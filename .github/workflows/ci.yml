@@ -61,10 +61,13 @@ name: CI
 #   - `verify` and `e2e` must still *contain* the steps that do the checking —
 #     the policy step, both self-tests, and every assert script by name
 #   - and where a check only means something because of an earlier step, the
-#     policy enforces the *pair*: the prerequisite must be in the same job and
-#     run first. `assert-floor-ratchet.mjs` without the `git fetch` below it is
-#     the case that named the rule — it still runs, finds no baseline, and exits
-#     0. A gate whose setup was deleted does not fail; it drifts.
+#     policy enforces the *pair*: the prerequisite must be in the same job, run
+#     first, and be a command rather than a mention of one.
+#     `assert-floor-ratchet.mjs` without the `git fetch` below it is the case
+#     that named the rule — it still runs, finds no baseline, and exits 0. A
+#     gate whose setup was deleted does not fail; it drifts. And a setup quoted
+#     into an `echo` of itself is the same drift wearing the original text, so
+#     prerequisites are matched at command position, exactly like the scripts.
 # A new job that forgets any of that fails policy at the edit, not six months
 # later in production.
 
@@ -207,6 +210,12 @@ jobs:
         # down the green no-baseline path. So the policy engine's
         # `required-step-prerequisites` rule requires this step to exist and to
         # come before the ratchet. The pair is the gate, not either half.
+        #
+        # Wrapping the line in an `echo` neuters it exactly as well, which is
+        # what round 4's substring matcher could not tell apart — policy green
+        # and run green over a fetch that never happened. The rule now requires
+        # the command at the start of a line, and the self-test carries the
+        # quoted-into-an-echo mutation for this step and six others.
         run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Assert the CI floors have not been ratcheted down

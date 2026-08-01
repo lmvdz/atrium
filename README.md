@@ -337,21 +337,49 @@ zero tests exits 0 just like one that passed 315:
   test runner, however it is spelled, and a string that merely contains the text
   is not one. And because the scan starts from every `*.{test,spec}.*` on disk
   and follows relative imports transitively, an annotation living in a helper —
-  a file no report will ever name — is still read. Fifteen spellings and four
-  lookalikes are fixtures in `gate-selftest.mjs`.
+  a file no report will ever name — is still read. "Rooted at a test runner"
+  means rooted at a binding actually *derived* from the runner, per name: a
+  module that imports `vitest` for its own assertions and also exports domain
+  code does not turn that domain code's `.fails` property into an annotation.
+  17 spellings and 6 lookalikes are fixtures in `gate-selftest.mjs`.
+- **The source scan is an independent witness, not a complete one**, and the
+  difference is load-bearing. It cannot see an annotation behind a bare or
+  aliased import specifier, a computed key it would have to constant-fold
+  (`it[KEY]`), a `globalThis` root, or a wrapper a `setupFiles` entry registered
+  outside every test file's import graph. All four fail *closed* through the
+  other witness — `vitest-ci-reporter.mjs` reads `options.fails` off the live
+  task object, so an annotation that actually runs raises its count above the
+  scan's and the gate fails on the disagreement. That is the whole design and
+  exactly its strength: it survives *either* witness being wrong, not both. 4
+  stated blind spots are fixtures asserting both halves of that. Closing the
+  conjunction needs a check that does not run from the revision under test,
+  which is the governance trigger below.
 - **Prerequisites are enforced as pairs.** A gate can be present, named, invoked
   and useless because the step it depends on is gone. `assert-floor-ratchet.mjs`
   is the case: without the `git fetch` of `origin/main` before it, the shallow
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. Nine pairs across eight steps:
-  the ratchet's fetch of `origin/main`; both report resets, before the runs they
+  prerequisite is in the same job *and earlier*. 9 pairs across 8 steps: the
+  ratchet's fetch of `origin/main`; both report resets, before the runs they
   reset for; both report gates, after those runs; the migration's wait for
   Postgres and the schema assertion's migration; and the browser install and
   browser check the Playwright suite needs. The count is derived —
   `PREREQUISITE_PAIRS.length`, printed by the self-test — because a hand-counted
   number in a receipt is how round 2 claimed 15 rules over an engine with 18.
+  Every number in this section is now read back out of the code by the
+  self-tests, prose included, because deriving a count at the point it is
+  printed does nothing for the copy of it sitting in a README.
+- **A prerequisite must be *invoked*, not mentioned.** Round 4 matched
+  prerequisites by substring, so `run: echo 'git fetch … refs/heads/main'`
+  satisfied the pair while `origin/main` never existed and the ratchet took its
+  no-baseline exit-0 path — policy green and run green over a fetch that never
+  happened, which is the fail-open the rule was added to close, reproduced by
+  the rule. Every step test and every prerequisite test now goes through one
+  matcher that recognises a command at the start of a line (optionally behind a
+  package-manager `exec`) and nowhere else. Seven "gutted but matching"
+  mutations — each step's script quoted into an `echo` of itself — are in the
+  self-test.
 - The two Vitest reports must describe the same run — every status, the file
   count, and the identity of every individual test, not just the total. Matching
   totals prove little; a gutted reporter cannot invent 315 test names that agree
@@ -370,14 +398,19 @@ zero tests exits 0 just like one that passed 315:
   job, and — self-referentially — `verify` and `e2e` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 46
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 58
   mutated copies of the real workflow and additionally asserts that every one of
   the 22 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
-  went unexercised through round 2. `gate-selftest.mjs` runs 58 cases, including
-  extracting the `gate` job's verdict script from the workflow and **executing
-  it** against synthetic `needs` payloads: a parser reads shapes, and a shape can
-  be right while the logic is wrong.
+  went unexercised through round 2. Each mutation must also name *what* it broke
+  (a message pattern, or the exact step→prerequisite edge) and must trip nothing
+  else it has not declared, so a mutation cannot pass for the wrong reason: two
+  of round 4's deleted a step that was required in its own right, and would have
+  gone red with the rule they claimed to test removed from the engine.
+  `gate-selftest.mjs` runs 67 cases, including extracting the `gate` job's
+  verdict script from the workflow and **executing it** against synthetic
+  `needs` payloads: a parser reads shapes, and a shape can be right while the
+  logic is wrong.
 
 ### Governance trigger (recorded)
 

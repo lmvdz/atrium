@@ -286,6 +286,69 @@ const HELPER_FORMS = {
     'helpers.ts':
       "import { it } from 'vitest';\nexport const brokenTest = (name, fn) => it(name, { fails: true }, fn);\n",
   },
+  // The two forms that make the *narrowed* taint (round 5) still have to work:
+  // the annotation is written in the test file, and the only thing that makes it
+  // one is that the name it roots at came out of `vitest` through a helper.
+  // Round 4 caught these by tainting every export of any module that reached
+  // vitest; round 5 has to know that this particular name is runner-derived.
+  'the runner renamed inside a helper and re-exported under the new name': {
+    'x.test.ts':
+      "import { runner } from './helpers';\nrunner.fails('via a renamed re-export', () => {});\n",
+    'helpers.ts': "export { it as runner } from 'vitest';\n",
+  },
+  'a helper that re-exports the whole runner with `export *`': {
+    'x.test.ts':
+      "import { it as sanity } from './helpers';\nsanity.fails('through a star re-export', () => {});\n",
+    'helpers.ts': "export * from 'vitest';\n",
+  },
+};
+
+/**
+ * A real annotation and a domain object with a `fails` property, in one module.
+ *
+ * The round-4 gauntlet's second major. Round 4's taint was per *module* — any
+ * name imported from anything that transitively reached `vitest` was treated as
+ * a possible runner — so this fixture produced two findings: the genuine
+ * `it.fails` in `lib.ts`, and `validate().fails` in the test, which is a count
+ * of failures in a domain object and nothing to do with Vitest. Verified against
+ * round 4's scanner before the narrowing: two findings, the second at
+ * `x.test.ts:3`.
+ *
+ * It needs its own case rather than a row in a table because both versions
+ * report *an* annotation here; only the identity of the findings tells them
+ * apart, and a fixture that cannot fail the thing it was written for is the
+ * defect this whole ticket keeps rediscovering.
+ */
+const CO_LOCATED = {
+  'x.test.ts':
+    "import { it, expect } from 'vitest';\nimport { knownBroken, validate } from './lib';\nit('counts failures', () => { expect(validate().fails).toBe(0); });\nknownBroken('and this one really is broken', () => {});\n",
+  'lib.ts':
+    "import { it } from 'vitest';\nexport const knownBroken = it.fails;\nexport const validate = () => ({ fails: 0 });\n",
+};
+
+/**
+ * Spellings this scanner genuinely cannot see, kept honest by proving the *other*
+ * witness catches them.
+ *
+ * Round 4's receipt called the source scan an "independent witness" and the
+ * round-4 gauntlet adjudicated the word "complete" out of that claim: bare and
+ * aliased import specifiers, non-literal computed keys, `globalThis` roots and
+ * setup-file registration are all invisible here. The design answer is that they
+ * fail *closed* through the reporter, which reads `options.fails` off the live
+ * task object — so each case below asserts both halves: this scanner sees
+ * nothing, and the moment the reporter says one ran, the two witnesses disagree
+ * and the gate goes red. A limitation with a test on it is a boundary; a
+ * limitation with a sentence on it is a hope.
+ */
+const BLIND_SPOTS = {
+  'a helper reached by a bare specifier, which the relative-import walk never follows':
+    "import { knownBroken } from '@atrium/test-utils';\nknownBroken('via a workspace package', () => {});\n",
+  'a computed key this pass will not constant-fold':
+    "import { it } from 'vitest';\nconst KEY = 'fails';\nit[KEY]('spelled through a variable', () => {});\n",
+  'the runner reached through globalThis, which is not and must not be a root':
+    "globalThis.it.fails('through the global object', () => {});\n",
+  'an annotation applied by something a setup file registered, outside every import graph':
+    "it.brokenByOurSetupFile('registered elsewhere', () => {});\n",
 };
 
 /**
@@ -311,6 +374,17 @@ const NOT_ANNOTATIONS = {
   },
   'an explicit `fails: false`, which is the opposite of an annotation': {
     'x.test.ts': "import { it } from 'vitest';\nit('normal', { fails: false }, () => {});\n",
+  },
+  // The round-4 gauntlet's second major, as a regression guard. Round 4 tainted
+  // every export of any module that reached `vitest`, so a helper that imports
+  // `expect` for its own assertions turned every `.fails` on anything it exports
+  // into a finding. Verified red against round 4's scanner, clean against this
+  // one — the taint is now per binding, not per module.
+  'a domain helper living in a module that imports the runner for its own use': {
+    'x.test.ts':
+      "import { it, expect } from 'vitest';\nimport { validate } from './lib';\nit('counts failures', () => { expect(validate().fails).toBe(0); });\n",
+    'lib.ts':
+      "import { expect } from 'vitest';\nexport const validate = () => ({ fails: 0 });\nexport const check = (value) => expect(value).toBeTruthy();\n",
   },
   // Regression guard: the import walk must not hand the parser a stylesheet and
   // then call the resulting syntax errors a blind spot. Measured against the
@@ -559,6 +633,19 @@ const CASES = [
     run: () => checkExpectedFailureWitness(scanFixture({ 'x.test.ts': 'it.fails(((((\n' }), 0),
     expect: /could not be parsed/i,
   },
+  {
+    name: 'a runner helper and a domain `.fails` in one module: only the helper is an annotation',
+    run: () => {
+      const found = scanFixture(CO_LOCATED)
+        .findings.map((finding) => `${finding.file}:${finding.line}`)
+        .sort();
+      if (found.join(', ') === 'lib.ts:2') return [];
+      return [
+        `the scanner reported ${found.join(', ') || '(nothing)'}; the only annotation in this fixture is lib.ts:2. \`validate().fails\` is a domain object exported beside a runner helper, and a witness that calls that an expected failure is a witness somebody turns off.`,
+      ];
+    },
+    expect: 'clean',
+  },
 
   // ---- floors ratchet up --------------------------------------------------
   {
@@ -718,6 +805,32 @@ function scannerCases() {
       expect: 'clean',
     });
   }
+  for (const [name, source] of Object.entries(BLIND_SPOTS)) {
+    cases.push({
+      name: `a stated blind spot, caught by the other witness instead: ${name}`,
+      run: () => {
+        const scan = scanFixture({ 'x.test.ts': source });
+        const problems = [];
+        // Half one: this witness really is blind here. If it stops being blind,
+        // that is good news and the scope statement in scan-expected-failures.mjs
+        // is now overcautious — say so rather than let the claim rot.
+        if (scan.findings.length > 0) {
+          problems.push(
+            `the scanner now sees "${name}" (${scan.findings.map((f) => `${f.file}:${f.line}`).join(', ')}). That is an improvement, and the WHAT THIS PASS IS NOT block in scan-expected-failures.mjs still lists it as invisible. Update the claim.`,
+          );
+        }
+        // Half two: and the pair still fails closed, because the reporter counts
+        // what actually ran.
+        if (checkExpectedFailureWitness(scan, 1).length === 0) {
+          problems.push(
+            `the scanner cannot see "${name}" and the gate stayed green while the reporter said one expected failure ran. That is the dual-witness design not working, which makes the blind spot a hole.`,
+          );
+        }
+        return problems;
+      },
+      expect: 'clean',
+    });
+  }
   return cases;
 }
 
@@ -745,15 +858,74 @@ function main() {
     }
   }
 
+  failures.push(...checkReadmeClaims());
+
   if (failures.length > 0) {
     for (const failure of failures) console.error(`::error::Gate self-test: ${failure}`);
     return 1;
   }
   const scanner = scannerCases().length;
   console.info(
-    `Gate self-test passed: ${CASES.length + scanner} cases, every fail-open shape rejected and every clean report accepted — including ${Object.keys(EVADED_FORMS).length + Object.keys(HELPER_FORMS).length} spellings of \`it.fails\` the source scanner must see and ${Object.keys(NOT_ANNOTATIONS).length} lookalikes it must not.`,
+    `Gate self-test passed: ${CASES.length + scanner} cases, every fail-open shape rejected and every clean report accepted — including ${Object.keys(EVADED_FORMS).length + Object.keys(HELPER_FORMS).length} spellings of \`it.fails\` the source scanner must see, ${Object.keys(NOT_ANNOTATIONS).length} lookalikes it must not, and ${Object.keys(BLIND_SPOTS).length} stated blind spots proved to fail closed through the reporter instead.`,
   );
   return 0;
+}
+
+/**
+ * The README's numbers about these gates must be these gates' numbers.
+ *
+ * Round 4's README said "four lookalikes" over a table holding five, in the same
+ * paragraph that explains why round 2's hand-counted rule total was wrong. The
+ * derived-at-the-point-of-printing fix does nothing for a copy of the number
+ * living in prose, so the prose is read back and compared. Same check as the one
+ * in workflow-policy-selftest.mjs, for the counts this file owns.
+ */
+function checkReadmeClaims() {
+  let readme;
+  try {
+    readme = readFileSync('README.md', 'utf8');
+  } catch {
+    return [];
+  }
+  const phrase = (words) => new RegExp(words.split(' ').join(String.raw`\s+`));
+  const claims = [
+    {
+      what: 'gate self-test cases',
+      pattern: phrase('runs (\\d+) cases'),
+      actual: CASES.length + scannerCases().length,
+    },
+    {
+      what: '`it.fails` spellings',
+      pattern: phrase('(\\d+) spellings'),
+      actual: Object.keys(EVADED_FORMS).length + Object.keys(HELPER_FORMS).length,
+    },
+    {
+      what: 'lookalikes',
+      pattern: phrase('(\\d+) lookalikes'),
+      actual: Object.keys(NOT_ANNOTATIONS).length,
+    },
+    {
+      what: 'stated blind spots',
+      pattern: phrase('(\\d+) stated blind spots'),
+      actual: Object.keys(BLIND_SPOTS).length,
+    },
+  ];
+  const failures = [];
+  for (const { what, pattern, actual } of claims) {
+    const found = pattern.exec(readme);
+    if (found === null) {
+      failures.push(
+        `README.md no longer states the number of ${what} in a form this check can read (${pattern}). Restore the sentence or update the pattern — an unchecked number in prose is how this ticket got three counts wrong.`,
+      );
+      continue;
+    }
+    if (Number(found[1]) !== actual) {
+      failures.push(
+        `README.md says ${found[1]} ${what}; the code says ${actual}. The prose is wrong, or the code is.`,
+      );
+    }
+  }
+  return failures;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

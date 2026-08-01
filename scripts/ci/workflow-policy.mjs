@@ -23,6 +23,17 @@
  * Adversarial closure is the governance trigger in the README — required-check
  * rulesets, pull requests, and code-owner review — not anything in this file.
  *
+ * KNOWN GAP, STATED RATHER THAN CHASED: composite-action bodies are not
+ * expanded. A step written `uses: ./.github/actions/run-gates` has its real
+ * commands in that action's `action.yml`, which this engine never reads, so a
+ * required step moved wholesale into a local composite action would read as
+ * missing (loud, and therefore safe) while a *prerequisite* moved there would
+ * also read as missing (equally loud). Both directions fail closed, which is why
+ * this is a note rather than a feature: the repo uses no composite actions
+ * today, and the day it does, the presence rules will say so on that commit.
+ * Expanding them means resolving and parsing a second file whose own `uses:`
+ * chain can recurse — cost that buys nothing until the first one exists.
+ *
  * Usage:
  *   node scripts/ci/workflow-policy.mjs .github/workflows/*.yml
  *   import { checkWorkflow } from './workflow-policy.mjs'
@@ -93,34 +104,61 @@ export const RULES = [
 ];
 
 /**
- * Matches a script being *invoked*, not merely mentioned.
+ * Command position: the start of a line in a `run:` script, optionally behind a
+ * package-manager `… exec ` prefix, because half of these run through
+ * `pnpm --filter X exec …`.
  *
- * The path has to sit in command position — at the start of a line, optionally
- * behind a `… exec ` prefix, because half of these run through
- * `pnpm --filter X exec node ../../scripts/ci/…`. That is deliberately a claim
- * about *invocation shape* and nothing more: see the SCOPE note above and the
- * one in ci.yml. It stops `echo node scripts/ci/assert-tables.mjs` from
- * satisfying a presence rule; it cannot stop the script's own contents being
- * replaced with `process.exit(0)`, and nothing in a workflow can.
+ * ── WHY EVERY MATCHER GOES THROUGH THIS (round 5) ───────────────────────────
+ * Round 4 gave *required steps* this treatment and left *prerequisites* on plain
+ * substring tests, and the round-4 gauntlet found what that costs. The pair that
+ * named the whole rule — `assert-floor-ratchet.mjs` needs the `git fetch` of
+ * `origin/main` — was satisfied by
+ *
+ *     run: echo 'git fetch --no-tags --depth=1 origin +refs/heads/main:…'
+ *
+ * The policy went green because the text was there; the ratchet went green
+ * because `origin/main` was not, so it took its no-baseline exit-0 path. Policy
+ * green *and* runtime green, over a fetch that never happened: the exact
+ * fail-open the rule was written to close, reproduced by the rule itself. A
+ * substring test cannot tell a command from a sentence about a command, and a
+ * prerequisite is a claim about something *running*.
+ *
+ * So there is now one notion of "this ran" in this file, and every step test and
+ * every prerequisite test is built from it. The prefix is restricted to real
+ * package-manager `exec` forms rather than any `\S…exec`, so `echo pnpm exec …`
+ * cannot creep back in through the prefix either.
+ *
+ * That is deliberately a claim about *invocation shape* and nothing more: see
+ * the SCOPE note above and the one in ci.yml. It stops
+ * `echo node scripts/ci/assert-tables.mjs` and `echo 'git fetch …'` from
+ * satisfying a rule; it cannot stop the script's own contents being replaced
+ * with `process.exit(0)`, and nothing in a workflow can.
  */
+const COMMAND_POSITION = String.raw`(?:^|\n)[^\S\n]*(?:(?:pnpm|npm|npx|yarn|bunx?)[^\n]*?\bexec\s+)?`;
+
+/** A command actually being run, rather than named. `pattern` is regex source. */
+function runs(pattern) {
+  return new RegExp(COMMAND_POSITION + pattern);
+}
+
+/** A script in `scripts/ci/` being *invoked*, not merely mentioned. */
 function invokes(script) {
-  return new RegExp(
-    String.raw`(?:^|\n)[^\S\n]*(?:\S[^\n]*?\bexec\s+)?node\s+(?:\.\.\/)*scripts\/ci\/${script}\b`,
-  );
+  return runs(String.raw`node\s+(?:\.\.\/)*scripts\/ci\/${script}\b`);
 }
 
 /**
- * Steps that must exist, by job — and, where one only means something because
- * of an earlier step, that pair.
+ * A run-scoped variable being *exported to the rest of the job*.
  *
- * A job can satisfy every rule above and still prove nothing, by simply not
- * running the checks any more — delete the policy step and the policy stops
- * objecting to its own absence. That is circular, and knowingly so: it cannot
- * stop an author who means it (see SCOPE at the top of this file). What it does
- * stop is the accident — a step dropped during a rebase, a script renamed
- * without its call site, a job hollowed out to "make CI fast" — which is the
- * threat model this repo actually has today.
- *
+ * `echo "VITEST_RUN_START=$(date +%s%3N)"` prints a line; only the `>>
+ * "$GITHUB_ENV"` half makes the later gate able to read it. Round 4 matched
+ * `/\bVITEST_RUN_START=/`, which a comment about the timestamp satisfies as
+ * happily as the assignment does — the same defect as the fetch, one step over.
+ */
+function exportsToJobEnv(name) {
+  return runs(String.raw`(?:echo|printf)\s+"?${name}=[^\n]*>>\s*"?\$\{?GITHUB_ENV\b`);
+}
+
+/**
  * ── PREREQUISITES (round 4) ─────────────────────────────────────────────────
  * Round 3 required each assert script to be present and stopped there, and the
  * round-3 gauntlet found the hole that leaves: `assert-floor-ratchet.mjs` is
@@ -153,31 +191,70 @@ function invokes(script) {
  * `policy-steps-present` covers the meta-guards: the things that check the
  * workflow itself. `required-job-steps` covers the verification work.
  * `required-step-prerequisites` covers what has to have happened first.
+ *
+ * ── ROUND 5 ─────────────────────────────────────────────────────────────────
+ * All of that was true and matched by substring, which meant the rule's own
+ * motivating case still passed when the fetch was quoted into an `echo`. Every
+ * test below now goes through COMMAND_POSITION, so a prerequisite has to be a
+ * command and not a sentence about one. See that comment for the receipt.
  */
+
+/**
+ * The commands the pairs below are about, each matched at command position.
+ *
+ * Declared once and shared, because several of them are both a required step in
+ * their own right and another step's prerequisite: `drizzle-kit migrate` has to
+ * exist *and* has to come after the wait for Postgres *and* has to come before
+ * the schema assertion. One matcher per command means the two rules can never
+ * drift into disagreeing about what "the migrations ran" means.
+ */
+const RUNS_ACTIONLINT = runs(String.raw`"?\S*actionlint"?\s+-{1,2}color\b`);
+const RUNS_LINT = runs(String.raw`pnpm\s+(?:run\s+)?lint\b`);
+const RUNS_TYPECHECK = runs(String.raw`pnpm\s+(?:run\s+)?typecheck\b`);
+const RUNS_BUILD = runs(String.raw`pnpm\s+(?:run\s+)?build\b`);
+const WAITS_FOR_POSTGRES = invokes('wait-for-postgres\\.mjs');
+const RUNS_MIGRATIONS = runs(String.raw`drizzle-kit\s+migrate\b`);
+const RUNS_VITEST = runs(String.raw`pnpm\s+vitest\s+run\b`);
+const INSTALLS_CHROMIUM = runs(String.raw`playwright\s+install\b`);
+const ASSERTS_CHROMIUM = invokes('assert-chromium\\.mjs');
+const RUNS_PLAYWRIGHT = runs(String.raw`playwright\s+test\b`);
+
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
-  test: /\bgit fetch\b[^\n]*\brefs\/heads\/main\b/,
+  test: runs(String.raw`git\s+fetch\b[^\n]*\brefs\/heads\/main\b`),
   because:
     'without it the shallow clone actions/checkout leaves has no `origin/main`, so the ratchet finds no baseline, reports that politely, and exits 0 — a floor lowered in the same pull request would sail through the very gate that exists to catch it',
 };
 const RESETS_VITEST_REPORT = {
   what: 'the step that deletes the vitest reports and records VITEST_RUN_START',
-  test: /\bVITEST_RUN_START=/,
+  test: exportsToJobEnv('VITEST_RUN_START'),
   because:
     "the gate proves a report is fresh by comparing its mtime against that timestamp; with no reset the previous run's report is still on disk, and with no timestamp freshness cannot be proven at all",
 };
 const RESETS_E2E_REPORT = {
   what: 'the step that deletes the e2e report and records E2E_RUN_START',
-  test: /\bE2E_RUN_START=/,
+  test: exportsToJobEnv('E2E_RUN_START'),
   because: 'same reason as the vitest reset: a leftover report is the quietest possible green',
 };
 
+/**
+ * Steps that must exist, by job — and, where one only means something because
+ * of an earlier step, that pair.
+ *
+ * A job can satisfy every rule above and still prove nothing, by simply not
+ * running the checks any more — delete the policy step and the policy stops
+ * objecting to its own absence. That is circular, and knowingly so: it cannot
+ * stop an author who means it (see SCOPE at the top of this file). What it does
+ * stop is the accident — a step dropped during a rebase, a script renamed
+ * without its call site, a job hollowed out to "make CI fast" — which is the
+ * threat model this repo actually has today.
+ */
 const REQUIRED_STEPS = {
   verify: [
     // Matches actionlint being *run*, not merely downloaded — the install step
     // names it too, and a job that fetches a linter it never invokes is exactly
     // the shape this rule is looking for.
-    { rule: 'policy-steps-present', what: 'actionlint', test: /actionlint"?\s+-{1,2}color\b/ },
+    { rule: 'policy-steps-present', what: 'actionlint', test: RUNS_ACTIONLINT },
     {
       rule: 'policy-steps-present',
       what: 'the workflow policy engine',
@@ -193,9 +270,9 @@ const REQUIRED_STEPS = {
       what: "the test gates' self-test",
       test: invokes('gate-selftest\\.mjs'),
     },
-    { rule: 'required-job-steps', what: 'the linter', test: /\bpnpm (?:run )?lint\b/ },
-    { rule: 'required-job-steps', what: 'the typechecker', test: /\bpnpm (?:run )?typecheck\b/ },
-    { rule: 'required-job-steps', what: 'the build', test: /\bpnpm (?:run )?build\b/ },
+    { rule: 'required-job-steps', what: 'the linter', test: RUNS_LINT },
+    { rule: 'required-job-steps', what: 'the typechecker', test: RUNS_TYPECHECK },
+    { rule: 'required-job-steps', what: 'the build', test: RUNS_BUILD },
     {
       rule: 'required-job-steps',
       what: 'the workspace-enrollment assertion',
@@ -210,16 +287,16 @@ const REQUIRED_STEPS = {
     {
       rule: 'required-job-steps',
       what: 'the wait for Postgres',
-      test: invokes('wait-for-postgres\\.mjs'),
+      test: WAITS_FOR_POSTGRES,
     },
     {
       rule: 'required-job-steps',
       what: 'the migrations',
-      test: /\bdrizzle-kit migrate\b/,
+      test: RUNS_MIGRATIONS,
       requires: [
         {
           what: 'the wait for Postgres',
-          test: /scripts\/ci\/wait-for-postgres\.mjs\b/,
+          test: WAITS_FOR_POSTGRES,
           because:
             'migrating against a container that has not finished starting is a race, and a race that loses looks like a broken migration rather than a slow database',
         },
@@ -232,7 +309,7 @@ const REQUIRED_STEPS = {
       requires: [
         {
           what: 'the migrations',
-          test: /\bdrizzle-kit migrate\b/,
+          test: RUNS_MIGRATIONS,
           because:
             'set equality against a database nobody migrated compares the built schema with an empty database — which is a real failure, but a confusing one, and the ordering is the thing that makes the assertion mean "the migrations did work"',
         },
@@ -241,7 +318,7 @@ const REQUIRED_STEPS = {
     {
       rule: 'required-job-steps',
       what: 'the unit/integration suite',
-      test: /\bpnpm vitest run\b/,
+      test: RUNS_VITEST,
       requires: [RESETS_VITEST_REPORT],
     },
     {
@@ -251,7 +328,7 @@ const REQUIRED_STEPS = {
       requires: [
         {
           what: 'the unit/integration suite',
-          test: /\bpnpm vitest run\b/,
+          test: RUNS_VITEST,
           because:
             'a report gate that runs before the runner reads whatever was on disk beforehand, which is the definition of the stale-report failure it exists to prevent',
         },
@@ -262,11 +339,11 @@ const REQUIRED_STEPS = {
     {
       rule: 'required-job-steps',
       what: 'the browser-presence assertion',
-      test: invokes('assert-chromium\\.mjs'),
+      test: ASSERTS_CHROMIUM,
       requires: [
         {
           what: 'the Chromium install',
-          test: /\bplaywright install\b/,
+          test: INSTALLS_CHROMIUM,
           because:
             'asserting a browser is present before anything installs one is a check guaranteed to fail, and a check guaranteed to fail is a check somebody will delete',
         },
@@ -275,12 +352,12 @@ const REQUIRED_STEPS = {
     {
       rule: 'required-job-steps',
       what: 'the Playwright suite',
-      test: /\bplaywright test\b/,
+      test: RUNS_PLAYWRIGHT,
       requires: [
         RESETS_E2E_REPORT,
         {
           what: 'the browser-presence assertion',
-          test: /scripts\/ci\/assert-chromium\.mjs\b/,
+          test: ASSERTS_CHROMIUM,
           because:
             'the smoke spec skips itself when no browser is installed, which is right on a laptop and a lie in CI; the assertion has to come first or the suite has already reported green over zero executed tests',
         },
@@ -293,13 +370,18 @@ const REQUIRED_STEPS = {
       requires: [
         {
           what: 'the Playwright suite',
-          test: /\bplaywright test\b/,
+          test: RUNS_PLAYWRIGHT,
           because: 'same as the vitest gate: a report read before the run is last run’s report',
         },
       ],
     },
   ],
 };
+
+/** Stable identity for one (job, step, prerequisite) edge. */
+export function pairId({ job, step, needs }) {
+  return `${job}: ${step} ← ${needs}`;
+}
 
 /**
  * Every declared (step → prerequisite) edge, derived from REQUIRED_STEPS.
@@ -308,6 +390,13 @@ const REQUIRED_STEPS = {
  * that round said "15 rules" over an engine carrying 18, because the number was
  * something a human counted. Anything a receipt wants to quote about this table
  * comes from here.
+ *
+ * Round 5 makes the *identities* load-bearing too, not only the count: every
+ * violation this rule emits carries the pair it is about, and the self-test
+ * requires each pair below to be named by at least one mutation. Round 4's
+ * self-test asserted only that some violation carried the rule id, which a
+ * mutation that trips a different pair satisfies just as well as the one it
+ * claims to model.
  */
 export const PREREQUISITE_PAIRS = Object.entries(REQUIRED_STEPS).flatMap(([jobId, required]) =>
   required.flatMap((step) =>
@@ -328,13 +417,13 @@ function isPlainObject(value) {
  * self-test has never heard of is a rule nobody has proved fires.
  */
 function makeAdd(violations, path) {
-  return (rule, message) => {
+  return (rule, message, detail = {}) => {
     if (!RULES.includes(rule)) {
       throw new Error(
         `workflow-policy: undeclared rule id "${rule}". Add it to RULES and give it a mutation in workflow-policy-selftest.mjs.`,
       );
     }
-    violations.push({ rule, message, path });
+    violations.push({ rule, message, path, ...detail });
   };
 }
 
@@ -529,11 +618,17 @@ export function checkWorkflow(source, path = '<workflow>') {
       continue;
     }
     const scripts = jobStepScripts(job);
-    const at = (test) => scripts.findIndex((step) => test.test(step));
+    // Every index that matches, not the first one. Round 4 used `findIndex` on
+    // both halves of a pair, which answers "is there a match somewhere" and then
+    // silently assumes the first match is the one that matters. That is fine
+    // while each pattern occurs once and wrong the moment one does not: a step
+    // that appears twice has its second occurrence judged by the first one's
+    // position. The satisfying prerequisite is now located per occurrence.
+    const indicesOf = (test) => scripts.flatMap((step, index) => (test.test(step) ? [index] : []));
 
     for (const { rule, what, test, requires = [] } of required) {
-      const index = at(test);
-      if (index === -1) {
+      const stepIndices = indicesOf(test);
+      if (stepIndices.length === 0) {
         add(
           rule,
           `${path}: job \`${jobId}\` never runs ${what} (nothing in its steps matches ${test}). A job can satisfy every other rule here and still prove nothing by quietly dropping the step that does the proving.`,
@@ -543,18 +638,26 @@ export function checkWorkflow(source, path = '<workflow>') {
       // The step is here. Everything it silently depends on had better be here
       // too, and earlier — a gate whose setup is gone does not fail, it drifts.
       for (const prerequisite of requires) {
-        const before = at(prerequisite.test);
-        if (before === -1) {
+        const pair = { job: jobId, step: what, needs: prerequisite.what };
+        const prerequisiteIndices = indicesOf(prerequisite.test);
+        if (prerequisiteIndices.length === 0) {
           add(
             'required-step-prerequisites',
             `${path}: job \`${jobId}\` runs ${what} but never runs ${prerequisite.what}, which it depends on (nothing matches ${prerequisite.test}). ${prerequisite.because}. A gate that still runs with its setup deleted is worse than a deleted gate: it reports.`,
+            { pair },
           );
           continue;
         }
-        if (before > index) {
+        // Each occurrence of the step needs *some* occurrence of its setup in
+        // front of it. Report the first one that has none.
+        const unsatisfied = stepIndices.find(
+          (stepIndex) => !prerequisiteIndices.some((before) => before < stepIndex),
+        );
+        if (unsatisfied !== undefined) {
           add(
             'required-step-prerequisites',
-            `${path}: job \`${jobId}\` runs ${what} at step ${index} but ${prerequisite.what} only at step ${before}, i.e. afterwards. ${prerequisite.because}. Order the pair, or the earlier step is decoration.`,
+            `${path}: job \`${jobId}\` runs ${what} at step ${unsatisfied} but the earliest ${prerequisite.what} is step ${prerequisiteIndices[0]}, i.e. afterwards. ${prerequisite.because}. Order the pair, or the earlier step is decoration.`,
+            { pair },
           );
         }
       }

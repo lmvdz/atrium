@@ -220,6 +220,13 @@ function main() {
     // name — a witness whose field of view is set by the thing it is checking is
     // not independent of it — and follows relative imports so a helper carrying
     // the annotation is read even though no report will ever mention it.
+    //
+    // Independent, not complete: bare/aliased import specifiers, non-literal
+    // computed keys, `globalThis` roots and setup-file registration are outside
+    // what a parse of this graph can see. They fail closed through the other
+    // witness — the reporter counts what actually ran — and the exact boundary,
+    // with the reason it is where it is, is in scan-expected-failures.mjs under
+    // WHAT THIS PASS IS NOT.
     const modules = (detailed.json.modules ?? []).map((module) => module.moduleId);
     scan = scanForExpectedFailures([...new Set([...collectTestFiles(), ...modules])]);
     problems.push(...checkExpectedFailureWitness(scan, detailed.json.totals?.expectedFailure ?? 0));

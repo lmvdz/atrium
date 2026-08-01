@@ -63,9 +63,41 @@
  * is no honest rule that keeps that quiet without a carve-out, and a carve-out
  * in a witness is a hole. Reachability from a test file is the boundary that
  * needs no exceptions.
+ *
+ * ── WHAT THIS PASS IS NOT (round 5, correcting round 4's claim) ──────────────
+ * Round 4's receipt called this an *independent witness*. It is independent —
+ * it reads source, not reports — but it is not a *complete* one, and the two
+ * words were run together. Being precise about it, because a witness whose
+ * limits are unwritten gets trusted past them:
+ *
+ *   - **Non-relative imports are not followed.** A helper reached as
+ *     `@atrium/test-utils`, a tsconfig path alias, or a bare workspace name is
+ *     never read, so an annotation living there is invisible here.
+ *   - **Computed keys must be literal.** `it['fails']` is seen; `it[KEY]` where
+ *     `const KEY = 'fails'`, or `it[`fai${'ls'}`]`, is not — this pass does no
+ *     constant folding and has no type information.
+ *   - **`globalThis` roots are not runner roots.** `globalThis.it.fails(…)`
+ *     roots at `globalThis`, which is not in the root set and deliberately is
+ *     not: putting it there would make every `.fails` in the repository a
+ *     finding.
+ *   - **Registration from a setup file is invisible.** A `setupFiles` entry
+ *     that installs a wrapper is not in any test file's import graph, so the
+ *     annotation it applies is applied somewhere this scan never looks.
+ *
+ * All four fail **closed**, and by the other witness rather than by this one:
+ * vitest-ci-reporter.mjs reads `test.options?.fails` off the live task object,
+ * so any of these that actually annotates a running test raises the reporter's
+ * count above this scan's, and `checkExpectedFailureWitness` fails on the
+ * disagreement. That is the design — two witnesses on different sides of the
+ * reporting path, each covering the other's blind spots — and it is exactly as
+ * strong as that: it survives *either* witness being wrong, not both. An
+ * annotation spelled one of the four ways above, in a run whose reporter has
+ * also been edited to drop the flag, is seen by neither. Closing that needs a
+ * check that does not execute from the revision under test, which is the
+ * governance trigger in the README and not something this file can do.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { posix, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
 
@@ -122,7 +154,22 @@ function scriptKind(file) {
  */
 export function collectTestFiles(root = process.cwd()) {
   const found = [];
+  // Symlinked directories can point at an ancestor, and a walk that follows one
+  // never finishes — it just goes on finding the same tests under longer and
+  // longer paths until the process dies, which reads as a hung CI job rather
+  // than as a bug. Real paths are cheap to remember, so remember them. (Nothing
+  // in this repo symlinks a directory today; this costs one syscall per
+  // directory and removes the failure mode outright.)
+  const visited = new Set();
   const walk = (dir) => {
+    let real;
+    try {
+      real = realpathSync(dir);
+    } catch {
+      return;
+    }
+    if (visited.has(real)) return;
+    visited.add(real);
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -132,15 +179,25 @@ export function collectTestFiles(root = process.cwd()) {
     for (const entry of entries) {
       if (SKIP_DIRS.has(entry.name)) continue;
       const full = resolve(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-      } else if (entry.isFile() && TEST_FILE.test(entry.name)) {
-        found.push(toPosix(relative(root, full)));
+      // `withFileTypes` does not follow links, so a symlink reports as neither
+      // a file nor a directory until it is resolved.
+      let isDirectory = entry.isDirectory();
+      let isFile = entry.isFile();
+      if (entry.isSymbolicLink()) {
+        try {
+          const stats = statSync(full);
+          isDirectory = stats.isDirectory();
+          isFile = stats.isFile();
+        } catch {
+          continue; // A dangling link is not a test file.
+        }
       }
+      if (isDirectory) walk(full);
+      else if (isFile && TEST_FILE.test(entry.name)) found.push(toPosix(relative(root, full)));
     }
   };
   walk(resolve(root));
-  return found.sort();
+  return [...new Set(found)].sort();
 }
 
 /** The root identifier of a member/call chain: `test.each(rows).fails` → `test`. */
@@ -180,14 +237,35 @@ function forEachNode(node, visitor) {
   });
 }
 
+/** In a runner-export set, "every name", for `export * from 'vitest'`. */
+const ANY_EXPORT = '*';
+
+function exportsRunnerBinding(exported, name) {
+  return exported !== undefined && (exported.has(ANY_EXPORT) || exported.has(name));
+}
+
+function hasExportModifier(node) {
+  return (node.modifiers ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+}
+
 /**
- * The module graph of one file: what it imports, and which names it binds from
- * where. Collected once, because the root-name set cannot be computed until the
- * whole graph is known (see `taintedModules`).
+ * The module graph of one file: what it imports, what it re-exports, and which
+ * of its own exports are bound to something runner-shaped.
+ *
+ * Collected once and interpreted later, because none of the interesting
+ * questions can be answered from a single file. Whether `import { broken } from
+ * './helpers'` binds a test runner depends on what `helpers` exports, which
+ * depends on what *it* imports; that is a property of the whole graph.
  */
 function readModuleShape(sourceFile) {
-  /** @type {{specifier: string, names: string[]}[]} */
-  const bindings = [];
+  /** `{specifier, names: [{imported, local}]}`; `imported` may be `default`/`*`. */
+  const imports = [];
+  /** `export … from './x'`: `{specifier, names?}`, `all` for `export *`. */
+  const reexports = [];
+  /** `export { a as b }` with no module specifier. */
+  const localAliases = [];
+  /** `export const n = <expr>` and `export default <expr>`. */
+  const exportedBindings = [];
   const specifiers = [];
 
   forEachNode(sourceFile, (node) => {
@@ -198,18 +276,74 @@ function readModuleShape(sourceFile) {
       const clause = node.importClause;
       if (clause === undefined) return;
       const names = [];
-      if (clause.name) names.push(clause.name.text);
+      if (clause.name) names.push({ imported: 'default', local: clause.name.text });
       const named = clause.namedBindings;
       if (named !== undefined) {
-        if (ts.isNamespaceImport(named)) names.push(named.name.text);
-        else for (const element of named.elements) names.push(element.name.text);
+        if (ts.isNamespaceImport(named))
+          names.push({ imported: ANY_EXPORT, local: named.name.text });
+        else
+          for (const element of named.elements) {
+            names.push({
+              imported: (element.propertyName ?? element.name).text,
+              local: element.name.text,
+            });
+          }
       }
-      bindings.push({ specifier, names });
+      imports.push({ specifier, names });
       return;
     }
     if (ts.isExportDeclaration(node)) {
       const target = node.moduleSpecifier;
-      if (target !== undefined && ts.isStringLiteralLike(target)) specifiers.push(target.text);
+      const specifier =
+        target !== undefined && ts.isStringLiteralLike(target) ? target.text : undefined;
+      if (specifier !== undefined) specifiers.push(specifier);
+      const clause = node.exportClause;
+      if (clause !== undefined && ts.isNamedExports(clause)) {
+        const names = clause.elements.map((element) => ({
+          imported: (element.propertyName ?? element.name).text,
+          exported: element.name.text,
+        }));
+        if (specifier === undefined) {
+          for (const { imported, exported } of names)
+            localAliases.push({ local: imported, exported });
+        } else {
+          reexports.push({ specifier, names });
+        }
+        return;
+      }
+      if (specifier === undefined) return;
+      // `export * as ns from './x'` and `export * from './x'`.
+      if (clause !== undefined && ts.isNamespaceExport(clause)) {
+        reexports.push({ specifier, namespace: clause.name.text });
+      } else {
+        reexports.push({ specifier, all: true });
+      }
+      return;
+    }
+    if (ts.isVariableStatement(node) && hasExportModifier(node)) {
+      for (const declaration of node.declarationList.declarations) {
+        if (declaration.initializer === undefined) continue;
+        if (ts.isIdentifier(declaration.name)) {
+          exportedBindings.push({
+            name: declaration.name.text,
+            initializer: declaration.initializer,
+          });
+        } else if (ts.isObjectBindingPattern(declaration.name)) {
+          // `export const { fails: broken } = it` — the annotation, exported.
+          for (const element of declaration.name.elements) {
+            if (ts.isIdentifier(element.name)) {
+              exportedBindings.push({
+                name: element.name.text,
+                initializer: declaration.initializer,
+              });
+            }
+          }
+        }
+      }
+      return;
+    }
+    if (ts.isExportAssignment(node) && node.isExportEquals !== true) {
+      exportedBindings.push({ name: 'default', initializer: node.expression });
       return;
     }
     if (ts.isCallExpression(node)) {
@@ -222,29 +356,63 @@ function readModuleShape(sourceFile) {
     }
   });
 
-  return { bindings, specifiers };
+  return { imports, reexports, localAliases, exportedBindings, specifiers };
 }
 
 /**
  * Names in one file that may denote a test runner.
  *
- * Seeded with Vitest's globals, extended with everything imported from `vitest`
- * itself and with everything imported from a *relative module that reaches
- * `vitest`* — that second clause is what makes the helper and re-export forms
- * visible without making every property named `fails` in the repository a
- * finding. `import { validate } from './domain'` binds nothing runner-shaped, so
- * `validate().fails` is not an annotation; `import { broken } from './helpers'`
- * where `helpers.ts` imports `it` from `vitest` binds something that might be.
+ * Seeded with Vitest's globals and extended with what is imported from `vitest`
+ * itself, then — and this is the part round 5 narrows — with names imported from
+ * a relative module *that are themselves bound to something runner-shaped over
+ * there*, rather than with every name from any module that happens to reach
+ * `vitest`.
+ *
+ * Round 4's rule was "an unknown helper is treated as suspect", which sounds
+ * conservative and is not: a single module that both imports `vitest` and
+ * exports domain code taints *all* of its exports, so
+ *
+ *     // lib.ts
+ *     import { it } from 'vitest';
+ *     export const knownBroken = it.fails;      // genuinely an annotation
+ *     export const validate = () => ({ fails: 0 });   // a domain object
+ *
+ *     // x.test.ts
+ *     expect(validate().fails).toBe(0);         // reported as an annotation
+ *
+ * went red, and a witness that fires on ordinary domain code is a witness
+ * somebody switches off — the same defect as round 3's line matcher firing on
+ * prose, one layer up. So `runnerExportsOf` answers per *name*, not per module.
+ *
+ * Nothing is lost by narrowing, because the annotation is found at the place it
+ * is written: `it.fails` inside `lib.ts` roots at `it` and is reported there,
+ * whether or not anyone imports it. The taint only decides whether a `.fails`
+ * *in the importing file* counts, and for that "was this binding derived from
+ * the runner" is the exact question.
  *
  * Then closed over local aliasing (`const t = test`) to a fixpoint, so a chain
  * of aliases is followed rather than only its first hop.
  */
-function runnerRootNames(sourceFile, shape, reaches) {
+function runnerRootNames(sourceFile, shape, runnerExportsOf) {
   const names = new Set(RUNNER_GLOBALS);
 
-  for (const { specifier, names: bound } of shape.bindings) {
-    if (!isRunnerModule(specifier) && !reaches(specifier)) continue;
-    for (const name of bound) names.add(name);
+  for (const { specifier, names: bound } of shape.imports) {
+    const fromRunner = isRunnerModule(specifier);
+    const exported = fromRunner ? undefined : runnerExportsOf(specifier);
+    for (const { imported, local } of bound) {
+      if (fromRunner) {
+        names.add(local);
+        continue;
+      }
+      if (exported === undefined) continue;
+      // `import * as helpers from './helpers'` — `helpers.it.fails` roots at
+      // `helpers`, so the namespace counts if anything behind it does.
+      if (imported === ANY_EXPORT) {
+        if (exported.size > 0) names.add(local);
+        continue;
+      }
+      if (exportsRunnerBinding(exported, imported)) names.add(local);
+    }
   }
 
   for (let pass = 0; pass < 8; pass += 1) {
@@ -259,6 +427,48 @@ function runnerRootNames(sourceFile, shape, reaches) {
   }
 
   return names;
+}
+
+/**
+ * Which of one module's exported names hand a test runner to whoever imports
+ * them: anything bound to an expression rooted at a runner name here, anything
+ * re-exported from a module (or from `vitest`) that exports it that way.
+ *
+ * A wrapper function — `export const brokenTest = (name, fn) => it(name, {fails:
+ * true}, fn)` — is deliberately *not* one of these. It is not a runner binding;
+ * it is a function that calls one, and the annotation it carries is found in the
+ * file that defines it, where `it` is in scope and in the root set.
+ */
+function runnerExportNames(shape, roots, runnerExportsOf) {
+  const exported = new Set();
+
+  for (const { name, initializer } of shape.exportedBindings) {
+    const root = rootIdentifier(initializer);
+    if (root !== undefined && roots.has(root)) exported.add(name);
+  }
+  for (const { local, exported: as } of shape.localAliases) {
+    if (roots.has(local)) exported.add(as);
+  }
+  for (const entry of shape.reexports) {
+    const fromRunner = isRunnerModule(entry.specifier);
+    const target = fromRunner ? undefined : runnerExportsOf(entry.specifier);
+    if (!fromRunner && target === undefined) continue;
+    if (entry.all === true) {
+      // `export * from 'vitest'` re-exports names this pass cannot enumerate.
+      if (fromRunner) exported.add(ANY_EXPORT);
+      else for (const name of target) exported.add(name);
+      continue;
+    }
+    if (entry.namespace !== undefined) {
+      if (fromRunner || target.size > 0) exported.add(entry.namespace);
+      continue;
+    }
+    for (const { imported, exported: as } of entry.names) {
+      if (fromRunner || exportsRunnerBinding(target, imported)) exported.add(as);
+    }
+  }
+
+  return exported;
 }
 
 /** True when `node` sits anywhere inside a call whose callee roots at a runner. */
@@ -442,33 +652,40 @@ export function scanForExpectedFailures(entryFiles, read = defaultRead) {
     modules.set(file, { sourceFile, shape, edges });
   }
 
-  // --- taint: which modules can hand out a test runner ----------------------
-  const reachesVitest = new Set();
-  for (const [file, { shape }] of modules) {
-    if (shape.specifiers.some(isRunnerModule)) reachesVitest.add(file);
-  }
-  for (let pass = 0; pass < modules.size + 1; pass += 1) {
-    const before = reachesVitest.size;
-    for (const [file, { edges }] of modules) {
-      if (reachesVitest.has(file)) continue;
-      for (const target of edges.values()) {
-        if (reachesVitest.has(target)) {
-          reachesVitest.add(file);
-          break;
+  // --- taint: which *bindings* can hand out a test runner --------------------
+  //
+  // Round 4 propagated a single bit per module — "reaches vitest" — and treated
+  // every name imported from such a module as a runner root. That is why domain
+  // code sitting in the same file as a test helper read as an annotation. What
+  // propagates now is a set of names per module, grown to a fixpoint: the sets
+  // only ever gain members, so the loop terminates, and the bound is generous
+  // rather than load-bearing.
+  const runnerExports = new Map([...modules.keys()].map((file) => [file, new Set()]));
+  const lookup = (file) => (specifier) => {
+    const target = modules.get(file).edges.get(specifier);
+    return target === undefined ? undefined : runnerExports.get(target);
+  };
+
+  for (let pass = 0; pass <= modules.size + 1; pass += 1) {
+    let grew = false;
+    for (const [file, { sourceFile, shape }] of modules) {
+      const runnerExportsOf = lookup(file);
+      const roots = runnerRootNames(sourceFile, shape, runnerExportsOf);
+      const current = runnerExports.get(file);
+      for (const name of runnerExportNames(shape, roots, runnerExportsOf)) {
+        if (!current.has(name)) {
+          current.add(name);
+          grew = true;
         }
       }
     }
-    if (reachesVitest.size === before) break;
+    if (!grew) break;
   }
 
   // --- pass 2: find annotations, now that roots can be decided --------------
   const findings = [];
-  for (const [file, { sourceFile, shape, edges }] of modules) {
-    const reaches = (specifier) => {
-      const target = edges.get(specifier);
-      return target !== undefined && reachesVitest.has(target);
-    };
-    const roots = runnerRootNames(sourceFile, shape, reaches);
+  for (const [file, { sourceFile, shape }] of modules) {
+    const roots = runnerRootNames(sourceFile, shape, lookup(file));
     findings.push(...findAnnotations(sourceFile, file, roots));
   }
 
