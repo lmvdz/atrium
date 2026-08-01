@@ -72,6 +72,23 @@ export function isMainModule(url, argv = process.argv) {
 const BROKEN_GUARD =
   /import\.meta\.url\s*={2,3}\s*[`'"]file:\/\/|[`'"]file:\/\/[^\n]{0,80}={2,3}\s*import\.meta\.url/;
 
+/**
+ * The one spelling of the guard, and why "not the broken one" is not enough.
+ *
+ * A blind review of the first version of this scanner pointed out what it
+ * accepts: `if (isMainModule(import.meta.url) && false) { … }` uses the sound
+ * predicate, passes the broken-spelling test, and exits 0 having asserted
+ * nothing. Refusing one spelling is the denylist this round exists to stop
+ * writing, one file over — so the guard is an allowlist too. A file that
+ * mentions `import.meta.url` at all must contain this exact line, and any other
+ * arrangement of the same words is refused without this file having heard of
+ * it. It is a shape check and says so: it cannot stop `main()` itself being
+ * replaced with `() => 0`, which is the semantics boundary the SCOPE block in
+ * workflow-policy.mjs owns.
+ */
+const CANONICAL_GUARD = 'if (isMainModule(import.meta.url)) {';
+const MENTIONS_ENTRY = /\bimport\.meta\.url\b/;
+
 /** Files that may not be run at all, so a guard in them would be theatre. */
 const NOT_ENTRY_POINTS = new Set(['main-module.mjs']);
 
@@ -98,10 +115,18 @@ export function mainGuardProblems(directory, read = (path) => readFileSync(path,
       continue;
     }
     if (!entry.name.endsWith('.mjs') || NOT_ENTRY_POINTS.has(entry.name)) continue;
-    if (!BROKEN_GUARD.test(read(full))) continue;
-    problems.push(
-      `${full} decides whether it was run by comparing \`import.meta.url\` against \`file://\` + \`process.argv[1]\`. \`import.meta.url\` percent-encodes and resolves symlinks; \`process.argv[1]\` does neither, so a checkout path containing a space — or an invocation through a symlink — makes the comparison false, and the script exits 0 having printed nothing and asserted nothing. Measured: \`node "/tmp/g/with space/g.mjs"\` exits 0 where \`node /tmp/g/g.mjs\` exits 3. Use \`isMainModule(import.meta.url)\` from scripts/ci/main-module.mjs.`,
-    );
+    const source = read(full);
+    if (BROKEN_GUARD.test(source)) {
+      problems.push(
+        `${full} decides whether it was run by comparing \`import.meta.url\` against \`file://\` + \`process.argv[1]\`. \`import.meta.url\` percent-encodes and resolves symlinks; \`process.argv[1]\` does neither, so a checkout path containing a space — or an invocation through a symlink — makes the comparison false, and the script exits 0 having printed nothing and asserted nothing. Measured: \`node "/tmp/g/with space/g.mjs"\` exits 0 where \`node /tmp/g/g.mjs\` exits 3. Use \`isMainModule(import.meta.url)\` from scripts/ci/main-module.mjs.`,
+      );
+      continue;
+    }
+    if (MENTIONS_ENTRY.test(source) && !source.includes(CANONICAL_GUARD)) {
+      problems.push(
+        `${full} names \`import.meta.url\` but does not contain the one spelling of the guard, \`${CANONICAL_GUARD}\`. Refusing only the broken comparison is a denylist: \`if (isMainModule(import.meta.url) && false) {\` uses the sound predicate, passes that test, and exits 0 having asserted nothing. Write the canonical line, or do not decide this here.`,
+      );
+    }
   }
   return problems;
 }

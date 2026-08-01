@@ -1418,6 +1418,22 @@ const CASES = [
     expect: /percent-encodes and resolves symlinks/,
   },
   {
+    name: 'the sound predicate wired so it can never be true',
+    // Refusing only the broken comparison is a denylist. `isMainModule(…) &&
+    // false` uses the right predicate, passes that test, and exits 0 having
+    // asserted nothing. Found by a blind review of the first version.
+    run: () =>
+      mainGuardProblems('scripts', (path) =>
+        path.endsWith('assert-tables.mjs')
+          ? readFileSync(path, 'utf8').replace(
+              CANONICAL_GUARD_LINE,
+              `${CANONICAL_GUARD_LINE.slice(0, -2)} && false) {`,
+            )
+          : readFileSync(path, 'utf8'),
+      ),
+    expect: /does not contain the one spelling of the guard/,
+  },
+  {
     name: 'the same written with a loose equality and single quotes',
     run: () =>
       mainGuardProblems('scripts', (path) =>
@@ -1492,6 +1508,20 @@ const CASES = [
   // filename characters truncates every one at the first bracket, and the
   // truncated prefix silently fails the extension test — assets unchecked,
   // check reporting clean. Each shape below must come back whole.
+  {
+    name: 'a chunk stamped with a query string, which must still be classified and fetched',
+    // Classified on the path, requested whole. An anchored extension test on
+    // the whole URL skips `page.js?dpl=abc` *silently* — stylesheets checked,
+    // every script 404ing, report clean — and calls a page whose only asset is
+    // stamped "nothing servable here". Wrong in both directions from one
+    // anchor, found by a blind review.
+    run: () =>
+      servedAssets('<script src="/_next/static/chunks/app/page-a.js?dpl=abc"></script>', () => ({
+        status: 404,
+        body: '',
+      })),
+    expect: /page-a\.js\?dpl=abc returned 404/,
+  },
   ...Object.entries({
     'a route group, which this app has three of': [
       '<script src="/_next/static/chunks/app/(auth)/sign-in/page-9f8e7d.js"></script>',
@@ -1573,6 +1603,8 @@ const CASES = [
  */
 // biome-ignore lint/suspicious/noTemplateCurlyInString: the broken guard, quoted verbatim as a fixture
 const BROKEN_GUARD_HALVES = ['import.meta.url', '===', '`file://${process.argv[1]}`'];
+/** The canonical guard, which every entry point in scripts/ must contain. */
+const CANONICAL_GUARD_LINE = 'if (isMainModule(import.meta.url)) {';
 const LOOSE_GUARD_HALVES = ['import.meta.url', '==', "'file://' + process.argv[1]"];
 
 /** A rendered page naming the chunks a Next build produces, escaping and all. */

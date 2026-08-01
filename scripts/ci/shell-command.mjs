@@ -893,7 +893,7 @@ export function launcherProblems(command, kinds = ['launcher', 'manager']) {
   const problems = [];
   const allowed = Object.keys(PROTECTED_STEP_LAUNCHERS).map((name) => `\`${name}\``);
   const managers = Object.keys(PROTECTED_STEP_MANAGERS).map((name) => `\`${name}\``);
-  for (const { name, kind, options } of command.via ?? []) {
+  for (const { name, kind, options, exec } of command.via ?? []) {
     if (!kinds.includes(kind)) continue;
     const table =
       kind === 'manager'
@@ -943,6 +943,34 @@ export function launcherProblems(command, kinds = ['launcher', 'manager']) {
       // command never started; `--fail-if-no-match` is pnpm's own name for the
       // missing property. Being on this table is a property of the binary with
       // these flags, and for these flags that includes the flags beside them.
+      // ── THE SEPARATE SPELLING OF THE SAME VALUE (#40 round 5, third pass) ─
+      // Refusing `--fail-if-no-match=false` left `--fail-if-no-match false`,
+      // and pnpm honours both: measured, `pnpm --fail-if-no-match false
+      // --filter @atrium/nope exec node fail7.mjs` exits **0** with the command
+      // never started. It walks past the attached-value test because this
+      // parser never consumed `false` as a value — `--fail-if-no-match` is not
+      // in `PACKAGE_MANAGERS.pnpm.value`, so the unwrap stopped at the bare
+      // word and read it as the command. Two tables describing one option's
+      // arity, disagreeing, which is the defect this whole ticket is about.
+      //
+      // The word after a BARE option is therefore ambiguous by construction:
+      // it is the manager's script (`pnpm build`) or the option's value, and
+      // nothing here can tell. Ambiguous is refused. `pnpm --fail-if-no-match
+      // --filter X exec node y` names its exec word and is unaffected, and so
+      // is `pnpm --fail-if-no-match --filter X build`, whose last option
+      // consumed its own value.
+      const last = words.at(-1);
+      if (
+        word === last &&
+        exec === false &&
+        table[flag]?.takesValue !== true &&
+        command.argv.length > 0
+      ) {
+        problems.push(
+          `it passes \`${flag}\` to \`${name}\` as the last option before \`${command.argv[0]}\`, with no \`exec\`/\`run\`/\`dlx\` between them. \`${flag}\` takes no value, so \`${command.argv[0]}\` is either a script name or the value somebody meant to give it — and \`${name}\` may read it either way. Measured: \`pnpm --fail-if-no-match false --filter @atrium/nope exec node fail7.mjs\` exits 0 with the command never started, because pnpm took \`false\` as the flag's value while this parser took it as the command. Write the option last only when an exec word follows, or give the manager a script name with no bare option in front of it`,
+        );
+        continue;
+      }
       const required = table[flag]?.requires ?? [];
       for (const companion of required) {
         if (flags.includes(companion)) continue;
@@ -1218,9 +1246,15 @@ function unwrap(argv) {
       // itself stays the command word — which is the whole defence against
       // `pnpm … echo exec node …`.
       if (index >= words.length) return { argv: words, via };
-      if (EXEC_WORDS.has(words[index])) index += 1;
+      const exec = EXEC_WORDS.has(words[index]);
+      if (exec) index += 1;
       if (index >= words.length) return { argv: words, via };
-      via.push({ name: head, kind: 'manager', options, assignments: [] });
+      // `exec` is recorded because the two tables that describe an option's
+      // arity are different tables: `PACKAGE_MANAGERS[x].value` decides what
+      // this function consumes, and `PROTECTED_STEP_MANAGERS[x].options[y]`
+      // decides what a protected step may pass. When they disagree, the word
+      // after the option is read as the command — see `launcherProblems`.
+      via.push({ name: head, kind: 'manager', options, assignments: [], exec });
       words = words.slice(index);
       continue;
     }

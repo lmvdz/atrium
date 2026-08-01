@@ -794,6 +794,16 @@ zero tests exits 0 just like one that passed 315:
   half to every `run:` step of every job. The launcher half stays
   protected-only, deliberately: refusing `xargs` on an ordinary step would be a
   prohibition with no defect behind it.
+- **The node-flag lesson is not about node.** Round 4 inverted the node flag
+  denylist because `node --check assert-page-serves.mjs` runs none of the
+  script, and applied that argument to one binary. `git fetch --dry-run …`
+  keeps every word the matcher reads, updates no ref, and sends the floor
+  ratchet down its documented no-baseline exit-0 path — the ticket's founding
+  defect wearing a flag, policy-clean. So does `playwright test --list`,
+  `vitest run -t nomatch`, `actionlint -version` and `playwright install
+  --dry-run`. Every matcher now declares the options its invocation may carry,
+  and an invocation carrying anything else reads as *missing*, which is the
+  loud answer.
 - **An option's value is part of its entry.** The pairing was first checked
   against the option's *name*, which is right for `--user=root` and wrong for a
   switch: `--fail-if-no-match=false` satisfied it and restored the fail-open
@@ -839,7 +849,7 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 167
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 174
   mutated copies of the real workflow and additionally asserts that every one of
   the 28 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
@@ -848,7 +858,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 140 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 142 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

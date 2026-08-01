@@ -1792,6 +1792,25 @@ const MUTATIONS = [
     message: /is not one of the entrypoints this job may use/,
   },
   {
+    name: 'a deploy assertion reached through pnpm, in the job whose comment says there is none',
+    rule: 'compose-through-one-entrypoint',
+    // Found by probing this round's own manager fix rather than by a reviewer:
+    // `deployEntrypoint` tested `argv[0]` after `unwrap()` had already stripped
+    // the manager, so a `pnpm … exec node scripts/ci/x.mjs` in this job matched
+    // the entrypoint. The job's comment has said "No pnpm here" since round 1,
+    // and a comment is not a control.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: pnpm --fail-if-no-match --filter @atrium/web exec node scripts/ci/assert-page-serves.mjs',
+      ),
+    message: /is not one of the entrypoints this job may use/,
+    // The step stops being a recognised invocation of the page assertion for
+    // the same reason, so the presence rule is right to say it is missing.
+    also: ['required-job-steps', 'required-step-prerequisites'],
+  },
+  {
     name: 'a third action in the deploy job, which could export NODE_OPTIONS for every step after it',
     rule: 'compose-through-one-entrypoint',
     mutate: (s) =>
@@ -2057,6 +2076,57 @@ const MUTATIONS = [
   // delimiter on any ordinary step of `verify` was clean. The fix is the same
   // polarity as everything else this round: a write to the job environment must
   // name its variable in a word this engine can read.
+  // ---- the node-flag lesson, applied to every binary (#40 round 5, third) ---
+  // Round 4 inverted the node flag denylist and applied the argument to `node`
+  // alone. A blind review found the other five, and all five were clean:
+  // `--dry-run` on the fetch is the ticket's founding defect wearing a flag —
+  // `origin/main` never materialises, the ratchet takes its no-baseline exit-0
+  // path, and a floor lowered in the same pull request sails through.
+  {
+    name: 'the baseline fetch with `--dry-run`, which keeps every word and updates no ref',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      rewriteFetch(s, [
+        `git fetch --dry-run --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main`,
+      ]),
+    pair: PAIRS.ratchetNeedsFetch,
+  },
+  {
+    name: 'the Playwright suite with `--list`, which prints the tests and runs none',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'playwright test --reporter=list,json',
+        'playwright test --list --reporter=list,json',
+      ),
+    message: /never runs the Playwright suite/,
+    also: ['required-step-prerequisites'],
+  },
+  {
+    name: 'the unit suite narrowed to a pattern nothing matches',
+    rule: 'required-job-steps',
+    mutate: (s) => replaceOnce(s, 'pnpm vitest run', 'pnpm vitest run -t nomatch_xyz'),
+    message: /never runs the unit\/integration suite/,
+    also: ['required-step-prerequisites'],
+  },
+  {
+    name: 'actionlint printing its version instead of linting',
+    rule: 'policy-steps-present',
+    mutate: (s) => replaceOnce(s, 'actionlint" -color', 'actionlint" -color -version'),
+    message: /never runs actionlint/,
+  },
+  {
+    name: 'the Chromium install with `--dry-run`, so the browser check has nothing to find',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'playwright install --with-deps chromium',
+        'playwright install --dry-run --with-deps chromium',
+      ),
+    pair: PAIRS.chromiumNeedsInstall,
+  },
   {
     name: 'a `uses:` in a YAML flow mapping, where the line scan could not see the mutable tag',
     rule: 'pin-actions-to-sha',
@@ -2071,6 +2141,19 @@ const MUTATIONS = [
         '      - { name: Checkout, uses: actions/checkout@v4 }\n',
       ),
     message: /`uses: actions\/checkout@v4` is not pinned to a 40-character commit SHA/,
+  },
+  {
+    name: 'a second occurrence borrowing the first one’s version comment',
+    rule: 'pin-actions-to-sha',
+    // Indexing comments by ref let an uncommented flow-mapping `uses:` of an
+    // already-commented action pass. One comment per occurrence, consumed.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n',
+        '      - { name: Checkout, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 }\n',
+      ),
+    message: /Every occurrence needs its own/,
   },
   {
     name: 'the same pinned to a SHA, where the version comment now has nowhere to live',

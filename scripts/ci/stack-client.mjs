@@ -163,8 +163,19 @@ export function buildAssets(html) {
   ].sort();
 }
 
-/** The ones that are a file this deployment must be able to serve. */
+/**
+ * The ones that are a file this deployment must be able to serve.
+ *
+ * Classified on the path, requested whole. A build that stamps its chunks —
+ * `/_next/static/chunks/page.js?dpl=abc`, and `?v=` and `?ts=` are the same
+ * idea — has an extension in the middle of the URL, so an anchored test on the
+ * whole string skips it *silently*: the fetch loop would check the stylesheets
+ * and report clean while every script 404ed, and if the query-bearing script
+ * were the only asset it would report "nothing servable here" on a healthy
+ * stack. Wrong in both directions from one anchor, found by a blind review.
+ */
 const SERVABLE_ASSET = /\.(?:js|mjs|css|json|woff2?|ttf|otf|svg|png|webp|ico|map)$/;
+const assetPath = (url) => url.split(/[?#]/)[0];
 
 /**
  * Every build asset the page names is actually served.
@@ -197,7 +208,7 @@ const SERVABLE_ASSET = /\.(?:js|mjs|css|json|woff2?|ttf|otf|svg|png|webp|ico|map
  */
 export async function buildAssetProblems(target, html, get = (path) => once(target, path)) {
   const named = buildAssets(html);
-  const servable = named.filter((path) => SERVABLE_ASSET.test(path));
+  const servable = named.filter((path) => SERVABLE_ASSET.test(assetPath(path)));
   if (servable.length === 0) {
     return [
       `the page references ${named.length} \`/_next/static/…\` path(s) and none of them is a file this deployment could serve (${named.join(', ') || 'none at all'}). A page produced by a Next build names its script and stylesheet chunks by content hash; four lines of \`respond\` in the Caddyfile name none, and a build whose \`static\` directory never made it into the image names them and cannot serve them.`,
@@ -230,7 +241,10 @@ export async function buildAssetProblems(target, html, get = (path) => once(targ
     // the browser gets a 200 it cannot execute. A real chunk or stylesheet
     // never begins with a document. Deliberately this narrow — anything about
     // the content-type header would be a constant the mutation writes.
-    if (/^\s*(?:<!doctype html|<html\b)/i.test(body) && /\.(?:js|mjs|css|map)$/.test(path)) {
+    if (
+      /^\s*(?:<!doctype html|<html\b)/i.test(body) &&
+      /\.(?:js|mjs|css|map)$/.test(assetPath(path))
+    ) {
       problems.push(
         `GET ${path} returned 200 with an HTML document in it, so something is answering for the build's assets with a page. A chunk the browser cannot execute is a chunk that is not there, and a 200 makes it quieter than a 404 rather than better.`,
       );

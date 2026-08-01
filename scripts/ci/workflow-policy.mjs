@@ -70,6 +70,7 @@ import {
   firstOperand,
   LAUNCHER_NAMES,
   managerProblems,
+  NODE_FLAGS_ALLOWED,
   PACKAGE_MANAGER_NAMES,
   parseScript,
   runsItsScript,
@@ -265,11 +266,65 @@ const DEPLOY_JOB = 'deploy';
 /** Every matcher built below, so the shadowing rule can derive what it protects. */
 const MATCHERS = [];
 
+/**
+ * The flags each recognised invocation may carry, and why there is a list.
+ *
+ * ── THE NODE-FLAG LESSON, APPLIED TO ONE BINARY (#40 round 5, third pass) ───
+ * Round 4 inverted the node-flag denylist into `NODE_FLAGS_ALLOWED`, because
+ * `node --check scripts/ci/assert-page-serves.mjs` parses the file, runs none
+ * of it, and satisfies every recognition rule. That argument is not about node.
+ * It is about *any* tool with a flag that makes it not do its work, and round 4
+ * applied it to `node` and to nothing else. A blind cross-lineage review of
+ * this round found what that left, and all five reproduced clean against the
+ * engine as committed twenty minutes earlier:
+ *
+ *     git fetch --dry-run --no-tags --depth=1 origin +refs/heads/main:…
+ *     playwright test --list --reporter=list,json
+ *     pnpm vitest run -t nomatch_xyz
+ *     actionlint -color -version
+ *     playwright install --dry-run --with-deps chromium
+ *
+ * The first is the one that matters most, and it is the ticket's own founding
+ * defect wearing a flag: `--dry-run` leaves `origin/main` unfetched, so
+ * `assert-floor-ratchet.mjs` takes its documented no-baseline path, prints a
+ * polite sentence and exits 0 — a floor lowered in the same pull request sails
+ * through the gate that exists to catch it, with the policy green.
+ *
+ * So every matcher declares the options its invocation may carry, and an
+ * invocation carrying anything else reads as **missing**, which is the loud
+ * answer — exactly as `runsItsScript` already does for `node`. The polarity is
+ * the point: `--dry-run`, `--list`, `-t`, `-version` and the flag the next
+ * release adds are one clause, not five.
+ *
+ * A flag goes on a list here when the workflow uses it, or when somebody argues
+ * for it in the same commit that adds it. Values may be attached (`--depth=1`)
+ * or separate; a separate value is a bare word and is not checked, because it
+ * is data. Short flags are compared whole, so `-sKILL` is refused as a spelling
+ * nobody justified — fail-closed, and stated rather than discovered.
+ */
 class CommandMatcher {
-  constructor(describes, names, match) {
+  constructor(describes, names, match, flags) {
     this.describes = describes;
     this.names = names;
-    this.match = match;
+    this.flags = flags;
+    this.match = (command) => match(command) && this.optionsAllowed(command);
+  }
+
+  /**
+   * True when every option word in this argv is one this invocation may carry.
+   *
+   * `argv`, not `raw`: the launcher's own options are governed by
+   * `PROTECTED_STEP_LAUNCHERS`, and asking this about them would refuse
+   * `timeout -s TERM 30 git fetch …` for a flag that belongs to `timeout`.
+   */
+  optionsAllowed({ argv }) {
+    for (const word of (argv ?? []).slice(1)) {
+      if (!word.startsWith('-') || word === '-' || word === '--') continue;
+      const equals = word.indexOf('=');
+      const flag = equals === -1 ? word : word.slice(0, equals);
+      if (!this.flags.has(flag)) return false;
+    }
+    return true;
   }
 
   /** True when some simple command in `script` runs this, and completes. */
@@ -287,9 +342,12 @@ class CommandMatcher {
  * @param {string} describes what a human should read in a violation message
  * @param {string[]} names the command words this recognition depends on
  * @param {(command: object) => boolean} match predicate over one simple command
+ * @param {string[]} [flags] the options this invocation may carry; the default
+ *   is none at all, which is the allowlist working — a matcher that needs one
+ *   says so, and every flag nobody has named reads as "not this command"
  */
-function command(describes, names, match) {
-  const matcher = new CommandMatcher(describes, names, match);
+function command(describes, names, match, flags = []) {
+  const matcher = new CommandMatcher(describes, names, match, new Set(flags));
   MATCHERS.push(matcher);
   return matcher;
 }
@@ -303,17 +361,26 @@ function command(describes, names, match) {
 function invokesIn(directory, script) {
   const path = new RegExp(String.raw`^(?:\.\.\/)*${directory}\/${script}$`);
   const shown = `${directory}/${script}`.replace(/\\/g, '');
-  return command(`\`node …/${shown}\``, ['node'], ({ argv }) => {
-    if (argv[0] !== 'node') return false;
-    // `node --check x.mjs` parses the file, exits 0, and runs none of it — and
-    // it is one unconditional command with the script as its first operand, so
-    // the shape rule cannot see it either. Found by a blind cross-lineage review
-    // of the first version of that rule. A node invocation that is not going to
-    // run the script reads as *missing*, which is loud.
-    if (!runsItsScript(argv)) return false;
-    const operand = firstOperand(argv);
-    return operand !== undefined && path.test(operand);
-  });
+  return command(
+    `\`node …/${shown}\``,
+    ['node'],
+    ({ argv }) => {
+      if (argv[0] !== 'node') return false;
+      // `node --check x.mjs` parses the file, exits 0, and runs none of it —
+      // and it is one unconditional command with the script as its first
+      // operand, so the shape rule cannot see it either. Found by a blind
+      // cross-lineage review of the first version of that rule. A node
+      // invocation that is not going to run the script reads as *missing*.
+      if (!runsItsScript(argv)) return false;
+      const operand = firstOperand(argv);
+      return operand !== undefined && path.test(operand);
+    },
+    // `runsItsScript` already governs which node flags are admissible and why —
+    // this is the same set, handed to the option gate so the two cannot
+    // disagree. A node flag nobody justified reads as "not this invocation"
+    // from both directions.
+    [...NODE_FLAGS_ALLOWED.keys()],
+  );
 }
 
 /** A script in `scripts/ci/` being *invoked*, not merely mentioned. */
@@ -334,12 +401,17 @@ function packageScript(name) {
 }
 
 /** A binary and its subcommand, however the package manager reaches it. */
-function binary(name, ...subcommand) {
+function binary(name, flags, ...subcommand) {
   const shown = [name, ...subcommand].join(' ');
-  return command(`\`${shown}\``, [name], ({ argv }) => {
-    if (basename(argv[0]) !== name) return false;
-    return subcommand.every((word, index) => argv[index + 1] === word);
-  });
+  return command(
+    `\`${shown}\``,
+    [name],
+    ({ argv }) => {
+      if (basename(argv[0]) !== name) return false;
+      return subcommand.every((word, index) => argv[index + 1] === word);
+    },
+    flags,
+  );
 }
 
 /**
@@ -424,22 +496,33 @@ function exportsToJobEnv(name) {
  * the schema assertion. One matcher per command means the two rules can never
  * drift into disagreeing about what "the migrations ran" means.
  */
-const RUNS_ACTIONLINT = command('`actionlint -color`', ['actionlint'], ({ argv }) => {
-  return (
-    basename(argv[0]) === 'actionlint' &&
-    argv.slice(1).some((word) => word === '-color' || word === '--color')
-  );
-});
+const RUNS_ACTIONLINT = command(
+  '`actionlint -color`',
+  ['actionlint'],
+  ({ argv }) => {
+    return (
+      basename(argv[0]) === 'actionlint' &&
+      argv.slice(1).some((word) => word === '-color' || word === '--color')
+    );
+  },
+  // `-version` prints a banner and lints nothing, and it satisfied the `-color`
+  // test happily: `actionlint -color -version` was clean.
+  ['-color', '--color'],
+);
 const RUNS_LINT = packageScript('lint');
 const RUNS_TYPECHECK = packageScript('typecheck');
 const RUNS_BUILD = packageScript('build');
 const WAITS_FOR_POSTGRES = invokes('wait-for-postgres\\.mjs');
-const RUNS_MIGRATIONS = binary('drizzle-kit', 'migrate');
-const RUNS_VITEST = binary('vitest', 'run');
-const INSTALLS_CHROMIUM = binary('playwright', 'install');
+const RUNS_MIGRATIONS = binary('drizzle-kit', [], 'migrate');
+// `-t nomatch_xyz` runs zero tests and exits 0, and the report gate reads a
+// report of a run that matched nothing. Same class as `--dry-run`.
+const RUNS_VITEST = binary('vitest', ['--reporter', '--outputFile.json'], 'run');
+const INSTALLS_CHROMIUM = binary('playwright', ['--with-deps'], 'install');
 const MIGRATES_E2E_DATABASE = invokesIn(String.raw`e2e\/support`, String.raw`ensure-database\.mjs`);
 const ASSERTS_CHROMIUM = invokes('assert-chromium\\.mjs');
-const RUNS_PLAYWRIGHT = binary('playwright', 'test');
+// `--list` prints the tests and runs none of them; `-g`/`--grep` runs the ones
+// that match a pattern, which may be none.
+const RUNS_PLAYWRIGHT = binary('playwright', ['--reporter'], 'test');
 
 /**
  * The `deploy` job's four compose verbs (#40).
@@ -466,12 +549,18 @@ const RUNS_PLAYWRIGHT = binary('playwright', 'test');
  */
 function composeStack(verb) {
   const path = /^(?:\.\.\/)*scripts\/ci\/compose-stack\.mjs$/;
-  return command(`\`node scripts/ci/compose-stack.mjs ${verb}\``, ['node'], ({ argv }) => {
-    if (argv[0] !== 'node') return false;
-    const script = firstOperand(argv);
-    if (script === undefined || !path.test(script)) return false;
-    return firstOperand(argv, argv.indexOf(script) + 1) === verb;
-  });
+  return command(
+    `\`node scripts/ci/compose-stack.mjs ${verb}\``,
+    ['node'],
+    ({ argv }) => {
+      if (argv[0] !== 'node') return false;
+      if (!runsItsScript(argv)) return false;
+      const script = firstOperand(argv);
+      if (script === undefined || !path.test(script)) return false;
+      return firstOperand(argv, argv.indexOf(script) + 1) === verb;
+    },
+    [...NODE_FLAGS_ALLOWED.keys()],
+  );
 }
 
 const BUILDS_IMAGES = composeStack('build');
@@ -494,10 +583,15 @@ const ASSERTS_SIGNUP = invokes('assert-signup-verifies\\.mjs');
  * comparison, and a report restored from a cache with a new mtime passes it.
  */
 function deletesReports(...files) {
-  return command(`\`rm -f ${files.join(' ')}\``, ['rm'], ({ argv }) => {
-    if (basename(argv[0]) !== 'rm') return false;
-    return files.every((file) => argv.slice(1).includes(file));
-  });
+  return command(
+    `\`rm -f ${files.join(' ')}\``,
+    ['rm'],
+    ({ argv }) => {
+      if (basename(argv[0]) !== 'rm') return false;
+      return files.every((file) => argv.slice(1).includes(file));
+    },
+    ['-f', '--force'],
+  );
 }
 
 const DELETES_VITEST_REPORTS = {
@@ -514,13 +608,24 @@ const DELETES_E2E_REPORT = {
 
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
-  test: command('`git fetch … refs/heads/main`', ['git'], ({ argv }) => {
-    if (basename(argv[0]) !== 'git') return false;
-    // The subcommand by membership rather than by position: `git -c x=y fetch`
-    // is a fetch, and reading the first operand would call it a `x=y`.
-    if (!argv.slice(1).includes('fetch')) return false;
-    return argv.slice(1).some((word) => word.includes('refs/heads/main'));
-  }),
+  test: command(
+    '`git fetch … refs/heads/main`',
+    ['git'],
+    ({ argv }) => {
+      if (basename(argv[0]) !== 'git') return false;
+      // The subcommand by membership rather than by position: `git -c x=y fetch`
+      // is a fetch, and reading the first operand would call it a `x=y`.
+      if (!argv.slice(1).includes('fetch')) return false;
+      return argv.slice(1).some((word) => word.includes('refs/heads/main'));
+    },
+    // The one that matters most in this file. `git fetch --dry-run …` keeps
+    // every word this matcher reads and updates no ref, so `origin/main` never
+    // materialises and the ratchet takes its no-baseline exit-0 path — the
+    // ticket's founding defect, wearing a flag, policy-clean until this list
+    // existed. `-c` is here because `git -c protocol.version=2 fetch …` is an
+    // accepted form; its value is a bare word and is not an option.
+    ['--no-tags', '--depth', '-c'],
+  ),
   because:
     'without it the shallow clone actions/checkout leaves has no `origin/main`, so the ratchet finds no baseline, reports that politely, and exits 0 — a floor lowered in the same pull request would sail through the very gate that exists to catch it',
 };
@@ -1081,7 +1186,8 @@ const SHADOWING_BUILTINS = new Set(['alias', 'export', 'declare', 'typeset', 're
  * *prerequisite* matcher `exportsToJobEnv` still compares the target as a whole
  * word, because there the mistake was the opposite one.
  */
-const jobFilePattern = (name) => new RegExp(String.raw`\$(?:${name}\b|\{${name}[^}]*\})`);
+const jobFilePattern = (name) =>
+  new RegExp(String.raw`\$(?:${name}\b|\{${name}(?![A-Za-z0-9_])[^}]*\})`);
 const GITHUB_ENV_FILE = jobFilePattern('GITHUB_ENV');
 const GITHUB_PATH_FILE = jobFilePattern('GITHUB_PATH');
 
@@ -1112,8 +1218,17 @@ const GITHUB_PATH_FILE = jobFilePattern('GITHUB_PATH');
  */
 function namesJobFile(pattern, { redirections, words }) {
   const names = ({ expandable, value }) => expandable === true && pattern.test(value);
+  // A redirection target is the file by construction. An *argument* is the file
+  // only if the word is the path and nothing else, or a `key=<path>` operand —
+  // which is `dd of="$GITHUB_ENV"` and is not `echo "never write secrets to
+  // $GITHUB_ENV"`. The second of those is a sentence, and reading it as a write
+  // is a false red a blind review found in the first version of this.
+  const isPath = ({ expandable, value }) =>
+    expandable === true &&
+    /^(?:[A-Za-z_][A-Za-z0-9_.-]*=)?\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)$/.test(value) &&
+    pattern.test(value);
   return (
-    (redirections ?? []).some(({ target }) => names(target)) || (words ?? []).slice(1).some(names)
+    (redirections ?? []).some(({ target }) => names(target)) || (words ?? []).slice(1).some(isPath)
   );
 }
 
@@ -1365,6 +1480,35 @@ function checkCommandShadowing(script, where, add, path) {
             `${path}: the script at ${where} aliases \`${word.split('=')[0]}\`, which is one of the command words this policy recognises.`,
           );
         }
+      }
+    }
+    // ── THE NAME AS DATA (#40 round 5, third pass) ───────────────────────────
+    // `${!NAME}` is bash's indirect expansion: it expands to the value of the
+    // variable *named by* NAME. Every rule in this file recognises a variable
+    // by its name, so a construct that computes the name defeats all of them at
+    // once. Measured, and found by a blind review of this round's own fix:
+    //
+    //     env:
+    //       GIT_TERMINAL_PROMPT: GITHUB_ENV
+    //     run: echo "NODE_OPTIONS=--require /tmp/nobble.cjs" >> "${!GIT_TERMINAL_PROMPT}"
+    //
+    // writes the real `$GITHUB_ENV`, and every name in it is on
+    // `DECLARED_VARIABLES` — the allowlist supplied the indirection itself.
+    // Policy: completely clean.
+    //
+    // There is no version of `namesJobFile` that can see through this, because
+    // the name is not in the text. So the construct is refused: nothing in this
+    // workflow needs it, and a rule that reads names cannot be asked to read a
+    // name that is not written down.
+    for (const value of [
+      ...words.map((word) => word.value),
+      ...redirections.map(({ target }) => target.value),
+    ]) {
+      if (/\$\{!/.test(value)) {
+        add(
+          'no-command-shadowing',
+          `${path}: the script at ${where} uses bash indirect expansion (\`\${!…}\`) in \`${value}\`. That expands to the value of the variable *named by* another variable, so the name this policy would read is not in the text: \`env: {GIT_TERMINAL_PROMPT: GITHUB_ENV}\` with \`>> "\${!GIT_TERMINAL_PROMPT}"\` writes the job environment with every name in it on the allowlist. Write the variable you mean.`,
+        );
       }
     }
     if (argv[0] === 'hash' && raw.includes('-p')) {
@@ -1680,8 +1824,18 @@ export const DEPLOY_ENTRYPOINTS = [
     id: 'ci-script',
     describe: '`node scripts/ci/<name>.mjs [args]`',
     /** @returns {string|null} the script's bare name */
-    match: ({ argv }) => {
+    match: ({ argv, via }) => {
       if (argv[0] !== 'node' || !runsItsScript(argv)) return null;
+      // No package manager may sit in front of it. `timeout 5 pnpm
+      // --fail-if-no-match --filter @atrium/nope exec node
+      // scripts/ci/assert-page-serves.mjs` unwraps to argv[0] === 'node' and
+      // was accepted here — found by probing this round's own manager fix. The
+      // job's own comment says why it must not be: "No pnpm here: every script
+      // this job runs is dependency-free by design, so the assertions cannot be
+      // broken by an install that resolved differently from the one inside the
+      // images." A comment is not a control; this is.
+      const manager = (via ?? []).find(({ kind }) => kind === 'manager');
+      if (manager !== undefined) return null;
       const operand = firstOperand(argv);
       const found = operand === undefined ? null : CI_SCRIPT_PATH.exec(operand);
       return found ? found[1] : null;
@@ -1996,12 +2150,17 @@ export function checkWorkflow(source, path = '<workflow>') {
   // line scan never saw is refused *for that reason*: not because the comment
   // is missing, but because it is written where the comment cannot be.
   const commentFor = new Map();
+  /** Refs that have already spent one of their comments, for the message. */
+  const seen = new Set();
   for (const line of source.split('\n')) {
     const match = USES_LINE.exec(line);
     if (!match) continue;
-    const [, ref, comment] = match;
+    // `uses: "actions/checkout@<sha>" # v7.0.1` is legal YAML and the parsed
+    // value carries no quotes, so keeping them here made the two halves
+    // disagree about the same step — a false red found by a blind review.
+    const ref = match[1].replace(/^(['"])(.*)\1$/, '$2');
     if (!commentFor.has(ref)) commentFor.set(ref, []);
-    commentFor.get(ref).push(comment);
+    commentFor.get(ref).push(match[2]);
   }
   for (const [keyPath, key, value] of walkKeys(workflow)) {
     if (key !== 'uses' || typeof value !== 'string') continue;
@@ -2015,21 +2174,31 @@ export function checkWorkflow(source, path = '<workflow>') {
       );
       continue;
     }
+    // One comment per *occurrence*, consumed as it is used. Indexing by ref
+    // alone let a second, uncommented occurrence of an already-commented action
+    // borrow the first one's comment — which is how `- { name: Checkout, uses:
+    // actions/checkout@<the real sha> }` came back clean, found by a blind
+    // review of the fix two commits earlier.
     const comments = commentFor.get(ref) ?? [];
     if (comments.length === 0) {
       add(
         'pin-actions-to-sha',
-        `${at}: \`uses: ${ref}\` is not written as a \`uses:\` line of its own, so the \`# vN.N.N\` comment this rule requires has nowhere to live and nothing here can read it. A YAML flow mapping — \`- { name: Checkout, uses: … }\` — is what this looked like before the parsed tree became the authority, and for four rounds it was clean with a mutable tag.`,
+        seen.has(ref)
+          ? `${at}: \`uses: ${ref}\` has no \`# vN.N.N\` comment of its own — the source lines carrying that ref are all spoken for by earlier occurrences. Every occurrence needs its own: one comment cannot vouch for two steps, and indexing them by ref alone is how a flow-mapping \`uses:\` borrowed a twin's comment and came back clean.`
+          : `${at}: \`uses: ${ref}\` is not written as a \`uses:\` line of its own, so the \`# vN.N.N\` comment this rule requires has nowhere to live and nothing here can read it. A YAML flow mapping — \`- { name: Checkout, uses: … }\` — is what this looked like before the parsed tree became the authority, and for four rounds it was clean with a mutable tag.`,
       );
       continue;
     }
-    const comment = comments.find((one) => one && VERSION_COMMENT.test(one));
-    if (comment === undefined) {
+    seen.add(ref);
+    const commented = comments.findIndex((one) => one && VERSION_COMMENT.test(one));
+    if (commented === -1) {
       add(
         'pin-actions-to-sha',
-        `${at}: \`uses: ${ref}\` needs a trailing \`# vN.N.N\` comment recording which release the SHA is, so the pin stays auditable.`,
+        `${at}: \`uses: ${ref}\` needs a trailing \`# vN.N.N\` comment recording which release the SHA is, so the pin stays auditable. Every occurrence needs its own: one comment cannot vouch for two steps.`,
       );
+      continue;
     }
+    comments.splice(commented, 1);
   }
 
   // ---- every job is bounded, and defined here -----------------------------
