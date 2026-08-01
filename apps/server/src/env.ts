@@ -4,18 +4,47 @@ import { loadEnvFile } from 'node:process';
 import { z } from 'zod';
 
 /**
- * Config comes from the environment, nowhere else. In development we load the
- * repo-root `.env` (Node 22's built-in loader — no dotenv dependency); in
- * Docker the values arrive as real environment variables and no file exists.
+ * `NODE_ENV` exactly as this process was started with, captured at import time
+ * — before anything here can load a file.
+ *
+ * `NODE_ENV` is not configuration like the others. It decides whether the
+ * published development credentials below are allowed to apply at all, so it
+ * must come from whoever *started the process* and from nowhere else. A `.env`
+ * is a file lying on a disk: it ships in a repo, it gets copied into an image
+ * by an over-eager `COPY .`, it survives a `docker run` that meant to override
+ * it. If a file can say `NODE_ENV=development`, then a file can turn the
+ * credential fallback back on, and the fail-closed default is decoration.
+ */
+const PROCESS_NODE_ENV = process.env.NODE_ENV;
+
+/**
+ * Config comes from the environment, nowhere else. On a laptop we fill in the
+ * gaps from the repo-root `.env` (Node 22's built-in loader — no dotenv
+ * dependency); in Docker the values arrive as real environment variables and no
+ * file exists.
+ *
+ * Note what this may and may not do: it may *supply* a value nobody set, and it
+ * may never *change* `NODE_ENV`. `loadEnvFile` writes straight into
+ * `process.env`, and it writes `NODE_ENV` along with everything else, so the
+ * captured value is put back immediately afterwards — including deleting the
+ * key again when the process genuinely had none. Anything else in the process
+ * that reads `process.env.NODE_ENV` later then sees the truth too, not just the
+ * schema below.
  */
 function loadDotEnv(): void {
   for (const candidate of ['.env', '../.env', '../../.env']) {
     const path = resolve(process.cwd(), candidate);
     if (existsSync(path)) {
       loadEnvFile(path);
+      restoreNodeEnv();
       return;
     }
   }
+}
+
+function restoreNodeEnv(): void {
+  if (PROCESS_NODE_ENV === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = PROCESS_NODE_ENV;
 }
 
 /**
@@ -37,7 +66,8 @@ const DEV_S3_SECRET_ACCESS_KEY = 'atrium-dev-secret';
  * `NODE_ENV` defaults to `production`, not `development`. An unset `NODE_ENV`
  * means nobody said, and "nobody said" on a bare host is a host on the
  * internet. The safe default is the strict one: the development credential
- * fallback below requires someone to have opted into development out loud.
+ * fallback below requires someone to have opted into development out loud, in
+ * the process environment — see `PROCESS_NODE_ENV`.
  */
 const BaseEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('production'),
@@ -119,9 +149,24 @@ function trimmed(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
+/**
+ * Parse a source into a schema, with `NODE_ENV` pinned to what the process was
+ * started with.
+ *
+ * Two rules, both about the same thing:
+ *  - the `.env` is only consulted when the source *is* the process environment.
+ *    Hand this an explicit object and that object is the environment — a file
+ *    on disk must not be able to reach into a caller's own config.
+ *  - `NODE_ENV` is taken from the captured process value (or, for an explicit
+ *    source, from that source), never from what `loadEnvFile` left behind.
+ *    Setting it to `undefined` is what the schema's `production` default is
+ *    for: an environment nobody declared is the strict one.
+ */
 function parseOrThrow<T extends z.ZodType>(schema: T, source: NodeJS.ProcessEnv): z.infer<T> {
-  loadDotEnv();
-  const parsed = schema.safeParse(trimmed(source));
+  const fromProcess = source === process.env;
+  const declared = fromProcess ? PROCESS_NODE_ENV : source.NODE_ENV;
+  if (fromProcess) loadDotEnv();
+  const parsed = schema.safeParse({ ...trimmed(source), NODE_ENV: declared?.trim() });
   if (!parsed.success) {
     const details = parsed.error.issues
       .map((issue) => `  ${issue.path.join('.') || '(root)'}: ${issue.message}`)
