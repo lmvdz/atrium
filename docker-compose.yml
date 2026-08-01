@@ -42,8 +42,13 @@
 # │ a guessed password costs everything.
 # │
 # │ Set real values in `.env` (or the deployment's own secret store) before
-# │ exposing any port to the internet, and do not publish 5432/9000/9001 at all
-# │ unless you mean to.
+# │ exposing any port to the internet. 5432/9000/9001 are published on
+# │ 127.0.0.1 only — that sentence used to read "do not publish them at all
+# │ unless you mean to", which is the same shape as the Caddyfile paragraph
+# │ rounds 4 and 5 replaced with a control: an instruction to the operator is
+# │ not a control. Only 80 and 443 reach a network, and only through `proxy`.
+# │ A deployment that genuinely needs the database from another host should
+# │ give it a private network or a tunnel, not widen this line.
 # └────────────────────────────────────────────────────────────────────────────
 #
 # ┌─ WHY THERE IS A PROXY IN FRONT ────────────────────────────────────────────
@@ -111,7 +116,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}
       POSTGRES_DB: ${POSTGRES_DB:-atrium}
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      # Loopback only. Published at all so `pnpm test:e2e` and psql can reach it
+      # from the host; reachable from nowhere else, because a bare
+      # `${POSTGRES_PORT}:5432` is `0.0.0.0` and puts the database on whatever
+      # network the host is attached to.
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -128,8 +137,11 @@ services:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header}
     ports:
-      - '${MINIO_PORT:-9000}:9000'
-      - '${MINIO_CONSOLE_PORT:-9001}:9001'
+      # Loopback only, same reason as postgres above — and the console on 9001
+      # is a login form for the object store, which is the last thing that
+      # should answer on a public interface by default.
+      - '127.0.0.1:${MINIO_PORT:-9000}:9000'
+      - '127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001'
     volumes:
       - minio-data:/data
     healthcheck:

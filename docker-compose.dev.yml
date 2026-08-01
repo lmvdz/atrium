@@ -19,6 +19,12 @@
 # Not for: anything reachable from a network you do not own. It sets
 # NODE_ENV=development, which switches on the published development credential
 # fallbacks in `apps/server/src/env.ts` as well as the console mail transport.
+# Round 5 relied on that sentence; the round-5 gauntlet pointed out that
+# NODE_ENV=development stops the *processes* refusing to boot, and does nothing
+# to stop an operator putting the pair on the internet. So it is enforced twice
+# now, in the two places that decide reachability: the published port binds to
+# 127.0.0.1 (below), and `deploy/Caddyfile.dev` answers only loopback Host
+# headers. Neither is a variable; both are edits to a marked file.
 #
 # Why the plaintext lives here rather than behind a variable in the main file:
 # under NODE_ENV=production both processes refuse to start with an `http://`
@@ -60,4 +66,13 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     ports: !override
-      - '${WEB_PORT:-3000}:80'
+      # 127.0.0.1, not 0.0.0.0. Round 5 published `${WEB_PORT}:80`, which docker
+      # expands to `0.0.0.0:${WEB_PORT}:80` — every interface on the host. The
+      # NODE_ENV=development this file also sets disables the production
+      # transport gate, so that pair put a cleartext auth stack on whatever
+      # network the host is attached to, reachable by setting one variable. The
+      # host-ip prefix is what makes "development only" a binding rather than a
+      # comment; `Caddyfile.dev` refuses non-loopback Host headers as the second
+      # half. Publishing to another address takes editing this line, in a file
+      # whose first nine lines say not to.
+      - '127.0.0.1:${WEB_PORT:-3000}:80'
