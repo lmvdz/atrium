@@ -15,6 +15,7 @@ import {
   PROVENANCE_PROBLEM_KINDS,
   type ProvenanceProblemKind,
   provenanceIsClean,
+  RECEIPT_POLICY,
   replyBlockquotes,
   SED_CORRECTION,
   stripReplyBlockquotes,
@@ -915,6 +916,12 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     ).toEqual(['missing_quote']);
   });
 
+  /** A body past `maxScannedSentences`, for the cap branch below. */
+  const LONG_BODY = Array.from(
+    { length: RECEIPT_POLICY.maxScannedSentences + 1 },
+    (_, index) => `Point ${index} stands.`,
+  ).join(' ');
+
   it('covers every problem kind it declares', () => {
     // A taxonomy with an unreachable member is a taxonomy that has drifted.
     //
@@ -1095,6 +1102,22 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
             authorId: JORDAN,
             body: 'Would we deploy production on Friday afternoon?',
           },
+        ],
+      ],
+      // quote_span_unscanned — r7: a body with more sentences than the span check
+      // will read. The disposition was already `refer`; what was wrong is that it
+      // arrived as `quote_is_a_fragment`, i.e. as a finding about the quote.
+      [
+        {
+          type: 'claim',
+          provenance: ['m_long'],
+          quote: LONG_BODY,
+          statement: LONG_BODY,
+          proposer: { kind: 'model' },
+        },
+        [
+          { id: 'm_long', authorId: JORDAN, body: LONG_BODY },
+          { id: 'm_long_tail', authorId: DHLOLO, body: 'noted, thanks for writing it out' },
         ],
       ],
       // statement_is_not_a_question — r7's mirror: a declarative filed under the

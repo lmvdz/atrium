@@ -390,7 +390,14 @@ export function normalizeForRouting(text: string): string {
  * sentence, meanwhile, tokenized to *nothing at all* and was refused as empty.
  *
  * So the rule is inverted: a token is a word, or it is a code point, and
- * `RECEIPT_POLICY.droppableTokens` is the only thing that may go missing.
+ * **nothing may go missing**.
+ *
+ * That sentence read "`RECEIPT_POLICY.droppableTokens` is the only thing that
+ * may go missing" until r7, thirty lines above the paragraph below saying
+ * nothing may — the field was emptied in r6 and deleted, and this line kept
+ * describing it in the present tense. `boundary.test.ts` asserts its absence by
+ * name so nobody re-adds it; this comment is the other half of that, because a
+ * live comment naming a deleted mechanism is an invitation to restore it.
  *
  * ## `[\s\S]` and not `[^\s']`, which is r6's first finding
  *

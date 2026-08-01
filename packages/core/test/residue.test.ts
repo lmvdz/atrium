@@ -5,6 +5,7 @@ import {
   findDuplicate,
   hasContent,
   normalizeForReceipt,
+  orderedTokens,
   type Proposal,
   Proposal as ProposalSchema,
   type ProvenanceMessage,
@@ -994,5 +995,151 @@ describe('r5 — the audit"s own find: a contradiction is not a duplicate', () =
 
   it('does not discard a quantifier substitution either', () => {
     expect(findDuplicate('claim', 'Some services restart cleanly', ['msg_1'], accepted)).toBeNull();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * r7 — the refusal a person reads has to be true about their own message
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Two refusals with the right verdict and a false sentence attached.
+ *
+ * Neither is a fail-open: every mislabel stays on a non-accepting branch, and
+ * r7's blind review verified that in both directions over 200k pairs. They are
+ * here because a room is shown these strings. A refusal that names the wrong
+ * defect sends somebody to fix a citation that is fine, and — worse for this
+ * package specifically — reads as evidence that the check understood the input
+ * when it did not.
+ *
+ * Both fail on `fix/core-engine-r6` as committed.
+ */
+describe('r7 — a refusal that names words the quote does contain', () => {
+  const BODY = 'We deploy production Friday and we deploy staging Monday.';
+  const TRANSPOSED = 'We deploy staging Friday and we deploy production Monday.';
+  const messages: ProvenanceMessage[] = room(
+    { id: 'msg_1', authorId: BOB, body: BODY },
+    { id: 'msg_2', authorId: ALICE, body: 'noted, thanks for the schedule' },
+  );
+
+  const subject = {
+    type: 'claim' as const,
+    provenance: ['msg_1'],
+    quote: BODY,
+    statement: TRANSPOSED,
+    proposer: { kind: 'model' as const },
+    attributedTo: BOB,
+  };
+
+  it('does not tell a room the quote lacks words the quote has', () => {
+    // A transposition of a **repeated** token knocks both sides of the
+    // resynchroniser out of step, so `unmatchedInStatement` came back holding
+    // "Friday", "and", "we", "deploy", "production" — every one of which the
+    // quote says — under the sentence *"which the quote does not say"*.
+    const problems = validateProposalProvenance(subject, messages);
+    expect(problems.map((problem) => problem.kind)).toEqual(['quote_does_not_bear_statement']);
+    const detail = problems[0]?.detail ?? '';
+    // The five words r7's review found named as absent, all of them present.
+    const quoteWords = new Set(orderedTokens(BODY));
+    for (const word of ['Friday', 'and', 'we', 'deploy', 'production']) {
+      expect(quoteWords.has(word), `${word} is in the quote`).toBe(true);
+    }
+    expect(detail).not.toContain('which the quote does not say');
+    expect(detail).toContain(
+      'uses only words the quote contains and puts them in a different order',
+    );
+  });
+
+  it('still names a word that really is absent, so this is not "never say absent"', () => {
+    // The anti-vacuity half: the original message is the common case and has to
+    // keep working, or the repair is "stop reporting".
+    const problems = validateProposalProvenance(
+      { ...subject, statement: 'We deploy production Friday and we redeploy staging Tuesday.' },
+      messages,
+    );
+    expect(problems.map((problem) => problem.kind)).toEqual(['quote_does_not_bear_statement']);
+    expect(problems[0]?.detail).toContain('which the quote does not say');
+  });
+
+  it('keeps the verdict, which was never the defect', () => {
+    // The disposition is right in both spellings, and this pins that the message
+    // repair did not move it.
+    expect(
+      decideAcceptance(
+        modelProposal({
+          type: 'claim',
+          payload: { statement: TRANSPOSED, claimant: BOB },
+          quote: BODY,
+        }),
+        { messages },
+      ).verdict,
+    ).toBe('discard');
+  });
+});
+
+describe('r7 — a body too long to scan is not a body that was read', () => {
+  // `quoteSpansWholeSentences` answers `false` both when the quote really is cut
+  // out of the middle of a sentence and when the body holds more sentences than
+  // it will read. Those are opposite facts, and both came out as *"the quote is
+  // a span cut out of the middle of a sentence"* — said about a quote that is
+  // the **whole body**.
+  const SENTENCES = RECEIPT_POLICY.maxScannedSentences + 1;
+  const BODY = Array.from({ length: SENTENCES }, (_, index) => `Point ${index} stands.`).join(' ');
+  const messages: ProvenanceMessage[] = room(
+    { id: 'msg_1', authorId: BOB, body: BODY },
+    { id: 'msg_2', authorId: ALICE, body: 'noted, thanks for writing it all out' },
+  );
+
+  it('says the check declined rather than calling a whole body a fragment', () => {
+    const problems = validateProposalProvenance(
+      {
+        type: 'claim',
+        provenance: ['msg_1'],
+        quote: BODY,
+        statement: BODY,
+        proposer: { kind: 'model' },
+        attributedTo: BOB,
+      },
+      messages,
+    );
+    // The quote is the entire message, so "cut out of the middle of a sentence"
+    // is false about it in every sense.
+    expect(problems.map((problem) => problem.kind)).toContain('quote_span_unscanned');
+    expect(problems.map((problem) => problem.kind)).not.toContain('quote_is_a_fragment');
+    const unscanned = problems.find((problem) => problem.kind === 'quote_span_unscanned');
+    expect(unscanned?.severity).toBe('refer');
+    expect(unscanned?.detail).toContain(`more than the ${RECEIPT_POLICY.maxScannedSentences}`);
+  });
+
+  it('keeps the disposition — an unread body is not a clean one', () => {
+    // The verdict was already right, and the repair is to the sentence only.
+    expect(
+      decideAcceptance(
+        modelProposal({ type: 'claim', payload: { statement: BODY, claimant: BOB }, quote: BODY }),
+        { messages },
+      ).verdict,
+    ).not.toBe('auto_accept');
+  });
+
+  it('still calls a real fragment a fragment, under the cap', () => {
+    // Anti-vacuity: the branch that was mislabelling everything must still fire
+    // on the input it was built for.
+    const short = 'It is not true that Bob will deploy production Friday afternoon.';
+    expect(
+      validateProposalProvenance(
+        {
+          type: 'claim',
+          provenance: ['msg_s'],
+          quote: 'Bob will deploy production Friday afternoon.',
+          statement: 'Bob will deploy production Friday afternoon.',
+          proposer: { kind: 'model' },
+          attributedTo: BOB,
+        },
+        room(
+          { id: 'msg_s', authorId: BOB, body: short },
+          { id: 'msg_s2', authorId: ALICE, body: 'understood, thanks for clarifying' },
+        ),
+      ).map((problem) => problem.kind),
+    ).toContain('quote_is_a_fragment');
   });
 });

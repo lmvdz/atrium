@@ -25,7 +25,7 @@ import { canonicalJson } from './state.js';
  *
  * | rule (#4)                                               | who may | where     |
  * | ------------------------------------------------------- | ------- | --------- |
- * | Claims auto-accept at confidence ≥ θ                     | model   | **here**  |
+ * | ~~Claims auto-accept at confidence ≥ θ~~ **(r7: human)**  | human   | **here**  |
  * | OpenQuestions auto-accept at confidence ≥ θ              | model   | **here**  |
  * | **Commitments never auto-accept** (r5)                   | human   | **here**  |
  * | **Objectives never auto-accept** (r5)                    | human   | **here**  |
@@ -35,6 +35,13 @@ import { canonicalJson } from './state.js';
  * | **Corrections (amend / retract / restore / …)**          | human   | **here**  |
  * | **Acceptance citing no proposal at all**                 | human   | **here**  |
  * | **Declaring a question answered**                        | human   | **here**  |
+ *
+ * The struck row is r7. A claim is still #4's auto-accept *shape* — cheap to
+ * correct, truth carried separately in `verification` — and the row moved
+ * anyway, because nothing in a message's words says they were a claim rather
+ * than a commitment, and `type` is supplied by the proposal. See
+ * `typeCertifiableFromText`. The floor enforces it here; the engine's
+ * `type_not_certified` row is its twin, and both derive from `modelMayMint`.
  *
  * ## What round 2 moved down here, and why
  *

@@ -700,8 +700,8 @@
       "id": "quote_anchoring_disabled",
       "why": "r4's own blind review, and the strongest finding of the round: the quote goes back to being any substring of the cited message, so a model that sets quote === statement to an affirmative span leaves `it is not true that` outside the scissors and auto-accepts the inversion.",
       "file": "src/escalation.ts",
-      "find": "      if (!quoteSpansWholeSentences(quote, ownText, policy)) {",
-      "replace": "      if (false && !quoteSpansWholeSentences(quote, ownText, policy)) {",
+      "find": "      } else if (!quoteSpansWholeSentences(quote, ownText, policy)) {",
+      "replace": "      } else if (false && !quoteSpansWholeSentences(quote, ownText, policy)) {",
       "catches": [
         "refuses a quote mined out of an explicit denial",
         "refuses a quote mined out of a report of what nobody thinks",
@@ -1055,6 +1055,14 @@
       "find": "export const LINE_BREAK = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]/u;",
       "replace": "export const LINE_BREAK = /[\\n]/u;",
       "catches": ["reads a line break the way every renderer does, not the way a newline does"]
+    },
+    {
+      "id": "fragment_scan_cap_reports_a_fragment",
+      "why": "r7. Removes the cap branch, so a body with more sentences than the scan will read falls through to `quoteSpansWholeSentences` returning false and the room is told the quote was 'cut out of the middle of a sentence' — about a quote that may be the entire body. Right disposition, false sentence; the same class as the transposition mislabel one function over.",
+      "file": "src/escalation.ts",
+      "find": "      if (sentencesOf(ownText).length > policy.maxScannedSentences) {",
+      "replace": "      if (false) {",
+      "catches": ["says the check declined rather than calling a whole body a fragment"]
     }
   ]
 }

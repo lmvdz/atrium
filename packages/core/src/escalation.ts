@@ -6,6 +6,7 @@ import {
   LINE_BREAK,
   normalizeForReceipt,
   normalizeForRouting,
+  orderedTokens,
   quoteCoversOwnText,
   quoteSpansWholeSentences,
   routingTokens,
@@ -767,6 +768,7 @@ export const PROVENANCE_PROBLEM_KINDS = [
   'quote_carries_more_than_statement',
   'statement_respaces_the_quote',
   'quote_is_a_fragment',
+  'quote_span_unscanned',
   'quote_omits_surrounding_text',
   'superseded_by_later_message',
   'statement_is_not_an_assertion',
@@ -1020,7 +1022,29 @@ export function validateProposalProvenance(
     // sentence to find out, which is the definition of the third severity.
     if (fromModel && bearing) {
       const ownText = stripReplyBlockquotes(bearing.body);
-      if (!quoteSpansWholeSentences(quote, ownText, policy)) {
+      // ── The cap is a refusal to look, not a finding, and it says so ────────
+      //
+      // r7. `quoteSpansWholeSentences` returns `false` in two situations that
+      // are opposite facts about the world: the quote really is cut out of the
+      // middle of a sentence, and *the body has more sentences than the scan
+      // will read* (`maxScannedSentences`). Both produced the fragment message,
+      // so a quote that is the **entire body** of a 201-sentence message was
+      // told it had been "cut out of the middle of a sentence". Right
+      // disposition — an unread body is not a clean one, and `refer` is what
+      // this file gives an unanswered question everywhere else — and a sentence
+      // a person reads that is simply false about their own message.
+      //
+      // Checked here rather than inside `quoteSpansWholeSentences`, because the
+      // predicate's answer is genuinely "no" in both cases; what differs is
+      // *why*, and why is what the room is shown.
+      if (sentencesOf(ownText).length > policy.maxScannedSentences) {
+        problems.push({
+          kind: 'quote_span_unscanned',
+          severity: 'refer',
+          detail: `message "${bearing.id}" holds more than the ${policy.maxScannedSentences} sentences this check will read, so whether the quote is whole sentences of it or a span cut out of the middle of one was never established — an unread message is not a clean one, and a check that declined to run is not a check that passed`,
+          messageId: bearing.id,
+        });
+      } else if (!quoteSpansWholeSentences(quote, ownText, policy)) {
         problems.push({
           kind: 'quote_is_a_fragment',
           severity: 'refer',
@@ -1101,11 +1125,17 @@ export function validateProposalProvenance(
     // r5. `objects.ts` requires a nonempty string and the receipt proves string
     // equality, so `"Would we deploy production Friday?"` minted as a `claim`
     // with an identical quote had a perfect receipt and turned somebody's
-    // question into their position. `RECEIPT_POLICY.droppableTokens` already
-    // makes this argument in the other direction — `?` is kept out of the set
-    // the bearing check will forgive because "Bob will deploy Friday?" is a
-    // question and minting it as an assertion is the same defect in different
-    // clothes. Here the mark is read rather than compared.
+    // question into their position.
+    //
+    // The r5 text here argued from `RECEIPT_POLICY.droppableTokens` — "`?` is
+    // kept out of the set the bearing check will forgive" — in the present
+    // tense. **That set no longer exists.** r6 emptied it and r6's own policy
+    // test asserts its absence by name (`boundary.test.ts`, "is exactly this
+    // table"), because every entry it ever held was broken by a reviewer. The
+    // argument outlived the set that used to carry it and is now the whole
+    // rule: nothing may differ between a quote and its statement, `?` included,
+    // so a question mark is never forgiven by the comparison. Here the mark is
+    // *read* rather than compared, which is the part the comparison cannot do.
     if (fromModel && subject.type !== 'open_question' && !isAssertion(subject.statement ?? '')) {
       problems.push({
         kind: 'statement_is_not_an_assertion',
@@ -1201,10 +1231,44 @@ export function validateProposalProvenance(
           // The reading asserts words that are not in the record. This is a
           // verdict, not a hesitation: the citation leads a reader to a sentence
           // that does not say this.
+          // ── …and the sentence a person reads has to be true, r7 ────────────
+          //
+          // `unmatchedInStatement` is *what the aligner could not pair*, which
+          // is not the same as *what the quote does not contain*, and the
+          // difference is visible to anyone reading the refusal. The
+          // resynchroniser recovers a single insertion or substitution exactly;
+          // a **transposition of a repeated token** knocks both sides out of
+          // step, and the leftovers are words the quote plainly holds:
+          //
+          //   quote     "We deploy production Friday and we deploy staging Monday."
+          //   statement "We deploy staging Friday and we deploy production Monday."
+          //   → asserts "Friday", "and", "we", "deploy", "production", *which the
+          //     quote does not say* — all five of which it says.
+          //
+          // Brute-forced over 200k random pairs by r7's blind review: **56,559
+          // refusals named a token the quote does contain.** The verdict was
+          // right every time and no mislabel ever reached an accepting branch —
+          // the message was the defect, and a refusal shown to a room that is
+          // false about the room's own words is worse than a vaguer true one,
+          // because it points at the wrong thing to fix.
+          //
+          // So the two cases are told apart by asking the quote directly. Words
+          // genuinely absent are named as absent; when every unpaired word is
+          // present, the refusal says what actually happened — the same words in
+          // a different order, which is one of the ways a sentence is reversed.
+          // The verdict does not move: either way this statement is not the
+          // quoted sentence.
+          const quoteTokens = new Set(orderedTokens(quote));
+          const absent = bearingResult.unmatchedInStatement.filter(
+            (word) => !quoteTokens.has(word),
+          );
           problems.push({
             kind: 'quote_does_not_bear_statement',
             severity: 'reject',
-            detail: `"${clip(statement, 60)}" asserts ${bearingResult.unmatchedInStatement.map(token).join(', ')}, which the quote does not say — the quoted span is from a cited message but it is not this sentence, so the citation leads a reader somewhere that does not say this`,
+            detail:
+              absent.length > 0
+                ? `"${clip(statement, 60)}" asserts ${absent.map(token).join(', ')}, which the quote does not say — the quoted span is from a cited message but it is not this sentence, so the citation leads a reader somewhere that does not say this`
+                : `"${clip(statement, 60)}" uses only words the quote contains and puts them in a different order — ${bearingResult.unmatchedInStatement.map(token).join(', ')} could not be lined up against ${bearingResult.unmatchedInQuote.length > 0 ? bearingResult.unmatchedInQuote.map(token).join(', ') : 'the quote'} — and swapping two words is one of the ways a sentence is reversed, so this is not the sentence that was quoted`,
             messageId: where,
           });
         } else if (bearingResult.unmatchedInQuote.length > 0) {
