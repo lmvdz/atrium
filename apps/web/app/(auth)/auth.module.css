@@ -1,0 +1,178 @@
+/*
+ * Sign-in, sign-up, verification, invitation. Functional and token-only — every
+ * value is a variable from design/tokens.css, so when the real interface work
+ * (#25) lands, these screens inherit it instead of fighting it.
+ */
+
+.page {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--sp-6) var(--sp-5);
+  overflow-y: auto;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  width: 100%;
+  max-width: 400px;
+  padding: var(--sp-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg3);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--tx0);
+}
+
+.lede {
+  margin: 0;
+  font-size: var(--fs-base);
+  color: var(--tx2);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.label {
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx3);
+}
+
+.input {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  background: var(--bg1);
+  color: var(--tx0);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+}
+
+.input:focus-visible {
+  border-color: var(--blu);
+  outline: 2px solid var(--blu);
+  outline-offset: 1px;
+}
+
+.hint {
+  font-size: var(--fs-micro);
+  color: var(--tx4);
+}
+
+.button {
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--grn2);
+  border-radius: var(--radius-card);
+  background: var(--grn);
+  color: var(--bg1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button:hover {
+  background: var(--grn2);
+}
+
+.secondaryButton {
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  background: var(--bg1);
+  color: var(--tx1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  cursor: pointer;
+}
+
+.secondaryButton:hover {
+  border-color: var(--line3);
+  color: var(--tx0);
+}
+
+/* Errors are amber-bordered, not red: a mistyped password is not a failure. */
+.error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--ambbd);
+  border-radius: var(--radius-card);
+  background: var(--ambbg);
+  color: var(--tx0);
+  font-size: var(--fs-row);
+}
+
+.notice {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--grnbd);
+  border-radius: var(--radius-card);
+  background: var(--grnbg);
+  color: var(--tx0);
+  font-size: var(--fs-row);
+}
+
+/* The one genuinely destructive state: a link that cannot be used again. */
+.blocked {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--redbd);
+  border-radius: var(--radius-card);
+  background: var(--redbg);
+  color: var(--tx0);
+  font-size: var(--fs-row);
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx4);
+}
+
+.divider::before,
+.divider::after {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+  content: '';
+}
+
+.footer {
+  margin: 0;
+  font-size: var(--fs-row);
+  color: var(--tx3);
+}
+
+.link {
+  color: var(--blu);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-row);
+  color: var(--tx1);
+  overflow-wrap: anywhere;
+}

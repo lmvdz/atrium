@@ -1,32 +1,61 @@
 import { defineConfig, devices } from '@playwright/test';
-
-const PORT = Number(process.env.E2E_PORT ?? 3100);
-// `localhost`, not `127.0.0.1`: Next's dev server only serves client assets to
-// allowed dev origins, and a mismatched host silently breaks hydration.
-const baseURL = `http://localhost:${PORT}`;
+import {
+  baseURL,
+  serverDir,
+  serverEnvironment,
+  serverPort,
+  webPort,
+} from './e2e/support/config.mjs';
 
 /**
  * E2E lives outside the Vitest workspace on purpose: `pnpm test` must stay fast
  * and browser-free. Run it with `pnpm test:e2e` (needs `pnpm exec playwright
  * install chromium` once).
+ *
+ * Two servers, because the auth story spans both: Next serves the pages and the
+ * Server Actions, `apps/server` terminates the WebSocket and enforces the
+ * upgrade. `pnpm test:e2e` runs `e2e/support/ensure-database.mjs` first — the
+ * database has to exist and be migrated before either process starts, and
+ * Playwright launches `webServer` before `globalSetup` would get the chance.
  */
+const environment = serverEnvironment();
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? 'github' : 'list',
+  // Signup → verify → invite → accept crosses two processes and a database.
+  timeout: 60_000,
+  expect: { timeout: 10_000 },
   use: {
     baseURL,
     trace: 'on-first-retry',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
-  webServer: {
-    command: `pnpm exec next dev --port ${PORT}`,
-    url: baseURL,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    stdout: 'ignore',
-    stderr: 'pipe',
-  },
+  webServer: [
+    {
+      // `localhost`, not `127.0.0.1`: Next's dev server only serves client
+      // assets to allowed dev origins, and a mismatched host silently breaks
+      // hydration.
+      command: `pnpm exec next dev --port ${webPort}`,
+      url: baseURL,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: 'ignore',
+      stderr: 'pipe',
+      env: environment,
+    },
+    {
+      command: 'pnpm exec tsx src/index.ts',
+      cwd: serverDir,
+      url: `http://127.0.0.1:${serverPort}/health`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: 'ignore',
+      stderr: 'pipe',
+      env: environment,
+    },
+  ],
 });

@@ -1,19 +1,5 @@
-import { existsSync } from 'node:fs';
-import { chromium, expect, test } from '@playwright/test';
-
-/**
- * Playwright downloads its browsers into a cache outside the repo. In sandboxes
- * where that download is blocked, skip with a reason instead of failing the
- * suite — a red smoke test would say "the app is broken" when the truth is "no
- * browser is installed".
- */
-function browserAvailable(): boolean {
-  try {
-    return existsSync(chromium.executablePath());
-  } catch {
-    return false;
-  }
-}
+import { expect, test } from '@playwright/test';
+import { browserAvailable } from './support/flows';
 
 test.describe('shell', () => {
   test.skip(
@@ -30,6 +16,14 @@ test.describe('shell', () => {
 
     await expect(page.locator('[data-region]')).toHaveCount(3);
     await expect(page.locator('[data-region="needs-you"]')).toContainText('needs you specifically');
+  });
+
+  test('offers a way in to someone who is not signed in', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.getByTestId('sign-in-link')).toBeVisible();
+    await page.getByTestId('sign-in-link').click();
+    await page.waitForURL(/\/sign-in/);
+    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   });
 
   test('toggles dark mode via the atr-dark class', async ({ page }) => {

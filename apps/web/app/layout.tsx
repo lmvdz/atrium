@@ -1,8 +1,10 @@
 import type { Metadata, Viewport } from 'next';
+import Link from 'next/link';
 import type { ReactNode } from 'react';
 // The single source of colour, type and spacing. Replace this file wholesale
 // when the `design/tokens` branch lands — nothing here needs to change.
 import '../../../design/tokens.css';
+import { AccountBar } from './account-bar';
 import styles from './shell.module.css';
 import { ThemeToggle } from './theme-toggle';
 
@@ -34,8 +36,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         <div className={styles.app}>
           <header className={styles.topbar}>
-            <span className={styles.wordmark}>atrium</span>
+            <Link className={styles.wordmark} href="/">
+              atrium
+            </Link>
             <span className={styles.roomName}>#scaffold</span>
+            <AccountBar />
             <ThemeToggle />
           </header>
           {children}

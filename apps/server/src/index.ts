@@ -1,8 +1,11 @@
-import { createDatabase } from '@atrium/db';
+import { createAtriumAuth, resolveAuthSecret } from '@atrium/auth';
+import { createDatabase, memberships, rooms } from '@atrium/db';
+import { and, eq, isNull } from 'drizzle-orm';
 import { loadEnv } from './env.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
-import { createRealtimeServer } from './ws-server.js';
+import { createUpgradeAuthenticator } from './ws-auth.js';
+import { createRealtimeServer, type LoadRoomMembership } from './ws-server.js';
 
 /**
  * Atrium server: one process, two responsibilities — the WebSocket realtime
@@ -18,6 +21,35 @@ async function main(): Promise<void> {
 
   const database = createDatabase({ url: env.DATABASE_URL, debug: env.LOG_LEVEL === 'debug' });
 
+  // The same Better Auth configuration the web app runs, over the same tables.
+  // The realtime server never mints a session; it only recognises one.
+  const auth = createAtriumAuth({
+    db: database.db,
+    baseURL: env.APP_URL,
+    secret: resolveAuthSecret(process.env),
+  });
+
+  /**
+   * Room membership, straight from the table the web app writes. An archived
+   * room has no live members, so archiving one closes it to commands without a
+   * second rule anywhere.
+   */
+  const loadRoomMembership: LoadRoomMembership = async (roomId, userId) => {
+    const [row] = await database.db
+      .select({ role: memberships.role })
+      .from(memberships)
+      .innerJoin(rooms, eq(memberships.roomId, rooms.id))
+      .where(
+        and(
+          eq(memberships.roomId, roomId),
+          eq(memberships.userId, userId),
+          isNull(rooms.archivedAt),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  };
+
   let ready = false;
   const realtime = createRealtimeServer({
     host: env.SERVER_HOST,
@@ -25,6 +57,8 @@ async function main(): Promise<void> {
     heartbeatIntervalMs: env.WS_HEARTBEAT_INTERVAL_MS,
     logger,
     isReady: () => ready,
+    authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }),
+    loadRoomMembership,
   });
 
   await realtime.listen();

@@ -27,6 +27,7 @@
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--stileac);
+  text-decoration: none;
 }
 
 .roomName {
@@ -34,6 +35,41 @@
   font-family: var(--font-mono);
   font-size: var(--fs-row);
   color: var(--stx);
+}
+
+/* ── account ──────────────────────────────────────────────────────────── */
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.accountLink {
+  font-family: var(--font-mono);
+  font-size: var(--fs-row);
+  color: var(--stx);
+  text-decoration: none;
+}
+
+.accountLink:hover {
+  color: var(--stileac);
+}
+
+.accountButton {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--stx);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.accountButton:hover {
+  color: var(--stileac);
 }
 
 .themeToggle {

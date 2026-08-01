@@ -24,6 +24,18 @@ const EnvSchema = z.object({
 
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required — copy .env.example to .env'),
 
+  /**
+   * Signing secret, shared with the web app. Not validated here: `@atrium/auth`
+   * owns that rule, so both processes fail the same way for the same reason.
+   */
+  BETTER_AUTH_SECRET: z.string().optional(),
+  /**
+   * The web app's public origin. Better Auth derives cookie names and the
+   * `secure` flag from it, so this must match what the browser actually used or
+   * every upgrade reads as unauthenticated.
+   */
+  APP_URL: z.url().default('http://localhost:3000'),
+
   SERVER_HOST: z.string().default('0.0.0.0'),
   SERVER_PORT: z.coerce.number().int().positive().default(4000),
 

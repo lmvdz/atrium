@@ -1,0 +1,98 @@
+import type { IncomingMessage } from 'node:http';
+import type { AtriumAuth } from '@atrium/auth';
+import { describe, expect, it, vi } from 'vitest';
+import { createLogger } from '../src/logger.js';
+import { createUpgradeAuthenticator, toHeaders } from '../src/ws-auth.js';
+
+/**
+ * `authenticateUpgrade` is the only thing standing between a stranger and a
+ * socket, so its failure modes are the interesting part: every one of them has
+ * to end in `null`, never in "well, probably fine".
+ */
+
+const logger = createLogger('error');
+
+function request(headers: Record<string, string | string[]>): IncomingMessage {
+  return { headers } as unknown as IncomingMessage;
+}
+
+/** A stand-in for the Better Auth instance, with only the call we make. */
+function fakeAuth(getSession: () => unknown): AtriumAuth {
+  return { api: { getSession: async () => getSession() } } as unknown as AtriumAuth;
+}
+
+const verifiedUser = {
+  session: { id: 'sess-1', userId: 'user-1', activeOrganizationId: 'ws-1' },
+  user: { email: 'ada@example.com', name: 'ada', emailVerified: true },
+};
+
+describe('authenticateUpgrade', () => {
+  it('returns the session for a valid cookie', async () => {
+    const authenticate = createUpgradeAuthenticator({ auth: fakeAuth(() => verifiedUser), logger });
+    const session = await authenticate(request({ cookie: 'atrium.session_token=abc' }));
+    expect(session).toEqual({
+      sessionId: 'sess-1',
+      userId: 'user-1',
+      email: 'ada@example.com',
+      displayName: 'ada',
+      emailVerified: true,
+      activeWorkspaceId: 'ws-1',
+    });
+  });
+
+  it('returns null when there is no session', async () => {
+    const authenticate = createUpgradeAuthenticator({ auth: fakeAuth(() => null), logger });
+    expect(await authenticate(request({}))).toBeNull();
+  });
+
+  it('returns null when the session has no user', async () => {
+    const authenticate = createUpgradeAuthenticator({
+      auth: fakeAuth(() => ({ session: { id: 's' }, user: null })),
+      logger,
+    });
+    expect(await authenticate(request({ cookie: 'atrium.session_token=abc' }))).toBeNull();
+  });
+
+  it('refuses an unverified address even if a session somehow exists', async () => {
+    const authenticate = createUpgradeAuthenticator({
+      auth: fakeAuth(() => ({
+        session: { id: 's', userId: 'u' },
+        user: { email: 'e@x.test', name: 'e', emailVerified: false },
+      })),
+      logger,
+    });
+    expect(await authenticate(request({ cookie: 'atrium.session_token=abc' }))).toBeNull();
+  });
+
+  it('treats a thrown lookup as unauthenticated, not as an open door', async () => {
+    const authenticate = createUpgradeAuthenticator({
+      auth: fakeAuth(() => {
+        throw new Error('database is on fire');
+      }),
+      logger,
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await authenticate(request({ cookie: 'atrium.session_token=abc' }))).toBeNull();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+});
+
+describe('toHeaders', () => {
+  it('carries a single-valued header across', () => {
+    const headers = toHeaders(request({ cookie: 'a=1' }));
+    expect(headers.get('cookie')).toBe('a=1');
+  });
+
+  it('keeps a repeated header repeated instead of losing one', () => {
+    const headers = toHeaders(request({ 'set-cookie': ['a=1', 'b=2'] }));
+    expect(headers.get('set-cookie')).toContain('a=1');
+    expect(headers.get('set-cookie')).toContain('b=2');
+  });
+
+  it('skips headers node reports as undefined', () => {
+    const headers = toHeaders(request({ cookie: undefined as unknown as string, host: 'x' }));
+    expect(headers.has('cookie')).toBe(false);
+    expect(headers.get('host')).toBe('x');
+  });
+});

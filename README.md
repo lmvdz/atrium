@@ -24,6 +24,11 @@ pnpm dev                  # web on :3000, server on :4000
 
 `pnpm dev` builds `packages/*` once, then runs both apps in watch mode.
 
+Then open <http://localhost:3000/sign-up>. There is no mail server in
+development: the confirmation link is printed to the terminal running `pnpm dev`
+under `atrium dev mailer`. Paste it in, create a workspace, and you land in its
+first room.
+
 Everything in containers instead:
 
 ```bash
@@ -35,16 +40,51 @@ Same compose file locally and on the VPS (issue #18) — only `.env` differs.
 ## Layout
 
 ```
-apps/web        Next.js 16 App Router, React 19. The three-region shell.
+apps/web        Next.js 16 App Router, React 19. Shell, auth screens, workspaces.
 apps/server     Node 22. ws WebSocket server + pg-boss workers. One process.
 packages/core   The Semantic Core. Pure TypeScript, zero I/O.
 packages/db     Drizzle schema, migrations, postgres-js client.
+packages/auth   One Better Auth configuration + `authorize()`. Shared by both apps.
 design/         Design tokens (light default, dark via `html.atr-dark`).
 ```
 
-The dependency arrow only ever points one way: `web`/`server` → `db` → `core`.
-`packages/core` imports nothing from `node:*`, no driver, no clock — that purity
-is what makes interpretation replayable and unit-testable in isolation.
+The dependency arrow only ever points one way: `web`/`server` → `auth` → `db` →
+`core`. `packages/core` imports nothing from `node:*`, no driver, no clock — that
+purity is what makes interpretation replayable and unit-testable in isolation.
+
+### Auth and workspaces
+
+Better Auth (issue #13), self-hosted on our own Postgres through its official
+Drizzle adapter. Three decisions are worth knowing before you touch it:
+
+- **One row per human.** Better Auth's `user` model *is* the existing `users`
+  table and its `organization` model *is* `workspaces`, rather than a parallel
+  identity store synced by webhook. Application data foreign-keys straight at
+  them. The remapping lives in `packages/db/src/auth-schema.ts`, and
+  `packages/db/test/auth-schema.test.ts` asks the installed library what schema
+  it expects and fails if ours has drifted — the adapter resolves columns by
+  name at runtime, so nothing else would catch a rename.
+- **One configuration, two processes.** `packages/auth` builds the instance; the
+  web app adds `nextCookies()` and the realtime server adds nothing. They must
+  share `BETTER_AUTH_SECRET` or every WebSocket upgrade reads as unauthenticated.
+- **One authorization function.** `authorize(command, membership)` in
+  `packages/auth/src/authz.ts` is deny-by-default: unknown command, unknown role,
+  no membership and wrong scope all refuse. The WebSocket passes `scope: 'room'`,
+  so a workspace-level command can never be waved through on a room membership.
+
+The WebSocket upgrade is authenticated in `apps/server/src/ws-auth.ts` —
+`authenticateUpgrade(request) → session | null`, before the handshake completes,
+so there is no "connected but anonymous" state. That is the seam the realtime
+protocol (#22) builds on.
+
+Email verification and invitations both go through the dev mailer
+(`packages/auth/src/mailer.ts`), which prints to the console and, when
+`ATRIUM_MAIL_OUTBOX` is set, appends one JSON object per message to a file. The
+e2e suite reads its links from there. It refuses to write that file when
+`NODE_ENV=production`.
+
+One OAuth provider (GitHub) is wired but optional: set `GITHUB_CLIENT_ID` and
+`GITHUB_CLIENT_SECRET` and the button appears, leave them blank and it does not.
 
 ### The semantic model
 
@@ -67,8 +107,8 @@ byte-identically.
 | --- | --- |
 | `pnpm dev` | Build packages, then web + server in watch mode |
 | `pnpm build` | Build packages, then both apps |
-| `pnpm test` | Vitest across `packages/*` |
-| `pnpm test:e2e` | Playwright smoke test in `apps/web` |
+| `pnpm test` | Vitest across `packages/*` and `apps/server` |
+| `pnpm test:e2e` | Playwright: shell, auth, workspaces, WebSocket authorization |
 | `pnpm lint` | Biome lint + format check |
 | `pnpm lint:fix` | Biome with safe fixes applied |
 | `pnpm typecheck` | `tsc --noEmit` in every workspace |
@@ -77,9 +117,15 @@ byte-identically.
 | `pnpm infra:up` / `infra:down` | Postgres + MinIO only |
 
 Playwright needs its browser once: `pnpm --filter @atrium/web exec playwright
-install chromium`. Without it the smoke test skips with a reason instead of
-failing — a red e2e run should mean "the app is broken", never "no browser
-here".
+install chromium`. Without it the suite skips with a reason instead of failing —
+a red e2e run should mean "the app is broken", never "no browser here".
+
+`pnpm test:e2e` drives the real thing: a real Next server, a real WebSocket
+server and a real Postgres. It provisions its own throwaway database first
+(`apps/web/e2e/support/ensure-database.mjs`) — reusing `E2E_DATABASE_URL` if it
+answers, otherwise starting a `postgres:16-alpine` container on :55432 — then
+migrates and empties it. If neither is available it fails with instructions
+rather than skipping; a green run that tested nothing is worse than a red one.
 
 ## Notes for the next change
 
@@ -91,8 +137,17 @@ here".
   is already in place: dedup key `${messageId}:${interpretationVersion}` with an
   explicit singleton window, backed by the `(message_id, interpretation_version)`
   unique constraint on `interpretations` (issue #16).
-- The WebSocket protocol is a heartbeat + echo placeholder. The real command and
-  event contract slots into `handleFrame` without the transport changing.
+- The WebSocket protocol is heartbeat, echo, and an authorized command path with
+  a presence roster. The real command and event contract slots into
+  `handleCommand` without the authentication or authorization around it moving.
+  Commands in `commandPolicy` with no handler answer `not_implemented` rather
+  than pretending to have worked.
+- `rooms.workspace_id` is `NOT NULL` with no backfill, so migration `0001` will
+  fail on a database that already has rooms in it. Nothing has shipped; drop the
+  dev database rather than writing a backfill for rows that do not exist.
+- No MFA, SSO or SCIM (out of scope for #26). Better Auth's `twoFactor` and
+  `passkey` plugins are the documented path when MFA is wanted; both add tables,
+  so they land with a migration and an update to the parity test.
 - Adapter seams (`ConversationSource`, `ExecutionProvider`) are type-only ports
   in `packages/core/src/ports.ts`. No integration ships in v1; the door stays
   open.

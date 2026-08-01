@@ -10,9 +10,11 @@ const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
 const database = createDatabase({ url: env.DATABASE_URL, max: 1 });
 
+const folder = migrationsFolder();
+
 try {
-  logger.info('applying migrations', { folder: migrationsFolder });
-  await runMigrations(database, migrationsFolder);
+  logger.info('applying migrations', { folder });
+  await runMigrations(database, folder);
   logger.info('migrations up to date');
 } catch (error) {
   logger.error('migration failed', { error: (error as Error).message });

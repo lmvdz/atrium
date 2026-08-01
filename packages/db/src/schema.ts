@@ -15,6 +15,7 @@ import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
   bigserial,
+  boolean,
   check,
   index,
   integer,
@@ -45,6 +46,10 @@ import {
  *  - `interpretations` carries the (message_id, interpretation_version) unique
  *    constraint that makes the pg-boss interpretation worker idempotent under
  *    at-least-once delivery (issue #16).
+ *  - `users` and `workspaces` are ALSO Better Auth models (issue #13/#26). Their
+ *    shape is therefore constrained from two directions at once; see
+ *    `auth-schema.ts` for the mapping and the parity test that enforces it.
+ *    Never remove a column from either table without checking that file.
  */
 
 /* ── enums ──────────────────────────────────────────────────────────────── */
@@ -103,29 +108,67 @@ export type ObjectPayload =
 
 /* ── identity ───────────────────────────────────────────────────────────── */
 
+/**
+ * The application's people table AND Better Auth's `user` model — one row per
+ * human, not two. Better Auth field names that differ from ours are remapped in
+ * `auth-schema.ts` (`name` → `displayName`, `image` → `avatarUrl`); every other
+ * property name below is a Better Auth field name and must not be renamed.
+ */
 export const users = pgTable(
   'users',
   {
     id: uuid('id').primaryKey().defaultRandom(),
     email: text('email').notNull(),
+    /** Better Auth `user.name`. */
     displayName: text('display_name').notNull(),
+    /** Better Auth `user.image`. */
     avatarUrl: text('avatar_url'),
+    /** Better Auth `user.emailVerified` — flipped by the verification link. */
+    emailVerified: boolean('email_verified').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('users_email_key').on(t.email)],
+);
+
+/**
+ * A workspace — the tenancy boundary that owns rooms and people. This is Better
+ * Auth's `organization` model under our name; `workspace_members` and
+ * `workspace_invitations` (auth-schema.ts) are its `member` and `invitation`.
+ */
+export const workspaces = pgTable(
+  'workspaces',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    slug: text('slug').notNull(),
+    /** Better Auth `organization.logo`. */
+    logo: text('logo'),
+    /** Better Auth `organization.metadata` — a JSON string, its own encoding. */
+    metadata: text('metadata'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('workspaces_slug_key').on(t.slug)],
 );
 
 export const rooms = pgTable(
   'rooms',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
     slug: text('slug').notNull(),
     name: text('name').notNull(),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
   },
-  (t) => [uniqueIndex('rooms_slug_key').on(t.slug)],
+  // Slugs are unique *within* a workspace: two tenants may both have #general.
+  (t) => [
+    uniqueIndex('rooms_workspace_slug_key').on(t.workspaceId, t.slug),
+    index('rooms_workspace_idx').on(t.workspaceId),
+  ],
 );
 
 export const memberships = pgTable(
@@ -425,6 +468,8 @@ export const corrections = pgTable(
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
+export type Workspace = typeof workspaces.$inferSelect;
+export type NewWorkspace = typeof workspaces.$inferInsert;
 export type Room = typeof rooms.$inferSelect;
 export type NewRoom = typeof rooms.$inferInsert;
 export type Membership = typeof memberships.$inferSelect;

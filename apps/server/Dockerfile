@@ -14,6 +14,7 @@ COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
+COPY packages/auth/package.json packages/auth/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
 # ── build ───────────────────────────────────────────────────────────────────
@@ -21,7 +22,7 @@ FROM deps AS build
 COPY tsconfig.base.json ./
 COPY packages packages
 COPY apps/server apps/server
-RUN pnpm --filter @atrium/core --filter @atrium/db --filter @atrium/server build
+RUN pnpm --filter "./packages/*" build && pnpm --filter @atrium/server build
 
 # ── runtime ─────────────────────────────────────────────────────────────────
 # The whole workspace ships as-is: `pnpm deploy` cannot be trusted across pnpm
