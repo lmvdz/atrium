@@ -1722,6 +1722,17 @@ const MUTATIONS = [
     message: /is not one of the entrypoints this job may use/,
   },
   {
+    name: 'a third action in the deploy job, which could export NODE_OPTIONS for every step after it',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Write the deployment environment\n',
+        '      - name: Cache something\n        uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4.2.1\n\n      - name: Write the deployment environment\n',
+      ),
+    message: /uses `actions\/cache`, which is not one of the actions this job may run/,
+  },
+  {
     name: 'the deploy job losing the one variable every compose invocation resolves from',
     rule: 'compose-through-one-entrypoint',
     mutate: (s) =>

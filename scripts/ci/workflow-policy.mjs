@@ -1285,6 +1285,28 @@ export const CI_SCRIPT_PATH = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
  * an entrypoint allowlist that accepted it would re-open the round-3 bypass at
  * the level below the shell.
  */
+/**
+ * The actions the deploy job may `uses:`.
+ *
+ * Found by attacking the entrypoint allowlist rather than by a reviewer, and it
+ * is the same hole one level out: the allowlist governs `run:` scripts, and a
+ * `uses:` step is a program too. An action can call `core.exportVariable` — the
+ * supported way to write `$GITHUB_ENV` — and set `NODE_OPTIONS` for every later
+ * step in the job, which is the sixteenth bypass reached through a dependency
+ * instead of through YAML. `pin-actions-to-sha` requires a commit SHA and says
+ * nothing about whose commit.
+ *
+ * So this job may use two actions: a checkout and a Node install. Both are what
+ * the runner needs before any of this repository's own code exists, and neither
+ * is something a `scripts/ci/*.mjs` file could do instead. Anything else — a
+ * cache, a docker login, a "setup" action for some tool — is refused, and the
+ * refusal does not have to have heard of it.
+ *
+ * Compared without the `@<sha>`: the SHA is `pin-actions-to-sha`'s business and
+ * a version bump must not be an edit to this list.
+ */
+export const DEPLOY_ACTIONS = ['actions/checkout', 'actions/setup-node'];
+
 export const DEPLOY_ENTRYPOINTS = [
   {
     id: 'ci-script',
@@ -1344,6 +1366,16 @@ function checkComposeEntrypoint(jobs, path, add) {
           `${path}: jobs.${DEPLOY_JOB}.steps.${index}.env re-declares \`${variable}\`. It is declared once, on the job, precisely so that the preflight and the boot cannot be looking at different stacks; a step that re-points it is that divergence with the job-level declaration still in place to reassure the reader.`,
         );
       }
+    }
+    if (typeof step.uses === 'string') {
+      const action = step.uses.split('@')[0];
+      if (!DEPLOY_ACTIONS.includes(action)) {
+        add(
+          'compose-through-one-entrypoint',
+          `${path}: jobs.${DEPLOY_JOB}.steps.${index} uses \`${action}\`, which is not one of the actions this job may run (${DEPLOY_ACTIONS.map((name) => `\`${name}\``).join(', ')}). An action is a program with the same reach as a \`run:\` step and one more capability: \`core.exportVariable\` writes \`$GITHUB_ENV\`, so an action can set \`NODE_OPTIONS\` for every later step and disarm every assertion in this job without a line of YAML that says so. If the work belongs to this deployment, it belongs in a \`scripts/ci/*.mjs\` file the ledger can run.`,
+        );
+      }
+      continue;
     }
     if (typeof step.run !== 'string') continue;
     // A step the shape rule already refuses is refused; naming it twice would
