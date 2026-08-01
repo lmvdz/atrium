@@ -1292,7 +1292,7 @@ S.rooms["users-migration"] = {
     {
       id: "K0", kind: "commitment", objectives: ["o1"], text: "Land the shadow-write path behind users.dualwrite",
       claimant: "justin", verification: "verified", verifiedBy: "checks", verifiedAt: "yesterday 16:10",
-      facts: ["justin", "verified by checks", "deploy 2f81c3"],
+      facts: ["justin", { read: "verification", post: " by checks" }, "deploy 2f81c3"],
       history: [
         { k: "claim",    who: "justin", tm: "29 Jul 14:02", text: "said the shadow-write path was ready to land" },
         { k: "verified", who: "checks", tm: "yest. 16:10",  text: "deploy 2f81c3 carried the flag into staging — checked by something other than the claimant" }
@@ -1309,7 +1309,7 @@ S.rooms["users-migration"] = {
          window opened, and the correction chain below is that amendment. */
       reading: "Decision",
       claimant: "priya", verification: "accepted", acceptedBy: "lars", acceptedAt: "29 Jul 11:20",
-      facts: ["accepted by lars", "29 Jul 11:20", "3 sources"],
+      facts: [{ read: "verification", post: " by lars" }, "29 Jul 11:20", "3 sources"],
       history: [
         { k: "claim",    who: "priya",  tm: "29 Jul 09:41", text: "proposed keeping dual-write until parity was proven — self-reported, no check attached" },
         /* a history line may only assert what its cited source carries. Round 4
@@ -1365,7 +1365,7 @@ S.rooms["users-migration"] = {
       owedTo: "lars", priority: 20, askedBy: "priya", askedAt: "08:36", sourceMsg: "m6",
       waiting: 3, blocks: "1 objective",
       why: "needs you specifically — you set the freeze date, and nobody else can trade $900/mo against the 4.7% of sessions still on legacy tokens.",
-      facts: ["proposed · not accepted", "conf .71", "from priya 08:36"],
+      facts: [{ read: "verification", post: " · not accepted" }, "conf .71", "from priya 08:36"],
       /* OPTION IDENTITY, NOT OPTION TEXT (round 4 D7). Whether an answer departs
          from the proposal is a fact about WHICH option was chosen, not about
          whether its wording happens to match `text`. `agrees: true` marks the
@@ -1407,7 +1407,7 @@ S.rooms["users-migration"] = {
     {
       id: "K1", kind: "commitment", objectives: ["o1", "o3"], text: "Ship the token-refresh fix",
       claimant: "dana", verification: "self_reported", owner: "dana", due: "Thu 31 Jul", sourceMsg: "m10",
-      facts: ["dana", "due Thu 31 Jul", "self-stated"],
+      facts: ["dana", { read: "due", pre: "due ", none: "no due date on record" }, "self-stated"],
       history: [{ k: "claim", who: "dana", tm: "09:09", text: "said the fix lands Thursday — her own word, nothing verifies it yet" }],
       provenance: [{ who: "dana", tm: "09:09", msg: "m10", ex: "I'll have the token-refresh fix out Thursday, before the freeze.", note: "message · seq 9109 · self-stated commitment, extracted at θ .77" }],
       corrections: [],
@@ -1416,7 +1416,7 @@ S.rooms["users-migration"] = {
     {
       id: "K3", kind: "commitment", objectives: ["o1"], text: "Document the dualwrite flag in the runbook",
       claimant: "justin", verification: "self_reported", owner: "justin", due: "no due date",
-      facts: ["justin", "no due date", "self-stated"],
+      facts: ["justin", { read: "due", none: "no due date on record" }, "self-stated"],
       history: [{ k: "claim", who: "justin", tm: "yest. 16:05", text: "offered to document the flag — no date, nothing checking it" }],
       provenance: [{ who: "justin", tm: "yest. 16:05", msg: "m1", ex: "Shadow-write path is in behind users.dualwrite — off everywhere except staging.", note: "message · seq 8901 · follow-up commitment extracted at θ .64" }],
       corrections: [],
@@ -1435,7 +1435,7 @@ S.rooms["users-migration"] = {
                       statement: "Legal approves 90-day retention of users_legacy, so retention is not what gates the drop" },
       reassignTo: "justin",
       why: "blocking — the retention answer gates the objective you own, Retire the legacy identity path.",
-      facts: ["open 3h", "asked by priya", "blocks retiring the legacy path"],
+      facts: [{ read: "verification", post: " 3h" }, "asked by priya", "blocks retiring the legacy path"],
       history: [{ k: "question", who: "priya", tm: "09:11", text: "raised it as the one thing gating the drop — nobody has been assigned" }],
       provenance: [{ who: "priya", tm: "09:11", msg: "m11", ex: "Nobody has confirmed whether legal is fine keeping users_legacy around for 90 days. That gates the drop.", note: "message · seq 9111 · open question, no assignee" }],
       corrections: [],
@@ -1444,7 +1444,7 @@ S.rooms["users-migration"] = {
     {
       id: "C1", kind: "claim", objectives: ["o1"], text: "Dual-write costs about $900/mo in extra write throughput",
       claimant: "mateo", verification: "unverified", sourceMsg: "m7",
-      facts: ["mateo", "unverified", "eyeballed off one bill"],
+      facts: ["mateo", { read: "verification" }, "eyeballed off one bill"],
       history: [
         { k: "claim",   who: "mateo",  tm: "08:41", text: "stated the figure and flagged it himself as eyeballed, not forecast" },
         { k: "routine", who: "atrium", tm: "08:41", text: "no billing source is linked, so verification state stays unverified" }
@@ -1456,7 +1456,7 @@ S.rooms["users-migration"] = {
     {
       id: "C2", kind: "claim", objectives: ["o1", "o3"], text: "4.7% of sessions still present legacy opaque tokens",
       claimant: "dana", verification: "unverified", sourceMsg: "m5",
-      facts: ["dana", "unverified", "7-day dashboard window"],
+      facts: ["dana", { read: "verification" }, "7-day dashboard window"],
       history: [{ k: "claim", who: "dana", tm: "08:31", text: "read it off the mobile auth dashboard — not cross-checked against server logs" }],
       provenance: [{ who: "dana", tm: "08:31", msg: "m5", ex: "4.7% of sessions still present legacy opaque tokens — almost all iOS 15.x holdouts.", note: "message · seq 9101 · auto-accepted as a Claim (θ .69)" }],
       corrections: [],
@@ -1465,7 +1465,7 @@ S.rooms["users-migration"] = {
     {
       id: "C3", kind: "claim", objectives: ["o1"], text: "Staging backfill ran clean — 4.2M rows in 38 minutes",
       claimant: "priya", verification: "unverified", sourceMsg: "m2",
-      facts: ["priya", "unverified", "said before any check ran"],
+      facts: ["priya", { read: "verification" }, "said before any check ran"],
       history: [{ k: "claim", who: "priya", tm: "yest. 16:31", text: "said the backfill ran clean before any check had run — that line stayed a claim" }],
       provenance: [{ who: "priya", tm: "yest. 16:31", msg: "m2", ex: "Staging backfill ran clean — 4.2M rows in 38 minutes.", note: "message · seq 8990 · auto-accepted as a Claim (θ .58)" }],
       corrections: [],
@@ -1474,7 +1474,7 @@ S.rooms["users-migration"] = {
     {
       id: "V1", kind: "claim", objectives: ["o1"], text: "Backfill parity: 4,218,904 / 4,218,904 rows, 0 checksum diffs",
       claimant: "checks", verification: "verified", verifiedBy: "the migration harness", verifiedAt: "09:07",
-      facts: ["checks", "verified 09:07", "dry-run #418"],
+      facts: ["checks", { read: "verification", post: " 09:07" }, "dry-run #418"],
       history: [
         { k: "verified", who: "checks", tm: "09:07",       text: "dry-run #418 on the prod snapshot — 0 constraint violations, 11m42s" },
         { k: "verified", who: "checks", tm: "yest. 16:44", text: "parity #402 — identical row counts on both sides" }
@@ -1494,7 +1494,7 @@ S.rooms["users-migration"] = {
          says where it lives and jumps there, instead of counting an item the
          feed filter can never highlight. */
       sourceMsg: "n0", sourceRoom: "identity-service",
-      facts: ["accepted by lars", "22 Jul", "source in #identity-service"],
+      facts: [{ read: "verification", post: " by lars" }, "22 Jul", "source in #identity-service"],
       history: [{ k: "accepted", who: "lars", tm: "22 Jul 15:40", text: "accepted directly in #identity-service — answer-bound" }],
       provenance: [{ who: "lars", tm: "22 Jul 15:40", msg: "n0", room: "identity-service", ex: "Once retention is up, the gateway refuses opaque tokens outright. No grace period.", note: "answer-bound reply · #identity-service · seq 7710" }],
       corrections: [],
@@ -1577,7 +1577,7 @@ S.rooms["identity-service"] = {
       owedTo: "lars", priority: 20, askedBy: "justin", askedAt: "08:14", sourceMsg: "n4",
       waiting: 2, blocks: "1 objective",
       why: "needs you specifically — strict rotation breaks any client that replays a refresh token, and you own the mobile compatibility call.",
-      facts: ["proposed · not accepted", "conf .66", "from justin 08:14"],
+      facts: [{ read: "verification", post: " · not accepted" }, "conf .66", "from justin 08:14"],
       options: [
         { label: "Rotate on every use", agrees: true, statement: "Refresh tokens rotate on every use; replayed tokens are refused outright" },
         { label: "Sliding window", statement: "Refresh tokens rotate on a 24h sliding window so replays inside the window still succeed" }
@@ -1604,7 +1604,7 @@ S.rooms["identity-service"] = {
       sourceMsg: "m5b", sourceRoom: "users-migration",
       waiting: 1, blocks: "1 objective",
       why: "needs you specifically — it is the same trade you owe #users-migration, and it was put to you over there, so this room has the decision without the line that raised it.",
-      facts: ["proposed · not accepted", "conf .58", "source in #users-migration"],
+      facts: [{ read: "verification", post: " · not accepted" }, "conf .58", "source in #users-migration"],
       options: [
         { label: "Stop with the cutover", agrees: true, statement: "Opaque-token issuance stops the day the users cutover lands" },
         { label: "Hold until the freeze", statement: "Opaque-token issuance stays open until the 14 Aug freeze, whatever the users cutover does" }
@@ -1622,7 +1622,7 @@ S.rooms["identity-service"] = {
     {
       id: "R2", kind: "claim", objectives: ["p1"], text: "Rotation load test: 12,000 req/s sustained, p99 41ms",
       claimant: "checks", verification: "verified", verifiedBy: "the load harness", verifiedAt: "08:22", sourceMsg: "n5",
-      facts: ["checks", "verified 08:22", "run #91"],
+      facts: ["checks", { read: "verification", post: " 08:22" }, "run #91"],
       history: [{ k: "verified", who: "checks", tm: "08:22", text: "load run #91 against staging — 12k req/s, p99 41ms" }],
       provenance: [{ who: "checks", voice: "machine", tm: "08:22", msg: "n5", ex: "rotation load #91 — 12,000 req/s sustained · p99 41ms · 0 errors", note: "verified event · run #91" }],
       corrections: [],
@@ -1631,7 +1631,7 @@ S.rooms["identity-service"] = {
     {
       id: "R3", kind: "commitment", objectives: ["p2"], text: "Wire revocation into the gateway",
       claimant: "justin", verification: "self_reported", owner: "justin", due: "Fri 1 Aug", sourceMsg: "n6",
-      facts: ["justin", "due Fri 1 Aug", "self-stated"],
+      facts: ["justin", { read: "due", pre: "due ", none: "no due date on record" }, "self-stated"],
       history: [{ k: "claim", who: "justin", tm: "08:31", text: "took it for Friday — his own word" }],
       provenance: [{ who: "justin", tm: "08:31", msg: "n6", ex: "I'll wire revocation into the gateway by Friday.", note: "message · seq 9061 · self-stated commitment, θ .74" }],
       corrections: [],
@@ -1971,10 +1971,25 @@ function seedRecord() {
        receipt's note can be held to ONE rule with no "unless it is data" branch
        in it, and a live transition that declares no claims stands out against
        the same-tick clause below. */
+    /* a seeded fact chip that states a recorded value declares WHICH field, and
+       the value is read out of the record here — the fixture supplies only the
+       words around it, exactly as its correction header supplies only the verb.
+       A chip about something the record does not keep (a name, a confidence,
+       "3 sources") stays a string and is held to the clause that refuses an
+       unminted chip stating a recorded value. */
+    o.facts = (o.facts || []).map(f => seedFact(o, f));
     o.history.forEach(h => { if (!isStated(h.text)) h.text = stated(o, [], () => h.text); });
     if (o.note != null && !isStated(o.note)) o.note = stated(o, [], () => o.note);
     (o.corrections || []).forEach(c => { if (!isStated(c.hd)) c.hd = stated(o, [], () => c.hd); });
   });
+}
+
+/* a fixture fact chip that names a recorded field, read out of the record */
+function seedFact(o, f) {
+  if (!f || typeof f !== "object" || Array.isArray(f) || !f.read) return f;
+  if (!RECORDED[f.read]) { console.error("[atrium invariant] a seeded fact names a field this record does not keep:", o.id, f.read); return String(f.read); }
+  return stated(o, [f.read], v => (f.pre || "") +
+    (v.value == null ? (f.none || "nothing on the record") : enumText(v.value)) + (f.post || ""));
 }
 
 /* THE ONLY WAY A RECORDED FIELD CHANGES, AND THE ONLY SOURCE OF A `change`. */
@@ -2762,11 +2777,15 @@ function checkCorrectionInvariant() {
  *   o.corrections[].hd     → `.corr .hdt`      the chain header       (5a)
  *   o.corrections[].was    → `.corr .was`      the chain body, before (1)
  *   o.corrections[].after  → `.corr .aft`      the chain body, after  (1)
+ *   o.corrections[].fact   → `.corr .ftx`      the entry's prose line (5f)
+ *   o.corrections[].quote  a person's own typed characters — the attribution
+ *                          invariant resolves it to text they really typed
  *   o.history[].text       → `.hap .htx`       WHAT HAPPENED          (5b)
  *   o.facts[]              → `.oitem`, `.acard`, `.acomp`  lens fact chips and
  *                            pin copy — the one line about an object most
  *                            readers ever see                          (5c)
  *   o.note                 → `.rc-foot .note`  the receipt's closing copy (5c)
+ *   receiptState(o)        → `.rc-state`       the receipt's state line (5g)
  *   o.provenance[]         quotations and machine records — held by the
  *                          attribution invariant, which resolves every excerpt
  *                          to a message that exists and contains the text
@@ -2775,22 +2794,47 @@ function checkCorrectionInvariant() {
  *                          toast is raised AFTER the render it belongs to and
  *                          is gone three seconds later                  (5e)
  *
- * That is the whole of it: there is no other property of an object this page
- * paints words from, and the two remaining ones (the statement itself and the
- * provenance) are each already covered by a named invariant. The strength
- * differs by channel, deliberately, and here is which and why:
+ * Three object-scoped surfaces are deliberately NOT on that list, and each has
+ * a named reason rather than an oversight:
  *
- *   - `.hap`, `.corr .hdt`, `.corr .was`, `.corr .aft` — the receipt's own
- *     record surfaces, which the page writes every character of. A mint is
- *     REQUIRED: an element here with no minted sentence behind it is a literal,
- *     and that is the defect. Seeded entries are minted too (see seedRecord) —
- *     there is no "unless it is fixture data" branch.
- *   - fact chips, the receipt note and the feed rows carry a person's own typed
- *     characters as well as the page's (`human(evidence)` lands in all three),
- *     and holding a human's sentence to a page-integrity rule is round 5's
- *     defect. So there the rule is: where a mint reaches the surface, the
- *     painted characters are the minted ones and its claims still re-read
- *     against the record. Feed rows additionally answer to (3).
+ *   o.text / o.question    the statement itself — a RECORDED FIELD, and
+ *                          checkRecordInvariant() holds every recorded field to
+ *                          the last value its own history contains, so it
+ *                          cannot paint a value the record does not hold
+ *   objectTag() `.tag`     a row's status chip. Every state word in it goes
+ *   sysTag()               through enumText() on a recorded field, held as
+ *                          above; the rest is a person's name, which belongs to
+ *                          the attribution invariant, not to this one
+ *   whyOf() `.why`         WHY YOU — a rationale about the READER, not a claim
+ *                          about a recorded field; checkAttentionInvariant()
+ *                          asserts every owed item has one
+ *
+ * The list was NOT complete when round 10 first wrote it, and that is the
+ * point of writing the reasons down: two blind foreign-lineage reviewers both
+ * found `.corr .fact` — a prose line inside the correction entry, beneath two
+ * operands and a header that were all record reads — narrating a reschedule
+ * that moved nothing, and both found `receiptState()` composing the loudest
+ * sentence in a receipt off the object rather than out of its history. A list
+ * of selectors somebody remembered is a denylist; a list derived from the
+ * object's own shape, with the exclusions argued, is the only kind that can be
+ * audited by the next reader.
+ *
+ * The strength differs by channel, deliberately, and here is which and why:
+ *
+ *   - `.hap`, `.corr .hdt`, `.corr .was`, `.corr .aft`, `.corr .ftx`,
+ *     `.rc-foot .note`, `.rc-state` — the receipt's own record surfaces, which
+ *     the page writes every character of. A mint is REQUIRED: an element here
+ *     with no minted sentence behind it is a literal, and that is the defect.
+ *     Seeded entries are minted too (see seedRecord) — there is no "unless it
+ *     is fixture data" branch.
+ *   - fact chips and feed rows carry a person's own typed characters as well as
+ *     the page's (`human(evidence)` lands in both), and holding a human's
+ *     sentence to a page-integrity rule is round 5's defect. So a mint is not
+ *     required there; instead, where a mint reaches the surface the painted
+ *     characters must be the minted ones and its claims must still re-read —
+ *     AND an unminted chip may not state a value the record holds, with the
+ *     vocabulary derived from the object's own history rather than from a list.
+ *     Feed rows additionally answer to (3) and must carry one minted segment.
  * ---------------------------------------------------------------------- */
 /* the painted characters of an element against the sentence it was minted with,
    plus a re-read of every record fact that sentence declares. Used by all five
@@ -2846,6 +2890,15 @@ function checkRenderedRecordInvariant() {
       console.error("[atrium invariant] a correction entry's painted header carries claims the record did not mint:",
         o.id, hdt.textContent.trim());
     else checkPaintedSentence("a correction entry's header", o.id, hdt, c.hd);
+    /* 5f — AND THE FACT LINE, which narrates the transition in prose beneath
+       the two operands and was the one part of the entry nothing read */
+    const ftx = el.querySelector(".ftx");
+    if (ftx) {
+      if (!isStated(c.fact) || c.fact.minted !== MINTED)
+        console.error("[atrium invariant] a correction entry's fact line was not read out of the record — it narrates " +
+          "this amendment in prose, under two operands that were:", o.id, ftx.textContent.trim());
+      else checkPaintedSentence("a correction entry's fact line", o.id, ftx, c.fact);
+    }
     /* the arrow the entry itself paints — the entry's own text, not the label
        on the link beside it, which ends in one because it is a route */
     const bd = el.querySelector(".bd");
@@ -2899,6 +2952,26 @@ function checkRenderedRecordInvariant() {
     checkPaintedSentence("a WHAT HAPPENED line", o.id, node, h.text);
   });
 
+  /* 5g — the receipt's state line, which is the loudest sentence in a receipt */
+  document.querySelectorAll("[data-rstate-obj]").forEach(el => {
+    const o = obj(r, el.dataset.rstateObj) ||
+              (Object.keys(S.rooms).map(k => obj(S.rooms[k], el.dataset.rstateObj)).filter(Boolean)[0]);
+    if (!o) return console.error("[atrium invariant] a receipt state line is on screen with no object behind it:", el.dataset.rstateObj);
+    const box = receiptState(o);
+    el.querySelectorAll("[data-rstate]").forEach(part => {
+      const want = box.said[Number(part.dataset.rstate)];
+      if (want == null || normText(part.textContent) !== normText(String(want)))
+        console.error("[atrium invariant] a receipt's state line is painting something other than what the record " +
+          "produced for it:", o.id, part.textContent.trim(), "vs", String(want));
+    });
+    (box.claims || []).forEach(cl => {
+      const h = (o.recorded || {})[cl.of];
+      if (h && h[cl.at] && !sameValue(h[cl.at].value, cl.value))
+        console.error("[atrium invariant] a receipt's state line was written from a value this record does not hold:",
+          o.id, cl.of, cl.value, "vs", h[cl.at].value);
+    });
+  });
+
   /* 5c — the fact chips and the receipt's note. The chip is the one line about
      an object most readers ever see, and the note is the last thing a receipt
      says. Both also carry a person's own typed characters, so the rule is
@@ -2913,6 +2986,30 @@ function checkRenderedRecordInvariant() {
     if (f.minted !== MINTED)
       return console.error("[atrium invariant] a fact chip carries claims the record did not mint:", o.id, el.textContent.trim());
     checkPaintedSentence("a fact chip", o.id, el, f);
+  });
+  /* AND A CHIP THAT WAS NOT MINTED MAY NOT STATE A VALUE THE RECORD HOLDS
+     (round 10 self-review). A fact chip may honestly be page copy about
+     something the record does not keep — a person's name, a confidence, "3
+     sources". What it may not be is a recorded VALUE written down beside the
+     record, because that is the defect class with a shorter sentence. The
+     vocabulary is derived from the object's own history, exactly as the raw-enum
+     clause below derives its own, so there is no list to maintain and no
+     phrasing to enumerate. */
+  document.querySelectorAll(".oitem .mt span, .acard .mt span, .acomp .fx span").forEach(el => {
+    if (el.dataset.factObj) return;                 // minted, and checked above
+    if (el.closest(HUMAN_SEL)) return;              // a person's own characters
+    const id = (el.closest("[data-lens-obj]") || {}).dataset;
+    const o = id && (obj(r, id.lensObj) || Object.keys(S.rooms).map(k => obj(S.rooms[k], id.lensObj)).filter(Boolean)[0]);
+    if (!o) return;
+    const text = normText(el.textContent);
+    Object.keys(o.recorded || {}).forEach(fld => {
+      const v = o.recorded[fld][o.recorded[fld].length - 1].value;
+      if (typeof v !== "string" || !v) return;
+      if (text.indexOf(normText(v)) >= 0 || text.indexOf(normText(enumText(v))) >= 0)
+        console.error("[atrium invariant] a fact chip states a value this object's record holds for its " + fld +
+          ", and was not read out of it — the shortest surface on the page is still a surface:",
+          o.id, el.textContent.trim(), "vs", v);
+    });
   });
   /* the note is the receipt's closing sentence and it is about the record —
      round 9's said "Rescheduling never erases the original date … it moves the
@@ -3630,12 +3727,36 @@ function boundKind(o) {
   if (o.kind === "question") return "question";
   return null;
 }
-/* and whose call it is. A decision or a question in the attention collection is
-   owed to somebody; only that person may put the answer on the record. An item
-   owed to nobody is nobody's to answer in this room. */
-function canBind(o) {
-  if (!boundKind(o)) return false;
-  return o.owedTo == null || o.owedTo === S.me;
+/* WHO IS BEING ASKED. `owedTo` is the answer while something is owed — but
+   handing a question on CLEARS it while setting the assignee, so reading
+   `owedTo` alone says "nobody owes this, therefore anybody may answer it" about
+   an item that was explicitly handed to a named person (round 10 self-review).
+   The assignee is the fallback, and only when neither names anyone is the item
+   genuinely unclaimed. */
+function askedOf(o) {
+  if (!o) return null;
+  if (o.owedTo != null) return o.owedTo;
+  return o.assignee != null ? o.assignee : null;
+}
+/* whose call it is. Only the person being asked may put an answer on the
+   record — the same rule commitmentOwner() states for a sign-off. */
+function canAnswer(o) {
+  if (!o || (o.kind !== "decision" && o.kind !== "question")) return false;
+  const who = askedOf(o);
+  return who == null || who === S.me;
+}
+function canBind(o) { return !!boundKind(o) && canAnswer(o); }
+/* the sentence the page says when it refuses. Never invents a name. */
+function refusalFor(o) {
+  if (!o) return "there is nothing here to record an answer against";
+  if (o.kind === "commitment")
+    return `${fieldOr(commitmentOwner(o), "someone else")} owns this commitment — typing at it would record your sentence as theirs and accept it in your name`;
+  if (o.kind === "claim")
+    return "a claim moves by being checked with evidence, by someone other than the claimant — typing at it is not a verification";
+  const who = askedOf(o);
+  if (who && who !== S.me)
+    return `${who} is being asked this, not you — recording an answer in your name would be a decision you were not asked to make`;
+  return "this is not something the composer can put on the record — say it in the room instead";
 }
 
 function pinActions(o, primaryOnly) {
@@ -3878,7 +3999,12 @@ function rowActions(r, m, o) {
   if (o && o.kind === "claim" && isClaim(o) && o.claimant !== S.me && !m.sysFor) {
     acts.push(`<button data-verify="${esc(o.id)}">Verify</button>`);
   }
-  if (o && o.kind === "question" && o.verification === "open" && o.answerOption && !m.sysFor) {
+  /* AND ONLY THE PERSON BEING ASKED (round 10 self-review). This control had no
+     ownership check at all: after handing Q1 to justin — which clears `owedTo`
+     and sets the assignee — the row still offered Answer to everyone, and
+     applyEffect() would have recorded `answeredBy: lars` on a question that is
+     justin's. Same class as the bound composer, on a different control. */
+  if (o && o.kind === "question" && o.verification === "open" && o.answerOption && !m.sysFor && canAnswer(o)) {
     acts.push(`<button data-obj="${esc(o.id)}" data-fx="answered" title="${esc(o.answerOption.statement)}">Answer</button>`);
   }
   return acts.join("");
@@ -4174,18 +4300,37 @@ function lensItem(o) {
   return b;
 }
 
+/* THE RECEIPT'S STATE LINE IS A RECORD READ (round 10 self-review, raised by
+   both foreign reviewers as a hole in the completeness claim). It is the
+   loudest sentence in a receipt — `ACCEPTED · commitment · by lars` — and it
+   branched on `o.verification`, `o.due` and `o.assignee` read straight off the
+   object. Those are recorded fields and checkRecordInvariant() pins each of
+   them to the last value its own history holds, so it could not paint a state
+   the record did not have; but the sentence was not PRODUCED by the read, which
+   is the property the doctrine is about, and the checkers could not see it. It
+   is minted now, and `.rc-state` is read back against it.
+   `o.due` is read through recordedLabel(), so K3's `"no due date"` — a value the
+   record genuinely holds, not an absent one — prints as itself rather than as
+   "due no due date". */
 function receiptState(o) {
-  if (o.verification === "accepted") return ["ACCEPTED", o.kind, `by ${fieldOr(o.acceptedBy, "nobody on record")} · ${fieldOr(o.acceptedAt, "time not recorded")}`];
-  if (o.verification === "verified") return ["VERIFIED", o.kind, `checked by ${fieldOr(o.verifiedBy, "nobody on record")} · ${fieldOr(o.verifiedAt, "time not recorded")}`];
-  if (o.verification === "proposed") return ["PROPOSED", "not accepted", `confidence ${fieldOr(o.confidence, "—")}`, "renders as a claim until a human answers"];
+  return say(reads(o, ["verification", "due", "assignee", "answer"]), (v, d, n, a) => {
+    const st = v.value;
+  if (st === "accepted") return ["ACCEPTED", o.kind, `by ${fieldOr(o.acceptedBy, "nobody on record")} · ${fieldOr(o.acceptedAt, "time not recorded")}`];
+  if (st === "verified") return ["VERIFIED", o.kind, `checked by ${fieldOr(o.verifiedBy, "nobody on record")} · ${fieldOr(o.verifiedAt, "time not recorded")}`];
+  if (st === "proposed") return ["PROPOSED", "not accepted", `confidence ${fieldOr(o.confidence, "—")}`, "renders as a claim until a human answers"];
   /* `openFor` is how long it had been open when the record was loaded. Once a
      question has been reopened that number is about the original ask, not about
      the state on screen, so the reopened case reports the reopen instead. */
-  if (o.verification === "open") return ["OPEN", "question",
+  if (st === "open") return ["OPEN", "question",
     o.reopenedAt ? `reopened ${o.reopenedAt}` : `open ${fieldOr(o.openFor, "—")}`,
-    o.assignee ? `assigned to ${o.assignee}` : "nobody assigned"];
-  if (o.verification === "self_reported") return ["SELF-REPORTED", o.kind, `${fieldOr(o.owner || o.claimant, "no owner on record")}`,
-    o.due ? `due ${o.due}` : "no due date on record", "nothing other than the claimant has checked it"];
+    n.value != null ? `assigned to ${n.value}` : "nobody assigned"];
+  if (st === "self_reported") return ["SELF-REPORTED", o.kind, `${fieldOr(o.owner || o.claimant, "no owner on record")}`,
+    /* K3's due is the STRING "no due date" — a value the record genuinely holds,
+       not an absent one — so it prints as itself instead of "due no due date"
+       (round 10 self-review) */
+    d.value == null ? "no due date on record"
+      : /due date/i.test(String(d.value)) ? recordedLabel(d.value) : "due " + recordedLabel(d.value),
+    "nothing other than the claimant has checked it"];
   /* A QUESTION IS ASKED, NOT CLAIMED (round 5 D2). There was no branch for a
      question that had been answered but not signed off, so it fell through to
      the CLAIM line below and the receipt header read
@@ -4196,16 +4341,17 @@ function receiptState(o) {
      own states, and none of them uses the word claimant. */
   if (o.kind === "question") {
     const asker = `asked by ${fieldOr(o.askedBy || o.claimant, "nobody on record")}`;
-    if (o.answerText) return ["ANSWERED", "question", asker,
+    if (a.value != null) return ["ANSWERED", "question", asker,
       `answered by ${fieldOr(o.answeredBy, "nobody on record")} · ${fieldOr(o.answeredAt, "time not recorded")}`,
-      "no sign-off attached, so the answer is unverified"];
-    return ["QUESTION", fieldOr(o.verification, "state not recorded"), asker,
-      o.assignee ? `assigned to ${o.assignee}` : "nobody assigned"];
+      `no sign-off attached, so the answer is ${enumText(st)}`];
+    return ["QUESTION", enumText(st), asker,
+      n.value != null ? `assigned to ${n.value}` : "nobody assigned"];
   }
   /* round 2 carried a REASSIGNED branch here and never wrote that value: an
      assignment changes who owes the answer, not whether it is verified. The
      assignee is reported by the OPEN branch above, where it actually lives. */
-  return ["CLAIM", "unverified", `claimant: ${fieldOr(o.claimant, "nobody on record")}`];
+  return ["CLAIM", enumText(st), `claimant: ${fieldOr(o.claimant, "nobody on record")}`];
+  }, o);
 }
 
 /* ---------------------------------------------------------------------------
@@ -4231,7 +4377,13 @@ function correctionHtml(c, o, i) {
     ? `<div class="reason"><q data-quoted="${esc(quoteRef(c.quote))}" data-voice="human">${esc(c.quote.text)}</q>
          <span class="src">— ${esc(c.quote.by)}, typed here${c.quote.seeded ? " on the record" : ""}</span></div>`
     : "";
-  const fact = c.fact ? `<div class="fact"><span aria-hidden="true">·</span> ${voiced(c.fact)}</div>` : "";
+  /* THE FACT LINE IS A SURFACE (round 10 self-review, found independently by
+     both foreign reviewers). It sits inside the correction entry, below two
+     operands and a header that are all record reads, and it was a literal — so
+     rescheduling to the date already on the record printed "rescheduled by lars
+     · the original date is not erased" under a header saying the date had not
+     moved. `.ftx` is where the checker reads it back. */
+  const fact = c.fact ? `<div class="fact"><span aria-hidden="true">·</span> <span class="ftx">${voiced(c.fact)}</span></div>` : "";
   /* THE ARROW IS A CLAIM (round 6 D1). Round 6 rendered `was → now: after` for
      every entry unconditionally, so an entry recording that nothing changed
      still asserted a swap — and did it with two byte-identical sentences either
@@ -4339,8 +4491,8 @@ function renderReceipt(o) {
     `<div class="rc-top">
        <button class="rc-back" id="rcBack">← BACK TO CURRENT STATE</button>
        <div class="rc-ttl ${gclass(g)}"><span class="g" aria-hidden="true">${g}</span><span class="h ${isClaim(o) ? "claim" : ""}">${voiced(titleFrag(o))}</span></div>
-       <div class="rc-state">${st.map((s, i) => i === 0
-          ? `<span class="st ${stateChip(g)}">${esc(s)}</span>` : `<span>${esc(s)}</span>`).join('<span aria-hidden="true">·</span>')}
+       <div class="rc-state" data-rstate-obj="${esc(o.id)}">${st.said.map((s, i) => i === 0
+          ? `<span class="st ${stateChip(g)}" data-rstate="0">${esc(s)}</span>` : `<span data-rstate="${i}">${esc(s)}</span>`).join('<span aria-hidden="true">·</span>')}
           <span aria-hidden="true">·</span><span>in ${o.objectives.length} objective${o.objectives.length > 1 ? "s" : ""}</span></div>
      </div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">WHAT HAPPENED</span><span class="rule"></span></div>${happened}</div>
@@ -4449,6 +4601,8 @@ function answerDecision(objectId, answer, provenanceNote) {
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
+  /* guarded on the write, for the reason answerQuestion() states */
+  if (!canAnswer(o)) { toast(refusalFor(o), "bad"); return; }
   const t = tick();
   const typed = answer.origin === "typed";
   const statement = answer.statement;
@@ -4544,11 +4698,11 @@ function answerDecision(objectId, answer, provenanceNote) {
       return typed
         ? (moved
             ? "answered it directly — the resolution was recorded from the typed answer, not interpreted from it"
-            : "typed the sentence already on the record, word for word — it was recorded again and nothing was amended")
+            : "typed the sentence already on the record, word for word — it was recorded again and the statement itself was not amended")
         : `chose the option ${answer.label} from the card — ` +
           (moved
             ? `the statement it carries was recorded verbatim, and none of it is worded by ${S.me}`
-            : "it is word for word the statement already on the record, so nothing was amended");
+            : "it is word for word the statement already on the record, so the statement itself was not amended");
     }) });
   /* the source entry for a chosen answer is a system record of a click, not a
      quotation of a sentence. `voice: "system"` is what renderReceipt() reads to
@@ -4608,13 +4762,14 @@ function answerDecision(objectId, answer, provenanceNote) {
          the only before/after pair on this page that the record can vouch for.
          checkCorrectionInvariant() holds every entry to all three of those. */
       change: change,
-      fact: (prior ? (stMoved ? `re-answered by ${S.me} at ${t}` : `re-recorded by ${S.me} at ${t}`)
+      fact: say([nowSt], () =>
+            (prior ? (stMoved ? `re-answered by ${S.me} at ${t}` : `re-recorded by ${S.me} at ${t}`)
                    : (stMoved ? `answered by ${S.me} at ${t}` : `re-affirmed by ${S.me} at ${t}`)) +
             (typed ? " · typed" : ` · chosen: ${answer.label} — the page wrote the sentence, ${S.me} chose it`) +
-            (stMoved ? "" : " · the statement on the record is unchanged, so nothing was amended") +
+            (stMoved ? "" : " · the statement on the record is unchanged, so the statement itself was not amended") +
             (stMoved && !contradicts && !prior
               ? " · the option agrees with the proposal, and its wording — the card's, not yours — is what is now on the record"
-              : ""),
+              : "")),
       msg: prior ? prior.id : (o.sourceMsg || null),
       room: prior ? null : sourceRoomOf(o),
       link: prior ? "the superseded answer is still in the room →" : "the proposal it replaced is still in the room →"
@@ -4623,7 +4778,7 @@ function answerDecision(objectId, answer, provenanceNote) {
        CHOSEN answer is a page-authored row; quoting it would re-open exactly
        the loophole D3 closes, one step removed. */
     if (prior && prior.origin === "typed") c.quote = { text: plain(prior.body), by: S.me, src: "typed" };
-    else if (prior) c.fact += ` · the superseded answer was chosen from the card, so there is nothing of ${S.me}'s to quote`;
+    else if (prior) c.fact = say([nowSt], () => [c.fact.said, ` · the superseded answer was chosen from the card, so there is nothing of ${S.me}'s to quote`]);
     o.corrections.push(c);
   }
 
@@ -4631,7 +4786,7 @@ function answerDecision(objectId, answer, provenanceNote) {
       ? "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. "
       : "You chose one of the statements the card offered. It is recorded verbatim as the decision, and the row that records it is in the system's voice — the page wrote that sentence, so it is not attributed to you as something you said. ") +
            (stMoved && contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
-           (stMoved ? "" : "It is word for word the sentence already on the record, so nothing was amended — the chain records that it was affirmed again, not that it changed. ") +
+           (stMoved ? "" : "It is word for word the sentence already on the record, so the statement itself was not amended — the chain records that it was affirmed again, not that it changed. ") +
            (prior ? "It replaces your earlier answer, which is still on the record and still in the room." : ""));
 
   /* the arrow states the verification the record moved through — round 8 wrote
@@ -4658,7 +4813,7 @@ function answerDecision(objectId, answer, provenanceNote) {
   /* the toast says which kind of answer it was. Round 3 told you your wording
      was recorded verbatim even when the wording was the card's, not yours. */
   toast(say([nowSt], () => !stMoved
-    ? "re-affirmed · the same sentence is on the record, recorded again — nothing was amended"
+    ? "re-affirmed · the same sentence is on the record, recorded again — the statement itself was not amended"
     : prior
       ? "re-answered · the earlier answer is now marked superseded, not deleted"
       : typed ? "recorded as a decision · answer-bound, your wording verbatim"
@@ -4682,6 +4837,11 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
+  /* THE GUARD IS ON THE WRITE, NOT ONLY ON THE CONTROL (round 10 self-review).
+     Both callers check first; this is the one that cannot be walked around by
+     a control somebody forgets to gate, which is exactly how the feed row's
+     Answer button came to have no check at all. */
+  if (!canAnswer(o)) { toast(refusalFor(o), "bad"); return; }
   const t = tick();
   const typed = label == null;
   const blocked = o.objectives.length;
@@ -4744,9 +4904,10 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
     after: say([nowA], a => aMoved ? ansFrag(a)
       : "recorded again, verbatim — nothing about the answer changed"),
     change: ac || sc2,
-    fact: `answered by ${S.me} at ${t} · ` +
-          (typed ? "typed — your own words are the answer of record" : `chosen: ${label} — the page wrote the sentence, ${S.me} chose it`) +
-          ` · no sign-off is attached, so the answer is on the record and unverified`,
+    fact: say([wasA, nowA, nowV2], (wa, na, nv) =>
+      (!sameValue(wa.value, na.value) ? `answered by ${S.me} at ${t} · ` : `re-recorded by ${S.me} at ${t} · the answer itself was not amended · `) +
+      (typed ? "typed — your own words are the answer of record" : `chosen: ${label} — the page wrote the sentence, ${S.me} chose it`) +
+      ` · no sign-off is attached, so the answer is on the record and ${enumText(nv.value)}`),
     msg: o.sourceMsg || m.id, room: sourceRoomOf(o),
     link: "the question is still in the room →"
   });
@@ -4755,11 +4916,17 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
              "no sign-off attached", "still blocks " + blocks];
   o.history.push({ k: "question", who: S.me, tm: t,
     text: say([wasA, nowA, nowV2], (wa, na, nv) => [
+      /* THE CLAIM IS SCOPED TO THE FIELD IT READ (round 10 self-review). "so
+         nothing was amended" was absolute, and re-answering after a reopen
+         moves the verification and the settlement in the same tick — so one
+         sentence denied an amendment the header beside it correctly announced.
+         A sentence written from one field may only make a claim about that
+         field, and the other field it names is read too. */
       `${chose} — ` +
       (!sameValue(wa.value, na.value)
         ? (typed ? "it is on the record verbatim, in your own words: "
                  : `the statement it carries was recorded verbatim and none of it is worded by ${S.me}: `)
-        : "it is word for word the answer already on the record, so nothing was amended: "),
+        : "it is word for word the answer already on the record, so the answer itself was not amended: "),
       ansFrag(na), ` · ${enumText(nv.value)}`]) });
   o.provenance.unshift(typed
     ? { who: S.me, tm: t, msg: m.id, ex: statement, note: provenanceNote }
@@ -4793,7 +4960,7 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
   toast(say([wasA, nowA], (wa, na) => !sameValue(wa.value, na.value)
     ? (typed ? `answered · your wording is the answer of record · stays ~ with no sign-off, and still blocks ${blocks}`
              : `answered · the card's statement recorded verbatim in the system's voice · stays ~ with no sign-off, and still blocks ${blocks}`)
-    : `re-recorded · it is the answer already on the record, so nothing was amended · still blocks ${blocks}`), "warn");
+    : `re-recorded · it is the answer already on the record, so the answer itself was not amended · still blocks ${blocks}`), "warn");
 }
 
 /* --- B2: reopen re-renders EVERYTHING, including the historical row ------
@@ -4976,7 +5143,9 @@ function reopen(objectId, reason) {
        not the record. The change is the enum the object actually moved through,
        or — when the enum did not move — the settlement it lost. */
     change: vChange || sChange,
-    fact: `reopened by ${S.me} at ${t}` + (reason ? "" : " · no reason given, and none was invented"),
+    fact: say([nowVr, wasSr, nowSr], (v, ws, ns) => `reopened by ${S.me} at ${t} · now ${enumText(v.value)}` +
+      (!sameValue(ws.value, ns.value) ? " and no longer settled" : "") +
+      (reason ? "" : " · no reason given, and none was invented")),
     msg: o.answerMsg || o.sourceMsg || (o.provenance[0] && o.provenance[0].msg) || null,
     room: o.answerMsg ? null : sourceRoomOf(o),
     link: o.answerMsg ? "the prior answer is still in the room →" : "the source is still in the room →"
@@ -5119,7 +5288,7 @@ function doVerify(objectId, evidence) {
     after: say([nowVv], v =>
       `${enumText(v.value).replace(/^./, s => s.toUpperCase())} by ${S.me}, who is not the claimant`),
     change: vChange || sChange,
-    fact: `verified by ${S.me} at ${t} · the evidence is ${S.me}'s own sentence and is quoted below`,
+    fact: say([nowVv], v => `${enumText(v.value)} by ${S.me} at ${t} · the evidence is ${S.me}'s own sentence and is quoted below`),
     quote: { text: evidence, by: S.me, src: "typed" },
     msg: o.sourceMsg || (o.provenance[1] && o.provenance[1].msg) || null,
     link: "the claim is still in the room →"
@@ -5157,6 +5326,9 @@ function applyEffect(objectId, fx) {
      as the claimant, which is two false statements about one object. You may
      record that you settled your own commitment; you may not record that you
      settled somebody else's. */
+  /* handing a question on is a change to whose it is, so it belongs to whoever
+     is being asked — the same rule, for the same reason (round 10 self-review) */
+  if ((fx === "answered" || fx === "reassign") && !canAnswer(o)) { toast(refusalFor(o), "bad"); return; }
   if ((fx === "signed" || fx === "resched") && commitmentOwner(o) !== S.me) {
     toast(`${fieldOr(commitmentOwner(o), "someone else")} owns this commitment, not you — signing it off would record their word as yours`, "bad");
     return;
@@ -5237,7 +5409,10 @@ function applyEffect(objectId, fx) {
         `${s.value === "settled" ? "Signed off" : "Recorded"} by ${S.me} at ${t} — ${enumText(v.value)}, ` +
         (v.ever("verified") ? "and the earlier check is still on the record" : "nothing has checked it")),
       change: vc || sc,
-      fact: `signed off by ${S.me} at ${t} · self-reported: the owner's own word, which is why it stays ~`,
+      fact: say([nowV, wasS, nowS], (v, ws, ns) =>
+        `signed off by ${S.me} at ${t} · ` +
+        (!sameValue(ws.value, ns.value) ? "" : "it was already settled · ") +
+        `${enumText(v.value)}: the owner's own word, which is why it stays ~`),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
       link: "the commitment is still in the room →"
     };
@@ -5295,7 +5470,15 @@ function applyEffect(objectId, fx) {
       was: say([rd[0]], d => "Due " + recordedLabel(d.value, "— no due date was ever set")),
       after: say([rd[1]], d => "Due " + recordedLabel(d.value)),
       change: dc,
-      fact: `rescheduled by ${S.me} at ${t} · the original date is not erased — it is above, and it is in this chain`,
+      /* THE FACT LINE IS A SURFACE TOO (round 10 self-review). It was written
+         unconditionally, so rescheduling to the date already on the record
+         printed "rescheduled by lars · the original date is not erased"
+         underneath a header and a body that both correctly reported that
+         nothing had moved — the fifth layer's defect, through a sixth door,
+         inside the very entry the other five were fixed in. */
+      fact: say(rd, (was, now) => moved(was, now)
+        ? `rescheduled by ${S.me} at ${t} · the original date is not erased — it is above, and it is in this chain`
+        : `re-recorded by ${S.me} at ${t} · the date it was moved to is the date it already had, so the due date was not amended and nothing was erased`),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
       link: "the commitment is still in the room →"
     };
@@ -5305,10 +5488,10 @@ function applyEffect(objectId, fx) {
     o.history.push({ k: "claim", who: S.me, tm: t,
       text: say(rd, (was, now) => moved(was, now)
         ? `moved the due date from ${recordedLabel(was.value, "no due date at all")} to ${recordedLabel(now.value, "no date at all")} — the original date stays above, and it is still owed`
-        : `recorded the due date again, unchanged at ${recordedLabel(now.value, "no date at all")} — nothing moved, and it is still owed`) });
+        : `recorded the due date again, unchanged at ${recordedLabel(now.value, "no date at all")} — the due date did not move, and it is still owed`) });
     o.note = say(rd, (was, now) => moved(was, now)
       ? "Rescheduling never erases the original date; both are in the history. It moves the date and nothing else — the commitment is still open, still yours, and still on your list."
-      : "The date it was moved to is the date it already had, so nothing was amended and the history has nothing new to hold. It is still open, still yours, and still on your list.");
+      : "The date it was moved to is the date it already had, so the due date was not amended and its history has nothing new to hold. It is still open, still yours, and still on your list.");
     /* both sides of the arrow are the values the record moved between (D2) */
     line = [`commitment ${o.id} · due `,
             say(rd, (was, now) => moved(was, now)
@@ -5318,7 +5501,7 @@ function applyEffect(objectId, fx) {
     trans = dc || vc2;
     msgText = say(rd, (was, now) => moved(was, now)
       ? "rescheduled · the original due date stays on the record, and it is still owed"
-      : "nothing was amended · the date it already had is the date it now has, and it is still owed");
+      : "the due date was not amended · the date it already had is the date it now has, and it is still owed");
     kind = "info";
   } else if (fx === "answered") {
     /* THE ANSWER IS THE RECORD (round 5 D2), AND THERE IS ONE PATH TO IT
@@ -5356,19 +5539,29 @@ function applyEffect(objectId, fx) {
       was: say([rn[0]], n => recordedLabel(n.value, "Nobody was assigned to it")),
       after: say([rn[1]], n => recordedLabel(n.value) + " — it is still open, and still blocking " + blocks),
       change: nc,
-      fact: `reassigned by ${S.me} at ${t} · nothing about the question itself changed, and nothing was answered`,
+      fact: say(rn, (was, now) => (moved(was, now)
+        ? `reassigned by ${S.me} at ${t}`
+        : `re-recorded by ${S.me} at ${t} · it was already theirs, so the assignee was not amended`) +
+        ` · nothing about the question itself changed, and nothing was answered`),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
       link: "the question is still in the room →"
     };
+    /* "still open" is a claim about the verification, which is a recorded field —
+       so it is read, not written down beside it (round 10 self-review) */
     o.facts = ["asked by " + fieldOr(o.askedBy, "nobody on the record"),
-               say([rn[1]], n => "now " + recordedLabel(n.value, "nobody") + "'s"), "still open"];
+               say([rn[1]], n => "now " + recordedLabel(n.value, "nobody") + "'s"),
+               stated(o, ["verification"], v => "still " + enumText(v.value))];
     o.history.push({ k: "question", who: S.me, tm: t,
+      /* "unchanged in the record" was inherited from round 9 and is false about
+         the one field this action amends: the assignee moved, which is what the
+         header beside it says. What is unchanged is the QUESTION — its text and
+         its answer — and that is what the sentence claims now. */
       text: say(rn, (was, now) => moved(was, now)
-        ? `reassigned it to ${recordedLabel(now.value)} — out of your list, unchanged in the record`
-        : `recorded ${recordedLabel(now.value)} as the assignee again — it was already theirs, so nothing moved`) });
+        ? `reassigned it from ${recordedLabel(was.value, "nobody")} to ${recordedLabel(now.value)} — out of your list; the question itself is unchanged and still unanswered`
+        : `recorded ${recordedLabel(now.value)} as the assignee again — it was already theirs, so the assignee did not move`) });
     o.note = say(rn, (was, now) => moved(was, now)
       ? "Reassigning moves it off your surface. It is still open and still blocking the objectives it blocked."
-      : "It was already assigned to that person, so nothing was amended. It is still open and still blocking the objectives it blocked.");
+      : "It was already assigned to that person, so the assignee was not amended. It is still open and still blocking the objectives it blocked.");
     line = [`question ${o.id} · `,
             say(rn, (was, now) => moved(was, now)
               ? `reassigned to ${recordedLabel(now.value)} by ${S.me}`
@@ -5377,7 +5570,7 @@ function applyEffect(objectId, fx) {
     trans = nc;
     msgText = say(rn, (was, now) => moved(was, now)
       ? `reassigned to ${recordedLabel(now.value)} · out of your list, still open, still blocking ${blocks}`
-      : `nothing was amended · it was already ${recordedLabel(now.value)}'s, and it is still open`);
+      : `the assignee was not amended · it was already ${recordedLabel(now.value)}'s, and it is still open`);
     kind = "warn";
   }
   /* an amendment that produced no recorded change would be a branch claiming to
@@ -5498,16 +5691,7 @@ function dropPrefill() {
    through a branch pinActions() renders deliberately. */
 function bindComposer(objectId) {
   const o = obj(room(), objectId);
-  if (!canBind(o)) {
-    toast(o && o.kind === "commitment"
-      ? `${fieldOr(commitmentOwner(o), "someone else")} owns this commitment — typing at it would record your sentence as theirs and accept it in your name`
-      : o && o.kind === "claim"
-        ? "a claim moves by being checked with evidence, by someone other than the claimant — typing at it is not a verification"
-        : o && o.owedTo && o.owedTo !== S.me
-          ? `${o.owedTo} is being asked this, not you — recording an answer in your name would be a decision you were not asked to make`
-          : "this is not something the composer can put on the record — say it in the room instead", "bad");
-    return;
-  }
+  if (!canBind(o)) { toast(refusalFor(o), "bad"); return; }
   dropPrefill();
   S.ui.bound = objectId; S.ui.replyTo = null; S.ui.about = null;
   render();
