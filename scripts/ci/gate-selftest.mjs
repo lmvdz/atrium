@@ -1403,14 +1403,14 @@ const CASES = [
   // asserted nothing — including both self-tests, so the thing that would have
   // noticed was disarmed by the same line.
   {
-    name: 'every guard in scripts/ci is the sound one',
-    run: () => mainGuardProblems('scripts/ci'),
+    name: 'every guard under scripts/ is the sound one',
+    run: () => mainGuardProblems('scripts'),
     expect: 'clean',
   },
   {
     name: 'the round-4 guard, re-introduced in one file',
     run: () =>
-      mainGuardProblems('scripts/ci', (path) =>
+      mainGuardProblems('scripts', (path) =>
         path.endsWith('assert-tables.mjs')
           ? `if (${BROKEN_GUARD_HALVES.join(' ')}) { process.exit(main()); }\n`
           : readFileSync(path, 'utf8'),
@@ -1420,7 +1420,7 @@ const CASES = [
   {
     name: 'the same written with a loose equality and single quotes',
     run: () =>
-      mainGuardProblems('scripts/ci', (path) =>
+      mainGuardProblems('scripts', (path) =>
         path.endsWith('assert-tables.mjs')
           ? `if (${LOOSE_GUARD_HALVES.join(' ')}) { main(); }\n`
           : readFileSync(path, 'utf8'),

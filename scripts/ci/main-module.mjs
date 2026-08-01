@@ -85,12 +85,22 @@ const NOT_ENTRY_POINTS = new Set(['main-module.mjs']);
  */
 export function mainGuardProblems(directory, read = (path) => readFileSync(path, 'utf8')) {
   const problems = [];
-  for (const name of readdirSync(directory).sort()) {
-    if (!name.endsWith('.mjs') || NOT_ENTRY_POINTS.has(name)) continue;
-    const source = read(join(directory, name));
-    if (!BROKEN_GUARD.test(source)) continue;
+  // Recursive, because "the directory this happens to be flat today" is the
+  // same kind of assumption as "the checkout path happens to have no space in
+  // it" — which is what made this defect latent rather than absent.
+  for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )) {
+    const full = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules') continue;
+      problems.push(...mainGuardProblems(full, read));
+      continue;
+    }
+    if (!entry.name.endsWith('.mjs') || NOT_ENTRY_POINTS.has(entry.name)) continue;
+    if (!BROKEN_GUARD.test(read(full))) continue;
     problems.push(
-      `${name} decides whether it was run by comparing \`import.meta.url\` against \`file://\` + \`process.argv[1]\`. \`import.meta.url\` percent-encodes and resolves symlinks; \`process.argv[1]\` does neither, so a checkout path containing a space — or an invocation through a symlink — makes the comparison false, and the script exits 0 having printed nothing and asserted nothing. Measured: \`node "/tmp/g/with space/g.mjs"\` exits 0 where \`node /tmp/g/g.mjs\` exits 3. Use \`isMainModule(import.meta.url)\` from scripts/ci/main-module.mjs.`,
+      `${full} decides whether it was run by comparing \`import.meta.url\` against \`file://\` + \`process.argv[1]\`. \`import.meta.url\` percent-encodes and resolves symlinks; \`process.argv[1]\` does neither, so a checkout path containing a space — or an invocation through a symlink — makes the comparison false, and the script exits 0 having printed nothing and asserted nothing. Measured: \`node "/tmp/g/with space/g.mjs"\` exits 0 where \`node /tmp/g/g.mjs\` exits 3. Use \`isMainModule(import.meta.url)\` from scripts/ci/main-module.mjs.`,
     );
   }
   return problems;
