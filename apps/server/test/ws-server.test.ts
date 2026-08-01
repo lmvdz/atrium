@@ -945,22 +945,27 @@ describe('revocation reaches a subscription, not only a command', () => {
   });
 
   /**
-   * The accepted bound, measured rather than asserted in prose.
+   * The accepted bound — and, since the round-7 delta, an actual ceiling.
    *
    * `broadcastPresence` fans out to the roster without re-asking membership per
    * recipient, so a socket that joined before its owner was removed keeps
-   * receiving that room's presence frames until the next sweep — up to
-   * `WS_SWEEP_INTERVAL_MS`, 15s by default (pinned in `test/env.test.ts`). The
-   * round-6 gauntlet accepted that and routed the eviction signal to #27; the
-   * condition was that r7 state the bound in code and in the README.
+   * receiving that room's presence frames until the sweep notices. Round 6
+   * accepted 15s on the strength of a paragraph and round 7 wrote the paragraph
+   * down; the delta showed the number was a description of the default
+   * configuration rather than a guarantee, because a hung membership lookup held
+   * the `sweeping` latch and every later interval was skipped.
    *
-   * A stated bound is a claim, and this ticket has spent four rounds learning
-   * that a first-draft claim about a mechanism is usually wrong. So both halves
-   * are measured here: what the window *does* leak, and what it does not.
+   * **What round 7's test measured, and did not.** It installed a 60s interval
+   * so nothing would sweep, then evicted the socket by *sending a command* — so
+   * it measured the command path, which was never the thing in doubt, and left
+   * the advertised window untested. The three tests below measure the window
+   * itself, with a clock, and fail when it is exceeded.
    */
-  it('leaks presence but never command authority, for one sweep interval', async () => {
-    // The default 60s sweep from `startServer` is what holds the window open —
-    // this test is about what happens *before* the sweep, so nothing may sweep.
+  it('leaks presence but never command authority, inside the window', async () => {
+    // The default 60s sweep from `startServer` holds the window open, which is
+    // what makes the leak observable at all. What is asserted here is the
+    // *content* of the window — that is all this test is for; the two below
+    // measure its length.
     const removed = await connect('ada');
     send(removed, { type: 'command', command: 'room.join', roomId });
     await nextFrame(removed, 'joined');
@@ -993,13 +998,188 @@ describe('revocation reaches a subscription, not only a command', () => {
     const denial = await nextFrame(removed, 'command_error');
     expect(denial.reason).toBe('not_a_member');
 
-    // …and the denial evicted them, so the window closes at the first frame
-    // they send rather than lasting the full interval when they are active.
-    await vi.waitFor(() => {
-      expect(server.presence(roomId)).toEqual([{ userId: grace.userId, displayName: 'grace' }]);
-    });
     staying.close();
     removed.close();
+  });
+
+  it('closes the presence window within one sweep interval, measured', async () => {
+    /**
+     * The first half of the ceiling: when the membership lookup answers, the
+     * window is one sweep interval. Measured with a clock rather than described,
+     * and the removed socket sends **nothing** — no command-driven eviction is
+     * allowed to stand in for the sweep, which is what round 7's version did.
+     *
+     * Catches: deleting the membership loop from `sweepConnections`, and any
+     * change that widens the window without widening the advertised bound — the
+     * `widen-sweep-window` mutation in `scripts/mutation-ledger.mjs` sweeps four
+     * times less often, still evicts, and fails here.
+     *
+     * **The interval is 150ms and not 40ms because of that mutation.** The first
+     * draft used 40ms with 250ms of scheduling slack, which is four intervals of
+     * slack — it passed against a sweep running a quarter as often, and was
+     * therefore measuring "it closed eventually", the very thing round 7's
+     * version was faulted for. The slack has to be small next to the interval,
+     * not next to the test.
+     */
+    const sweepIntervalMs = 150;
+    await server.close();
+    await listen(startServer({ sweepIntervalMs }));
+
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+    await nextFrame(removed, 'presence');
+
+    const staying = await connect('grace');
+    send(staying, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(staying, 'joined');
+    await nextFrame(removed, 'presence');
+
+    const closed = new Promise<number>((resolve) => removed.once('close', resolve));
+    const removedAt = Date.now();
+    memberships.delete(membershipKey(roomId, ada.userId));
+
+    expect(await closed).toBe(1008);
+    const window = Date.now() - removedAt;
+    expect(server.presence(roomId)).toEqual([{ userId: grace.userId, displayName: 'grace' }]);
+
+    /**
+     * Two intervals, not one. The removal can land a hair after a sweep has
+     * already read this connection, so the sweep that notices is the *next* one
+     * — that is inherent to a polling bound and is why the README says "up to".
+     * Anything beyond two intervals is the bound failing, not the schedule.
+     */
+    expect(window).toBeLessThan(sweepIntervalMs * 2 + 120);
+    staying.close();
+  });
+
+  it('closes the window on a bound even when the membership lookup never answers', async () => {
+    /**
+     * The second half of the ceiling, and the one that was not there.
+     *
+     * Round 7 awaited `loadRoomMembership` with no deadline behind a `sweeping`
+     * latch cleared in a `finally`. A lookup that never settles never reaches
+     * that `finally`, so the latch stayed held and every later interval returned
+     * at `if (sweeping) return` — presence to a removed member persisted for as
+     * long as the query stayed wedged, which is to say indefinitely.
+     *
+     * **Verified against `fix/auth-r7`: this test hangs until vitest times it
+     * out.** Against r8 the hung lookup is a sweep failure like any other, so
+     * the socket is closed after `sweepFailureLimit` sweeps — bounded, and the
+     * bound is measured here rather than asserted.
+     *
+     * Catches: removing `withLookupDeadline` from the membership await, and
+     * removing the latch's own deadline.
+     */
+    const sweepIntervalMs = 100;
+    const sweepFailureLimit = 3;
+    let wedged = false;
+    /** Every promise this test refused to settle, so nothing outlives it. */
+    const hung: (() => void)[] = [];
+
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs,
+        sweepFailureLimit,
+        sweepUnverifiedMs: 300_000,
+        loadRoomMembership: async (room, user) => {
+          if (wedged && user === ada.userId) {
+            // Not slow. Never. A pooled connection that will not come back.
+            return new Promise<MembershipLike | null>((resolve) => {
+              hung.push(() => resolve(null));
+            });
+          }
+          const role = memberships.get(membershipKey(room, user));
+          return role ? { role } : null;
+        },
+      }),
+    );
+
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+
+    const closed = new Promise<number>((resolve) => removed.once('close', resolve));
+    const wedgedAt = Date.now();
+    wedged = true;
+    memberships.delete(membershipKey(roomId, ada.userId));
+
+    expect(await closed).toBe(1008);
+    const window = Date.now() - wedgedAt;
+    expect(server.presence(roomId)).toHaveLength(0);
+
+    /**
+     * The stated bound: `sweepFailureLimit` sweeps, each of which cannot start
+     * before the previous one's deadline. One interval of slack for the sweep
+     * that was already in flight, and 120ms of scheduling allowance — small next
+     * to the interval on purpose, so this is an inequality about the bound and
+     * not about the machine.
+     */
+    expect(window).toBeLessThan(sweepIntervalMs * (sweepFailureLimit + 1) + 120);
+    for (const settle of hung) settle();
+  });
+
+  it('starts the next sweep even while a lookup from the last one is still hanging', async () => {
+    /**
+     * The mechanism underneath the test above, isolated — because "the socket
+     * eventually closed" is also what a single very slow sweep looks like, and
+     * the defect was specifically that *later sweeps did not run at all*.
+     *
+     * grace is the metronome again: her lookups answer immediately, so counting
+     * them counts sweeps. ada's hang forever. Against r7 the count stops at one
+     * and never moves; against r8 it keeps climbing, because the latch has a
+     * deadline of its own and the pass resumes where the last one stopped.
+     *
+     * Catches: reverting the `sweeping` latch to one cleared only in `finally`.
+     */
+    const sweepIntervalMs = 25;
+    let wedged = false;
+    let graceLookups = 0;
+    const hung: (() => void)[] = [];
+
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs,
+        sweepFailureLimit: 1_000,
+        sweepUnverifiedMs: 300_000,
+        loadRoomMembership: async (room, user) => {
+          if (wedged && user === ada.userId) {
+            return new Promise<MembershipLike | null>((resolve) => {
+              hung.push(() => resolve(null));
+            });
+          }
+          if (user === grace.userId) graceLookups += 1;
+          const role = memberships.get(membershipKey(room, user));
+          return role ? { role } : null;
+        },
+      }),
+    );
+
+    const stuck = await connect('ada');
+    send(stuck, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(stuck, 'joined');
+    const metronome = await connect('grace');
+    send(metronome, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(metronome, 'joined');
+
+    wedged = true;
+    const before = graceLookups;
+
+    // Four further sweeps' worth of the metronome answering. Under r7's latch
+    // this never arrives, whatever the timeout is set to.
+    await vi.waitFor(
+      () => {
+        expect(graceLookups).toBeGreaterThanOrEqual(before + 4);
+      },
+      { timeout: 4_000 },
+    );
+
+    expect(stuck.readyState).toBe(stuck.OPEN);
+    stuck.close();
+    metronome.close();
+    for (const settle of hung) settle();
   });
 
   it('tells the room who is left the moment somebody is evicted', async () => {

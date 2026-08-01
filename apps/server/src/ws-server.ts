@@ -156,6 +156,76 @@ export interface RealtimeOptions {
    * count alone a promise about nothing. Whichever comes first.
    */
   sweepUnverifiedMs?: number;
+  /**
+   * How long any one lookup inside a sweep gets before it counts as a failure.
+   *
+   * **This is what makes the sweep interval a ceiling rather than a schedule.**
+   * Round 7 ran one sweep at a time behind a `sweeping` latch and awaited the
+   * session and membership lookups with no deadline, so a lookup that never
+   * settled — a connection wedged in the pool, a query waiting on a lock that is
+   * never released — left the latch held forever and every later interval was
+   * skipped. Presence to a removed member then persisted indefinitely, and the
+   * round-6 receipt's "15s ceiling" was a description of the *default
+   * configuration*, not a guarantee.
+   *
+   * A lookup that exceeds this is treated exactly as one that threw: it does not
+   * decide anything, it advances `sweepFailures`, and the socket is closed once
+   * that or `sweepUnverifiedMs` is reached. So a hung dependency cannot extend
+   * either bound, and the eviction path does not depend on the lookup's health.
+   *
+   * Defaults to a third of `sweepIntervalMs`, so a pass over a handful of wedged
+   * connections still finishes inside the interval that started it. Deliberately
+   * not its own environment variable: one knob, `WS_SWEEP_INTERVAL_MS`, decides
+   * the bound the README states.
+   */
+  sweepLookupTimeoutMs?: number;
+}
+
+/** A sweep lookup that did not answer inside its deadline. */
+class SweepDeadlineExceeded extends Error {
+  constructor(what: string, ms: number) {
+    super(`${what} did not answer within ${ms}ms`);
+    this.name = 'SweepDeadlineExceeded';
+  }
+}
+
+/**
+ * Await `work` for at most `timeoutMs`, and never leave it unhandled.
+ *
+ * The second half is not decoration. A lookup that rejects *after* losing the
+ * race is still a rejected promise, and `apps/server/src/index.ts` exits the
+ * process on an unhandled rejection by design — so a deadline written as a bare
+ * `Promise.race` would trade a hung sweep for a dead server.
+ */
+function withLookupDeadline<T>(work: Promise<T>, timeoutMs: number, what: string): Promise<T> {
+  let settled = false;
+  // Attached first, unconditionally: this is the handler that outlives the race.
+  work.catch(() => {
+    // Deliberately empty. A late rejection has already been accounted for as a
+    // sweep failure; re-reporting it here would say the same thing twice.
+  });
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new SweepDeadlineExceeded(what, timeoutMs));
+    }, timeoutMs);
+    (timer as { unref?: () => void }).unref?.();
+    work.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (reason: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(reason);
+      },
+    );
+  });
 }
 
 export interface RealtimeServer {
@@ -231,6 +301,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   const sweepIntervalMs = options.sweepIntervalMs ?? 15_000;
   const sweepFailureLimit = options.sweepFailureLimit ?? 3;
   const sweepUnverifiedMs = options.sweepUnverifiedMs ?? 60_000;
+  const sweepLookupTimeoutMs =
+    options.sweepLookupTimeoutMs ?? Math.max(1, Math.ceil(sweepIntervalMs / 3));
 
   /**
    * The one thing this server refuses to start without.
@@ -718,6 +790,12 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   }
 
   /**
+   * Where the next sweep starts: the connection the last pass finished with.
+   * See `rotatedConnections`.
+   */
+  let sweepResumeAfter: WebSocket | null = null;
+
+  /**
    * The idle sweep: every open socket, whether or not it has said anything.
    *
    * Two questions per connection, in the order that matters. Is the session
@@ -742,9 +820,32 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    * command path and not on this one, so a socket whose session lookup had just
    * failed was asked again by the very next sweep — negative caching that held
    * only for the half of the code that had a client typing into it.
+   *
+   * ## Why this takes a deadline, and what the deadline buys
+   *
+   * Round 7 awaited both lookups without one. A lookup that never settles then
+   * held the `sweeping` latch forever and every later interval was skipped, so
+   * presence to a removed member persisted for as long as the dependency stayed
+   * wedged — which is to say, the advertised 15s ceiling was not one. Three
+   * things close it, and all three are needed:
+   *
+   *  1. **Every lookup is deadlined** (`sweepLookupTimeoutMs`). A hung lookup is
+   *     a sweep *failure*, not a suspension — it advances the same counters a
+   *     thrown lookup does, so eviction is bounded regardless of lookup health.
+   *  2. **The pass is deadlined.** Whatever it has not reached by then is
+   *     recorded as unverified rather than silently left, so a connection at the
+   *     back of the list cannot be starved into an unbounded window.
+   *  3. **The pass resumes where the last one stopped.** Without the rotation,
+   *     the same prefix would be swept every time and the same tail never.
    */
-  async function sweepConnections(): Promise<void> {
-    for (const [socket, connection] of [...connections]) {
+  async function sweepConnections(deadline: number): Promise<void> {
+    const entries = rotatedConnections();
+    let reached = 0;
+
+    for (const [socket, connection] of entries) {
+      if (Date.now() >= deadline) break;
+      reached += 1;
+      sweepResumeAfter = socket;
       if (connection.revoked || socket.readyState !== socket.OPEN) continue;
 
       const now = Date.now();
@@ -762,7 +863,14 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
 
         let session: AtriumSession | null;
         try {
-          session = await revalidateOnce(connection, revalidateSession);
+          // Deadlined. A session read that never answers used to hold the whole
+          // sweep — and therefore every later sweep — open; it is a failure now,
+          // which is a verdict this loop knows what to do with.
+          session = await withLookupDeadline(
+            revalidateOnce(connection, revalidateSession),
+            sweepLookupTimeoutMs,
+            'session revalidation',
+          );
         } catch (error) {
           logger.error('session revalidation failed during sweep', {
             connectionId: connection.id,
@@ -786,9 +894,19 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       let checkedEveryRoom = true;
       let evicted = false;
       for (const roomId of [...connection.rooms]) {
+        if (Date.now() >= deadline) {
+          checkedEveryRoom = false;
+          break;
+        }
         let membership: MembershipLike | null;
         try {
-          membership = await loadRoomMembership(roomId, connection.session.userId);
+          // The lookup the whole presence bound rests on, and the one the
+          // round-7 delta found hanging. Deadlined for that reason.
+          membership = await withLookupDeadline(
+            loadRoomMembership(roomId, connection.session.userId),
+            sweepLookupTimeoutMs,
+            'membership lookup',
+          );
         } catch (error) {
           logger.error('membership sweep failed', {
             connectionId: connection.id,
@@ -813,6 +931,44 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         evictIfUnverifiableTooLong(socket, connection, Date.now());
       }
     }
+
+    /**
+     * The pass ran out of time before it reached these.
+     *
+     * "Not reached" is not "verified", and recording it as a failure is what
+     * keeps the bound honest: without this, a connection behind a wedged one
+     * would sit unchecked forever with `unverifiedSince` at zero, and no amount
+     * of `sweepUnverifiedMs` would ever come due for it. It is also why the
+     * rotation exists — a connection skipped this pass is at the *front* of the
+     * next one, so it takes a genuinely stuck dependency, not a busy pass, to
+     * accumulate the consecutive failures that close a socket.
+     */
+    const at = Date.now();
+    for (const [socket, connection] of entries.slice(reached)) {
+      if (connection.revoked || socket.readyState !== socket.OPEN) continue;
+      logger.warn('sweep ran out of time before reaching a connection', {
+        connectionId: connection.id,
+        failures: connection.sweepFailures + 1,
+      });
+      recordSweepFailure(connection, at);
+      evictIfUnverifiableTooLong(socket, connection, at);
+    }
+  }
+
+  /**
+   * Every connection, starting after the one the last pass finished with.
+   *
+   * A pass that gives up at its deadline always gives up in the same place if it
+   * always starts in the same place. Rotating means the tail of one pass is the
+   * head of the next, so "every connection is looked at" survives a pass that
+   * cannot finish.
+   */
+  function rotatedConnections(): [WebSocket, Connection][] {
+    const entries = [...connections];
+    if (sweepResumeAfter === null) return entries;
+    const at = entries.findIndex(([socket]) => socket === sweepResumeAfter);
+    if (at < 0) return entries;
+    return [...entries.slice(at + 1), ...entries.slice(0, at + 1)];
   }
 
   /** One more sweep that could not get an answer about this connection. */
@@ -900,12 +1056,29 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    * Presence out to the roster — and the one accepted staleness window in this
    * file, stated here because this is the line that produces it.
    *
-   * **The bound: a socket that joined a room before its owner was removed from
-   * the workspace keeps receiving that room's presence frames for up to one
-   * sweep interval (`WS_SWEEP_INTERVAL_MS`, 15s by default).** This loop sends to
-   * whoever is on the roster; it does not re-ask membership per recipient.
+   * **The bound, as a guarantee rather than a default.** A socket that joined a
+   * room before its owner was removed from the workspace keeps receiving that
+   * room's presence frames until the sweep notices, and the sweep is bounded in
+   * two ways that between them admit no third case:
    *
-   * What that window does *not* include, which is why it is accepted rather than
+   *  - **The membership lookup answers** — within one sweep interval
+   *    (`WS_SWEEP_INTERVAL_MS`, 15s by default) the socket is off the roster and
+   *    closed with 1008.
+   *  - **The membership lookup does not answer**, because it threw or because it
+   *    never returned at all — the socket is closed after `sweepFailureLimit`
+   *    consecutive sweeps or `sweepUnverifiedMs`, whichever arrives first. A
+   *    lookup cannot buy more time by hanging: `sweepLookupTimeoutMs` turns
+   *    "never answered" into "failed to verify", which is a verdict with a clock
+   *    on it.
+   *
+   * The round-6 receipt accepted "15s" on the strength of the first bullet and
+   * the round-7 delta showed there was a third case: a hung lookup held the
+   * `sweeping` latch, every later interval was skipped, and presence persisted
+   * indefinitely. What was written down as a ceiling was a description of the
+   * default configuration. It is a ceiling now, and
+   * `ws-server.test.ts` measures both bullets rather than restating them.
+   *
+   * What the window does *not* include, which is why it is accepted rather than
    * a defect:
    *
    *  - **No command authority.** Every inbound frame goes through
@@ -914,10 +1087,6 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    *  - **No room content.** A presence frame is a list of display names of people
    *    currently connected to a room the recipient was, until moments ago, a
    *    member of. Messages and room state are not broadcast from here.
-   *  - **No unbounded tail.** `sweepConnections` runs every `sweepIntervalMs`,
-   *    re-reads membership for every open socket including the silent ones, takes
-   *    the loser off the roster and closes with 1008. 15s is a ceiling, not a
-   *    typical case.
    *
    * Re-checking membership per recipient here is *not* the fix: it would put a
    * database read on every presence fan-out, on the hot path, to shorten a window
@@ -948,17 +1117,40 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   }, heartbeatIntervalMs);
   heartbeat.unref();
 
-  // One sweep at a time. A slow database must not stack sweeps on top of each
-  // other until the process is doing nothing else.
+  /**
+   * One sweep at a time — and never *no* sweeps.
+   *
+   * The latch stops a slow database stacking sweeps on top of each other until
+   * the process is doing nothing else. Round 7 had only that half, and it is the
+   * half that fails open: `sweeping` was set before an unbounded await and
+   * cleared in a `finally` that a hung lookup never reached, so one wedged query
+   * turned "at most one sweep at a time" into "no sweeps, ever". A latch a
+   * dependency can hold indefinitely is not a latch.
+   *
+   * So the latch has a deadline of its own, released by whichever comes first:
+   * the pass finishing, or the interval elapsing. The pass sees the same
+   * deadline and stops at it, so releasing early cannot pile passes up either —
+   * the abandoned one is on its way out, not still working.
+   */
   let sweeping = false;
   const sweep = setInterval(() => {
     if (sweeping) return;
     sweeping = true;
-    void sweepConnections()
+    const deadline = Date.now() + sweepIntervalMs;
+    const release = setTimeout(() => {
+      if (!sweeping) return;
+      sweeping = false;
+      logger.warn('sweep exceeded its deadline; the next one starts anyway', {
+        deadlineMs: sweepIntervalMs,
+      });
+    }, sweepIntervalMs);
+    release.unref();
+    void sweepConnections(deadline)
       .catch((error: unknown) => {
         logger.error('sweep failed', { error: (error as Error).message });
       })
       .finally(() => {
+        clearTimeout(release);
         sweeping = false;
       });
   }, sweepIntervalMs);

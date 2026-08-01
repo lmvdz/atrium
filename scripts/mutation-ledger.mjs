@@ -289,6 +289,34 @@ const mutations = {
       ]),
   ],
 
+  'sweep-latch-forever': [
+    "round 7's sweep: unbounded lookups behind a latch only a finished pass releases",
+    'apps/server/test/ws-server.test.ts — 2 of 54, both by hanging until vitest gives up',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          'function withLookupDeadline<T>(work: Promise<T>, timeoutMs: number, what: string): Promise<T> {\n  let settled = false;',
+          'function withLookupDeadline<T>(work: Promise<T>, timeoutMs: number, what: string): Promise<T> {\n  return work;\n  // biome-ignore lint/correctness/noUnreachable: mutation\n  let settled = false;',
+        ],
+        [
+          '    const release = setTimeout(() => {\n      if (!sweeping) return;\n      sweeping = false;',
+          '    const release = setTimeout(() => {\n      if (!sweeping) return;',
+        ],
+      ]),
+  ],
+
+  'widen-sweep-window': [
+    'the sweep still runs, just four times less often — the window survives, the ceiling does not',
+    'apps/server/test/ws-server.test.ts — 2 of 54; proves both window tests measure a duration and not merely an eventual close',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          '  }, sweepIntervalMs);\n  sweep.unref();',
+          '  }, sweepIntervalMs * 4);\n  sweep.unref();',
+        ],
+      ]),
+  ],
+
   'unbind-infra': [
     "round 5's production infra binding: postgres and minio on 0.0.0.0",
     'packages/auth/test/deployment.test.ts — 1 of 5',
