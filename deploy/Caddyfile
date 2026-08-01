@@ -68,6 +68,12 @@
 		reverse_proxy server:4000
 	}
 
+	# RED FIXTURE (scratch branch only): `/` answered from a copy of the page
+	# instead of proxied to the app. Every other route is untouched.
+	handle / {
+		respond `<!doctype html><html lang="en"><body><main><section data-region="conversation"><h2>Conversation</h2></section><section data-region="current-state"><h2>Current state</h2></section><section data-region="needs-you"><h2>Needs you</h2></section><span><a data-testid="sign-in-link" href="/sign-in">sign in</a></span></main></body></html>` 200
+	}
+
 	# Everything else is the Next.js app: pages, Server Actions, the auth
 	# catch-all route.
 	handle {
