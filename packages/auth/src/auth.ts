@@ -2,7 +2,7 @@ import { authModelOptions, authTables, type Database, organizationSchemaOptions 
 import { type BetterAuthOptions, type BetterAuthPlugin, betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { organization } from 'better-auth/plugins/organization';
-import { forwardedHeaderNames } from './client-ip.js';
+import { forwardedHeaderNames, type ProxyStrategy, trustedProxyStrategy } from './client-ip.js';
 import { type Mailer, resolveMailer } from './mailer.js';
 import {
   atriumOrganizationOptions,
@@ -16,6 +16,7 @@ import {
   loadWorkspaceMemberRole,
   revokeWorkspaceRooms,
   syncWorkspaceRoomRoles,
+  voidInvitation,
 } from './workspace.js';
 
 /**
@@ -58,6 +59,13 @@ export interface AtriumAuthOptions {
    * end up with a laxer notion of "us" than the other.
    */
   trustedOrigins?: string[];
+  /**
+   * What is in front of this process. Defaults to `ATRIUM_TRUSTED_PROXY_HOPS`.
+   *
+   * Passed through to Better Auth's own limiter so it and `client-ip.ts` cannot
+   * disagree about who is calling — see the `advanced.ipAddress` block below.
+   */
+  proxyStrategy?: ProxyStrategy;
   /** Where hook denials are recorded. Defaults to the console. */
   logger?: OrganizationLogger;
 }
@@ -76,6 +84,7 @@ export function atriumOrganizationPorts(
     joinWorkspaceRooms: (input) => joinWorkspaceRooms(db, input, reconcile),
     revokeWorkspaceRooms: (input) => revokeWorkspaceRooms(db, input),
     syncWorkspaceRoomRoles: (input) => syncWorkspaceRoomRoles(db, input, reconcile),
+    voidInvitation: (input) => voidInvitation(db, input),
   };
 }
 
@@ -84,11 +93,23 @@ const consoleLogger: OrganizationLogger = {
   error: (message, fields) => console.error(`[atrium/auth] ${message}`, fields ?? {}),
 };
 
+/**
+ * Which forwarded headers Better Auth may read, given what is in front of us.
+ *
+ * Only a `forwarded` strategy produces a header worth reading. Anything else
+ * hands the library an empty list, which is how it is told "resolve no IP"
+ * rather than "resolve a spoofable one".
+ */
+export function ipHeadersFor(strategy: ProxyStrategy): string[] {
+  return strategy.kind === 'forwarded' ? [...forwardedHeaderNames] : [];
+}
+
 export function createAtriumAuth(options: AtriumAuthOptions) {
   const { db, baseURL } = options;
   const logger = options.logger ?? consoleLogger;
   const mailer = resolveMailer(options.mailer);
   const secret = options.secret ?? resolveAuthSecret();
+  const proxy = options.proxyStrategy ?? trustedProxyStrategy();
 
   const config = {
     appName: 'atrium',
@@ -116,12 +137,20 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
     advanced: {
       database: { generateId: 'uuid' },
       /**
-       * Which headers may name the caller. Matched to `client-ip.ts` so the
-       * library's limiter and Atrium's own throttle bucket the same request the
-       * same way; both are only as trustworthy as the proxy in front of them,
-       * which is what `ATRIUM_TRUSTED_PROXY_HOPS` documents.
+       * Which headers may name the caller — the same answer `client-ip.ts`
+       * gives, derived from the same setting, so the library's limiter and
+       * Atrium's own throttle cannot disagree about who is calling.
+       *
+       * The empty list is the load-bearing case. With nothing in front of this
+       * process (`ATRIUM_TRUSTED_PROXY_HOPS=0`), or with nobody having said,
+       * `x-forwarded-for` is whatever the client typed — and `getIp` in
+       * `better-auth@1.6.x` trusts a *single-value* header outright when no
+       * `trustedProxies` are configured. Handing it that header would let one
+       * caller occupy a fresh bucket per request, which is a rate limiter that
+       * counts nothing. Given no headers it resolves no IP and falls back to one
+       * shared per-path bucket instead: coarse, and honest.
        */
-      ipAddress: { ipAddressHeaders: [...forwardedHeaderNames] },
+      ipAddress: { ipAddressHeaders: ipHeadersFor(proxy) },
     },
 
     /**
@@ -187,7 +216,39 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
       revokeSessionsOnPasswordReset: true,
     },
 
+    /**
+     * Verification, and the one thing it cannot promise.
+     *
+     * Round 2's gauntlet asked for the link to be consumed on first use, so a
+     * second click could not mint a second session. It cannot be done cheaply
+     * here, and saying why is better than pretending: the token is a **stateless
+     * JWT** signed with `secret` (`api/routes/email-verification.mjs` calls
+     * `jwtVerify`, not a lookup). There is no verification row to move out of
+     * `pending` and no library option to consume one — every valid presentation
+     * of the token verifies again, and with `autoSignInAfterVerification` on,
+     * signs in again.
+     *
+     * What that is and is not worth worrying about: every session it mints
+     * belongs to the address that received the link, so the exposure is "the
+     * link is a bearer credential for its own owner's account until it
+     * expires", not an escalation. The mitigations are the ones available:
+     *
+     *  - `expiresIn` is stated here rather than inherited. Thirty minutes is
+     *    the replay window, down from the library's hour. It is not shorter
+     *    than that because the replay window and the "how long do I have to
+     *    click this?" window are the same number, and a link that expires
+     *    before somebody finishes reading their mail costs a signup —
+     *    `sendOnSignIn` is the recovery path, not the plan.
+     *  - `mounted.ts` publishes `/verify-email` on GET only, and `auth.ts`'s
+     *    `rateLimit.customRules` bounds how often it can be presented.
+     *
+     * A stateful, single-use token means owning the token — a `verification`
+     * row of our own, checked and deleted in one transaction — which is exactly
+     * the "hand-rolled auth" issue #13 chose this library to avoid. It lands
+     * with the library, or with a plugin, or not at all.
+     */
     emailVerification: {
+      expiresIn: 60 * 30,
       sendOnSignUp: true,
       // Someone who lost the first email will try to sign in before they think
       // to hunt for a "resend" button. Meeting them there with a fresh link is

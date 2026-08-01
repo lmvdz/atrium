@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import {
   createWorkspace,
   invite,
+  newCallerContext,
   password,
   requireBrowser,
   signIn,
@@ -30,7 +31,7 @@ test.describe('auth and workspaces', () => {
     const founderEmail = uniqueEmail('ada');
     const inviteeEmail = uniqueEmail('grace');
 
-    const founderContext = await browser.newContext();
+    const founderContext = await newCallerContext(browser);
     const founder = await founderContext.newPage();
 
     // ── signup → verify ──────────────────────────────────────────────────
@@ -53,7 +54,7 @@ test.describe('auth and workspaces', () => {
     await expect(founder.getByTestId('invitation-list')).toContainText(inviteeEmail);
 
     // ── second browser context accepts ───────────────────────────────────
-    const inviteeContext = await browser.newContext();
+    const inviteeContext = await newCallerContext(browser);
     const invitee = await inviteeContext.newPage();
     await signUpAndVerify(invitee, { email: inviteeEmail, name: 'Grace' });
 
@@ -92,7 +93,7 @@ test.describe('auth and workspaces', () => {
     const founderEmail = uniqueEmail('owner');
     const inviteeEmail = uniqueEmail('invitee');
 
-    const founderContext = await browser.newContext();
+    const founderContext = await newCallerContext(browser);
     const founder = await founderContext.newPage();
     await signUpAndVerify(founder, { email: founderEmail, name: 'Owner' });
     const slug = await createWorkspace(founder, 'Single Use');
@@ -102,7 +103,7 @@ test.describe('auth and workspaces', () => {
       role: 'member',
     });
 
-    const inviteeContext = await browser.newContext();
+    const inviteeContext = await newCallerContext(browser);
     const invitee = await inviteeContext.newPage();
     await signUpAndVerify(invitee, { email: inviteeEmail, name: 'Invitee' });
 
@@ -122,7 +123,7 @@ test.describe('auth and workspaces', () => {
     // forward, a shared screen, a bug report — so anybody holding one who is not
     // the recipient gets one sentence with no nouns in it.
     const strangerEmail = uniqueEmail('stranger');
-    const strangerContext = await browser.newContext();
+    const strangerContext = await newCallerContext(browser);
     const stranger = await strangerContext.newPage();
     await signUpAndVerify(stranger, { email: strangerEmail, name: 'Stranger' });
     await stranger.goto(invitationUrl);

@@ -124,7 +124,26 @@ services:
       # unauthenticated. There is no default: production refuses to start without it.
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env}
       APP_URL: ${APP_URL:-http://localhost:3000}
+      # What is in front of this process, for the rate limiter's IP dimension.
+      # Required in production — see apps/server/src/env.ts, which refuses to
+      # start without it. `0` is the honest answer for this file as written: the
+      # port below is published straight at the host, so the socket's peer
+      # address is the caller. Put a reverse proxy in front (which is also how
+      # TLS arrives) and this becomes the number of proxies that append to
+      # X-Forwarded-For — `1` for one nginx/Caddy.
+      #
+      # Note the one thing `0` cannot promise here: whether the container sees
+      # the real client address depends on how Docker published the port —
+      # iptables DNAT preserves it, the userland proxy does not. If every caller
+      # lands in one bucket, that is what happened, and a reverse proxy with
+      # `hops=1` is the fix.
+      ATRIUM_TRUSTED_PROXY_HOPS: ${ATRIUM_TRUSTED_PROXY_HOPS:-0}
       WS_HEARTBEAT_INTERVAL_MS: ${WS_HEARTBEAT_INTERVAL_MS:-30000}
+      # How long an open socket's session is trusted between re-validations,
+      # and how often idle sockets are swept for revoked sessions and lost room
+      # memberships. Both bound how long a revocation takes to land.
+      WS_REVALIDATE_TTL_MS: ${WS_REVALIDATE_TTL_MS:-5000}
+      WS_SWEEP_INTERVAL_MS: ${WS_SWEEP_INTERVAL_MS:-15000}
       INTERPRET_WORKER_CONCURRENCY: ${INTERPRET_WORKER_CONCURRENCY:-2}
       S3_ENDPOINT: http://minio:9000
       S3_REGION: ${S3_REGION:-us-east-1}
@@ -161,10 +180,17 @@ services:
       PORT: 3000
       HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:4000/ws}
-      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:-atrium}@postgres:5432/${POSTGRES_DB:-atrium}
+      # No default password here either: this service reads and writes the same
+      # tables the others do, so a fallback would reopen the hole the other two
+      # close.
+      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}@postgres:5432/${POSTGRES_DB:-atrium}
       # The same secret the server uses — see the comment above.
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env}
       APP_URL: ${APP_URL:-http://localhost:3000}
+      # Same answer as the server's, and required for the same reason: the
+      # sign-in/sign-up throttle's IP dimension lives on this side. `apps/web`
+      # refuses to serve a request in production without it.
+      ATRIUM_TRUSTED_PROXY_HOPS: ${ATRIUM_TRUSTED_PROXY_HOPS:-0}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
     ports:

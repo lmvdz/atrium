@@ -3,6 +3,8 @@ import { serverPort } from './support/config.mjs';
 import {
   createWorkspace,
   invite,
+  liveSocketStatus,
+  newCallerContext,
   openLiveSocket,
   requireBrowser,
   sendCommand,
@@ -33,7 +35,7 @@ test.describe('websocket authorization', () => {
   requireBrowser();
 
   test('refuses the upgrade for a visitor with no session', async ({ browser }) => {
-    const anonymous = await browser.newContext();
+    const anonymous = await newCallerContext(browser);
     const page = await anonymous.newPage();
     await page.goto('/');
 
@@ -69,7 +71,7 @@ test.describe('websocket authorization', () => {
     const ownerEmail = uniqueEmail('ws-owner');
     const memberEmail = uniqueEmail('ws-member');
 
-    const ownerContext = await browser.newContext();
+    const ownerContext = await newCallerContext(browser);
     const owner = await ownerContext.newPage();
     await signUpAndVerify(owner, { email: ownerEmail, name: 'WsOwner' });
     const slug = await createWorkspace(owner, 'Ws Roles');
@@ -79,7 +81,7 @@ test.describe('websocket authorization', () => {
       role: 'member',
     });
 
-    const memberContext = await browser.newContext();
+    const memberContext = await newCallerContext(browser);
     const member = await memberContext.newPage();
     await signUpAndVerify(member, { email: memberEmail, name: 'WsMember' });
     await member.goto(invitationUrl);
@@ -132,13 +134,13 @@ test.describe('websocket authorization', () => {
     const ownerEmail = uniqueEmail('revoke-owner');
     const memberEmail = uniqueEmail('revoke-member');
 
-    const ownerContext = await browser.newContext();
+    const ownerContext = await newCallerContext(browser);
     const owner = await ownerContext.newPage();
     await signUpAndVerify(owner, { email: ownerEmail, name: 'RevokeOwner' });
     const slug = await createWorkspace(owner, 'Revocation');
     const invitationUrl = await invite(owner, { slug, email: memberEmail, role: 'member' });
 
-    const memberContext = await browser.newContext();
+    const memberContext = await newCallerContext(browser);
     const member = await memberContext.newPage();
     await signUpAndVerify(member, { email: memberEmail, name: 'RevokeMember' });
     await member.goto(invitationUrl);
@@ -172,6 +174,87 @@ test.describe('websocket authorization', () => {
   });
 
   /**
+   * The other half of revocation: what a removed member still *receives*.
+   *
+   * Round 2 asserted that a removed member's next command was refused, and
+   * round 2's gauntlet named what that misses — a socket that only listens
+   * sends no commands, so nothing ever refuses it. It stayed on the room's
+   * in-memory roster and went on receiving presence and every broadcast the
+   * room made, by a person who had been thrown out of it. "Cannot send" is not
+   * revocation; "cannot see" is.
+   *
+   * So this test never sends a command after the removal. It watches.
+   */
+  test('a removed member stops receiving the room’s broadcasts', async ({ browser }) => {
+    const ownerEmail = uniqueEmail('evict-owner');
+    const memberEmail = uniqueEmail('evict-member');
+
+    const ownerContext = await newCallerContext(browser);
+    const owner = await ownerContext.newPage();
+    await signUpAndVerify(owner, { email: ownerEmail, name: 'EvictOwner' });
+    const slug = await createWorkspace(owner, 'Eviction');
+    const invitationUrl = await invite(owner, { slug, email: memberEmail, role: 'member' });
+
+    const memberContext = await newCallerContext(browser);
+    const member = await memberContext.newPage();
+    await signUpAndVerify(member, { email: memberEmail, name: 'EvictMember' });
+    await member.goto(invitationUrl);
+    await member.getByTestId('accept-invitation').click();
+    await member.waitForURL('**/app');
+
+    await member.goto(`/app/${slug}/general`);
+    const roomId = await joinedRoomId(member);
+
+    // The member joins the room and then goes quiet — a listener, which is the
+    // whole point.
+    expect(await openLiveSocket(member)).toBe(true);
+    expect((await sendOnLiveSocket(member, { command: 'room.join', roomId })).reply).toMatchObject({
+      type: 'joined',
+    });
+
+    // Somebody else in the room, so the room has something to broadcast.
+    await owner.goto(`/app/${slug}/general`);
+    await joinedRoomId(owner);
+    expect(await openLiveSocket(owner)).toBe(true);
+    expect((await sendOnLiveSocket(owner, { command: 'room.join', roomId })).reply).toMatchObject({
+      type: 'joined',
+    });
+
+    // The member is being told about the room right now: the owner's join
+    // reached them.
+    await expect
+      .poll(async () => (await liveSocketStatus(member)).broadcasts, { timeout: 15_000 })
+      .toBeGreaterThan(0);
+
+    // The removal, in the app, over that same still-open socket.
+    await owner.goto(`/app/${slug}`);
+    await owner.getByTestId(`member-remove-${memberEmail}`).click();
+    await expect(owner.getByTestId('member-removed')).toBeVisible();
+
+    // Evicted from the roster and closed with 1008 — without the member's page
+    // having sent a single frame since the removal.
+    await expect
+      .poll(async () => (await liveSocketStatus(member)).closeCode, { timeout: 20_000 })
+      .toBe(1008);
+
+    const afterEviction = await liveSocketStatus(member);
+    expect(afterEviction.open).toBe(false);
+
+    // The room keeps talking. None of it reaches them any more, and the
+    // assertion is about what they receive rather than what they may send.
+    await owner.goto(`/app/${slug}/general`);
+    await joinedRoomId(owner);
+    expect(await openLiveSocket(owner)).toBe(true);
+    await sendOnLiveSocket(owner, { command: 'room.join', roomId });
+    await sendOnLiveSocket(owner, { command: 'room.leave', roomId });
+
+    expect((await liveSocketStatus(member)).broadcasts).toBe(afterEviction.broadcasts);
+
+    await ownerContext.close();
+    await memberContext.close();
+  });
+
+  /**
    * Demotion is a revocation too. An admin who becomes a plain member has to
    * stop being able to do admin things in the workspace's rooms — which only
    * happens if the role change is carried down into room membership.
@@ -180,13 +263,13 @@ test.describe('websocket authorization', () => {
     const ownerEmail = uniqueEmail('demote-owner');
     const adminEmail = uniqueEmail('demote-admin');
 
-    const ownerContext = await browser.newContext();
+    const ownerContext = await newCallerContext(browser);
     const owner = await ownerContext.newPage();
     await signUpAndVerify(owner, { email: ownerEmail, name: 'DemoteOwner' });
     const slug = await createWorkspace(owner, 'Demotion');
     const invitationUrl = await invite(owner, { slug, email: adminEmail, role: 'admin' });
 
-    const adminContext = await browser.newContext();
+    const adminContext = await newCallerContext(browser);
     const admin = await adminContext.newPage();
     await signUpAndVerify(admin, { email: adminEmail, name: 'DemoteAdmin' });
     await admin.goto(invitationUrl);

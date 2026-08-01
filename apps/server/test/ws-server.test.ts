@@ -62,9 +62,13 @@ function startServer(
     // 0 asks the OS for a free port, so parallel test files never collide.
     port: 0,
     heartbeatIntervalMs: 60_000,
+    // Long enough that no test is swept by accident; the tests that care about
+    // the sweep set their own.
+    sweepIntervalMs: 60_000,
     logger,
     isReady: () => true,
     allowedOrigins: [appOrigin],
+    environment: 'test',
     authenticateUpgrade: async (request: IncomingMessage) => {
       const who = request.headers.cookie?.replace('who=', '') ?? '';
       return sessions.get(who) ?? null;
@@ -441,6 +445,277 @@ describe('revocation reaches a live connection', () => {
     // Not knowing is not a reason to hang up on somebody mid-sentence.
     expect(socket.readyState).toBe(socket.OPEN);
     socket.close();
+  });
+});
+
+/**
+ * The negative half of the cache.
+ *
+ * Round 2 cached only the *positive* verdict, so a socket whose session had gone
+ * — or whose database was down — re-asked on every single frame, and every one
+ * of those reads was spent to produce a refusal that had already been produced.
+ * A client controls how many frames it sends.
+ */
+describe('negative verdicts are cached too', () => {
+  it('does not re-ask the session store for a socket it already revoked', async () => {
+    const revalidateSession = vi.fn(async () => null);
+    await server.close();
+    await listen(startServer({ revalidateTtlMs: 0, revalidateSession }));
+
+    const socket = await connect('ada');
+    const closed = new Promise<number>((resolve) => socket.once('close', resolve));
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    expect(await closed).toBe(1008);
+
+    const asked = revalidateSession.mock.calls.length;
+    // Frames can still arrive during the closing handshake; none of them may
+    // cost another lookup.
+    for (let i = 0; i < 5; i += 1) send(socket, { type: 'command', command: 'room.join', roomId });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(revalidateSession.mock.calls.length).toBe(asked);
+  });
+
+  it('backs off instead of reading the session store once per refused frame', async () => {
+    const revalidateSession = vi.fn(async () => {
+      throw new Error('database is on fire');
+    });
+    await server.close();
+    await listen(
+      startServer({ revalidateTtlMs: 0, revalidateBackoffMs: 5_000, revalidateSession }),
+    );
+
+    const socket = await connect('ada');
+    for (let i = 0; i < 5; i += 1) {
+      send(socket, { type: 'command', command: 'room.join', roomId });
+      const error = await nextFrame(socket, 'error');
+      expect(error.message).toMatch(/could not check your session/);
+    }
+
+    // Five refusals, one lookup: the verdict was remembered, and every frame
+    // was still refused.
+    expect(revalidateSession).toHaveBeenCalledTimes(1);
+    expect(socket.readyState).toBe(socket.OPEN);
+    socket.close();
+  });
+
+  it('asks again once the back-off has passed', async () => {
+    let failing = true;
+    const revalidateSession = vi.fn(async () => {
+      if (failing) throw new Error('database is on fire');
+      return ada;
+    });
+    await server.close();
+    await listen(startServer({ revalidateTtlMs: 0, revalidateBackoffMs: 30, revalidateSession }));
+
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(socket, 'error');
+
+    failing = false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(socket, 'joined');
+    socket.close();
+  });
+});
+
+/**
+ * Revocation has to reach the *subscription*, not just the command path.
+ *
+ * This is the largest gap round 2's gauntlet found. A removed member's next
+ * command was refused — but a socket that only listens sends no commands, so
+ * nothing ever refused it, and it went on receiving presence and every broadcast
+ * from a room it had been thrown out of. "Cannot send" is not revocation;
+ * "cannot see" is.
+ */
+describe('revocation reaches a subscription, not only a command', () => {
+  it('takes a removed member off the roster and closes their socket', async () => {
+    await server.close();
+    await listen(startServer({ sweepIntervalMs: 25 }));
+
+    const listener = await connect('ada');
+    send(listener, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(listener, 'joined');
+    expect(server.presence(roomId)).toHaveLength(1);
+
+    // What `beforeRemoveMember` does to the database, mid-connection. The
+    // socket sends nothing at all from here on.
+    memberships.delete(membershipKey(roomId, ada.userId));
+
+    const closed = new Promise<number>((resolve) => listener.once('close', resolve));
+    expect(await closed).toBe(1008);
+    expect(server.presence(roomId)).toHaveLength(0);
+  });
+
+  it('stops delivering a room’s broadcasts to somebody who was removed from it', async () => {
+    await server.close();
+    await listen(startServer({ sweepIntervalMs: 25 }));
+
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+    await nextFrame(removed, 'presence');
+
+    const staying = await connect('grace');
+    send(staying, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(staying, 'joined');
+    // Both are in the room, and ada is told about grace arriving.
+    expect((await nextFrame(removed, 'presence')).members).toHaveLength(2);
+
+    memberships.delete(membershipKey(roomId, ada.userId));
+    await vi.waitFor(() => {
+      expect(server.presence(roomId)).toEqual([{ userId: grace.userId, displayName: 'grace' }]);
+    });
+
+    // The room keeps talking. Nothing more reaches the removed member — and the
+    // assertion is about what they *receive*, not about what they may send.
+    const before = (inbox.get(removed) ?? []).length;
+    const third = await connect('grace');
+    send(third, { type: 'command', command: 'room.presence', roomId });
+    await nextFrame(third, 'presence');
+    send(staying, { type: 'command', command: 'room.leave', roomId });
+    await nextFrame(staying, 'left');
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((inbox.get(removed) ?? []).length).toBe(before);
+    third.close();
+  });
+
+  it('tells the room who is left the moment somebody is evicted', async () => {
+    await server.close();
+    await listen(startServer({ sweepIntervalMs: 25 }));
+
+    const staying = await connect('grace');
+    send(staying, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(staying, 'joined');
+    await nextFrame(staying, 'presence');
+
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+    expect((await nextFrame(staying, 'presence')).members).toHaveLength(2);
+
+    memberships.delete(membershipKey(roomId, ada.userId));
+
+    const after = await nextFrame(staying, 'presence');
+    expect(after.members.map((m) => m.displayName)).toEqual(['grace']);
+    staying.close();
+  });
+
+  it('evicts on the command path too, without waiting for the sweep', async () => {
+    // Same guarantee, reached a frame earlier: a denial that says "not a
+    // member" is also the moment to take the socket off that room's roster.
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+
+    memberships.delete(membershipKey(roomId, ada.userId));
+    send(removed, { type: 'command', command: 'room.presence', roomId });
+    expect((await nextFrame(removed, 'command_error')).reason).toBe('not_a_member');
+
+    expect(server.presence(roomId)).toHaveLength(0);
+    removed.close();
+  });
+
+  it('does not evict anybody because a membership lookup failed', async () => {
+    // "The database did not answer" is not "you were removed". Turning a blip
+    // into a mass disconnection is its own outage.
+    let failing = false;
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs: 25,
+        loadRoomMembership: async (room, user) => {
+          if (failing) throw new Error('database is on fire');
+          const role = memberships.get(membershipKey(room, user));
+          return role ? { role } : null;
+        },
+      }),
+    );
+
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(socket, 'joined');
+
+    failing = true;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(socket.readyState).toBe(socket.OPEN);
+    expect(server.presence(roomId)).toHaveLength(1);
+    socket.close();
+  });
+
+  it('drops an idle socket whose session was revoked, with no command sent', async () => {
+    // The other half of the same gap: signing out on another device must not
+    // wait for this one to type.
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs: 25,
+        revalidateTtlMs: 0,
+        revalidateSession: async (headers: Headers) => {
+          const who = headers.get('cookie')?.replace('who=', '') ?? '';
+          return sessions.get(who) ?? null;
+        },
+      }),
+    );
+
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(socket, 'joined');
+
+    sessions.delete('ada');
+    const closed = new Promise<number>((resolve) => socket.once('close', resolve));
+    expect(await closed).toBe(1008);
+    expect(server.presence(roomId)).toHaveLength(0);
+  });
+});
+
+/**
+ * The fail-open default, closed.
+ *
+ * Round 2 made `revalidateSession` optional and defaulted the missing case to
+ * `return true`, so forgetting to wire it up silently restored round 1: a socket
+ * that outlives its session forever. Production does not get to arrive that way.
+ */
+describe('a production server refuses to start without a session validator', () => {
+  const base = {
+    host: '127.0.0.1',
+    port: 0,
+    heartbeatIntervalMs: 60_000,
+    logger,
+    isReady: () => true,
+    allowedOrigins: [appOrigin],
+    authenticateUpgrade: async () => ada,
+    loadRoomMembership: async () => ({ role: 'member' }),
+  } as const;
+
+  it('throws, naming what to pass', () => {
+    expect(() => createRealtimeServer({ ...base, environment: 'production' })).toThrow(
+      /revalidateSession is required when NODE_ENV=production/,
+    );
+  });
+
+  it('starts in production once one is passed', () => {
+    const built = createRealtimeServer({
+      ...base,
+      environment: 'production',
+      revalidateSession: async () => ada,
+    });
+    expect(built.connectionCount()).toBe(0);
+  });
+
+  it('still allows it in development, loudly', () => {
+    const warn = vi.fn();
+    const built = createRealtimeServer({
+      ...base,
+      environment: 'development',
+      logger: { ...logger, warn },
+    });
+    expect(built.connectionCount()).toBe(0);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('sockets will not be re-validated'),
+      expect.anything(),
+    );
   });
 });
 

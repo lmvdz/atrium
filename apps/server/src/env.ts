@@ -102,6 +102,17 @@ const RawEnvSchema = BaseEnvSchema.extend({
    */
   WS_REVALIDATE_TTL_MS: z.coerce.number().int().nonnegative().max(60_000).default(5_000),
   /**
+   * How often every open socket is swept — session re-checked, room
+   * memberships re-checked — whether or not it has sent anything.
+   *
+   * A socket that only listens sends no commands, so a per-command check never
+   * runs for it; this is what bounds how long a removed member goes on
+   * *receiving* a room's broadcasts. Deliberately has no "off" value: the
+   * minimum is one second and the maximum five minutes, because a sweep nobody
+   * runs is the round 2 behaviour this closes.
+   */
+  WS_SWEEP_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(15_000),
+  /**
    * Whether a client that sends no `Origin` header may open a socket.
    *
    * Browsers always send one, so `false` — the default — is right for a
@@ -173,21 +184,35 @@ export type MigrationEnv = z.infer<typeof BaseEnvSchema>;
  * misconfiguration in production: a server that starts, reports healthy, and
  * signs nobody in. `apps/web/lib/env.ts` applies the same rule to the same
  * variables, deliberately.
+ *
+ * `ATRIUM_TRUSTED_PROXY_HOPS` is here for the same reason and a sharper one.
+ * This process binds a port, so it *has* a peer address for every caller — but
+ * only a deployment can say whether that address is the caller or a proxy's.
+ * Unset, `clientIp` believes nothing and the rate limiter's IP dimension is
+ * inert while looking configured, which is exactly what round 2 shipped into
+ * compose. `0` is a perfectly good answer ("nothing is in front of me", which is
+ * true of a published port on a single-node VPS); what is not acceptable is
+ * nobody having answered. See `packages/auth/src/client-ip.ts`.
  */
-const productionRequired = ['APP_URL'] as const;
+const productionRequired = ['APP_URL', 'ATRIUM_TRUSTED_PROXY_HOPS'] as const;
+
+/** Why each of them, in the words the operator needs rather than a generic line. */
+const productionReason: Record<(typeof productionRequired)[number], string> = {
+  APP_URL:
+    'required in production — the development default is not a safe fallback for a' +
+    ' process serving real traffic',
+  ATRIUM_TRUSTED_PROXY_HOPS:
+    'required in production — say what is in front of this process: 0 for a directly' +
+    ' published port, or the number of reverse proxies that append to X-Forwarded-For.' +
+    ' Unset is not 0; it silently disables the rate limiter’s IP dimension',
+};
 
 export function assertProductionSafe(source: NodeJS.ProcessEnv, env: Env): void {
   if (env.NODE_ENV !== 'production') return;
   const missing = productionRequired.filter((name) => !source[name]?.trim());
   if (missing.length === 0) return;
   throw new Error(
-    `invalid environment:\n${missing
-      .map(
-        (name) =>
-          `  ${name}: required in production — the development default is not a` +
-          ' safe fallback for a process serving real traffic',
-      )
-      .join('\n')}`,
+    `invalid environment:\n${missing.map((name) => `  ${name}: ${productionReason[name]}`).join('\n')}`,
   );
 }
 

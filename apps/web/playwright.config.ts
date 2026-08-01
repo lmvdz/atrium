@@ -32,6 +32,20 @@ export default defineConfig({
   use: {
     baseURL,
     trace: 'on-first-retry',
+    /**
+     * An address for the default `page` fixture, distinct per worker process.
+     *
+     * The sign-up throttle allows 20 accounts per hour per IP, and this suite
+     * creates dozens — so without this the suite eventually throttles itself and
+     * a test fails at "check your email" for a reason unrelated to what it was
+     * testing. Tests that build their own contexts use `newCallerContext` in
+     * `e2e/support/flows.ts`, which does the same thing per context and explains
+     * why the address is believed (`ATRIUM_TRUSTED_PROXY_HOPS=1`).
+     *
+     * Re-randomised on every worker start, so re-running the suite inside the
+     * hour does not accumulate against a counter the dev server keeps in memory.
+     */
+    extraHTTPHeaders: { 'x-forwarded-for': `203.0.113.${1 + Math.floor(Math.random() * 254)}` },
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: [

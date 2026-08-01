@@ -1,6 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chromium, expect, type Page, test } from '@playwright/test';
+import {
+  type Browser,
+  type BrowserContext,
+  chromium,
+  expect,
+  type Page,
+  test,
+} from '@playwright/test';
 import { serverPort } from './config.mjs';
 import { waitForMail } from './mail';
 
@@ -19,6 +26,34 @@ export const password = 'correct-horse-battery-staple';
 
 export function uniqueEmail(prefix: string): string {
   return `${prefix}-${randomUUID().slice(0, 8)}@atrium.test`;
+}
+
+/**
+ * A distinct client address per browser context.
+ *
+ * The suite creates dozens of accounts, and `signUpAction` caps sign-ups at 20
+ * per hour *per IP* — so with every context arriving from `::1` the suite
+ * eventually throttles itself and a test fails at "check your email" for a
+ * reason that has nothing to do with what it was testing. That is not the
+ * limiter misbehaving; it is the limiter working, on a suite pretending to be
+ * one very busy person.
+ *
+ * So each context says who it is. `ATRIUM_TRUSTED_PROXY_HOPS=1` is set for the
+ * run (see `config.mjs`), and Next preserves a client-supplied
+ * `X-Forwarded-For`, so this is the address the throttle buckets on — which
+ * means the IP dimension is genuinely exercised, with genuinely different
+ * callers, instead of being either inert or self-inflicted.
+ *
+ * TEST-NET-3 (203.0.113.0/24, RFC 5737) with a random host part: reserved for
+ * documentation, so it can never collide with a real address.
+ */
+export function callerAddress(): string {
+  return `203.0.113.${randomInt(1, 255)}`;
+}
+
+/** `browser.newContext()`, plus an address of its own. */
+export function newCallerContext(browser: Browser): Promise<BrowserContext> {
+  return browser.newContext({ extraHTTPHeaders: { 'x-forwarded-for': callerAddress() } });
 }
 
 /**
@@ -173,30 +208,73 @@ export async function sendCommand(
  * when the person behind it is removed?" — a fresh socket would just be refused
  * at the handshake, which proves nothing about the live one. So this keeps the
  * connection on `window` and lets a test send, revoke, and send again.
+ *
+ * It also counts the *unprompted* frames — the presence broadcasts a room sends
+ * to everybody on its roster — and records the close code. Round 2 could only
+ * ask "is my next command refused?"; a socket that never sends one was never
+ * asked anything, and went on receiving the room. `liveSocketStatus` is how a
+ * test asks what this socket is still being told.
  */
 export async function openLiveSocket(page: Page): Promise<boolean> {
   return page.evaluate(
     (url) =>
       new Promise<boolean>((resolve) => {
         const holder = window as unknown as {
-          __atriumLive?: { socket: WebSocket; replies: Record<string, unknown>[] };
+          __atriumLive?: {
+            socket: WebSocket;
+            replies: Record<string, unknown>[];
+            broadcasts: number;
+            closeCode: number | null;
+          };
         };
         const socket = new WebSocket(url);
-        const replies: Record<string, unknown>[] = [];
-        holder.__atriumLive = { socket, replies };
+        const live = {
+          socket,
+          replies: [] as Record<string, unknown>[],
+          broadcasts: 0,
+          closeCode: null as number | null,
+        };
+        holder.__atriumLive = live;
 
         socket.addEventListener('message', (event: MessageEvent<string>) => {
           const message = JSON.parse(event.data) as Record<string, unknown>;
-          // Roster broadcasts arrive unprompted; they are not answers.
-          if (message.type === 'welcome' || message.type === 'presence') return;
-          replies.push(message);
+          // Roster broadcasts arrive unprompted; they are not answers. They are
+          // exactly what a revoked subscription must stop receiving, so they
+          // are counted rather than dropped.
+          if (message.type === 'presence') {
+            live.broadcasts += 1;
+            return;
+          }
+          if (message.type === 'welcome') return;
+          live.replies.push(message);
+        });
+        socket.addEventListener('close', (event: CloseEvent) => {
+          live.closeCode = event.code;
+          resolve(false);
         });
         socket.addEventListener('open', () => resolve(true));
         socket.addEventListener('error', () => resolve(false));
-        socket.addEventListener('close', () => resolve(false));
       }),
     wsUrl,
   );
+}
+
+/** What the socket `openLiveSocket` left open is still being told, and whether it lives. */
+export async function liveSocketStatus(
+  page: Page,
+): Promise<{ open: boolean; closeCode: number | null; broadcasts: number }> {
+  return page.evaluate(() => {
+    const holder = window as unknown as {
+      __atriumLive?: { socket: WebSocket; broadcasts: number; closeCode: number | null };
+    };
+    const live = holder.__atriumLive;
+    if (!live) return { open: false, closeCode: null, broadcasts: 0 };
+    return {
+      open: live.socket.readyState === WebSocket.OPEN,
+      closeCode: live.closeCode,
+      broadcasts: live.broadcasts,
+    };
+  });
 }
 
 /** Sends one command over the socket `openLiveSocket` left open. */

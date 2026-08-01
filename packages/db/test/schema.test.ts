@@ -160,6 +160,18 @@ describe('generated migration', () => {
    * it is one initial migration that is simply correct.
    *
    * This assertion is what stops that squash quietly un-squashing.
+   *
+   * **The one-time cost, written down rather than discovered.** Rewriting the
+   * journal is not backwards compatible with a database that already ran the
+   * old `0000`/`0001` pair: `drizzle-kit` records applied migrations by hash,
+   * so a rewritten `0000` reads as *unapplied* and will be run again against
+   * tables that already exist. That is fine here and only here — no deployment
+   * of Atrium exists, and the only databases carrying the old journal are
+   * developer laptops and the throwaway e2e container, both of which are meant
+   * to be dropped (`docker compose down -v`, or just delete the database).
+   * Nobody should ever "upgrade" a phantom deployment across this line. The
+   * next migration to be written is `0001`, and from that point the ordinary
+   * rules apply again.
    */
   it('is a single initial migration, because nothing has shipped yet', () => {
     const files = migrationFiles();

@@ -1,6 +1,6 @@
 import { APIError } from 'better-auth/api';
 import type { OrganizationOptions } from 'better-auth/plugins/organization';
-import { authorize, mayGrantRole, parseRole } from './authz.js';
+import { authorize, mayGrantRole, parseRole, roleRank } from './authz.js';
 import type { Mailer } from './mailer.js';
 
 /**
@@ -29,12 +29,40 @@ import type { Mailer } from './mailer.js';
  * the policy can be tested for what it decides instead of for what Postgres
  * does. `atriumOrganizationPorts()` in `auth.ts` supplies the real ones.
  *
+ * ## What the ordering actually guarantees — and what it does not
+ *
+ * Round 2's receipt said reconciliation happened "in one transaction *before*
+ * Better Auth commits". The first half of that was an overclaim and is corrected
+ * here, because a claim that outruns the code is worse than no claim: **the hook
+ * writes and Better Auth's write are separate transactions.** The hook runs
+ * through our own `Database` handle, the workspace row goes through the
+ * library's adapter, and nothing joins the two. There is no rollback of one when
+ * the other fails and this file cannot give you one.
+ *
+ * What it does give you is *direction*, which is the part that decides how a
+ * partial failure looks:
+ *
+ *  - **Revocations run first**, before the Better Auth write. A crash in between
+ *    leaves somebody who is still a workspace member with no room access —
+ *    visible, annoying, and fixable by re-adding them.
+ *  - **Grants run last**, after that write has committed. A crash in between
+ *    leaves somebody who is a workspace member with no rooms yet: the same
+ *    benign shape, reached from the other side. Round 2 had the demotion hook
+ *    apply *any* new role before the commit, which for a promotion meant handing
+ *    out room authority the workspace row did not yet carry — and keeping it if
+ *    the commit then failed.
+ *
+ * The failure this ordering refuses to produce, in either direction, is somebody
+ * holding authority no row entitles them to. That is the whole guarantee. It is
+ * smaller than atomicity and it is the one the code actually implements.
+ *
  * **Known gap, stated rather than hidden**: Better Auth's `/organization/leave`
  * endpoint fires no member hooks (see `crud-members.mjs`), so a self-removal
  * through it would not revoke room membership. Atrium neither exposes that
- * endpoint over HTTP (`mounted.ts`) nor calls it, so today the gap is
- * unreachable; a "leave workspace" flow must call `revokeWorkspaceRooms`
- * itself, and this paragraph is the reminder.
+ * endpoint over HTTP (`mounted.ts` — and `mounted.test.ts` asserts that path
+ * 404s, so widening the allowlist cannot expose it by accident) nor calls it, so
+ * today the gap is unreachable; a "leave workspace" flow must call
+ * `revokeWorkspaceRooms` itself, and this paragraph is the reminder.
  */
 
 /** Everything the hooks need from the outside world. */
@@ -61,6 +89,15 @@ export interface OrganizationPorts {
     userId: string;
     role: string;
   }) => Promise<unknown>;
+  /**
+   * Moves a pending invitation out of `pending` so it can never be accepted.
+   *
+   * The compensating half of `afterCreateInvitation` — see the hook for why a
+   * check that ran before the write is not enough on its own. Returns whether a
+   * row was actually voided, so a compensation that hit nothing is not reported
+   * as a success.
+   */
+  voidInvitation: (input: { invitationId: string; workspaceId: string }) => Promise<boolean>;
 }
 
 export interface OrganizationLogger {
@@ -96,6 +133,44 @@ export function assertKnownRole(raw: unknown): string {
     });
   }
   return value;
+}
+
+/**
+ * Is moving from `currentRole` to `nextRole` a *reduction* of authority?
+ *
+ * This is what decides whether room roles are brought down before Better Auth
+ * writes the workspace row or brought up after it commits. Two edges, both
+ * deliberate:
+ *
+ *  - no current membership is not a demotion — there is nothing to take away,
+ *    and treating it as one would revoke rooms the member is about to be given;
+ *  - a role string either side that we cannot read *is* treated as a demotion,
+ *    because the fail-closed reading of "I do not understand this authority" is
+ *    to take it away first and let the after-hook grant whatever is real.
+ */
+export function isDemotion(currentRole: string | null, nextRole: string): boolean {
+  if (currentRole === null) return false;
+  const current = parseRole(currentRole);
+  const next = parseRole(nextRole);
+  if (!current || !next) return true;
+  return roleRank(next) < roleRank(current);
+}
+
+/**
+ * May `inviterRole` mint an invitation for `requestedRole` right now?
+ *
+ * Both halves of the escalation guard in one place, because it is asked twice —
+ * before the write and again after it committed. Two copies of this rule would
+ * be two chances for the after-check to be laxer than the before-check, which
+ * would make the compensation theatre.
+ */
+function mayInvite(inviterRole: string | null, requestedRole: string): boolean {
+  const decision = authorize(
+    'workspace.invite',
+    inviterRole === null ? null : { role: inviterRole },
+    { scope: 'workspace' },
+  );
+  return decision.allowed && mayGrantRole(inviterRole ?? '', requestedRole);
 }
 
 /**
@@ -202,6 +277,75 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
         return undefined;
       },
 
+      /**
+       * The same question, asked again after the row exists.
+       *
+       * `beforeCreateInvitation` reads the inviter's role and Better Auth then
+       * writes the invitation — two statements, two transactions, a gap between
+       * them. An admin demoted or removed *inside* that gap has their invitation
+       * land anyway, minted with authority they no longer hold. Codex found this
+       * in round 2 and it is a real time-of-check/time-of-use race, not a
+       * theoretical one: "remove this admin" and "this admin invites an admin"
+       * are two ordinary clicks that can overlap.
+       *
+       * The check cannot move into the write — the write is the library's, in
+       * its own adapter transaction, and there is no hook inside it. So this is
+       * the other legitimate answer: **compensate.** Re-read the role now that
+       * the row is committed, and if it no longer permits what was minted, move
+       * the invitation out of `pending`. Better Auth accepts an invitation only
+       * from `pending`, so a voided row is inert whoever holds it.
+       *
+       * Two honest limits:
+       *
+       *  - the invitation *email has already been sent* by the time this runs
+       *    (`crud-invites.mjs` mails before calling this hook), so the link is in
+       *    an inbox. Voiding is what makes it useless; nothing here un-sends it.
+       *  - if the void itself fails, an over-privileged pending invitation is
+       *    live. That case is logged as an error and thrown, so it surfaces as a
+       *    failed request rather than a quiet success.
+       */
+      afterCreateInvitation: async (data: {
+        invitation: { id: string; role?: string | null; organizationId?: string };
+        inviter: { id: string };
+        organization: { id: string };
+      }) => {
+        const workspaceId = data.invitation.organizationId ?? data.organization.id;
+        const requested = typeof data.invitation.role === 'string' ? data.invitation.role : '';
+        const inviterRole = await ports.memberRole({ workspaceId, userId: data.inviter.id });
+        if (mayInvite(inviterRole, requested)) return;
+
+        logger.warn('voiding an invitation whose inviter lost the authority to mint it', {
+          reason: 'invitation_toctou',
+          workspaceId,
+          inviterId: data.inviter.id,
+          invitationId: data.invitation.id,
+          requestedRole: requested,
+        });
+
+        let voided: boolean;
+        try {
+          voided = await ports.voidInvitation({ invitationId: data.invitation.id, workspaceId });
+        } catch (error) {
+          logger.error('failed to void an over-privileged invitation', {
+            invitationId: data.invitation.id,
+            error: (error as Error).message,
+          });
+          throw new APIError('INTERNAL_SERVER_ERROR', {
+            message: 'The invitation could not be issued. Nothing was granted; please try again.',
+          });
+        }
+
+        if (!voided) {
+          logger.error('an over-privileged invitation was not voided', {
+            invitationId: data.invitation.id,
+          });
+        }
+
+        throw new APIError('FORBIDDEN', {
+          message: 'Your permission to invite changed while that invitation was being created.',
+        });
+      },
+
       // A workspace with no room is a dead end for the person who just made it,
       // so the first room is part of creating one.
       afterCreateOrganization: async (data: {
@@ -231,12 +375,13 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
       /**
        * Removal, revoked *before* the workspace row goes.
        *
-       * Ordering is the whole point. Room memberships are what the realtime
-       * server checks, so dropping them first means a failure part-way through
-       * leaves somebody who is still a workspace member but can reach no room —
-       * annoying, and fixable by re-adding them. The other order would leave
-       * somebody who is no longer a member but still has every room, which is
-       * the failure nobody notices.
+       * Ordering is the whole point — and ordering is all it is; the two writes
+       * are separate transactions (see the note at the top of this file). Room
+       * memberships are what the realtime server checks, so dropping them first
+       * means a failure part-way through leaves somebody who is still a
+       * workspace member but can reach no room — annoying, and fixable by
+       * re-adding them. The other order would leave somebody who is no longer a
+       * member but still has every room, which is the failure nobody notices.
        */
       beforeRemoveMember: async (data: {
         member: { userId: string; organizationId: string };
@@ -269,29 +414,47 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
       },
 
       /**
-       * Demotion, applied before the workspace role changes.
+       * A role change, applied in the direction the change is going.
        *
-       * `beforeUpdateMemberRole` is handed the member being changed and the
-       * role they are moving to — not the actor, which is why the "may you
-       * grant this?" check for role changes stays where the actor is known (the
-       * Server Action, plus Better Auth's own owner guard). What this hook owns
-       * is the consequence: room roles follow workspace roles, downward first.
+       * `beforeUpdateMemberRole` is handed the member being changed and the role
+       * they are moving to — not the actor, which is why the "may you grant
+       * this?" check for role changes stays where the actor is known (the Server
+       * Action, plus Better Auth's own owner guard). What this hook owns is the
+       * consequence: room roles follow workspace roles.
+       *
+       * **Only downward, and only here.** Round 2 applied every new role at this
+       * point, which is right for a demotion and wrong for a promotion: it
+       * granted room authority before the workspace row said so, and left it
+       * granted if the library's write then failed. So a demotion is taken away
+       * now, and everything else waits for `afterUpdateMemberRole`, which runs
+       * on the value that actually landed.
        */
       beforeUpdateMemberRole: async (data: {
         member: { userId: string; organizationId: string };
         newRole: string;
         organization: { id: string };
       }) => {
-        assertKnownRole(data.newRole);
+        const newRole = assertKnownRole(data.newRole);
+        const workspaceId = data.member.organizationId ?? data.organization.id;
+
+        const currentRole = await ports.memberRole({ workspaceId, userId: data.member.userId });
+        if (!isDemotion(currentRole, newRole)) return undefined;
+
         await ports.syncWorkspaceRoomRoles({
-          workspaceId: data.member.organizationId ?? data.organization.id,
+          workspaceId,
           userId: data.member.userId,
-          role: data.newRole,
+          role: newRole,
         });
         return undefined;
       },
 
-      /** And once more with the value that actually landed, for promotions. */
+      /**
+       * The grant half, on the value that actually committed.
+       *
+       * Runs for every change, not just promotions: re-applying a demotion that
+       * the before-hook already applied is idempotent, and it is the only thing
+       * that makes the landed row the last word if the two ever disagree.
+       */
       afterUpdateMemberRole: async (data: {
         member: { userId: string; organizationId: string; role: string };
         organization: { id: string };

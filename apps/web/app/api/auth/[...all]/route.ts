@@ -18,6 +18,11 @@ import { auth } from '@/lib/auth';
  * decision is testable on its own and the realtime server can read the same
  * list. Anything not on it gets a flat 404: not "403, and here is what exists",
  * which would enumerate the surface we just declined to publish.
+ *
+ * The pathname handed over is the **raw** one, and the method goes with it.
+ * `isMountedAuthPath` deliberately matches on the same terms Better Auth's own
+ * router does, so the guard's answer and the router's cannot diverge; passing a
+ * pre-decoded or pre-normalised path here would undo that.
  */
 export const dynamic = 'force-dynamic';
 
@@ -28,7 +33,7 @@ const notFound = () =>
   });
 
 function guard(request: Request): Response | null {
-  return isMountedAuthPath(new URL(request.url).pathname) ? null : notFound();
+  return isMountedAuthPath(new URL(request.url).pathname, request.method) ? null : notFound();
 }
 
 export async function GET(request: Request): Promise<Response> {

@@ -1,11 +1,12 @@
 'use server';
 
-import { clientIp, createThrottle, type Throttle, trustedProxyHops } from '@atrium/auth';
+import { clientIp, createThrottle, type Throttle } from '@atrium/auth';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { z } from 'zod';
 import { auth } from '@/lib/auth';
 import { authErrorCode } from '@/lib/auth-errors';
+import { proxyStrategy } from '@/lib/env';
 import { safeNextPath } from '@/lib/next-path';
 
 /**
@@ -54,9 +55,13 @@ const safeNext = (value: FormDataEntryValue | null) => safeNextPath(value);
  *
  * Where the IP comes from — and whether it can be trusted — is
  * `@atrium/auth`'s `clientIp`, which believes the forwarded headers only as far
- * as `ATRIUM_TRUSTED_PROXY_HOPS` says to. With that unset the IP dimension is
- * absent rather than forged, and the address dimension carries the load; that is
- * the honest default for a deployment nobody has described to us.
+ * as `ATRIUM_TRUSTED_PROXY_HOPS` says to. That variable is **required in
+ * production** (`lib/env.ts`): leaving the limiter silently one-dimensional was
+ * round 2's finding, and a value nobody set is not a safe default. `0` says
+ * there is nothing in front of this process, which on the Server Action path
+ * means no address is available at all — Next cannot hand one over — so the
+ * per-address limiter carries the load until a proxy is put in front and `hops`
+ * says so. Absent, never forged.
  *
  * Scope caveats (single process, reset on restart) are in
  * `packages/auth/src/throttle.ts` and hold here.
@@ -106,7 +111,7 @@ const limitKey = (email: string) => email.trim().toLowerCase();
 
 /** The caller's address, or null when nothing in front of us can be believed. */
 async function callerIp(): Promise<string | null> {
-  return clientIp(await headers(), { trustProxyHops: trustedProxyHops() });
+  return clientIp(await headers(), { strategy: proxyStrategy() });
 }
 
 /**

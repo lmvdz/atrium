@@ -2,7 +2,7 @@ import 'server-only';
 import { type AtriumAuth, createAtriumAuth, resolveAuthSecret } from '@atrium/auth';
 import { nextCookies } from 'better-auth/next-js';
 import { db } from './db';
-import { appUrl, githubOAuth, realtimeOrigin } from './env';
+import { appUrl, githubOAuth, proxyStrategy, realtimeOrigin } from './env';
 
 /**
  * The web app's Better Auth instance: the shared configuration from
@@ -29,6 +29,9 @@ export function auth(): AtriumAuth {
     // Both processes pass their configured origins, so neither ends up with a
     // laxer notion of "us" than the other.
     trustedOrigins: realtime ? [realtime] : [],
+    // The library's own limiter reads the same answer the Server Action
+    // throttle does, so the two cannot bucket a caller differently.
+    proxyStrategy: proxyStrategy(),
     ...(github ? { github } : {}),
     plugins: [nextCookies()],
   });

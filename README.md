@@ -120,22 +120,38 @@ protocol (#22) builds on. Two things happen alongside it:
   an authenticated socket as them — and the valid session is what would make it
   work. A client that sends no `Origin` at all is refused too, unless
   `WS_ALLOW_ORIGINLESS=true` says the deployment has real non-browser clients.
-- **A socket does not outlive its session.** Each command re-validates, cached
-  for `WS_REVALIDATE_TTL_MS` (5s), so a revoked session loses its socket within
-  that window. Room membership is read per command with no cache at all, so
-  removing somebody takes effect on their very next frame.
+- **A socket does not outlive its session, or its membership.** Each command
+  re-validates the session, cached for `WS_REVALIDATE_TTL_MS` (5s) — and the
+  negative verdicts are cached too, so a revoked socket is not a session read
+  per frame. Room membership is read per command with no cache at all, so
+  removing somebody takes effect on their very next frame. A socket that only
+  *listens* sends no commands, so both questions are also asked of every open
+  connection every `WS_SWEEP_INTERVAL_MS` (15s); losing a room takes the socket
+  off that room's roster and closes it with 1008, because "cannot send" is not
+  revocation and "cannot see" is. In production the server **refuses to start**
+  without a session validator rather than defaulting to trusting the handshake.
 
 Removing or demoting a workspace member reconciles room membership in the same
-operation (`packages/auth/src/org.ts`, `workspace.ts`) — room membership is what
+request (`packages/auth/src/org.ts`, `workspace.ts`) — room membership is what
 the realtime server authorizes against, so it is what removal has to remove.
+Note what that is *not*: our writes and Better Auth's are separate transactions
+and nothing joins them. The guarantee is directional — revocations commit before
+the library's write, grants only after it — so a partial failure leaves somebody
+a member with no rooms, never a non-member with every room.
 
-Only two of Better Auth's HTTP endpoints are actually mounted
-(`packages/auth/src/mounted.ts`): the verification link and the OAuth callback.
-Everything else Atrium needs it calls in-process from a Server Action, where
-`authorize()` and the sign-in throttle live, so publishing the rest would only
-provide a way around both. The organization plugin additionally enforces its own
-policy in `beforeCreateInvitation` — nobody can hand out a role they do not hold
-themselves — so the rule holds even for a caller who does reach the API.
+Only three of Better Auth's HTTP endpoints are actually mounted
+(`packages/auth/src/mounted.ts`): the verification link, the OAuth callback and
+the error page it redirects to. Everything else Atrium needs it calls in-process
+from a Server Action, where `authorize()` and the sign-in throttle live, so
+publishing the rest would only provide a way around both. The guard matches on
+the same terms Better Auth's own router does — the raw pathname, per segment,
+method included, percent-encoding refused outright — so the two cannot disagree
+about what a path means; the smuggling fixtures in `mounted.test.ts` assert the
+refusals at the guard rather than trusting a dependency to be stricter than we
+are. The organization plugin additionally enforces its own policy in
+`beforeCreateInvitation`, and re-checks it in `afterCreateInvitation` — nobody
+can hand out a role they do not hold, and an inviter demoted in the gap between
+those two has the invitation voided.
 
 Email verification and invitations both go through the mailer
 (`packages/auth/src/mailer.ts`). In development it prints to the console and,
@@ -146,12 +162,19 @@ passed** — those links are one-click account takeovers and belong in an inbox,
 not in a log aggregator.
 
 Sign-in, sign-up and resend are throttled per address *and* per IP
-(`packages/auth/src/throttle.ts`). The IP dimension believes forwarded headers
-only as far as `ATRIUM_TRUSTED_PROXY_HOPS` tells it to — `1` behind a single
-reverse proxy, `0` (the default) meaning "trust no header", in which case the
-address dimension carries the load rather than a spoofable one pretending to.
-Counters are per-process and reset on restart, which is honest for the one-node
-deployment in issue #18 and must move to Postgres or Redis if that changes.
+(`packages/auth/src/throttle.ts`). `ATRIUM_TRUSTED_PROXY_HOPS` says what is in
+front of the process and is **required in production** — both apps refuse to run
+without it, because an unset value is a limiter running on one dimension while
+looking like it has two. There are three states, not two: unset (believe
+nothing), `0` (nothing in front, so the socket's peer address *is* the caller),
+and `N` (N proxies that append to `X-Forwarded-For`; the caller is the Nth entry
+counted from the right). Better Auth's own limiter is handed the same answer, so
+the two cannot bucket a caller differently. One honest limit: on the Next.js
+side `0` yields no address at all — Next cannot hand a Server Action the socket's
+peer — so the per-address limit carries the load until a proxy is put in front.
+Absent, never forged. Counters are per-process and reset on restart, which is
+honest for the one-node deployment in issue #18 and must move to Postgres or
+Redis if that changes.
 
 One OAuth provider (GitHub) is wired but optional: set `GITHUB_CLIENT_ID` and
 `GITHUB_CLIENT_SECRET` and the button appears, leave them blank and it does not.
@@ -336,7 +359,9 @@ no attempt to reconcile a stored corpus against later upstream history, and
 
 Playwright needs its browser once: `pnpm --filter @atrium/web exec playwright
 install chromium`. Without it the suite skips with a reason instead of failing —
-a red e2e run should mean "the app is broken", never "no browser here".
+a red e2e run should mean "the app is broken", never "no browser here". **In CI
+that courtesy stops**: `CI=1` turns the missing browser into a hard error, because
+a fully skipped suite reporting green is the exact failure CI exists to catch.
 
 `pnpm test:e2e` drives the real thing: a real Next server, a real WebSocket
 server and a real Postgres. It provisions its own throwaway database first

@@ -54,11 +54,17 @@ export function serverEnvironment() {
     SERVER_HOST: '127.0.0.1',
     LOG_LEVEL: 'warn',
     /**
-     * Next appends the socket address to `X-Forwarded-For` when nothing else
-     * has, so it is the one trusted hop here. Setting it means the sign-in
-     * throttle's IP dimension is genuinely live during the suite rather than
-     * silently inert — a rate limiter nobody has ever seen count is a rate
-     * limiter nobody has tested.
+     * One hop, so the throttle's IP dimension is genuinely live during the
+     * suite rather than silently inert — a rate limiter nobody has ever seen
+     * count is a rate limiter nobody has tested.
+     *
+     * Precisely why it works here, since round 2's comment overstated it: Next
+     * fills `x-forwarded-for` from the socket's peer address **only when the
+     * client sent none** (`??=` in `base-server.js`), and nothing in this suite
+     * sends one — so the single-entry chain is the peer address and `hops=1`
+     * reads it. In a real deployment `hops=1` is a claim that a reverse proxy
+     * *appends*, and it is only as true as that proxy; with nothing in front,
+     * `0` is the honest value and `docker-compose.yml` uses it.
      */
     ATRIUM_TRUSTED_PROXY_HOPS: '1',
     /**
@@ -68,5 +74,10 @@ export function serverEnvironment() {
      * half of the same question.
      */
     WS_REVALIDATE_TTL_MS: '1000',
+    /**
+     * And this bounds the half a command never reaches: a socket that only
+     * listens is checked by the sweep or by nothing at all.
+     */
+    WS_SWEEP_INTERVAL_MS: '1000',
   };
 }

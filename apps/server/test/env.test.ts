@@ -20,7 +20,10 @@ const BASE = {
  * that means to test *S3* credentials in production has to supply it or it
  * fails on the wrong variable.
  */
-const PROD_ORIGIN = { APP_URL: 'https://atrium.example' } as const;
+const PROD_ORIGIN = {
+  APP_URL: 'https://atrium.example',
+  ATRIUM_TRUSTED_PROXY_HOPS: '1',
+} as const;
 
 describe('loadEnv — S3 credentials', () => {
   it('falls back to the dev credentials only under NODE_ENV=development', () => {
@@ -235,8 +238,45 @@ describe('loadEnv — auth and realtime settings', () => {
   });
 
   it('is satisfied when production says what its origin is', () => {
-    const env = loadEnv({ ...PROD, APP_URL: 'https://atrium.example' });
+    const env = loadEnv({ ...PROD, ...PROD_ORIGIN });
     expect(env.APP_URL).toBe('https://atrium.example');
+  });
+
+  /**
+   * The rate limiter's second dimension, made honest.
+   *
+   * A process that binds a port has a peer address for every caller, but only
+   * the deployment can say whether that address is the caller or a proxy's.
+   * Round 2 read "unset" as 0 and 0 as "dimension off", so the compose stack
+   * shipped a limiter counting one dimension while looking like it had two.
+   */
+  it('refuses to start in production without being told what is in front of it', () => {
+    expect(() => loadEnv({ ...PROD, APP_URL: 'https://atrium.example' })).toThrow(
+      /ATRIUM_TRUSTED_PROXY_HOPS/,
+    );
+    expect(() => loadEnv({ ...PROD, APP_URL: 'https://atrium.example' })).toThrow(/Unset is not 0/);
+  });
+
+  it('accepts 0 as a real answer — a published port has nothing in front of it', () => {
+    const env = loadEnv({
+      ...PROD,
+      APP_URL: 'https://atrium.example',
+      ATRIUM_TRUSTED_PROXY_HOPS: '0',
+    });
+    expect(env.NODE_ENV).toBe('production');
+  });
+
+  it('says nothing about it outside production', () => {
+    expect(() => loadEnv({ ...DEV })).not.toThrow();
+  });
+
+  it('bounds the idle sweep instead of offering a way to turn it off', () => {
+    expect(loadEnv({ ...DEV }).WS_SWEEP_INTERVAL_MS).toBe(15_000);
+    expect(loadEnv({ ...DEV, WS_SWEEP_INTERVAL_MS: '2000' }).WS_SWEEP_INTERVAL_MS).toBe(2_000);
+    // A sweep nobody runs is the behaviour this exists to close, so 0 is not a
+    // value — and neither is an interval long enough to be one.
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_INTERVAL_MS: '0' })).toThrow();
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_INTERVAL_MS: '600000' })).toThrow();
   });
 
   it('refuses origin-less websocket clients unless told otherwise', () => {

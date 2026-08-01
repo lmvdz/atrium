@@ -87,16 +87,49 @@ export interface RealtimeOptions {
   allowedOrigins: readonly string[];
   allowOriginless?: boolean;
   /**
+   * What environment this process is running in.
+   *
+   * Required, and not defaulted, because it is what decides whether an absent
+   * `revalidateSession` is a development convenience or a refusal to start. A
+   * default here would be a way for production to arrive without saying so.
+   */
+  environment: 'development' | 'test' | 'production';
+  /**
    * Re-checks an open socket's session. Omitted, a socket is trusted for its
    * whole life, which is what round 1 did and what this exists to stop.
+   *
+   * **In production, omitting it is fatal**: the constructor throws rather than
+   * falling back to "yes". Round 2 defaulted the missing validator to `return
+   * true`, so forgetting to wire it up silently restored round 1's behaviour —
+   * a fail-open default guarding the thing this ticket exists to close.
    */
   revalidateSession?: RevalidateSession;
   /**
-   * How long a re-validation result is reused before asking again. The window
-   * in which a revoked session still has authority is at most this long, so it
-   * is short; making it zero would put a session read in front of every frame.
+   * How long a *positive* re-validation result is reused before asking again.
+   * The window in which a revoked session still has authority is at most this
+   * long, so it is short; making it zero would put a session read in front of
+   * every frame.
    */
   revalidateTtlMs?: number;
+  /**
+   * How long a *failed* re-validation (the lookup threw) is remembered before
+   * asking again. Negative verdicts are cached too — otherwise a database that
+   * is down turns one chatty socket into a session read per frame, and every
+   * frame is refused anyway.
+   */
+  revalidateBackoffMs?: number;
+  /**
+   * How often every open socket is swept — session re-validated, room
+   * memberships re-checked — regardless of whether it has sent anything.
+   *
+   * A socket that only *listens* sends no commands, so a per-command check
+   * never runs for it: round 2 revoked the right to send and left the right to
+   * receive alone, and a removed member kept watching the room. This is what
+   * bounds that. It is also the idle half of session revocation — signing out
+   * on another device drops the socket within one interval instead of waiting
+   * for the person to type.
+   */
+  sweepIntervalMs?: number;
 }
 
 export interface RealtimeServer {
@@ -120,8 +153,21 @@ interface Connection {
    * actually presented, rather than against the snapshot we took of its meaning.
    */
   headers: Headers;
-  /** When the cached re-validation result expires. */
+  /** When the cached *positive* re-validation result expires. */
   validUntil: number;
+  /**
+   * When a cached *negative* verdict expires — set when a re-validation threw.
+   * Until then the socket is refused without asking again.
+   */
+  retryAfter: number;
+  /**
+   * Sticky. Once the session behind a socket is gone, or the membership that
+   * put it in a room is, nothing on this connection can bring it back: the
+   * close handshake takes a moment and frames keep arriving during it, and
+   * re-deriving "no" per frame is both a session read per frame and a chance to
+   * derive a different answer.
+   */
+  revoked: boolean;
 }
 
 export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
@@ -132,6 +178,32 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   };
   const revalidateSession = options.revalidateSession ?? null;
   const revalidateTtlMs = options.revalidateTtlMs ?? 5_000;
+  const revalidateBackoffMs = options.revalidateBackoffMs ?? 1_000;
+  const sweepIntervalMs = options.sweepIntervalMs ?? 15_000;
+
+  /**
+   * The one thing this server refuses to start without.
+   *
+   * A realtime server that cannot re-ask "is this still a session?" is a server
+   * where signing out, being removed, or having a session revoked does nothing
+   * until the client happens to reconnect. That is round 1's behaviour, and
+   * round 2 left it reachable by simply omitting the option. It is not reachable
+   * now: production says so out loud, at boot, before a socket exists.
+   */
+  if (!revalidateSession) {
+    if (options.environment === 'production') {
+      throw new Error(
+        'revalidateSession is required when NODE_ENV=production: without it an open socket ' +
+          'outlives the session that opened it, and revocation reaches nothing. Pass ' +
+          'createSessionResolver({ auth, logger }).',
+      );
+    }
+    logger.warn('sockets will not be re-validated — no revalidateSession was passed', {
+      environment: options.environment,
+      consequence: 'a signed-out or removed user keeps their open socket until it closes',
+    });
+  }
+
   const connections = new Map<WebSocket, Connection>();
   /** roomId → the sockets currently joined to it. */
   const roster = new Map<string, Set<WebSocket>>();
@@ -218,6 +290,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       rooms: new Set(),
       headers: toHeaders(request),
       validUntil: Date.now() + revalidateTtlMs,
+      retryAfter: 0,
+      revoked: false,
     };
     connections.set(socket, connection);
     logger.info('ws connected', {
@@ -344,6 +418,12 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     // through on the strength of a room membership.
     const decision = authorize(command, membership, { scope: 'room' });
     if (!decision.allowed) {
+      // Losing the membership does not only mean "you may not send" — it means
+      // "you may not listen". If this socket is still on the room's roster, the
+      // denial is also the moment to take it off, before waiting for the sweep.
+      if (decision.reason === 'not_a_member' || decision.reason === 'unknown_role') {
+        evictFromRoom(socket, connection, roomId);
+      }
       logger.warn('command denied', {
         connectionId: connection.id,
         userId: connection.session.userId,
@@ -421,13 +501,33 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    * is the trade, stated: bounded and short, rather than unbounded and silent,
    * which is what having no re-validation at all amounted to.
    *
-   * Room membership needs no equivalent: `loadRoomMembership` already runs per
-   * command against the table the removal hook deletes from, so losing a
-   * membership takes effect on the very next frame.
+   * **Both verdicts are cached, not just the good one.** A revocation is sticky
+   * (`connection.revoked`) and a lookup that *failed* is remembered for
+   * `revalidateBackoffMs`. Round 2 cached only the positive answer, which meant
+   * a socket whose session had gone — or whose database was down — re-asked on
+   * every single frame, all of them refused: a session read per frame, driven
+   * by the client, on the exact path that is already failing.
+   *
+   * Room membership is checked per command by `handleCommand` and per sweep by
+   * `sweepConnections`, against the table the removal hook deletes from — so
+   * losing a membership takes effect on the very next frame *and* within one
+   * sweep for a socket that only listens.
    */
   async function stillAuthenticated(socket: WebSocket, connection: Connection): Promise<boolean> {
-    if (!revalidateSession) return true;
-    if (Date.now() < connection.validUntil) return true;
+    // The negative verdict, cached. Nothing this socket sends can reopen it.
+    if (connection.revoked) return false;
+    if (!revalidateSession) {
+      // Unreachable in production: the constructor refuses to build a server
+      // without a validator there. This is the development convenience only.
+      return true;
+    }
+
+    const at = Date.now();
+    if (at < connection.validUntil) return true;
+    if (at < connection.retryAfter) {
+      send(socket, { type: 'error', message: 'could not check your session just now — try again' });
+      return false;
+    }
 
     let session: AtriumSession | null;
     try {
@@ -435,29 +535,132 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     } catch (error) {
       // Failing to *learn* whether the session is still good is not a reason to
       // hang up on somebody mid-sentence; it is a reason to refuse this command
-      // and ask again next time.
+      // and ask again after a short back-off.
       logger.error('session revalidation failed', {
         connectionId: connection.id,
         error: (error as Error).message,
       });
+      connection.retryAfter = Date.now() + revalidateBackoffMs;
       send(socket, { type: 'error', message: 'could not check your session just now — try again' });
       return false;
     }
 
     if (!session || session.sessionId !== connection.session.sessionId) {
-      logger.info('closing socket: session no longer valid', {
-        connectionId: connection.id,
-        userId: connection.session.userId,
-      });
-      // 1008 is "policy violation", which is what an expired mandate is. The
-      // close handler clears the roster, so presence drops with the socket.
-      socket.close(1008, 'session ended');
+      revoke(socket, connection, 'session ended', 'session no longer valid');
       return false;
     }
 
     connection.session = session;
     connection.validUntil = Date.now() + revalidateTtlMs;
+    connection.retryAfter = 0;
     return true;
+  }
+
+  /**
+   * End a socket's mandate: off every roster, then closed with 1008.
+   *
+   * The roster eviction is the half round 2 was missing. `socket.close()` starts
+   * a closing *handshake* — the peer has to answer, and until it does the socket
+   * is still in `roster`, still in `presence()`, and still receiving every
+   * broadcast the room makes. For a member who was just removed from the
+   * workspace that is the difference between "cannot send" and "cannot see", and
+   * only the second one is revocation. So the roster is cleared synchronously,
+   * here, and the remaining occupants are told who is left before the close is
+   * even requested.
+   *
+   * 1008 is "policy violation", which is what an expired mandate is.
+   */
+  function revoke(
+    socket: WebSocket,
+    connection: Connection,
+    closeReason: string,
+    why: string,
+  ): void {
+    if (connection.revoked) return;
+    connection.revoked = true;
+
+    const left = leaveAllRooms(socket);
+    logger.info('revoking socket', {
+      connectionId: connection.id,
+      userId: connection.session.userId,
+      reason: why,
+      rooms: left.length,
+    });
+    for (const roomId of left) broadcastPresence(roomId);
+    socket.close(1008, closeReason);
+  }
+
+  /** Takes one socket off one room's roster and tells the room, if it was on it. */
+  function evictFromRoom(socket: WebSocket, connection: Connection, roomId: string): void {
+    if (!connection.rooms.has(roomId)) return;
+    leaveRoom(socket, connection, roomId);
+    logger.info('evicted a socket from a room it no longer belongs to', {
+      connectionId: connection.id,
+      userId: connection.session.userId,
+      roomId,
+    });
+    broadcastPresence(roomId);
+  }
+
+  /**
+   * The idle sweep: every open socket, whether or not it has said anything.
+   *
+   * Two questions per connection, in the order that matters. Is the session
+   * still real — which catches a sign-out on another device without waiting for
+   * this one to type. And is the person still a member of each room this socket
+   * is *subscribed* to — which is the gap round 2's gauntlet named: a listener
+   * sends no commands, so a per-command check never runs for them, and a removed
+   * member went on receiving presence and broadcasts from a room they had been
+   * thrown out of.
+   *
+   * A membership lookup that *throws* changes nothing. "The database did not
+   * answer" is not "you were removed", and evicting on it would turn a database
+   * blip into a mass disconnection.
+   */
+  async function sweepConnections(): Promise<void> {
+    for (const [socket, connection] of [...connections]) {
+      if (connection.revoked || socket.readyState !== socket.OPEN) continue;
+
+      if (revalidateSession && Date.now() >= connection.validUntil) {
+        let session: AtriumSession | null;
+        try {
+          session = await revalidateSession(connection.headers);
+        } catch (error) {
+          logger.error('session revalidation failed during sweep', {
+            connectionId: connection.id,
+            error: (error as Error).message,
+          });
+          connection.retryAfter = Date.now() + revalidateBackoffMs;
+          continue;
+        }
+        if (!session || session.sessionId !== connection.session.sessionId) {
+          revoke(socket, connection, 'session ended', 'session no longer valid (idle sweep)');
+          continue;
+        }
+        connection.session = session;
+        connection.validUntil = Date.now() + revalidateTtlMs;
+        connection.retryAfter = 0;
+      }
+
+      for (const roomId of [...connection.rooms]) {
+        let membership: MembershipLike | null;
+        try {
+          membership = await loadRoomMembership(roomId, connection.session.userId);
+        } catch (error) {
+          logger.error('membership sweep failed', {
+            connectionId: connection.id,
+            roomId,
+            error: (error as Error).message,
+          });
+          continue;
+        }
+        // `room.join` is the least a socket needs to be in a room at all, so it
+        // is the right question to ask about staying in one.
+        if (authorize('room.join', membership, { scope: 'room' }).allowed) continue;
+        revoke(socket, connection, 'membership ended', `no longer a member of ${roomId}`);
+        break;
+      }
+    }
   }
 
   function joinRoom(socket: WebSocket, connection: Connection, roomId: string): void {
@@ -523,6 +726,22 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   }, heartbeatIntervalMs);
   heartbeat.unref();
 
+  // One sweep at a time. A slow database must not stack sweeps on top of each
+  // other until the process is doing nothing else.
+  let sweeping = false;
+  const sweep = setInterval(() => {
+    if (sweeping) return;
+    sweeping = true;
+    void sweepConnections()
+      .catch((error: unknown) => {
+        logger.error('sweep failed', { error: (error as Error).message });
+      })
+      .finally(() => {
+        sweeping = false;
+      });
+  }, sweepIntervalMs);
+  sweep.unref();
+
   return {
     httpServer,
     wss,
@@ -541,6 +760,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       }),
     close: async () => {
       clearInterval(heartbeat);
+      clearInterval(sweep);
       for (const socket of wss.clients) socket.close(1001, 'server shutting down');
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => httpServer.close(() => resolve()));

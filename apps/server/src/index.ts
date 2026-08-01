@@ -1,4 +1,4 @@
-import { createAtriumAuth, resolveAuthSecret } from '@atrium/auth';
+import { createAtriumAuth, resolveAuthSecret, trustedProxyStrategy } from '@atrium/auth';
 import { createDatabase, memberships, rooms } from '@atrium/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { loadEnv } from './env.js';
@@ -30,6 +30,9 @@ async function main(): Promise<void> {
     // The web app's origin, passed explicitly in both processes so neither ends
     // up with a laxer notion of "us" than the other.
     trustedOrigins: [env.APP_URL],
+    // What is in front of this process, so the library's own limiter reads the
+    // same forwarded headers `client-ip.ts` does — or, at hops=0, none.
+    proxyStrategy: trustedProxyStrategy(process.env),
     logger,
   });
 
@@ -68,9 +71,15 @@ async function main(): Promise<void> {
     // trusts on the HTTP side.
     allowedOrigins: [env.APP_URL],
     allowOriginless: env.WS_ALLOW_ORIGINLESS,
+    // Passed rather than inferred: it decides whether a missing session
+    // validator is a development convenience or a refusal to start.
+    environment: env.NODE_ENV,
     // And a socket does not get to outlive the session that opened it.
     revalidateSession: createSessionResolver({ auth, logger }),
     revalidateTtlMs: env.WS_REVALIDATE_TTL_MS,
+    // …nor the room membership that let it listen. This is the idle half: a
+    // socket that only receives never triggers the per-command check.
+    sweepIntervalMs: env.WS_SWEEP_INTERVAL_MS,
   });
 
   await realtime.listen();

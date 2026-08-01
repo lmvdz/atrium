@@ -1,4 +1,10 @@
-import { type Database, memberships, rooms, workspaceMembers } from '@atrium/db';
+import {
+  type Database,
+  memberships,
+  rooms,
+  workspaceInvitations,
+  workspaceMembers,
+} from '@atrium/db';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { parseRole, type Role } from './authz.js';
 
@@ -18,11 +24,18 @@ import { parseRole, type Role } from './authz.js';
  * removed member kept every room membership they had, which is to say removal
  * removed nothing the realtime server could see.
  *
- * Every write below runs in one transaction. Reconciliation that half-happened
- * is worse than reconciliation that failed, because the failure is at least
- * visible to the caller — and the caller, in the revoking direction, runs
- * *before* Better Auth commits the workspace change, so a throw leaves the
- * person a workspace member with no room access rather than the reverse.
+ * Each function below is internally transactional: the rooms it reads and the
+ * memberships it writes move together, so reconciliation never half-happens
+ * *within* one call.
+ *
+ * It is worth being exact about what that does **not** mean, because round 2's
+ * receipt was not. These transactions are ours, opened on our own `Database`
+ * handle; Better Auth's workspace write happens in the library's own adapter
+ * transaction, and the two are never joined. Nothing here rolls back when that
+ * one fails. The guarantee is the *ordering* `org.ts` imposes — revocations
+ * before the library's write, grants after it commits — which bounds a partial
+ * failure to "member with no rooms" in both directions, never "no longer a
+ * member, still in every room".
  */
 
 /** The room every new workspace starts with, so nobody arrives at an empty page. */
@@ -206,6 +219,39 @@ export async function syncWorkspaceRoomRoles(
 
     return updated.length;
   });
+}
+
+/**
+ * Moves a pending invitation to `canceled`, so it can never be accepted.
+ *
+ * The compensating write behind `afterCreateInvitation` — the inviter's
+ * authority is re-checked once the row exists, and an invitation minted in the
+ * gap by somebody who has since lost that authority is voided here. Better Auth
+ * accepts only from `pending`, so this is what makes an already-emailed link
+ * inert.
+ *
+ * Conditional on the row still being `pending`, which is what keeps it safe to
+ * run against a race: an invitation somebody accepted a millisecond earlier is
+ * not dragged back out of `accepted`, and the `false` return says so rather than
+ * reporting a compensation that did not happen.
+ */
+export async function voidInvitation(
+  db: Database,
+  input: { invitationId: string; workspaceId: string },
+): Promise<boolean> {
+  const voided = await db
+    .update(workspaceInvitations)
+    .set({ status: 'canceled' })
+    .where(
+      and(
+        eq(workspaceInvitations.id, input.invitationId),
+        eq(workspaceInvitations.organizationId, input.workspaceId),
+        eq(workspaceInvitations.status, 'pending'),
+      ),
+    )
+    .returning({ id: workspaceInvitations.id });
+
+  return voided.length > 0;
 }
 
 /** The caller's workspace role, straight from Better Auth's own member table. */

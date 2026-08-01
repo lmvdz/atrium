@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { type ProxyStrategy, trustedProxyStrategy } from '@atrium/auth';
+
 /**
  * Server-side configuration for the web app.
  *
@@ -66,6 +68,45 @@ export function appUrl(): string {
 
 export function databaseUrl(): string {
   return required('DATABASE_URL', 'postgres://atrium:atrium@localhost:5432/atrium');
+}
+
+/**
+ * What is in front of this process, for the rate limiter's IP dimension.
+ *
+ * Required in production, exactly like `APP_URL`, and for the same reason: an
+ * unset value is not a safe default, it is a limiter running on one dimension
+ * while looking like it has two. `ATRIUM_TRUSTED_PROXY_HOPS=0` is a valid answer
+ * ("nothing is in front of me") and is what the compose stack sets; `1` is the
+ * answer behind a reverse proxy, which is also where TLS gets terminated.
+ *
+ * Thrown from here rather than at module load for the reason the whole file is
+ * lazy: `next build` imports every route module, and a build machine must not
+ * need production configuration to compile one.
+ *
+ * **The honest limit, said out loud rather than buried.** Under `hops=0` the
+ * caller's address is the socket's peer address, and a Next Server Action has no
+ * way to see it — `headers()` is the whole request, and Next fills
+ * `x-forwarded-for` from the peer *only when the client sent none*, so a present
+ * value is either the peer or entirely attacker-written with no way to tell.
+ * Reading it would be the forged dimension `client-ip.ts` refuses. So on this
+ * path `hops=0` means the IP dimension is absent and the per-address limiter
+ * carries the load; `hops=1` behind a proxy that appends is what makes it real.
+ * `apps/server`'s WebSocket upgrade has a genuine socket address and does not
+ * share this limitation.
+ */
+export function proxyStrategy(): ProxyStrategy {
+  const strategy = trustedProxyStrategy(process.env);
+  if (strategy.kind !== 'unconfigured') return strategy;
+
+  if (isProduction() && !isBuildPhase()) {
+    throw new Error(
+      'ATRIUM_TRUSTED_PROXY_HOPS is required in production. Say what is in front of this ' +
+        'process: 0 for a directly published port, or the number of reverse proxies that ' +
+        'append to X-Forwarded-For. Leaving it unset silently disables the rate limiter’s ' +
+        'IP dimension, which is the failure this check exists to make loud.',
+    );
+  }
+  return strategy;
 }
 
 /**
