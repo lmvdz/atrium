@@ -96,6 +96,73 @@ The system is deliberately dense — an operator surface, not a marketing page.
 - Small type at these sizes leans on `--tx2`/`--tx3` rather than on size alone for
   hierarchy. Do not go below 10px for anything a user must read.
 
+## A number that needs a disclaimer is the wrong number
+
+Every review round adds a clause. No round had ever removed one, and after eleven
+of them the most valuable real estate on this page — the top three lines of the
+CURRENT STATE pane — was spent on arithmetic disclaimers about its own counts:
+
+```
+13 objects · 4 settled · 8 unverified · 2 items awaiting you · updated 09:07
+4 + 8 + 1 open = 13 of 13 · awaiting you overlaps them, it does not add to them
+the need-you counts below sum to 4, not 3 — an object under two objectives is
+counted by both, and is still one item in Needs you
+```
+
+Three lines explaining why the numbers do not add, above the numbers. The pin
+trailer had the same shape from the other direction: **six unrelated statistics in
+one 30-word run-on** with nothing but middots between them. Each clause was
+demanded by a round that was individually right, and the accumulation is a defect
+none of those rounds could see from inside itself.
+
+**The rule. A count that needs a sentence beside it to be read correctly is the
+wrong count to show.** The honest fix is fewer numbers, not more prose about them.
+Ask what a returning reader needs on the first screen, show those, and delete the
+reconciliations. Three specific traps, each one a real line that was removed:
+
+- **Do not print an equation to apologise for a partition.** `4 + 8 + 1 = 13`
+  existed because "settled" and "unverified" were presented as slices of one pie
+  that "awaiting you" cut across. Stop claiming the partition and the equation has
+  nothing to reconcile.
+- **Do not apologise for a sum the page never showed.** The overlap caveat added
+  up the per-objective counts *on the reader's behalf* and then explained the
+  total. Each header is true of its own section; nothing on screen adds them
+  together but the note that regrets it.
+- **A count that duplicates a sentence beside it is not corroboration.** The
+  trailer printed `N failures` next to a lead whose first branch *is* the failure
+  count, and `N overdue` next to a lead that says how many things are late.
+
+And the counterweight, so this does not become licence: **remove displayed prose,
+never a guarantee.** Every invariant, every mint stays. What goes is the page
+explaining its own arithmetic to a reader who did not ask.
+
+**One honest exception, because a blind reviewer refused the blanket version.**
+Deleting `last check HH:MM` deleted the *read* behind it — the scan for the most
+recent dated verification in the room — and that was a freshness fact, not
+prose. `updated HH:MM` is not a replacement: it is `S.now`, which a chat message
+advances. So the room-level freshness signal is **gone, not relocated**, and the
+lead's `N of M unverified` is a different fact that happens to answer the same
+worry most of the time. Written down that way rather than as an equivalence,
+because a prune that quietly drops a read while claiming it drops only prose is
+the same defect as a count that needs a disclaimer. **And delete the arithmetic
+with the line** — the first cut left every removed statistic's computation
+standing in `clearSummary()`, dead work that reads like a guarantee and is the
+easiest way for a statistic to come back without a decision.
+
+Two things to preserve while pruning, both of which cost nothing on screen:
+
+- **A disclaimer that answers a real question moves off the screen, not out of
+  reach.** The objective-overlap explanation lives on the header's `title` now.
+  Be exact about what that is: a button with visible text takes its accessible
+  *name* from that text, so `title` is a description and a tooltip — available to
+  a pointer and to most screen readers, not to touch, and not a line anyone pays
+  for. That is the right trade for a caveat nobody asked for; it would be the
+  wrong trade for anything a reader needs to act.
+- **Fewer numbers is not fewer groups.** The trailer's remaining facts are
+  separated by a rule rather than by punctuation. The run-on was a legibility
+  problem as much as a count problem, and dropping four statistics without
+  grouping the rest would have fixed half of it.
+
 ## Epistemic glyphs
 
 Every rendered fact carries exactly one glyph. The glyph is *derived from the
@@ -109,8 +176,14 @@ repeating: **a claim never dresses as a fact.**
 | `?` | explicitly unverified | `--amb` |
 | `·` | routine / informational | `--tx3` |
 | `◆` | needs you — escalation or decision pending | `--amb` |
-| `■` | destructive decision pending | `--red` |
+| `■` | destructive decision pending — **reserved; `glyphOf()` has no branch that produces it, and nothing in v1 is destructive** | `--red` |
 | `✗` | failed | `--red` |
+
+The `■` row is honest about being empty on purpose. It was load-bearing for ten
+rounds — the friction rule keyed on it — while no code path could assign it, so
+the rule it keyed had one side. Friction is decided by the reversibility audit
+now, not by this row; if something destructive arrives, it gets `■` *and* the
+audit will already have flagged it.
 
 `~` and `✓` are the load-bearing pair. An LLM-derived decision is a `~` claim
 until a human accepts it, at which point it becomes `✓`. The dotted underline on
@@ -128,16 +201,61 @@ Friction is applied in proportion to reversibility, not to importance. This is t
 most consistent single decision in the whole corpus — unchanged across every
 version and independently arrived at on both design branches.
 
-- **Reversible** (amber `◆` gates): **one click.** A yes/no answer, immediate, no
-  confirmation dialog. Making these fast is the whole reason the attention surface
-  is usable.
-- **Irreversible** (red `■` decisions — merges, deletions, anything destructive):
-  **press-and-hold for 2 seconds**, with a progress bar filling during the hold.
-  Click-only; the action records who armed it and when.
+**Reversibility is a fact about the control set, not a property of a glyph.** The
+rule used to read: amber `◆` gates get one click, red `■` decisions get a
+press-and-hold. #10 r11 reported honestly that the irreversible tier was
+unexercised, and a blind reviewer found the consequence: `glyphOf()` has no branch
+that can return `■`, so **the partition had one side**, and every action on the
+page defaulted to the safest tier by virtue of a glyph nothing could produce.
+Under it, `Ask justin instead` — one unconfirmed click — set the assignee, cleared
+`owedTo`, left `canAnswer` false and `canReopen` false, and **no control anywhere
+took it back**. A rule that classifies by appearance will exempt whatever does not
+wear the costume.
 
-Do not add a confirmation modal to a reversible action, and do not let an
-irreversible one through on a single click. The hold is the confirmation — it is
-cheaper to explain and impossible to muscle-memory through.
+So the question is asked of what the page actually offers, after the action:
+**does a control exist that puts this back?** Every action answers for its own
+irreversibility in one of exactly three ways, strongest first:
+
+1. **A control puts it back.** After the action the page offers you the control
+   that restores it — `reassign` ↔ `takeback`, `signed`/`answered`/`opt`/`verify`
+   ↔ `reopen`. This is the only one of the three that is an actual undo, and it
+   is the one to reach for: #10 r12 answered the reassign trap by *building the
+   way back*, not by putting a modal in front of it.
+2. **It asked first.** The control opens a prompt with a cancel instead of
+   writing — reopen wants the reason, verify wants the evidence — so the click
+   that commits is the second one. This is checked in the DOM (the control has to
+   be a disclosure, `aria-expanded`) rather than declared in a table, because a
+   table saying "this one asks" is the kind of claim this artifact has shipped
+   false four times.
+3. **It named what it writes.** The label carries the value — *"Reschedule to
+   today 17:00"* — and what it replaces stays on the record and in the chain.
+   **This is the weakest tier**, honest only for an action that erases nothing,
+   and it is written down as a tier rather than as an exemption precisely so the
+   next reviewer can see which actions are leaning on it. Today exactly one is.
+
+An action with none of the three is the defect, and `reversibilityAudit()` says so
+on every render, driven by the same `offeredActions()` the renders build their
+buttons from — so it cannot be an audit of a control set the page does not have.
+
+**And "the same function the renders use" is itself checked, over every control
+that reaches a write and not only the ones wearing `data-fx`.** The first draft
+of that check walked `[data-fx]` alone, which is the selector list r10 shipped
+and r11 replaced, one layer down — and a blind reviewer used it to find the gap:
+`Answer in your own words →` opens the composer, Send calls
+`answerQuestion`/`answerDecision`, and that write had no action id at all. On a
+question whose card carries no wording it is the *only* action the pin offers, so
+the friction rule was blind to the one move available. `WRITE_CONTROLS` maps each
+control's own markup to its action id — `[data-fx]`, `[data-opt]`,
+`[data-verify]`, `[data-bind]`, `#rcReopen` — and a new control has to name which
+action it is or the check says so. **A control that reaches a write and is not in
+the offered set is a write the friction rule cannot see.**
+
+Do not add a confirmation modal to an action that has an undo; **build the undo
+before you reach for the friction.** Where a hold is genuinely right — a
+destructive action with no way back and nothing to name — press-and-hold for 2
+seconds with a progress bar, click-only, recording who armed it and when. Nothing
+in v1 is in that class, and the audit is what will tell you when something is,
+rather than a glyph nobody assigns.
 
 ## Motion
 
@@ -230,7 +348,17 @@ So the reader is a property of the TRANSITION, not of one surface: a write path 
 
   The list is the render now, not a list. **Every path that turns a minted sentence into output marks what it produced** — `voiced()` and `bodyHtml()` both go through `paintSaid` (`data-said`); `paintParts` marks the one surface the render takes apart into chips, the receipt's state line (`data-said-parts`); and the toast, which is text rather than HTML and is raised after the render it belongs to, is checked on the path that raises it. The checker then enumerates **every marked node in the document**. Nothing to remember and nothing to omit; a surface written next year is covered on the day it is written, provided it renders through one of those paths — which is the honest shape of the claim, and is why the completeness walk below exists to catch a surface that does not.
 
-  And the *completeness* claim is checked rather than asserted: every element that renders an object declares which object (`data-obj`), and a walk over every text node inside those elements refuses any clause that pairs a history quantifier with a recorded field's own vocabulary while sitting outside a minted sentence. That is what makes "the surfaces are covered" a thing the page proves on each render instead of a thing this file claims. **A claim in a doctrine file is subject to the same evidence rule as a claim in code.**
+  And the *completeness* claim is checked rather than asserted — with the reach of the check stated as narrowly as it actually is, because **this is the third round in a row where the mechanism was real and the claim about its reach was not.** r10 claimed a surface list "taken from the object's own shape" that was written from memory. r11 replaced it with a walk over `[data-obj]` — a real mechanism, which caught r12's D1 unprompted — and then wrote, in code and in this file, that the walk found `last check 09:07` in the pin trailer. `#pinTrailer` had no `data-obj` ancestor; the walk provably could not see it. **The comment proving the fix cited something the fix did not cover**, which is the same defect one layer in.
+
+  **The mechanism, exactly.** Two declarations, because there are two kinds of surface. `data-obj` says *this renders one object*; `data-agg` says *this speaks for many* — the lens summary over thirteen records, the pin trailer over ten, an objective header over eleven. A walk over every text node inside either refuses any clause pairing a history quantifier with a recorded field's vocabulary while sitting outside a minted sentence; **inside a `data-agg` host the rule is stricter — the field's vocabulary alone is enough**, no quantifier required, because an aggregate contains no human's characters and every one of them is the page's. `4 settled` needs no "still" to be a claim about `settlement`, and r11 computed it from `verification` and painted `settlement`'s word on it.
+
+  **And the value rule belongs to the walk, not to a selector list.** r10 wrote "an unminted chip may not state a value the record holds" and scoped it with three selectors — `.oitem .mt span`, `.acard .mt span`, `.acomp .fx span`, inside `[data-lens-obj]`. So a feed row's state tag painting `verified · checks`, `accepted · lars`, `claim · unverified` — and one branch interpolating `o.verification` raw — sat outside it permanently, on the surface that never goes away, and no instrument on the page could see it: the quantifier rule needs a quantifier and a state tag has none. Six branches of `objectTag()`, found by a blind reviewer in r12 after the rounds that minted the four branches above them had left them alone. **The list is the render**: the rule runs inside the walk now, over every text node in every declared subject, with its vocabulary derived from the object's own history — every field, every point — so there is nothing to maintain and an action label ("Mark signed off") never trips it, because an action name is not a value the record holds.
+
+  **One exception, and it is one string rather than a field.** `reading` records how a line was read — D1's history is `["Claim","Decision"]` — and *decision* is also the page's structural word for that object's kind, printed as a row prefix and a heading. Same characters, different claim: amend the reading and `o.kind` does not move, so minting the prefix from the reading would make a sentence move when the field it is not about moves. A value that **is** the object's own `kind` is the page naming the object, not the page quoting the record. That is the whole exception — derived from the object, not a list of forgiven fields.
+
+  **And what it does not cover is a function, not a sentence.** `uncoveredRecordWords()` returns every page-authored text node that uses a recorded field's own vocabulary while sitting inside no declared subject and no mint — computed on the live DOM on demand, instead of recalled. **One example from it, so the shape is concrete: the control label `Mark signed off`.** It uses `verification`'s vocabulary, declares no record, and is correct: it names an *action*, not a state, and the rule that governs it is the reversibility audit, not this one. Section labels, empty states and refusal sentences are in the list for the same reason: they use a field's word and speak for no record.
+
+  **And be exact about the function's reach, because a blind reviewer was.** It finds text that uses a field's *vocabulary*. The row/message counters — rail badges, surface tabs, `pinCount`, SINCE-YOU chips, the routine strip, the kind-group counts — carry bare numbers and no field word, so they can never appear in it. They are uncovered by every clause here, deliberately: they count messages and rows rather than speaking for a record. Attributes are outside it too, including the objective header's `title`. That is the honest boundary — a function for what uses the vocabulary, and a sentence for the counters that do not. **A claim in a doctrine file is subject to the same evidence rule as a claim in code — including the claim about how far a check reaches.**
 
   **And an aggregate is a sentence about many records, so it is minted from all of them.** A blind reviewer found the one surface that escaped both instruments: the pin trailer, which speaks for ten objects at once — `6 of 10 still unverified` — was a literal composed beside them, outside `paintSaid` and outside a walk scoped to elements that render *one* object. It was the exact escape the paragraph above said could not exist. So a claim and a query each carry **the record they were read out of**, rather than a box carrying one owner for all of them; the aggregate reads every object it counts, computes the counts inside the phrase, and the checkers re-read ten records instead of one. A sentence that speaks for a set is not exempt from speaking for each of them.
 
@@ -292,6 +420,10 @@ Three details that decide whether this rule is an instrument or a noise generato
 
 The generalisation, which is the useful part: **a guarantee about provenance is escaped by ignoring what was provided. Provenance is checked by construction; USE is checked by mutation.** Wherever this file says "read out of the record", the second half now has a test.
 
+**What survived a blind attack, recorded so it is not traded away.** A reviewer driving #10 r12's base tried to break the query mutation and could not: both arms of a two-branch clause move independently with no `||` short-circuit desynchronising the replay index; a sentence assembled from two queries moves when either is mutated; the `owner` field on each read record makes per-claim re-reads genuinely work; `enumText`/`enumLabel`/pluralisation are injective, so no two states collapse to the same characters. **The synthesis holds — do not simplify any of those four properties away for tidiness.** The one structural note it left: `say()`'s point-read mutation is skipped for a view whose field does not appear in the sentence and for a view whose history was queried. Round 12's D1 landed in that gap from the other side — a continuity claim about a field the transition never read, which `checkQuantifiers` caught and `say()` did not — so the two instruments cover each other's gap and neither is redundant.
+
+**And the completeness walk works where it reaches.** The same review classified every text node in the live DOM and found no un-minted quantified claim escaping on feed rows, pin cards, pin compacts, lens items or receipts, and the walk caught round 12's D1 unprompted, on the artifact the round shipped. The defect was never that the instrument was weak; it was that six surface families declared no subject for it to reach — which is what `data-agg` is for, and what `uncoveredRecordWords()` now enumerates rather than promises.
+
 **And a control may only offer an action whose write it can survive.** Same round, #10 r9 D4: the bound composer offered "Answer in your own words →" on four kinds and `send()` called the *decision* path for all of them, so typing at a commitment owned by someone else recorded the typist's sentence as the commitment's own text and accepted it in their name — around an ownership guard that had been enforced on the button beside it since r4. A dead attention item is one failure; an item offering an action it cannot honestly take is the other. The guard belongs on the **write path**, not only on the render, and the invariant that proves it asserts the rendered control against the same predicate.
 
 Two corollaries, both found by review of r10's own fix:
@@ -299,13 +431,67 @@ Two corollaries, both found by review of r10's own fix:
 - **Every control that reaches a write is gated, not just the one that was being discussed.** The pin's bound composer was fixed while the feed row's one-click Answer, which reaches the same write, had no ownership check at all. Gating the write path is what makes that survivable; gating only the controls means the next control added is unguarded by default.
 - **"Nobody owes it" is not "anybody may do it."** Handing a question on *clears* `owedTo` while setting the assignee, so a predicate that reads `owedTo` alone concludes that an item explicitly given to a named person is unclaimed. Ask who is being asked — the person owed it, or failing that the person it was assigned to — and only treat it as open when neither names anyone.
 
-## A control has to be legible, not merely non-zero
+## A painted claim is painted whole, or it is not painted
 
 A geometry tripwire set at `width < 1` catches nothing that matters. #10 r7 D2: an owed item's title rendered **5.36px** wide at 1124 — counted, glyphed, actionable, unidentifiable — and the guard was silent, because the same click path could also drive it to 0 and that was the case the guard had been written for. One pixel above the wire is the same defect.
 
-So the floor is legibility, expressed in the control's own type size rather than a constant: **a control whose label is being truncated must be at least six characters wide at its own font size.** A control showing all of its text is legible at whatever width its text needs; a control with no text only has to be aimable.
+The rule that replaced it was **"a control whose label is being truncated must be at least six characters wide at its own font size"**, and #10 r11 shipped, under it, a pin row reading `reopened by lars 09:15 · answer ke…` and a cross-room title truncating mid-alternative — `…or hol…` — above a single button offering one of two options the reader could not see. Two things were wrong with it, and both are the same thing:
 
-**And the layout gives the identifying text priority.** The cause was a track template mixing `auto` and `1fr`: grid sizes auto tracks before it distributes free space, so `nowrap` metadata and buttons took their full max-content width at every viewport and the title absorbed the entire shortfall. Where several things on a row must flex, they are all `fr` so they share the shortfall in a fixed ratio — and controls do not flex at all, because a control whose label you cannot read is not one click to act.
+- **It was scoped to controls.** A truncated *fact chip* is not a control, so the doctrine exempted exactly the case it exists for — the failure mode this file names two sections down, arriving inside the fix for the previous one.
+- **Six characters is a floor for aiming, not for reading.** `answer ke…` is thirteen characters wide and says nothing. A claim is not "legible" because you can tell roughly where it is.
+
+**The rule: a minted sentence is painted whole. A control's own label is painted whole. Not wide enough to guess at — whole.** And it is *measured*, not declared: `scrollWidth > clientWidth` and `scrollHeight > clientHeight` are what the browser knows about characters it did not draw. This matters because **`text-overflow: ellipsis` does not change `textContent`**, and every painted-equals-minted rule on this page compares `textContent` — so the entire apparatus that proves a chip says what the record minted passes on a chip that says nothing. A guarantee about the string is not a guarantee about the reader.
+
+The mechanism is `checkLegibilityInvariant()`, over `[data-said]`, the parts of `[data-said-parts]`, and every `button` and its leaf children, walking up to the ancestor that does the clipping. **What it does not cover, named here rather than discovered later:** `.prov .ex`, the provenance excerpt — a person's quoted words, line-clamped to one line, expanded by hover *and* focus, with the full note beneath. Human speech rather than a minted claim, and its truncation has an affordance a keyboard can reach. It is the one deliberate clip on the page, and it is one, not a category.
+
+**And the layout stops asking a row to fit.** The cause of r7's defect was a track template mixing `auto` and `1fr`: grid sizes auto tracks before it distributes free space, so `nowrap` metadata and buttons took their full max-content width and the title absorbed the entire shortfall. r7's fix made every flexible track `fr` so they *share* the shortfall — a ratio, not a floor, and every one of them still ended in an ellipsis. The compact row wraps now: title on the first line, meta on its own line under it, nothing cut at any width. **A row two lines tall is a cost; a chip reading `answer ke…` is not a cost, it is a defect.**
+
+## A count of clicks is not a count of paths
+
+#10 r11 reported **"0 errors across 900 randomised real clicks"** and shipped four
+live invariant violations reachable in three deliberate ones: open the page, click
+the compact row, click Reschedule, click the receipt. 900 random clicks never
+traverse one specific sequence, and the number is worse than useless because it
+*reads* like coverage. The walk that would have caught it shipped in the same
+round, and did catch it — the instrument was right and the verification was not.
+
+**Verification enumerates the controls the artifact offers and drives each one
+deliberately, then randomises on top.** Report the enumeration — how many controls
+exist, how many were driven, which were not and why — never a click total.
+
+Two things make the enumeration honest rather than another remembered list:
+
+- **The inventory is the page's own registrations, not a list somebody wrote.**
+  The *harness* patches `EventTarget.prototype.addEventListener` before the
+  artifact's script runs — the patch lives in `design/prototype-drive.mjs`, not
+  in the page — so every element the page attaches a click handler to is tagged
+  as it is attached. Nothing in the artifact changes and nothing has to be
+  remembered; the inventory is rebuilt with the DOM on every render. Say it that
+  way round: "the page declares its own inventory" reads as though the artifact
+  contained the patch, and it does not.
+- **Reachability is a property of a path, so exploration keeps moving.** Within a
+  session an undriven on-screen control is always preferred; when the screen
+  offers none, a random visible control is clicked to *move the state*. Sessions
+  run until a whole lap of fresh loads drives nothing new. The first screen is not
+  the page.
+
+And every defect gets a repro that **fires on the previous branch as committed**
+and is silent after — a named three-click path, not a seed. The repro asserts
+against the DOM and the record rather than against the artifact's own checkers,
+so a round cannot pass its own exam by grading it.
+
+**Run the pass until it changes nothing, and freeze the tree while somebody else
+reads it.** #10 r12's first enumeration pass, on the artifact r12 had just built,
+found a class r12 had fixed in one branch and not the branch beside it — the
+one-click *answer*'s provenance note stopped claiming things about the
+verification history in r11, and the one-click *re-affirmation*'s went on saying
+`the statement already on the record, recorded again verbatim`. Four deliberate
+clicks. **A pass that changes something is not the last pass.** In parallel, the
+frozen tree went to two foreign-lineage reviewers; between them they found six
+more of the same class, including a comment in that round's own pruning block
+that said the trailer keeps three facts while the code beside it painted two.
+That comment is corrected in place *and the correction says what it was*, because
+the alternative is a doctrine file that has never been wrong.
 
 ## Focus goes somewhere usable after every interaction, not only after a write
 
