@@ -66,6 +66,97 @@ describe('loadEnv — S3 credentials', () => {
   });
 });
 
+describe('loadEnv — an unset NODE_ENV is production', () => {
+  /**
+   * The failure this closes: `docker run atrium-server` on a bare host, no
+   * NODE_ENV anywhere, booting happily on a password published in this
+   * repository. "Nobody said" is not "development".
+   */
+  it('refuses to boot with no NODE_ENV and no credentials', () => {
+    expect(() => loadEnv({ ...BASE })).toThrow(/S3_ACCESS_KEY_ID/);
+    expect(() => loadEnv({ ...BASE })).toThrow(/unset NODE_ENV is treated as production/);
+  });
+
+  it('never hands back the published dev credential without an explicit opt-in', () => {
+    for (const env of [{}, { NODE_ENV: 'production' }, { NODE_ENV: 'test' }]) {
+      let value: string | undefined;
+      try {
+        value = loadEnv({ ...BASE, ...env }).S3_SECRET_ACCESS_KEY;
+      } catch {
+        value = undefined;
+      }
+      expect(value).not.toBe('atrium-dev-secret');
+    }
+    expect(loadEnv({ ...BASE, NODE_ENV: 'development' }).S3_SECRET_ACCESS_KEY).toBe(
+      'atrium-dev-secret',
+    );
+  });
+
+  it('reports production as the effective environment when none was set', () => {
+    const env = loadEnv({
+      ...BASE,
+      S3_ACCESS_KEY_ID: 'AKIAREAL',
+      S3_SECRET_ACCESS_KEY: 'a-real-secret',
+    });
+    expect(env.NODE_ENV).toBe('production');
+  });
+
+  it('treats an empty NODE_ENV as unset, not as development', () => {
+    expect(() => loadEnv({ ...BASE, NODE_ENV: '' })).toThrow();
+    expect(() => loadEnv({ ...BASE, NODE_ENV: '   ' })).toThrow();
+  });
+});
+
+describe('loadEnv — whitespace is not a value', () => {
+  it('rejects a whitespace-only credential', () => {
+    expect(() =>
+      loadEnv({
+        ...BASE,
+        NODE_ENV: 'production',
+        S3_ACCESS_KEY_ID: '   ',
+        S3_SECRET_ACCESS_KEY: '\t\n',
+      }),
+    ).toThrow(/S3_ACCESS_KEY_ID/);
+  });
+
+  it('rejects a whitespace-only DATABASE_URL', () => {
+    expect(() => loadEnv({ DATABASE_URL: '  ', NODE_ENV: 'development' })).toThrow(/DATABASE_URL/);
+    expect(() => loadMigrationEnv({ DATABASE_URL: '\n' })).toThrow(/DATABASE_URL/);
+  });
+
+  it('trims a credential that arrived with the newline it was pasted with', () => {
+    const env = loadEnv({
+      ...BASE,
+      NODE_ENV: 'production',
+      S3_ACCESS_KEY_ID: ' AKIAREAL\n',
+      S3_SECRET_ACCESS_KEY: 'a-real-secret ',
+    });
+    expect(env.S3_ACCESS_KEY_ID).toBe('AKIAREAL');
+    expect(env.S3_SECRET_ACCESS_KEY).toBe('a-real-secret');
+  });
+
+  it('trims the connection string and the enums too', () => {
+    const env = loadEnv({
+      DATABASE_URL: ` ${BASE.DATABASE_URL} `,
+      NODE_ENV: ' development ',
+      LOG_LEVEL: ' debug ',
+    });
+    expect(env.DATABASE_URL).toBe(BASE.DATABASE_URL);
+    expect(env.NODE_ENV).toBe('development');
+    expect(env.LOG_LEVEL).toBe('debug');
+  });
+
+  it('rejects a whitespace-only setting that has a default rather than silently blanking it', () => {
+    expect(() =>
+      loadEnv({
+        ...BASE,
+        NODE_ENV: 'development',
+        S3_BUCKET: '   ',
+      }),
+    ).toThrow(/S3_BUCKET/);
+  });
+});
+
 describe('loadMigrationEnv — narrower on purpose', () => {
   it('boots in production on a connection string alone', () => {
     // The migrate service runs the production image with no S3 config at all.

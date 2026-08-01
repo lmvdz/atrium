@@ -39,15 +39,24 @@ Same compose file locally and on the VPS (issue #18) — only `.env` differs.
 public repository.** They exist so a laptop boots with no setup, and for nothing
 else. Never run this stack on a public VPS with those values.
 
-Two things enforce that rather than merely asking:
+Three things enforce that rather than merely asking:
 
-- Every secret in `docker-compose.yml` is `${VAR:?...}` with **no default**.
-  Compose refuses to start when one is unset instead of reusing a known
-  password. That is why `cp .env.example .env` is the first step above.
+- The three secrets in `docker-compose.yml` — `POSTGRES_PASSWORD`,
+  `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` — are each `${VAR:?...}` with **no
+  default**. Compose refuses to start when one is unset instead of reusing a
+  known password. That is why `cp .env.example .env` is the first step above.
+  The non-secret settings (`POSTGRES_USER`, `POSTGRES_DB`, `S3_BUCKET`,
+  `S3_REGION`, ports, log level) do keep defaults.
 - `apps/server/src/env.ts` applies its dev fallback for `S3_ACCESS_KEY_ID` /
-  `S3_SECRET_ACCESS_KEY` **only** when `NODE_ENV=development`. The `server`
-  service runs `NODE_ENV=production`, so a deployment missing them fails at
-  boot with a named error rather than reaching for a public secret.
+  `S3_SECRET_ACCESS_KEY` **only** when `NODE_ENV` is explicitly `development`.
+  An **unset `NODE_ENV` is treated as production** — "nobody said" on a bare
+  host is a host on the internet — so `docker run atrium-server` with no
+  environment at all fails at boot with a named error rather than reaching for
+  a public secret. `pnpm dev` sets `NODE_ENV=development` itself; that is the
+  opt-in.
+- Every value is trimmed before it is validated, so a secret pasted with the
+  newline that came with it still authenticates, and a variable set to nothing
+  but whitespace fails as empty instead of passing a length check.
 
 Before exposing anything: set real values in `.env` (or the deployment's own
 secret store), and do not publish 5432 / 9000 / 9001 at all unless you mean to.
@@ -84,16 +93,49 @@ byte-identically.
 
 The reducer is also where the trust boundary is enforced, not merely described.
 A recorded proposal is always `proposed` — an interpreter cannot hand itself an
-`accepted` one. An acceptance that cites a proposal must cite one that exists,
-is still open, has not already been spent on another object, and matches the
-object's type; an object with no proposal at all stays legal, because a human
-writing a decision directly is not an interpretation.
+`accepted` one, and the record is the only place a proposal's status lives, so
+acceptance cannot leave a stale copy behind. An acceptance that cites a proposal
+must cite one that exists, is still open, has not already been spent on another
+object, and matches the object's type. An acceptance that cites *no* proposal
+must come from a human actor: that is the answer-binding path, where a person
+writes a decision directly. A model has exactly one route to a fact — propose
+it, and have a human accept the proposal.
 
-Live folding gets the same guarantee. `reduce([next], state)` cannot re-sort
-what it has already folded, so `CoreState.watermarks` holds each room's last
-consumed `(at, id)` and an event arriving before it is refused into
-`state.issues` rather than applied out of order. A live fold and a full replay
-of the same accepted sequence therefore land on the same bytes.
+### Consumed, or rejected
+
+Live folding is a command, not a fold. `appendEvent(state, event)` returns a
+typed outcome:
+
+- **applied** — consumed and applied.
+- **applied with issue** — consumed, and a business problem was recorded in
+  `state.issues` (a coerced proposal, an amendment to an object that does not
+  exist, a relation that fails its type signature). It happened, in order; a
+  replay of the log reproduces it exactly.
+- **rejected** — *not* consumed. The event sorts before `state.cursor` in the
+  canonical `(at, id)` order, or its id was already applied. Rejection leaves
+  nothing behind: no issue, no cursor movement, no `appliedEventIds` entry. The
+  state handed back is the state handed in, the same object.
+
+So consumption only ever moves forward, and the consumed sequence is in
+canonical order by construction. For any log `L` of consumed events, folding
+`L` one event at a time in arrival order and replaying `L` in one `reduce` call
+produce byte-identical states — `issues` and `appliedEventIds` included. That
+is the entire live≡replay claim, and it is checked property-style over
+generated logs with same-timestamp ties, two rooms, redeliveries and a mix of
+all three outcomes (`packages/core/test/replay.test.ts`).
+
+The other half of the invariant is the ledger's, and it is recorded on
+[#22](https://github.com/lmvdz/atrium/issues/22): the durable log must contain
+only events accepted in canonical order, because an out-of-order event is
+rejected at the command layer and never persisted. Rejected events enter
+neither state nor log, so the two sides are folding the same sequence rather
+than being reconciled after the fact.
+
+`CoreState.watermarks` still records each room's last consumed position — that
+is what `core_events.room_seq` will map onto — but the gate is the global
+`cursor`, because `issues`, `corrections` and `appliedEventIds` are global
+ordered lists and a per-room gate would let two rooms interleave them one way
+live and another way on replay.
 
 ## Scripts
 
