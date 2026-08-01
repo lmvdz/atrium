@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { compareCursor } from '@atrium/core';
+import { CANONICAL_TIMESTAMP, compareCursor, Timestamp } from '@atrium/core';
 import type { DatabaseHandle } from '@atrium/db';
 import {
   acceptedObjects,
@@ -7,11 +7,12 @@ import {
   coreEvents,
   messages,
   proposals,
+  users,
 } from '@atrium/db/schema';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { LEDGER_ADVISORY_LOCK_KEY } from '../../apps/server/src/ledger.js';
-import { violatesConstraint } from '../support/constraints.js';
+import { describeError, violatesConstraint } from '../support/constraints.js';
 import { openDatabase, resetDatabase, seedRoom, until } from '../support/harness.js';
 
 /**
@@ -79,7 +80,8 @@ function ledgerRow(
     actorKind?: string;
     actorId?: string | null;
     payloadActor?: unknown;
-    trustedMessages?: unknown;
+    /** The room the *payload* declares, when a test needs it to disagree. */
+    payloadRoomId?: string;
   } = {},
 ) {
   const id = overrides.id ?? randomUUID();
@@ -88,7 +90,7 @@ function ledgerRow(
     id,
     at,
     type: 'message_posted',
-    roomId,
+    roomId: overrides.payloadRoomId ?? roomId,
     messageId: randomUUID(),
     body: 'hello',
     replyToId: null,
@@ -104,10 +106,6 @@ function ledgerRow(
     actorId: overrides.actorId ?? null,
     payload,
     occurredAt: overrides.occurredAt ?? at,
-    // `undefined` means "do not supply a window" and lands as NULL; anything
-    // else is passed verbatim, so the shape constraint is reachable through the
-    // only door that exists.
-    trustedMessages: overrides.trustedMessages,
   };
 }
 
@@ -122,11 +120,21 @@ type LedgerRow = ReturnType<typeof ledgerRow>;
  * about a door nobody walks through. Round 1's tests inserted directly, which
  * is exactly the bypass the r1 gauntlet flagged as *possible*; that they could
  * do it was the demonstration.
+ *
+ * Note what a caller can no longer pass: a receipt window. Round 4's signature
+ * took one, validated its shape and stored it, so this helper could hand the
+ * ledger a fabricated snapshot — which is exactly what the r4 delta gauntlet
+ * found and what the round-5 boundary removed. The window is derived inside and
+ * handed *back*, which is why this returns it.
  */
 async function append(row: LedgerRow, origin: string | null = null) {
   return handle.db.transaction(async (tx) => {
-    const result = await tx.execute<{ seq: string; room_seq: string }>(sql`
-      SELECT "seq", "room_seq" FROM atrium_append_core_event(
+    const result = await tx.execute<{
+      seq: string;
+      room_seq: string;
+      trusted_messages: unknown;
+    }>(sql`
+      SELECT "seq", "room_seq", "trusted_messages" FROM atrium_append_core_event(
         ${row.roomId}::uuid,
         ${row.id}::text,
         ${row.type}::event_type,
@@ -134,12 +142,15 @@ async function append(row: LedgerRow, origin: string | null = null) {
         ${row.actorId}::text,
         ${JSON.stringify(row.payload)}::jsonb,
         ${row.occurredAt}::timestamptz,
-        ${row.trustedMessages === undefined ? null : JSON.stringify(row.trustedMessages)}::jsonb,
         ${origin}::text
       )
     `);
     const minted = result[0];
-    return { seq: Number(minted?.seq), roomSeq: Number(minted?.room_seq) };
+    return {
+      seq: Number(minted?.seq),
+      roomSeq: Number(minted?.room_seq),
+      trustedMessages: minted?.trusted_messages ?? null,
+    };
   });
 }
 
@@ -251,25 +262,64 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
   });
 
   it('refuses a receipt snapshot that is not a list of {id, authorId, body}', async () => {
-    // The snapshot is what a replay folds a receipt against, so a writer that is
-    // not the server must not be able to leave one a replay cannot read.
-    // Catches: dropping `core_events_trusted_messages_shape`.
-    for (const bad of [
-      { id: 'm1' },
-      [{ id: 'm1', authorId: 'u1' }],
-      [{ id: 'm1', authorId: 7, body: 'hi' }],
-      ['m1'],
-    ]) {
-      await violatesConstraint('core_events_trusted_messages_shape', () =>
-        append(ledgerRow(roomA, { trustedMessages: bad })),
-      );
+    /**
+     * The snapshot is what a replay folds a receipt against, so a window a replay
+     * cannot read must not be able to reach the table.
+     *
+     * Reached the only way it still can. Round 4 let this test drive the CHECK
+     * through the append function's `p_trusted_messages` argument — which was the
+     * blocking finding, not a testing convenience: an argument a test can forge is
+     * an argument anybody can forge. There is no such argument now, so the only
+     * writer left that can put a bad window in the column is the one 0004, 0005
+     * and 0006 all name as out of scope — a superuser with the append trigger
+     * disabled. That is exactly who this constraint is for, so that is who drives
+     * it, explicitly and with the trigger put back in the same test.
+     *
+     * Catches: dropping `core_events_trusted_messages_shape`.
+     */
+    await handle.db.execute(sql`ALTER TABLE core_events DISABLE TRIGGER core_events_append_guard`);
+    try {
+      let seq = 0;
+      const bypass = (window: unknown) => {
+        seq += 1;
+        const row = ledgerRow(roomA);
+        return handle.db.execute(sql`
+          INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages)
+          VALUES (${roomA}::uuid, ${seq}, ${row.id}::text, 'message_posted', 'system', NULL,
+                  ${JSON.stringify(row.payload)}::jsonb, ${row.occurredAt}::timestamptz,
+                  ${window === undefined ? null : JSON.stringify(window)}::jsonb)
+        `);
+      };
+      for (const bad of [
+        { id: 'm1' },
+        [{ id: 'm1', authorId: 'u1' }],
+        [{ id: 'm1', authorId: 7, body: 'hi' }],
+        ['m1'],
+      ]) {
+        await violatesConstraint('core_events_trusted_messages_shape', () => bypass(bad));
+      }
+      // …and it accepts the two shapes that mean something: a window, and a window
+      // that was looked for and came back empty. Both are what the derivation
+      // produces, so a constraint that refused either would refuse real appends.
+      await expect(bypass([{ id: 'm1', authorId: 'u1', body: 'hi' }])).resolves.toBeDefined();
+      await expect(bypass([])).resolves.toBeDefined();
+    } finally {
+      await handle.db.execute(sql`ALTER TABLE core_events ENABLE TRIGGER core_events_append_guard`);
     }
-    // …and accepts the two shapes that mean something: a window, and a window
-    // that was looked for and came back empty.
-    await expect(
-      append(ledgerRow(roomA, { trustedMessages: [{ id: 'm1', authorId: 'u1', body: 'hi' }] })),
-    ).resolves.toBeDefined();
-    await expect(append(ledgerRow(roomA, { trustedMessages: [] }))).resolves.toBeDefined();
+    // The trigger really is back on, so a later test in this file is not running
+    // against a ledger with its front door removed.
+    await violatesConstraint('core_events_append_through_procedure', () =>
+      handle.db.insert(coreEvents).values({
+        roomId: roomA,
+        roomSeq: 99,
+        id: randomUUID(),
+        type: 'message_posted',
+        actorKind: 'system',
+        actorId: null,
+        payload: { at: nextAt() },
+        occurredAt: nextAt(),
+      }),
+    );
   });
 
   it('refuses an id outside the charset the two orderings agree on', async () => {
@@ -435,8 +485,7 @@ describe('core_events — the append path is structural, not cooperative', () =>
     const rows = await handle.db.execute<{ src: string }>(
       sql`SELECT prosrc AS src FROM pg_proc
           WHERE proname = 'atrium_append_core_event'
-            AND pronamespace = 'public'::regnamespace
-            AND pronargs = 9`,
+            AND pronamespace = 'public'::regnamespace`,
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]?.src).toContain(String(LEDGER_ADVISORY_LOCK_KEY));
@@ -472,8 +521,7 @@ describe('core_events — the append function is the authorization boundary', ()
       sql`SELECT has_function_privilege('public', p.oid, 'EXECUTE') AS granted
           FROM pg_proc p
           WHERE p.proname = 'atrium_append_core_event'
-            AND p.pronamespace = 'public'::regnamespace
-            AND p.pronargs = 9`,
+            AND p.pronamespace = 'public'::regnamespace`,
     );
     expect(row?.granted).toBe(false);
   });
@@ -486,8 +534,7 @@ describe('core_events — the append function is the authorization boundary', ()
       sql`SELECT has_function_privilege(current_user, p.oid, 'EXECUTE') AS granted
           FROM pg_proc p
           WHERE p.proname = 'atrium_append_core_event'
-            AND p.pronamespace = 'public'::regnamespace
-            AND p.pronargs = 9`,
+            AND p.pronamespace = 'public'::regnamespace`,
     );
     expect(row?.granted).toBe(true);
   });
@@ -1135,8 +1182,7 @@ describe('canonical order — the SQL gate and the reducer agree, and only insid
     const [fn] = await handle.db.execute<{ src: string }>(
       sql`SELECT prosrc AS src FROM pg_proc
           WHERE proname = 'atrium_append_core_event'
-            AND pronamespace = 'public'::regnamespace
-            AND pronargs = 9`,
+            AND pronamespace = 'public'::regnamespace`,
     );
     const body = fn?.src ?? '';
     // Both the read of the cursor and the comparison against it.
@@ -1213,5 +1259,646 @@ describe('canonical order — the SQL gate and the reducer agree, and only insid
         append(ledgerRow(roomA, { id: bad.id, at: bad.at, occurredAt: bad.at })),
       );
     }
+  });
+});
+
+/** How many rows the ledger holds right now. */
+async function ledgerCount(): Promise<number> {
+  const [row] = await handle.db.select({ n: sql<number>`count(*)::int` }).from(coreEvents);
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * The receipt window is **derived at the boundary**, and there is no way to hand
+ * one in (#22 gauntlet r4 delta, blocking).
+ *
+ * The finding, in full, because each clause needs its own test:
+ *
+ * > `0005…sql:152` validates only the *shape* of `trusted_messages` and `:261`
+ * > inserts `p_trusted_messages` verbatim; nothing proves the snapshot matches
+ * > the event's payload, room, or source messages. A direct caller of the granted
+ * > append function supplies a fabricated but well-formed receipt window and
+ * > every fold trusts it.
+ *
+ * Round 4's answer to the *previous* round had been to move the window into an
+ * immutable column. That was right and it was not enough, and the general form is
+ * the lesson this round is scoped to close: **trust follows derivation, not
+ * location.** A trusted location holding a caller's value is a longer path to the
+ * same defect — this is its third appearance in three rounds (the actor in #21,
+ * the window's substrate in r3, the window itself here).
+ *
+ * So these are not "the fabricated window is rejected" tests. They are **there is
+ * nowhere to put one**, which is the only version of this a fourth round cannot
+ * re-find.
+ */
+describe('core_events — the receipt window is derived, not supplied', () => {
+  /** A real person, so an author id is an author id. */
+  async function seedUser(label: string): Promise<string> {
+    const id = randomUUID();
+    await handle.db
+      .insert(users)
+      .values({ id, email: `${label}-${id}@example.test`, displayName: label });
+    return id;
+  }
+
+  /** A real message in a room, so a citation cites something. */
+  async function seedMessage(
+    roomId: string,
+    authorId: string | null,
+    body: string,
+  ): Promise<string> {
+    const id = randomUUID();
+    await handle.db.insert(messages).values({ id, roomId, authorId, body });
+    return id;
+  }
+
+  /** A model `object_accepted` citing `messageIds`, as the append function sees it. */
+  function acceptance(
+    roomId: string,
+    messageIds: readonly string[],
+    objectRoomId = roomId,
+  ): LedgerRow {
+    const id = randomUUID();
+    const at = nextAt();
+    return {
+      roomId,
+      id,
+      type: 'object_accepted',
+      actorKind: 'model',
+      actorId: 'test-model',
+      occurredAt: at,
+      payload: {
+        id,
+        at,
+        type: 'object_accepted',
+        object: {
+          id: randomUUID(),
+          roomId: objectRoomId,
+          type: 'claim',
+          payload: { statement: 'ship it', claimant: null, verification: 'unverified' },
+          objectiveId: null,
+          provenance: { messageIds: [...messageIds], proposalId: null, interpretationId: null },
+          createdAt: at,
+          updatedAt: at,
+        },
+      },
+    };
+  }
+
+  it('takes eight arguments, and none of them is a receipt window', async () => {
+    /**
+     * The structural half, and the one that makes the rest of this block about a
+     * closed door rather than a guarded one. Asserted against the deployed catalog
+     * rather than the migration text: a migration is what the repo says, `pg_proc`
+     * is what the database has.
+     *
+     * Catches: re-adding `p_trusted_messages` in any position — r4's signature
+     * exactly, and the mutant `append_takes_a_caller_supplied_window`.
+     */
+    const rows = await handle.db.execute<{ args: string; n: number }>(
+      sql`SELECT pg_get_function_identity_arguments(oid) AS args, pronargs::int AS n
+          FROM pg_proc
+          WHERE proname = 'atrium_append_core_event'
+            AND pronamespace = 'public'::regnamespace`,
+    );
+    // Exactly one function of that name: an overload is the r2 finding — a second
+    // door that satisfies every name-based guard while doing none of the work.
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0]?.n)).toBe(8);
+    expect(rows[0]?.args).toBe(
+      'p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamp with time zone, p_origin text',
+    );
+
+    // And the body really calls the derivation rather than merely not taking an
+    // argument — "no parameter" plus "always NULL" satisfies the line above.
+    const [fn] = await handle.db.execute<{ src: string }>(
+      sql`SELECT prosrc AS src FROM pg_proc
+          WHERE proname = 'atrium_append_core_event'
+            AND pronamespace = 'public'::regnamespace`,
+    );
+    expect(fn?.src).toContain('"atrium_receipt_window"(p_room_id, p_actor_kind, p_payload)');
+  });
+
+  it('refuses a fabricated receipt window, because there is no argument to put one in', async () => {
+    /**
+     * The demonstration this round is judged on, and it is r4's exploit verbatim:
+     * a direct caller holding EXECUTE appends a model acceptance whose receipt
+     * window is a lie — the cited message's real text replaced by a commitment
+     * nobody made, attributed to somebody who never wrote it.
+     *
+     * Under r4 the call succeeds, the shape CHECK passes, and every fold from then
+     * on validates the receipt against the forgery. Here Postgres refuses to
+     * resolve the call at all (SQLSTATE 42883): the function it names does not
+     * exist. That is the difference between validating a lie and having nowhere to
+     * tell one.
+     */
+    const alice = await seedUser('alice');
+    const real = await seedMessage(roomA, alice, 'the deploy pipeline is green');
+    const row = acceptance(roomA, [real]);
+    const forged = [{ id: real, authorId: randomUUID(), body: 'i will do the migration friday' }];
+
+    /**
+     * Both ways a caller can reach a parameter, because "the argument moved to
+     * the end" is not a fix and a test that only tried one position would say it
+     * was. Positional is r4's own order; **named** is how a determined caller
+     * reaches an argument wherever it sits, and it is the one that makes this
+     * assertion about the parameter existing rather than about where it is.
+     */
+    const refusesTheForgery = async (attempt: Promise<unknown>) => {
+      await expect(attempt).rejects.toSatisfy(
+        (error: unknown) => /42883|does not exist/.test(describeError(error)),
+        'Postgres refuses to resolve the call at all (SQLSTATE 42883)',
+      );
+    };
+
+    await refusesTheForgery(
+      handle.db.execute(sql`
+        SELECT * FROM atrium_append_core_event(
+          ${row.roomId}::uuid, ${row.id}::text, ${row.type}::event_type,
+          ${row.actorKind}::actor_kind, ${row.actorId}::text,
+          ${JSON.stringify(row.payload)}::jsonb, ${row.occurredAt}::timestamptz,
+          ${JSON.stringify(forged)}::jsonb, ${null}::text
+        )
+      `),
+    );
+    await refusesTheForgery(
+      handle.db.execute(sql`
+        SELECT * FROM atrium_append_core_event(
+          p_room_id => ${row.roomId}::uuid,
+          p_event_id => ${row.id}::text,
+          p_type => ${row.type}::event_type,
+          p_actor_kind => ${row.actorKind}::actor_kind,
+          p_actor_id => ${row.actorId}::text,
+          p_payload => ${JSON.stringify(row.payload)}::jsonb,
+          p_occurred_at => ${row.occurredAt}::timestamptz,
+          p_trusted_messages => ${JSON.stringify(forged)}::jsonb
+        )
+      `),
+    );
+
+    // Nothing was written by the attempt, and the honest append that follows gets
+    // the window the room actually holds — not the forgery, and not nothing.
+    expect(await ledgerCount()).toBe(0);
+    const appended = await append(row);
+    expect(appended.trustedMessages).toEqual([
+      { id: real, authorId: alice, body: 'the deploy pipeline is green' },
+    ]);
+    // …and the row holds what the function said it stored, which is the value the
+    // server compares its own fold against.
+    const [stored] = await handle.db
+      .select({ trusted: coreEvents.trustedMessages })
+      .from(coreEvents);
+    expect(stored?.trusted).toEqual(appended.trustedMessages);
+  });
+
+  it('derives the window from the event’s own provenance, in the room’s own order', async () => {
+    /**
+     * The positive half: what the boundary stores is a function of the row.
+     *
+     * Order is asserted because the window is durable and the reducer reads it
+     * positionally — a quote carried by several cited messages is reported against
+     * the first match — so "whatever the planner returned" would be a value two
+     * databases holding the same history could disagree about.
+     *
+     * Catches: dropping `ORDER BY m.seq` from `atrium_receipt_window`, and
+     * deriving from anything other than `object.provenance.messageIds`.
+     */
+    const alice = await seedUser('alice');
+    const first = await seedMessage(roomA, alice, 'first');
+    const second = await seedMessage(roomA, null, 'second');
+    const uncited = await seedMessage(roomA, alice, 'not cited');
+
+    // Cited in the wrong order on purpose: the window is the room's order, not the
+    // payload's.
+    const appended = await append(acceptance(roomA, [second, first]));
+    expect(appended.trustedMessages).toEqual([
+      { id: first, authorId: alice, body: 'first' },
+      // A message whose author is gone keeps its text and loses its name — '' and
+      // not null, because attribution to '' matches no actor.
+      { id: second, authorId: '', body: 'second' },
+    ]);
+    expect(JSON.stringify(appended.trustedMessages)).not.toContain(uncited);
+  });
+
+  it('will not put another room’s message in a room’s receipt window', async () => {
+    /**
+     * The room-scoping half, and a defect in its own right: the TypeScript
+     * derivation this replaced looked messages up **by id alone**, so a model
+     * acceptance in room A could be handed the text of a message from room B and
+     * check its receipt against a conversation the room never had. @atrium/core's
+     * own `TrustedContext` doc says "the room's own message table"; the derivation
+     * did not say it until now.
+     *
+     * Catches: dropping `WHERE m.room_id = p_room_id` from `atrium_receipt_window`
+     * — the mutant `receipt_window_ignores_the_room`.
+     */
+    const bob = await seedUser('bob');
+    const foreign = await seedMessage(roomB, bob, 'said in another room entirely');
+
+    const appended = await append(acceptance(roomA, [foreign]));
+    // `[]`, not the foreign message: the citation was looked for in this room and
+    // found nothing. `[]` rather than NULL matters — #21's reducer refuses an
+    // empty window and an absent one for different reasons, and a replay has to be
+    // able to report the same one.
+    expect(appended.trustedMessages).toEqual([]);
+  });
+
+  it('gives a human acceptance no window at all', async () => {
+    // A person reading the room is the receipt, so #21's gate does not run and the
+    // column stays NULL. Catches: deriving a window for every actor kind, which
+    // would make `null` unreachable and collapse two refusal reasons into one.
+    const room = await seedRoom(handle, ['yves'], { slug: 'room-y' });
+    const yves = room.people.yves as string;
+    const message = await seedMessage(room.roomId, yves, 'a thing');
+
+    const human = acceptance(room.roomId, [message]);
+    human.actorKind = 'human';
+    human.actorId = yves;
+    expect((await append(human)).trustedMessages).toBeNull();
+
+    // …and a plain ledger event, which has no receipt of any kind.
+    expect((await append(ledgerRow(room.roomId))).trustedMessages).toBeNull();
+  });
+
+  it('gives an acceptance that cites nothing a null window rather than an empty one', async () => {
+    // Absent and empty are different facts: "no window was called for" against
+    // "one was looked for and came back empty". Catches: returning `'[]'::jsonb`
+    // for an acceptance with no citations, which would make every uncited model
+    // acceptance replay as a receipt failure instead of as no receipt at all.
+    expect((await append(acceptance(roomA, []))).trustedMessages).toBeNull();
+  });
+
+  it('refuses a lifted room that disagrees with the room the payload declares', async () => {
+    /**
+     * The other half of the round-5 append-surface audit, and the same class as
+     * `payload_id_matches` and `payload_type_matches`: `room_id` was a lifted
+     * column nothing compared to the payload.
+     *
+     * A direct caller could file an event under room A whose payload says room B.
+     * The fan-out reads the column and delivers to A's subscribers; the fold reads
+     * the payload and files the object under B; `since(A, n)` then serves a row
+     * that folded into another room. Catches: dropping
+     * `core_events_payload_room_matches`.
+     */
+    await violatesConstraint('core_events_payload_room_matches', () =>
+      append(ledgerRow(roomA, { payloadRoomId: roomB })),
+    );
+    // The nested spellings too: an object, a proposal and a relation each carry
+    // their room one level down, and a check that only read the bare `roomId`
+    // would cover two of the eight event kinds.
+    await violatesConstraint('core_events_payload_room_matches', () =>
+      append(acceptance(roomA, [], roomB)),
+    );
+    // …and the three kinds that declare no room at all are still appendable, which
+    // is what makes the check total rather than a ban on half the union.
+    const roomless = ledgerRow(roomA);
+    roomless.type = 'proposal_rejected';
+    roomless.payload = {
+      id: roomless.id,
+      at: roomless.occurredAt,
+      type: 'proposal_rejected',
+      proposalId: randomUUID(),
+      reason: null,
+    };
+    await expect(append(roomless)).resolves.toBeDefined();
+  });
+});
+
+/**
+ * The `at` type and the `at` CHECK admit exactly the same strings
+ * (#22 gauntlet r4 delta, major 1).
+ *
+ * > `at` type/CHECK parity is false — `z.iso.datetime({ offset: true })` accepts
+ * > non-`Z` offsets and other spellings while the CHECK accepts only `…SS.mmmZ`,
+ * > so "one ISO spelling on both sides" does not hold.
+ *
+ * The fix is not two rules that agree: `CANONICAL_TIMESTAMP` in @atrium/core is
+ * the pattern, and `packages/db/src/schema.ts` interpolates its `source` into the
+ * CHECK. This measures that the two *engines* agree about it, which is the part
+ * sharing a string does not buy — Postgres's advanced regular expressions and
+ * JavaScript's are different implementations of overlapping languages.
+ *
+ * **The pattern it asks Postgres about is read off the deployed CHECK**, not
+ * handed to Postgres by the test. The first draft did the latter and the mutant
+ * ledger caught it: `at_check_is_shape_only` and
+ * `canonical_timestamp_edited_without_a_migration` each moved one side of the
+ * real rule and this fuzz stayed green, because both of *its* sides came from the
+ * same constant. A parity test whose two operands are the same value is a test
+ * that the value equals itself — the #10 r7 lesson (a guard over a relationship
+ * is only as good as the provenance of its operands) arriving in the shape of a
+ * regular expression.
+ */
+describe('canonical `at` — the type and the CHECK are one rule', () => {
+  /**
+   * The pattern the database is enforcing right now, out of `pg_constraint`.
+   *
+   * `pg_get_constraintdef` renders the CHECK as `… ~ '<pattern>'::text`, and
+   * Postgres doubles any embedded quote on the way out.
+   */
+  async function deployedPattern(): Promise<string> {
+    const [row] = await handle.db.execute<{ def: string }>(
+      sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE conrelid = 'core_events'::regclass
+            AND conname = 'core_events_payload_at_is_canonical_utc'`,
+    );
+    const matched = /~ '(.*)'::text/s.exec(row?.def ?? '');
+    if (!matched) throw new Error(`no pattern in the deployed CHECK: ${row?.def}`);
+    return (matched[1] as string).replace(/''/g, "'");
+  }
+
+  /** Ask Postgres, one round trip for the whole corpus. */
+  async function sqlAccepts(values: readonly string[]): Promise<boolean[]> {
+    const pattern = await deployedPattern();
+    const rows = await handle.db.execute<{ idx: number; ok: boolean }>(sql`
+      SELECT t.idx, (t.s ~ ${sql.raw(`'${pattern.replace(/'/g, "''")}'`)}) AS ok
+      FROM json_to_recordset(${JSON.stringify(
+        values.map((s, idx) => ({ idx, s })),
+      )}::json) AS t(idx int, s text)
+      ORDER BY t.idx
+    `);
+    return rows.map((row) => row.ok);
+  }
+
+  it('accepts and refuses exactly the same strings as @atrium/core’s Timestamp', async () => {
+    /**
+     * Generated across the area the two sides ever disagreed about, plus the
+     * hand-picked cases a generator produces too rarely to rely on: every ISO
+     * spelling r4's type admitted and its CHECK refused, both leap-year rules, the
+     * ends of every field's range, and the impossible dates a shape-only check
+     * lets through.
+     *
+     * The assertion is on the *disagreements*, so this is not a test that the
+     * pattern is right — it is a test that there is one pattern, being enforced
+     * in two places. Catches: loosening either side — `core_timestamp_accepts_any_iso`
+     * moves the type, `at_check_is_shape_only` moves the deployed CHECK, and
+     * `canonical_timestamp_edited_without_a_migration` moves the constant without
+     * moving the database.
+     */
+    const candidates: string[] = [];
+    const pad = (n: number, width: number) => String(n).padStart(width, '0');
+
+    // The spellings a caller might reasonably send. Every one of these was legal
+    // to `z.iso.datetime({ offset: true })` and refused by the CHECK.
+    candidates.push(
+      '2026-08-01T12:00:03.000Z',
+      '2026-08-01T12:00:03Z',
+      '2026-08-01T12:00:03.00Z',
+      '2026-08-01T12:00:03.0000Z',
+      '2026-08-01T12:00:03.000+00:00',
+      '2026-08-01T14:00:03.000+02:00',
+      '2026-08-01T12:00:03.000-05:00',
+      '2026-08-01T12:00:03',
+      '2026-08-01 12:00:03.000Z',
+      '2026-08-01t12:00:03.000Z',
+      '2026-08-01T12:00:03.000z',
+      ' 2026-08-01T12:00:03.000Z',
+      '2026-08-01T12:00:03.000Z ',
+      '2026-08-01T12:00:03.000Z\n',
+    );
+
+    // Every field walked past both of its edges, so a range written `[0-9]{2}` on
+    // one side and `[0-5]\d` on the other cannot survive.
+    for (const month of [0, 1, 9, 10, 12, 13, 19, 99]) {
+      candidates.push(`2026-${pad(month, 2)}-15T00:00:00.000Z`);
+    }
+    for (const day of [0, 1, 28, 29, 30, 31, 32, 39]) {
+      candidates.push(`2026-01-${pad(day, 2)}T00:00:00.000Z`);
+      // …and against a 30-day month, which is where a month-agnostic day range
+      // and a month-aware one part company.
+      candidates.push(`2026-04-${pad(day, 2)}T00:00:00.000Z`);
+      candidates.push(`2026-02-${pad(day, 2)}T00:00:00.000Z`);
+    }
+    for (const hour of [0, 12, 23, 24, 25, 99]) {
+      candidates.push(`2026-01-15T${pad(hour, 2)}:00:00.000Z`);
+    }
+    for (const minute of [0, 59, 60, 99]) {
+      candidates.push(`2026-01-15T00:${pad(minute, 2)}:00.000Z`);
+    }
+    for (const second of [0, 59, 60, 99]) {
+      candidates.push(`2026-01-15T00:00:${pad(second, 2)}.000Z`);
+    }
+    // The leap-year rule, in all four of its cases.
+    for (const year of [1900, 2000, 2024, 2026, 2027, 2028, 2100, 2400]) {
+      candidates.push(`${year}-02-29T00:00:00.000Z`);
+      candidates.push(`${year}-02-28T00:00:00.000Z`);
+    }
+    // And a deterministic sweep, so the corpus is not only what a person thought
+    // of. Seeded: a fuzz that cannot be re-run on the input that failed reports a
+    // mystery.
+    let state = 0x41_54_52_35;
+    const next = () => {
+      state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+      return state / 0x1_0000_0000;
+    };
+    const pick = <T>(options: readonly T[]) => options[Math.floor(next() * options.length)] as T;
+    for (let i = 0; i < 400; i += 1) {
+      const year = 1970 + Math.floor(next() * 80);
+      const month = 1 + Math.floor(next() * 13);
+      const day = 1 + Math.floor(next() * 32);
+      const hour = Math.floor(next() * 25);
+      const minute = Math.floor(next() * 61);
+      const second = Math.floor(next() * 61);
+      const fraction = pick(['', '.0', '.00', '.000', '.0000', '.123', '.12']);
+      const zone = pick(['Z', 'z', '', '+00:00', '-03:00', '+0000', 'UTC']);
+      candidates.push(
+        `${pad(year, 4)}-${pad(month, 2)}-${pad(day, 2)}T${pad(hour, 2)}:${pad(minute, 2)}:${pad(second, 2)}${fraction}${zone}`,
+      );
+    }
+
+    const fromSql = await sqlAccepts(candidates);
+    const disagreements = candidates
+      .map((value, index) => ({
+        value,
+        sql: fromSql[index] === true,
+        zod: Timestamp.safeParse(value).success,
+      }))
+      .filter((row) => row.sql !== row.zod);
+
+    // The whole finding, as an empty array.
+    expect(disagreements).toEqual([]);
+    // Not vacuous in either direction: the corpus contains values both sides take
+    // and values both sides refuse, so a pattern that matched everything or
+    // nothing would fail here rather than pass silently.
+    expect(candidates.filter((v) => Timestamp.safeParse(v).success).length).toBeGreaterThan(20);
+    expect(candidates.filter((v) => !Timestamp.safeParse(v).success).length).toBeGreaterThan(100);
+  });
+
+  it('is the same pattern in the deployed CHECK as in @atrium/core', async () => {
+    // The two engines agreeing is only worth something if they are reading the
+    // same string. Read off the deployed constraint rather than the migration
+    // file: a migration is what the repo says, `pg_get_constraintdef` is what the
+    // database has. Catches: editing `CANONICAL_TIMESTAMP` without a migration,
+    // and writing the CHECK out by hand again.
+    const [row] = await handle.db.execute<{ def: string }>(
+      sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE conrelid = 'core_events'::regclass
+            AND conname = 'core_events_payload_at_is_canonical_utc'`,
+    );
+    expect(row?.def).toContain(CANONICAL_TIMESTAMP.source);
+  });
+
+  it('refuses every spelling the boundary can be handed', async () => {
+    // The parity fuzz compares two regular expressions; this drives the real
+    // append. Catches: a CHECK that is correct and not attached to the column the
+    // boundary writes.
+    for (const at of [
+      '2026-08-01T12:00:03Z',
+      '2026-08-01T12:00:03.000+00:00',
+      '2026-13-45T00:00:00.000Z',
+      '2026-02-30T00:00:00.000Z',
+      '2026-01-01T25:00:00.000Z',
+    ]) {
+      await violatesConstraint('core_events_payload_at_is_canonical_utc', () =>
+        append(ledgerRow(roomA, { at, occurredAt: '2026-08-01T12:00:03.000Z' })),
+      );
+    }
+  });
+});
+
+/**
+ * The structural pin, extended to the CHECK (#22 gauntlet r4 delta, major).
+ *
+ * > the ID ASCII CHECK is locale-dependent — Postgres bracket ranges are
+ * > collation-dependent, so `[!-~]` without `COLLATE "C"` is not a durable ASCII
+ * > guarantee, and the `prosrc`/`indexdef` structural pin covers the function and
+ * > index but not this CHECK.
+ *
+ * Both halves granted. r4's own receipt already recorded why a behavioural test
+ * cannot see this: the compose image's `en_US.utf8` behaves as byte order because
+ * the locale data is not generated, so `strcoll` degrades to `strcmp` and every
+ * value this suite can generate compares identically with and without the
+ * collation. The same is true of a bracket range. So it is measured the way the
+ * r1 advisory-lock key was — by reading what is deployed.
+ */
+describe('COLLATE "C" — asserted in the deployed objects, because behaviour cannot show it', () => {
+  it('evaluates the id charset CHECK under COLLATE "C"', async () => {
+    /**
+     * A regex bracket range is resolved in the collation of its input. Under a
+     * generated glibc or an ICU locale `[!-~]` means "everything that sorts
+     * between `!` and `~`", which admits accented letters and much else — so the
+     * constraint would stop enforcing the subset in which the reducer's UTF-16
+     * order and the gate's byte order are one order, on every deployment except
+     * this image.
+     *
+     * Catches: re-adding `core_events_id_is_safe_to_order` without the collation —
+     * the mutant `id_charset_check_loses_its_collation`, which no behavioural test
+     * in this suite can see.
+     */
+    const [row] = await handle.db.execute<{ def: string }>(
+      sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE conrelid = 'core_events'::regclass
+            AND conname = 'core_events_id_is_safe_to_order'`,
+    );
+    expect(row?.def).toContain('COLLATE "C"');
+    // Positioned on the subject rather than anywhere in the expression: a
+    // collation on the pattern would parse and would do nothing.
+    expect(row?.def).toMatch(/\(id COLLATE "C"\)\s*~/);
+  });
+
+  it('says out loud that this image cannot tell the difference', async () => {
+    // The honest limit, asserted rather than left in a comment. If a future image
+    // ships a collation that really is variable-weight, this flips and somebody
+    // finds out from a test rather than from a divergent ledger.
+    const [row] = await handle.db.execute<{ agrees: boolean; collation: string }>(
+      sql`SELECT ('a-b' < 'ab') = (('a-b' COLLATE "C") < ('ab' COLLATE "C")) AS agrees,
+                 (SELECT datcollate FROM pg_database WHERE datname = current_database()) AS collation`,
+    );
+    expect(typeof row?.agrees).toBe('boolean');
+    expect(typeof row?.collation).toBe('string');
+  });
+});
+
+/**
+ * The FK audit in `0006_derived_receipt_snapshot.sql`, derived from the catalog.
+ *
+ * 0005 shipped a "full FK audit" that named `attention_items.created_by` — a
+ * column that does not exist, under a delete action it does not have, while
+ * omitting `relations.created_by` entirely. The finding is right that this makes
+ * the whole audit worthless: nothing in a prose list tells a reader which of its
+ * other rows are also wrong.
+ *
+ * So the audit is pinned to the database rather than maintained by hand. A schema
+ * change that adds, removes or retypes a delete action fails here, in the same
+ * commit, with the message that the migration header has to be updated too.
+ */
+describe('foreign keys — the audit is the catalog, not a paragraph', () => {
+  it('has exactly the delete actions 0006’s audit lists', async () => {
+    const rows = await handle.db.execute<{ name: string; action: string }>(
+      sql`SELECT c.conname AS name, c.confdeltype AS action
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid = c.conrelid
+          JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE c.contype = 'f' AND n.nspname = 'public' AND c.confdeltype <> 'a'
+          ORDER BY c.confdeltype, c.conname`,
+    );
+    const of = (action: string) =>
+      rows.filter((row) => row.action === action).map((row) => row.name);
+
+    // `n` = SET NULL. Every one is a projection column written *from* the ledger's
+    // trusted actor columns and read back for display; the authority lives in
+    // `core_events.actor_kind`/`actor_id`, which have no FK to `users` at all.
+    expect(of('n')).toEqual([
+      'accepted_objects_accepted_by_users_id_fk',
+      'corrections_by_user_id_users_id_fk',
+      'messages_author_id_users_id_fk',
+      'proposals_decided_by_users_id_fk',
+      'proposals_interpretation_id_interpretations_id_fk',
+      'proposals_proposer_user_id_users_id_fk',
+      'relations_created_by_users_id_fk',
+      'rooms_created_by_users_id_fk',
+    ]);
+
+    // `c` = CASCADE. Room deletes take the ledger with them (the row is gone, not
+    // misremembered), user deletes take per-person rows, and the rest are
+    // provenance link tables the reducer never reads.
+    expect(of('c')).toEqual([
+      'accepted_objects_room_id_rooms_id_fk',
+      'attention_items_object_same_room_fk',
+      'attention_items_proposal_same_room_fk',
+      'attention_items_room_id_rooms_id_fk',
+      'attention_items_user_id_users_id_fk',
+      'core_events_room_id_rooms_id_fk',
+      'corrections_object_same_room_fk',
+      'corrections_room_id_rooms_id_fk',
+      'interpretations_message_id_messages_id_fk',
+      'memberships_room_id_rooms_id_fk',
+      'memberships_user_id_users_id_fk',
+      'messages_room_id_rooms_id_fk',
+      'object_sources_message_same_room_fk',
+      'object_sources_object_same_room_fk',
+      'object_sources_room_id_rooms_id_fk',
+      'proposal_sources_message_same_room_fk',
+      'proposal_sources_proposal_same_room_fk',
+      'proposal_sources_room_id_rooms_id_fk',
+      'proposals_room_id_rooms_id_fk',
+      'relations_from_object_same_room_fk',
+      'relations_room_id_rooms_id_fk',
+      'relations_to_message_same_room_fk',
+      'relations_to_object_same_room_fk',
+    ]);
+
+    // And the stale row, named so the correction cannot be quietly re-broken:
+    // there is no `attention_items.created_by` anywhere in the schema.
+    const [column] = await handle.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM information_schema.columns
+          WHERE table_name = 'attention_items' AND column_name = 'created_by'`,
+    );
+    expect(Number(column?.n)).toBe(0);
+  });
+
+  it('leaves nothing downstream of reduce behind a delete action', async () => {
+    // The rule the audit exists to enforce, stated as a query rather than as a
+    // sentence: `core_events` is what `reduce` folds, and the only delete action
+    // touching it removes whole rows with their room. A `SET NULL` on any
+    // `core_events` column would be a fold whose inputs a later DELETE can rewrite
+    // — the r3-delta class, exactly.
+    const rows = await handle.db.execute<{ name: string; action: string }>(
+      sql`SELECT c.conname AS name, c.confdeltype AS action
+          FROM pg_constraint c
+          WHERE c.contype = 'f' AND c.conrelid = 'core_events'::regclass`,
+    );
+    expect(rows.map((row) => [row.name, row.action])).toEqual([
+      ['core_events_room_id_rooms_id_fk', 'c'],
+    ]);
   });
 });

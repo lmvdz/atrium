@@ -16,6 +16,7 @@ import type {
   RationaleReason,
   RelationKind,
 } from '@atrium/core';
+import { CANONICAL_TIMESTAMP } from '@atrium/core';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -386,6 +387,22 @@ export const coreEvents = pgTable(
      * a message edited, a row moved between rooms all reopen it. Denormalising at
      * append holds for any future mutation of `messages`, because after the
      * append the fold does not read `messages` at all.
+     *
+     * ## Why nobody can write one (#22 gauntlet r4 delta, blocking)
+     *
+     * Round 4 made this an immutable column and let the append function take it as
+     * a *parameter*, checked only for shape. That is the same defect one move
+     * further along: a trusted location holding a value the caller computed.
+     *
+     * > A direct caller of the granted append function supplies a fabricated but
+     * > well-formed receipt window and every fold trusts it.
+     *
+     * There is no parameter now. `atrium_receipt_window(room_id, actor_kind,
+     * payload)` derives this from the row itself — room-scoped, ordered by the
+     * room's own `messages.seq` — and `atrium_append_core_event` calls it and
+     * inserts the result. The shape check below survives for the one writer that
+     * can still get around all of it (a superuser with the triggers disabled), and
+     * for nobody else. **Trust follows derivation, not location.**
      */
     trustedMessages: jsonb('trusted_messages').$type<ProvenanceMessage[]>(),
     /** The complete event. `reduce` folds `payload`, not a reassembly of it. */
@@ -458,10 +475,30 @@ export const coreEvents = pgTable(
      * `YYYY-MM-DDTHH:MM:SS.mmmZ`, which is what `Date#toISOString` produces and
      * what `nextTimestamp` in `ledger.ts` mints. Inside it, string order and
      * `timestamptz` order are the same order for every value.
+     *
+     * ## The pattern is @atrium/core's, not a copy of it (r4 delta, major 1)
+     *
+     * Round 4 wrote this shape here and left `Timestamp` in @atrium/core as
+     * `z.iso.datetime({ offset: true })`, then called the two one rule. They were
+     * two rules that agreed about the common case: the type admitted `+00:00`,
+     * second precision and every other legal ISO spelling, all of which this CHECK
+     * refuses — so a value could pass every type in the system and be refused by
+     * the database at the INSERT.
+     *
+     * The fix is not a second transcription. `CANONICAL_TIMESTAMP` is imported and
+     * its `source` is interpolated, so there is exactly one pattern and the two
+     * engines evaluate the same characters. It is calendar-aware — `2026-13-45`
+     * and `T25:00` are refused here as well as there — because a shape-only check
+     * would let an impossible instant reach the `::timestamptz` cast in
+     * `core_events_payload_at_matches` and fail as a cast error rather than as a
+     * named constraint. Postgres ARE reads `\d`, `{n}` and `(?:…)` exactly as
+     * JavaScript does, which is what makes sharing the source honest rather than
+     * lucky; the integration suite fuzzes both engines against each other and
+     * asserts no value is accepted by one and refused by the other.
      */
     check(
       'core_events_payload_at_is_canonical_utc',
-      sql`${t.payload}->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'`,
+      sql`${t.payload}->>'at' ~ ${sql.raw(`'${CANONICAL_TIMESTAMP.source}'`)}`,
     ),
     /**
      * The other half of the same rule: the id's charset.
@@ -482,7 +519,47 @@ export const coreEvents = pgTable(
     // at 255, and a bound expressed as a regex quantifier would have silently
     // been 255 or a syntax error depending on the number chosen. `ID_MAX_LENGTH`
     // in @atrium/core is the same 256.
-    check('core_events_id_is_safe_to_order', sql`${t.id} ~ '^[!-~]+$' AND length(${t.id}) <= 256`),
+    //
+    // `COLLATE "C"` on the subject is not decoration (#22 gauntlet r4 delta): a
+    // regex bracket *range* is resolved in the collation of its input, so `[!-~]`
+    // means "printable ASCII" only where the collation is byte order. Under ICU or
+    // a generated glibc locale it means "everything that sorts between `!` and
+    // `~`", which admits accented letters and a great deal else — and this
+    // constraint's entire job is to keep the ledger inside the subset where the
+    // reducer's UTF-16 order and the gate's `COLLATE "C"` order are one order. The
+    // compose image's `en_US.utf8` happens to behave as byte order, so **no
+    // behavioural test in this suite can see the difference**; the deployed
+    // `pg_get_constraintdef` is asserted directly in
+    // `integration/db/ledger-constraints.test.ts`, beside the function's `prosrc`
+    // and the index's `indexdef`, for that reason.
+    check(
+      'core_events_id_is_safe_to_order',
+      sql`(${t.id} COLLATE "C") ~ '^[!-~]+$' AND length(${t.id}) <= 256`,
+    ),
+    /**
+     * The room the row lands in is the room the payload declares (#22 gauntlet r4
+     * delta → r5, the append-surface audit).
+     *
+     * `room_id` was a lifted column nothing compared to the payload. A direct
+     * caller of the append function could write an `object_accepted` whose
+     * `object.roomId` names room B into `room_id = A`: the fan-out reads the
+     * column and delivers it to A's subscribers, the fold reads the payload and
+     * files the object under B, and `since(A, n)` then serves a row that folded
+     * into another room. Same class as `payload_id_matches` and
+     * `payload_type_matches`, and the last of the lifted columns to get one.
+     *
+     * Four of the eight ledger kinds declare a room (`proposal.roomId`,
+     * `object.roomId`, `relation.roomId`, and the bare `roomId` on
+     * `message_posted` / `attention_resolved`). The other three name a proposal or
+     * an object and take their room from state — a question only the reducer can
+     * answer, and `resolveRoomId` in `ledger.ts` is where it is asked. So the
+     * check is total by construction: when no path yields a room, `coalesce` falls
+     * through to the column and the comparison holds.
+     */
+    check(
+      'core_events_payload_room_matches',
+      sql`${t.roomId}::text = coalesce(${t.payload}->'proposal'->>'roomId', ${t.payload}->'object'->>'roomId', ${t.payload}->'relation'->>'roomId', ${t.payload}->>'roomId', ${t.roomId}::text)`,
+    ),
     /**
      * The snapshot is a list of `{id, authorId, body}`, all strings.
      *

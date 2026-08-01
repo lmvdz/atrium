@@ -12,10 +12,10 @@ import {
   type TrustedContext,
   trustedContext,
 } from '@atrium/core';
-import { coreEvents, type Database, messages } from '@atrium/db';
+import { coreEvents, type Database } from '@atrium/db';
 import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
 import type { Logger } from './logger.js';
-import { declaredRoomId, isCoreEvent, provenanceMessageIds, RoomEvent } from './room-events.js';
+import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
 
 /**
  * The durable ledger, and the single writer in front of it.
@@ -107,10 +107,34 @@ import { declaredRoomId, isCoreEvent, provenanceMessageIds, RoomEvent } from './
  * which is what makes the guarantee hold for *any* future mutation of it rather
  * than for the one the gauntlet happened to name.
  *
+ * ## …and it is DERIVED at the boundary, not handed to it (r4 delta, blocking)
+ *
+ * Round 4 got the column right and the door wrong: the append function took the
+ * window as a parameter, checked only its shape, and stored it.
+ *
+ * > A direct caller of the granted append function supplies a fabricated but
+ * > well-formed receipt window and every fold trusts it.
+ *
+ * This is the third appearance of one shape, and the general form is the lesson:
+ * **trust follows derivation, not location.** The actor moved out of the payload
+ * into a column and was still forgeable until the command layer derived it from
+ * the session. The window moved out of a mutable table into an immutable column
+ * and was still forgeable because the boundary accepted it. A trusted location
+ * holding an untrusted value is a longer path to the same defect.
+ *
+ * There is no window parameter now. `atrium_receipt_window(room_id, actor_kind,
+ * payload)` in `drizzle/0006_derived_receipt_snapshot.sql` is the only derivation
+ * in the system: this module calls it to obtain what the fold runs against, the
+ * append function calls it to obtain what it stores, and the append returns what
+ * it stored so `append` can refuse the transaction if the two ever differ. The
+ * practical test for the next argument anybody adds to that function is the one
+ * the gauntlet gave: *could a direct caller supply a well-formed lie?*
+ *
  * The general rule, since it outlives this column: anything a fold validates
- * against belongs in the event or on the event's row. See the FK audit in the
- * head of `drizzle/0005_receipt_snapshot_and_canonical_subset.sql` for every
- * `SET NULL`/`CASCADE` in the schema checked against it.
+ * against belongs in the event or on the event's row, and must be computed there
+ * rather than accepted there. The corrected FK audit and the full audit of the
+ * append function's remaining arguments are in the head of
+ * `drizzle/0006_derived_receipt_snapshot.sql`.
  *
  * ## `seq` may gap. `room_seq` may not.
  *
@@ -469,63 +493,80 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
   }
 
   /**
-   * Load the bodies of the messages a receipt cites — **on the append path
-   * only**, exactly once per event.
+   * The receipt window a row folds under, **derived by the database** from the
+   * row itself.
    *
-   * Round 3 called this from the replay path too, and the r3-delta gauntlet's
-   * blocking finding 2 is what that cost: `messages.author_id` is
-   * `ON DELETE SET NULL`, so an acceptance that folded cleanly under a real
-   * author replayed under `''` once the author was deleted, failed its receipt,
-   * and vanished from replayed state. Same code, different substrate.
+   * Round 3 derived it in TypeScript on both the append and the replay path and
+   * called that sameness the guarantee; the r3 delta showed the substrate moved
+   * underneath it. Round 4 snapshotted it into a column and let the append
+   * function take it as a *parameter*, checked only for shape — and the r4 delta
+   * found the same defect one move further along:
    *
-   * Now it runs once, its result is written to `core_events.trusted_messages` in
-   * the same transaction, and every fold reads that column. This function is
-   * private for that reason: a caller that could ask for a window would be a
-   * caller that could derive one at fold time, which is the defect.
+   * > A direct caller of the granted append function supplies a fabricated but
+   * > well-formed receipt window and every fold trusts it.
    *
-   * `ORDER BY seq` because the window is now durable and a durable value should
-   * not depend on which plan Postgres chose. It also matters to the reducer: a
-   * quote carried by several cited messages is reported with the first match's
-   * id, and "first" must be the room's order rather than the planner's.
+   * So there is no window in TypeScript at all now, and nothing here reads
+   * `messages`. `atrium_receipt_window(room_id, actor_kind, payload)` is the only
+   * derivation there is: this function calls it to obtain what the fold runs
+   * against, and `atrium_append_core_event` calls it again to obtain what it
+   * stores. Neither value is chosen by a caller, and `append` compares the two
+   * before it lets the transaction commit — see the note there.
+   *
+   * Run inside the append transaction, after the ledger lock: `messages` is only
+   * ever written by a projection inside an append, so under the lock the answer
+   * cannot move between the two calls.
+   *
+   * `atrium_receipt_window` is `SECURITY INVOKER` while the append function is
+   * `SECURITY DEFINER`, so in a deployment with a dedicated unprivileged app role
+   * this call runs as that role and the boundary's runs as the table owner. Least
+   * privilege was preferred over making the two identical, and what that costs is
+   * *checked* rather than assumed — see the comparison in `append`. Making the
+   * derivation `SECURITY DEFINER` would close the class instead of checking it, at
+   * the price of a read primitive over every room's message bodies granted to the
+   * app role; that role already holds `SELECT` on `messages` in every deployment
+   * this repo ships, so the two answers are closer than the choice looks.
    */
-  async function messageWindow(
-    runner: Pick<Database, 'select'>,
-    messageIds: readonly string[],
-  ): Promise<ProvenanceMessage[]> {
-    if (messageIds.length === 0) return [];
-    const rows = await runner
-      .select({ id: messages.id, authorId: messages.authorId, body: messages.body })
-      .from(messages)
-      .where(inArray(messages.id, [...new Set(messageIds)]))
-      .orderBy(asc(messages.seq));
-    return rows.map((row) => ({
-      id: row.id,
-      // A message whose author was deleted keeps its text and loses its name.
-      // Empty rather than the id of nobody: attribution to "" matches no actor,
-      // which is the conservative reading the receipt checks want. It is also
-      // now a fact about the moment of the append rather than about today.
-      authorId: row.authorId ?? '',
-      body: row.body,
-    }));
+  async function trustToRecord(
+    runner: Pick<Database, 'execute'>,
+    event: RoomEvent,
+    actor: Actor,
+    roomId: string,
+  ): Promise<TrustedContext> {
+    const columns = actorToColumns(actor);
+    const rows = (await runner.execute(sql`
+      SELECT atrium_receipt_window(
+        ${roomId}::uuid,
+        ${columns.kind}::actor_kind,
+        ${JSON.stringify(event)}::jsonb
+      ) AS window
+    `)) as unknown as Array<{ window: ProvenanceMessage[] | null }>;
+    const window = rows[0]?.window ?? null;
+    return window === null
+      ? trustedContext({ actor })
+      : trustedContext({ actor, messages: window });
   }
 
   /**
-   * The trusted context one row folds under, **at append time**: its actor, plus
-   * the window its own payload cites, read from `messages` once.
+   * Two windows, compared as values.
    *
-   * What this returns is both what `appendEvent` folds and what is written to the
-   * row, which is the whole of live ≡ replay for the receipt checks: the replay
-   * does not reconstruct this, it reads it.
+   * `jsonb` normalises key order, so the round trip cannot be compared by
+   * `JSON.stringify` on the raw objects. `null` and `[]` stay distinct because
+   * #21's reducer reports them as different refusals.
    */
-  async function trustToRecord(
-    runner: Pick<Database, 'select'>,
-    event: RoomEvent,
-    actor: Actor,
-  ): Promise<TrustedContext> {
-    if (actor.kind === 'human') return trustedContext({ actor });
-    const ids = provenanceMessageIds(event);
-    if (ids.length === 0) return trustedContext({ actor });
-    return trustedContext({ actor, messages: await messageWindow(runner, ids) });
+  function sameWindow(
+    a: readonly ProvenanceMessage[] | null | undefined,
+    b: readonly ProvenanceMessage[] | null | undefined,
+  ): boolean {
+    // Length-prefixed rather than delimited. A message body may contain any
+    // character at all, so any separator is a separator a body can forge — and a
+    // comparison fooled by its own encoding is the exact class of bug this
+    // function exists to catch.
+    const part = (value: string) => `${value.length}:${value}`;
+    const canonical = (window: readonly ProvenanceMessage[] | null | undefined) =>
+      window === null || window === undefined
+        ? null
+        : window.map((m) => `${part(m.id)}${part(m.authorId)}${part(m.body)}`).join('');
+    return canonical(a) === canonical(b);
   }
 
   /**
@@ -700,20 +741,23 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           let after = state;
           let outcome: EventOutcome | null = null;
           /**
-           * The window this event folded under, on its way to the row.
+           * The window this event folded under.
            *
-           * `undefined` means no window was supplied and the column stays NULL;
-           * an array — including an empty one — is written verbatim, because a
-           * replay must read back the same absence or the same emptiness that the
-           * live fold saw. See `trustFromRow`.
+           * Not on its way anywhere: the append function derives its own from the
+           * same `atrium_receipt_window` and writes that. This is kept only so the
+           * two can be compared once the append returns what it stored, which is
+           * what makes "one derivation" a checked fact rather than a claim about
+           * the code. `undefined` for a ledger-only kind that was never folded.
            */
-          let recordedWindow: readonly ProvenanceMessage[] | undefined;
+          let foldedWindow: readonly ProvenanceMessage[] | undefined;
+          let folded = false;
           if (isCoreEvent(event)) {
-            // Read once, folded, and written to the row below. A replay reads the
-            // column; it never re-derives this. See the module note on r3-delta
-            // blocking 2.
-            const trusted = await trustToRecord(tx, event, actor);
-            recordedWindow = trusted.messages;
+            // Derived by the database, from the row this transaction is about to
+            // insert. Nothing here reads `messages`, and nothing here chooses the
+            // window — see the note on `trustToRecord` and r4-delta blocking.
+            const trusted = await trustToRecord(tx, event, actor, roomId);
+            foldedWindow = trusted.messages;
+            folded = true;
             const applied = appendEvent(state, event, trusted);
             if (applied.outcome === 'rejected' || applied.outcome === 'malformed') {
               // The whole point. Throwing here aborts the transaction, so the
@@ -740,9 +784,17 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           // parse of that column, not a re-assembly from the lifted ones. The
           // actor is NOT in the payload — a constraint refuses one that is — and
           // rides in its own two columns instead.
+          //
+          // There is **no receipt-window argument**. Round 4's signature had one
+          // and the r4-delta gauntlet's blocking finding is what it cost: the
+          // boundary validated its shape and stored it verbatim, so a direct
+          // caller supplied a well-formed lie and every later fold believed it.
+          // The window is derived inside, from `p_payload` and `p_room_id` — the
+          // same values this statement inserts — and returned so the fold above
+          // can be checked against it.
           const columns = actorToColumns(actor);
           const appended = (await tx.execute(sql`
-          SELECT "seq", "room_seq" FROM atrium_append_core_event(
+          SELECT "seq", "room_seq", "trusted_messages" FROM atrium_append_core_event(
             ${roomId}::uuid,
             ${event.id}::text,
             ${event.type}::event_type,
@@ -750,15 +802,36 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             ${columns.id}::text,
             ${JSON.stringify(event)}::jsonb,
             ${event.at}::timestamptz,
-            ${recordedWindow === undefined ? null : JSON.stringify(recordedWindow)}::jsonb,
             ${instanceId ?? null}::text
           )
-        `)) as unknown as Array<{ seq: string | number; room_seq: string | number }>;
+        `)) as unknown as Array<{
+            seq: string | number;
+            room_seq: string | number;
+            trusted_messages: ProvenanceMessage[] | null;
+          }>;
           const minted = appended[0];
           const seq = Number(minted?.seq);
           const roomSeq = Number(minted?.room_seq);
           if (!Number.isFinite(seq) || !Number.isFinite(roomSeq)) {
             throw new CommandError('conflict', 'the ledger append procedure returned no position');
+          }
+          /**
+           * The row folded under exactly the window the row now holds.
+           *
+           * Both values come from `atrium_receipt_window`, called twice in one
+           * transaction while this process holds the ledger lock — so this can
+           * only fail if the two calls were given different arguments, or if
+           * something wrote `messages` from outside an append. Either would mean
+           * the live fold and every future replay disagree about a receipt, which
+           * is the divergence the whole column exists to prevent, so it aborts
+           * rather than logs: the transaction rolls back and the event leaves
+           * nothing behind.
+           */
+          if (folded && !sameWindow(foldedWindow, minted?.trusted_messages ?? null)) {
+            throw new CommandError(
+              'conflict',
+              'the receipt window this event folded under is not the one the ledger recorded — refusing the append rather than storing a row that replays differently than it applied',
+            );
           }
 
           await request.project?.({

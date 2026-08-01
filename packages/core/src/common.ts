@@ -59,8 +59,74 @@ export const Id = z
   );
 export type Id = z.infer<typeof Id>;
 
-/** ISO-8601 timestamp. Callers supply time; the core never reads a clock. */
-export const Timestamp = z.iso.datetime({ offset: true });
+/**
+ * The one spelling of an instant this system uses:
+ * `YYYY-MM-DDTHH:MM:SS.mmmZ` — exactly what `Date#toISOString` produces.
+ *
+ * ## Why a spelling and not a format family (#22 gauntlet r4 delta, major 1)
+ *
+ * Round 4 constrained `core_events.payload->>'at'` to this spelling with a CHECK
+ * and left this type as `z.iso.datetime({ offset: true })`, then claimed the two
+ * were one rule. They were not:
+ *
+ * > `at` type/CHECK parity is false — `z.iso.datetime({ offset: true })` accepts
+ * > non-`Z` offsets and other spellings while the CHECK accepts only `…SS.mmmZ`,
+ * > so "one ISO spelling on both sides" does not hold.
+ *
+ * Exactly right, and the gap is not cosmetic. `2026-08-01T12:00:03.000+00:00`
+ * and `2026-08-01T12:00:03.000Z` are one instant to `timestamptz` and two
+ * different strings to `orderEvents`, so a log holding both has an ordering gate
+ * (SQL) and a reducer (JS) that disagree about whether two events are
+ * simultaneous. A type that admits a value the database refuses is also a type
+ * that turns a data problem into a runtime failure at the last possible moment —
+ * the event is built, folded, and then the INSERT says no.
+ *
+ * So the type is the CHECK, character for character, and
+ * `integration/db/ledger-constraints.test.ts` generates values across the whole
+ * disputed area and asserts that no value is accepted by one side and refused by
+ * the other.
+ *
+ * ## One regex, two engines
+ *
+ * Parity is not achieved by writing the same rule twice. `CANONICAL_TIMESTAMP` is
+ * the rule, and `packages/db/src/schema.ts` builds
+ * `core_events_payload_at_is_canonical_utc` out of `CANONICAL_TIMESTAMP.source`
+ * — so the CHECK is not a transcription that can drift, it is the same string.
+ * The pattern is deliberately calendar-aware (leap years, month lengths, hour and
+ * minute ranges) rather than the loose `[0-9]{2}` shape round 4 used, because a
+ * *shape* check admits `2026-13-45T25:00:00.000Z`: well-formed, impossible, and
+ * refused by the value type on one side while the database accepts it into a
+ * CHECK and only trips over it later at the `::timestamptz` cast. That is a
+ * parity failure too, just a quieter one. Postgres's advanced regular expressions
+ * take `\d`, `{n}` and `(?:…)` with the same meaning JavaScript gives them, so
+ * one source really does serve both.
+ *
+ * `integration/db/ledger-constraints.test.ts` fuzzes the two engines against each
+ * other across the whole disputed area and asserts the set of values one accepts
+ * and the other refuses is empty.
+ *
+ * ## What this narrows
+ *
+ * Deliberately every `Timestamp` in the core, not only an event's `at` — the same
+ * call `Id` got in round 4, for the same reason: a rule that applies to one of a
+ * type's uses is a rule the next caller does not know about. A `due` date, an
+ * `acceptedAt`, an ingest line's `ts` are all now one spelling, and the only
+ * producers in this repo (`Date#toISOString`, `nextTimestamp`,
+ * `normalizeTimestamp`) already emit it. The cost is real and worth naming: any
+ * writer that is not this codebase must normalise before handing a timestamp in,
+ * where before it could hand in any ISO-8601 instant. That is the trade the
+ * finding asks for — one spelling, so that string order and instant order are the
+ * same order everywhere.
+ */
+export const CANONICAL_TIMESTAMP =
+  /^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|02-(?:0[1-9]|1\d|2[0-8])))T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/;
+
+export const Timestamp = z
+  .string()
+  .regex(
+    CANONICAL_TIMESTAMP,
+    'a timestamp must be spelled exactly YYYY-MM-DDTHH:MM:SS.mmmZ and name a real instant — what Date#toISOString produces, and the only spelling core_events_payload_at_is_canonical_utc admits: two spellings of one instant make string order and timestamptz order disagree about which of two events came first',
+  );
 export type Timestamp = z.infer<typeof Timestamp>;
 
 /** Who did a thing. Mirrors `proposals.proposer_kind` / `corrections.by_*`. */

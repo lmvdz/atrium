@@ -229,6 +229,23 @@ function and nothing else. The integration suite proves the trigger by trying a
 direct insert *as the superuser owner* and being refused, and it appends through
 the same procedure the server does — there is no test-only write path.
 
+**Nothing the boundary trusts comes from its caller.** Two values on a ledger row
+decide what a fold is allowed to believe: the actor, and the receipt window a
+model acceptance is checked against. Both are now *computed* at the append rather
+than accepted there — the actor from the authenticated session, the window by
+`atrium_receipt_window(room_id, actor_kind, payload)`, which reads the room's own
+messages in the room's own order and takes nothing from the caller. There is no
+argument for either. That is not fussiness: three separate rounds moved one of
+these values into a more trusted place and left it forgeable, which is the rule
+worth carrying out of this ticket — **trust follows derivation, not location**,
+and the test for any new argument is whether a direct caller of the lowest-level
+write path could supply a well-formed lie. The audit of every argument
+`atrium_append_core_event` still takes, and of every `ON DELETE` action in the
+schema, is in the head of
+`packages/db/drizzle/0006_derived_receipt_snapshot.sql`; the FK audit is pinned to
+`pg_constraint` by an integration test rather than maintained by hand, because an
+audit with a stale row is evidence of nothing.
+
 The honest limit: a role with `CREATE` privilege could define a function with
 the same name and satisfy the stack check. It would still be refused by the lock
 assertion, and anyone with that privilege can drop the trigger anyway. The guard
@@ -301,7 +318,7 @@ What that does and does not buy, stated plainly:
 | Catch-up and recovery | **Yes.** `since(room, room_seq)` reads the ledger; any instance can answer it. |
 | Presence and typing | **Yes, as a relay.** Frames are forwarded on a second channel. There is no shared presence *registry*: each instance knows who is connected to it, and learns about everyone else only from the updates they send. An instance that starts mid-session sees nobody until they next say something. |
 | Notification delivery | **Best-effort, and nothing depends on it.** An instance disconnected when a NOTIFY fires never sees it; the reconciler folds and fans out those rows on its next pass, and on the listener's resubscribe. A lost doorbell costs latency, never delivery — `integration/server/reconcile.test.ts` severs a listener mid-run and asserts convergence with no client command at all. |
-| Writing around the app | **Refused.** `atrium_append_core_event` is the only way a row reaches `core_events`; `EXECUTE` on it is granted to the application role and revoked from `PUBLIC`, it authorizes a human actor's membership inside the transaction, and it refuses anything that does not sort strictly after the ledger's canonical cursor. A privileged operator who disables triggers (`session_replication_role`, `pg_restore --disable-triggers`) is out of scope and the migration says so. |
+| Writing around the app | **Refused.** `atrium_append_core_event` is the only way a row reaches `core_events`; `EXECUTE` on it is granted to the application role and revoked from `PUBLIC`, it authorizes a human actor's membership inside the transaction, refuses anything that does not sort strictly after the ledger's canonical cursor, refuses a row whose lifted room disagrees with the room its payload declares, and **derives** the receipt window rather than accepting one. A privileged operator who disables triggers (`session_replication_role`, `pg_restore --disable-triggers`) is out of scope and the migration says so. |
 | Throughput | **Bounded by the global append lock**, deliberately. Appends serialize instance-wide *and* across instances, because core state is global. init.md prescribes one application server; if that stops being true, the fix is to shard core state per room, not to weaken the lock while the state stays global. |
 
 `docker-compose.yml` still runs exactly one `server`. That is a capacity
