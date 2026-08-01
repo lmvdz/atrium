@@ -79,15 +79,29 @@ CREATE INDEX "core_events_object_subject_idx" ON "core_events" USING btree (("pa
 --     A smuggled key from another member's shape makes the sets differ, so it is
 --     a refusal rather than an alternative source of truth. There is nothing left
 --     to smuggle.
---  2. **That key's value is the row's room.** `IS NOT DISTINCT FROM`, not `=`: a
---     CHECK passes when its expression evaluates to NULL, so `=` against an
---     absent key would admit precisely the rows this exists to refuse.
+--  2. **That key's value is the row's room.** `IS NOT DISTINCT FROM`, not `=`.
+--
+--     CORRECTED IN R7 (#22 gauntlet r6, major 2). This said "`=` against an
+--     absent key would admit precisely the rows this exists to refuse", and that
+--     is no longer true of the shape shipped above: clause 1 already requires the
+--     declared key to be present and non-NULL for the five room-bearing kinds,
+--     and `ELSE room_id::text` covers the other three, so the CASE in clause 2 is
+--     never NULL when clause 1 holds — and when clause 1 fails, `false AND
+--     anything` is `false` regardless. The two spellings are **behaviourally
+--     identical** here and no test can separate them. The operator is kept so
+--     clause 2 does not depend on clause 1 for its own NULL behaviour, and it is
+--     pinned structurally rather than argued for; see `fails closed on a kind it
+--     does not enumerate, and says so structurally` in
+--     `integration/db/ledger-constraints.test.ts`.
 --
 -- `coalesce(…, false)` wraps the pair so an event type this `CASE` does not
--- enumerate **fails closed**. Unreachable today — `type` is an enum and
--- `core_events_payload_type_matches` pins the payload to it — and deliberately
--- kept, so a ninth kind added without a room policy is refused rather than waved
--- through by a NULL.
+-- enumerate **fails closed**. Unreachable through the table today — `type` is an
+-- enum and `core_events_payload_type_matches` pins the payload to it — and
+-- deliberately kept, so a ninth kind added without a room policy is refused
+-- rather than waved through by a NULL. Unlike the clause above this one *is*
+-- observable, and until r7 nothing observed it: the test named above reads this
+-- expression back out of `pg_constraint` and evaluates it against a ninth-kind
+-- payload, where dropping the wrapper yields NULL instead of `false`.
 --
 -- A smuggled key whose value is JSON `null` (`"proposal": {"roomId": null}`) is
 -- accepted, and that is not a gap: `->>'roomId'` yields SQL NULL either way, so
@@ -137,6 +151,23 @@ ALTER TABLE "core_events" ADD CONSTRAINT "core_events_payload_room_matches" CHEC
 -- *another row*, and a CHECK sees one row. So it is answered here, one layer up,
 -- in the only function that can put a row in this table.
 --
+-- CORRECTED IN R7 (#22 gauntlet r6, major 3). That last clause was false, and the
+-- entire room-less-kind guarantee rested on it. `0003`'s own header concedes the
+-- class in prose — "a role with CREATE privilege could define its own function
+-- with the same name and satisfy the stack check" — and the r6 gauntlet executed
+-- it: a function in schema `evil2`, compiled with `evil2` on the search path so
+-- PL/pgSQL labelled its frame unqualified, filed a rejection of room A's proposal
+-- into room B at `room_seq` 9999 dated 2020. This block was not reached, because
+-- this block only binds callers of this function.
+--
+-- `0008_invariants_on_the_table.sql` moves everything below onto the table, as
+-- the `core_events_invariants` BEFORE INSERT trigger, byte-for-byte the same
+-- rules with `NEW.` in place of the parameters. **What is deployed is the
+-- trigger; what follows is the version this migration installed and 0008
+-- replaced.** It is left here rather than rewritten because a migration is a
+-- record of what happened, and because the sentence that was wrong is worth
+-- keeping visible next to what replaced it.
+--
 -- The answer is read from the **ledger**, not from a projection: `proposals` and
 -- `accepted_objects` are derived tables written by the server after the append,
 -- and a boundary that trusted them would be trusting the thing it exists to
@@ -145,27 +176,48 @@ ALTER TABLE "core_events" ADD CONSTRAINT "core_events_payload_room_matches" CHEC
 -- Three outcomes, all refusals. Two of them are the command path's:
 -- an unknown subject (`resolveRoomId` throws `unknown proposal`/`unknown object`)
 -- and a subject that lives in another room (it throws "target belongs to room …").
--- The third is only reachable here, because only a direct caller can create the
--- log it describes: a subject minted twice in two different rooms, which no
--- replay can fold and which the boundary refuses rather than arbitrating with a
--- `LIMIT 1`.
+-- The third is a subject minted twice in two different rooms, which no replay can
+-- fold and which is refused rather than arbitrated with a `LIMIT 1`.
+--
+-- CORRECTED IN R7. This used to say the third was "only reachable here, because
+-- only a direct caller can create the log it describes", and the mechanism named
+-- was wrong: a second `proposal_recorded` for a known id is not a reducer
+-- rejection, it is `applied_with_issue`, and it appends. What actually stops the
+-- server producing a two-room subject is that `apps/server/src/commands.ts` mints
+-- subject ids with `randomUUID()`, so a client cannot choose one — a different
+-- mechanism entirely, in a different file, and one no test pinned. Stated here
+-- because "a caller cannot reach this" is exactly the kind of sentence this
+-- round is about.
 --
 -- ## This is the log's oracle. It is not the fold's, and the gap is stated here
 --
 -- `resolveRoomId` asks the folded `CoreState`, whose `proposals`/`objects` hold
 -- only subjects whose minting event **applied**. This asks the log, which holds
--- every minting row that exists. They differ for one shape: a minting event the
--- reducer refused — an authority gate, a duplicate — which only a direct caller
--- can put in the ledger, since the server refuses to append one.
+-- every minting row that exists. They differ for one shape: a minting row the
+-- fold does not install.
 --
--- For that shape this places the dependent row in the room its refused minting
+-- CORRECTED IN R7 (#22 gauntlet r6, minor 5). This used to add "which only a
+-- direct SQL caller can put there, since this function refuses to append one",
+-- and that containment argument was false. `ledger.append` aborts on `rejected`
+-- and `malformed` only; a *business* refusal is `applied_with_issue` and **is
+-- appended**. Accepting the same proposal twice through the ordinary command path
+-- produces two `object_accepted` rows, and the second object is absent from
+-- `coreState()` — `integration/server/commands.test.ts` says so out loud. So the
+-- seam is reachable by an ordinary client, not only by a direct caller. (The two
+-- reasons the reducer actually *rejects* for, `out_of_order` and `duplicate`, are
+-- both excluded from this table by the ordering gate and `core_events_id_key`, so
+-- naming them as the shape was wrong twice over.)
+--
+-- For that shape this places the dependent row in the room its unfolded minting
 -- event was recorded in, and the fold places it in **no** room (`null`, plus an
 -- `unknown object` issue). That is a column-versus-fold difference and it is not
 -- the cross-room misroute this round is about: the fold never answers a
 -- *different* room, because the candidate rooms are exactly the ones the CHECK
 -- above has already pinned to the column, and two candidates in two rooms are
 -- refused outright. Live still equals replay — both fold that row to the same
--- issue.
+-- issue. The r6 critic went looking for a case where the two oracles answer
+-- different rooms and reported finding none; what changes here is the size of the
+-- gap's *reachable* population, not its shape.
 --
 -- Closing it completely would mean folding inside the boundary, which means
 -- running the reducer in SQL. A CHECK and a plpgsql function can be the ledger's

@@ -73,67 +73,46 @@
       "apply": "GRANT EXECUTE ON FUNCTION public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text) TO PUBLIC",
       "restoreFrom": ["REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"", "DO $privileges$"],
       "catches": ["is not executable by PUBLIC"],
-      "restoreMigration": "0007_kind_discriminated_room.sql"
+      "restoreMigration": "0008_invariants_on_the_table.sql"
     },
     {
       "id": "append_authorizes_nobody",
       "suite": "integration",
       "kind": "sql",
-      "why": "Round 2's append function performed no membership authorization at all: any caller that could execute it wrote durable history into any room as any user.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_max_at timestamptz; v_max_id text; v_window jsonb; v_stored jsonb; v_subject_rooms uuid[]; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (p_occurred_at > v_max_at OR (p_occurred_at = v_max_at AND (p_event_id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; v_window := atrium_receipt_window(p_room_id, p_actor_kind, p_payload); IF p_payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = p_payload->>'proposalId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF p_payload->>'type' = 'object_corrected' THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = p_payload->>'objectId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM core_events e WHERE e.room_id = p_room_id; INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, v_room_seq, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, v_window) RETURNING core_events.seq, core_events.trusted_messages INTO v_seq, v_stored; PERFORM pg_notify('atrium_ledger', json_build_object('origin', p_origin, 'roomId', p_room_id, 'seq', v_seq, 'roomSeq', v_room_seq)::text); \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
-      ],
-      "restoreFrom": [
-        "CREATE FUNCTION \"atrium_append_core_event\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
-        "DO $privileges$"
-      ],
+      "why": "Round 2's append path performed no membership authorization at all: any caller that could reach the table wrote durable history into any room as any user. Since 0008 the rule is the core_events_invariants trigger rather than a block inside the append function, because a rule inside the function only binds callers of the function (r6 major 3).",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload); RETURN NEW; END; $m$",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
       "catches": [
         "refuses a human actor who holds no membership in the room",
         "refuses a human actor id that could not be a member at all"
       ],
-      "restoreMigration": "0007_kind_discriminated_room.sql"
+      "restoreMigration": "0008_invariants_on_the_table.sql"
     },
     {
       "id": "append_accepts_any_position",
       "suite": "integration",
       "kind": "sql",
-      "why": "Round 2's append function ran no reducer validation. The reducer refuses an event for exactly two reasons and both are properties of position; without the canonical-order gate a caller can write a row that a replay refuses to fold, and the server then cannot start against its own log.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_max_at timestamptz; v_max_id text; v_window jsonb; v_stored jsonb; v_subject_rooms uuid[]; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); IF p_actor_kind = 'human' THEN IF p_actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM memberships m WHERE m.room_id = p_room_id AND m.user_id = p_actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; v_window := atrium_receipt_window(p_room_id, p_actor_kind, p_payload); IF p_payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = p_payload->>'proposalId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF p_payload->>'type' = 'object_corrected' THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = p_payload->>'objectId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM core_events e WHERE e.room_id = p_room_id; INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, v_room_seq, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, v_window) RETURNING core_events.seq, core_events.trusted_messages INTO v_seq, v_stored; PERFORM pg_notify('atrium_ledger', json_build_object('origin', p_origin, 'roomId', p_room_id, 'seq', v_seq, 'roomSeq', v_room_seq)::text); \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
-      ],
-      "restoreFrom": [
-        "CREATE FUNCTION \"atrium_append_core_event\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
-        "DO $privileges$"
-      ],
+      "why": "Round 2 ran no reducer validation. The reducer refuses an event for exactly two reasons and both are properties of position; without the canonical-order gate a caller writes a row a replay refuses to fold, and the server then cannot start against its own log. Now enforced on the table, so it binds a caller that never goes through the append function.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload); RETURN NEW; END; $m$",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
       "catches": [
         "refuses an event that does not sort strictly after the ledger cursor",
         "breaks an exact timestamp tie on the event id, the way the reducer does"
       ],
-      "restoreMigration": "0007_kind_discriminated_room.sql"
+      "restoreMigration": "0008_invariants_on_the_table.sql"
     },
     {
       "id": "append_rings_no_doorbell",
       "suite": "integration",
       "kind": "sql",
-      "why": "Round 2 emitted pg_notify from the application, so a row written by anything else landed durably and told nobody.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_max_at timestamptz; v_max_id text; v_window jsonb; v_stored jsonb; v_subject_rooms uuid[]; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); IF p_actor_kind = 'human' THEN IF p_actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM memberships m WHERE m.room_id = p_room_id AND m.user_id = p_actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (p_occurred_at > v_max_at OR (p_occurred_at = v_max_at AND (p_event_id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; v_window := atrium_receipt_window(p_room_id, p_actor_kind, p_payload); IF p_payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = p_payload->>'proposalId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF p_payload->>'type' = 'object_corrected' THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = p_payload->>'objectId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM core_events e WHERE e.room_id = p_room_id; INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, v_room_seq, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, v_window) RETURNING core_events.seq, core_events.trusted_messages INTO v_seq, v_stored; \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
-      ],
-      "restoreFrom": [
-        "CREATE FUNCTION \"atrium_append_core_event\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
-        "DO $privileges$"
-      ],
+      "why": "Round 2 emitted pg_notify from the application, so a row written by anything else landed durably and told nobody. Since 0008 the emitter is an AFTER INSERT trigger rather than the append function, because a doorbell inside the function is silent for exactly the writer the comment above it names (r6 major 3).",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_doorbell() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ BEGIN PERFORM set_config('atrium.origin', '', true); RETURN NULL; END; $m$",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_doorbell\""],
       "catches": [
-        "emits the doorbell from inside the function, with the appending origin",
+        "emits the doorbell for every row that reaches the table, with the appending origin",
         "rings for everybody when the appender did not name itself"
       ],
-      "restoreMigration": "0007_kind_discriminated_room.sql"
+      "restoreMigration": "0008_invariants_on_the_table.sql"
     },
     {
       "id": "payload_may_carry_an_actor",
@@ -490,17 +469,19 @@
       "id": "append_takes_a_caller_supplied_window",
       "suite": "integration",
       "kind": "sql",
-      "why": "The r4-delta blocking finding, whole: the append boundary accepts the receipt window as a parameter, checks its shape, and stores it. A direct caller then fabricates a well-formed snapshot and every later fold validates the receipt against the forgery. Restored in the trailing position so the rest of the suite still resolves the call — the defect is that the argument EXISTS, not where it sits, and a caller reaches it by name whatever the order.",
-      "apply": "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text); CREATE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL, p_trusted_messages jsonb DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_max_at timestamptz; v_max_id text; v_window jsonb; v_stored jsonb; v_subject_rooms uuid[]; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); IF p_actor_kind = 'human' THEN IF p_actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM memberships m WHERE m.room_id = p_room_id AND m.user_id = p_actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (p_occurred_at > v_max_at OR (p_occurred_at = v_max_at AND (p_event_id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; v_window := coalesce(p_trusted_messages, atrium_receipt_window(p_room_id, p_actor_kind, p_payload)); IF p_payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = p_payload->>'proposalId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF p_payload->>'type' = 'object_corrected' THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = p_payload->>'objectId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM core_events e WHERE e.room_id = p_room_id; INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, v_room_seq, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, v_window) RETURNING core_events.seq, core_events.trusted_messages INTO v_seq, v_stored; PERFORM pg_notify('atrium_ledger', json_build_object('origin', p_origin, 'roomId', p_room_id, 'seq', v_seq, 'roomSeq', v_room_seq)::text); \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$",
+      "why": "The r4-delta blocking finding, whole: the append boundary accepts the receipt window as a parameter and stores it. A direct caller then fabricates a well-formed snapshot and every later fold validates the receipt against the forgery. Both halves are restored, because since 0008 the derivation is the table's — an argument on the function is only reachable if the trigger also stops overwriting the column, and half of the defect is not the defect.",
+      "apply": "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text); CREATE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL, p_trusted_messages jsonb DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_stored jsonb; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); PERFORM set_config('atrium.origin', coalesce(p_origin, ''), true); INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, p_trusted_messages) RETURNING core_events.seq, core_events.room_seq, core_events.trusted_messages INTO v_seq, v_room_seq, v_stored; \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$; CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := coalesce(NEW.trusted_messages, public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload)); RETURN NEW; END; $m$",
       "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text, jsonb)"
+        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text, jsonb)",
+        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
       ],
       "restoreFrom": [
+        "CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\"",
         "CREATE FUNCTION \"atrium_append_core_event\"",
         "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
         "DO $privileges$"
       ],
-      "restoreMigration": "0007_kind_discriminated_room.sql",
+      "restoreMigration": "0008_invariants_on_the_table.sql",
       "catches": [
         "takes eight arguments, and none of them is a receipt window",
         "refuses a fabricated receipt window, because there is no argument to put one in"
@@ -527,17 +508,10 @@
       "id": "append_stores_a_window_it_did_not_derive",
       "suite": "integration",
       "kind": "sql",
-      "why": "The boundary writes a window that is not the one the derivation produced. Nothing in SQL can notice, because both halves are the boundary's — so the server compares the window it folded under against the one the function reports storing, and refuses the append rather than committing a row that replays differently than it applied.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_max_at timestamptz; v_max_id text; v_window jsonb; v_stored jsonb; v_subject_rooms uuid[]; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); IF p_actor_kind = 'human' THEN IF p_actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM memberships m WHERE m.room_id = p_room_id AND m.user_id = p_actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (p_occurred_at > v_max_at OR (p_occurred_at = v_max_at AND (p_event_id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; v_window := '[]'::jsonb; IF p_payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = p_payload->>'proposalId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF p_payload->>'type' = 'object_corrected' THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = p_payload->>'objectId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM core_events e WHERE e.room_id = p_room_id; INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, v_room_seq, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, v_window) RETURNING core_events.seq, core_events.trusted_messages INTO v_seq, v_stored; PERFORM pg_notify('atrium_ledger', json_build_object('origin', p_origin, 'roomId', p_room_id, 'seq', v_seq, 'roomSeq', v_room_seq)::text); \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
-      ],
-      "restoreFrom": [
-        "CREATE FUNCTION \"atrium_append_core_event\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
-        "DO $privileges$"
-      ],
-      "restoreMigration": "0007_kind_discriminated_room.sql",
+      "why": "The table stores a window that is not the one the derivation produced. Nothing in SQL can notice, because both halves are the database's — so the server compares the window it folded under against the one the append reports storing, and refuses the append rather than committing a row that replays differently than it applied.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := '[]'::jsonb; RETURN NEW; END; $m$",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
+      "restoreMigration": "0008_invariants_on_the_table.sql",
       "catches": [
         "replays an accepted claim identically after its author is deleted",
         "derives the window from the event’s own provenance, in the room’s own order"
@@ -711,17 +685,10 @@
       "id": "append_trusts_a_room_less_kind",
       "suite": "integration",
       "kind": "sql",
-      "why": "The boundary stops resolving a room-less kind back to the room its subject was minted in. `proposal_rejected`, `proposal_superseded` and `object_corrected` name a proposal or an object rather than a room, so no CHECK over a single row can contradict the lifted `room_id` — a direct caller files a rejection of room A’s proposal into room B and both the fan-out and `since(B, n)` believe it. This is r5’s behaviour exactly.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_max_at timestamptz; v_max_id text; v_window jsonb; v_stored jsonb; v_subject_rooms uuid[]; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); IF p_actor_kind = 'human' THEN IF p_actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM memberships m WHERE m.room_id = p_room_id AND m.user_id = p_actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (p_occurred_at > v_max_at OR (p_occurred_at = v_max_at AND (p_event_id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; v_window := atrium_receipt_window(p_room_id, p_actor_kind, p_payload); SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM core_events e WHERE e.room_id = p_room_id; INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, v_room_seq, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, v_window) RETURNING core_events.seq, core_events.trusted_messages INTO v_seq, v_stored; PERFORM pg_notify('atrium_ledger', json_build_object('origin', p_origin, 'roomId', p_room_id, 'seq', v_seq, 'roomSeq', v_room_seq)::text); \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
-      ],
-      "restoreFrom": [
-        "CREATE FUNCTION \"atrium_append_core_event\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
-        "DO $privileges$"
-      ],
-      "restoreMigration": "0007_kind_discriminated_room.sql",
+      "why": "The boundary stops resolving a room-less kind back to the room its subject was minted in. `proposal_rejected`, `proposal_superseded` and `object_corrected` name a proposal or an object rather than a room, so no CHECK over a single row can contradict the lifted `room_id` — a caller files a rejection of room A's proposal into room B and both the fan-out and `since(B, n)` believe it. This is r5's behaviour exactly, at r7's location.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload); RETURN NEW; END; $m$",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
+      "restoreMigration": "0008_invariants_on_the_table.sql",
       "catches": [
         "refuses a rejection filed into a room its proposal does not live in",
         "refuses a correction filed into a room its object does not live in",
@@ -733,8 +700,8 @@
       "id": "append_returns_the_window_it_meant_to_store",
       "suite": "integration",
       "kind": "sql",
-      "why": "The append returns the value it intended to store instead of a `RETURNING` of the column it stored — r5’s body, and the overclaim in r5’s receipt. The two are the same value today, so this mutant changes no behaviour and **no behavioural test can catch it**; it is pinned structurally, by reading `prosrc`, and the test says so out loud. It is in the ledger to keep that pin honest rather than to demonstrate a defect.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_max_at timestamptz; v_max_id text; v_window jsonb; v_stored jsonb; v_subject_rooms uuid[]; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); IF p_actor_kind = 'human' THEN IF p_actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM memberships m WHERE m.room_id = p_room_id AND m.user_id = p_actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (p_occurred_at > v_max_at OR (p_occurred_at = v_max_at AND (p_event_id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; v_window := atrium_receipt_window(p_room_id, p_actor_kind, p_payload); IF p_payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = p_payload->>'proposalId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF p_payload->>'type' = 'object_corrected' THEN SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = p_payload->>'objectId'; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> p_room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM core_events e WHERE e.room_id = p_room_id; INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, v_room_seq, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, v_window) RETURNING core_events.seq INTO v_seq; PERFORM pg_notify('atrium_ledger', json_build_object('origin', p_origin, 'roomId', p_room_id, 'seq', v_seq, 'roomSeq', v_room_seq)::text); \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_window; RETURN NEXT; END; $m$",
+      "why": "The append returns the values it *intended* rather than a `RETURNING` of the columns the table assigned — r5's body, and the overclaim in r5's receipt. The two agree today, so this changes no behaviour and **no behavioural test can catch it**; it is pinned structurally, by reading `prosrc`, and the test says so out loud. Since 0008 the same argument covers `room_seq`, which the trigger mints: a function that recomputes it is a function that can report a position the row does not hold.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_window jsonb; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); PERFORM set_config('atrium.origin', coalesce(p_origin, ''), true); SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = p_room_id; v_window := public.atrium_receipt_window(p_room_id, p_actor_kind, p_payload); INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at) VALUES (p_room_id, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at) RETURNING core_events.seq INTO v_seq; \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_window; RETURN NEXT; END; $m$",
       "restorePrelude": [
         "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
       ],
@@ -743,7 +710,7 @@
         "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
         "DO $privileges$"
       ],
-      "restoreMigration": "0007_kind_discriminated_room.sql",
+      "restoreMigration": "0008_invariants_on_the_table.sql",
       "catches": [
         "returns the window by RETURNING of the stored column, not the value it meant to store"
       ]
@@ -781,6 +748,165 @@
         "refuses to run at all when the leftover mutation was a sql one",
         "refuses on a record it cannot read, rather than assuming there was none"
       ]
+    },
+    {
+      "id": "invariants_take_the_room_seq_they_are_given",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "The trigger stops minting `room_seq` and keeps whatever the INSERT supplied. The append function passes none, so every row lands NULL — but the shape that matters is the r6 exploit's, which supplied 9999: a caller-chosen position is a gap in a sequence the whole `since(room, room_seq)` contract calls contiguous.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; NEW.trusted_messages := public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload); RETURN NEW; END; $m$",
+      "restoreMigration": "0008_invariants_on_the_table.sql",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
+      "catches": [
+        "assigns a global seq and a per-room room_seq independently",
+        "mints room_seq itself, so no caller can choose or repeat one"
+      ]
+    },
+    {
+      "id": "append_guard_matches_an_unqualified_name",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "r6's guard, verbatim: `position('function atrium_append_core_event(' in v_context)`. PL/pgSQL labels each stack frame with `format_procedure` at compile time, which omits the schema qualifier when that schema is on `search_path` at that moment and caches the result for the session — so a function in any schema can wear the name. The r6 gauntlet used it to file a rejection of room A's proposal into room B, at room_seq 9999, dated 2020.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_append_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_context text; v_locked boolean; BEGIN GET DIAGNOSTICS v_context = PG_CONTEXT; IF position('function atrium_append_core_event(' in v_context) = 0 THEN RAISE EXCEPTION 'direct insert' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_through_procedure'; END IF; SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND classid = 0 AND objid = 1096045106 AND objsubid = 1 AND granted) INTO v_locked; IF NOT v_locked THEN RAISE EXCEPTION 'no lock' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_lock_held'; END IF; RETURN NEW; END; $m$",
+      "restoreMigration": "0008_invariants_on_the_table.sql",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_append_guard\""],
+      "catches": [
+        "refuses a spoofed call frame that borrows the append function’s name",
+        "refuses an append smuggled in from another schema’s atrium_append_core_event"
+      ]
+    },
+    {
+      "id": "append_guard_opens_when_its_door_is_missing",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "The guard derives the signature it expects from the catalog, and `position(x in y)` is NULL when either side is. Written as `IF position(...) = 0` without the NULL arm, a guard whose append function has been dropped or renamed stops refusing anything at all — a fail-open guard, produced by the obvious spelling. Mutated by dropping the NULL arm and pointing the lookup at a signature that does not exist, which is the state that spelling mishandles.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_append_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_context text; v_expected text; v_locked boolean; BEGIN GET DIAGNOSTICS v_context = PG_CONTEXT; v_expected := to_regprocedure('public.atrium_append_core_event(uuid,text,public.event_type,public.actor_kind,text,jsonb,timestamptz,text,text)')::text; IF position('function ' || v_expected || ' line ' in v_context) = 0 THEN RAISE EXCEPTION 'direct insert' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_through_procedure'; END IF; SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND classid = 0 AND objid = 1096045106 AND objsubid = 1 AND granted) INTO v_locked; IF NOT v_locked THEN RAISE EXCEPTION 'no lock' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_lock_held'; END IF; RETURN NEW; END; $m$",
+      "restoreMigration": "0008_invariants_on_the_table.sql",
+      "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_append_guard\""],
+      "catches": [
+        "refuses a direct INSERT, even from the table owner",
+        "refuses a spoofed call frame that borrows the append function’s name"
+      ]
+    },
+    {
+      "id": "append_takes_no_lock",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "The append function stops taking the ledger advisory lock. This is the only way to reach the guard's *second* branch now that its first one refuses a borrowed name outright: a frame that really is the append function, without the lock. r1 shipped a hand-conversion typo in this key and every single-process test stayed green while the mutual-exclusion guarantee was simply absent.",
+      "apply": "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text); CREATE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_stored jsonb; BEGIN PERFORM set_config('atrium.origin', coalesce(p_origin, ''), true); INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at) VALUES (p_room_id, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at) RETURNING core_events.seq, core_events.room_seq, core_events.trusted_messages INTO v_seq, v_room_seq, v_stored; \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$",
+      "restorePrelude": [
+        "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
+      ],
+      "restoreMigration": "0008_invariants_on_the_table.sql",
+      "restoreFrom": [
+        "CREATE FUNCTION \"atrium_append_core_event\"",
+        "REVOKE EXECUTE ON FUNCTION \"atrium_append_core_event\"",
+        "DO $privileges$"
+      ],
+      "catches": ["uses the same advisory lock key the server does"]
+    },
+    {
+      "id": "payload_room_check_does_not_fail_closed",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "The `coalesce(…, false)` wrapper is dropped from `core_events_payload_room_matches`. Both `schema.ts` and 0007 say in prose that it makes an unknown ninth kind fail closed; nothing tested it for two rounds, and it is behaviourally real — with the wrapper gone, a ninth kind with `room_id` = B and `object.roomId` = A lands, because a CHECK passes when its expression is NULL.",
+      "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches; ALTER TABLE core_events ADD CONSTRAINT core_events_payload_room_matches CHECK (array_remove(ARRAY[CASE WHEN payload->'proposal'->>'roomId' IS NOT NULL THEN 'proposal.roomId' END, CASE WHEN payload->'object'->>'roomId' IS NOT NULL THEN 'object.roomId' END, CASE WHEN payload->'relation'->>'roomId' IS NOT NULL THEN 'relation.roomId' END, CASE WHEN payload->>'roomId' IS NOT NULL THEN 'roomId' END], NULL) = CASE payload->>'type' WHEN 'proposal_recorded' THEN ARRAY['proposal.roomId'] WHEN 'object_accepted' THEN ARRAY['object.roomId'] WHEN 'relation_added' THEN ARRAY['relation.roomId'] WHEN 'message_posted' THEN ARRAY['roomId'] WHEN 'attention_resolved' THEN ARRAY['roomId'] WHEN 'proposal_rejected' THEN ARRAY[]::text[] WHEN 'proposal_superseded' THEN ARRAY[]::text[] WHEN 'object_corrected' THEN ARRAY[]::text[] END AND room_id::text IS NOT DISTINCT FROM CASE payload->>'type' WHEN 'proposal_recorded' THEN payload->'proposal'->>'roomId' WHEN 'object_accepted' THEN payload->'object'->>'roomId' WHEN 'relation_added' THEN payload->'relation'->>'roomId' WHEN 'message_posted' THEN payload->>'roomId' WHEN 'attention_resolved' THEN payload->>'roomId' ELSE room_id::text END)",
+      "restorePrelude": [
+        "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches"
+      ],
+      "restoreFrom": [
+        "ALTER TABLE \"core_events\" ADD CONSTRAINT \"core_events_payload_room_matches\""
+      ],
+      "restoreMigration": "0007_kind_discriminated_room.sql",
+      "catches": ["fails closed on a kind it does not enumerate, and says so structurally"]
+    },
+    {
+      "id": "payload_room_check_uses_equality",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "`IS NOT DISTINCT FROM` becomes `=` in the second clause. This changes no behaviour — clause 1 already guarantees the declared key is present and non-NULL, and `ELSE room_id::text` covers the rest, so no input separates the two spellings; the round-7 comments say exactly that instead of the justification they used to give. It is in the ledger to keep the structural pin honest: a corrected comment with nothing holding the code to it is the same defect one round later.",
+      "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches; ALTER TABLE core_events ADD CONSTRAINT core_events_payload_room_matches CHECK (coalesce(array_remove(ARRAY[CASE WHEN payload->'proposal'->>'roomId' IS NOT NULL THEN 'proposal.roomId' END, CASE WHEN payload->'object'->>'roomId' IS NOT NULL THEN 'object.roomId' END, CASE WHEN payload->'relation'->>'roomId' IS NOT NULL THEN 'relation.roomId' END, CASE WHEN payload->>'roomId' IS NOT NULL THEN 'roomId' END], NULL) = CASE payload->>'type' WHEN 'proposal_recorded' THEN ARRAY['proposal.roomId'] WHEN 'object_accepted' THEN ARRAY['object.roomId'] WHEN 'relation_added' THEN ARRAY['relation.roomId'] WHEN 'message_posted' THEN ARRAY['roomId'] WHEN 'attention_resolved' THEN ARRAY['roomId'] WHEN 'proposal_rejected' THEN ARRAY[]::text[] WHEN 'proposal_superseded' THEN ARRAY[]::text[] WHEN 'object_corrected' THEN ARRAY[]::text[] END AND room_id::text = CASE payload->>'type' WHEN 'proposal_recorded' THEN payload->'proposal'->>'roomId' WHEN 'object_accepted' THEN payload->'object'->>'roomId' WHEN 'relation_added' THEN payload->'relation'->>'roomId' WHEN 'message_posted' THEN payload->>'roomId' WHEN 'attention_resolved' THEN payload->>'roomId' ELSE room_id::text END, false))",
+      "restorePrelude": [
+        "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches"
+      ],
+      "restoreFrom": [
+        "ALTER TABLE \"core_events\" ADD CONSTRAINT \"core_events_payload_room_matches\""
+      ],
+      "restoreMigration": "0007_kind_discriminated_room.sql",
+      "catches": ["fails closed on a kind it does not enumerate, and says so structurally"]
+    },
+    {
+      "id": "event_type_drifts_from_the_deployed_enum",
+      "suite": "integration",
+      "kind": "file",
+      "why": "The drizzle event_type enum grows a value the database does not have. _CoreEventTypeCoverage asserts only that every core event type is in the enum, so this compiles. It pins that a comparison exists at all — and it is honest to say it does not discriminate r7 from r6, because r6 compared Object.keys(OWN_KEY) against eventType.enumValues and this trips that too. The direction r7 added is the database growing a kind TypeScript has not heard of, which cannot be a mutant at all: ALTER TYPE ... ADD VALUE is irreversible, so it would leak a ninth kind into every later file in the run. That half is verified by hand and the test says so.",
+      "file": "packages/db/src/schema.ts",
+      "find": "  'message_posted',\n  'attention_resolved',\n]);",
+      "replace": "  'message_posted',\n  'attention_resolved',\n  'ninth_kind',\n]);",
+      "catches": ["takes its list of kinds from the deployed enum, not from a TypeScript constant"]
+    },
+    {
+      "id": "bus_relays_whatever_is_published",
+      "suite": "integration",
+      "kind": "file",
+      "why": "The ephemeral channel goes back to casting: `JSON.parse(raw) as EphemeralAnnouncement`, which is r6 exactly. `NOTIFY` needs no privilege, so anything that can reach the database publishes a frame and `hub.broadcast` fans it out — including a durable `event` frame, which the client commits to its journal and advances `lastSeq` past, permanently skipping the real event at that position.",
+      "file": "apps/server/src/event-bus.ts",
+      "find": "const note = parse(raw, EPHEMERAL_CHANNEL, EphemeralNote);",
+      "replace": "const note = parse(raw, EPHEMERAL_CHANNEL, {\n            safeParse: (value: unknown) => ({ success: true as const, data: value as EphemeralAnnouncement }),\n          });",
+      "catches": ["drops a forged frame published on the ephemeral channel by anyone at all"]
+    },
+    {
+      "id": "client_casts_the_frame_it_was_sent",
+      "suite": "unit",
+      "kind": "file",
+      "why": "The client goes back to `JSON.parse(String(event.data)) as ServerFrame`. `handleFrame` reaches `applyEntry`, which writes the durable journal and moves `lastSeq`, so a frame accepted on the strength of a cast is a position the real event can never occupy — the durable half of r6's major 1.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "const parsed = ServerFrame.safeParse(json);",
+      "replace": "const parsed = { success: true as const, data: json as ServerFrame } as ReturnType<\n        typeof ServerFrame.safeParse\n      >;",
+      "catches": [
+        "does not move the cursor for an event whose envelope does not parse",
+        "refuses a catch-up page carrying one unreadable entry, and keeps the socket"
+      ]
+    },
+    {
+      "id": "journal_casts_what_it_reads_back",
+      "suite": "unit",
+      "kind": "file",
+      "why": "The journal goes back to `parsed.events as RoomEventEnvelope[]` behind two `typeof` checks. `localStorage` is shared with everything else on the origin and survives reloads, so a poisoned record is a `lastSeq` this client resumes from — and every real event at or below it is silently skipped. It was the last cast on a durable path in the client.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "const stored = StoredRoom.safeParse(JSON.parse(raw));",
+      "replace": "const loose = JSON.parse(raw) as { events?: unknown; lastSeq?: unknown };\n      const stored =\n        Array.isArray(loose.events) && typeof loose.lastSeq === \"number\"\n          ? { success: true as const, data: { events: loose.events as RoomEventEnvelope[], lastSeq: loose.lastSeq } }\n          : { success: false as const };",
+      "catches": ["reads a poisoned record as no history at all"]
+    },
+    {
+      "id": "client_resumes_a_cursor_past_the_head",
+      "suite": "unit",
+      "kind": "file",
+      "why": "The client stops checking its resumed cursor against the head the server states in the subscribed reply. Parsing the journal makes it well-formed, not authentic — localStorage is same-origin and carries no provenance — so a well-shaped forgery with lastSeq 50 resumes a room at 50 and skips every real position at or below it, permanently. Both foreign-lineage reviewers found this in r7s first draft; the arithmetic is the only check available, because the head is the one number the client did not write.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "        if (room.lastSeq > frame.head) {",
+      "replace": "        if (false) {",
+      "catches": ["discards a well-formed journal that resumes past the room’s head"]
+    },
+    {
+      "id": "client_lets_an_event_body_carry_an_actor",
+      "suite": "unit",
+      "kind": "file",
+      "why": "The client stops refusing an actor inside an event body. z.looseObject keeps unknown keys, so without this refinement event.actor survives the parse while the comment beside it says there is no such field — which is what a foreign-lineage probe of r7s first draft got back out of the journal. The server refuses a payload actor three times over, so a body carrying one did not come from the ledger.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "    .refine((body) => !('actor' in body), {",
+      "replace": "    .refine(() => true, {",
+      "catches": ["refuses an event whose body carries an actor"]
+    },
+    {
+      "id": "client_applies_a_catchup_page_for_another_room",
+      "suite": "unit",
+      "kind": "file",
+      "why": "The client stops requiring a catch-up page entries to name the page room. handleFrame does its arithmetic against view(frame.roomId) while applyEntry files each entry under entry.roomId, so a page whose entries name another room moves one room journal on another room cursor. The same cross-check exists on the bus (EphemeralNote) and was missing on the socket — an asymmetry inside r7 own fix, found by a second lineage.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "    .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {",
+      "replace": "    .refine(() => true, {",
+      "catches": ["refuses a catch-up page whose entries name a different room"]
     }
   ]
 }

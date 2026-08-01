@@ -165,9 +165,19 @@ ALTER TABLE "attention_items" ADD CONSTRAINT "attention_items_reason_has_kind" C
 -- position, and the problem is recorded beside it. There is nothing for a
 -- boundary to reject. So the two rejection reasons are the complete list, and
 -- with them enforced, **no caller — through the server or around it — can put a
--- row in this table that a replay would refuse to fold.** That was the invariant
--- this ticket exists to hold, and it now holds against writers the server has
--- never heard of.
+-- row in this table that a replay would *reject for position*.** That was the
+-- invariant this ticket exists to hold, and it now holds against writers the
+-- server has never heard of.
+--
+-- CORRECTED IN R7 (#22 gauntlet r6, major 2's sweep). That sentence said "that a
+-- replay would refuse to fold", which is a strictly larger claim and is refuted
+-- by its own next paragraph: a replay also refuses on **`malformed`** — see
+-- `apps/server/src/ledger.ts`, "ledger integrity: a row in core_events does not
+-- parse as a CoreEvent" — and SQL runs no zod, so a direct caller holding EXECUTE
+-- can store a structurally valid payload that `RoomEvent.parse` rejects. The
+-- narrower claim is the one this migration can hold, and it is the one it now
+-- makes. (What that residue costs a reader is #46's subject; the r6 gauntlet
+-- found the `since`/catch-up half of it.)
 --
 -- What is *not* claimed: full `CoreEvent` schema validation. A model claim
 -- missing its quote, a payload whose object type disagrees with its payload

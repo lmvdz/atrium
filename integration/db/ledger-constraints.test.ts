@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { CANONICAL_TIMESTAMP, compareCursor, Timestamp } from '@atrium/core';
-import type { DatabaseHandle } from '@atrium/db';
+import { type DatabaseHandle, migrationsFolder } from '@atrium/db';
 import {
   acceptedObjects,
   attentionItems,
@@ -10,10 +12,12 @@ import {
   proposals,
   users,
 } from '@atrium/db/schema';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import postgres from 'postgres';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { LEDGER_ADVISORY_LOCK_KEY } from '../../apps/server/src/ledger.js';
 import { describeError, violatesConstraint } from '../support/constraints.js';
+import { databaseUrl } from '../support/env.js';
 import { openDatabase, resetDatabase, seedRoom, until } from '../support/harness.js';
 
 /**
@@ -28,6 +32,22 @@ import { openDatabase, resetDatabase, seedRoom, until } from '../support/harness
  * below is Postgres's, and every assertion names the constraint that did it —
  * see `violatesConstraint` for why the name rather than the message.
  */
+
+/**
+ * The statements of one migration, from the file the server ships.
+ *
+ * Used by the privileges test to **replay the migration's own `DO` block** rather
+ * than to restate the rule it encodes. A test that spelled the loop out again
+ * would be a test that the test's copy of the rule does what the test's copy of
+ * the rule does — the vacuity the mutant ledger's restore-from-the-migration rule
+ * exists to rule out, arriving in a test instead of in an instrument.
+ */
+function statementsOf(file: string): string[] {
+  return readFileSync(join(migrationsFolder, file), 'utf8')
+    .split('--> statement-breakpoint')
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+}
 
 let handle: DatabaseHandle;
 let roomA: string;
@@ -413,13 +433,23 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
      * blocking finding, not a testing convenience: an argument a test can forge is
      * an argument anybody can forge. There is no such argument now, so the only
      * writer left that can put a bad window in the column is the one 0004, 0005
-     * and 0006 all name as out of scope — a superuser with the append trigger
+     * and 0006 all name as out of scope — a superuser with the append triggers
      * disabled. That is exactly who this constraint is for, so that is who drives
-     * it, explicitly and with the trigger put back in the same test.
+     * it, explicitly and with the triggers put back in the same test.
+     *
+     * **Two** triggers now, and the second one is r7's (#22 gauntlet r6, major 3):
+     * `core_events_invariants` *derives* `trusted_messages` on the way in, so with
+     * it enabled there is no value here for the CHECK to refuse — the column is
+     * whatever `atrium_receipt_window` returned, never what the INSERT said. That
+     * makes the CHECK a second line rather than the first one, which is the right
+     * shape and is exactly why it still has to be tested behind the trigger that
+     * now shadows it.
      *
      * Catches: dropping `core_events_trusted_messages_shape`.
      */
-    await handle.db.execute(sql`ALTER TABLE core_events DISABLE TRIGGER core_events_append_guard`);
+    await handle.db.execute(
+      sql`ALTER TABLE core_events DISABLE TRIGGER core_events_append_guard, DISABLE TRIGGER core_events_invariants`,
+    );
     try {
       let seq = 0;
       const bypass = (window: unknown) => {
@@ -446,9 +476,11 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
       await expect(bypass([{ id: 'm1', authorId: 'u1', body: 'hi' }])).resolves.toBeDefined();
       await expect(bypass([])).resolves.toBeDefined();
     } finally {
-      await handle.db.execute(sql`ALTER TABLE core_events ENABLE TRIGGER core_events_append_guard`);
+      await handle.db.execute(
+        sql`ALTER TABLE core_events ENABLE TRIGGER core_events_append_guard, ENABLE TRIGGER core_events_invariants`,
+      );
     }
-    // The trigger really is back on, so a later test in this file is not running
+    // The triggers really are back on, so a later test in this file is not running
     // against a ledger with its front door removed.
     await violatesConstraint('core_events_append_through_procedure', () =>
       handle.db.insert(coreEvents).values({
@@ -568,26 +600,37 @@ describe('core_events — the append path is structural, not cooperative', () =>
   });
 
   /**
-   * The honest limit of the call-stack check, tested rather than only admitted.
+   * A frame that borrows the append function's *name* is no longer a frame that
+   * satisfies the guard (#22 gauntlet r6, major 3).
    *
-   * A role with CREATE privilege can define a function with the same *name* — an
-   * overload, in the same schema, so the stack frame reads unqualified — and
-   * satisfy `position('function atrium_append_core_event(' in PG_CONTEXT)`.
-   * That is why the guard also asserts the ledger lock, and why the second
-   * check is not decoration: a spoofed frame that did not take the lock is
-   * still refused, by the lock.
+   * Until r7 the guard read `position('function atrium_append_core_event(' in
+   * PG_CONTEXT)`, and the r6 critic took that apart precisely: PL/pgSQL builds
+   * each frame's label from `format_procedure` **at compile time**, which omits
+   * the schema qualifier iff that schema is on `search_path` at that moment, and
+   * caches it for the session. So an overload in the same schema matched, and so
+   * did a function in a *different* schema compiled with that schema on the path
+   * — which is `refuses an append smuggled in from another schema’s
+   * atrium_append_core_event` below, the executed exploit.
    *
-   * Anyone able to do this can also drop the trigger, so the guard is aimed at
-   * the accidental bypass — the migration, the fix-up script, the well-meant
-   * backfill — and not at a DBA determined to lie to the log. Stating that is
-   * cheap; demonstrating exactly where the line falls is not.
+   * The guard now compares against `to_regprocedure(…)::text` under its own
+   * `search_path = pg_catalog, pg_temp`, which renders the schema-qualified
+   * signature `public.atrium_append_core_event(uuid,text,public.event_type,…)`.
+   * Both the overload here (wrong argument list) and any function outside
+   * `public` (wrong schema, and no search path can make `format_procedure` print
+   * `public.` in front of an `evil2` function) miss it.
+   *
+   * The limit that remains is stated rather than hidden: a role holding CREATE on
+   * schema `public` could define the colliding function there — and that role can
+   * also drop this trigger, so the guard is aimed at the accidental bypass and at
+   * the cross-schema one, not at the table's owner.
    */
-  it('refuses a spoofed call frame that does not hold the ledger lock', async () => {
+  it('refuses a spoofed call frame that borrows the append function’s name', async () => {
     await handle.db.execute(
       sql.raw(`
         CREATE OR REPLACE FUNCTION atrium_append_core_event(p jsonb) RETURNS void
         LANGUAGE plpgsql AS $spoof$
         BEGIN
+          PERFORM pg_advisory_xact_lock(1096045106::bigint);
           INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at)
           VALUES ((p->>'roomId')::uuid, 1, p->>'id', 'message_posted',
                   'system', NULL, p->'payload', (p->>'at')::timestamptz);
@@ -596,7 +639,10 @@ describe('core_events — the append path is structural, not cooperative', () =>
     );
     try {
       const row = ledgerRow(roomA);
-      await violatesConstraint('core_events_append_lock_held', () =>
+      // The spoof takes the real advisory lock, so the lock half of the guard is
+      // satisfied and the refusal below can only be the signature half. Under r6
+      // this INSERT landed.
+      await violatesConstraint('core_events_append_through_procedure', () =>
         handle.db.execute(
           sql`SELECT atrium_append_core_event(${JSON.stringify({
             roomId: row.roomId,
@@ -608,6 +654,103 @@ describe('core_events — the append path is structural, not cooperative', () =>
       );
     } finally {
       await handle.db.execute(sql.raw('DROP FUNCTION atrium_append_core_event(jsonb)'));
+    }
+    const [{ count } = { count: 0 }] = await handle.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(coreEvents);
+    expect(Number(count)).toBe(0);
+  });
+
+  /**
+   * The exploit the r6 gauntlet executed against a real Postgres 16, run here.
+   *
+   * > `CREATE SCHEMA evil2; CREATE FUNCTION evil2.atrium_append_core_event(...)`
+   * > … `SET search_path = evil2, public;` **before the first compile**
+   * > → seq 51, room_id = room B, room_seq 9999, occurred_at 2020, for a proposal
+   * > minted in room A
+   *
+   * Two independent things now stop it, and the test asserts both, because either
+   * one alone would leave the other's sentence load-bearing:
+   *
+   *  1. the guard refuses the frame, because `format_procedure` can never print
+   *     `public.` in front of an `evil2` function whatever the search path;
+   *  2. with the guard disabled — the operator bypass everything here concedes —
+   *     `core_events_invariants` still refuses it, because the rejection names a
+   *     proposal minted in room A and is being filed into room B. That is the
+   *     half that matters, since it is the half a call stack cannot lie its way
+   *     past.
+   *
+   * The `search_path` is set on the same connection *before* the evil function is
+   * ever called, which is what the finding turns on: the qualifier is decided at
+   * compile time and cached for the session.
+   */
+  it('refuses an append smuggled in from another schema’s atrium_append_core_event', async () => {
+    const minted = randomUUID();
+    await append(recording(roomA, minted));
+
+    // Its own connection, because the exploit is about one session's search path
+    // at one moment, and the pool the rest of this file uses is shared.
+    const client = postgres(databaseUrl(), { max: 1, onnotice: () => undefined });
+    try {
+      await client.unsafe('CREATE SCHEMA evil2');
+      await client.unsafe(`
+        CREATE FUNCTION evil2.atrium_append_core_event(
+          p_room_id uuid, p_event_id text, p_payload jsonb, p_room_seq bigint, p_at timestamptz
+        ) RETURNS bigint LANGUAGE plpgsql AS $evil$
+        DECLARE v_seq bigint;
+        BEGIN
+          PERFORM pg_advisory_xact_lock(1096045106::bigint);
+          INSERT INTO public.core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at)
+          VALUES (p_room_id, p_room_seq, p_event_id, (p_payload->>'type')::public.event_type,
+                  'system'::public.actor_kind, NULL, p_payload, p_at)
+          RETURNING seq INTO v_seq;
+          RETURN v_seq;
+        END; $evil$;
+      `);
+      // Before the first compile. This is the whole mechanism of the finding.
+      await client.unsafe('SET search_path = evil2, public');
+
+      const smuggled = {
+        id: randomUUID(),
+        at: '2020-01-01T00:00:00.000Z',
+        type: 'proposal_rejected',
+        proposalId: minted,
+        reason: 'no',
+      };
+      const call = () =>
+        client.unsafe(
+          `SELECT evil2.atrium_append_core_event('${roomB}'::uuid, '${smuggled.id}', '${JSON.stringify(
+            smuggled,
+          )}'::jsonb, 9999, '${smuggled.at}'::timestamptz)`,
+        );
+
+      // 1. the guard, on its own.
+      await violatesConstraint('core_events_append_through_procedure', call);
+
+      // 2. and the invariants, with the guard taken out of the way entirely —
+      //    which is the operator bypass this file has always conceded, and the
+      //    reason the guarantee could not be allowed to live in the guard.
+      await client.unsafe(
+        'ALTER TABLE public.core_events DISABLE TRIGGER core_events_append_guard',
+      );
+      try {
+        await violatesConstraint('core_events_subject_room_matches', call);
+      } finally {
+        await client.unsafe(
+          'ALTER TABLE public.core_events ENABLE TRIGGER core_events_append_guard',
+        );
+      }
+
+      // Nothing landed either way: one row in the ledger, the honest one. Under
+      // r6 the first call alone landed a `proposal_rejected` in room B, at
+      // room_seq 9999, dated 2020, for a proposal minted in room A.
+      const [{ count } = { count: 0 }] = await handle.db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(coreEvents);
+      expect(Number(count)).toBe(1);
+    } finally {
+      await client.unsafe('DROP SCHEMA IF EXISTS evil2 CASCADE').catch(() => undefined);
+      await client.end({ timeout: 5 });
     }
   });
 
@@ -655,7 +798,7 @@ describe('core_events — the append path is structural, not cooperative', () =>
  * `drizzle/0004_trusted_actor_and_append_boundary.sql`, which says so in as many
  * words rather than implying coverage it cannot have.
  */
-describe('core_events — the append function is the authorization boundary', () => {
+describe('core_events — the table is the authorization boundary', () => {
   it('is not executable by PUBLIC', async () => {
     // Catches: the r2 privilege block, which granted EXECUTE to PUBLIC on the
     // reasoning that the trigger was the real guard. It made the door the guard.
@@ -679,6 +822,96 @@ describe('core_events — the append function is the authorization boundary', ()
             AND p.pronamespace = 'public'::regnamespace`,
     );
     expect(row?.granted).toBe(true);
+  });
+
+  it('grants the door to exactly the roles its own heuristic names', async () => {
+    /**
+     * The migration's privilege loop is `rolcanlogin AND NOT rolsuper AND
+     * rolname <> owner AND has_table_privilege(role, 'core_events', 'SELECT')`,
+     * and what it grants is EXECUTE on the append function. That is how 0004
+     * identifies the application role without being told its name.
+     *
+     * The function's `COMMENT` said "EXECUTE is granted to the application role
+     * only", which is **not what that loop does**: a read-only LOGIN role that
+     * already holds SELECT — an auditor, a metrics scraper — matches it too, and
+     * comes out able to append a `system`-actor event into any room it can name.
+     * A foreign-lineage review of r7's own diff found the sentence, and found
+     * that r7's first attempt at this test passed for the wrong reason twice: it
+     * created the role `NOLOGIN` and *after* the migrations, so it could never
+     * have matched the loop it claimed to be about.
+     *
+     * So this runs the real rule against real roles: two of them, differing only
+     * in the thing the heuristic keys on, with the migration's own block replayed
+     * over them. The point is not that the posture is *good* — it is wider than
+     * the comment claimed and that is now written down in 0008 and routed — but
+     * that it is **known**, and that nobody has to re-derive it from a `DO` block
+     * to find out what a `GRANT SELECT` costs.
+     */
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12);
+    const reader = `atrium_reader_${suffix}`;
+    const stranger = `atrium_stranger_${suffix}`;
+    const privileges = statementsOf('0008_invariants_on_the_table.sql').find((statement) =>
+      statement.includes('$privileges$'),
+    );
+    if (!privileges) throw new Error('0008 has no privileges block to replay');
+
+    await handle.db.execute(sql.raw(`CREATE ROLE "${reader}" LOGIN`));
+    await handle.db.execute(sql.raw(`CREATE ROLE "${stranger}" LOGIN`));
+    try {
+      // The only difference between them, and the only thing the loop reads.
+      await handle.db.execute(sql.raw(`GRANT SELECT ON TABLE public.core_events TO "${reader}"`));
+      await handle.db.execute(sql.raw(privileges));
+
+      const [granted] = await handle.db.execute<Record<string, boolean>>(
+        sql`SELECT
+              has_function_privilege(${reader}, p.oid, 'EXECUTE') AS "reader",
+              has_function_privilege(${stranger}, p.oid, 'EXECUTE') AS "stranger",
+              has_function_privilege('public', p.oid, 'EXECUTE') AS "everyone"
+            FROM pg_proc p
+            WHERE p.proname = 'atrium_append_core_event'
+              AND p.pronamespace = 'public'::regnamespace`,
+      );
+      // The posture as it actually is: SELECT buys the door; nothing buys it for
+      // a role without SELECT; PUBLIC never holds it.
+      expect(granted).toEqual({ reader: true, stranger: false, everyone: false });
+
+      // And the table itself stays read-only for both, which is the half the
+      // `REVOKE` in 0003 is responsible for and which nothing had asserted.
+      for (const role of [reader, stranger]) {
+        const [table] = await handle.db.execute<Record<string, boolean>>(
+          sql`SELECT
+                has_table_privilege(${role}, 'public.core_events', 'INSERT') AS "insert",
+                has_table_privilege(${role}, 'public.core_events', 'UPDATE') AS "update",
+                has_table_privilege(${role}, 'public.core_events', 'DELETE') AS "delete",
+                has_table_privilege(${role}, 'public.core_events', 'TRUNCATE') AS "truncate"`,
+        );
+        expect(table).toEqual({
+          insert: false,
+          update: false,
+          delete: false,
+          truncate: false,
+        });
+      }
+      const [pub] = await handle.db.execute<Record<string, boolean>>(
+        sql`SELECT has_table_privilege('public', 'public.core_events', 'INSERT') AS "insert"`,
+      );
+      expect(pub).toEqual({ insert: false });
+    } finally {
+      await handle.db.execute(sql.raw(`REVOKE ALL ON TABLE public.core_events FROM "${reader}"`));
+      for (const role of [reader, stranger]) {
+        await handle.db.execute(
+          sql.raw(
+            `REVOKE ALL ON FUNCTION public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text) FROM "${role}"`,
+          ),
+        );
+        await handle.db.execute(
+          sql.raw(
+            `REVOKE ALL ON FUNCTION public.atrium_receipt_window(uuid, actor_kind, jsonb) FROM "${role}"`,
+          ),
+        );
+        await handle.db.execute(sql.raw(`DROP ROLE "${role}"`));
+      }
+    }
   });
 
   it('refuses a human actor who holds no membership in the room', async () => {
@@ -718,9 +951,13 @@ describe('core_events — the append function is the authorization boundary', ()
    * @atrium/core refuses an event for exactly two reasons and both are
    * properties of *position*: `out_of_order` (it does not sort strictly after
    * the state's cursor) and `duplicate` (its id is spent). Position is what a
-   * database can check, so both are checked in the function — and with them
-   * enforced, no caller can put a row in this table that a replay would refuse
-   * to fold, which is the invariant the whole ticket rests on.
+   * database can check, so both are checked — the ordering gate in the
+   * `core_events_invariants` trigger since r7, the duplicate gate by
+   * `core_events_id_key` — and with them enforced, no caller can put a row in
+   * this table that a replay would refuse **for position**, which is the
+   * invariant the whole ticket rests on. Not "refuse to fold": a replay also
+   * refuses a payload `RoomEvent.parse` rejects, and SQL runs no zod. That
+   * residue is #46 and the claim is scoped to exclude it (r6 major 2's sweep).
    *
    * The reducer's third verdict, `applied_with_issue`, is not a refusal: the
    * event happened and the problem is recorded beside it, so there is nothing
@@ -762,7 +999,18 @@ describe('core_events — the append function is the authorization boundary', ()
    * durably and told nobody — and every other instance's subscribers sat at
    * their cursors indefinitely with no gap to notice.
    */
-  it('emits the doorbell from inside the function, with the appending origin', async () => {
+  it('emits the doorbell for every row that reaches the table, with the appending origin', async () => {
+    /**
+     * `apps/server/src/event-bus.ts` says "no writer can insert a row silently —
+     * including a writer that is not this application", and until r7 the
+     * `pg_notify` was inside `atrium_append_core_event`, which made that sentence
+     * false for exactly the writer it named: the r6 gauntlet landed a row through
+     * a different function and nothing rang. It is an AFTER INSERT trigger now
+     * (`core_events_doorbell`), so the second half of this test is the sentence.
+     *
+     * Catches: moving `pg_notify` back into the application, and moving it back
+     * into the append function.
+     */
     const notifications: string[] = [];
     const listener = await handle.sql.listen('atrium_ledger', (raw) => {
       notifications.push(raw);
@@ -771,13 +1019,53 @@ describe('core_events — the append function is the authorization boundary', ()
       const appended = await append(ledgerRow(roomA), 'instance-under-test');
       await until(() => notifications.length > 0, 5_000, 'a ledger notification');
       const note = JSON.parse(notifications[0] as string) as Record<string, unknown>;
-      // Catches: moving `pg_notify` back into the application. A row appended by
-      // this test — which is not the application — must still ring the bell.
       expect(note).toMatchObject({
         origin: 'instance-under-test',
         roomId: roomA,
         seq: appended.seq,
         roomSeq: appended.roomSeq,
+      });
+
+      // And a writer that is not the append function at all — in the **same
+      // transaction** as an append that did name itself, which is the only case
+      // where "the doorbell consumes the origin" is a claim rather than a
+      // description. `atrium.origin` is a transaction-local GUC; without the
+      // clear inside the doorbell, this row would inherit `instance-under-test`
+      // and be ignored by the one instance that most needs to fold it.
+      //
+      // The guard is the thing being stepped around, so it is stepped around
+      // explicitly. The invariants trigger is left on, which is why this row is
+      // legal at all — it gets its `room_seq` and its window from the table.
+      await handle.db.transaction(async (tx) => {
+        await tx.execute(sql`ALTER TABLE core_events DISABLE TRIGGER core_events_append_guard`);
+        const named = ledgerRow(roomA);
+        await tx.execute(sql`
+          SELECT "seq" FROM atrium_append_core_event(
+            ${roomA}::uuid, ${named.id}::text, 'message_posted'::event_type, 'system'::actor_kind,
+            NULL::text, ${JSON.stringify(named.payload)}::jsonb, ${named.occurredAt}::timestamptz,
+            'instance-under-test'::text)
+        `);
+        const stranger = ledgerRow(roomA);
+        await tx.execute(sql`
+          INSERT INTO core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at)
+          VALUES (${roomA}::uuid, ${stranger.id}::text, 'message_posted', 'system', NULL,
+                  ${JSON.stringify(stranger.payload)}::jsonb, ${stranger.occurredAt}::timestamptz)
+        `);
+        await tx.execute(sql`ALTER TABLE core_events ENABLE TRIGGER core_events_append_guard`);
+      });
+      await until(() => notifications.length > 2, 5_000, 'the stranger’s doorbell');
+      // The named append still names itself…
+      expect(JSON.parse(notifications[1] as string)).toMatchObject({
+        origin: 'instance-under-test',
+        roomSeq: appended.roomSeq + 1,
+      });
+      // …and the stranger, one statement later in the same transaction, is
+      // `null`: it named no instance, which matches none of them, so every
+      // instance folds it. That is the direction to be wrong in.
+      expect(JSON.parse(notifications[2] as string)).toMatchObject({
+        origin: null,
+        roomId: roomA,
+        roomSeq: appended.roomSeq + 2,
       });
     } finally {
       await listener.unlisten();
@@ -1197,7 +1485,7 @@ function insertRelation(roomId: string, fromId: string, toId: string) {
  *    rule about mutation ledgers exists to rule out.
  */
 describe('canonical order — the SQL gate and the reducer agree, and only inside the subset', () => {
-  /** The comparison the append function performs, evaluated by Postgres. */
+  /** The comparison the `core_events_invariants` trigger performs, in Postgres. */
   async function sqlCompare(
     pairs: ReadonlyArray<{ aAt: string; aId: string; bAt: string; bId: string }>,
   ): Promise<number[]> {
@@ -1318,18 +1606,23 @@ describe('canonical order — the SQL gate and the reducer agree, and only insid
    * behavioural test in this suite able to see it.
    *
    * Catches: dropping `COLLATE "C"` from either side of the ordering comparison
-   * in `atrium_append_core_event`, or from the index that serves it.
+   * in `atrium_core_events_invariants`, or from the index that serves it.
+   *
+   * The gate moved out of `atrium_append_core_event` and onto the table in 0008
+   * (#22 gauntlet r6, major 3), so this reads the trigger function's body. That
+   * is not a cosmetic follow: a gate inside the append function only binds
+   * callers of the append function, which is the assumption the r6 exploit broke.
    */
   it('compares ids under COLLATE "C" in the deployed append gate', async () => {
     const [fn] = await handle.db.execute<{ src: string }>(
       sql`SELECT prosrc AS src FROM pg_proc
-          WHERE proname = 'atrium_append_core_event'
+          WHERE proname = 'atrium_core_events_invariants'
             AND pronamespace = 'public'::regnamespace`,
     );
     const body = fn?.src ?? '';
     // Both the read of the cursor and the comparison against it.
     expect(body).toContain('e."id" COLLATE "C" DESC');
-    expect(body).toContain('(p_event_id COLLATE "C") > (v_max_id COLLATE "C")');
+    expect(body).toContain('(NEW."id" COLLATE "C") > (v_max_id COLLATE "C")');
 
     const [index] = await handle.db.execute<{ def: string }>(
       sql`SELECT indexdef AS def FROM pg_indexes
@@ -1511,14 +1804,34 @@ describe('core_events — the receipt window is derived, not supplied', () => {
       'p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamp with time zone, p_origin text',
     );
 
-    // And the body really calls the derivation rather than merely not taking an
+    // And something really calls the derivation rather than merely not taking an
     // argument — "no parameter" plus "always NULL" satisfies the line above.
+    //
+    // Since 0008 the caller is the `core_events_invariants` trigger, not the
+    // append function: the window is assigned onto the row on its way into the
+    // table, so it is derived for *every* writer rather than for callers of one
+    // function (#22 gauntlet r6, major 3). The append function is asserted not to
+    // mention the derivation at all, which is what "it moved" means as opposed to
+    // "it is in two places now".
+    const [derivation] = await handle.db.execute<{ src: string }>(
+      sql`SELECT prosrc AS src FROM pg_proc
+          WHERE proname = 'atrium_core_events_invariants'
+            AND pronamespace = 'public'::regnamespace`,
+    );
+    expect(derivation?.src).toContain(
+      'NEW."trusted_messages" := public."atrium_receipt_window"(NEW."room_id", NEW."actor_kind", NEW."payload")',
+    );
     const [fn] = await handle.db.execute<{ src: string }>(
       sql`SELECT prosrc AS src FROM pg_proc
           WHERE proname = 'atrium_append_core_event'
             AND pronamespace = 'public'::regnamespace`,
     );
-    expect(fn?.src).toContain('"atrium_receipt_window"(p_room_id, p_actor_kind, p_payload)');
+    expect(fn?.src).not.toContain('atrium_receipt_window');
+    // …and it does not name `trusted_messages` in the INSERT either, so there is
+    // no column list a later edit could quietly add a caller-supplied value to.
+    expect(fn?.src).toContain(
+      'INSERT INTO public."core_events" ("room_id", "id", "type", "actor_kind", "actor_id", "payload", "occurred_at")',
+    );
   });
 
   it('refuses a fabricated receipt window, because there is no argument to put one in', async () => {
@@ -1754,7 +2067,7 @@ describe('core_events — the room key is the one this kind declares, and no oth
   };
 
   /** Write a room key into a payload at one of the four spellings. */
-  function smuggle(payload: Record<string, unknown>, key: RoomKey, value: string): void {
+  function smuggle(payload: Record<string, unknown>, key: RoomKey, value: string | null): void {
     if (key === 'roomId') {
       payload.roomId = value;
       return;
@@ -1854,10 +2167,184 @@ describe('core_events — the room key is the one this kind declares, and no oth
       landed += 1;
     }
     expect(landed).toBe(8);
-    // …and the whole union is covered rather than the half somebody remembered.
-    // Against the database's own enum, so a ninth kind added to `event_type`
-    // fails here rather than quietly going untested by both loops above.
-    expect(new Set(Object.keys(OWN_KEY))).toEqual(new Set(eventType.enumValues));
+  });
+
+  /**
+   * The union this file loops over is the **database's**, not TypeScript's
+   * (#22 gauntlet r6, minor 4).
+   *
+   * The line here used to say "against the database's own enum, so a ninth kind
+   * added to `event_type` fails here" while comparing `Object.keys(OWN_KEY)` to
+   * `eventType.enumValues` — the drizzle constant, on *both* sides. The critic
+   * added `ninth_kind` to the live enum and the suite stayed green, because
+   * nothing in the repo read `pg_enum`. Migrations 0003–0008 are hand-written
+   * SQL, so that drift is writable.
+   *
+   * Two comparisons now, and they are different comparisons:
+   *
+   *  1. the deployed enum against `OWN_KEY`, so a ninth kind is a kind this file
+   *     has no room policy for and says so;
+   *  2. the deployed enum against `eventType.enumValues`, so a ninth kind added
+   *     in SQL without the drizzle schema following is caught where it happens
+   *     rather than wherever it is first read back.
+   *
+   * `enum_range` rather than a `pg_enum` join, because it is the value the type
+   * actually has, in `enumsortorder`.
+   *
+   * ## Half of this is not mutatable, and that is stated rather than papered over
+   *
+   * The mutant `event_type_drifts_from_the_deployed_enum` adds a value to the
+   * drizzle constant, which trips comparison 2 — but it tripped r6's assertion
+   * too, so it is a pin, not evidence that r7 fixed anything. The direction that
+   * *is* r7's is the database growing a kind TypeScript has not heard of, and
+   * that cannot be a mutant: `ALTER TYPE … ADD VALUE` cannot be undone, so a
+   * mutation using it would leak a ninth kind into every later file in the run.
+   *
+   * It was therefore verified by hand, twice, on throwaway instances: the r6
+   * critic added `ninth_kind` to a live enum and `pnpm test:integration` exited 0
+   * on r6; this round reproduced that (r6 tree, 9 values confirmed, r6's own
+   * `integration/db` file still 71/71 green) and confirmed this test goes red
+   * against the same database. Recorded here because "verified by hand" that is
+   * not written down is indistinguishable from not verified.
+   */
+  it('accepts a smuggled key whose value is JSON null, because it carries no room', async () => {
+    /**
+     * The one shape both `schema.ts` and 0007 explicitly say is *accepted*, and
+     * which nothing exercised until r7 — the `smuggle` helper above only ever
+     * wrote strings (#22 gauntlet r6, major 2's sweep).
+     *
+     * > A smuggled key whose value is JSON `null` (`proposal: {roomId: null}`) is
+     * > accepted, and that is not a gap: `->>'roomId'` is SQL NULL either way, the
+     * > key carries no room, and no fan-out or fold can read one out of it.
+     *
+     * A sentence claiming a *permission* is as much a claim as one claiming a
+     * refusal, and it is the easier one to break by accident: any tightening of
+     * clause 1 from "is not null" to "exists" turns every one of these into a
+     * refusal, and the shape is legal JSON that a client could produce.
+     *
+     * So it is asserted both ways round — the row lands, **and** the room it
+     * lands in is still the one its own kind's key names, which is the property
+     * the acceptance is only safe because of.
+     */
+    let landed = 0;
+    for (const [type, own] of Object.entries(OWN_KEY)) {
+      for (const key of ROOM_KEYS) {
+        if (key === own) continue;
+        const row = kindRow(type, roomA, { proposalId, objectId });
+        smuggle(row.payload as Record<string, unknown>, key, null);
+        const appended = await append(row);
+        expect(appended.seq).toBeGreaterThan(0);
+        landed += 1;
+      }
+    }
+    // 5 kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
+    expect(landed).toBe(27);
+    const filed = await handle.db
+      .select({ roomId: coreEvents.roomId })
+      .from(coreEvents)
+      .where(eq(coreEvents.roomId, roomB));
+    expect(filed).toEqual([]);
+  });
+
+  it('takes its list of kinds from the deployed enum, not from a TypeScript constant', async () => {
+    const [row] = await handle.db.execute<{ kinds: string[] }>(
+      sql`SELECT enum_range(NULL::event_type)::text[] AS kinds`,
+    );
+    const deployed = row?.kinds ?? [];
+    expect(deployed.length).toBeGreaterThan(0);
+    // 1. every kind the database has, has a room policy in this file.
+    expect(new Set(Object.keys(OWN_KEY))).toEqual(new Set(deployed));
+    // 2. …and drizzle's constant is the same list, so SQL and TypeScript cannot
+    //    drift apart silently in either direction.
+    expect(new Set(eventType.enumValues)).toEqual(new Set(deployed));
+  });
+
+  /**
+   * The two decisions in `core_events_payload_room_matches` that nothing pinned
+   * (#22 gauntlet r6, major 2).
+   *
+   * > Nothing pins `core_events_payload_room_matches` structurally —
+   * > `pg_get_constraintdef` is asserted for the `at` pattern and for COLLATE,
+   * > never for this one — and no mutant covers either.
+   *
+   * **(a) `coalesce(…, false)`** — the wrapper both `schema.ts` and the migration
+   * say makes an unknown ninth kind fail closed. Dropping it left the whole suite
+   * green, and it is behaviourally real: with the wrapper gone, a ninth kind with
+   * `room_id` = B and `object.roomId` = A lands.
+   *
+   * The test below is behavioural without touching the enum. `ALTER TYPE … ADD
+   * VALUE` cannot be undone, so adding `ninth_kind` to the shared test database
+   * would leak into every later file; instead the **deployed expression** is read
+   * out of `pg_constraint` and evaluated against a fabricated row. That is the
+   * same expression Postgres evaluates at INSERT, on a payload of a type the
+   * `CASE` does not enumerate — and the whole point is the difference between
+   * `false` and NULL, which a CHECK cannot show you from the outside because it
+   * treats them the same.
+   *
+   * **(b) `IS NOT DISTINCT FROM`** — and here the finding is that the *stated
+   * reason* is no longer true:
+   *
+   * > Clause 1 already guarantees the key is present for the five room kinds and
+   * > the `ELSE room_id::text` covers the rest, so the stated justification is no
+   * > longer true of the shipped shape.
+   *
+   * Granted. The two spellings are behaviourally identical under the shipped
+   * constraint and no test can separate them, so the comments now say that rather
+   * than the old justification, and this is a **structural** pin — the same
+   * treatment, and for the same reason, as `returns the window by RETURNING of
+   * the stored column`. It is here so the operator cannot be changed silently
+   * while the comment explaining why it is redundant stays behind.
+   *
+   * Catches: `payload_room_check_does_not_fail_closed`,
+   * `payload_room_check_uses_equality`.
+   */
+  it('fails closed on a kind it does not enumerate, and says so structurally', async () => {
+    const [row] = await handle.db.execute<{ def: string }>(
+      sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE conrelid = 'core_events'::regclass
+            AND conname = 'core_events_payload_room_matches'`,
+    );
+    const def = row?.def ?? '';
+
+    // (a), behavioural: the deployed expression, evaluated on a row of a kind the
+    // `CASE` has never heard of. `pg_get_constraintdef` renders the columns
+    // unqualified, so a one-row subquery supplying `payload` and `room_id` is
+    // exactly the environment the CHECK runs in.
+    const expression = /^CHECK \((.*)\)$/s.exec(def)?.[1];
+    if (!expression) throw new Error(`could not read the deployed expression: ${def}`);
+    const evaluate = async (payload: unknown, roomId: string): Promise<boolean | null> => {
+      const [verdict] = await handle.db.execute<{ ok: boolean | null }>(
+        sql`SELECT (${sql.raw(expression)}) AS ok
+            FROM (SELECT ${JSON.stringify(payload)}::jsonb AS payload, ${roomId}::uuid AS room_id) t`,
+      );
+      return verdict?.ok ?? null;
+    };
+
+    // A ninth kind, filed into room B, whose own shape names room A. Without the
+    // `coalesce` this is NULL — and a CHECK passes on NULL, so the row lands.
+    expect(
+      await evaluate({ type: 'ninth_kind', object: { roomId: roomA }, roomId: roomA }, roomB),
+    ).toBe(false);
+    // …with no room key at all, and with only the column's own room, which are
+    // the other two ways a new kind can arrive without a policy.
+    expect(await evaluate({ type: 'ninth_kind' }, roomB)).toBe(false);
+    expect(await evaluate({ type: 'ninth_kind', roomId: roomB }, roomB)).toBe(false);
+
+    // Non-vacuity: the same harness says `true` for an honest enumerated kind, so
+    // a `false` above is the `CASE` falling through rather than the evaluation
+    // being broken.
+    expect(await evaluate({ type: 'message_posted', roomId: roomB }, roomB)).toBe(true);
+    expect(await evaluate({ type: 'message_posted', roomId: roomA }, roomB)).toBe(false);
+
+    // (b), structural — and it is second on purpose, so that dropping the
+    // `coalesce` fails above, on what the constraint *does*, rather than here on
+    // what it looks like. Postgres re-renders `a IS NOT DISTINCT FROM b` as
+    // `NOT (a IS DISTINCT FROM b)`, so that — not the source spelling — is what a
+    // reader of the catalog sees; `=` renders as `(room_id)::text = CASE …`,
+    // which this refuses.
+    expect(def).toContain('NOT ((room_id)::text IS DISTINCT FROM');
+    expect(def).toMatch(/^CHECK \(\(*COALESCE\(/);
+    expect(def).toMatch(/,\s*false\)\)*\)$/s);
   });
 
   it('refuses a rejection filed into a room its proposal does not live in', async () => {
@@ -1868,10 +2355,13 @@ describe('core_events — the room key is the one this kind declares, and no oth
      * > `resolveRoomId` covers the command path only.
      *
      * "Which room is proposal P in" is a fact about *another row*, and a CHECK
-     * sees one row. So the boundary answers it: `atrium_append_core_event`
+     * sees one row. So the table answers it: the `core_events_invariants` trigger
      * resolves the named proposal back to the room its own `proposal_recorded`
-     * landed in. The proposal here is `roomA`'s; filing its rejection into `roomB`
-     * would give the fan-out one room and the fold another.
+     * landed in. (It was `atrium_append_core_event` until r7, which bound callers
+     * of that function and nobody else — see `refuses an append smuggled in from
+     * another schema’s atrium_append_core_event`.) The proposal here is `roomA`'s;
+     * filing its rejection into `roomB` would give the fan-out one room and the
+     * fold another.
      *
      * Catches: `append_trusts_a_room_less_kind`.
      */
@@ -1968,6 +2458,12 @@ describe('core_events — the room key is the one this kind declares, and no oth
      *
      * Read off `prosrc` — what the database has — rather than the migration text.
      *
+     * Since 0008 this is no longer only about the *window*: `room_seq` travels the
+     * same way, because the `core_events_invariants` trigger mints it onto the row
+     * and the function has no variable holding an intended value to return
+     * instead. The function cannot report a position it did not get, because it
+     * never had one.
+     *
      * Catches: `append_returns_the_window_it_meant_to_store`.
      */
     const [fn] = await handle.db.execute<{ src: string }>(
@@ -1976,12 +2472,13 @@ describe('core_events — the room key is the one this kind declares, and no oth
             AND pronamespace = 'public'::regnamespace`,
     );
     expect(fn?.src).toContain(
-      'RETURNING "core_events"."seq", "core_events"."trusted_messages" INTO v_seq, v_stored',
+      'RETURNING "core_events"."seq", "core_events"."room_seq", "core_events"."trusted_messages"\n  INTO v_seq, v_room_seq, v_stored',
     );
     expect(fn?.src).toContain('"trusted_messages" := v_stored;');
-    // And the value it meant to store is not what leaves: `v_window` is written
-    // into the row and never assigned to the OUT parameter.
-    expect(fn?.src).not.toContain('"trusted_messages" := v_window;');
+    expect(fn?.src).toContain('"room_seq" := v_room_seq;');
+    // And the value it meant to store is not what leaves: there is no `v_window`
+    // in this function at all any more, because the derivation is the table's.
+    expect(fn?.src).not.toContain('v_window');
   });
 });
 

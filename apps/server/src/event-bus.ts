@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
 import type { Logger } from './logger.js';
+import {
+  type EphemeralFrame,
+  EphemeralNote,
+  type LedgerNote,
+  LedgerNote as LedgerNoteSchema,
+} from './protocol.js';
 
 /**
  * Cross-instance fan-out, on Postgres `LISTEN`/`NOTIFY`.
@@ -38,11 +44,17 @@ import type { Logger } from './logger.js';
  * Two changes, and between them the doorbell is demoted to what it should always
  * have been:
  *
- *  1. **It rings from inside the database.** `pg_notify` is emitted by
- *     `atrium_append_core_event` rather than by this process, so no writer can
- *     insert a row silently — including a writer that is not this application.
- *     `announce` is gone from this file for that reason: a method here would be
- *     a second way to ring, free to disagree with the row.
+ *  1. **It rings from inside the database.** `pg_notify` is emitted by the
+ *     `core_events_doorbell` trigger rather than by this process, so no writer
+ *     can insert a row silently — including a writer that is not this
+ *     application. `announce` is gone from this file for that reason: a method
+ *     here would be a second way to ring, free to disagree with the row.
+ *
+ *     It rang from inside `atrium_append_core_event` until r7, and that made
+ *     this sentence false for exactly the writer it names: the r6 gauntlet got a
+ *     row into `core_events` through a function that was not that one, and it
+ *     landed silently. A trigger on the table has no such gap — see
+ *     `packages/db/drizzle/0008_invariants_on_the_table.sql`.
  *  2. **Losing it costs latency, not delivery.** `reconciler.ts` folds and fans
  *     out on a timer regardless, and `onListen` below fires on every
  *     (re)subscription — postgres-js re-establishes `LISTEN` after a dropped
@@ -52,6 +64,42 @@ import type { Logger } from './logger.js';
  * The rule stated once: **nothing in this file may ever be the only path by
  * which a fact arrives.** It is now enforced by the reconciler rather than
  * asserted in a comment, and by a test that severs the listener mid-run.
+ *
+ * ## Neither channel is trusted input (#22 gauntlet r6, major 1)
+ *
+ * Round 6's blocking finding was not about delivery at all. `NOTIFY` requires
+ * **no privilege** in Postgres: anything that can connect can put a string on
+ * either channel. Until r7 this file answered that with two casts —
+ * `JSON.parse(raw) as T` — and `ws-server.ts` handed the result to
+ * `hub.broadcast` with no validation of any kind. The gauntlet executed it:
+ *
+ * ```sql
+ * NOTIFY atrium_ephemeral, '{"origin":"attacker","roomId":"<room>","frame":{
+ *   "type":"event","entry":{"roomSeq":1,"seq":1,…}}}';
+ * ```
+ *
+ * A subscribed client received a forged **`event`** frame — a durable ledger
+ * entry — while `core_events` was empty, committed it to its own journal, and
+ * advanced `lastSeq` past a position the real ledger had not reached. The real
+ * event at that position is then skipped forever. Durable client/ledger
+ * divergence, and `core_events` was never touched.
+ *
+ * Two things changed, and the second is the one that closes the class:
+ *
+ *  1. **Both channels parse rather than cast.** `LedgerNote` and `EphemeralNote`
+ *     in `protocol.ts` are the schemas; a string that does not match is logged
+ *     and dropped exactly like unparseable JSON, because a notification is not
+ *     a request and there is nobody to answer.
+ *  2. **The ephemeral channel has a closed alphabet.** `EphemeralFrame` is
+ *     `presence | typing` and nothing else, with a compile-time assertion that no
+ *     durable frame can ever join it. There is no longer a spelling of "event"
+ *     that this channel accepts, so the exploit above is not a validation failure
+ *     to be caught — it is a sentence that cannot be said.
+ *
+ * The rule those two enforce, stated once: **a durable entry reaches a client by
+ * exactly one route — this server read it out of `core_events` under an
+ * authenticated session.** Not from a notification, not from a peer, not from a
+ * cache. See `protocol.ts` for where that rule is written down.
  */
 
 /** The channel a committed ledger position is announced on. */
@@ -59,26 +107,14 @@ export const LEDGER_CHANNEL = 'atrium_ledger';
 /** The channel presence and typing — never durable — are relayed on. */
 export const EPHEMERAL_CHANNEL = 'atrium_ephemeral';
 
-/**
- * "Something landed at this position." The rows come from the ledger.
- *
- * `origin` is the instance that appended, so it can ignore the echo of its own
- * commit. It is `null` when the row was written by something that did not name
- * itself — a script, a migration, a second application. Null matches no
- * instance, so *everybody* folds it, which is the direction to be wrong in.
- */
-export interface LedgerAnnouncement {
-  origin: string | null;
-  roomId: string;
-  seq: number;
-  roomSeq: number;
-}
+/** @see LedgerNote in `protocol.ts` — the schema this channel is parsed with. */
+export type LedgerAnnouncement = LedgerNote;
 
 /** A frame that is not history, and so has no ledger to be read back from. */
-export interface EphemeralAnnouncement<T = unknown> {
+export interface EphemeralAnnouncement {
   origin: string;
   roomId: string;
-  frame: T;
+  frame: EphemeralFrame;
 }
 
 export interface EventBusOptions {
@@ -108,8 +144,14 @@ export interface BusHandlers {
 export interface EventBus {
   /** This process's identity, so it can ignore the echo of its own commits. */
   readonly instanceId: string;
-  /** Relay one ephemeral frame. Fire-and-forget: failure is logged, not thrown. */
-  relay: <T>(roomId: string, frame: T) => void;
+  /**
+   * Relay one ephemeral frame. Fire-and-forget: failure is logged, not thrown.
+   *
+   * Typed `EphemeralFrame`, not `<T>`. The generic was how a durable frame could
+   * be handed to this channel without anything objecting, and the receiving half
+   * would have accepted it (r6 major 1).
+   */
+  relay: (roomId: string, frame: EphemeralFrame) => void;
   start: (handlers: BusHandlers) => Promise<void>;
   close: () => Promise<void>;
 }
@@ -119,15 +161,45 @@ export function createEventBus({ sql: client, logger, instanceId }: EventBusOpti
   const unlisteners: Array<() => Promise<void>> = [];
   let closed = false;
 
-  function parse<T>(raw: string, channel: string): T | null {
+  /**
+   * Parse one notification against the channel's schema, or drop it.
+   *
+   * Not a cast. `NOTIFY` needs no privilege, so `raw` is attacker-reachable on
+   * both channels and the only difference between "someone else's bug" and "an
+   * exploit" is what the receiver does with a string it did not validate. A
+   * notification is not a request: there is nobody to answer and nothing to
+   * retry, so a refusal is a log line and a dropped frame.
+   *
+   * `raw.slice(0, 200)` because a rejected notification is by definition a string
+   * this process does not understand, and logging all of it is how a log becomes
+   * the place an attacker writes.
+   */
+  function parse<T>(
+    raw: string,
+    channel: string,
+    schema: {
+      safeParse: (
+        v: unknown,
+      ) => { success: true; data: T } | { success: false; error: { message: string } };
+    },
+  ): T | null {
+    let json: unknown;
     try {
-      return JSON.parse(raw) as T;
+      json = JSON.parse(raw);
     } catch {
-      // A malformed notification is someone else's bug on a channel we do not
-      // own exclusively. Log it and carry on; the ledger is still the truth.
       logger.warn('unparseable notification', { channel, raw: raw.slice(0, 200) });
       return null;
     }
+    const result = schema.safeParse(json);
+    if (!result.success) {
+      logger.warn('notification refused by the channel schema', {
+        channel,
+        raw: raw.slice(0, 200),
+        reason: result.error.message,
+      });
+      return null;
+    }
+    return result.data;
   }
 
   return {
@@ -159,7 +231,7 @@ export function createEventBus({ sql: client, logger, instanceId }: EventBusOpti
       const ledger = await client.listen(
         LEDGER_CHANNEL,
         (raw) => {
-          const note = parse<LedgerAnnouncement>(raw, LEDGER_CHANNEL);
+          const note = parse(raw, LEDGER_CHANNEL, LedgerNoteSchema);
           // `note.origin !== id` and not `note.origin && …`: a null origin is a
           // writer that did not name itself, and this instance must fold it.
           if (note && note.origin !== id) onLedger(note);
@@ -171,7 +243,7 @@ export function createEventBus({ sql: client, logger, instanceId }: EventBusOpti
       const ephemeral = await client.listen(
         EPHEMERAL_CHANNEL,
         (raw) => {
-          const note = parse<EphemeralAnnouncement>(raw, EPHEMERAL_CHANNEL);
+          const note = parse(raw, EPHEMERAL_CHANNEL, EphemeralNote);
           if (note && note.origin !== id) onEphemeral(note);
         },
         announceListening(EPHEMERAL_CHANNEL),

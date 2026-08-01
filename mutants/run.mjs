@@ -450,13 +450,32 @@ async function main() {
       if (verbose) for (const name of result.names) console.log(`    ↳ ${name}`);
       exitCode = 1;
     } else {
+      // The recorded number is the count of *claimed* tests confirmed red, not
+      // the total that failed (#22 gauntlet r6, nit).
+      //
+      // The r6 critic re-ran `--check` and got `1 failing` where the committed
+      // file said `2 failing` for two entries. Every named catcher still went
+      // red, so the verdict was sound — but the number was not reproducible,
+      // because the total includes **collateral**: tests that fail for the same
+      // reason without being the pin, and whose count moves whenever a suite
+      // gains a case, a timing-sensitive test flips, or a mutation happens to
+      // wedge something adjacent. A ledger whose whole point is that a claim is
+      // measured must not print a number that drifts on a re-run of the same
+      // commit.
+      //
+      // `catches` is what the mutant claims, the runner already requires every
+      // one of them to have gone red, and `catches.length` is a property of the
+      // committed file. So that is what is recorded. The full failure list is
+      // still kept on the row for `--verbose`, where it is diagnostics rather
+      // than a receipt.
+      const claimed = (mutant.catches ?? []).length;
       rows.push({
         ...mutant,
         verdict: 'caught',
-        detail: `${result.failed} failing`,
+        detail: `${claimed} claimed ${claimed === 1 ? 'test' : 'tests'} red`,
         failures: result.names,
       });
-      console.log(`caught (${result.failed} failing)`);
+      console.log(`caught (${claimed} claimed red, ${result.failed} failing in total)`);
       if (verbose) for (const name of result.names) console.log(`    ↳ ${name}`);
     }
   }
@@ -488,6 +507,15 @@ if (!only && !suiteFilter) {
     '`packages/`, because `packages/ingest` and `apps/server` resolve `@atrium/core`',
     'and `@atrium/db` through their built `dist`. A ledger that skips this measures',
     'whatever was on disk (#26 r6).',
+    '',
+    '**The `detail` column counts the tests each mutant *claimed*, and only those.**',
+    'It used to be the total that failed, which is not byte-reproducible: the total',
+    'includes collateral — tests that fail for the same reason without being the pin —',
+    'and it moves whenever a suite gains a case. The r6 gauntlet re-ran `--check` and',
+    'got `1 failing` where this file said `2 failing`; every named catcher had gone',
+    'red, so the verdict was sound and only the number drifted. The runner already',
+    'requires every claimed test to go red, so "*n* claimed tests red" means *n* named',
+    'pins were measured and all *n* fired. `--verbose` prints the full failure list.',
     '',
     '| mutant | suite | verdict | detail |',
     '| --- | --- | --- | --- |',

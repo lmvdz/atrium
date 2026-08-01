@@ -7,7 +7,7 @@ import { createHeadAcks } from './head-acks.js';
 import { createHub, type Hub } from './hub.js';
 import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
 import type { Logger } from './logger.js';
-import { ClientFrame, type ServerFrame, type WireEvent } from './protocol.js';
+import { ClientFrame, type EphemeralFrame, type ServerFrame, type WireEvent } from './protocol.js';
 import { createReconciler, DEFAULT_RECONCILE_INTERVAL_MS, type Reconciler } from './reconciler.js';
 import type { Session, SessionAuthenticator } from './session.js';
 
@@ -433,7 +433,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
           return;
         }
         case 'presence': {
-          const frame: ServerFrame = {
+          const frame: EphemeralFrame = {
             type: 'presence',
             roomId: result.roomId,
             userId: result.userId,
@@ -449,7 +449,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
           return;
         }
         case 'typing': {
-          const frame: ServerFrame = {
+          const frame: EphemeralFrame = {
             type: 'typing',
             roomId: result.roomId,
             userId: result.userId,
@@ -579,8 +579,15 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         onLedger: () => {
           void reconciler?.reconcile();
         },
+        // `note.frame` is an `EphemeralFrame` — `presence` or `typing`, parsed
+        // against a schema in `event-bus.ts` and structurally unable to be a
+        // durable frame (#22 gauntlet r6, major 1). It used to be
+        // `note.frame as ServerFrame`, which is how a forged `event` frame
+        // published on an unprivileged `NOTIFY` reached a client's journal.
+        // Nothing here has to decide anything: what arrives is already one of
+        // exactly two shapes, and its room already matches the envelope's.
         onEphemeral: (note) => {
-          hub.broadcast(note.roomId, note.frame as ServerFrame);
+          hub.broadcast(note.roomId, note.frame);
         },
         // Fired on the first LISTEN and on every one postgres-js re-establishes
         // after a dropped connection. Everything that landed while this process

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { loadRuntimeConfig } from './runtime-config.js';
 import { resolveWsUrl } from './ws-url.js';
 
@@ -42,34 +43,90 @@ import { resolveWsUrl } from './ws-url.js';
 /* ── the wire, as this client needs to see it ───────────────────────────── */
 
 /**
- * One ledger row, as the wire carries it.
+ * Every wire shape below is a **schema**, and the types are read off it
+ * (#22 gauntlet r6, major 1).
  *
- * `actor` is **beside** the event, not inside it. #21 took the actor out of the
- * event payload entirely — the schema has no place to put one and refuses an
- * input that carries one — because a payload is whatever the writer says it is
- * and every trust gate in the reducer reads the actor. The ledger stores it as
- * columns on the row and the wire carries it as a sibling of `event`. Nothing in
- * this client may read `entry.event.actor`; there is no such field.
+ * These were hand-written `interface`s until r7, and the socket did
+ * `JSON.parse(String(event.data)) as ServerFrame`. A cast is a promise the
+ * compiler believes and nothing checks, and the r6 gauntlet showed what that
+ * costs on this particular path: `applyEntry` **commits to the durable journal
+ * and advances `lastSeq`**, so a frame this client accepts is a frame this
+ * client will still believe after a reload — and a `roomSeq` it accepts once is
+ * a position the real event can never occupy again (`if (entry.roomSeq <=
+ * room.lastSeq) return`).
+ *
+ * The server-side hole that let a forged frame reach here is closed in
+ * `apps/server/src/event-bus.ts`; this half is the client refusing to write
+ * something it cannot read, which is a rule worth having on its own. It is the
+ * same rule the ledger applies to `core_events` rows — parse, do not cast —
+ * arriving at the last place in the system that was still casting.
+ *
+ * What is deliberately **not** tightened: the event body. `event` is
+ * `{id, at, type}` plus whatever that kind carries, and this client renders
+ * messages and counts positions rather than folding events, so demanding a full
+ * per-kind schema here would create exactly the outage #46 is about — one row
+ * the client cannot parse taking the whole room's catch-up down. The envelope is
+ * checked; the body is passed through.
  */
-export interface RoomEventEnvelope {
-  roomId: string;
-  roomSeq: number;
-  seq: number;
-  actor: { kind: string; userId?: string; model?: string };
-  event: {
-    id: string;
-    at: string;
-    type: string;
-    [key: string]: unknown;
-  };
-}
+const Envelope = z.object({
+  roomId: z.string().min(1),
+  roomSeq: z.number().int().positive(),
+  seq: z.number().int().positive(),
+  /**
+   * `actor` is **beside** the event, not inside it. #21 took the actor out of the
+   * event payload entirely — the schema has no place to put one and refuses an
+   * input that carries one — because a payload is whatever the writer says it is
+   * and every trust gate in the reducer reads the actor. The ledger stores it as
+   * columns on the row and the wire carries it as a sibling of `event`. Nothing
+   * in this client may read `entry.event.actor`; there is no such field.
+   */
+  actor: z.object({
+    kind: z.string().min(1),
+    userId: z.string().optional(),
+    model: z.string().optional(),
+  }),
+  /**
+   * The body is passed through — with one exception, and the exception is what
+   * makes the sentence above true.
+   *
+   * `z.looseObject` keeps unknown keys, so `event.actor` survived the parse while
+   * the comment said "there is no such field" (found by a foreign-lineage review
+   * of r7's own first draft). The server refuses an actor in a payload at three
+   * levels — `RoomEvent`'s guard, `CoreEvent.parse`, and the
+   * `core_events_payload_has_no_actor` CHECK — so a body carrying one did not
+   * come from the ledger, whatever else is true of it. Refusing it here is the
+   * same rule at the last reader, and it costs nothing a real event needs.
+   */
+  event: z
+    .looseObject({
+      id: z.string().min(1),
+      at: z.string().min(1),
+      type: z.string().min(1),
+    })
+    .refine((body) => !('actor' in body), {
+      message: 'a ledger payload carries no actor; the actor is beside the event',
+    }),
+});
 
-export type ServerFrame =
-  | { type: 'welcome'; connectionId: string; userId: string; heartbeatIntervalMs: number }
-  | { type: 'pong'; at: string }
-  | { type: 'subscribed'; roomId: string; head: number; seenSeq: number }
-  | { type: 'unsubscribed'; roomId: string }
-  | { type: 'event'; entry: RoomEventEnvelope }
+/** One ledger row, as the wire carries it. */
+export type RoomEventEnvelope = z.infer<typeof Envelope>;
+
+export const ServerFrame = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('welcome'),
+    connectionId: z.string(),
+    userId: z.string(),
+    heartbeatIntervalMs: z.number(),
+  }),
+  z.object({ type: z.literal('pong'), at: z.string() }),
+  z.object({
+    type: z.literal('subscribed'),
+    roomId: z.string().min(1),
+    head: z.number().int().min(0),
+    seenSeq: z.number().int().min(0),
+  }),
+  z.object({ type: z.literal('unsubscribed'), roomId: z.string().min(1) }),
+  z.object({ type: z.literal('event'), entry: Envelope }),
   /**
    * "This room is at `head`" — unsolicited, from the server's reconciler.
    *
@@ -77,31 +134,75 @@ export type ServerFrame =
    * treats it as it treats every other statement about the head: compare it with
    * its own cursor, and ask for the gap if it is behind.
    */
-  | { type: 'head'; roomId: string; head: number }
-  | {
-      type: 'catchup';
-      roomId: string;
-      from: number;
-      to: number;
-      head: number;
-      more: boolean;
-      entries: RoomEventEnvelope[];
-    }
-  | {
-      type: 'ack';
-      commandId: string;
-      roomId: string;
-      /** `null` when nothing was appended — presence, typing, the read cursor. */
-      seq: number | null;
-      roomSeq: number | null;
-      eventId: string | null;
-      issues: string[];
-    }
-  | { type: 'nack'; commandId: string; code: string; message: string }
-  | { type: 'presence'; roomId: string; userId: string; state: string; at: string }
-  | { type: 'typing'; roomId: string; userId: string; typing: boolean; at: string }
-  | { type: 'seen'; roomId: string; userId: string; seenSeq: number }
-  | { type: 'error'; message: string };
+  z.object({
+    type: z.literal('head'),
+    roomId: z.string().min(1),
+    head: z.number().int().min(0),
+  }),
+  /**
+   * Every entry names the room the page names.
+   *
+   * The loop in `handleFrame` does its arithmetic against `view(frame.roomId)`
+   * while `applyEntry` files each entry under `entry.roomId`, so a page whose
+   * entries name a different room would move one room's journal on another room's
+   * cursor. On the server both come from one query and cannot disagree; here they
+   * are two fields of a parsed message, which is exactly the asymmetry r7 closed
+   * on the bus (`EphemeralNote` refuses an envelope and a frame that name
+   * different rooms) and had not closed on the socket. Second lineage, r7's own
+   * review.
+   */
+  z
+    .object({
+      type: z.literal('catchup'),
+      roomId: z.string().min(1),
+      from: z.number().int().min(0),
+      to: z.number().int().min(0),
+      head: z.number().int().min(0),
+      more: z.boolean(),
+      entries: z.array(Envelope),
+    })
+    .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {
+      message: 'a catch-up page carries an entry for a different room',
+    }),
+  z.object({
+    type: z.literal('ack'),
+    commandId: z.string(),
+    roomId: z.string(),
+    /** `null` when nothing was appended — presence, typing, the read cursor. */
+    seq: z.number().int().nullable(),
+    roomSeq: z.number().int().nullable(),
+    eventId: z.string().nullable(),
+    issues: z.array(z.string()),
+  }),
+  z.object({
+    type: z.literal('nack'),
+    commandId: z.string(),
+    code: z.string(),
+    message: z.string(),
+  }),
+  z.object({
+    type: z.literal('presence'),
+    roomId: z.string().min(1),
+    userId: z.string(),
+    state: z.string(),
+    at: z.string(),
+  }),
+  z.object({
+    type: z.literal('typing'),
+    roomId: z.string().min(1),
+    userId: z.string(),
+    typing: z.boolean(),
+    at: z.string(),
+  }),
+  z.object({
+    type: z.literal('seen'),
+    roomId: z.string().min(1),
+    userId: z.string(),
+    seenSeq: z.number().int().min(0),
+  }),
+  z.object({ type: z.literal('error'), message: z.string() }),
+]);
+export type ServerFrame = z.infer<typeof ServerFrame>;
 
 /** The minimum of `WebSocket` this client uses. A browser socket satisfies it. */
 export interface SocketLike {
@@ -181,6 +282,22 @@ export interface RoomJournal {
    * arithmetic. An implementation may not persist one without the other.
    */
   commit: (roomId: string, entry: RoomEventEnvelope, lastSeq: number) => void;
+  /**
+   * Throw this room's record away and start again from nothing.
+   *
+   * Added in r7 for one caller and one reason: the client resuming from a record
+   * the **server** contradicts. Shape validation cannot tell a real record from a
+   * well-formed forgery — `localStorage` is same-origin and carries no
+   * provenance — so the check that can be made is arithmetic rather than
+   * structural: a cursor past the room's head is a cursor for history the room
+   * does not have, whoever wrote it. The answer is to stop believing the record,
+   * which costs one catch-up and is the same trade `reads a torn record as no
+   * history at all` already makes.
+   *
+   * Not a general "delete": there is no caller that wants to forget a room it is
+   * still resuming from, and there must not be one.
+   */
+  reset: (roomId: string) => void;
 }
 
 /**
@@ -211,6 +328,9 @@ export function memoryJournal(): RoomJournal {
       const current = room(roomId);
       current.events.push(entry);
       current.lastSeq = Math.max(current.lastSeq, lastSeq);
+    },
+    reset: (roomId) => {
+      rooms.delete(roomId);
     },
   };
 }
@@ -261,6 +381,18 @@ export interface LocalStorageJournalOptions {
 function warnDegraded(roomId: string, reason: string): void {
   console.warn(`[atrium] room ${roomId}: journal degraded to memory — ${reason}`);
 }
+
+/**
+ * One room's durable record, as the schema it is read back with.
+ *
+ * The write side is `{events, lastSeq}` and the read side used to trust that on
+ * the strength of two `typeof` checks and a cast. See the note at the read for
+ * why this is the strict one of the two parses in this file.
+ */
+const StoredRoom = z.object({
+  events: z.array(Envelope),
+  lastSeq: z.number().int().min(0),
+});
 
 /**
  * A `localStorage`-backed journal.
@@ -449,10 +581,21 @@ export function localStorageJournal(
     }
     if (raw === null) return { events: [], lastSeq: 0 };
     try {
-      const parsed = JSON.parse(raw) as { events?: unknown; lastSeq?: unknown };
-      const events = Array.isArray(parsed.events) ? (parsed.events as RoomEventEnvelope[]) : null;
-      const lastSeq = typeof parsed.lastSeq === 'number' ? parsed.lastSeq : null;
-      if (events === null || lastSeq === null) return { events: [], lastSeq: 0 };
+      // Parsed against the same envelope schema the socket uses, not cast
+      // (#22 gauntlet r6, major 1). `localStorage` is durable state this client
+      // reads back and believes: a poisoned record is a `lastSeq` this client
+      // resumes from, so every real event at or below it is skipped for good.
+      // The store is shared with everything else on the origin and survives
+      // reloads, which makes it the *most* attacker-durable input here, not the
+      // least — and it was the one still going through `as RoomEventEnvelope[]`.
+      //
+      // A record that does not parse is treated exactly like a torn one: no
+      // history, cursor 0, refetch. That is already the safe answer here — the
+      // room is re-read from the ledger — and it is why this can be strict
+      // without risking the outage #46 is about.
+      const stored = StoredRoom.safeParse(JSON.parse(raw));
+      if (!stored.success) return { events: [], lastSeq: 0 };
+      const { events, lastSeq } = stored.data;
       // The invariant the whole interface exists for, checked on the way back
       // in: the cursor may not name a position past the last event held. Still
       // exact under eviction — trimming drops from the front, never the end.
@@ -518,6 +661,20 @@ export function localStorageJournal(
           degrade(roomId, { events: current.events, lastSeq }, describeStorageError(error));
           return;
         }
+      }
+    },
+    reset: (roomId) => {
+      fallback.reset(roomId);
+      const access = storage();
+      if (!access.store) return;
+      // A store that refuses `removeItem` is a store this room cannot resume
+      // from safely, and the caller has already decided not to trust the record.
+      // Degrading here rather than throwing keeps `reset` a promise the caller
+      // can rely on: after it returns, this room resumes from nothing.
+      try {
+        access.store.removeItem(key(roomId));
+      } catch (error) {
+        degrade(roomId, { events: [], lastSeq: 0 }, describeStorageError(error));
       }
     },
   };
@@ -796,6 +953,42 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       case 'subscribed': {
         const room = view(frame.roomId);
         room.subscribed = true;
+        /**
+         * A cursor past the room's head is a cursor for history the room does
+         * not have — so the journal it came from is not this room's, and the
+         * only safe thing to do with it is stop believing it
+         * (#22 gauntlet r7 self-review, both foreign lineages).
+         *
+         * Parsing the journal makes it *well-formed*; it cannot make it
+         * *authentic*. `localStorage` is same-origin, carries no provenance, and
+         * a forgery that satisfies every field type is trivial to write:
+         * `{events: [{roomSeq: 50, …}], lastSeq: 50}` resumes room A at 50 and
+         * silently skips every real position at or below it, which is the r6
+         * exploit's durable consequence reached from the other end. Schema
+         * validation was r7's answer and is not an answer to this.
+         *
+         * Arithmetic is, because there is one number the client did not write:
+         * `frame.head`, from the server, in the reply to this socket's own
+         * `subscribe`. Nothing has been applied to this room on this socket yet,
+         * so a `lastSeq` above it cannot be an honest race — it is a claim about
+         * events the room has never had. The room is dropped back to nothing and
+         * re-read, which costs one catch-up.
+         *
+         * This does not make the journal trustworthy and is not offered as
+         * making it so: a forgery *at or below* the true head still displaces
+         * real events, and nothing on this side of the socket can tell. What it
+         * closes is the unbounded case — the one where a single forged record
+         * takes a room out permanently rather than corrupting a prefix of it.
+         */
+        if (room.lastSeq > frame.head) {
+          fail(
+            `room "${frame.roomId}" resumed at ${room.lastSeq} but the server says its head is ${frame.head}; the stored journal is not this room's history and has been discarded`,
+          );
+          journal.reset(frame.roomId);
+          room.events = [];
+          room.lastSeq = 0;
+          room.pending = [];
+        }
         room.head = frame.head;
         room.seenSeq = frame.seenSeq;
         changed(frame.roomId);
@@ -977,14 +1170,25 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       }
     };
     next.onmessage = (event) => {
-      let parsed: ServerFrame;
+      let json: unknown;
       try {
-        parsed = JSON.parse(String(event.data)) as ServerFrame;
+        json = JSON.parse(String(event.data));
       } catch {
         fail('received a frame that is not valid JSON');
         return;
       }
-      handleFrame(parsed);
+      // Parsed, not cast (#22 gauntlet r6, major 1). `handleFrame` reaches
+      // `applyEntry`, which writes the durable journal and moves `lastSeq`; a
+      // frame that gets that far on the strength of a cast is a frame that can
+      // make this client permanently skip a real event. Reported and dropped,
+      // rather than thrown: the socket is still fine, and one unreadable frame
+      // is not a reason to stop reading the next one.
+      const parsed = ServerFrame.safeParse(json);
+      if (!parsed.success) {
+        fail(`received a frame this client cannot read: ${parsed.error.message}`);
+        return;
+      }
+      handleFrame(parsed.data);
     };
     next.onerror = () => {
       fail('websocket error');

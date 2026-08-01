@@ -296,6 +296,7 @@ describe('the cursor never names an event the client does not hold', () => {
       survivor,
       journal: {
         load: survivor.load,
+        reset: survivor.reset,
         commit: (roomId, entry, lastSeq) => {
           if (committed >= commits) throw new Error('journal died mid-page');
           committed += 1;
@@ -443,6 +444,44 @@ describe('the durable journal writes both halves or neither', () => {
 
     storage.setItem(key as string, 'not json');
     expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+  });
+
+  it('reads a poisoned record as no history at all', () => {
+    /**
+     * The journal is durable state this client reads back and *believes*
+     * (#22 gauntlet r6, major 1). Until r7 the read did
+     * `parsed.events as RoomEventEnvelope[]` behind two `typeof` checks, so a
+     * record whose entries were not entries resumed anyway — and the `lastSeq`
+     * that came with it is a cursor every real event at or below it is then
+     * silently skipped against.
+     *
+     * `localStorage` is shared with everything else on the origin and survives
+     * reloads, which makes it the most *durable* attacker-reachable input in this
+     * file, not the least. It was the last thing here still going through a cast.
+     *
+     * Strict is safe on this path and only on this path: the answer to an
+     * unreadable record is already "no history, refetch the room", which costs a
+     * round trip. Catches: restoring the cast.
+     */
+    const journal = localStorageJournal('test');
+    journal.commit(ROOM, messageEvent(1, 'a'), 1);
+    const [key] = [...storage.raw.keys()];
+    const good = messageEvent(1, 'a');
+
+    for (const events of [
+      [{ ...good, roomSeq: '1' }],
+      [{ ...good, actor: null }],
+      [{ ...good, event: { id: 'e1', at: '2026-07-31T00:00:01.000Z' } }],
+      ['not an entry at all'],
+      [null],
+    ]) {
+      storage.setItem(key as string, JSON.stringify({ events, lastSeq: 1 }));
+      expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+    }
+
+    // …and the honest record still loads, so this is a check and not a ban.
+    storage.setItem(key as string, JSON.stringify({ events: [good], lastSeq: 1 }));
+    expect(journal.load(ROOM)).toMatchObject({ lastSeq: 1 });
   });
 
   /**
@@ -942,6 +981,246 @@ describe('the cursor is the only thing that decides', () => {
       entries: [messageEvent(2, 'two'), messageEvent(3, 'three')],
     });
     expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3]);
+  });
+});
+
+/**
+ * The client parses what arrives; it does not cast it (#22 gauntlet r6, major 1).
+ *
+ * `applyEntry` is the only thing in this file that writes durable state — it
+ * commits to the journal and moves `lastSeq` — and until r7 the only thing
+ * standing between a socket frame and that write was
+ * `JSON.parse(String(event.data)) as ServerFrame`. The r6 gauntlet reached the
+ * socket from outside the application entirely (an unprivileged `NOTIFY` on the
+ * ephemeral bus, relayed by the server without validation), and what made the
+ * consequence *durable* rather than cosmetic was this end: an entry accepted
+ * here is an entry the journal still holds after a reload, and a `roomSeq`
+ * accepted here is a position the real event can never take
+ * (`if (entry.roomSeq <= room.lastSeq) return`).
+ *
+ * The server-side hole is closed in `apps/server/src/event-bus.ts`. These are
+ * the assertions that this end refuses to write something it cannot read,
+ * which is worth having whoever sent it.
+ *
+ * Deliberately checked here: the *envelope*. The event body is passed through,
+ * because this client counts positions and renders messages rather than folding
+ * events, and a per-kind schema here would be #46's outage — one unreadable row
+ * taking a whole room's catch-up down — arriving in a new place.
+ */
+describe('a frame the client cannot read is refused, not written', () => {
+  function raw(frame: unknown): void {
+    latest().onmessage?.({ data: JSON.stringify(frame) });
+  }
+
+  beforeEach(() => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 0,
+      head: 0,
+      more: false,
+      entries: [],
+    });
+  });
+
+  it('does not move the cursor for an event whose envelope does not parse', () => {
+    const good = messageEvent(1, 'the real one');
+    // Every one of these would have been committed and would have advanced
+    // `lastSeq` to 1 under a cast — taking position 1 away from `good` for good.
+    const forgeries: unknown[] = [
+      { type: 'event', entry: { ...good, roomSeq: '1' } },
+      { type: 'event', entry: { ...good, roomSeq: 0 } },
+      { type: 'event', entry: { ...good, seq: null } },
+      { type: 'event', entry: { ...good, actor: 'alice' } },
+      { type: 'event', entry: { ...good, event: { id: 'e1', at: '2026-07-31T00:00:01.000Z' } } },
+      { type: 'event', entry: { ...good, roomId: 42 } },
+      { type: 'event' },
+      { type: 'nonsense', entry: good },
+    ];
+    for (const forgery of forgeries) raw(forgery);
+
+    expect(client.lastSeq(ROOM)).toBe(0);
+    expect(client.room(ROOM).events).toEqual([]);
+    expect(errors.length).toBe(forgeries.length);
+    for (const message of errors) expect(message).toContain('cannot read');
+
+    // …and the position is still there for the event that really holds it.
+    latest().deliver({ type: 'event', entry: good });
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events).toHaveLength(1);
+  });
+
+  it('refuses a catch-up page whose entries name a different room', () => {
+    /**
+     * The loop does its arithmetic against `view(frame.roomId)` while
+     * `applyEntry` files each entry under `entry.roomId`, so a page whose entries
+     * name another room would move one room's journal on another room's cursor.
+     *
+     * On the server both come from one query and cannot disagree. Here they are
+     * two fields of a parsed message — which is the cross-check r7 added on the
+     * bus (`EphemeralNote` refuses an envelope and a frame naming different
+     * rooms) and had *not* added on the socket. Found by a foreign-lineage review
+     * of r7's own diff; an asymmetry in the round's own fix.
+     */
+    raw({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 1,
+      head: 1,
+      more: false,
+      entries: [{ ...messageEvent(1, 'elsewhere'), roomId: 'room-2' }],
+    });
+    expect(client.lastSeq(ROOM)).toBe(0);
+    expect(client.room('room-2').events).toEqual([]);
+    expect(errors.at(-1)).toContain('cannot read');
+  });
+
+  it('refuses an event whose body carries an actor', () => {
+    /**
+     * `z.looseObject` keeps unknown keys, so `event.actor` survived the parse
+     * while the comment beside it said "there is no such field" — found by a
+     * foreign-lineage review, which ran a probe and got the forged actor back out
+     * of the journal.
+     *
+     * The server refuses an actor in a payload three times over (`RoomEvent`'s
+     * guard, `CoreEvent.parse`, and `core_events_payload_has_no_actor`), so a
+     * body carrying one did not come from the ledger whatever else is true of it.
+     */
+    const forged = messageEvent(1, 'signed by somebody else');
+    (forged.event as Record<string, unknown>).actor = { kind: 'human', userId: 'not-me' };
+    raw({ type: 'event', entry: forged });
+    expect(client.lastSeq(ROOM)).toBe(0);
+    expect(client.room(ROOM).events).toEqual([]);
+    expect(errors.at(-1)).toContain('cannot read');
+  });
+
+  it('refuses a catch-up page carrying one unreadable entry, and keeps the socket', () => {
+    raw({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 2,
+      head: 2,
+      more: false,
+      entries: [messageEvent(1, 'one'), { ...messageEvent(2, 'two'), roomSeq: -2 }],
+    });
+    // The whole page, not the readable prefix: a page is one statement about a
+    // range, and applying half of it would move the cursor to a position the
+    // server never described.
+    expect(client.lastSeq(ROOM)).toBe(0);
+    expect(client.room(ROOM).events).toEqual([]);
+
+    // The socket is still live — one bad frame is not a reason to stop reading.
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 2,
+      head: 2,
+      more: false,
+      entries: [messageEvent(1, 'one'), messageEvent(2, 'two')],
+    });
+    expect(client.lastSeq(ROOM)).toBe(2);
+  });
+});
+
+/**
+ * A journal the server contradicts is discarded (#22 gauntlet r7 self-review).
+ *
+ * Both foreign-lineage reviewers landed on the same hole in r7's first draft, and
+ * they were right: **parsing the journal makes it well-formed, not authentic.**
+ * `localStorage` is same-origin and carries no provenance, so a forgery that
+ * satisfies every field type is trivial —
+ * `{events: [{roomSeq: 50, …}], lastSeq: 50}` — and the client resumes room A at
+ * 50 and skips every real position at or below it. That is the r6 exploit's
+ * durable consequence reached from the other end, and schema validation is not an
+ * answer to it.
+ *
+ * Arithmetic is, for the unbounded case. `frame.head` in the `subscribed` reply is
+ * the one number the client did not write, nothing has been applied to the room on
+ * this socket yet, and a cursor above the head is a claim about events the room
+ * has never had. The room is dropped and re-read.
+ *
+ * What this does **not** do is stated in the source and asserted below: a forgery
+ * at or under the true head still displaces real events, and nothing on this side
+ * of the socket can tell. The bound is "a single forged record cannot take a room
+ * out permanently", not "the journal is trustworthy".
+ */
+describe('a resumed cursor the server contradicts is not believed', () => {
+  function fakeStorage(): Storage & { raw: Map<string, string> } {
+    const raw = new Map<string, string>();
+    const store = {
+      raw,
+      getItem: (key: string) => raw.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        raw.set(key, value);
+      },
+      removeItem: (key: string) => {
+        raw.delete(key);
+      },
+      clear: () => raw.clear(),
+      key: (index: number) => [...raw.keys()][index] ?? null,
+      get length() {
+        return raw.size;
+      },
+    };
+    return store as unknown as Storage & { raw: Map<string, string> };
+  }
+
+  it('discards a well-formed journal that resumes past the room’s head', async () => {
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('poison');
+    // Perfectly shaped, and a lie: the room has three events, this says fifty.
+    journal.commit(ROOM, messageEvent(50, 'not in the ledger'), 50);
+    expect(journal.load(ROOM).lastSeq).toBe(50);
+
+    const poisoned = await clientWith({ journal });
+    poisoned.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+
+    // Dropped, loudly, and re-read from nothing rather than from 50.
+    expect(poisoned.lastSeq(ROOM)).toBe(0);
+    expect(poisoned.room(ROOM).events).toEqual([]);
+    expect(errors.at(-1)).toContain('has been discarded');
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomId: ROOM, roomSeq: 0 });
+    // …and the store no longer holds it, so a reload does not resume the forgery.
+    expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+
+    // The room then loads normally, which is what makes this a check and not a ban.
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(1, 'a'), messageEvent(2, 'b'), messageEvent(3, 'c')],
+    });
+    expect(poisoned.lastSeq(ROOM)).toBe(3);
+  });
+
+  it('keeps an honest journal that resumes at or below the head', async () => {
+    // Non-vacuity, and the thing that would break every ordinary resume if the
+    // comparison were `>=`: a client that holds exactly the head is the common
+    // case, not a suspect one.
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('honest');
+    journal.commit(ROOM, messageEvent(1, 'a'), 1);
+    journal.commit(ROOM, messageEvent(2, 'b'), 2);
+
+    const resumed = await clientWith({ journal });
+    resumed.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 2, seenSeq: 0 });
+    expect(resumed.lastSeq(ROOM)).toBe(2);
+    expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+    expect(errors).toEqual([]);
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 2 });
   });
 });
 

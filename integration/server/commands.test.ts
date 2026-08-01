@@ -281,6 +281,68 @@ describe('the proposal → acceptance boundary, over the wire', () => {
     expect(Number(row?.count)).toBe(1);
   });
 
+  /**
+   * The sentence that bounded the two-oracle seam, as a test (#22 gauntlet r6,
+   * minor 5).
+   *
+   * `apps/server/src/ledger.ts` and `0007_kind_discriminated_room.sql` both said
+   * the log oracle and the fold oracle differ only for a minting event "which
+   * only a direct SQL caller can put there, since this function refuses to append
+   * one". They do not: `append` aborts on `rejected`/`malformed`, a business
+   * refusal is `applied_with_issue`, and `applied_with_issue` **is appended** —
+   * which the test above has demonstrated all along without anybody connecting it
+   * to the containment claim.
+   *
+   * So this asserts the connection directly, which is the thing the comment was
+   * asserting in prose: the ordinary command path, over a real socket, puts a
+   * minting row in `core_events` that `coreState()` does not install. Both
+   * comments now say that; this is what makes them stay true.
+   *
+   * There is still no cross-room misroute here — the r6 critic looked and found
+   * none, and the second `object_accepted` names the same room as the first. What
+   * changes is who can reach the seam.
+   */
+  it('appends a minting event the fold does not install, through the ordinary path', async () => {
+    const alice = await connect(room.people.alice as string);
+    const { proposalId, objectId } = await acceptedDecision(alice, 'ship on friday');
+
+    const again = await alice.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(again.type).toBe('ack');
+
+    // Two `object_accepted` rows in the durable log, from one client, with no
+    // direct SQL anywhere.
+    // `orderBy` is load-bearing, not tidiness: without it Postgres may return
+    // these two rows in either order and the identity assertions below become a
+    // coin flip. (Found by this round's self-adversarial pass, against the
+    // json-reporter run the mutant runner uses — the plain run had been green
+    // three times.)
+    const minting = await handle.db
+      .select({ payload: coreEvents.payload, roomId: coreEvents.roomId })
+      .from(coreEvents)
+      .where(eq(coreEvents.type, 'object_accepted'))
+      .orderBy(coreEvents.seq);
+    expect(minting).toHaveLength(2);
+    // Both name this room, which is the half that still holds: the CHECK pins
+    // `room_id` to `object.roomId`, so the log oracle can only ever answer this
+    // room for either of them.
+    expect(minting.map((r) => r.roomId)).toEqual([room.roomId, room.roomId]);
+
+    // And the second object is not in the fold. That is the seam: the log has a
+    // minting row for it, `coreState()` does not.
+    const minted = minting.map((r) => (r.payload as { object: { id: string } }).object.id);
+    expect(minted).toHaveLength(2);
+    expect(minted[0]).toBe(objectId);
+    expect(minted[1]).not.toBe(objectId);
+    const state = server.ledger.coreState();
+    expect(state.objects[minted[0] as string]).toBeDefined();
+    expect(state.objects[minted[1] as string]).toBeUndefined();
+  });
+
   it('corrects an accepted object, bumping revision and logging the before/after', async () => {
     const alice = await connect(room.people.alice as string);
     const { objectId } = await acceptedDecision(alice, 'ship on friday');

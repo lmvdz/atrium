@@ -72,12 +72,23 @@ import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
  *
  * `drizzle/0004_trusted_actor_and_append_boundary.sql` is the answer and is the
  * authority on it: `EXECUTE` is revoked from `PUBLIC` and granted to the app
- * role; a human actor's membership is read `FOR SHARE` inside the function; the
- * reducer's two rejection reasons — both properties of position — are enforced
- * there in canonical `(at, id)` order under `COLLATE "C"`; and the notification
- * is emitted inside, so no path can insert without ringing the bell. This file
- * still does all of it too, because a boundary that only the outer layer checks
- * and a boundary that only the inner layer checks are both one layer short.
+ * role; a human actor's membership is read `FOR SHARE`; the reducer's two
+ * rejection reasons — both properties of position — are enforced in canonical
+ * `(at, id)` order under `COLLATE "C"`; and the notification is emitted, so no
+ * path can insert without ringing the bell. This file still does all of it too,
+ * because a boundary that only the outer layer checks and a boundary that only
+ * the inner layer checks are both one layer short.
+ *
+ * **Since r7 those rules live on the table, not in the function**
+ * (`drizzle/0008_invariants_on_the_table.sql`). The r6 gauntlet reached
+ * `core_events` through a function that was not `atrium_append_core_event` — the
+ * call-stack guard matched an unqualified name any schema can claim — so a rule
+ * inside the function bound only callers of the function. Membership, the
+ * subject-room resolution, the ordering gate, `room_seq` and the receipt window
+ * are the `core_events_invariants` BEFORE INSERT trigger; the doorbell is the
+ * `core_events_doorbell` AFTER INSERT trigger. The function keeps the lock and
+ * the door. Everything above is still true of the *database*; none of it is
+ * still true of the *function*, and the difference is the whole of r6's major 3.
  *
  * ## The actor is a column, and replay reads it back (#21)
  *
@@ -125,8 +136,9 @@ import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
  * There is no window parameter now. `atrium_receipt_window(room_id, actor_kind,
  * payload)` in `drizzle/0006_derived_receipt_snapshot.sql` is the only derivation
  * in the system: this module calls it to obtain what the fold runs against, the
- * append function calls it to obtain what it stores, and the append returns what
- * it stored so `append` can refuse the transaction if the two ever differ. The
+ * `core_events_invariants` trigger calls it to obtain what the row stores (it was
+ * the append function until r7 — see above), and the append returns what was
+ * stored so `append` can refuse the transaction if the two ever differ. The
  * practical test for the next argument anybody adds to that function is the one
  * the gauntlet gave: *could a direct caller supply a well-formed lie?*
  *
@@ -276,8 +288,9 @@ export interface AppendRequest<T extends RoomEvent = RoomEvent> {
    * minted; it must throw to refuse, and the throw takes the whole append with
    * it.
    *
-   * As of r3 the append function refuses an unauthorized human actor on its own,
-   * so this is the outer half of two. It stays because it produces the error the
+   * As of r3 the database refuses an unauthorized human actor on its own — in the
+   * append function then, in the `core_events_invariants` trigger since r7 — so
+   * this is the outer half of two. It stays because it produces the error the
    * client can act on, and because the two halves answer for different callers:
    * this one for the command layer, that one for everybody else.
    */
@@ -508,9 +521,13 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    * So there is no window in TypeScript at all now, and nothing here reads
    * `messages`. `atrium_receipt_window(room_id, actor_kind, payload)` is the only
    * derivation there is: this function calls it to obtain what the fold runs
-   * against, and `atrium_append_core_event` calls it again to obtain what it
-   * stores. Neither value is chosen by a caller, and `append` compares the two
-   * before it lets the transaction commit — see the note there.
+   * against, and the `core_events_invariants` trigger calls it again to obtain
+   * what the row stores. Neither value is chosen by a caller, and `append`
+   * compares the two before it lets the transaction commit — see the note there.
+   *
+   * The second caller was `atrium_append_core_event` until r7; it is the trigger
+   * now, which is what makes the derivation cover a writer that never went
+   * through the function (`drizzle/0008_invariants_on_the_table.sql`).
    *
    * Run inside the append transaction, after the ledger lock: `messages` is only
    * ever written by a projection inside an append, so under the lock the answer
@@ -518,7 +535,13 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    *
    * `atrium_receipt_window` is `SECURITY INVOKER` while the append function is
    * `SECURITY DEFINER`, so in a deployment with a dedicated unprivileged app role
-   * this call runs as that role and the boundary's runs as the table owner. Least
+   * this call runs as that role and the boundary's runs as the table owner. That
+   * survives r7 unchanged even though the second caller moved into a trigger: a
+   * trigger fired by a statement inside a `SECURITY DEFINER` function runs under
+   * that function's effective user, so it is still the owner deriving the stored
+   * value. What *is* new is the fail-closed direction — a writer that reaches
+   * `core_events` outside the function derives the window as itself, and a role
+   * without `SELECT` on `messages` cannot complete the insert at all. Least
    * privilege was preferred over making the two identical, and what that costs is
    * *checked* rather than assumed — see the comparison in `append`. Making the
    * derivation `SECURITY DEFINER` would close the class instead of checking it, at
@@ -621,8 +644,20 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         // A rejection here is the invariant in the module header, violated: the
         // ledger held an event that canonical order refuses. It is not
         // recoverable by retrying, and carrying on would serve a state that no
-        // replay reproduces. Since r3 the append function refuses those rows in
-        // SQL, so reaching this line means something wrote around the boundary.
+        // replay reproduces. Since r3 the `rejected` half is refused in SQL — the
+        // canonical-order gate and `core_events_id_key` are exactly
+        // `out_of_order` and `duplicate` — so reaching *that* branch means
+        // something wrote around the boundary.
+        //
+        // The `malformed` branch below is different and the difference is worth
+        // stating rather than implying (#22 gauntlet r6, major 2's sweep): SQL
+        // runs no zod, so nothing in the database refuses a payload that
+        // `RoomEvent.parse` will. A row like that is reachable by any writer, and
+        // by one ordinary path too — #46 is the `body: ""` case, where a
+        // `z.string().min(1)` violation lands durably and then takes this room's
+        // catch-up down. So this throw is not "somebody wrote around the
+        // boundary"; it is "the boundary cannot see this class", which is the
+        // reason #46 exists.
         for (const outcome of result.outcomes) {
           if (outcome.outcome === 'rejected') {
             throw new Error(
@@ -674,20 +709,42 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    * worth writing down
    *
    * This function asks the **fold**: `state.proposals[id]` holds only subjects
-   * whose minting event actually applied. The boundary asks the **log**: every
-   * `proposal_recorded` row that exists, applied or not. Those differ for exactly
-   * one shape — a minting event the reducer refused (an authority gate, a
-   * duplicate) — which only a direct SQL caller can put there, since this function
-   * refuses to append one.
+   * whose minting event actually installed. The boundary asks the **log**: every
+   * `proposal_recorded` row that exists, folded or not. Those differ for exactly
+   * one shape — a minting row the fold does not install.
    *
-   * For that shape the boundary places the correction in the room the refused
+   * ## The containment argument that used to be here was false (#22 gauntlet r6,
+   * minor 5)
+   *
+   * It said that shape is one "which only a direct SQL caller can put there,
+   * since this function refuses to append one". `append` aborts on `rejected` and
+   * `malformed` only. A **business** refusal is `applied_with_issue`, and
+   * `applied_with_issue` is appended — that is the whole point of it. Accepting
+   * the same proposal twice through the ordinary command path produces two
+   * `object_accepted` rows, and the second object is absent from `coreState()`;
+   * `integration/server/commands.test.ts` has said so all along, which is what
+   * makes the sentence above a thing nobody checked rather than a thing nobody
+   * could have.
+   *
+   * The two reasons the reducer actually rejects for are `out_of_order` and
+   * `duplicate` (`RejectionReason` in @atrium/core — there is no authority-gate
+   * rejection, and naming one was the second error in the same sentence). Both are
+   * excluded from `core_events` by SQL: the canonical-order gate and
+   * `core_events_id_key`. So the set the old sentence described was empty, and the
+   * set that is actually reachable is reachable by an ordinary client.
+   *
+   * ## What still holds, which is the part that matters
+   *
+   * For that shape the boundary places the correction in the room the unfolded
    * minting event was recorded in, and the fold places it in **no** room at all
    * (`null`, and an `unknown object` issue). That is a column-versus-fold
    * difference and it is *not* the cross-room misroute the finding is about: the
    * fold never answers a *different* room, because the only candidate rooms are
    * the ones `core_events_payload_room_matches` has already pinned to the column,
    * and two candidates in two rooms are refused outright. Live still equals
-   * replay — both fold the same row to the same issue.
+   * replay — both fold the same row to the same issue. The r6 critic went looking
+   * for a case where the two oracles answer different rooms and reported finding
+   * none. What r7 changes is the honesty of the bound, not the bound.
    *
    * Closing it entirely would mean folding inside the boundary, which means
    * running the reducer in SQL. The boundary is the ledger's oracle; it is not
@@ -696,8 +753,10 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    * The refusals are not the same set either, and the difference is the direction
    * you would expect: this function has two (unknown subject, subject in another
    * room) and the boundary has three — it also refuses a subject minted in more
-   * than one room, which is a log this function can never produce and a direct
-   * caller can.
+   * than one room. That third one is not a log this function "can never produce"
+   * either, and the reason it does not is worth naming because it is not in this
+   * file: `commands.ts` mints every subject id with `randomUUID()`, so a client
+   * cannot name an existing subject into a second room.
    */
   function resolveRoomId(event: RoomEvent, authorizedRoomId: string): string {
     const declared = declaredRoomId(event);
@@ -780,8 +839,9 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           /**
            * The window this event folded under.
            *
-           * Not on its way anywhere: the append function derives its own from the
-           * same `atrium_receipt_window` and writes that. This is kept only so the
+           * Not on its way anywhere: the `core_events_invariants` trigger derives
+           * its own from the same `atrium_receipt_window` and assigns it onto the
+           * row on the way in. This is kept only so the
            * two can be compared once the append returns what it stored, which is
            * what makes "one derivation" a checked fact rather than a claim about
            * the code. `undefined` for a ledger-only kind that was never folded.

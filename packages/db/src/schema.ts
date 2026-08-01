@@ -134,13 +134,17 @@ export const interpretationStatus = pgEnum('interpretation_status', [
 /**
  * Every kind of thing that takes a position in `core_events`.
  *
- * The first five are @atrium/core's `CoreEvent` types verbatim — the reducer
- * folds exactly those, and `_CoreEventTypeCoverage` below stops compiling if
- * core ever grows a sixth that is not listed here. The last two are room
- * history that the reducer has no concept of: a message is substrate, not
- * semantics, and an attention item is a per-person projection. Both still
- * belong in the ledger, because a client replaying `since(room, room_seq)`
- * must get the room back exactly as it was.
+ * **Six** of the eight are @atrium/core's `CoreEvent` types verbatim — the
+ * reducer folds exactly those, and `_CoreEventTypeCoverage` below stops
+ * compiling if core ever grows a seventh that is not listed here. (This said
+ * "the first five … a sixth" until r7; #21 added `proposal_superseded` and the
+ * sentence was never updated, so a paragraph explaining an exhaustiveness assert
+ * was itself out of date about the set it covered. `coreEventTypes` has six, and
+ * `apps/server/test/protocol.test.ts` says so.) The other two are room history
+ * the reducer has no concept of: a message is substrate, not semantics, and an
+ * attention item is a per-person projection. Both still belong in the ledger,
+ * because a client replaying `since(room, room_seq)` must get the room back
+ * exactly as it was.
  *
  * Presence and typing are deliberately absent, and that absence is asserted by
  * a test: they are transient ws frames and never become rows (#14).
@@ -301,27 +305,45 @@ export const memberships = pgTable(
  *
  * ## What is NOT in this file, and cannot be
  *
- * Drizzle describes tables. Three of this table's rules are procedural and live
- * in `drizzle/0003_append_enforcement.sql`, which is the authority on them:
+ * Drizzle describes tables. Several of this table's rules are procedural and
+ * live in `drizzle/0003_append_enforcement.sql` and
+ * `drizzle/0008_invariants_on_the_table.sql`, which are the authority on them:
  *
- *  - **`atrium_append_core_event(...)` is the only way a row gets here.** A
- *    `BEFORE INSERT` trigger reads its own `PG_CONTEXT` call stack and refuses
- *    any insert not made from inside that function. #22's r1 gauntlet found the
- *    advisory lock to be *cooperative* — a migration, a seed script or an admin
- *    at a psql prompt could bypass canonical minting entirely — and a call-stack
- *    assertion is what makes it structural. It binds the table owner and a
- *    superuser, neither of whom a `REVOKE` does, **because they are roles**; it
- *    does not bind an operator who disables the trigger, and `ALTER TABLE …
- *    DISABLE TRIGGER` is what the migrations themselves use to re-derive a
- *    column. Privileged bypasses are operator territory and out of scope, which
- *    is what the function's own `COMMENT` says.
+ *  - **The append rules are enforced by triggers on this table, not by the
+ *    function in front of it** (#22 gauntlet r6, major 3). Membership, the room
+ *    a room-less kind resolves to, the canonical `(at, id)` order, `room_seq` and
+ *    the receipt window are all `core_events_invariants`, a `BEFORE INSERT` row
+ *    trigger. It fires for every INSERT from every caller through every function,
+ *    whatever the call stack claims. This is a change of *place*, and the reason
+ *    is that the previous place turned out not to be a boundary: the r6 gauntlet
+ *    defined `evil2.atrium_append_core_event`, compiled it with `evil2` on the
+ *    search path so PL/pgSQL labelled its frame unqualified, and satisfied the
+ *    call-stack check with a plain INSERT. Only rules attached to the table
+ *    survived that, so the rules are attached to the table.
+ *  - **`atrium_append_core_event(...)` is still the door, and the guard still
+ *    refuses a stranger.** `core_events_append_guard` reads its own `PG_CONTEXT`
+ *    call stack and now compares it against the *schema-qualified* signature it
+ *    reads back out of the catalog, which no function outside `public` can render.
+ *    It binds the table owner and a superuser, neither of whom a `REVOKE` does,
+ *    **because they are roles**; it does not bind an operator who disables the
+ *    trigger, and `ALTER TABLE … DISABLE TRIGGER` is what the migrations
+ *    themselves use to re-derive a column. Privileged bypasses are operator
+ *    territory and out of scope, which is what the function's own `COMMENT` says
+ *    — and, since r7, so is what happens if somebody takes that door off its
+ *    hinges: the invariants above still hold.
  *  - **The advisory lock is asserted, not assumed.** The function takes it and
- *    the trigger re-checks `pg_locks` before letting the row through.
+ *    the guard re-checks `pg_locks` before letting the row through.
+ *  - **Nothing lands silently.** `core_events_doorbell` is an `AFTER INSERT`
+ *    trigger emitting `pg_notify('atrium_ledger', …)`, so a row written by
+ *    something that is not this application still announces itself — as `null`,
+ *    which matches no instance and is therefore folded by all of them.
  *  - **`UPDATE` raises. `DELETE` and `TRUNCATE` do not, deliberately.**
  *    `core_events_no_update` is a `BEFORE UPDATE` trigger and nothing else:
  *    `room_id` cascades from `rooms`, so deleting a room has to be able to take
  *    its history with it, and the integration suite truncates between files. Both
- *    are `REVOKE`d from every role a `REVOKE` binds, which is a weaker guarantee
+ *    are `REVOKE`d from every role a `REVOKE` binds — asserted since r7 against
+ *    a real role in `leaves an ordinary reader with SELECT and nothing else`,
+ *    rather than asserted here — which is a weaker guarantee
  *    than a trigger and is the right one here. Rewriting a row in place has no
  *    legitimate caller at all, and it is the one that would let history be edited
  *    after the fact without leaving a trace — so that is the one with a trigger.
@@ -606,14 +628,29 @@ export const coreEvents = pgTable(
      *     kind's shape is not ignored, it is a refusal, so there is nothing to
      *     smuggle. This also closes the room-less kinds, which under the coalesce
      *     were satisfied by *anything* because the fall-through reached the column.
-     *  2. **That key's value is the row's room.** `IS NOT DISTINCT FROM`, not `=`:
-     *     a CHECK passes when its expression is NULL, so `=` against a missing key
-     *     would admit exactly the rows this exists to refuse.
+     *  2. **That key's value is the row's room.** `IS NOT DISTINCT FROM`, not `=`
+     *     — and the reason is *not* the one this comment gave until r7. It said
+     *     "`=` against a missing key would admit exactly the rows this exists to
+     *     refuse", and the r6 gauntlet took that apart: clause 1 already requires
+     *     the declared key to be present and non-NULL for the five room-bearing
+     *     kinds, and the `ELSE room_id::text` covers the other three, so the CASE
+     *     here is never NULL when clause 1 holds — and when clause 1 fails, `false
+     *     AND anything` is `false` either way. **The two spellings are
+     *     behaviourally identical under the shipped shape, and no test can
+     *     separate them.** It is kept because clause 2 should not need clause 1 to
+     *     be safe against a NULL, which is a property of *this* clause rather than
+     *     of the pair — and, being unobservable, it is pinned structurally by
+     *     `fails closed on a kind it does not enumerate, and says so structurally`
+     *     rather than left as an argument.
      *
      * Wrapped in `coalesce(…, false)` so an event type this `CASE` does not
      * enumerate fails closed. The type column is an enum and `payload_type_matches`
-     * pins the payload to it, so that is unreachable today; a ninth kind added
-     * without a room policy should be refused rather than waved through.
+     * pins the payload to it, so that is unreachable through the table today; a
+     * ninth kind added without a room policy is refused rather than waved through.
+     * That one *is* observable, and it went untested for two rounds: the test
+     * above reads this constraint's expression back out of `pg_constraint` and
+     * evaluates it against a ninth-kind payload, where dropping the `coalesce`
+     * yields NULL — which a CHECK accepts — instead of `false`.
      *
      * A smuggled key whose value is JSON `null` (`proposal: {roomId: null}`) is
      * accepted, and that is not a gap: `->>'roomId'` is SQL NULL either way, the
@@ -1225,7 +1262,14 @@ export type _CorrectionActionParity = Assert<
  * One-way, deliberately: every @atrium/core event type must be storable in
  * `core_events`, but `event_type` is a strict superset — `message_posted` and
  * `attention_resolved` are room history the reducer has no opinion about. Add a
- * sixth `CoreEvent` and this stops compiling until the enum learns about it.
+ * seventh `CoreEvent` and this stops compiling until the enum learns about it.
+ *
+ * One way is the whole of what it buys, and the missing direction is a real gap
+ * rather than a shrug: a value added *here* and not to the database compiles,
+ * and a value added to the database and not here compiles too. Neither is a
+ * TypeScript question — `event_type` is deployed by hand-written SQL in
+ * 0003–0008 — so it is asked of `enum_range(NULL::event_type)` in
+ * `integration/db/ledger-constraints.test.ts` instead (#22 gauntlet r6, minor 4).
  */
 export type _CoreEventTypeCoverage = Assert<CoreEventType, (typeof eventType.enumValues)[number]>;
 

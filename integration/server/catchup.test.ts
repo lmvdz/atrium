@@ -313,6 +313,127 @@ describe('cross-instance fan-out', () => {
     expect(Number(count)).toBe(0);
     expect(await a.server.ledger.head(room.roomId)).toBe(0);
   });
+
+  /**
+   * The r6 gauntlet's blocking finding, executed (#22 gauntlet r6, major 1).
+   *
+   * `NOTIFY` requires **no privilege** in Postgres. Anything that can open a
+   * connection can put a string on `atrium_ephemeral`, and until r7 the receiving
+   * side cast it (`JSON.parse(raw) as T`) and `ws-server.ts` handed the result to
+   * `hub.broadcast(note.roomId, note.frame as ServerFrame)` — no schema, no
+   * membership check, no room-ownership check. The critic's probe:
+   *
+   * > a subscribed client received a forged `event` frame while
+   * > `SELECT count(*) FROM core_events` was **0**
+   *
+   * and the damage is durable rather than cosmetic, because `applyEntry` commits
+   * the entry to the client's journal and advances `lastSeq` — so the **real**
+   * event at that `roomSeq` is thereafter permanently skipped
+   * (`if (entry.roomSeq <= room.lastSeq) return`). Ledger/client divergence
+   * without touching `core_events` at all.
+   *
+   * What the test asserts, in order: the forged event never reaches the socket;
+   * the client's cursor does not move; and the room still works afterwards, so
+   * the refusal is a refusal and not a wedged listener. Then the real event at
+   * that very position arrives and *is* applied — which is the half that shows
+   * the r6 exploit's actual consequence is gone rather than merely its frame.
+   *
+   * Two forgeries, because they fail for different reasons and a test for one is
+   * not a test for the other: a durable `event` frame, which the ephemeral
+   * channel's alphabet has no spelling for; and a well-formed `presence` frame
+   * whose envelope names a different room than its body, which is the fan-out
+   * key and the frame contents disagreeing.
+   */
+  it('drops a forged frame published on the ephemeral channel by anyone at all', async () => {
+    const a = await startSecondInstance();
+    teardown.push(a.close);
+
+    const watcher = await TestClient.connect(a.server.url, room.people.bob as string);
+    open.push(watcher);
+    await watcher.subscribe(room.roomId);
+    const other = await seedRoom(handle, ['dave'], { slug: 'forgery-target' });
+
+    // Published straight onto the channel, with no application involved and no
+    // privilege beyond a connection — which is the finding.
+    const forgedEvent = {
+      origin: 'attacker',
+      roomId: room.roomId,
+      frame: {
+        type: 'event',
+        entry: {
+          roomId: room.roomId,
+          roomSeq: 1,
+          seq: 1,
+          actor: { kind: 'human', userId: room.people.alice as string },
+          event: {
+            id: '00000000-0000-4000-8000-000000000001',
+            at: '2026-08-01T00:00:00.000Z',
+            type: 'message_posted',
+            roomId: room.roomId,
+            messageId: '00000000-0000-4000-8000-000000000002',
+            body: 'this message is not in the ledger',
+            replyToId: null,
+            clientMessageId: null,
+            attachments: [],
+          },
+        },
+      },
+    };
+    const forgedPresence = {
+      origin: 'attacker',
+      roomId: room.roomId,
+      frame: {
+        type: 'presence',
+        roomId: other.roomId,
+        userId: other.people.dave as string,
+        state: 'online',
+        at: '2026-08-01T00:00:00.000Z',
+      },
+    };
+    for (const forgery of [forgedEvent, forgedPresence]) {
+      await handle.db.execute(
+        sql`SELECT pg_notify('atrium_ephemeral', ${JSON.stringify(forgery)}::text)`,
+      );
+    }
+
+    // Nothing to wait *for*, so wait for something that would arrive after it:
+    // a real presence relay on the same channel, from the same instance, sent
+    // after both forgeries. If the forgeries were going to be delivered they
+    // would have been delivered first — NOTIFY is ordered per connection.
+    const mover = await TestClient.connect(a.server.url, room.people.alice as string);
+    open.push(mover);
+    await mover.subscribe(room.roomId);
+    await mover.command({ name: 'set_presence', roomId: room.roomId, state: 'online' });
+    await until(
+      () => watcher.frames.some((f) => f.type === 'presence' && f.userId === mover.userId),
+      15_000,
+      'a real presence frame to arrive behind the forgeries',
+    );
+
+    expect(watcher.frames.filter((f) => f.type === 'event')).toEqual([]);
+    expect(
+      watcher.frames.some((f) => f.type === 'presence' && f.userId === other.people.dave),
+    ).toBe(false);
+    const [{ count } = { count: 0 }] = await handle.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(coreEvents);
+    expect(Number(count)).toBe(0);
+
+    // And the position the forgery claimed is still available to the real event,
+    // which is the whole of the durable half of the finding.
+    const ack = await post(mover, 'the real first message');
+    expect(ack.type).toBe('ack');
+    await until(
+      () => watcher.frames.some((f) => f.type === 'event'),
+      15_000,
+      'the real event at roomSeq 1 to arrive',
+    );
+    const delivered = watcher.frames.filter((f) => f.type === 'event');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      entry: { roomSeq: 1, event: { body: 'the real first message' } },
+    });
+  });
 });
 
 /**
