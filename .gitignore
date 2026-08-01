@@ -46,3 +46,8 @@ yarn-error.log*
 
 # harness-managed agent worktrees and session state
 .claude/
+
+# the mutant runner's crash-recovery record. Written between applying a mutation
+# and undoing it, deleted after; a leftover one is recovered on the next start.
+# Never a committed artifact — it holds a file's pre-mutation bytes.
+mutants/.inflight.json

@@ -59,13 +59,15 @@ const MIGRATIONS = join(ROOT, 'packages/db/drizzle');
 /**
  * The migration a `sql` mutant restores from when it does not name one.
  *
- * Named per mutant rather than assumed, because 0004 and 0005 both define
- * `atrium_append_core_event` and both carry a `REVOKE EXECUTE ON FUNCTION` for
- * it. A bare marker matches in both, and restoring from the older one would
- * quietly re-deploy the eight-argument function this round replaced — a restore
- * that "succeeds" and leaves the database describing the previous round.
+ * Named per mutant rather than assumed, because 0004, 0005 and 0006 all define
+ * `atrium_append_core_event` and each carries a `REVOKE EXECUTE ON FUNCTION` for
+ * it. A bare marker matches in all three, and restoring from an older one would
+ * quietly re-deploy a signature a later round replaced — including 0005's, whose
+ * ninth argument is the caller-supplied receipt window round 5 removed. A restore
+ * that "succeeds" and leaves the database describing the defect is the worst
+ * failure available to a ledger whose whole claim is restoring faithfully.
  */
-const DEFAULT_RESTORE_MIGRATION = '0005_receipt_snapshot_and_canonical_subset.sql';
+const DEFAULT_RESTORE_MIGRATION = '0006_derived_receipt_snapshot.sql';
 
 function statementsOf(file: string): string[] {
   return readFileSync(join(MIGRATIONS, file), 'utf8')

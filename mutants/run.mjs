@@ -41,10 +41,13 @@
  * re-deploys exactly what the repo ships, or the run fails.
  *
  * A mutant names the migration it restores from (`restoreMigration`), because
- * more than one migration now defines `atrium_append_core_event` and a bare
- * marker would match both. Restoring the append function from 0004 would
- * re-deploy the eight-argument version this branch replaced — a restore that
- * "worked" and left the database describing the previous round.
+ * three migrations now define `atrium_append_core_event` and a bare marker would
+ * match all of them. Restoring the append function from 0005 would re-deploy the
+ * nine-argument version this round removed — the one that took the receipt window
+ * from its caller — as a restore that "worked" and left the database describing
+ * the defect. Markers are named down to the function for the same reason: 0006
+ * carries a `REVOKE EXECUTE ON FUNCTION` for the append and another for the
+ * derivation, and a bare `REVOKE EXECUTE ON FUNCTION` would match both.
  *
  * ## The three ways a ledger like this lies, all closed
  *
@@ -56,7 +59,12 @@
  *     go red, and every one of them must actually have. A mutant that only trips
  *     something unrelated is recorded as an escape, because the claim is "this
  *     test pins this rule", not "something, somewhere, noticed".
- *  3. **A mutant measured against a stale build.** #26 r6's lesson, applied
+ *  3. **A run that died mid-mutation.** Applying a mutation and undoing it are two
+ *     moments, and anything that kills the process between them leaves an earlier
+ *     round's behaviour in the working tree. `mutants/.inflight.json` records the
+ *     mutation and the file's original bytes for exactly that window; a leftover
+ *     record is recovered on the next start and reported. See the note on it.
+ *  4. **A mutant measured against a stale build.** #26 r6's lesson, applied
  *     here: `packages/*` are consumed by their *built* `dist` in some suites
  *     (`packages/ingest` and `apps/server` both resolve `@atrium/core` and
  *     `@atrium/db` that way), so mutating a file under `packages/` without
@@ -67,7 +75,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -79,7 +87,7 @@ const LEDGER = join(HERE, 'mutants.json');
 const RESULTS = join(HERE, 'RESULTS.md');
 const MIGRATIONS = join(ROOT, 'packages/db/drizzle');
 /** The migration a `sql` mutant restores from when it does not name one. */
-const DEFAULT_RESTORE_MIGRATION = '0005_receipt_snapshot_and_canonical_subset.sql';
+const DEFAULT_RESTORE_MIGRATION = '0006_derived_receipt_snapshot.sql';
 
 const args = process.argv.slice(2);
 const check = args.includes('--check');
@@ -207,6 +215,67 @@ function runSuite(suite) {
 const originals = new Map();
 let sql = null;
 
+/**
+ * The crash-recovery record — the fourth way a ledger like this lies.
+ *
+ * The three in the header are about a mutant that no longer applies, one caught
+ * by the wrong test, and one measured against a stale build. This is the one that
+ * bit during round 5 and is not in that list: **a run that dies between applying
+ * a mutation and undoing it leaves the mutation in the working tree**. The signal
+ * handlers below cover a clean SIGINT; they do not cover `kill -9`, an OOM, a
+ * killed process group, or a laptop lid. What is left behind is a source file
+ * silently reverted to an earlier round's behaviour — which the next `pnpm test`
+ * may or may not notice, and which a later commit would ship.
+ *
+ * The RETRO's standing form of this is "a ledger should assert a clean tree
+ * before trusting its own output" (#40 r2), and a plain `git status` cannot: a
+ * fix branch has legitimate uncommitted work by definition. So the record is
+ * explicit rather than inferred — the in-flight mutation and the file's original
+ * bytes, written before the mutation and deleted after the restore. On startup a
+ * leftover record is put back automatically and reported loudly, because the
+ * alternative is a person reading a diff and wondering which half is theirs.
+ */
+const INFLIGHT = join(HERE, '.inflight.json');
+
+function recoverInterruptedRun() {
+  if (!existsSync(INFLIGHT)) return;
+  let record;
+  try {
+    record = JSON.parse(readFileSync(INFLIGHT, 'utf8'));
+  } catch {
+    console.error(
+      `mutants/.inflight.json exists and does not parse. A previous run died mid-mutation and its\n` +
+        'record is unreadable; restore the working tree by hand (git diff will show the mutation)\n' +
+        'and delete the file before running again.',
+    );
+    process.exit(1);
+  }
+  if (record.kind === 'file') {
+    writeFileSync(join(ROOT, record.file), record.original);
+    console.error(
+      `recovered: a previous run died with "${record.id}" applied to ${record.file}. The file has\n` +
+        'been restored from the record. Rebuilding, then continuing.',
+    );
+    rebuildPackages();
+  } else {
+    console.error(
+      `a previous run died with the sql mutant "${record.id}" applied to the database. This run\n` +
+        'would measure a mutated schema, so it is refusing. Re-apply the migrations to a clean\n' +
+        `database (\`pnpm test:integration\` recreates one) and delete mutants/.inflight.json.`,
+    );
+    process.exit(1);
+  }
+  rmSync(INFLIGHT, { force: true });
+}
+
+function markInFlight(record) {
+  writeFileSync(INFLIGHT, JSON.stringify(record));
+}
+
+function clearInFlight() {
+  rmSync(INFLIGHT, { force: true });
+}
+
 function readOnce(file) {
   const path = join(ROOT, file);
   if (!originals.has(path)) originals.set(path, readFileSync(path, 'utf8'));
@@ -230,6 +299,7 @@ async function restoreSql(mutant) {
 
 function restoreFiles() {
   for (const [path, source] of originals) writeFileSync(path, source);
+  clearInFlight();
 }
 
 let interrupted = false;
@@ -247,6 +317,9 @@ const rows = [];
 let exitCode = 0;
 
 async function main() {
+  // Before anything else, and before the baseline in particular: a baseline
+  // measured over a leftover mutation is a baseline for a tree nobody wrote.
+  recoverInterruptedRun();
   if (needsDatabase) sql = postgres(databaseUrl, { max: 2, onnotice: () => {} });
 
   // The baseline is measured against a freshly built workspace for the same
@@ -279,6 +352,7 @@ async function main() {
 
     let result;
     if (mutant.kind === 'sql') {
+      markInFlight({ id: mutant.id, kind: 'sql' });
       try {
         await sql.unsafe(mutant.apply);
       } catch (error) {
@@ -296,6 +370,7 @@ async function main() {
         result = runSuite(mutant.suite);
       } finally {
         await restoreSql(mutant);
+        clearInFlight();
       }
     } else {
       const { path, source } = readOnce(mutant.file);
@@ -311,6 +386,7 @@ async function main() {
         exitCode = 1;
         continue;
       }
+      markInFlight({ id: mutant.id, kind: 'file', file: mutant.file, original: source });
       writeFileSync(path, source.replace(mutant.find, mutant.replace));
       let restoredCleanly = true;
       try {
@@ -336,6 +412,7 @@ async function main() {
         result = runSuite(mutant.suite);
       } finally {
         writeFileSync(path, source);
+        clearInFlight();
         // Restored *and* rebuilt, or every mutant after this one is measured
         // against this one's artifact. Recorded rather than thrown: a throw from
         // a `finally` would swallow whatever the `try` was doing, including the
