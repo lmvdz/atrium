@@ -43,10 +43,7 @@ Options
 
 Sources
 ${Object.values(SOURCES)
-  .map(
-    (source) =>
-      `  ${source.id.padEnd(20)} ${source.title}${source.evalOnly ? '  [eval holdout]' : ''}`,
-  )
+  .map((source) => `  ${source.id.padEnd(20)} [${source.role}] ${source.title}`)
   .join('\n')}
 `;
 
@@ -220,7 +217,9 @@ export async function main(argv: string[]): Promise<number> {
   switch (command) {
     case 'list':
       for (const source of Object.values(SOURCES)) {
-        console.info(`${source.id}\n  ${source.title}\n  ${source.note}\n  → ${source.out}`);
+        console.info(
+          `${source.id}  [${source.role}]\n  ${source.title}\n  ${source.note}\n  → ${source.out}`,
+        );
       }
       return 0;
     case 'all':

@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { serializeCorpus } from '../src/jsonl.js';
-import { SOURCES } from '../src/sources.js';
+import { demoSource, SOURCES, sourcesWithRole } from '../src/sources.js';
 import { corpusStats } from '../src/stats.js';
 import { validateCorpusText } from '../src/validate.js';
 
@@ -59,20 +59,56 @@ describe.each(Object.values(SOURCES))('corpus $id', (source) => {
   });
 });
 
+const corpusOf = (source: { out: string }) =>
+  validateCorpusText(readFileSync(resolve(REPO_ROOT, source.out), 'utf8')).messages;
+
 describe('holdout discipline', () => {
-  it('keeps the eval corpus flagged and separate from the demo corpus', () => {
-    const holdout = Object.values(SOURCES).filter((source) => source.evalOnly);
-    const demo = Object.values(SOURCES).filter((source) => !source.evalOnly);
-    expect(holdout).toHaveLength(1);
-    expect(demo).toHaveLength(1);
-    expect(holdout[0]?.out).not.toBe(demo[0]?.out);
+  it('registers exactly one demo corpus and exactly one eval holdout, and they differ', () => {
+    expect(sourcesWithRole('demo')).toHaveLength(1);
+    expect(sourcesWithRole('eval-holdout')).toHaveLength(1);
+    expect(demoSource().out).not.toBe(sourcesWithRole('eval-holdout')[0]?.out);
+  });
+
+  it('never demos against the holdout', () => {
+    expect(demoSource().number).not.toBe(37136);
   });
 
   it('holds a long threaded discussion, as the eval set needs', () => {
-    const holdout = Object.values(SOURCES).find((source) => source.evalOnly);
+    const holdout = sourcesWithRole('eval-holdout')[0];
     if (!holdout) throw new Error('no holdout source registered');
-    const { messages } = validateCorpusText(readFileSync(resolve(REPO_ROOT, holdout.out), 'utf8'));
+    const messages = corpusOf(holdout);
     expect(messages.length).toBeGreaterThanOrEqual(150);
     expect(messages.filter((message) => message.reply_to !== undefined).length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The demo corpus drives the threaded replay UI, so a flat one is useless
+ * however large it is — the round-1 demo had 111 messages and zero reply edges.
+ * These bounds are the ticket's, asserted rather than trusted.
+ */
+describe('the demo corpus', () => {
+  const demo = demoSource();
+  const messages = corpusOf(demo);
+  const replies = messages.filter((message) => message.reply_to !== undefined);
+
+  it('comes from a genuinely threaded source', () => {
+    expect(demo.kind).toBe('github-discussion');
+  });
+
+  it('is between 150 and 500 messages', () => {
+    expect(messages.length).toBeGreaterThanOrEqual(150);
+    expect(messages.length).toBeLessThanOrEqual(500);
+  });
+
+  it('carries real reply topology, not a handful of edges', () => {
+    expect(replies.length).toBeGreaterThan(100);
+    // More replies than roots: the tree has depth, not one flat fan-out.
+    expect(replies.length).toBeGreaterThan(messages.length - replies.length);
+    expect(new Set(replies.map((reply) => reply.reply_to)).size).toBeGreaterThan(20);
+  });
+
+  it('is a many-voiced debate', () => {
+    expect(corpusStats(messages).participants).toBeGreaterThan(50);
   });
 });

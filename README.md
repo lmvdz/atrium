@@ -69,7 +69,7 @@ byte-identically.
 (issue #2) — JSONL, one message per line:
 
 ```json
-{"id":"github:vercel/next.js#37136/c2807428","author":"leerob","ts":"2022-05-23T21:22:00.000Z","text":"Yes! …","reply_to":"github:vercel/next.js#37136/c2807422"}
+{"id":"github:vercel/next.js#11552/c2632","author":"timneutkens","ts":"2020-04-01T15:43:13.000Z","text":"Only if your code changes. In cases of data it can just be re-rendered.","reply_to":"github:vercel/next.js#11552/c2631"}
 ```
 
 `{id, author, ts, text, reply_to?, attachments?[]}` — small on purpose, so a
@@ -78,24 +78,51 @@ with a tiny parser. Files in, files out: no database, no interpretation, no UI.
 
 ```bash
 pnpm ingest list                      # registered sources
-pnpm ingest ts9998                    # → corpora/ts9998.jsonl
+pnpm ingest nextjs-isr                # → corpora/nextjs-isr.jsonl
 pnpm ingest all                       # every registered source
-pnpm ingest ts9998 --check            # fail if a refetch would change the file
+pnpm ingest nextjs-isr --check        # fail if a refetch would change the file
 pnpm ingest markdown notes.md         # pasted transcript → JSONL on stdout
 pnpm ingest validate                  # re-validate the committed corpora
 ```
 
-Two corpora are committed:
+Three corpora are committed:
 
-| File | Source | Why |
-| --- | --- | --- |
-| `corpora/ts9998.jsonl` | TypeScript #9998, *Trade-offs in Control Flow Analysis* | A decade-long design argument: decisions, supersessions, open questions, commitments. The demo corpus. |
-| `corpora/holdout-nextjs-rfc.jsonl` | Next.js discussion #37136, *RFC: Layouts* | Threaded RFC feedback. **Eval holdout** — reserved for the interpretation-quality golden set, so prompts are never tuned on the corpus they are scored against. |
+| File | Source | Role | Why |
+| --- | --- | --- | --- |
+| `corpora/nextjs-isr.jsonl` | Next.js discussion #11552, *RFC: Incremental Static Regeneration* | **demo** | 454 messages, 368 reply edges, 184 participants. A two-year RFC-to-shipped-feature argument with real threading — which is what the replay UI has to render. |
+| `corpora/ts9998.jsonl` | TypeScript #9998, *Trade-offs in Control Flow Analysis* | sample | A decade-long design argument, and the only corpus on the REST path. Flat: GitHub *issues* carry no threading, so it has zero reply edges — which is why it is no longer the demo. |
+| `corpora/holdout-nextjs-rfc.jsonl` | Next.js discussion #37136, *RFC: Layouts* | eval holdout | Reserved for the interpretation-quality golden set, so prompts are never tuned on the corpus they are scored against. Never demoed. |
 
 A rerun is byte-identical. Ids are derived from the source, messages are sorted
-by `(ts, id)`, keys are written in a fixed order, and nothing records when the
-fetch happened — so `pnpm ingest all` twice leaves `git diff` empty and any real
-change to the upstream thread shows up as a readable diff.
+by `(ts, id)`, keys are written in a fixed order, message bodies are stored
+verbatim, and nothing records when the fetch happened — so `pnpm ingest all`
+twice leaves `git diff` empty and any real change to the upstream thread shows
+up as a readable diff.
+
+**Bodies are verbatim.** No NFC composition, no line-ending rewriting, no
+trailing-whitespace strip — two trailing spaces are a Markdown hard break, and
+stripping them would silently reflow what someone wrote. Determinism comes from
+stable source bytes plus canonical *serialisation*, not from normalising the
+text; JSON escaping carries CR, LF, tabs and combining marks through unchanged.
+
+**A partial corpus is unwritable.** A truncated fetch is the dangerous failure
+because its output looks perfect — schema-clean, canonically ordered, stable
+across reruns, and missing half the conversation. So the fetchers throw rather
+than return short: on a stalled cursor (`hasNextPage` with no `endCursor`), on
+the page-count guard being hit with pages outstanding, on the same item arriving
+twice, and on the fetched count disagreeing with the API's own `totalCount`
+(GraphQL) or `comments` count (REST). The failure paths are covered by
+transport-mock tests, not just by the committed corpora.
+
+**A corpus is a snapshot at fetch time — by design.** It records the thread as
+the API described it during that one run, reconciled against the API's own
+counts so it is a coherent single moment rather than a smear across a mid-run
+edit. Edits, deletions and new messages *after* that run are out of scope:
+replay is about what was said, and a refetch is how you move the snapshot
+forward. When upstream really has changed, the rerun's `git diff` is the record
+of what changed — which is the point of committing the corpora at all. There is
+no attempt to reconcile a stored corpus against later upstream history, and
+`--check` deliberately reports drift as a failure rather than absorbing it.
 
 ## Scripts
 
