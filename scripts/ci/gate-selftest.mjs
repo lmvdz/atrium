@@ -312,6 +312,16 @@ const NOT_ANNOTATIONS = {
   'an explicit `fails: false`, which is the opposite of an annotation': {
     'x.test.ts': "import { it } from 'vitest';\nit('normal', { fails: false }, () => {});\n",
   },
+  // Regression guard: the import walk must not hand the parser a stylesheet and
+  // then call the resulting syntax errors a blind spot. Measured against the
+  // real tree — an earlier resolver reached design/tokens.css through apps/web's
+  // layout — and a gate that goes red because a component test imported a
+  // `.module.css` is a gate somebody deletes.
+  'a relative import of something that is not source at all': {
+    'x.test.ts':
+      "import { it } from 'vitest';\nimport './styles.module.css';\nit('renders', () => {});\n",
+    'styles.module.css': ':root { --shell-gap: 1px; }\n',
+  },
 };
 
 const CASES = [

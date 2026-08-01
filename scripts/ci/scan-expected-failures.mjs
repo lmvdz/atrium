@@ -54,6 +54,15 @@
  * world entirely. So the scan starts from every test file on disk, and then
  * follows relative imports transitively, so a helper is read even though no
  * report will ever name it.
+ *
+ * That boundary — the test glob plus what it reaches — is where it stops, and
+ * that was measured rather than assumed. Pointed at every source file in the
+ * repository instead, the scan reports one finding: `test.options?.fails ===
+ * true` in vitest-ci-reporter.mjs, where `test` is a Vitest task object and the
+ * line is the reporter *detecting* annotations rather than carrying one. There
+ * is no honest rule that keeps that quiet without a carve-out, and a carve-out
+ * in a witness is a hole. Reachability from a test file is the boundary that
+ * needs no exceptions.
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
@@ -334,9 +343,24 @@ export function findAnnotations(sourceFile, file, roots) {
   return findings;
 }
 
-/** Extension candidates for a relative import, TypeScript's `.js`-means-`.ts` included. */
+/** Files this scanner can read at all. A stylesheet is not a blind spot. */
+const SOURCE_FILE = /\.[cm]?[jt]sx?$/;
+
+/**
+ * Extension candidates for a relative import, TypeScript's `.js`-means-`.ts`
+ * included.
+ *
+ * Every candidate is JS or TS. A relative import can just as easily name a
+ * stylesheet or a JSON fixture, and following one of those would hand the
+ * TypeScript parser something it cannot read — which this file, correctly,
+ * treats as a blind spot and fails the gate over. Measured: pointed at the whole
+ * repository, an earlier version of this resolver reached `design/tokens.css`
+ * through `apps/web`'s layout and called it unparsable. A gate that goes red
+ * because someone imported a `.module.css` into a component test is a gate
+ * someone deletes, so the resolver never offers the parser a non-source file.
+ */
 function resolutionCandidates(base) {
-  const candidates = [base];
+  const candidates = SOURCE_FILE.test(base) ? [base] : [];
   const rewritten = base.replace(/\.([cm]?)js$/, '.$1ts');
   if (rewritten !== base) candidates.push(rewritten, base.replace(/\.[cm]?js$/, '.tsx'));
   for (const extension of ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']) {
