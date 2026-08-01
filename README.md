@@ -5,32 +5,27 @@ You step away for four hours. You come back to two hundred messages.
 You can read every one of them and still not answer three questions: what got
 decided, what is owed and by whom, and what is waiting on you.
 
-Atrium's bet is that the durable artifact of a conversation should not be the
-transcript. It should be a structured, correctable statement of what the group
-understands and is committed to, every part of it linked back to the messages it
-was read from. A machine may draft that statement. A machine may never be the
-thing that certifies it — so every line carries a mark saying which of the two
-it is:
-
 ```
 ~  decision   Use Postgres for the event log            alex, 14:02  →
 ✓  decision   Use Postgres for the event log            alex, 14:02  →
 ```
+
+The bet: what is worth keeping from a conversation is not the transcript. It is
+a list of what the group decided, promised, asked and claimed, each line
+pointing back at the message it came from. A machine can draft that list. A
+machine can never be the thing that certifies it, so every line says which of
+the two it is.
 
 `~` is a *reading*: something in the transcript looked like a decision, and
 nothing has checked it. `✓` is the same sentence after a person accepted it. The
 arrow is the provenance link back to the messages it was read from. [The actor
 floor](#the-actor-floor) is where that difference is enforced.
 
-Three surfaces render that state. Conversation is what people are saying.
-Current state is what the group now understands and is committed to. Needs you
-is what specifically requires this person, and why.
-
-**Most of that does not run yet.** The rules are enforced and tested in
-`packages/core`; the machine reading that would feed them does not exist, and no
-running process is wired to the core at all. [What is actually
-built](#what-is-actually-built) says exactly how much — it is the section to
-read before believing anything above it.
+**None of that runs yet.** The rules are enforced and tested in `packages/core`,
+and nowhere else: the machine reading that would feed them does not exist, and
+no running process is wired to the core at all. [What is actually
+built](#what-is-actually-built) spells that out, and it is the section to read
+before believing anything above it.
 
 ## What goes wrong now
 
@@ -46,8 +41,8 @@ away.
 The nearest familiar thing to this is a memory store: save what was said,
 retrieve it later. That is a different product. A store has no opinion about
 whether what it saved is true, who is accountable for it, or whether it still
-holds — and the moment you need those, deciding what is allowed into the record
-stops being an implementation detail and becomes the entire design.
+holds. The moment you need those, deciding what is allowed into the record stops
+being an implementation detail and becomes the entire design.
 
 The scope is deliberately small. Atrium does not replace Slack, host bots, carry
 voice or video, or run agents in v1; [`init.md`](init.md) draws that boundary on
@@ -58,8 +53,8 @@ autonomous.
 
 **The panel below is the design, not a screenshot.** Nothing renders it today.
 `apps/web` lays out the three regions over hardcoded fixtures, and this sketch is
-drawn from [`design/CONVENTIONS.md`](design/CONVENTIONS.md) rather than captured
-from a running app.
+drawn from [`design/CONVENTIONS.md`](design/CONVENTIONS.md). Nothing here was
+captured from a running app.
 
 Conversation is the messages, with each machine reading attached to the message
 it was drawn from. Current state is a flat list, one glyph per line. Needs you is
@@ -99,22 +94,21 @@ product is about:
 Nobody retypes the sentence and nothing is regenerated. The mark changes, an
 acceptance event goes on the log, and the arrow still points at alex's message.
 
-Two other things there carry the argument. The `~` decision sits in the list
-rather than in a pending queue — a reading is *in* the state, where you can see
-it and act on it, not parked out of sight until someone triages it. And the `◆`
-item states why it is *this* person's: attention items are a recomputed
-projection over the state, and every one of them must carry the sentence that
-justifies it. "Needs you" without a reason is a notification badge, and the
-design does not have one.
+The `~` decision sits in the list itself. A reading is *in* the state, where you
+can see it and act on it; there is no pending queue holding it out of sight
+until someone triages it. And the `◆` item states why it is *this* person's.
+Attention items are a recomputed projection over the state, and every one of
+them must carry the sentence that justifies it. "Needs you" without a reason is
+a notification badge, and the design does not have one.
 
 ## A claim is not a fact
 
 Someone writes: *"yeah that sounds fine, let's go with Postgres."*
 
 Was that a decision? A machine reading says probably. Atrium's answer is to
-record the reading and mark what it is, rather than to settle it on the reader's
-behalf. It enters the state as `~`. It becomes `✓` only when a person accepts
-it — not when a confidence score crosses a threshold.
+record the reading and mark what it is. It does not settle the question on the
+reader's behalf. The reading enters the state as `~`, and becomes `✓` only when
+a person accepts it, never when a confidence score crosses a threshold.
 
 `packages/core/src/authority.ts` holds that line, and it holds it inside the
 reducer rather than in the layer above it, because a boundary enforced only
@@ -146,14 +140,14 @@ narrower than `✓` implies:
 | `commitment` | **yes — and it should not** | attribution is deferred to #21 |
 | `objective` | **yes — and it should not** | no gate exists |
 
-The commitment row is the sharp one. `{statement: 'Bob will deploy production
-Friday', owner: 'user_bob'}` — a third-party commitment naming a human — is
-accepted on a model actor's word with no issue raised. `authority.ts`'s own
-header concedes why: deciding whether a commitment is self-stated or third-party
-needs the message it was drawn from, which the reducer does not have, so the row
-is routed to [#21](https://github.com/lmvdz/atrium/issues/21). It is scheduled
-rather than unknown. But until #21 lands, "`✓` means a human checked it" is true
-of decisions and of verified claims, and false of commitments and objectives.
+`{statement: 'Bob will deploy production Friday', owner: 'user_bob'}` — a
+third-party commitment naming a human — is accepted on a model actor's word with
+no issue raised. `authority.ts`'s own header concedes why: deciding whether a
+commitment is self-stated or third-party needs the message it was drawn from,
+which the reducer does not have, so the row is routed to
+[#21](https://github.com/lmvdz/atrium/issues/21) and the gap is scheduled. Until
+#21 lands, "`✓` means a human checked it" is true of decisions and of verified
+claims, and false of commitments and objectives.
 
 **Corrections are events, not erasures.** Saying *"that was only a suggestion,
 not a decision"* does not delete the decision. It writes a correction that
@@ -168,9 +162,10 @@ the durable thing.
 Seven glyphs carry the whole vocabulary — `✓` verified, `~` claim, `?`
 explicitly unverified, `·` routine, `◆` needs you, `■` destructive decision
 pending, `✗` failed. [`design/CONVENTIONS.md`](design/CONVENTIONS.md) defines
-each one, records the measured contrast rulings that constrain them — `--red2`
-measures 4.21–4.26:1 behind a glyph at 10.5px and fails AA, so `■` and `✗` are
-prescribed `--red3` instead — and states the invariant they all exist to serve:
+each one, records the measured contrast rulings that constrain them (`--red2`
+measures 4.21–4.26:1 behind a glyph at 10.5px on `--bg1`/`--bg3` and fails AA
+**in dark**, so `■` and `✗` are prescribed `--red3` instead), and states the
+invariant they all exist to serve:
 **a claim never dresses as a fact.**
 
 ## What is actually built
@@ -180,7 +175,7 @@ prescribed `--red3` instead — and states the invariant they all exist to serve
 `package.json`; neither imports a symbol from it. `apps/server/src/index.ts`
 opens a database handle, starts a WebSocket server and registers a worker, and
 issues no query. The reducer the rest of this file describes is exercised by its
-own test suite and by nothing else — 129 tests across 4 files in
+own test suite and by nothing else: 129 tests across 4 files in
 `packages/core`, all passing, measuring something real about code that no user
 action can currently reach. The repository's whole unit suite is 315 tests
 across 14 files, over the four projects `vitest.config.ts` declares
@@ -191,28 +186,29 @@ across 14 files, over the four projects `vitest.config.ts` declares
 and no clock, holding five accepted object types (decision, commitment, open
 question, claim, objective), typed relations, proposal staging,
 corrections-as-events, and a deterministic reducer whose live-and-replay
-equivalence is checked property-style — the test generates logs and asserts the
-equivalence across all of them, rather than over hand-written cases.
+equivalence is checked property-style: the test generates logs and asserts the
+equivalence across all of them.
 `packages/db` has the Drizzle schema and its first migration. `packages/ingest`
 turns a real conversation into canonical JSONL, byte-identically on a rerun;
 three corpora are committed, of 454, 111 and 480 messages. `design/` holds the
-token system — 51 variables per theme, extracted from the `:root` and
+token system (51 variables per theme, extracted from the `:root` and
 `html.atr-dark` blocks of `Atrium v6.dc.html`, the last of the prior prototype
-lineage — and the rules for using it. `apps/web` is a Next.js shell that lays
+lineage) and the rules for using it. `apps/web` is a Next.js shell that lays
 out the three regions over hardcoded fixtures; it declares `@atrium/core`
 directly and does not declare `@atrium/db` at all, so the arrow under
-[Layout](#layout) describes the shape the code is held to rather than what the
-manifests currently say. `apps/server` is one Node process whose WebSocket
+[Layout](#layout) is the shape the code is held to; it is not what the manifests
+currently say. `apps/server` is one Node process whose WebSocket
 server is a heartbeat-and-echo placeholder and whose job queue is real but
 registers `interpret-message` as a no-op.
 
 The token file's header still says its values are byte-identical to that
-prototype. On `main` they are not: a routine `pnpm lint` reformatted the file —
-every hex lower-cased, two `rgba()` values respaced, 83 lines changed — and
-because the checker that proved the property was never committed, nothing caught
-it. Measured today, the `:root` block matches on 0 of 51 declarations and
-`html.atr-dark` on 19 of 51; every colour is still the same colour, and it is
-the byte-identity claim that broke rather than the palette.
+prototype. On `main` they are not: a routine `pnpm lint` reformatted the file,
+lower-casing every hex, renotating two `rgba()` values (`rgba(244,241,234,.10)`
+→ `rgba(244, 241, 234, 0.1)`), and changing 83 lines. The checker that proved
+the property was never committed, so nothing caught it. Measured today, the
+`:root` block matches on 0 of 51 declarations and `html.atr-dark` on 19 of 51;
+every colour is still the same colour. The byte-identity claim broke; the
+palette did not.
 [#48](https://github.com/lmvdz/atrium/issues/48) owns restoring the file and
 committing the checker; the same stale sentence is still in `CONVENTIONS.md`
 and in `design/tokens.css`'s own header, which is how this class survives being
@@ -229,7 +225,7 @@ interaction prototype ([#10](https://github.com/lmvdz/atrium/issues/10)), and th
 next round of the core engine
 ([#21](https://github.com/lmvdz/atrium/issues/21)). Each is a branch with an open
 ticket and an unfinished review round. None of it is shipped, and there is no
-continuous integration on `main` yet — the workflow that would provide it is
+continuous integration on `main` yet; the workflow that would provide it is
 itself on a branch. There is also no host. #40 is open precisely because the
 deployment does not yet serve a page, so the compose stack under "Boot it" is a
 local stack today, whatever the file says about production.
@@ -239,16 +235,14 @@ local stack today, whatever the file says about production.
 anything, no eval run, no live multiplayer, and no attention computation over
 real data. The only model work that has happened is a throwaway spike on a
 `research/` branch, which measured how the reading would behave and settled the
-pipeline decision; nothing from it ships. The `~`/`✓` grammar above is enforced
-in the core and rendered against fixtures — it has never yet marked a machine
-reading of a real conversation. [What would settle
+pipeline decision; nothing from it ships. [What would settle
 this](#what-would-settle-this) is the last section.
 
 ## Why it is built this way
 
 Four choices shape everything above, and not one of them was reasoned out here
-for the first time. They come from what was already written down — the map,
-`init.md`, and the research briefs — including the choice that was never argued
+for the first time. They come from what was already written down: the map,
+`init.md`, and the research briefs, including the choice that was never argued
 at all.
 
 **Humans come before agents.** If a handful of people and a few hundred messages
@@ -260,45 +254,37 @@ agents are the fourth, after the thing they would accelerate is known to work.
 
 **Postgres holds the event log**, append-only, with projections recomputed over
 it. That choice was not argued and won; it was inherited. `init.md`'s
-persistence section is a list of things *not to build* —
-"a custom event database; a graph database; an embedding-native database; a
-distributed ledger" (`init.md:212–217`) — issued as a directive, not as the
+persistence section is a list of things *not to build*
+("a custom event database; a graph database; an embedding-native database; a
+distributed ledger", `init.md:212–217`), issued as a directive, not as the
 record of a comparison, and nothing in this repository weighs those four against
 Postgres. [#11](https://github.com/lmvdz/atrium/issues/11) locked the stack and
 [#12](https://github.com/lmvdz/atrium/issues/12) settled the table set and the
-wire protocol on top of that premise; neither reopened it. The reason it holds
-is that none of the four is where this product's difficulty lives.
+wire protocol on top of that premise; neither reopened it. It hasn't been
+reopened because none of those four is where this product's difficulty lives.
+That's a judgement, not a comparison — nobody has run the comparison.
 
-**The server is authoritative over the shared state**, rather than clients
-converging on it through CRDTs. Messages are append-only and semantic state
-changes through server commands, so there is nothing to merge. Who may change
-shared understanding is an access-control question, not a convergence question —
-and
+**The server is authoritative over the shared state.** Clients do not converge on
+it through CRDTs. Messages are append-only and semantic state changes through
+server commands, so there is nothing to merge. Who may change shared
+understanding is an access-control question, not a convergence question, and
 [`plans/research-terminal-multiplexing/`](plans/research-terminal-multiplexing/)
-found the same answer in a different field. Of the collaborative terminals
-surveyed — sshx, tmate, Zellij, VS Code Live Share — not one resolves concurrent
-input by merging, and none attempts OT or CRDT over a terminal buffer. They all
-push the conflict up to the access-control layer instead, though how far varies:
-Zellij mints distinct read and read-write tokens and Live Share can hold a whole
-session read-only, while an sshx link gives every viewer the ability to type.
+found the same answer in a different field: none of the collaborative terminals
+surveyed resolves concurrent input by merging, and they all push the conflict up
+to the access-control layer instead.
 
 **Patterns are borrowed; dependencies are not.** The design system, the glyph
 grammar and the attention rules come from the prior Atrium design lineage
 recorded in
 [`plans/research-live-call-design-system/`](plans/research-live-call-design-system/).
-Several architectural rules come from reading `block/buzz` — the closest live
-analog, Apache-2.0, read at a pinned commit, source and specifications together,
-in [`plans/research-buzz/`](plans/research-buzz/). Three things came back from
-it. An authorization model in which a machine acting under a person's authority
-never *becomes* that person but stays the author of its own events — the shape
-the agent phase is now designed toward, rather than delegation. Resolving the
-tenant server-side from the authenticated connection instead of from anything
-the client sends: Atrium had already made that call for actors, and what was
-taken is their name for the failure it avoids, a confused deputy. And an
-activity-feed doctrine — every item renders as verb, object and outcome, waiting
-and timeout are rendered states rather than silence, and references resolve to
-names rather than ids — which the Conversation surface inherits. Both bodies of
-work were read as patterns. Neither was taken as a dependency.
+Three things came back from reading `block/buzz`, the closest live analog,
+Apache-2.0, read at a pinned commit in
+[`plans/research-buzz/`](plans/research-buzz/): the authorization shape the agent
+phase is now designed toward, where a machine acting under a person's authority
+never *becomes* that person; a name for a failure Atrium had already ruled out
+for actors, a confused deputy; and the activity-feed doctrine the Conversation
+surface inherits. Both bodies of work were read as patterns. Neither was taken
+as a dependency.
 
 ## How the work gets reviewed
 
@@ -340,9 +326,9 @@ both of the above.
   reuse, what to defer, and the five phases.
 - [Issue #1](https://github.com/lmvdz/atrium/issues/1) — the map. Every settled
   decision, one line each, linked to the ticket that argued it. Start here for
-  *why* rather than *what*.
+  the *why*.
 - [`RETRO.md`](RETRO.md) — what the process got wrong, per ticket, kept so
-  decisions are made against evidence rather than memory.
+  decisions are made against evidence and not from memory.
 - [`design/CONVENTIONS.md`](design/CONVENTIONS.md) — the token system, the
   glyphs, and the measured contrast floors, as an operating manual.
 - [`plans/`](plans/) — the research briefs the decisions were made from: the
@@ -379,29 +365,10 @@ this repository in plain text and readable by anyone who can read it.** They
 exist so a laptop boots with no setup, and for nothing else. Never run this
 stack on a public VPS with those values.
 
-Three things enforce that:
-
-- The three secrets in `docker-compose.yml` — `POSTGRES_PASSWORD`,
-  `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` — are each `${VAR:?...}` with **no
-  default**. Compose refuses to start when one is unset instead of reusing a
-  known password. That is why `cp .env.example .env` is the first step above.
-  The non-secret settings (`POSTGRES_USER`, `POSTGRES_DB`, `S3_BUCKET`,
-  `S3_REGION`, ports, log level) do keep defaults.
-- `apps/server/src/env.ts` applies its dev fallback for `S3_ACCESS_KEY_ID` /
-  `S3_SECRET_ACCESS_KEY` **only** when `NODE_ENV` is explicitly `development`.
-  An **unset `NODE_ENV` is treated as production** — "nobody said" on a bare
-  host is a host on the internet — so `docker run atrium-server` with no
-  environment at all fails at boot with a named error rather than reaching for
-  a public secret. `pnpm dev` sets `NODE_ENV=development` itself; that is the
-  opt-in. **`NODE_ENV` is read from the process environment only.** A `.env`
-  found on disk may supply a value nobody set, but it may never say what
-  environment this process is in — a file ships in a repo and gets copied into
-  images, so if a file could turn the fallback back on, the strict default
-  would be decoration. `apps/server/test/entrypoint-env.test.ts` boots the real
-  entrypoint in a scratch directory with a planted `.env` to prove it.
-- Every value is trimmed before it is validated, so a secret pasted with the
-  newline that came with it still authenticates, and a variable set to nothing
-  but whitespace fails as empty instead of passing a length check.
+Two things enforce that: the three secrets in `docker-compose.yml` have no
+default, so compose refuses to start when one of them is unset, and an unset
+`NODE_ENV` is treated as production, because "nobody said" on a bare host is a
+host on the internet.
 
 Before exposing anything: set real values in `.env` (or the deployment's own
 secret store), and do not publish 5432 / 9000 / 9001 at all unless you mean to.
@@ -436,11 +403,10 @@ projection, and every one of them must say why it needs *this* person.
 
 `reduce(events) → state` in `packages/core` is deterministic: events are
 canonically ordered by `(at, id)`, and the same log always serializes
-byte-identically. It is total over the events it is given — one it cannot apply
-is recorded in `state.issues` rather than thrown, so a replay never wedges.
-That totality starts at the schema rather than below it: `reduce` takes
-`CoreEvent[]`, and structurally malformed input is refused one level up by
-`CoreEvent.parse`, which throws.
+byte-identically. It is total over the events it is given: one it cannot apply
+lands in `state.issues` and does not throw, so a replay never wedges. That
+totality starts at the schema. `reduce` takes `CoreEvent[]`, and structurally
+malformed input is refused one level up by `CoreEvent.parse`, which throws.
 
 The reducer is also where the trust boundary is enforced. A recorded proposal is
 always `proposed` — an interpreter cannot hand itself an
@@ -469,10 +435,9 @@ breaks them:
 | **Superseding an accepted decision** | human only |
 | **Corrections** — amend, retract, restore | human only |
 
-Those five rows are the whole floor, and what they cover is narrower than `✓`
-implies — [A claim is not a fact](#a-claim-is-not-a-fact) runs the shipped
-reducer once per object type and prints which ones a model can still mint
-accepted.
+Those five rows are the whole floor. [A claim is not a
+fact](#a-claim-is-not-a-fact) runs the shipped reducer once per object type and
+prints which ones a model can still mint accepted.
 
 The openings that *are* deliberate are the remaining rows. A model may accept
 its own claim and open-question readings — a claim carries its truth status in a
@@ -483,44 +448,22 @@ the route that stays open, and every gate is tested in both directions.
 
 ### Consumed, or rejected
 
-Live folding is a command, not a fold. `appendEvent(state, event)` returns a
-typed outcome:
+`appendEvent(state, event)` either consumes an event or rejects it. A consumed
+event takes its position even when its business checks failed, and its problem
+is recorded in `state.issues`. A rejected one, out of order or a duplicate id
+arriving ahead of the cursor, leaves nothing behind: no issue, no cursor
+movement, no `consumedEventIds` entry, and the state handed back is the state
+handed in.
 
-- **applied** — consumed and applied.
-- **applied with issue** — consumed, and a business problem was recorded in
-  `state.issues` (a coerced proposal, an amendment to an object that does not
-  exist, a relation that fails its type signature). It happened, in order; a
-  replay of the log reproduces it exactly.
-- **rejected** — *not* consumed, for one of two reasons. `out_of_order`: it does
-  not sort **strictly after** `state.cursor` in the canonical `(at, id)` order —
-  strictly, because one position holds one event, so anything landing on the
-  cursor is a redelivery or a forged id. `duplicate`: its id was consumed
-  already, and it arrived *ahead* of the cursor, which is the one case position
-  cannot see (a redelivery that re-minted its timestamp). Rejection leaves
-  nothing behind: no issue, no cursor movement, no `consumedEventIds` entry. The
-  state handed back is the state handed in, the same object.
-
-Position is checked first. Both branches reject and neither touches the state,
-so the order cannot change what the state becomes — it decides which reason is
-reported, and position is the stronger fact: it holds on the log's terms alone,
-so the ordering guarantee never becomes a property of the id set.
-
-An id is spent by being **consumed**, not by succeeding. An event that failed
-its business checks still took its position, and letting it back in later would
-let a redelivery retry against a state that had moved on — the same id flipping
-failure into success once its missing object finally arrived.
-
-So consumption only ever moves forward, and the consumed sequence is in
+Consumption only ever moves forward, and the consumed sequence is in
 canonical order by construction. For any log `L` of consumed events, folding
 `L` one event at a time in arrival order and replaying `L` in one `reduce` call
 produce byte-identical states — `issues` and `consumedEventIds` included. That
 is the entire live≡replay claim, and it is checked property-style over generated
-logs (`packages/core/test/replay.test.ts`): two rooms with deliberate same-`at`
-cross-room ties, verbatim redeliveries, redeliveries that re-minted their
-timestamp, model actors reaching for every gate above, and both shuffled and
-near-in-order delivery. The replay side does not ask the reducer what it
-consumed — it reconstructs that from the input stream with an independent filter
-written in the test, so a defect shared by both paths cannot cancel out.
+logs (`packages/core/test/replay.test.ts`). The replay side does not ask the
+reducer what it consumed. It reconstructs that from the input stream with an
+independent filter written in the test, so a defect shared by both paths cannot
+cancel out.
 
 The other half of the invariant is the ledger's, and it is recorded on
 [#22](https://github.com/lmvdz/atrium/issues/22): the durable log must contain
@@ -593,7 +536,7 @@ replay is about what was said, and a refetch is how you move the snapshot
 forward. When upstream really has changed, the rerun's `git diff` is the record
 of what changed — which is the point of committing the corpora at all. There is
 no attempt to reconcile a stored corpus against later upstream history, and
-`--check` deliberately reports drift as a failure rather than absorbing it.
+`--check` deliberately reports drift as a failure and never absorbs it.
 
 ## Scripts
 
@@ -601,7 +544,7 @@ no attempt to reconcile a stored corpus against later upstream history, and
 | --- | --- |
 | `pnpm dev` | Build packages, then web + server in watch mode |
 | `pnpm build` | Build packages, then both apps |
-| `pnpm test` | Vitest across `packages/*` |
+| `pnpm test` | Vitest across `packages/*` and `apps/server` |
 | `pnpm ingest <source>` | Fetch a conversation into `corpora/` (see Replay ingest) |
 | `pnpm test:e2e` | Playwright smoke test in `apps/web` |
 | `pnpm lint` | Biome lint + format check |
@@ -625,9 +568,9 @@ here".
   reads only the variables, so replacing the file is enough for everything the
   page paints; the one exception is `apps/web/app/layout.tsx`, whose viewport
   `themeColor` hardcodes `#e6e2da` and `#0a0b0c` for the browser chrome. Those
-  are emitted as `<meta name="theme-color">`, which is HTML metadata rather than
-  CSS and so cannot reference a custom property; they have to be updated by hand
-  and kept in step with `--bg0`.
+  are emitted as `<meta name="theme-color">`, which is HTML metadata and so
+  cannot reference a custom property; they have to be updated by hand and kept
+  in step with `--bg0`.
 - `interpret-message` is registered as a no-op worker. Its idempotency contract
   is already in place: dedup key `${messageId}:${interpretationVersion}` with an
   explicit singleton window, backed by the `(message_id, interpretation_version)`
@@ -654,6 +597,9 @@ supersessions and 5 commitments naming someone other than the speaker, then scor
 the machine reading against those annotations for per-type precision and recall,
 commitment-attribution accuracy, and supersession detection.
 
-Twenty-five windows is the number to watch. Until it exists, this document is a
-design and an argument, and the honest summary of the project is that the hard
-part is specified, partly enforced, and entirely untested against reality.
+Twenty-five windows is the number to watch — and scoring them settles only half
+of it. Precision and recall say whether the machine reads a conversation
+correctly. They say nothing about whether the list it produces gets anyone back
+up to speed faster than scrolling would, which is the actual claim and still has
+no test behind it. #24 is necessary and not sufficient; it now also records what
+the other half would need: a task, a measurement, a baseline, and a population.
