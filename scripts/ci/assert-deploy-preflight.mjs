@@ -67,6 +67,7 @@
  */
 
 import { compose, docker } from './compose.mjs';
+import { isMainModule } from './main-module.mjs';
 import { check, report } from './stack-client.mjs';
 
 /**
@@ -236,7 +237,7 @@ function composeNetworks() {
   return resolved.networks ?? {};
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   const engineVersion = docker(['version', '--format', '{{.Server.Version}}']).trim();
   const defaultBridge = observeDefaultBridge();
   const problems = checkHostNetworkPolicy({

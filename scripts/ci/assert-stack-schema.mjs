@@ -102,6 +102,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { queryDatabase } from './compose.mjs';
+import { isMainModule } from './main-module.mjs';
 import { check, report } from './stack-client.mjs';
 
 const META = 'packages/db/drizzle/meta';
@@ -249,7 +250,9 @@ function renderForeignKey({ columnsFrom = [], tableTo, columnsTo = [], onDelete 
   // exactly the kind of latent false red that shows up the week somebody adds a
   // composite key. The cost is that a key's column *order* is not compared, and
   // for a foreign key that is not a property with consequences.
-  return `foreign key (${[...columnsFrom].sort().join(', ')}) references ${tableTo} (${[...columnsTo]
+  return `foreign key (${[...columnsFrom].sort().join(', ')}) references ${tableTo} (${[
+    ...columnsTo,
+  ]
     .sort()
     .join(', ')}) on delete ${action}`;
 }
@@ -307,10 +310,18 @@ export function checkSchema(expected, actual) {
         differences.push(`is \`${held.type}\` and the migrations say \`${wanted.type}\``);
       }
       if (held.notNull !== wanted.notNull) {
-        differences.push(held.notNull ? 'is `not null` and should be nullable' : 'is nullable and the migrations say `not null`');
+        differences.push(
+          held.notNull
+            ? 'is `not null` and should be nullable'
+            : 'is nullable and the migrations say `not null`',
+        );
       }
       if (held.hasDefault !== wanted.hasDefault) {
-        differences.push(held.hasDefault ? 'has a default the migrations do not give it' : 'has no default and the migrations give it one');
+        differences.push(
+          held.hasDefault
+            ? 'has a default the migrations do not give it'
+            : 'has no default and the migrations give it one',
+        );
       }
       if (differences.length > 0) {
         problems.push(
@@ -493,7 +504,7 @@ export function schemaTotals(expected) {
   return { tables: expected.tables.size, columns, constraints, indexes };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   const expected = expectedSchema();
   const actual = deployedSchema();
   if (actual.migrations === -1) {

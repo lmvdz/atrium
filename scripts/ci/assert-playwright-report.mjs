@@ -15,6 +15,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { isMainModule } from './main-module.mjs';
 import { fail, readFreshReport } from './report-file.mjs';
 
 const REPORT = process.env.PLAYWRIGHT_REPORT ?? 'playwright-report.json';
@@ -136,6 +137,6 @@ function main() {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main());
 }

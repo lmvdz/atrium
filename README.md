@@ -743,7 +743,7 @@ zero tests exits 0 just like one that passed 315:
   subshells — and yields simple commands; a rule is a predicate over the words
   of one command, and `echo exec node x` is an `echo` with two arguments however
   it is spaced. Both polarities are fixtures: the evasions are mutations that
-  must go red, and 14 legitimate rewrites of the real steps must leave the whole
+  must go red, and 17 legitimate rewrites of the real steps must leave the whole
   file clean, because a guard that is wrong in that direction is one somebody
   deletes.
 - **Recognising a command is not proving it runs.** Six rounds asked whether a
@@ -771,6 +771,31 @@ zero tests exits 0 just like one that passed 315:
   and that is a list, not a proof. Executable *provenance* cannot be established
   by reading the workflow, because anything checking it also runs from the
   revision under test. It belongs to the governance trigger below.
+- **The environment is an allowlist, because the denylist could not be
+  finished.** Round 4 listed the variables that make a program load code —
+  `NODE_OPTIONS`, `BASH_ENV`, `LD_PRELOAD` and the rest — and called the list
+  "the union". It was not: `BASH_FUNC_node%%` exports a shell *function* that
+  beats the binary in command position (`env "BASH_FUNC_node%%=() { return 0; }"
+  bash -e step.sh` exits 0 where the same script exits 7),
+  `NODE_TLS_REJECT_UNAUTHORIZED=0` turns off the certificate verification the
+  `deploy` job is conditioned on, and `OPENSSL_CONF` can load a provider `.so`.
+  So the polarity is inverted: `DECLARED_VARIABLES` names the 17 variables
+  this workflow sets and why, and any other name — in a workflow, job or step
+  `env:`, as a one-shot assignment, through `env NAME=`, or written into
+  `$GITHUB_ENV` — is refused without the engine having heard of it. The
+  denylist survives underneath, demoted to choosing which sentence the refusal
+  prints.
+- **A container is a runtime too.** Round 4 derived "an action is a program" and
+  guarded `uses:` in one job; nothing looked at `container:`, where a job runs
+  every step inside an author-chosen image — `node` is its node, `bash` is its
+  bash — while `pin-actions-to-sha` waves the digest through, because that rule
+  only reads `uses:` lines. `no-runtime-override` refuses the four keys that
+  decide where and in what a step executes: `container:`, `working-directory:`
+  at any of its three positions, a `runs-on:` other than `ubuntu-latest`, and a
+  `uses: docker://…` container action. `deploy-mutation-ledger.mjs` re-checks
+  all four before it runs a stage, because its whole claim is that it executes
+  what CI executes, and "another program enforces that" is a dependency rather
+  than a proof.
 - The two Vitest reports must describe the same run — every status, the file
   count, and the identity of every individual test, not just the total. Matching
   totals prove little; a gutted reporter cannot invent 315 test names that agree
@@ -781,7 +806,7 @@ zero tests exits 0 just like one that passed 315:
 - Reports are deleted immediately before each runner starts and rejected unless
   their mtime post-dates that moment, so a leftover file cannot stand in for a
   run.
-- `scripts/ci/workflow-policy.mjs` enforces 26 house rules over the parsed
+- `scripts/ci/workflow-policy.mjs` enforces 27 house rules over the parsed
   workflow: no `continue-on-error`, no job conditions, no step conditions beyond
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
   action pinned to a commit SHA, no reusable workflows (a job body that is not in
@@ -792,16 +817,16 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 142
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 157
   mutated copies of the real workflow and additionally asserts that every one of
-  the 26 declared rules has a mutation proving it fires — coverage derived from
+  the 27 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
   went unexercised through round 2. Each mutation must also name *what* it broke
   (a message pattern, or the exact step→prerequisite edge) and must trip nothing
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 118 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 136 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

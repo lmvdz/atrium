@@ -38,10 +38,13 @@ import { checkPlaywrightReport } from './assert-playwright-report.mjs';
 import { checkSchema, readSchema } from './assert-stack-schema.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
+import { notAVerdict } from './child-verdict.mjs';
 import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
+import { isMainModule, mainGuardProblems } from './main-module.mjs';
 import { readFreshReport } from './report-file.mjs';
 import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
+import { buildAssetProblems, buildAssets, forgeLike } from './stack-client.mjs';
 
 const WORKFLOW = process.env.CI_WORKFLOW ?? '.github/workflows/ci.yml';
 
@@ -1067,10 +1070,7 @@ const CASES = [
   {
     name: 'a table with the right name and a column short',
     run: () =>
-      checkSchema(
-        schemaFixture(),
-        deployedFixture(drift('columns', 'users|email_verified|')),
-      ),
+      checkSchema(schemaFixture(), deployedFixture(drift('columns', 'users|email_verified|'))),
     expect: /`users` does not match the migrations: missing email_verified/,
   },
 
@@ -1124,8 +1124,7 @@ const CASES = [
   },
   {
     name: 'a check constraint the migrations create and the database does not have',
-    run: () =>
-      checkSchema(schemaFixture(), deployedFixture(drift('constraints', 'users|c|'))),
+    run: () => checkSchema(schemaFixture(), deployedFixture(drift('constraints', 'users|c|'))),
     expect: /`users` is missing 1 constraint\(s\).*users_email_present/s,
   },
   {
@@ -1318,7 +1317,243 @@ const CASES = [
     run: () => ledgerRefuses((source) => source),
     expect: 'clean',
   },
+
+  // ---- the ledger and CI must agree about *where*, not only about what -----
+  // Round 4 checked `shell:` in three positions and stopped. `container:` puts
+  // every stage inside somebody's image on the runner while this file runs the
+  // same scripts on the host with `bash -e`; `working-directory:` moves them.
+  // Both were accepted, and both make the receipt a description of an execution
+  // that never happened — which is the exact defect the ledger exists to find.
+  {
+    name: 'a deploy job that would run every stage inside an author-chosen image',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          '    name: the deployment serves (not the product works)\n',
+          `    name: the deployment serves (not the product works)\n    container:\n      image: ghcr.io/example/builder@sha256:${'a'.repeat(64)}\n`,
+        ),
+      ),
+    expect: /changes the execution context at jobs\.deploy\.container/,
+  },
+  {
+    name: 'a deploy step that would run from a directory the ledger does not replay it in',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          '      - name: Assert every container is healthy\n',
+          '      - name: Assert every container is healthy\n        working-directory: apps/web\n',
+        ),
+      ),
+    expect: /changes the execution context at jobs\.deploy\.steps\.\d+\.working-directory/,
+  },
+  {
+    name: 'a deploy job on a runner whose bash, node and PATH this repository has never seen',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          '  deploy:\n    name: the deployment serves (not the product works)\n    runs-on: ubuntu-latest',
+          '  deploy:\n    name: the deployment serves (not the product works)\n    runs-on: self-hosted',
+        ),
+      ),
+    expect: /changes the execution context at jobs\.deploy\.runs-on/,
+  },
+
+  // ---- a stage that did not exit on its own has not decided anything -------
+  // `attempt()` caught the 420-second timeout throw, returned `{ok:false}` and
+  // never asked why, so a slow stage — or ENOENT, or an OOM kill — was written
+  // down as CAUGHT. The four shapes below are measured, not assumed: node
+  // v24.5.0 leaves `error.killed` undefined for a timeout, so a fix written
+  // from that field's name would have been another silent pass.
+  {
+    name: 'a child that exits 7 on its own is a verdict',
+    run: () =>
+      notAVerdict({ status: 7, signal: null }, 420_000) === undefined
+        ? []
+        : ['it was treated as inconclusive'],
+    expect: 'clean',
+  },
+  {
+    name: 'a child killed by the ledger’s own timeout is not a verdict',
+    run: () => [
+      notAVerdict({ status: null, signal: 'SIGTERM', code: 'ETIMEDOUT' }, 420_000) ??
+        'treated as a verdict',
+    ],
+    expect: /killed by this ledger's own 420s timeout/,
+  },
+  {
+    name: 'a child the kernel killed (an OOM looks exactly like this) is not a verdict',
+    run: () => [
+      notAVerdict({ status: null, signal: 'SIGKILL' }, 420_000) ?? 'treated as a verdict',
+    ],
+    expect: /killed by SIGKILL/,
+  },
+  {
+    name: 'a child that never started is not a verdict',
+    run: () => [
+      notAVerdict({ status: null, signal: null, code: 'ENOENT' }, 420_000) ??
+        'treated as a verdict',
+    ],
+    expect: /never started: ENOENT/,
+  },
+
+  // ---- the main-module guard, in every file that has one ------------------
+  // Fifteen scripts decided "was I run?" by comparing `import.meta.url` against
+  // `file://` + `process.argv[1]`. Measured: with a space anywhere in the path,
+  // or through a symlink, the comparison is false and the script exits 0 having
+  // asserted nothing — including both self-tests, so the thing that would have
+  // noticed was disarmed by the same line.
+  {
+    name: 'every guard in scripts/ci is the sound one',
+    run: () => mainGuardProblems('scripts/ci'),
+    expect: 'clean',
+  },
+  {
+    name: 'the round-4 guard, re-introduced in one file',
+    run: () =>
+      mainGuardProblems('scripts/ci', (path) =>
+        path.endsWith('assert-tables.mjs')
+          ? `if (${BROKEN_GUARD_HALVES.join(' ')}) { process.exit(main()); }\n`
+          : readFileSync(path, 'utf8'),
+      ),
+    expect: /percent-encodes and resolves symlinks/,
+  },
+  {
+    name: 'the same written with a loose equality and single quotes',
+    run: () =>
+      mainGuardProblems('scripts/ci', (path) =>
+        path.endsWith('assert-tables.mjs')
+          ? `if (${LOOSE_GUARD_HALVES.join(' ')}) { main(); }\n`
+          : readFileSync(path, 'utf8'),
+      ),
+    expect: /percent-encodes and resolves symlinks/,
+  },
+
+  // ---- the build's assets, actually fetched (#40 round 5) ------------------
+  // Round 4 compared the *names* of the `/_next/static/…` chunks in two
+  // responses of the same build. Delete `COPY --from=build …/.next/static` from
+  // apps/web/Dockerfile and both responses name the same chunks and every one
+  // of them 404s: SSR HTML with no script, no stylesheet and no hydration, and
+  // the job green end to end. No script in scripts/ci ever fetched one.
+  {
+    name: 'a page whose chunks are all served',
+    run: () => servedAssets(PAGE_WITH_ASSETS, () => ({ status: 200, body: 'chunk' })),
+    expect: 'clean',
+  },
+  {
+    name: 'the missing `static` directory: every chunk named, every chunk 404',
+    run: () => servedAssets(PAGE_WITH_ASSETS, () => ({ status: 404, body: '' })),
+    expect: /returned 404, not 200/,
+  },
+  {
+    name: 'one stylesheet missing, which is a page that renders unstyled',
+    run: () =>
+      servedAssets(PAGE_WITH_ASSETS, (path) =>
+        path.endsWith('.css') ? { status: 404, body: '' } : { status: 200, body: 'chunk' },
+      ),
+    expect: /\/_next\/static\/css\/[^ ]* returned 404/,
+  },
+  {
+    name: 'a chunk served as 200 with nothing in it',
+    run: () => servedAssets(PAGE_WITH_ASSETS, () => ({ status: 200, body: '' })),
+    expect: /200 with an empty body/,
+  },
+  {
+    name: 'four lines of `respond` in the Caddyfile, which name no chunk at all',
+    run: () =>
+      servedAssets('<html><body><p>the page</p></body></html>', () => ({ status: 200, body: 'x' })),
+    expect: /none of them is a file this deployment could serve/,
+  },
+  {
+    name: 'the escaped copies Next embeds in its RSC payload are not fetched as-is',
+    run: () => {
+      const named = buildAssets(PAGE_WITH_ASSETS);
+      const bad = named.filter((path) => /[\\"']/.test(path));
+      return bad.length > 0
+        ? [
+            `buildAssets returned ${bad.join(', ')} — the escaping around the RSC payload's copy of the path was captured too, and the deployment is right to 404 that URL. A false red here is a reason to delete the check.`,
+          ]
+        : [];
+    },
+    expect: 'clean',
+  },
+
+  // ---- the forged cookie is not separable from a real one -----------------
+  {
+    name: 'a forged session cookie has the real one’s length and alphabet',
+    run: () => {
+      const real = 'qXsD2p8kLmN4vT0wYzB6.aF3hJ9rQ7uE1iO5cV8n';
+      const problems = [];
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const forged = forgeLike(real);
+        if (forged === real) problems.push('the forgery equalled the real value');
+        if (forged.length !== real.length) {
+          problems.push(
+            `length ${forged.length} rather than ${real.length}: a proxy separates them with one \`header_regexp\``,
+          );
+        }
+        for (const character of forged) {
+          if (!real.includes(character)) {
+            problems.push(
+              `the forgery uses \`${character}\`, which the real cookie does not: an alphabet test tells them apart`,
+            );
+          }
+        }
+      }
+      return [...new Set(problems)];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'the round-3 constant, measured against the same two tests',
+    run: () => {
+      const real = 'qXsD2p8kLmN4vT0wYzB6.aF3hJ9rQ7uE1iO5cV8n';
+      const constant = `${'0'.repeat(24)}.${'f'.repeat(24)}`;
+      const problems = [];
+      if (constant.length !== real.length) {
+        problems.push(`length ${constant.length} rather than ${real.length}`);
+      }
+      if ([...constant].some((character) => !real.includes(character))) {
+        problems.push('it uses characters the real cookie does not');
+      }
+      return problems;
+    },
+    // This case asserts the *old* fixture fails the test the new one passes —
+    // otherwise "drawn from the real cookie" is a claim with nothing behind it.
+    expect: /length 49 rather than 40/,
+  },
 ];
+
+/**
+ * The broken guard, in halves.
+ *
+ * Written as two strings joined at runtime because `mainGuardProblems` scans
+ * this directory and this file is in it: spelled out in one literal, the
+ * fixture would make the scanner report *this* file, and a self-test that
+ * cannot contain the thing it tests is a self-test with a hole where its
+ * fixture should be.
+ */
+// biome-ignore lint/suspicious/noTemplateCurlyInString: the broken guard, quoted verbatim as a fixture
+const BROKEN_GUARD_HALVES = ['import.meta.url', '===', '`file://${process.argv[1]}`'];
+const LOOSE_GUARD_HALVES = ['import.meta.url', '==', "'file://' + process.argv[1]"];
+
+/** A rendered page naming the chunks a Next build produces, escaping and all. */
+const PAGE_WITH_ASSETS = [
+  '<link rel="stylesheet" href="/_next/static/css/a1b2c3d4.css"/>',
+  '<script src="/_next/static/chunks/main-app-9f8e7d.js" async=""></script>',
+  '<script src="/_next/static/chunks/webpack-1a2b3c.js" async=""></script>',
+  '<script>self.__next_f.push([1,"3:HL[\\"/_next/static/css/a1b2c3d4.css\\",\\"style\\"]\\n"])</script>',
+].join('');
+
+/**
+ * `buildAssetProblems` with the fetch replaced, so no stack has to be up.
+ *
+ * Returns a promise; `main()` awaits every case's result for this reason. The
+ * alternative was a synchronous variant of the checker used only by the tests,
+ * which is a second implementation of the thing under test.
+ */
+function servedAssets(html, respond) {
+  return buildAssetProblems(null, html, async (path) => respond(path));
+}
 
 /** The `-f` values of a compose argv, in order, as a colon-joined list. */
 function fileList(argv) {
@@ -1378,19 +1613,15 @@ function schemaFixture() {
             token: 'text|t|f',
             expires_at: 'timestamp with time zone|t|f',
           },
-          [
-            'primary key (id)',
-            'foreign key (user_id) references users (id) on delete cascade',
-          ],
+          ['primary key (id)', 'foreign key (user_id) references users (id) on delete cascade'],
           ['unique index `auth_sessions_token_idx` (token)'],
         ),
       ],
       [
         'corrections',
-        table(
-          { id: 'uuid|t|t', message_id: 'uuid|t|f', action: 'correction_action|t|f' },
-          ['primary key (id)'],
-        ),
+        table({ id: 'uuid|t|t', message_id: 'uuid|t|f', action: 'correction_action|t|f' }, [
+          'primary key (id)',
+        ]),
       ],
     ]),
   };
@@ -1549,12 +1780,15 @@ function scannerCases() {
   return cases;
 }
 
-function main() {
+async function main() {
   const failures = [];
   for (const { name, run, expect } of [...CASES, ...scannerCases()]) {
     let problems;
     try {
-      problems = run();
+      // Awaited, because `buildAssetProblems` is async: the real fetch is, and a
+      // synchronous copy of the checker written for the tests would be a second
+      // implementation of the thing under test.
+      problems = await run();
     } catch (error) {
       failures.push(`case "${name}" threw: ${error.stack}`);
       continue;
@@ -1643,6 +1877,6 @@ function checkReadmeClaims() {
   return failures;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exit(main());
+if (isMainModule(import.meta.url)) {
+  process.exit(await main());
 }

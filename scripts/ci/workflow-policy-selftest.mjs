@@ -48,13 +48,15 @@
 
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
+import { isMainModule } from './main-module.mjs';
 import { LAUNCHER_NAMES, PACKAGE_MANAGER_NAMES } from './shell-command.mjs';
 import {
-  PREREQUISITE_PAIRS,
-  RULES,
   checkWorkflowFile,
+  DECLARED_VARIABLES,
+  PREREQUISITE_PAIRS,
   pairId,
   protectedCommandCoverage,
+  RULES,
 } from './workflow-policy.mjs';
 
 const WORKFLOW = process.argv[2] ?? '.github/workflows/ci.yml';
@@ -245,6 +247,25 @@ const ACCEPTED_FORMS = {
   // A package.json script is still one behind a launcher: `sudo` is not what
   // makes `pnpm lint` a lint, so the rule asks what was unwrapped, not argv[0].
   'the linter behind a launcher': [LINT_RUN, '        run: timeout 300 pnpm lint\n'],
+  // Requirement (c) for the *manager* table, which round 4 never applied to it.
+  // Each entry there and each option beside it has a form the real workflow can
+  // be written in that must come back completely clean — otherwise "`--filter`
+  // is admissible with `--fail-if-no-match`" is a sentence in a comment rather
+  // than a thing the engine does.
+  'the schema assertion filtered with the short spelling and the pairing': [
+    '        run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs\n',
+    '        run: pnpm --fail-if-no-match -F @atrium/db exec node ../../scripts/ci/assert-tables.mjs\n',
+  ],
+  'the same with the filter value attached and the pairing after it': [
+    '        run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs\n',
+    '        run: pnpm --filter=@atrium/db --fail-if-no-match exec node ../../scripts/ci/assert-tables.mjs\n',
+  ],
+  // The environment allowlist from the accepting side: a declared variable must
+  // still be settable, or the inversion is a ban on `env:`.
+  'a declared variable set on a step': [
+    LINT_RUN,
+    '        env:\n          NODE_VERSION: "22"\n        run: pnpm lint\n',
+  ],
 };
 
 /**
@@ -911,7 +932,7 @@ const MUTATIONS = [
     mutate: (s) =>
       replaceOnce(
         s,
-        'pnpm --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs',
+        'pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs',
         'echo node ../../scripts/ci/assert-tables.mjs',
       ),
     message: /never runs the schema set-equality assertion/,
@@ -1579,7 +1600,11 @@ const MUTATIONS = [
     name: 'NODE_OPTIONS on the whole workflow, which loads code into every gate',
     rule: 'no-command-shadowing',
     mutate: (s) =>
-      replaceOnce(s, "  NODE_VERSION: '22'\n", "  NODE_VERSION: '22'\n  NODE_OPTIONS: --require /tmp/nobble.cjs\n"),
+      replaceOnce(
+        s,
+        "  NODE_VERSION: '22'\n",
+        "  NODE_VERSION: '22'\n  NODE_OPTIONS: --require /tmp/nobble.cjs\n",
+      ),
     message: /`env:` at .* sets `NODE_OPTIONS`/,
   },
   {
@@ -1779,6 +1804,196 @@ const MUTATIONS = [
         '',
       ),
     message: /does not declare `ATRIUM_COMPOSE_FILES`/,
+  },
+
+  // ---- the manager table, which round 4 never gave the criteria to ---------
+  // Round 4 wrote the admission criteria for `PROTECTED_STEP_LAUNCHERS` and
+  // left `PROTECTED_STEP_MANAGERS` exactly as it was: twelve pnpm options, no
+  // measurement, no fixture, no argument. Half this repo's gates go through it.
+  // Measured under `bash -e <file>` at the repository root, pnpm 10.13.1:
+  // `pnpm --filter @atrium/does-not-exist exec node fail7.mjs` prints "No
+  // projects matched the filters" and exits **0 in 194ms** with the command
+  // never started. Nine steps of the real ci.yml rewritten that way came back
+  // clean from the round-4 engine, deploy job included.
+  {
+    name: 'a filter naming a workspace that does not exist, which pnpm reports as success',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs',
+        'run: pnpm --filter @atrium/nope exec node ../../scripts/ci/assert-tables.mjs',
+      ),
+    message: /passes `--filter` to `pnpm` without `--fail-if-no-match`/,
+  },
+  {
+    name: 'the same with the short spelling, `-F`',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: pnpm --fail-if-no-match --filter @atrium/db exec drizzle-kit migrate',
+        'run: pnpm -F @atrium/nope exec drizzle-kit migrate',
+      ),
+    message: /passes `-F` to `pnpm` without `--fail-if-no-match`/,
+  },
+  {
+    name: 'the same with the value attached, which `optionName()` has to normalise',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/wait-for-postgres.mjs',
+        'run: pnpm --filter=@atrium/nope exec node ../../scripts/ci/wait-for-postgres.mjs',
+      ),
+    message: /passes `--filter` to `pnpm` without `--fail-if-no-match`/,
+  },
+  {
+    name: '`--if-present`, which exits 0 when the script is missing and no filter flag fixes',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: pnpm --fail-if-no-match --filter "./packages/*" build',
+        'run: pnpm --if-present --fail-if-no-match --filter "./packages/*" build',
+      ),
+    message: /passes `--if-present` to `pnpm`, which is not one of the options/,
+  },
+  {
+    name: '`--recursive`, which runs the command once per matched project and may match none',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs',
+        'run: pnpm -r --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs',
+      ),
+    message: /passes `-r` to `pnpm`, which is not one of the options/,
+  },
+  {
+    name: 'a package manager nobody justified: `npx`, which came off the table with npm, yarn and bun',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: npx --yes node scripts/ci/assert-page-serves.mjs',
+      ),
+    message: /reaches the command through `npx`, which is not on the allowlist/,
+  },
+
+  // ---- where and in what a step runs (#40 round 5) -------------------------
+  // Round 4 derived "an action is a program too" and guarded `uses:` in one
+  // job. A container is a runtime too. Each of these was clean against the
+  // round-4 engine, and the first one silently satisfies `pin-actions-to-sha`
+  // as well, because that rule only ever reads `uses:` lines.
+  {
+    name: 'the deploy job moved wholesale into an author-chosen image',
+    rule: 'no-runtime-override',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '    name: the deployment serves (not the product works)\n',
+        `    name: the deployment serves (not the product works)\n    container:\n      image: ghcr.io/example/builder@sha256:${'a'.repeat(64)}\n`,
+      ),
+    message: /`container: .*` at jobs\.deploy\.container/,
+  },
+  {
+    name: 'a step run from a different directory than the one the ledger replays it in',
+    rule: 'no-runtime-override',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Lint\n        run: pnpm lint\n',
+        '      - name: Lint\n        working-directory: apps/web\n        run: pnpm lint\n',
+      ),
+    message: /`working-directory: apps\/web`/,
+  },
+  {
+    name: 'a self-hosted runner, i.e. a different bash, a different node and a different PATH',
+    rule: 'no-runtime-override',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '  deploy:\n    name: the deployment serves (not the product works)\n    runs-on: ubuntu-latest',
+        '  deploy:\n    name: the deployment serves (not the product works)\n    runs-on: self-hosted',
+      ),
+    message: /`runs-on: self-hosted`/,
+  },
+  {
+    name: 'a container action, which `pin-actions-to-sha` deliberately skips',
+    rule: 'no-runtime-override',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Lint\n        run: pnpm lint\n',
+        '      - name: Lint\n        uses: docker://alpine:3.20\n',
+      ),
+    message: /is a container action/,
+    // The step stops being `pnpm lint`, so the presence rule is right to say
+    // the linter is gone. Both statements are true and neither is redundant.
+    also: ['required-job-steps'],
+  },
+
+  // ---- the environment, inverted (#40 round 5) -----------------------------
+  // Round 4 said INJECTING_VARIABLES was "the union" of the variables that make
+  // a program run code it was not asked to. Three refutations, all measured,
+  // all clean against that engine — and the fix is not three more entries, it
+  // is DECLARED_VARIABLES, which refuses a name nobody has justified whether or
+  // not anybody has heard of what it does.
+  {
+    name: 'a shell function exported through the environment: BASH_FUNC_node%%',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+        '      BASH_FUNC_node%%: "() { return 0; }"\n      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+      ),
+    // Measured: `bash -e step.sh` exits 7; `env "BASH_FUNC_node%%=() { return
+    // 0; }" bash -e step.sh` exits 0. A function beats the binary in command
+    // position, and `no-command-shadowing` banned only the in-script spelling.
+    message: /sets `BASH_FUNC_node%%`.*bash imports exported shell functions/s,
+  },
+  {
+    name: 'certificate verification turned off for every gate in the job',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+        '      NODE_TLS_REJECT_UNAUTHORIZED: "0"\n      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+      ),
+    message: /sets `NODE_TLS_REJECT_UNAUTHORIZED`/,
+  },
+  {
+    name: 'an OpenSSL config, which can load a provider .so into the process',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+        '      OPENSSL_CONF: /tmp/nobble.cnf\n      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+      ),
+    message: /sets `OPENSSL_CONF`/,
+  },
+  {
+    name: 'a variable nobody has justified, which is the whole point of the inversion',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+        '      ATRIUM_SOMETHING_NEW: "1"\n      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+      ),
+    message:
+      /`ATRIUM_SOMETHING_NEW` is not one of the environment variables this workflow declares/,
+  },
+  {
+    name: 'the same as a one-shot assignment in front of a command',
+    rule: 'no-command-shadowing',
+    mutate: (s) => rewriteFetch(s, [`ATRIUM_SOMETHING_NEW=1 ${FETCH}`]),
+    message: /assigns `ATRIUM_SOMETHING_NEW` for one command/,
   },
 
   // Every entry in REJECTED_FORMS, as a mutation of the baseline fetch step.
@@ -2025,6 +2240,16 @@ function checkReadmeClaims() {
       pattern: phrase('(\\d+) legitimate rewrites'),
       actual: Object.keys(ACCEPTED_FORMS).length,
     },
+    {
+      // Added in round 5 with the table it counts. Every other number in this
+      // list is here because a receipt once quoted a wrong one; this is the
+      // first that has never been wrong, and the point is to keep it that way
+      // — an allowlist whose size is described in prose nobody checks is an
+      // allowlist that grows quietly.
+      what: 'declared environment variables',
+      pattern: phrase('names the (\\d+) variables'),
+      actual: Object.keys(DECLARED_VARIABLES).length,
+    },
   ];
   const failures = [];
   for (const { what, pattern, actual } of claims) {
@@ -2044,6 +2269,6 @@ function checkReadmeClaims() {
   return failures;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main());
 }

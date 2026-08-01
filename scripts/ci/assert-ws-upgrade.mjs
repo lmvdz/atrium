@@ -88,6 +88,11 @@ function upgrade(target, { cookie, timeoutMs = 15_000 } = {}) {
       host: target.address,
       port: target.httpsPort,
       servername: target.domain,
+      // Written rather than defaulted, for the reason stack-client.mjs gives at
+      // length: `NODE_TLS_REJECT_UNAUTHORIZED=0` changes the default, and this
+      // is the second TLS client in the job. A guarantee enforced at one of two
+      // call sites is the defect this round is about.
+      rejectUnauthorized: true,
       ...(target.ca ? { ca: target.ca } : {}),
       path: '/ws',
       method: 'GET',

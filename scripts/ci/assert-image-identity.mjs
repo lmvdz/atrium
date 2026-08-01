@@ -47,6 +47,7 @@
 
 import { readFileSync } from 'node:fs';
 import { inspect, psAll } from './compose.mjs';
+import { isMainModule } from './main-module.mjs';
 import { BUILT_SERVICES, manifestPath } from './record-built-images.mjs';
 import { check, report } from './stack-client.mjs';
 
@@ -88,7 +89,7 @@ export function checkImageIdentity(manifest, running) {
   return problems;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   const path = manifestPath();
   let manifest;
   try {

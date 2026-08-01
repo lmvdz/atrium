@@ -603,9 +603,10 @@ export function singleCommandProblems(script) {
  * spellings rather than a proof". The round-3 gauntlet spent one line proving
  * it: `setsid -f node scripts/ci/assert-page-serves.mjs`. `setsid` was in the
  * recognised-launcher table, so `unwrap()` saw straight through it; `-f` is
- * neither `-b` nor `--background`; and `bash -eo pipefail -c 'setsid -f sleep
- * 30'` exits 0 in two milliseconds. Policy-clean, CI-green, and the assertion's
- * exit status never observed by anything.
+ * neither `-b` nor `--background`; and a file whose one line is `setsid -f sleep
+ * 30`, run as `bash -e <file>` the way a runner runs a step, exits 0 in three
+ * milliseconds. Policy-clean, CI-green, and the assertion's exit status never
+ * observed by anything.
  *
  * That was the fifteenth spelling of "invoked is not runs" across #28 and #40,
  * and each of the previous fourteen was closed one at a time by adding it to a
@@ -618,27 +619,42 @@ export function singleCommandProblems(script) {
  * yet are all refused by the same clause, which is the point: the refusal does
  * not have to have heard of them.
  *
- * Measured here, under `bash --noprofile --norc -eo pipefail -c`, which is the
- * shell a runner uses for a step with no `shell:` key:
+ * ── THE HARNESS, WHICH ROUND 4 GOT WRONG ───────────────────────────────────
+ * Round 4 measured under `bash --noprofile --norc -eo pipefail -c '<line>'` and
+ * called that "the shell a runner uses for a step with no `shell:` key". It is
+ * not. A runner writes the step's script to a file and runs `bash -e <file>`;
+ * `--noprofile --norc -eo pipefail` is what `shell: bash` asks for, which this
+ * workflow never does. The numbers happened to survive the correction — except
+ * for the one launcher whose whole entry is about them:
  *
- *     setsid -f false                              exit 0,    2ms
+ *     bash --noprofile --norc -eo pipefail -c 'setsid sleep 3'   exit 0,    3ms
+ *     bash -e <file containing `setsid sleep 3`>                 exit 0, 3003ms
+ *
+ * Same machine, same minute, opposite answers. So requirement (b) below names
+ * `bash -e <file>`, and every number here was re-taken under it:
+ *
+ *     setsid -f false                              exit 0,    3ms
  *     setsid sleep 3                               exit 0, 3003ms
- *     flock -n -E 0 <a held lock> false            exit 0,    2ms
- *     timeout 5 false                              exit 1,    3ms
+ *     flock -n -E 0 <a held lock> false            exit 0,    3ms
+ *     timeout 5 false                              exit 1,    4ms
+ *     timeout 5 sleep 2                            exit 0, 2004ms
  *     timeout 0 false                              exit 1,    3ms
- *     command false                                exit 1,    2ms
+ *     command false                                exit 1,    1ms
  *     command sleep 2                              exit 0, 2003ms
- *     nohup false                                  exit 1,    3ms
+ *     command -p false                             exit 1,    2ms
+ *     nohup false                                  exit 1,    2ms
  *
- * Two of those are worth reading twice. **Bare `setsid` waited**, because it
- * execs its argument when the caller is not already a process group leader and
- * forks when it is — so whether the step waits depends on how the runner
- * happened to start the shell, which is not a property the workflow controls or
- * can test. A launcher whose waiting is conditional on its caller fails
- * property 3 whichever way today's measurement came out. And **`nohup` passes
- * all three properties**: it is refused for not being on the list, not for being
- * unsafe. That is the allowlist working as intended — absence is the default,
- * and "nobody has needed it" is a sufficient reason to leave a launcher out.
+ * Two of those are worth reading twice. **Bare `setsid` waited here and did not
+ * wait under `-c`**, because it execs its argument when the caller is not
+ * already a process group leader and forks when it is — so whether the step
+ * waits depends on how the runner happened to start the shell, which is not a
+ * property the workflow controls or can test. That is no longer an argument
+ * from the manual; it is the two lines above. A launcher whose waiting is
+ * conditional on its caller fails property 3 whichever way today's measurement
+ * came out. And **`nohup` passes all three properties**: it is refused for not
+ * being on the list, not for being unsafe. That is the allowlist working as
+ * intended — absence is the default, and "nobody has needed it" is a sufficient
+ * reason to leave a launcher out.
  *
  * ── WHAT AN ENTRY HAS TO PROVE ──────────────────────────────────────────────
  * Three properties, all three, for the launcher *and* for every option listed
@@ -657,10 +673,11 @@ export function singleCommandProblems(script) {
  *
  * The evidence for each is written in `why` below and has two parts: the
  * sentence of the manual that states the property, and a measurement under the
- * shell GitHub Actions uses — `bash --noprofile --norc -eo pipefail -c '<the
- * launcher> false'` must exit non-zero, and `… '<the launcher> sleep 2'` must
- * take about two seconds. A launcher that passes the first and not the second
- * has property 3 exactly backwards, which is what `setsid -f` does.
+ * shell GitHub Actions actually uses — a file containing `<the launcher> false`
+ * run as `bash -e <file>` must exit non-zero, and one containing `<the
+ * launcher> sleep 2` must take about two seconds. A launcher that passes the
+ * first and not the second has property 3 exactly backwards, which is what
+ * `setsid -f` does.
  *
  * The rule those two measurements encode, stated once so a future entry can be
  * argued about rather than guessed at: **no value of any listed option may
@@ -676,7 +693,9 @@ export function singleCommandProblems(script) {
  *   a. an entry here whose `why` cites the manual sentence for each of the three
  *      properties, for the launcher and for each option added beside it;
  *   b. the two measurements above, quoted in `why` with the exit status and the
- *      elapsed time, taken under `bash --noprofile --norc -eo pipefail -c`;
+ *      elapsed time, taken under `bash -e <file>` — the shell the runner uses
+ *      for a step with no `shell:` key, and not `bash … -c`, which gives a
+ *      different answer for `setsid` and would have given a wrong one here;
  *   c. an ACCEPTED_FORMS fixture in `workflow-policy-selftest.mjs` — the real
  *      workflow rewritten to use it must come back *completely clean*, which is
  *      what proves the entry is reachable rather than decorative;
@@ -697,7 +716,7 @@ export function singleCommandProblems(script) {
 export const PROTECTED_STEP_LAUNCHERS = {
   command: {
     options: { '-p': true },
-    why: 'POSIX: `command` executes the utility "in the current shell environment" with the argv it is given, suppressing function lookup — one exec, one wait, and the status is the utility\'s. `-p` only changes which PATH is searched. Measured: `command false` exits 1 in 2ms, `command sleep 2` takes 2003ms. `-v`/`-V` print a path instead of running anything and are refused by `unwrap` itself, one layer earlier.',
+    why: 'POSIX: `command` executes the utility "in the current shell environment" with the argv it is given, suppressing function lookup — one exec, one wait, and the status is the utility\'s. `-p` only changes which PATH is searched. Measured under `bash -e <file>`: `command false` exits 1 in 1ms, `command sleep 2` takes 2003ms, `command -p false` exits 1 in 2ms. `-v`/`-V` print a path instead of running anything and are refused by `unwrap` itself, one layer earlier.',
   },
   timeout: {
     options: {
@@ -710,7 +729,7 @@ export const PROTECTED_STEP_LAUNCHERS = {
       '-v': true,
       '--verbose': true,
     },
-    why: 'coreutils: "Start COMMAND, and kill it if still running after DURATION"; the exit status is the command\'s, or 124 when the duration expired. Every listed option changes which signal is sent or when — none of them stops the wait, and 124 is non-zero, so a timed-out assertion fails the step rather than passing it. Measured: `timeout 5 false` exits 1 in 3ms, `timeout 5 sleep 2` takes 2003ms, and `timeout 0 false` exits 1 — a duration of 0 is documented as no limit, so neither branch of the argument is a silent success.',
+    why: 'coreutils: "Start COMMAND, and kill it if still running after DURATION"; the exit status is the command\'s, or 124 when the duration expired. Every listed option changes which signal is sent or when — none of them stops the wait, and 124 is non-zero, so a timed-out assertion fails the step rather than passing it. Measured under `bash -e <file>`: `timeout 5 false` exits 1 in 4ms, `timeout 5 sleep 2` takes 2004ms, and `timeout 0 false` exits 1 in 3ms — a duration of 0 is documented as no limit, so neither branch of the argument is a silent success.',
   },
   sudo: {
     options: {
@@ -730,40 +749,94 @@ export const PROTECTED_STEP_LAUNCHERS = {
 };
 
 /**
- * Package managers a protected step may run its command through.
+ * Package managers a protected step may run its command through, and the
+ * options of theirs it may pass.
  *
- * Half this repository's gates are `pnpm --filter @atrium/db exec node …`, so
- * these have to be reachable, and they satisfy the same three properties: `pnpm`
- * spawns the child, waits for it, and exits with its status (`pnpm exec false`
- * exits 1, `pnpm exec sleep 2` takes 2.0s). Their options are enumerated for the
- * same reason the launchers' are — `--filter` and `--frozen-lockfile` are what
- * the workflow uses, and an option nobody has justified is refused rather than
- * assumed harmless.
+ * ── THE DEFECT THIS TABLE WAS (#40 round 5) ─────────────────────────────────
+ * Round 4 wrote the admission criteria above, applied them to
+ * `PROTECTED_STEP_LAUNCHERS`, and left this table exactly as it had been: twelve
+ * `pnpm` options and four other managers, none of them measured, none of them
+ * with a fixture, and none of them argued for. A rule stated in one comment and
+ * applied to one table is indistinguishable in a diff from a rule applied
+ * everywhere, and the blind review of round 4 spent one line proving it. Half
+ * this repo's gates are `pnpm --filter @atrium/db exec node …`, and, measured
+ * here under pnpm 10.13.1:
+ *
+ *     pnpm --filter @atrium/web exec node fail7.mjs         exit 1,  249ms
+ *     pnpm --filter @atrium/does-not-exist exec node fail7.mjs
+ *                          "No projects matched the filters"  exit 0,  194ms
+ *     pnpm -F nope exec node fail7.mjs                      exit 0,  205ms
+ *     pnpm --filter=@atrium/nope exec node fail7.mjs        exit 0,  193ms
+ *     pnpm -r --filter nope exec node fail7.mjs             exit 0,  199ms
+ *     pnpm --if-present run nosuchscript-xyz                exit 0,  194ms
+ *
+ * A filter that matches nothing is exit 0 with the command never started —
+ * which is the disqualifier property 2 exists for, the same one that keeps
+ * `flock -n -E 0` and `xargs -r` off the launcher list. Nine steps of the real
+ * `ci.yml` rewritten to name a workspace that does not exist came back
+ * **clean** from `node scripts/ci/workflow-policy.mjs`, deploy job included,
+ * because `DEPLOY_ENTRYPOINTS['ci-script'].match` tests `argv[0]` after
+ * `unwrap()` has already discarded the filter.
+ *
+ * ── WHAT AN ENTRY HERE HAS TO PROVE ─────────────────────────────────────────
+ * The same four things a launcher does, per manager *and per option*: the
+ * manual sentence for each of the three properties, the two measurements with
+ * exit status and elapsed time, an ACCEPTED_FORMS fixture in
+ * `workflow-policy-selftest.mjs` where the real workflow uses it and comes back
+ * completely clean, and a REJECTED fixture for the nearest option that breaks
+ * one of the three. `why` below carries the first two; the self-test carries
+ * the other two.
+ *
+ * ── WHAT CAME OFF, AND WHY ──────────────────────────────────────────────────
+ * `--recursive`/`-r` run the command once per matched project, and "once per
+ * match" includes zero — measured above. `--if-present` is exit 0 when the
+ * script is absent, which is the same failure with the filter matching: `pnpm
+ * --if-present run nosuchscript-xyz` exits 0 having run nothing, and no filter
+ * flag fixes it because the *script* is what is missing. `--frozen-lockfile`,
+ * `--workspace-root`/`-w`, `--silent`, `--reporter`, `--dir`/`-C` and the whole
+ * of `npm`, `yarn`, `bun`, `npx` and `bunx` came off for the reason the
+ * launcher table gives for `nohup`: nothing in this repository needs them, and
+ * "nobody has needed it" is a sufficient reason to leave an entry out. An
+ * unknown manager is refused by the same clause that refuses an unknown
+ * launcher, without this file having heard of it.
+ *
+ * ── AND WHAT REPLACED THEM ──────────────────────────────────────────────────
+ * `--filter`/`-F` stay, because the workflow genuinely needs them, and they are
+ * admissible **only paired with pnpm's own `--fail-if-no-match`**, whose help
+ * text is exactly the missing property: "If no projects are matched by the
+ * command, exit with exit code 1 (fail)". That is `requires` below, and it is
+ * checked over the option words `unwrap()` actually consumed, so
+ * `--filter=@atrium/nope` and `-F nope` are the same claim as `--filter nope`.
  *
  * Stated rather than implied: what a package.json script *does* once pnpm has
  * waited for it is semantics, and semantics is out of scope for every rule in
  * this repository's policy engine (see the SCOPE block in ci.yml).
+ *
+ * Also stated, because it is a real deviation from property 3: `pnpm --filter X
+ * exec node -e 'process.exit(3)'` exits **1**, not 3 —
+ * `ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL` replaces the child's status with its
+ * own. Non-zero is preserved, zero is preserved, and the *value* is not. Every
+ * rule in this repository asks "did the step fail", never "with what number",
+ * so the narrowing is admissible and it is written down here rather than
+ * discovered by somebody relying on the number.
  */
 export const PROTECTED_STEP_MANAGERS = {
   pnpm: {
-    '--filter': true,
-    '-F': true,
-    '--dir': true,
-    '-C': true,
-    '--frozen-lockfile': true,
-    '--recursive': true,
-    '-r': true,
-    '--workspace-root': true,
-    '-w': true,
-    '--silent': true,
-    '--reporter': true,
-    '--if-present': true,
+    why: 'pnpm spawns the child, waits for it, and fails the step when it fails. Measured under `bash -e <file>` from the repository root: `pnpm exec node fail7.mjs` exits 7 in 237ms (the status is the child\'s, unfiltered), `pnpm --filter @atrium/web exec node fail7.mjs` exits 1 in 249ms, and `pnpm --fail-if-no-match --filter @atrium/web exec sleep 2` takes 2200ms — so it waits rather than detaching. `pnpm exec` is documented as "Execute a shell command in scope of a project", i.e. an argv it runs, not a string it interprets.',
+    options: {
+      '--filter': {
+        why: 'pnpm(1): "--filter <selector> … restricts the scope to package names matching the given pattern". It changes *which* project the command runs in and nothing about the wait. Measured under `bash -e <file>`: `pnpm --fail-if-no-match --filter @atrium/web exec node fail7.mjs` exits 1 in 229ms, `pnpm --fail-if-no-match --filter @atrium/web exec sleep 2` takes 2200ms. Alone it fails property 2 — `pnpm --filter @atrium/does-not-exist exec node fail7.mjs` prints "No projects matched the filters" and exits **0 in 194ms** with the command never started — so it is admissible only with `--fail-if-no-match`.',
+        requires: ['--fail-if-no-match'],
+      },
+      '-F': {
+        why: 'the documented short spelling of `--filter`; same measurement, same failure without the pairing (`pnpm -F nope exec node fail7.mjs` exits 0 in 205ms, and `pnpm --filter=@atrium/nope exec node fail7.mjs` — the attached spelling `optionName()` normalises — exits 0 in 193ms).',
+        requires: ['--fail-if-no-match'],
+      },
+      '--fail-if-no-match': {
+        why: 'pnpm(1), verbatim from `pnpm help exec`: "If no projects are matched by the command, exit with exit code 1 (fail)". It is the option that gives `--filter` property 2, and it cannot itself skip the command: measured, `pnpm --fail-if-no-match --filter nope exec node fail7.mjs` exits 1 in 198ms and `pnpm --fail-if-no-match --filter @atrium/web exec sleep 2` takes 2200ms.',
+      },
+    },
   },
-  npm: { '--prefix': true, '-w': true, '--workspace': true, '--silent': true },
-  yarn: { '--cwd': true, '--silent': true },
-  bun: { '--cwd': true, '--silent': true },
-  npx: { '--package': true, '-p': true, '--yes': true, '-y': true, '--no-install': true },
-  bunx: { '--package': true, '-p': true, '--yes': true, '-y': true },
 };
 
 /** `--user=root` and `--user root` name the same option. */
@@ -789,7 +862,7 @@ export function launcherProblems(command) {
   for (const { name, kind, options } of command.via ?? []) {
     const table =
       kind === 'manager'
-        ? PROTECTED_STEP_MANAGERS[name]
+        ? PROTECTED_STEP_MANAGERS[name]?.options
         : PROTECTED_STEP_LAUNCHERS[name]?.options;
     if (table === undefined) {
       problems.push(
@@ -797,13 +870,30 @@ export function launcherProblems(command) {
       );
       continue;
     }
-    for (const option of options ?? []) {
-      const flag = optionName(option);
+    const flags = (options ?? []).map(optionName);
+    for (const flag of flags) {
       if (!Object.hasOwn(table, flag)) {
         problems.push(
-          `it passes \`${flag}\` to \`${name}\`, which is not one of the options a protected step may use it with (${Object.keys(table)
+          `it passes \`${flag}\` to \`${name}\`, which is not one of the options a protected step may use it with (${Object.keys(
+            table,
+          )
             .map((word) => `\`${word}\``)
-            .join(', ')}). Being on the launcher allowlist is a property of the binary *with these flags*: \`sudo\` waits for its command and exits with its status, and \`sudo -b\` returns immediately. An option is justified one at a time, with the manual sentence and the two measurements, or it is refused`,
+            .join(
+              ', ',
+            )}). Being on the launcher allowlist is a property of the binary *with these flags*: \`sudo\` waits for its command and exits with its status, and \`sudo -b\` returns immediately. An option is justified one at a time, with the manual sentence and the two measurements, or it is refused`,
+        );
+        continue;
+      }
+      // An option can be admissible only *in company*. `pnpm --filter nope exec
+      // node x` prints "No projects matched the filters" and exits 0 with the
+      // command never started; `--fail-if-no-match` is pnpm's own name for the
+      // missing property. Being on this table is a property of the binary with
+      // these flags, and for these flags that includes the flags beside them.
+      const required = table[flag]?.requires ?? [];
+      for (const companion of required) {
+        if (flags.includes(companion)) continue;
+        problems.push(
+          `it passes \`${flag}\` to \`${name}\` without \`${companion}\`. \`${flag}\` may select zero targets, and \`${name}\` reports that as success with the command never started — measured, \`pnpm --filter @atrium/does-not-exist exec node fail7.mjs\` exits 0 in 194ms — which is the same fail-open as \`flock -n -E 0\` and \`xargs -r\`. \`${companion}\` is the option whose documented job is to turn that into a failure, so on a protected step the two are one entry`,
         );
       }
     }

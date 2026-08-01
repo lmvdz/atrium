@@ -31,6 +31,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { importFrom } from './import-from.mjs';
+import { isMainModule } from './main-module.mjs';
 
 /** Tables the migration tool owns. Drizzle keeps its journal in the `drizzle` schema by default; if a config change ever moves it into `public`, it is infrastructure, not drift. */
 const INFRASTRUCTURE = new Set(['__drizzle_migrations']);
@@ -128,6 +129,6 @@ async function main() {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(await main());
 }

@@ -93,10 +93,13 @@
 
 import { queryDatabase, sqlLiteral } from './compose.mjs';
 import {
-  Jar,
+  buildAssetProblems,
+  buildAssets,
   check,
   establishSession,
   follow,
+  forgeLike,
+  Jar,
   mailpit,
   once,
   report,
@@ -251,8 +254,13 @@ check(
  * lazy version — labelled as what it is, rather than as the argument.
  */
 const forged = new Jar();
-for (const name of session.jar.names) {
-  forged.accept([`${name}=${'0'.repeat(24)}.${'f'.repeat(24)}; Path=/`]);
+for (const [name, value] of session.jar.entries) {
+  // Same length, same alphabet, different value — see `forgeLike`. Round 3's
+  // `'0'.repeat(24) + '.' + 'f'.repeat(24)` was a constant a one-line
+  // `header_regexp` in the Caddyfile separates from a real Better Auth token,
+  // which makes "a request the fixture cannot have been conditioned on" false
+  // in the same paragraph that claims it.
+  forged.accept([`${name}=${forgeLike(value)}; Path=/`]);
 }
 const withForgedCookie = await follow(target, '/', { jar: forged });
 check(
@@ -265,22 +273,26 @@ check(
   'GET / with a forged session cookie did not render the signed-out page. The forged request exists to obtain a signed-out `/` that a cookie-presence rule in the proxy would have routed to the app, so it has to be the signed-out page that comes back.',
 );
 
-/** The build's own asset names, which only this build produces. */
-function buildAssets(html) {
-  return [...new Set([...html.matchAll(/\/_next\/static\/[^"'\s)]+/g)].map((match) => match[0]))]
-    .sort()
-    .join(' ');
-}
-
-const assets = buildAssets(anonymous.body);
+const assets = buildAssets(anonymous.body).join(' ');
 check(
-  assets !== '',
-  'GET / signed out references no `/_next/static/…` asset at all, so nothing about it was produced by a Next build. Four lines of `respond` in the Caddyfile look exactly like this.',
-);
-check(
-  assets === buildAssets(withForgedCookie.body),
+  assets === buildAssets(withForgedCookie.body).join(' '),
   'GET / signed out and GET / with a cookie that is not a session reference different build assets, so the two are not being rendered by the same thing. A proxy that answers `/` from a fixture *unless a session cookie is present* is precisely this: the second request carries a cookie, reaches the app, and comes back naming chunks the first response does not.',
 );
+
+/**
+ * And every one of those chunks is actually served.
+ *
+ * The comparison above is two strings from two responses of the same build, so
+ * a build with no `static` directory in the image satisfies it perfectly: both
+ * responses name the same chunks and every one of them 404s. That is a dead
+ * page — no JavaScript, no stylesheet, no hydration — and it is what deleting
+ * one `COPY` line from apps/web/Dockerfile produces, with this job green from
+ * end to end. Fetching is the only thing that can tell "the build named its
+ * assets" from "the build shipped them"; see `buildAssetProblems`.
+ */
+for (const problem of await buildAssetProblems(target, anonymous.body)) {
+  check(false, problem);
+}
 
 // The lazy version of the same mutation, caught cheaply. Stated for what it is:
 // these are constants, a Caddyfile can write a header as easily as a body, and

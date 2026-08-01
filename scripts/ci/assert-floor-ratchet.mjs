@@ -26,6 +26,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { isMainModule } from './main-module.mjs';
 
 const MANIFEST = process.env.CI_MANIFEST ?? '.github/ci-manifest.json';
 const BASELINE_REF = process.env.CI_MANIFEST_BASELINE_REF ?? 'origin/main';
@@ -195,6 +196,6 @@ function main() {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main());
 }

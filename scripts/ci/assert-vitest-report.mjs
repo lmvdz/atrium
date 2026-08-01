@@ -28,6 +28,7 @@
 
 import { readFileSync } from 'node:fs';
 import { relative } from 'node:path';
+import { isMainModule } from './main-module.mjs';
 import { fail, readFreshReport } from './report-file.mjs';
 import {
   checkExpectedFailureWitness,
@@ -242,6 +243,6 @@ function main() {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main());
 }

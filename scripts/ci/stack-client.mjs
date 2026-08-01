@@ -39,6 +39,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { randomInt } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -88,6 +89,120 @@ export class Jar {
   get names() {
     return [...this.#cookies.keys()];
   }
+
+  /** `[name, value]` pairs — what a forgery has to be shaped like. */
+  get entries() {
+    return [...this.#cookies];
+  }
+}
+
+/**
+ * A value of the same length, drawn from the same characters, that is not it.
+ *
+ * ── WHY THIS IS NOT `'0'.repeat(24) + '.' + 'f'.repeat(24)` (#40 round 5) ───
+ * `assert-page-serves.mjs` sends a cookie that is not a session, precisely so
+ * that the signed-out page it gets back came from a request a proxy would have
+ * routed to the app — and then claimed the request "cannot be conditioned on
+ * something a proxy cannot see". A constant of twenty-four zeroes and
+ * twenty-four `f`s is conditionable on both counts: one line of Caddy
+ * (`header_regexp Cookie "=0{24}\."`, or a length test) tells it from a real
+ * Better Auth token without knowing anything a proxy is not allowed to know.
+ *
+ * So the forgery is derived from the real cookie instead: the same length, and
+ * a uniform draw from the alphabet the real value itself uses. A discriminator
+ * over length or character class now has to be one that would reject the real
+ * session too. What it still is not is *unforgeable* — a proxy that could
+ * verify the signature could tell them apart, and a proxy that could do that is
+ * the app.
+ */
+export function forgeLike(value, random = (bound) => randomInt(bound)) {
+  const alphabet = [...new Set(value)];
+  if (alphabet.length < 2) {
+    throw new Error(
+      `cannot forge a cookie like ${JSON.stringify(value)}: it uses ${alphabet.length} distinct character(s), so every same-length draw from its own alphabet is either it or trivially distinguishable`,
+    );
+  }
+  for (;;) {
+    const forged = Array.from({ length: value.length }, () => alphabet[random(alphabet.length)]);
+    const candidate = forged.join('');
+    if (candidate !== value) return candidate;
+  }
+}
+
+/** Every `/_next/static/…` URL a rendered page references, deduplicated. */
+export function buildAssets(html) {
+  // Deliberately a strict character class rather than "anything but a quote".
+  // Next embeds these paths inside its RSC payload as JSON strings, so the
+  // loose version captured the escaping too — `…/x.css\` — and would have
+  // fetched a URL the deployment is right to 404. Chunk, stylesheet, font and
+  // manifest names are letters, digits, `.`, `_`, `-`, `~` and `/`.
+  return [
+    ...new Set([...String(html).matchAll(/\/_next\/static\/[A-Za-z0-9._~/-]+/g)].map((m) => m[0])),
+  ].sort();
+}
+
+/** The ones that are a file this deployment must be able to serve. */
+const SERVABLE_ASSET = /\.(?:js|mjs|css|json|woff2?|ttf|otf|svg|png|webp|ico|map)$/;
+
+/**
+ * Every build asset the page names is actually served.
+ *
+ * ── THE DEFECT (#40 round 5) ────────────────────────────────────────────────
+ * Round 4 compared the *set* of `/_next/static/…` names in two responses and
+ * called it a proof that both came from the same build. It is, and that was not
+ * the question anybody needed answered. Delete line 35 of `apps/web/Dockerfile`
+ * — `COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static` —
+ * and the deployment serves SSR HTML whose every script and stylesheet 404s: a
+ * dead, unstyled, non-hydrating page, which is the single most common real
+ * failure of a Next standalone image. Both responses name the same chunks,
+ * because they come from the same broken build, so the comparison holds and the
+ * job stays green end to end. **No script in `scripts/ci/` ever fetched a
+ * `/_next/static/…` URL.**
+ *
+ * Two strings from two responses of one build cannot answer "is the build
+ * there". Fetching can, and it is one request per chunk against a stack that is
+ * already up. It also gives `assets !== ''` something to stand on: a page that
+ * names assets nobody can retrieve is no better evidence of a Next build than a
+ * page that names none.
+ *
+ * @param {object} target from `stackTarget()`
+ * @param {string} html   the rendered page
+ * @param {(path: string) => Promise<{status: number, body: string}>} [get]
+ *   injectable so `gate-selftest.mjs` can prove this catches a 404 and an empty
+ *   body without a running stack
+ * @returns {Promise<string[]>} human-readable problems; empty means every one
+ *   of them came back 200 with something in it
+ */
+export async function buildAssetProblems(target, html, get = (path) => once(target, path)) {
+  const named = buildAssets(html);
+  const servable = named.filter((path) => SERVABLE_ASSET.test(path));
+  if (servable.length === 0) {
+    return [
+      `the page references ${named.length} \`/_next/static/…\` path(s) and none of them is a file this deployment could serve (${named.join(', ') || 'none at all'}). A page produced by a Next build names its script and stylesheet chunks by content hash; four lines of \`respond\` in the Caddyfile name none, and a build whose \`static\` directory never made it into the image names them and cannot serve them.`,
+    ];
+  }
+  const problems = [];
+  for (const path of servable) {
+    let response;
+    try {
+      response = await get(path);
+    } catch (error) {
+      problems.push(`GET ${path} could not be fetched at all: ${error.message}`);
+      continue;
+    }
+    if (response.status !== 200) {
+      problems.push(
+        `GET ${path} returned ${response.status}, not 200. The page names this chunk, so the browser asks for it: a deployment that renders the HTML and 404s its own assets is a dead page with a correct-looking body, and it is what deleting \`COPY --from=build /app/apps/web/.next/static\` from apps/web/Dockerfile produces. Every structural check above passes on it.`,
+      );
+      continue;
+    }
+    if (String(response.body ?? '').length === 0) {
+      problems.push(
+        `GET ${path} returned 200 with an empty body, so whatever is answering for the build's assets is not the build.`,
+      );
+    }
+  }
+  return problems;
 }
 
 /**
@@ -119,9 +234,22 @@ export function once(target, path, options = {}) {
         port: cleartext ? target.httpPort : target.httpsPort,
         // The hostname in the handshake, so Caddy serves the right certificate
         // and matches the right site block.
+        // `rejectUnauthorized: true` is written rather than relied on. It is
+        // the default, and the default is what `NODE_TLS_REJECT_UNAUTHORIZED=0`
+        // changes — measured against a self-signed server: with that variable
+        // set and no explicit option the request returns 200, and with the
+        // option written it still fails DEPTH_ZERO_SELF_SIGNED_CERT. One
+        // `env:` line would otherwise have made this job's "certificate
+        // verification is never disabled" false without touching this file.
+        // `no-command-shadowing` refuses that line as well; this is the half
+        // that does not depend on another program having run.
         ...(cleartext
           ? {}
-          : { servername: target.domain, ...(target.ca ? { ca: target.ca } : {}) }),
+          : {
+              servername: target.domain,
+              rejectUnauthorized: true,
+              ...(target.ca ? { ca: target.ca } : {}),
+            }),
         path,
         method,
         headers: requestHeaders,

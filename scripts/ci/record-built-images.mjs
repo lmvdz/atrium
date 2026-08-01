@@ -38,6 +38,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { compose, docker } from './compose.mjs';
+import { isMainModule } from './main-module.mjs';
 
 /**
  * The services whose image identity is load-bearing.
@@ -91,7 +92,7 @@ export function imageNames(env = process.env) {
   return names;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   const path = manifestPath();
   const manifest = {};
   for (const [service, image] of Object.entries(imageNames())) {

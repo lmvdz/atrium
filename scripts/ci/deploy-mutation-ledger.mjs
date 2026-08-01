@@ -147,6 +147,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { notAVerdict } from './child-verdict.mjs';
 import { firstOperand, parseScript, singleCommandProblems } from './shell-command.mjs';
 import { deployEntrypoint } from './workflow-policy.mjs';
 
@@ -243,34 +244,73 @@ function classify(command, script) {
  * The shell GitHub Actions runs a `run:` step with, and the proof that it is
  * still that one.
  *
- * A step with no `shell:` key runs as `bash -e <file>` on a Linux runner. Every
- * way of changing that — `defaults.run.shell` at workflow or job level, a
- * `shell:` on the step — is refused by `no-shell-override` in the policy engine,
- * and is re-checked here rather than assumed: this file's whole claim in round 4
- * is that it executes what CI executes, and "a different program enforces that"
- * is not a claim, it is a dependency.
+ * A step with no `shell:` key runs as `bash -e <file>` on a Linux runner —
+ * `-e` and nothing else, which is why `-o pipefail` is deliberately absent both
+ * here and from the `execFileSync` below. Every way of changing that —
+ * `defaults.run.shell` at workflow or job level, a `shell:` on the step — is
+ * refused by `no-shell-override` in the policy engine, and is re-checked here
+ * rather than assumed: this file's whole claim in round 4 is that it executes
+ * what CI executes, and "a different program enforces that" is not a claim, it
+ * is a dependency.
  */
 const RUNNER_SHELL = ['bash', '-e'];
 
-function requireDefaultShell(workflow) {
+/**
+ * Every key that would make CI's execution differ from this file's, checked
+ * before a single stage runs.
+ *
+ * ── WHY THIS IS NO LONGER ONLY ABOUT THE SHELL (#40 round 5) ────────────────
+ * Round 4 asked one of the three questions this file depends on. `shell:`
+ * decides *what interprets* the script and was checked; `container:` decides
+ * *what image it runs in* and was not, and `working-directory:` decides *where*
+ * and was not either. A deploy job with `container: { image: … }` runs every
+ * stage inside somebody's image on the runner while this file runs it with the
+ * host's `bash` from the repository root — two receipts about two executions,
+ * which is precisely the failure round 4 claims to have closed. `runs-on:` is
+ * the same question one level out.
+ *
+ * The policy engine refuses all four (`no-shell-override` and
+ * `no-runtime-override`). They are re-checked here for the reason the shell
+ * always was: this file may only *execute* what it read, and a dependency on
+ * another program having run is not a proof.
+ */
+function requireSameExecutionContext(workflow) {
   const overrides = [];
-  if (workflow?.defaults?.run?.shell !== undefined) overrides.push('defaults.run.shell');
+  const note = (where, what) => overrides.push(`${where} (${what})`);
+  const runtime = (where, node) => {
+    if (node?.container !== undefined) note(`${where}.container`, 'a different image');
+    if (node?.['working-directory'] !== undefined) {
+      note(`${where}.working-directory`, 'a different directory');
+    }
+    if (node?.['runs-on'] !== undefined && node['runs-on'] !== 'ubuntu-latest') {
+      note(`${where}.runs-on`, 'a different machine');
+    }
+  };
+
+  if (workflow?.defaults?.run?.shell !== undefined) note('defaults.run.shell', 'a different shell');
+  runtime('defaults.run', workflow?.defaults?.run);
   for (const [jobId, job] of Object.entries(workflow?.jobs ?? {})) {
-    if (job?.defaults?.run?.shell !== undefined) overrides.push(`jobs.${jobId}.defaults.run.shell`);
+    if (job?.defaults?.run?.shell !== undefined) {
+      note(`jobs.${jobId}.defaults.run.shell`, 'a different shell');
+    }
+    runtime(`jobs.${jobId}.defaults.run`, job?.defaults?.run);
+    runtime(`jobs.${jobId}`, job);
     for (const [index, step] of (Array.isArray(job?.steps) ? job.steps : []).entries()) {
-      if (step?.shell !== undefined) overrides.push(`jobs.${jobId}.steps.${index}.shell`);
+      if (step?.shell !== undefined)
+        note(`jobs.${jobId}.steps.${index}.shell`, 'a different shell');
+      runtime(`jobs.${jobId}.steps.${index}`, step);
     }
   }
   if (overrides.length > 0) {
     throw new Error(
-      `${WORKFLOW} sets a shell at ${overrides.join(', ')}. This ledger runs every stage as \`${RUNNER_SHELL.join(' ')} <script>\` because that is what the runner does with a step that has no \`shell:\` key, and a receipt from a different shell is a receipt about a different execution — which is exactly how \`setsid -f node …\` came to be green in CI and caught here at the same time.`,
+      `${WORKFLOW} changes the execution context at ${overrides.join(', ')}. This ledger runs every stage as \`${RUNNER_SHELL.join(' ')} <script>\`, on this host, from the repository root, because that is what the runner does with a step that declares none of those keys. A receipt from a different shell, a different image or a different directory is a receipt about a different execution — which is exactly how \`setsid -f node …\` came to be green in CI and caught here at the same time.`,
     );
   }
 }
 
 function readPipeline() {
   const workflow = parse(readFileSync(WORKFLOW, 'utf8'));
-  requireDefaultShell(workflow);
+  requireSameExecutionContext(workflow);
   const steps = workflow?.jobs?.deploy?.steps;
   if (!Array.isArray(steps)) throw new Error(`${WORKFLOW} has no \`deploy\` job with steps`);
   const pipeline = [];
@@ -560,7 +600,11 @@ function attempt(run) {
     return { ok: true, output: run() };
   } catch (error) {
     const captured = `${error.stdout ?? ''}${error.stderr ?? ''}`;
-    return { ok: false, output: captured.trim() === '' ? String(error.message) : captured };
+    return {
+      ok: false,
+      output: captured.trim() === '' ? String(error.message) : captured,
+      inconclusive: notAVerdict(error, STAGE_TIMEOUT_MS),
+    };
   }
 }
 
@@ -770,11 +814,9 @@ function bakeRealtimeOrigin(entry, service = 'app') {
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  const mutated = execFileSync(
-    'docker',
-    ['image', 'inspect', built.image, '--format', '{{.Id}}'],
-    { encoding: 'utf8' },
-  ).trim();
+  const mutated = execFileSync('docker', ['image', 'inspect', built.image, '--format', '{{.Id}}'], {
+    encoding: 'utf8',
+  }).trim();
   if (mutated === original) {
     throw new Error(
       `building a layer onto \`${built.image}\` produced the same image ID ${original}; the tag was not re-pointed and this case would assert nothing`,
@@ -852,6 +894,9 @@ const CONTAINER_FAILURE = /container .* (is unhealthy|exited|has no healthcheck 
  */
 let stepSerial = 0;
 
+/** How long a stage may take before this file stops believing its own receipt. */
+const STAGE_TIMEOUT_MS = 420_000;
+
 function runValidatedCommand(stage, files, env) {
   stepSerial += 1;
   const scriptFile = join(workDir, `step-${stepSerial}.sh`);
@@ -865,7 +910,7 @@ function runValidatedCommand(stage, files, env) {
         ATRIUM_COMPOSE_FILES: files.join(':'),
         ATRIUM_IMAGE_MANIFEST: manifestFile,
       },
-      timeout: 420_000,
+      timeout: STAGE_TIMEOUT_MS,
     }),
   );
 }
@@ -942,6 +987,14 @@ function runCase(entry) {
     const result = runStage(stage, entry, context);
     if (result.skipped) continue;
     if (!result.ok) {
+      // A stage that did not exit on its own has not decided anything — see
+      // `notAVerdict`. Reporting CAUGHT here would credit an assertion with a
+      // verdict it never reached, which is the failure this whole file exists
+      // to detect, committed by the file itself.
+      if (result.inconclusive !== undefined) {
+        setupFailure = `\`${stage.name}\` (${stage.id}) did not produce a verdict: ${result.inconclusive}. Its output was: ${lastLines(result.output, 2)}`;
+        break;
+      }
       fired = stage;
       output = result.output;
       break;
@@ -1260,7 +1313,9 @@ for (const { entry, verdict, fired, detail } of results) {
         ? 'MISSED '
         : verdict === 'misattributed'
           ? 'MISCRED'
-          : 'UNKNOWN';
+          : verdict === 'inconclusive'
+            ? 'NOCALL '
+            : 'UNKNOWN';
   console.info(`${label} ${entry.id.padEnd(28)} ${fired?.id ?? '(nothing fired)'}`);
   if (verdict !== 'caught') console.info(`         ${detail}`);
 }

@@ -50,6 +50,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, rmSync, statSync } from 'node:fs';
 import { composeArgs } from './compose.mjs';
+import { isMainModule } from './main-module.mjs';
 
 /**
  * The four verbs, and what each one's flags are for.
@@ -141,7 +142,7 @@ export function composeStackArgv(verb, env = process.env) {
   return ['compose', ...composeArgs(env), ...definition.args(env)];
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   const [verb, ...rest] = process.argv.slice(2);
   if (rest.length > 0) {
     console.error(

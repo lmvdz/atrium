@@ -283,10 +283,10 @@ jobs:
       - name: Wait for Postgres
         # Uses the workspace's own postgres client rather than pg_isready, so
         # readiness never depends on what the runner image happens to ship.
-        run: pnpm --filter @atrium/db exec node ../../scripts/ci/wait-for-postgres.mjs
+        run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/wait-for-postgres.mjs
 
       - name: Apply migrations
-        run: pnpm --filter @atrium/db exec drizzle-kit migrate
+        run: pnpm --fail-if-no-match --filter @atrium/db exec drizzle-kit migrate
 
       - name: Build the workspace packages
         # The schema assertion below derives its expectations from the built
@@ -295,14 +295,14 @@ jobs:
         # things `required-job-steps` looks for, and a protected step is one
         # unconditional command (see the policy engine's
         # `protected-steps-run-one-command`).
-        run: pnpm --filter "./packages/*" build
+        run: pnpm --fail-if-no-match --filter "./packages/*" build
 
       - name: Assert the database matches the schema exactly
         # Set equality, derived from the built schema export rather than from a
         # hand-copied list: a missing table and an unexpected thirteenth one both
         # fail. Proves the service container was genuinely reachable and the
         # migration did work, rather than a no-op that exits 0 against nothing.
-        run: pnpm --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs
+        run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs
 
       - name: Delete the test reports
         # Deleted immediately before the runner starts, with the start time
@@ -384,13 +384,13 @@ jobs:
       - name: Build workspace packages
         # apps/web imports @atrium/core through its built dist/, so the Next dev
         # server Playwright boots needs the packages compiled first.
-        run: pnpm --filter "./packages/*" build
+        run: pnpm --fail-if-no-match --filter "./packages/*" build
 
       - name: Resolve Playwright version
         id: playwright
         run: |
           set -euo pipefail
-          version="$(pnpm --filter @atrium/web exec playwright --version | awk '{ print $2 }')"
+          version="$(pnpm --fail-if-no-match --filter @atrium/web exec playwright --version | awk '{ print $2 }')"
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -401,14 +401,14 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
 
       - name: Install Chromium
-        run: pnpm --filter @atrium/web exec playwright install --with-deps chromium
+        run: pnpm --fail-if-no-match --filter @atrium/web exec playwright install --with-deps chromium
 
       - name: Assert Chromium is present
         # The e2e suite skips itself when no browser is installed, which is the
         # right call on a laptop and a lie in CI. Belt to the spec's braces: if
         # the download silently failed, stop here rather than report a green run
         # over zero executed browser tests.
-        run: pnpm --filter @atrium/web exec node ../../scripts/ci/assert-chromium.mjs
+        run: pnpm --fail-if-no-match --filter @atrium/web exec node ../../scripts/ci/assert-chromium.mjs
 
       - name: Migrate the e2e database
         # `pnpm test:e2e` runs this before Playwright on a laptop; the workflow
@@ -418,7 +418,7 @@ jobs:
         # `webServer` processes before `globalSetup` would get a chance, so a
         # suite run against an unmigrated database has two servers querying
         # tables that do not exist. The policy enforces the pair.
-        run: pnpm --filter @atrium/web exec node e2e/support/ensure-database.mjs
+        run: pnpm --fail-if-no-match --filter @atrium/web exec node e2e/support/ensure-database.mjs
 
       - name: Delete the e2e report
         run: rm -f playwright-report.json
@@ -431,7 +431,7 @@ jobs:
           # Absolute: the json reporter resolves this against the Playwright
           # process's own cwd, which is apps/web here, not the repo root.
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/playwright-report.json
-        run: pnpm --filter @atrium/web exec playwright test --reporter=list,json
+        run: pnpm --fail-if-no-match --filter @atrium/web exec playwright test --reporter=list,json
 
       - name: Assert the e2e suite actually ran
         # Per project, against .github/ci-manifest.json, and rejecting every
@@ -473,7 +473,8 @@ jobs:
     # │   deployed schema against the migrations (names, types, nullability,
     # │   defaults, keys, checks, indexes) · signup through the real form and the
     # │   real SMTP relay · `/` and `/app` rendered by the app from this run's
-    # │   database · an authenticated websocket upgrade · the rate limiter
+    # │   database, with every `/_next/static/…` chunk those pages name fetched
+    # │   and served · an authenticated websocket upgrade · the rate limiter
     # │   counting per address · the teardown taking its volumes with it.
     # │
     # │ NOT COVERED, deliberately: workspace and room flows, invitations,
@@ -561,9 +562,14 @@ jobs:
         # runner with no published database port.
         #
         # One command, like every step in this job: the heredoc is a redirection,
-        # not a second command, and `set -euo pipefail` is what the default
-        # `bash -e -o pipefail` already is (`no-shell-override` keeps it that
-        # way). A missing or empty file needs no `test -s` here either — every
+        # not a second command, and a `set -e` of its own would be redundant —
+        # a step with no `shell:` key runs as `bash -e <file>`, which
+        # `no-shell-override` keeps it as. (`-e` and nothing else: round 4 said
+        # `bash -e -o pipefail` here, which is what `shell: bash` asks for and
+        # not what the default is. `deploy-mutation-ledger.mjs` had it right,
+        # and two halves of one verification stack describing the same shell
+        # differently is the class of defect this job exists for.) A missing or
+        # empty file needs no `test -s` here either — every
         # value below is `${VAR:?…}` in docker-compose.yml, so compose refuses to
         # start and names the variable.
         run: |
@@ -662,10 +668,18 @@ jobs:
         #
         # The signed-out half is narrower and the script says so at length: `/`
         # is fetched a third time carrying a cookie that is not a session — a
-        # request any cookie-presence rule in a proxy routes to the app — and
-        # the two signed-out responses must name the same build assets. That
-        # raises the cost of a fixture from four lines of markup to a current
-        # render of this build; it does not make one impossible.
+        # request any cookie-presence rule in a proxy routes to the app, and one
+        # whose value is now drawn from the real cookie's own length and
+        # alphabet, so a `header_regexp` cannot separate the two — and the two
+        # signed-out responses must name the same build assets. That raises the
+        # cost of a fixture from four lines of markup to a current render of
+        # this build; it does not make one impossible.
+        #
+        # And every chunk the page names is fetched. Round 4 compared the two
+        # responses' asset *names*, which a build whose `.next/static` never
+        # made it into the image satisfies perfectly: same names both times,
+        # every one of them 404, and the page dead. Nothing in scripts/ci had
+        # ever fetched a `/_next/static/…` URL.
         run: node scripts/ci/assert-page-serves.mjs
 
       - name: Assert an authenticated websocket upgrade completes

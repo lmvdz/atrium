@@ -100,6 +100,7 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { posix, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
+import { isMainModule } from './main-module.mjs';
 
 /** The test glob, as a predicate: `*.{test,spec}.{js,ts,jsx,tsx,mjs,cjs,mts,cts}`. */
 export const TEST_FILE = /\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/;
@@ -828,6 +829,6 @@ function main(argv) {
   return scan.findings.length > 0 || scan.unparsable.length > 0 ? 1 : 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main(process.argv));
 }

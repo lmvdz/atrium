@@ -63,6 +63,7 @@
 
 import { readFileSync } from 'node:fs';
 import { isAlias, isCollection, parseDocument, visit } from 'yaml';
+import { isMainModule } from './main-module.mjs';
 import {
   basename,
   completedCommands,
@@ -92,6 +93,81 @@ const FAIL_OPEN_SHELL = [
   { pattern: /set\s+\+o\s+pipefail\b/, label: '`set +o pipefail`' },
   { pattern: /continue-on-error/, label: '`continue-on-error`' },
 ];
+
+/**
+ * The keys that decide *where and in what* a step runs, and the one answer each
+ * of them may have.
+ *
+ * ── THE DEFECT (#40 round 5) ────────────────────────────────────────────────
+ * Round 4 derived "an action is a program too" and guarded `uses:` — in the
+ * deploy job, once. A container is a runtime too, and nothing in `RULES`
+ * inspected the key. A job carrying
+ *
+ *     container:
+ *       image: ghcr.io/somebody/thing@sha256:<40 hex>
+ *
+ * passed this engine completely clean — the digest even satisfies
+ * `pin-actions-to-sha`, which only ever reads `uses:` lines — and every `run:`
+ * step of that job then executes inside an image the author chose. `node` is
+ * that image's node and `bash` is its bash, so `NODE_FLAGS_ALLOWED`,
+ * `INJECTING_VARIABLES`, `no-command-shadowing` and `DEPLOY_ENTRYPOINTS` are all
+ * governing argv inside a runtime nobody checked. It breaks the round's fidelity
+ * claim independently: `deploy-mutation-ledger.mjs` runs each stage with
+ * `execFileSync('bash', ['-e', scriptFile])` **on this host**, while CI would
+ * run it in the image — two verifiers describing different executions, which is
+ * the exact failure round 4 says it closed.
+ *
+ * So the sweep, rather than the one site. Everything below changes the machine,
+ * the image, or the directory a step executes in:
+ *
+ *   - `container:` — the whole job runs inside somebody's image.
+ *   - `working-directory:` — at workflow `defaults.run`, at job `defaults.run`,
+ *     or on a step. The ledger writes each stage's script to a temp file and
+ *     runs it from the repository root; a step that ran somewhere else is a step
+ *     it replays wrongly, and `../../scripts/ci/x.mjs` resolves differently.
+ *   - `runs-on:` — a self-hosted or differently-imaged runner is a different
+ *     `bash`, a different `node`, and a `$PATH` this repository has never seen.
+ *     The object form (`{group:…, labels:…}`) is refused by the same comparison.
+ *   - `uses: docker://…` — a container action, i.e. an image with an entrypoint.
+ *     `pin-actions-to-sha` deliberately skips these, so nothing else looks.
+ *
+ * `services:` is deliberately *not* here, and that is a claim rather than an
+ * oversight: a service container is a sidecar the steps talk to over TCP, not
+ * something a step runs inside. `verify` and `e2e` both use one for Postgres.
+ * If a future GitHub schema adds another key that answers "where does this
+ * execute", it belongs in this table, and the fixture beside it is what proves
+ * the answer is enforced rather than described.
+ *
+ * ── ONE THING THIS DOES NOT SEE, STATED RATHER THAN CHASED ─────────────────
+ * A published action can itself be a Docker action — `runs: using: docker` in
+ * its own `action.yml` — reached by an ordinary `owner/repo@<sha>` ref with no
+ * `docker://` anywhere in this file. This engine never reads `action.yml` (the
+ * same boundary as the composite-action gap at the top of this file), so it
+ * cannot tell that step from a JavaScript one. It is closed where it matters
+ * and open where it does not: `deploy` — the job whose execution
+ * `deploy-mutation-ledger.mjs` claims to reproduce — allowlists its two actions
+ * by name in `DEPLOY_ACTIONS`, so nothing there can be a Docker action without
+ * an edit to that list. In `verify` and `e2e` a container action would run in
+ * its own image and nothing here would say so; those jobs have no ledger making
+ * a fidelity claim about them. Closing it means resolving and parsing a second
+ * repository's file, which is cost that buys nothing until the first such
+ * action exists.
+ */
+const RUNTIME_KEYS = {
+  container: {
+    /** No value at all is admissible: the key itself is the defect. */
+    allowed: [],
+    why: 'every `run:` step of that job then executes inside an image the author chose, where `node` is its node and `bash` is its bash — so every rule in this file about argv is governing a runtime nobody checked, and `deploy-mutation-ledger.mjs`, which re-executes those same scripts on the host with `bash -e`, is certifying a different execution from the one CI performs',
+  },
+  'working-directory': {
+    allowed: [],
+    why: 'the ledger replays each stage from the repository root, the paths in these steps are written relative to it, and a step that ran somewhere else is a step the receipt describes wrongly — put the directory in the command (`pnpm --fail-if-no-match --filter @atrium/db exec …`) where both readers can see it',
+  },
+  'runs-on': {
+    allowed: ['ubuntu-latest'],
+    why: 'a self-hosted or differently-imaged runner is a different `bash`, a different `node` and a `$PATH` this repository has never seen, which is the same substitution `no-command-shadowing` refuses one word at a time',
+  },
+};
 
 /** Untrusted context that must never be interpolated into a shell script. */
 const INJECTABLE_CONTEXT =
@@ -134,6 +210,7 @@ export const RULES = [
   'required-step-prerequisites',
   'no-remote-reusable-workflow',
   'no-command-shadowing',
+  'no-runtime-override',
   'protected-steps-run-one-command',
   'compose-through-one-entrypoint',
   'protected-commands-cover-the-verbs',
@@ -953,7 +1030,9 @@ export function protectedCommandCoverage(jobs, protectedCommands = PROTECTED_COM
           const words = [
             basename(command.raw[0] ?? ''),
             ...via.map(({ name }) => name),
-            ...(via.some(({ kind }) => kind === 'manager') ? [] : [basename(command.argv[0] ?? '')]),
+            ...(via.some(({ kind }) => kind === 'manager')
+              ? []
+              : [basename(command.argv[0] ?? '')]),
           ].filter(Boolean);
           for (const word of words) {
             if (held.has(word)) continue;
@@ -992,15 +1071,39 @@ const SHADOWING_BUILTINS = new Set(['alias', 'export', 'declare', 'typeset', 're
  * at once — and all three spellings were clean against the engine as committed
  * an hour earlier.
  *
- * ── WHY THIS IS A LIST, WHEN THE ROUND'S LESSON IS "DON'T LIST" ─────────────
- * Because this list is bounded and the others were not. "Ways to write a shell
- * command that does not run" is a space of spellings with no edge; the next one
- * always exists. "Environment variables that make a program execute code it was
- * not asked to" is a documented property of three programs — Node, bash, and the
- * dynamic loader — and each of them publishes its own set. The entries below are
- * that union, with the sentence of documentation that puts each one there. A
- * variable belongs here when the program's own manual says it loads or locates
- * code; nothing else qualifies, and `ATRIUM_STACK_DOMAIN` never will.
+ * ── THE COMPLETENESS CLAIM THIS TABLE USED TO MAKE, AND WHY IT IS GONE ──────
+ * Round 4 justified keeping a *list* here, in a round whose whole lesson was
+ * "don't list", with this sentence: "Environment variables that make a program
+ * execute code it was not asked to is a documented property of three programs —
+ * Node, bash, and the dynamic loader — and each of them publishes its own set.
+ * The entries below are that union." It was not the union, and the blind review
+ * of round 4 needed three lines to show it:
+ *
+ *     $ bash -e step.sh                                          # runs node, exits 7
+ *     $ env "BASH_FUNC_node%%=() { return 0; }" bash -e step.sh   # exits 0
+ *
+ * bash imports exported *functions* from the environment, and a function beats
+ * the binary in command position — `no-command-shadowing` bans `node() { :; }`
+ * written in the script and could not see the same function arriving through
+ * `env:`. Two more, both honoured and both clean against the round-4 engine:
+ * `NODE_TLS_REJECT_UNAUTHORIZED=0`, which turns off the certificate
+ * verification the whole deploy job is conditioned on, and `OPENSSL_CONF`,
+ * whose config file can load provider and engine `.so`s — code injection at
+ * `LD_PRELOAD`'s level, which was already on the list.
+ *
+ * A completeness claim about a denylist is itself an overclaim, so the claim is
+ * deleted rather than repaired. What replaced it is the polarity that closed
+ * every other table in this round: `DECLARED_VARIABLES` below is an
+ * **allowlist** of the variable names this workflow sets, and a name that is not
+ * on it is refused *whether or not anybody has heard of what it does*.
+ * `BASH_FUNC_node%%`, `NODE_TLS_REJECT_UNAUTHORIZED`, `OPENSSL_CONF` and the
+ * next runtime's next idea are one clause, not four entries.
+ *
+ * This table survives underneath that, demoted to what it can honestly be: the
+ * *reasons*, for the names somebody is most likely to reach for, so the refusal
+ * says why rather than only that. It is explicitly not exhaustive and nothing
+ * depends on it being so — every one of these names is refused by the allowlist
+ * first, and this only decides which sentence the violation prints.
  *
  * Stated where it will be read: this is the same boundary `no-command-shadowing`
  * has always drawn. It makes the documented injection points loud. It does not
@@ -1014,16 +1117,110 @@ const INJECTING_VARIABLES = {
     "NODE_PATH prepends directories to the CommonJS module search path, so a gate's `require` can be answered by somebody else's file.",
   NODE_REPL_EXTERNAL_MODULE:
     'Node loads the named module in place of its REPL, and it is documented as ignored only when the process is hardened — an injection point by construction.',
+  NODE_TLS_REJECT_UNAUTHORIZED:
+    'Node reads it as the default for `rejectUnauthorized`, so `NODE_TLS_REJECT_UNAUTHORIZED=0` turns off certificate verification for every TLS client in the process. Measured against a self-signed server: with the variable set and no explicit option, the request returns 200; unset, it fails DEPTH_ZERO_SELF_SIGNED_CERT. The deploy job asserts real TLS through the shipped proxy, so one `env:` line would have made "certificate verification is never disabled" false — see the explicit `rejectUnauthorized: true` in stack-client.mjs, which is what makes that sentence true rather than customary.',
+  NODE_EXTRA_CA_CERTS:
+    'Node adds the named file to the trusted roots for every TLS client in the process, so a certificate of somebody else’s minting verifies — the same guarantee as NODE_TLS_REJECT_UNAUTHORIZED, undone more quietly.',
   BASH_ENV:
     'bash sources the file named by BASH_ENV before running a non-interactive script, which is every `run:` block in this file.',
   ENV: 'the POSIX equivalent of BASH_ENV, sourced by `sh`.',
   SHELLOPTS:
     'bash applies SHELLOPTS at startup, so it can turn off the `-e` that makes a failing command fail the step.',
+  OPENSSL_CONF:
+    'OpenSSL reads its configuration from OPENSSL_CONF, and a configuration file can load providers and engines — `.so` files, in-process, chosen by whoever wrote the config. That is LD_PRELOAD-level injection through a file that does not look like code.',
   LD_PRELOAD:
     'the dynamic loader loads the named objects into every process started, ahead of libc — code injection one level below the interpreter.',
   LD_LIBRARY_PATH:
     'the dynamic loader searches it first, so a shared object of somebody else’s choosing answers for a real one.',
 };
+
+/**
+ * `BASH_FUNC_node%%` is not a name, it is a family.
+ *
+ * bash exports a shell function as an environment variable called
+ * `BASH_FUNC_<name>%%`, and imports every such variable at startup. The name in
+ * the middle is the function being defined, so no fixed key can name them: the
+ * prefix is the entry. Measured, exactly as written above — `env
+ * "BASH_FUNC_node%%=() { return 0; }" bash -e step.sh` exits 0 where the same
+ * script exits 7 without it.
+ */
+const EXPORTED_FUNCTION_PREFIX = 'BASH_FUNC_';
+
+/** Why this variable is an injection point, or undefined if nobody has said. */
+function injectionReason(name) {
+  if (Object.hasOwn(INJECTING_VARIABLES, name)) return INJECTING_VARIABLES[name];
+  if (name.startsWith(EXPORTED_FUNCTION_PREFIX)) {
+    return `bash imports exported shell functions from the environment, and \`${name}\` is how one is spelled: it defines \`${name.slice(EXPORTED_FUNCTION_PREFIX.length).replace(/%%$/, '')}\` as a function for every \`run:\` block in the job, and a function beats the binary in command position. It is the \`node() { :; }\` this rule already refuses, arriving where the script cannot be read for it — measured: \`env "BASH_FUNC_node%%=() { return 0; }" bash -e step.sh\` exits 0 where \`bash -e step.sh\` exits 7.`;
+  }
+  return undefined;
+}
+
+/**
+ * Every environment variable name this workflow is allowed to set, anywhere.
+ *
+ * ── WHY AN ALLOWLIST (#40 round 5) ──────────────────────────────────────────
+ * See the block above `INJECTING_VARIABLES`: a denylist of injecting variables
+ * cannot be complete, and round 4 claimed one was. This is the same inversion
+ * the launcher table, the node-flag table, the deploy entrypoints and the
+ * manager table have each had in turn, and it is cheap here because the set is
+ * genuinely small — fourteen names, every one of them derived from what the
+ * workflow actually does.
+ *
+ * The reason beside each is the same standard the launcher table asks for: a
+ * variable is here because some program in this repository reads it, not
+ * because it looked harmless. Nothing on this list names or locates code.
+ *
+ * The cost is stated rather than discovered: adding an environment variable to
+ * this workflow is now an edit to this file. That is the intended price. Every
+ * bypass in this ticket's sixteen rounds arrived as something nobody had
+ * enumerated, and the only enumeration that survives that is the one that says
+ * what is allowed.
+ */
+export const DECLARED_VARIABLES = {
+  NODE_VERSION: 'the Node version the workflow installs and the jobs interpolate into a step name.',
+  ACTIONLINT_VERSION: 'the actionlint release the lint job downloads.',
+  ACTIONLINT_SHA256: 'the checksum that download is verified against.',
+  DATABASE_URL: 'the connection string the `verify` job’s migrations and suite use.',
+  POSTGRES_USER: 'the service container’s own credentials, read by Postgres at startup.',
+  POSTGRES_PASSWORD: 'the same.',
+  POSTGRES_DB: 'the same.',
+  PLAYWRIGHT_JSON_OUTPUT_NAME: 'where Playwright writes the report the e2e gate reads.',
+  NEEDS: 'the `toJSON(needs)` payload the gate job inspects.',
+  ATRIUM_COMPOSE_PROJECT: 'the compose project name every stage of the deploy job shares.',
+  ATRIUM_COMPOSE_FILES:
+    'THE compose file list, declared once on the deploy job — see `compose-through-one-entrypoint`.',
+  ATRIUM_STACK_DOMAIN: 'the hostname the deployment serves and the assertions ask for.',
+  ATRIUM_STACK_CA: 'the path the certificate authority is copied to and verified against.',
+  ATRIUM_IMAGE_MANIFEST: 'where this run records the image IDs it built.',
+  VITEST_RUN_START:
+    'the millisecond the unit suite started, written to `$GITHUB_ENV` so the report gate can refuse a stale report.',
+  E2E_RUN_START: 'the same, for the Playwright suite.',
+  GIT_TERMINAL_PROMPT:
+    'git’s own "never ask for credentials" switch. Not set by the workflow today; it is here because an ACCEPTED_FORMS fixture writes it in front of the baseline fetch, and a fixture that the policy refuses is a fixture that proves nothing.',
+};
+
+/**
+ * Why this variable name may not be set here, or undefined if it may.
+ *
+ * One sentence either way, never two: a name that is both undeclared and a
+ * known injection point gets the sentence that says what it does, because "each
+ * mutation fires exactly its own rule, once" is what makes the self-test's
+ * purity check mean anything. Every caller below prints it after its own
+ * description of *where* the name was set, so the two halves — what was done
+ * and why it is refused — stay in the voice each site already had.
+ */
+function variableProblem(name) {
+  const reason = injectionReason(name);
+  if (reason !== undefined) return reason;
+  if (Object.hasOwn(DECLARED_VARIABLES, name)) return undefined;
+  return `\`${name}\` is not one of the environment variables this workflow declares (${Object.keys(
+    DECLARED_VARIABLES,
+  )
+    .map((word) => `\`${word}\``)
+    .join(
+      ', ',
+    )}). This is an allowlist because the denylist it replaces claimed to be "the union" of the variables that make a program run code it was not asked to, and was not: \`BASH_FUNC_node%%\` defines a shell function that beats the binary, \`NODE_TLS_REJECT_UNAUTHORIZED=0\` turns off the certificate verification this workflow's deploy job is conditioned on, and \`OPENSSL_CONF\` can load a provider \`.so\` — all three were clean against the previous version. To add a variable, put it here with the sentence saying which program in this repository reads it.`;
+}
 
 /**
  * Obvious redefinitions of a protected command word.
@@ -1068,28 +1265,31 @@ function checkCommandShadowing(script, where, add, path) {
       name === 'env' ? words : [],
     ) ?? []) {
       const name = assignment.split('=')[0];
-      if (Object.hasOwn(INJECTING_VARIABLES, name)) {
+      const problem = variableProblem(name);
+      if (problem !== undefined) {
         add(
           'no-command-shadowing',
-          `${path}: the script at ${where} runs \`env ${name}=…\`. That is an assignment the shell never sees — it is an argument to \`env\` — and ${INJECTING_VARIABLES[name]}`,
+          `${path}: the script at ${where} runs \`env ${name}=…\`. That is an assignment the shell never sees — it is an argument to \`env\` — and ${problem}`,
         );
       }
     }
     for (const { name } of assignments) {
-      if (Object.hasOwn(INJECTING_VARIABLES, name)) {
+      const problem = variableProblem(name);
+      if (problem !== undefined) {
         add(
           'no-command-shadowing',
-          `${path}: the script at ${where} assigns \`${name}\` for one command. ${INJECTING_VARIABLES[name]}`,
+          `${path}: the script at ${where} assigns \`${name}\` for one command. ${problem}`,
         );
       }
     }
     if (SHADOWING_BUILTINS.has(raw[0])) {
       for (const word of raw.slice(1)) {
         const name = word.split('=')[0];
-        if (Object.hasOwn(INJECTING_VARIABLES, name)) {
+        const problem = word.includes('=') ? variableProblem(name) : undefined;
+        if (problem !== undefined) {
           add(
             'no-command-shadowing',
-            `${path}: the script at ${where} runs \`${raw[0]} ${name}=…\`. ${INJECTING_VARIABLES[name]}`,
+            `${path}: the script at ${where} runs \`${raw[0]} ${name}=…\`. ${problem}`,
           );
         }
         if (raw[0] === 'alias' && protectedWord(word.split('=')[0])) {
@@ -1132,10 +1332,15 @@ function checkCommandShadowing(script, where, add, path) {
     ) {
       for (const word of raw) {
         const name = word.split('=')[0].trim();
-        if (word.includes('=') && Object.hasOwn(INJECTING_VARIABLES, name)) {
+        // A word is an assignment only if it is *shaped* like one. `--foo=bar`
+        // contains an `=` and names no variable, and an allowlist that read it
+        // as one would be a false red on the first ordinary flag.
+        if (!/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word)) continue;
+        const problem = variableProblem(name);
+        if (problem !== undefined) {
           add(
             'no-command-shadowing',
-            `${path}: the script at ${where} writes \`${name}=…\` to \`$GITHUB_ENV\`, which sets it for every later step in the job. ${INJECTING_VARIABLES[name]}`,
+            `${path}: the script at ${where} writes \`${name}=…\` to \`$GITHUB_ENV\`, which sets it for every later step in the job. ${problem}`,
           );
         }
       }
@@ -1324,9 +1529,7 @@ export const DEPLOY_ENTRYPOINTS = [
     describe: '`cat > .env <<…`, the deployment environment heredoc',
     match: ({ argv, redirections }) =>
       argv[0] === 'cat' &&
-      redirections.some(
-        ({ op, target }) => (op === '>' || op === '>>') && target.value === '.env',
-      )
+      redirections.some(({ op, target }) => (op === '>' || op === '>>') && target.value === '.env')
         ? '.env'
         : null,
   },
@@ -1494,12 +1697,42 @@ export function checkWorkflow(source, path = '<workflow>') {
     if (key === 'shell') {
       add(
         'no-shell-override',
-        `${path}: \`shell: ${value}\` at ${where}. The default \`bash -e -o pipefail\` is the only shell allowed; an override can drop the flags that make a failing command fail the step.`,
+        // The runner's default for a step with no \`shell:\` key is \`bash -e
+        // <file>\` — `-e` and nothing else. Round 4 wrote `bash -e -o pipefail`
+        // here and in ci.yml, which is what `shell: bash` asks for; the ledger
+        // (`RUNNER_SHELL = ['bash', '-e']`) had it right, so the two halves of
+        // the verification stack disagreed in prose about the shell they claim
+        // to share.
+        `${path}: \`shell: ${value}\` at ${where}. The runner's default for a step with no \`shell:\` key — \`bash -e <file>\` — is the only shell allowed; an override can drop the \`-e\` that makes a failing command fail the step, and \`deploy-mutation-ledger.mjs\` re-executes these scripts under exactly that shell, so an override also makes its receipt about a different execution.`,
       );
     }
 
     if (key === 'if') {
       classifyCondition(keyPath, value, where, add, path);
+    }
+
+    // Where and in what a step runs — see RUNTIME_KEYS. Checked at every depth,
+    // for the reason `shell` is: a key that means the same thing on a workflow,
+    // a job and a step is a key that has to be refused in all three places, and
+    // round 4's `uses:` guard was written for one job only.
+    if (Object.hasOwn(RUNTIME_KEYS, key)) {
+      const { allowed, why } = RUNTIME_KEYS[key];
+      if (!allowed.includes(value)) {
+        add(
+          'no-runtime-override',
+          `${path}: \`${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}\` at ${where}. ${allowed.length === 0 ? `\`${key}\` may not appear in this workflow at all` : `\`${key}\` may only be ${allowed.map((one) => `\`${one}\``).join(' or ')}`} — ${why}. Two verifiers that disagree about *where* a command ran is the same defect as two that disagree about whether it ran.`,
+        );
+      }
+    }
+
+    // A container action is an image with an entrypoint, and `pin-actions-to-sha`
+    // deliberately skips `docker://` refs, so nothing else in this file looks at
+    // one. Same clause, one line: a step may not bring its own runtime.
+    if (key === 'uses' && DOCKER_USES.test(String(value))) {
+      add(
+        'no-runtime-override',
+        `${path}: \`uses: ${value}\` at ${where} is a container action — an image with an entrypoint, run in place of a step. ${RUNTIME_KEYS.container.why}.`,
+      );
     }
 
     if (key === 'timeout-minutes' && keyPath.at(-2) === 'steps') {
@@ -1530,12 +1763,17 @@ export function checkWorkflow(source, path = '<workflow>') {
     // the same bypass as `export PATH=…` with a longer reach and no shell.
     // Round 4 widened it from PATH to every variable in INJECTING_VARIABLES —
     // see that table for why `NODE_OPTIONS` belongs beside it.
+    // Round 5 inverted it again, from "the injecting variables" to "the
+    // variables this workflow declares" — see DECLARED_VARIABLES for why a
+    // denylist here could not be finished. `BASH_FUNC_node%%: "() { return 0; }"`
+    // is a legal YAML key and was clean against round 4.
     if (key === 'env' && isPlainObject(value)) {
       for (const name of Object.keys(value)) {
-        if (Object.hasOwn(INJECTING_VARIABLES, name)) {
+        const problem = variableProblem(String(name));
+        if (problem !== undefined) {
           add(
             'no-command-shadowing',
-            `${path}: \`env:\` at ${where} sets \`${name}\`. ${INJECTING_VARIABLES[name]} Set it nowhere, or invoke the binary by its full path with the flags written in the step.`,
+            `${path}: \`env:\` at ${where} sets \`${name}\`. ${problem} Set it nowhere, or invoke the binary by its full path with the flags written in the step.`,
           );
         }
       }
@@ -1889,6 +2127,6 @@ function main(argv) {
   return failed > 0 ? 1 : 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main(process.argv));
 }

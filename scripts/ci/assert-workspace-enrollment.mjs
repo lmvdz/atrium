@@ -10,6 +10,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { isMainModule } from './main-module.mjs';
 
 const MANIFEST = process.env.CI_MANIFEST ?? '.github/ci-manifest.json';
 const WORKSPACE_FILE = process.env.PNPM_WORKSPACE_FILE ?? 'pnpm-workspace.yaml';
@@ -92,6 +93,6 @@ function main() {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   process.exit(main());
 }
