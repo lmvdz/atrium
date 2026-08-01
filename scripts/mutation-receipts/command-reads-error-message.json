@@ -1,0 +1,59 @@
+{
+  "mutation": "command-reads-error-message",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:48:16.952Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "0111b826ba97ffbb",
+  "claim": "apps/server/test/ws-server.test.ts — the command-path test, by timing out with an unhandled rejection",
+  "suites": [
+    {
+      "suite": "server:ws-server",
+      "verdict": "red",
+      "subjectHash": "339f1d94c7ae85ae",
+      "suiteFile": "apps/server/test/ws-server.test.ts",
+      "suiteHash": "6adaefa1d4427a66",
+      "files": [
+        "apps/server/src/ws-server.ts"
+      ],
+      "baseline": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2089
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-server.json",
+        "cwd": "apps/server",
+        "exitCode": 0,
+        "total": 60,
+        "passed": 60,
+        "failed": 0,
+        "durationMs": 5034
+      },
+      "mutated": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2186
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-command-reads-error-message.json",
+        "cwd": "apps/server",
+        "exitCode": 1,
+        "total": 60,
+        "passed": 59,
+        "failed": 1,
+        "durationMs": 6974
+      },
+      "caught": [
+        "a rejection value nobody can read cannot suspend the sweep answers a command whose membership lookup rejects unreadably"
+      ]
+    }
+  ]
+}

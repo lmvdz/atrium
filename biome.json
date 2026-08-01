@@ -16,6 +16,7 @@
       "!**/playwright-report",
       "!**/test-results",
       "!packages/db/drizzle",
+      "!scripts/mutation-receipts",
       "!pnpm-lock.yaml",
       "!.claude",
       "!design/*.html"

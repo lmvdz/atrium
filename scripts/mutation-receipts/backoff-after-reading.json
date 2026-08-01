@@ -1,0 +1,59 @@
+{
+  "mutation": "backoff-after-reading",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:48:28.309Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "698245854bb1176f",
+  "claim": "apps/server/test/ws-server.test.ts — the session-command test, on both the refusal frame and the one-lookup assertion",
+  "suites": [
+    {
+      "suite": "server:ws-server",
+      "verdict": "red",
+      "subjectHash": "339f1d94c7ae85ae",
+      "suiteFile": "apps/server/test/ws-server.test.ts",
+      "suiteHash": "6adaefa1d4427a66",
+      "files": [
+        "apps/server/src/ws-server.ts"
+      ],
+      "baseline": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2089
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-server.json",
+        "cwd": "apps/server",
+        "exitCode": 0,
+        "total": 60,
+        "passed": 60,
+        "failed": 0,
+        "durationMs": 5034
+      },
+      "mutated": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2157
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-backoff-after-reading.json",
+        "cwd": "apps/server",
+        "exitCode": 1,
+        "total": 60,
+        "passed": 59,
+        "failed": 1,
+        "durationMs": 7034
+      },
+      "caught": [
+        "a rejection value nobody can read cannot suspend the sweep answers a command whose session revalidation rejects unreadably, and arms the back-off"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "mutation": "widen-report-deadline",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:49:09.552Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "ef82f070bb664ab8",
+  "claim": "packages/auth/test/org.test.ts — the reporter-deadline tests. **Measured against round 8 and it caught this too**, but on the logged `timeoutMs: 40` rather than on the clock: the run took 165ms against a 2000ms ceiling, so the elapsed assertion never fired. The delta was right about what that assertion measured, and it was not the only thing pinning the number. `report-deadline-overruns` isolates the clock.",
+  "suites": [
+    {
+      "suite": "auth:org",
+      "verdict": "red",
+      "subjectHash": "e8b4f162dd072bde",
+      "suiteFile": "packages/auth/test/org.test.ts",
+      "suiteHash": "232e38b363d86277",
+      "files": [
+        "packages/auth/src/org.ts"
+      ],
+      "baseline": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 52,
+        "passed": 52,
+        "failed": 0,
+        "durationMs": 1589
+      },
+      "mutated": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-widen-report-deadline.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 52,
+        "passed": 50,
+        "failed": 2,
+        "durationMs": 2106
+      },
+      "caught": [
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit an unbounded reporter cannot hang a completed removal gives up on a reporter that never settles, and says so",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit an unbounded reporter cannot hang a completed removal still catches a rejection that arrives after the deadline"
+      ]
+    }
+  ]
+}

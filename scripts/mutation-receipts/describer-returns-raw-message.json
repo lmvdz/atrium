@@ -1,0 +1,62 @@
+{
+  "mutation": "describer-returns-raw-message",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:49:15.462Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "4b6b10755cbe9a94",
+  "claim": "packages/auth/test/errors.test.ts — measured; the shape assertions and nothing else",
+  "suites": [
+    {
+      "suite": "auth:errors",
+      "verdict": "red",
+      "subjectHash": "e07c0d28df684af0",
+      "suiteFile": "packages/auth/test/errors.test.ts",
+      "suiteHash": "72a563013bf42b03",
+      "files": [
+        "packages/auth/src/errors.ts"
+      ],
+      "baseline": {
+        "suite": "auth:errors",
+        "builds": [],
+        "command": "pnpm exec vitest run test/errors.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-errors.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 42,
+        "passed": 42,
+        "failed": 0,
+        "durationMs": 705
+      },
+      "mutated": {
+        "suite": "auth:errors",
+        "builds": [],
+        "command": "pnpm exec vitest run test/errors.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-describer-returns-raw-message.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 42,
+        "passed": 26,
+        "failed": 16,
+        "durationMs": 690
+      },
+      "caught": [
+        "describeUnknown describes a non-string message rather than discarding it",
+        "describeUnknown returns a string for an Error whose message cannot be converted",
+        "describeUnknown returns a string for an Error whose message is a Symbol",
+        "describeUnknown returns a string for an Error whose message is a number",
+        "describeUnknown returns a string for an Error whose message is an object",
+        "describeUnknown returns a string for an Error whose message is null",
+        "describeUnknown returns a string, not a Symbol, for an Error carrying a Symbol as its message",
+        "describeUnknown returns a string, not a bigint, for an Error carrying a bigint as its message",
+        "describeUnknown returns a string, not a function, for an Error carrying a function as its message",
+        "describeUnknown returns a string, not a number, for an Error carrying a number as its message",
+        "describeUnknown returns a string, not an array, for an Error carrying an array as its message",
+        "describeUnknown returns a string, not an object, for an Error carrying an object as its message",
+        "describeUnknown returns a string, not null, for an Error carrying null as its message",
+        "describeUnknown returns a string, not undefined, for an Error carrying undefined as its message",
+        "toReportableError hands back an Error whose message cannot be converted unchanged, and describing it is still a string",
+        "toReportableError hands back an Error whose message is a Symbol unchanged, and describing it is still a string"
+      ]
+    }
+  ]
+}

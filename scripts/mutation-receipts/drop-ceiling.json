@@ -1,0 +1,97 @@
+{
+  "mutation": "drop-ceiling",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:45:46.297Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "7413b9c68cb56a5e",
+  "claim": "apps/web/e2e/room-access.spec.ts and packages/auth/test/room-access.test.ts — the demotion half alone",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "4bdc7f1bed5097db",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "3468cfb8c6a39a5c",
+      "files": [
+        "packages/auth/src/room-access.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 69,
+        "passed": 69,
+        "failed": 0,
+        "durationMs": 2317
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-drop-ceiling.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 69,
+        "passed": 65,
+        "failed": 4,
+        "durationMs": 2401
+      },
+      "caught": [
+        "effectiveRoomRole caps a stale elevated room role at the committed workspace role",
+        "effectiveRoomRole denies, and says so, when either role is unreadable",
+        "effectiveRoomRole produces a role `authorize` refuses admin commands for after a demotion",
+        "effectiveRoomRole reads a list of known roles as its strongest member, and still caps"
+      ]
+    },
+    {
+      "suite": "e2e:room-access",
+      "verdict": "red",
+      "subjectHash": "4bdc7f1bed5097db",
+      "suiteFile": "apps/web/e2e/room-access.spec.ts",
+      "suiteHash": "84d91a68d33ea0d5",
+      "files": [
+        "packages/auth/src/room-access.ts"
+      ],
+      "baseline": {
+        "suite": "e2e:room-access",
+        "builds": [
+          {
+            "command": "pnpm --filter ./packages/* build",
+            "exitCode": 0,
+            "durationMs": 4834
+          }
+        ],
+        "command": "pnpm exec playwright test e2e/room-access.spec.ts --reporter=json",
+        "cwd": "apps/web",
+        "exitCode": 0,
+        "total": 7,
+        "passed": 7,
+        "failed": 0,
+        "durationMs": 39159
+      },
+      "mutated": {
+        "suite": "e2e:room-access",
+        "builds": [
+          {
+            "command": "pnpm --filter ./packages/* build",
+            "exitCode": 2,
+            "durationMs": 4253
+          }
+        ],
+        "command": "pnpm exec playwright test e2e/room-access.spec.ts --reporter=json",
+        "cwd": "apps/web",
+        "exitCode": 1,
+        "total": 7,
+        "passed": 6,
+        "failed": 1,
+        "durationMs": 42138
+      },
+      "caught": [
+        "room-access.spec.ts › the role a stale room row carries is capped at the workspace role › reads a demoted member as a member, even with an admin room row"
+      ]
+    }
+  ]
+}

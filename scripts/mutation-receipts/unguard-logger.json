@@ -1,0 +1,84 @@
+{
+  "mutation": "unguard-logger",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:45:55.749Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "e3479109719b306e",
+  "claim": "packages/auth/test/org.test.ts and packages/auth/test/errors.test.ts. Round 9 moved the guard from `org.ts` into `errors.ts`, so this now covers both files at once; it threw \"mutation target not found\" until it was repointed, which is the ledger doing its job.",
+  "suites": [
+    {
+      "suite": "auth:org",
+      "verdict": "red",
+      "subjectHash": "e07c0d28df684af0",
+      "suiteFile": "packages/auth/test/org.test.ts",
+      "suiteHash": "232e38b363d86277",
+      "files": [
+        "packages/auth/src/errors.ts"
+      ],
+      "baseline": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 52,
+        "passed": 52,
+        "failed": 0,
+        "durationMs": 1589
+      },
+      "mutated": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-unguard-logger.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 52,
+        "passed": 50,
+        "failed": 2,
+        "durationMs": 1529
+      },
+      "caught": [
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit survives a logger that throws, and still reaches the operator seam",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit survives a throwing logger and a rejecting reporter at the same time"
+      ]
+    },
+    {
+      "suite": "auth:errors",
+      "verdict": "red",
+      "subjectHash": "e07c0d28df684af0",
+      "suiteFile": "packages/auth/test/errors.test.ts",
+      "suiteHash": "72a563013bf42b03",
+      "files": [
+        "packages/auth/src/errors.ts"
+      ],
+      "baseline": {
+        "suite": "auth:errors",
+        "builds": [],
+        "command": "pnpm exec vitest run test/errors.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-errors.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 42,
+        "passed": 42,
+        "failed": 0,
+        "durationMs": 705
+      },
+      "mutated": {
+        "suite": "auth:errors",
+        "builds": [],
+        "command": "pnpm exec vitest run test/errors.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-unguard-logger.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 42,
+        "passed": 40,
+        "failed": 2,
+        "durationMs": 706
+      },
+      "caught": [
+        "guardedErrorLog swallows a field builder that throws, which is why fields are a thunk",
+        "guardedErrorLog swallows a logger that throws"
+      ]
+    }
+  ]
+}

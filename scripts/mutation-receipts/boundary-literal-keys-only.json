@@ -1,0 +1,48 @@
+{
+  "mutation": "boundary-literal-keys-only",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:46:19.866Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "b54ea2af85c8bbc1",
+  "claim": "packages/auth/test/room-access.test.ts — the unresolvable-key fixtures",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "5b0af1e36541e3d0",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "3468cfb8c6a39a5c",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 69,
+        "passed": 69,
+        "failed": 0,
+        "durationMs": 2317
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-literal-keys-only.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 69,
+        "passed": 67,
+        "failed": 2,
+        "durationMs": 2216
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key held in a variable",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key it cannot resolve"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "mutation": "boundary-initializer-walk",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:49:14.766Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "6d821a6b21173326",
+  "claim": "packages/auth/test/room-access.test.ts — measured; see the receipt",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "5b0af1e36541e3d0",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "3468cfb8c6a39a5c",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 69,
+        "passed": 69,
+        "failed": 0,
+        "durationMs": 2317
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-initializer-walk.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 69,
+        "passed": 58,
+        "failed": 11,
+        "durationMs": 2395
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a comma sequence, including the indirect-call idiom",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a conditional used directly as the receiver",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a handle from `??`, `||` and `&&`",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a handle from a conditional initializer",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a handle laundered through another package as `export default`",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a handle that is a binding element default",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a handle that is a parameter default",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on an assignment expression used as an initializer",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on the table destructured in a parameter default",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on the table destructured off an annotated parameter",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires when only one arm of the conditional is a handle"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "mutation": "widen-revalidate-ttl",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:48:56.952Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "a92539997031da95",
+  "claim": "apps/server/test/ws-server.test.ts — the TTL test. Round 8 asserted this against a flat 2s ceiling and stayed green under this mutation.",
+  "suites": [
+    {
+      "suite": "server:ws-server",
+      "verdict": "red",
+      "subjectHash": "339f1d94c7ae85ae",
+      "suiteFile": "apps/server/test/ws-server.test.ts",
+      "suiteHash": "6adaefa1d4427a66",
+      "files": [
+        "apps/server/src/ws-server.ts"
+      ],
+      "baseline": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2089
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-server.json",
+        "cwd": "apps/server",
+        "exitCode": 0,
+        "total": 60,
+        "passed": 60,
+        "failed": 0,
+        "durationMs": 5034
+      },
+      "mutated": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2202
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-widen-revalidate-ttl.json",
+        "cwd": "apps/server",
+        "exitCode": 1,
+        "total": 60,
+        "passed": 59,
+        "failed": 1,
+        "durationMs": 5263
+      },
+      "caught": [
+        "revocation reaches a live connection reuses a validation for at most one TTL, and no longer"
+      ]
+    }
+  ]
+}

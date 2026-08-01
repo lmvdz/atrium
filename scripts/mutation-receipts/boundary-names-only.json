@@ -1,0 +1,51 @@
+{
+  "mutation": "boundary-names-only",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:45:58.052Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "fdbc61c1989d7572",
+  "claim": "packages/auth/test/room-access.test.ts — the whole-module evasion fixtures",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "5b0af1e36541e3d0",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "3468cfb8c6a39a5c",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 69,
+        "passed": 69,
+        "failed": 0,
+        "durationMs": 2317
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-names-only.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 69,
+        "passed": 64,
+        "failed": 5,
+        "durationMs": 2296
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted fires on `require`",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted fires on a dynamic import",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted fires on a namespace import",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted fires on a namespace re-export through an app file",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted fires on a star re-export through an app file"
+      ]
+    }
+  ]
+}

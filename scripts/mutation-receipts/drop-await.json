@@ -1,0 +1,54 @@
+{
+  "mutation": "drop-await",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:45:52.798Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "3c2d4dc8b7ef27ef",
+  "claim": "packages/auth/test/org.test.ts — the reporter tests, including the unhandled-rejection watch",
+  "suites": [
+    {
+      "suite": "auth:org",
+      "verdict": "red",
+      "subjectHash": "e8b4f162dd072bde",
+      "suiteFile": "packages/auth/test/org.test.ts",
+      "suiteHash": "232e38b363d86277",
+      "files": [
+        "packages/auth/src/org.ts"
+      ],
+      "baseline": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 52,
+        "passed": 52,
+        "failed": 0,
+        "durationMs": 1589
+      },
+      "mutated": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-drop-await.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 52,
+        "passed": 44,
+        "failed": 8,
+        "durationMs": 1389
+      },
+      "caught": [
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit an unbounded reporter cannot hang a completed removal does not deadline a reporter that answers in time",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit an unbounded reporter cannot hang a completed removal gives up on a reporter that never settles, and says so",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit an unbounded reporter cannot hang a completed removal still catches a rejection that arrives after the deadline",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit awaits an async reporter that rejects, instead of leaking the rejection",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit does not return before the reporter has finished",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit normalizing the rejection cannot itself become the failure survives a reporter that rejects with a prototype-less object too",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit reports an async reporter that rejects with a non-Error",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit survives a throwing logger and a rejecting reporter at the same time"
+      ]
+    }
+  ]
+}

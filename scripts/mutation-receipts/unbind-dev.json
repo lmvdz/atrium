@@ -1,0 +1,49 @@
+{
+  "mutation": "unbind-dev",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:45:50.696Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "44d037163143d641",
+  "claim": "packages/auth/test/deployment.test.ts — the dev-binding assertions",
+  "suites": [
+    {
+      "suite": "auth:deployment",
+      "verdict": "red",
+      "subjectHash": "8db99949fbe2f5c8",
+      "suiteFile": "packages/auth/test/deployment.test.ts",
+      "suiteHash": "5a6b2b0a7a2600e6",
+      "files": [
+        "deploy/Caddyfile.dev",
+        "docker-compose.dev.yml"
+      ],
+      "baseline": {
+        "suite": "auth:deployment",
+        "builds": [],
+        "command": "pnpm exec vitest run test/deployment.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-deployment.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 5,
+        "passed": 5,
+        "failed": 0,
+        "durationMs": 748
+      },
+      "mutated": {
+        "suite": "auth:deployment",
+        "builds": [],
+        "command": "pnpm exec vitest run test/deployment.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-unbind-dev.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 5,
+        "passed": 3,
+        "failed": 2,
+        "durationMs": 718
+      },
+      "caught": [
+        "the dev compose pair cannot be put on a network proxies the app to loopback Hosts only, and refuses every other name",
+        "the dev compose pair cannot be put on a network publishes the dev proxy on loopback only"
+      ]
+    }
+  ]
+}

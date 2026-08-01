@@ -1,0 +1,48 @@
+{
+  "mutation": "report-deadline-overruns",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:49:11.657Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "9977f2ae6d6b317b",
+  "claim": "packages/auth/test/org.test.ts — the deadline test itself and its sibling. **Against round 8 it failed 1, and not that one**: the deadline test stayed green (165ms → 600ms, both under its 2000ms ceiling) and the incidental red is the sibling late-rejection test, which stops being late when the deadline quadruples. That is the polish finding measured rather than argued — round 8 pinned the number in a log field and never on the clock.",
+  "suites": [
+    {
+      "suite": "auth:org",
+      "verdict": "red",
+      "subjectHash": "e8b4f162dd072bde",
+      "suiteFile": "packages/auth/test/org.test.ts",
+      "suiteHash": "232e38b363d86277",
+      "files": [
+        "packages/auth/src/org.ts"
+      ],
+      "baseline": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 52,
+        "passed": 52,
+        "failed": 0,
+        "durationMs": 1589
+      },
+      "mutated": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-report-deadline-overruns.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 52,
+        "passed": 50,
+        "failed": 2,
+        "durationMs": 2095
+      },
+      "caught": [
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit an unbounded reporter cannot hang a completed removal gives up on a reporter that never settles, and says so",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit an unbounded reporter cannot hang a completed removal still catches a rejection that arrives after the deadline"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "mutation": "boundary-blind-receiver",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:46:22.115Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "3ee3ec3594464de2",
+  "claim": "packages/auth/test/room-access.test.ts — the receiver controls, the real-repo access assertion (which then names every legitimate computed access under apps/ — `order[level]`, `errors[error]`, `holder[key]`…) and the limit fixtures, every one of which a receiver-blind check reports. That list is the argument for asking about the receiver.",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "5b0af1e36541e3d0",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "3468cfb8c6a39a5c",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 69,
+        "passed": 69,
+        "failed": 0,
+        "durationMs": 2317
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-blind-receiver.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 69,
+        "passed": 56,
+        "failed": 13,
+        "durationMs": 2242
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores a computed key on something that is not a handle",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores a domain object that has a memberships field",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores the word on a value that never came from the database",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores `??` and `||` between values that never came from the database",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores a computed key on a defaulted parameter that is not a handle",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores a conditional between two things that are not handles",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores an arithmetic or comparison expression that mentions a handle",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle arriving as an unannotated callback parameter",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle assigned after its declaration",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle held in a class field",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle held in an object property",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle stored in an array or a Map",
+        "room membership is not reachable outside @atrium/auth finds no app file naming `memberships` as a property either"
+      ]
+    }
+  ]
+}

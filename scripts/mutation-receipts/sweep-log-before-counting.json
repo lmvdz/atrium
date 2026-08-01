@@ -1,0 +1,61 @@
+{
+  "mutation": "sweep-log-before-counting",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:47:22.912Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "2205aa1fa01caed3",
+  "claim": "apps/server/test/ws-server.test.ts — the two sweep-bound tests, by timing out",
+  "suites": [
+    {
+      "suite": "server:ws-server",
+      "verdict": "red",
+      "subjectHash": "339f1d94c7ae85ae",
+      "suiteFile": "apps/server/test/ws-server.test.ts",
+      "suiteHash": "6adaefa1d4427a66",
+      "files": [
+        "apps/server/src/ws-server.ts"
+      ],
+      "baseline": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2089
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-server.json",
+        "cwd": "apps/server",
+        "exitCode": 0,
+        "total": 60,
+        "passed": 60,
+        "failed": 0,
+        "durationMs": 5034
+      },
+      "mutated": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 2131
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-sweep-log-before-counting.json",
+        "cwd": "apps/server",
+        "exitCode": 1,
+        "total": 60,
+        "passed": 57,
+        "failed": 3,
+        "durationMs": 18967
+      },
+      "caught": [
+        "a rejection value nobody can read cannot suspend the sweep still evicts within the failure bound when session revalidation rejects unreadably",
+        "a rejection value nobody can read cannot suspend the sweep still evicts within the failure bound when the logger itself throws",
+        "a rejection value nobody can read cannot suspend the sweep still evicts within the failure bound when the membership lookup rejects unreadably"
+      ]
+    }
+  ]
+}

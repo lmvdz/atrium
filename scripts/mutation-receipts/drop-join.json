@@ -1,0 +1,63 @@
+{
+  "mutation": "drop-join",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:44:50.992Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "ec9665f82e9d6251",
+  "claim": "apps/web/e2e/room-access.spec.ts — the workspace-role paths; the positive controls hold",
+  "suites": [
+    {
+      "suite": "e2e:room-access",
+      "verdict": "red",
+      "subjectHash": "4bdc7f1bed5097db",
+      "suiteFile": "apps/web/e2e/room-access.spec.ts",
+      "suiteHash": "84d91a68d33ea0d5",
+      "files": [
+        "packages/auth/src/room-access.ts"
+      ],
+      "baseline": {
+        "suite": "e2e:room-access",
+        "builds": [
+          {
+            "command": "pnpm --filter ./packages/* build",
+            "exitCode": 0,
+            "durationMs": 4834
+          }
+        ],
+        "command": "pnpm exec playwright test e2e/room-access.spec.ts --reporter=json",
+        "cwd": "apps/web",
+        "exitCode": 0,
+        "total": 7,
+        "passed": 7,
+        "failed": 0,
+        "durationMs": 39159
+      },
+      "mutated": {
+        "suite": "e2e:room-access",
+        "builds": [
+          {
+            "command": "pnpm --filter ./packages/* build",
+            "exitCode": 2,
+            "durationMs": 4996
+          }
+        ],
+        "command": "pnpm exec playwright test e2e/room-access.spec.ts --reporter=json",
+        "cwd": "apps/web",
+        "exitCode": 1,
+        "total": 7,
+        "passed": 2,
+        "failed": 5,
+        "durationMs": 50907
+      },
+      "caught": [
+        "room-access.spec.ts › authorization does not depend on cleanup having succeeded › denies after a post-removal sweep fails on the lock timeout",
+        "room-access.spec.ts › authorization does not depend on cleanup having succeeded › denies after the full interleaving the round-5 delta drew",
+        "room-access.spec.ts › authorization does not depend on cleanup having succeeded › denies every read when the member row is gone but the room rows are not",
+        "room-access.spec.ts › authorization does not depend on cleanup having succeeded › denies through the real removal hook, whose sweep it lets fail",
+        "room-access.spec.ts › the role a stale room row carries is capped at the workspace role › reads a demoted member as a member, even with an admin room row"
+      ]
+    }
+  ]
+}

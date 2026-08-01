@@ -1,0 +1,49 @@
+{
+  "mutation": "boundary-no-helpers",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T15:46:00.343Z",
+  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "890ded02e787a72f",
+  "claim": "packages/auth/test/room-access.test.ts — the laundered-helper fixtures and the empty-allowlist premise",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "5b0af1e36541e3d0",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "3468cfb8c6a39a5c",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 69,
+        "passed": 69,
+        "failed": 0,
+        "durationMs": 2317
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-no-helpers.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 69,
+        "passed": 66,
+        "failed": 3,
+        "durationMs": 2283
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the controls, without which all of the above is noise allows an app to import a vetted reader that holds the table",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted fires on an unsafe helper re-exported from another package",
+        "room membership is not reachable outside @atrium/auth the premise, measured would fail this very repository if the allowlist were empty"
+      ]
+    }
+  ]
+}
