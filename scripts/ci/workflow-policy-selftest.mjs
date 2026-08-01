@@ -246,6 +246,23 @@ const ACCEPTED_FORMS = {
     ENV_LINE,
     '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> $GITHUB_ENV\n',
   ],
+  // An absolute path to the binary is hardening, not evasion, and the first
+  // draft of `COMPUTED_BY_DATE` refused it — a false red a blind cross-lineage
+  // review measured.
+  'the run-start timestamp from an absolute path to date': [
+    ENV_LINE,
+    '        run: echo "VITEST_RUN_START=$(/usr/bin/date +%s%3N)" >> "$GITHUB_ENV"\n',
+  ],
+  // And the one this rule deliberately does NOT catch, recorded on the
+  // accepting side so the boundary is written down rather than assumed:
+  // `date --date=@…` reads a clock and prints a constant. The policy cannot
+  // tell those apart without evaluating the shell; `report-file.mjs` refuses
+  // the value at runtime because it is not within a day of now. Two halves,
+  // and this is the seam between them.
+  'the run-start timestamp from a `date` told which date to print': [
+    ENV_LINE,
+    '        run: echo "VITEST_RUN_START=$(date --date=@1748736000 +%s%3N)" >> "$GITHUB_ENV"\n',
+  ],
   // A package.json script is still one behind a launcher: `sudo` is not what
   // makes `pnpm lint` a lint, so the rule asks what was unwrapped, not argv[0].
   'the linter behind a launcher': [LINT_RUN, '        run: timeout 300 pnpm lint\n'],
@@ -2135,6 +2152,21 @@ const MUTATIONS = [
         '        run: echo "E2E_RUN_START=1" >> "$GITHUB_ENV"\n',
       ),
     pair: PAIRS.e2eSuiteNeedsReset,
+  },
+  {
+    // The policy half accepts this one — `date` is read — and it is here as an
+    // ACCEPTED form below rather than a mutation, because what refuses it is
+    // `report-file.mjs`. Its neighbour, which the policy *does* refuse:
+    name: 'the timestamp taken from a variable rather than from a clock',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        ENV_LINE,
+        '        run: echo "VITEST_RUN_START=$RUN_START" >> "$GITHUB_ENV"\n',
+      ),
+    pair: PAIRS.suiteNeedsReset,
+    also: ['environment-is-declared'],
   },
   {
     name: 'the timestamp computed by something that is not a clock',

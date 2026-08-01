@@ -30,9 +30,27 @@ const CLOCK_SLACK_MS = 1000;
  * requires it to be a *millisecond* one from roughly now. Neither half can be
  * satisfied by satisfying the other.
  */
-const EARLIEST_PLAUSIBLE_MS = Date.UTC(2025, 0, 1);
-/** A runner whose clock is a day ahead of ours is a broken runner, loudly. */
-const FUTURE_SLACK_MS = 24 * 60 * 60 * 1000;
+/**
+ * ── AND WHY A FIXED WINDOW WAS NOT ENOUGH (blind review of r6) ──────────────
+ * The first version of this bound was "after 2025-01-01 and not in the future",
+ * and a cross-lineage review measured what that still accepts:
+ *
+ *     run: echo "VITEST_RUN_START=$(date --date=@1748736000 +%s%3N)" >> "$GITHUB_ENV"
+ *
+ * — policy-clean, because the value does come from `date`, and runtime-clean,
+ * because mid-2025 is inside the window. Every report on disk post-dates it, so
+ * every report is fresh, which is the same hole `0` opened with a longer
+ * spelling. A calendar bound is a *constant*, and a constant is exactly what
+ * this is trying to refuse.
+ *
+ * So the bound is relative: a run this gate is reading the report of started
+ * *recently*. A GitHub job cannot exceed six hours; a day is generous and still
+ * refuses any timestamp somebody typed and left there, because a literal stops
+ * being "within a day" a day after it is written.
+ */
+const MAX_RUN_AGE_MS = 24 * 60 * 60 * 1000;
+/** A runner whose clock is an hour ahead of ours is a broken runner, loudly. */
+const FUTURE_SLACK_MS = 60 * 60 * 1000;
 
 export function readFreshReport(path, runStartMs, label) {
   const problems = [];
@@ -52,9 +70,13 @@ export function readFreshReport(path, runStartMs, label) {
     problems.push(
       `no run-start timestamp was recorded for ${label}, so ${path} cannot be proven fresh. The step that deletes the report must export it.`,
     );
-  } else if (runStartMs < EARLIEST_PLAUSIBLE_MS || runStartMs > Date.now() + FUTURE_SLACK_MS) {
+  } else if (
+    runStartMs < Date.now() - MAX_RUN_AGE_MS ||
+    runStartMs > Date.now() + FUTURE_SLACK_MS
+  ) {
+    const age = Math.round((Date.now() - runStartMs) / 1000);
     problems.push(
-      `the run-start timestamp recorded for ${label} is ${runStartMs}, which is not a plausible epoch-milliseconds time (expected between ${EARLIEST_PLAUSIBLE_MS} and now). A constant makes every report fresh — \`0\` makes the comparison \`mtime + ${CLOCK_SLACK_MS} < 0\`, false for every file that has ever existed — so ${path} proves nothing about this run. The step must export \`$(date +%s%3N)\`.`,
+      `the run-start timestamp recorded for ${label} is ${runStartMs}, which is ${age}s from now and therefore not this run's start (expected within ${MAX_RUN_AGE_MS / 1000}s). A constant makes every report fresh: \`0\` makes the comparison \`mtime + ${CLOCK_SLACK_MS} < 0\`, false for every file that has ever existed, and \`$(date --date=@1748736000 +%s%3N)\` does the same thing more slowly. \`date +%s\` instead of \`date +%s%3N\` lands in 1970 and fails here too. ${path} proves nothing about this run — the step must export \`$(date +%s%3N)\`.`,
     );
   } else if (stat.mtimeMs + CLOCK_SLACK_MS < runStartMs) {
     const age = Math.round((runStartMs - stat.mtimeMs) / 1000);

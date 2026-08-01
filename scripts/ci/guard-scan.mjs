@@ -45,14 +45,17 @@
  *       process.exit(main());                ← and it must actually exit
  *     }
  *
- * `isMainModule` must be the binding imported from `scripts/ci/main-module.mjs`
- * and not a local redefinition; the `if` must be a top-level statement, so one
- * nested inside `if (false)` is not a guard; the consequent must call
- * `process.exit`, so an empty block is not a guard; and every other appearance
+ * `isMainModule` must be the binding imported from `./main-module.mjs` by that
+ * exact specifier and not a local redefinition or a lookalike beside it; the
+ * call must not be optional (`?.` short-circuits to a falsy `undefined`); the
+ * `if` must be a top-level statement, so one nested inside `if (false)` is not a
+ * guard; the body must contain a statement that can do something, so `{}`,
+ * `{ void 0; }` and `{ debugger; }` are not guards; and every other appearance
  * of `import.meta` anywhere in the file is a violation, whatever it is spelled
  * like. Denylisting evasions is unbounded — `&& false`, `&& process.env.CI ===
  * undefined`, `&& !process.env.SKIP`, and the next one nobody has thought of —
- * so this names the compliant form and refuses the complement.
+ * so this names the compliant form and refuses the complement. Parentheses are
+ * not a spelling: `if ((isMainModule(import.meta.url)))` is the guard.
  *
  * ── AND WHO RUNS IT ─────────────────────────────────────────────────────────
  * Three callers, deliberately: `gate-selftest.mjs`, `workflow-policy-selftest.mjs`
@@ -65,7 +68,7 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import ts from 'typescript';
 
 /** The one compliant spelling, for error messages. Never compared as text. */
@@ -75,8 +78,38 @@ export const CANONICAL_GUARD = [
   '}',
 ].join('\n');
 
-/** Where `isMainModule` must come from for a guard to count. */
+/**
+ * Where `isMainModule` must come from for a guard to count.
+ *
+ * ── WHY THIS IS NOT `basename(specifier)` (found by a blind review of r6) ───
+ * The first version of this file compared the basename, and a cross-lineage
+ * review measured what that accepts:
+ *
+ *     import { isMainModule } from './vendor/main-module.mjs';   ← accepted
+ *     import { isMainModule } from '/tmp/main-module.mjs';       ← accepted
+ *     import { isMainModule } from '../attacker/main-module.mjs';← accepted
+ *
+ * A module at any of those paths that returns `false` restores the exact
+ * fail-open this scanner exists to stop, with the scanner green — which is the
+ * round-5 defect again, in the commit that fixed the round-5 defect, because a
+ * *name* was checked where a *location* was meant. (Same class as
+ * `VITEST_RUN_START=`: the rule was about the identifier, the meaning was in
+ * the value.)
+ *
+ * So the specifier is normalised and must be the file itself, reached by `./`
+ * or by `../` only. No sideways directory component, no absolute path, and no
+ * bare specifier — a bare `main-module.mjs` is a *package* name in ESM, which is
+ * a different module entirely and one an attacker controls through
+ * `node_modules`. `../main-module.mjs` stays legal so a script may live in a
+ * subdirectory of `scripts/ci/`.
+ *
+ * This is a path rule, not a proof. Replacing `scripts/ci/main-module.mjs`
+ * itself still defeats it — and that is a one-line edit to the shared file every
+ * entry point imports, which is the loud kind of change. Adding a lookalike
+ * beside it was the quiet kind.
+ */
 const GUARD_MODULE = 'main-module.mjs';
+const GUARD_SPECIFIER = /^(?:\.\/|(?:\.\.\/)+)main-module\.mjs$/;
 
 const EQUALITY = new Set([
   ts.SyntaxKind.EqualsEqualsToken,
@@ -140,7 +173,43 @@ function isImportMetaUrl(node) {
  */
 function isEmptyBody(statement) {
   const body = ts.isBlock(statement) ? statement.statements : [statement];
-  return body.every((child) => ts.isEmptyStatement(child));
+  return body.every((child) => doesNothing(child));
+}
+
+/**
+ * A statement that cannot have an effect however it is reached.
+ *
+ * `{}` was the only shape the first version refused; a blind review pointed out
+ * that `{ void 0; }`, `{ debugger; }` and `{ 0; }` are the same guard with
+ * punctuation in it. This is still a *syntactic* claim and stops well short of
+ * "the body asserts something" — `process.exit(0)` is a real statement with a
+ * real effect and this accepts it, which is the semantics boundary the SCOPE
+ * block owns and not something a scanner can take from it.
+ */
+function doesNothing(statement) {
+  if (ts.isEmptyStatement(statement) || statement.kind === ts.SyntaxKind.DebuggerStatement) {
+    return true;
+  }
+  if (!ts.isExpressionStatement(statement)) return false;
+  const expression = unwrap(statement.expression);
+  if (ts.isVoidExpression(expression)) return true;
+  return (
+    ts.isIdentifier(expression) ||
+    ts.isLiteralExpression(expression) ||
+    expression.kind === ts.SyntaxKind.TrueKeyword ||
+    expression.kind === ts.SyntaxKind.FalseKeyword ||
+    expression.kind === ts.SyntaxKind.NullKeyword
+  );
+}
+
+/**
+ * Parentheses are not a spelling. `if ((isMainModule(import.meta.url)))` is the
+ * guard; refusing it was a false red a blind review measured.
+ */
+function unwrap(node) {
+  let current = node;
+  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  return current;
 }
 
 /**
@@ -152,7 +221,7 @@ function isEmptyBody(statement) {
  */
 function guardShape(statement) {
   if (!ts.isIfStatement(statement)) return undefined;
-  const condition = statement.expression;
+  const condition = unwrap(statement.expression);
   // Is this an attempt at the guard at all? Anything whose condition mentions
   // `isMainModule` is, including `isMainModule(import.meta.url) && false`.
   const mentionsPredicate = (function walk(node) {
@@ -164,11 +233,14 @@ function guardShape(statement) {
   if (
     !(
       ts.isCallExpression(condition) &&
+      // `isMainModule?.(…)` short-circuits to `undefined` — falsy — if the
+      // binding is ever not a function, which is a guard with a fuse in it.
+      condition.questionDotToken === undefined &&
       ts.isIdentifier(condition.expression) &&
       condition.expression.text === 'isMainModule' &&
       condition.arguments.length === 1 &&
       condition.arguments[0] !== undefined &&
-      isImportMetaUrl(condition.arguments[0])
+      isImportMetaUrl(unwrap(condition.arguments[0]))
     )
   ) {
     return {
@@ -187,7 +259,10 @@ function guardShape(statement) {
         'its body is empty, so the script establishes that it was run and then does nothing and exits 0 — which passes any check that reads the condition alone',
     };
   }
-  return { node: statement };
+  // The unwrapped call, not `statement.expression`: with parentheses round the
+  // condition those are different nodes, and the caller needs the one that has
+  // `arguments` on it.
+  return { node: statement, call: condition };
 }
 
 /** Every `isMainModule` binding this file imports, and where from. */
@@ -260,7 +335,7 @@ export function guardProblems(path, source) {
     const shape = guardShape(statement);
     if (shape === undefined) continue;
     if (shape.reason === undefined) {
-      guards.push(shape.node);
+      guards.push(shape.call);
       continue;
     }
     problems.push(
@@ -273,9 +348,10 @@ export function guardProblems(path, source) {
     claim(shape.node.expression);
   }
 
-  for (const guard of guards) {
-    const argument = guard.expression.arguments[0];
-    accounted.add(argument.expression); // the `import.meta` of `import.meta.url`
+  for (const call of guards) {
+    // `unwrap`, because `isMainModule((import.meta.url))` reaches the same node
+    // through a ParenthesizedExpression and it is the same `import.meta`.
+    accounted.add(unwrap(call.arguments[0]).expression);
   }
   const offenders = [];
   const visit = (node) => {
@@ -297,9 +373,9 @@ export function guardProblems(path, source) {
   const argvVisit = (node) => {
     if (ts.isBinaryExpression(node) && EQUALITY.has(node.operatorToken.kind)) {
       for (const side of [node.left, node.right]) {
-        if (isEntryArgv(side)) {
+        if (isEntryArgv(unwrap(side), sourceFile)) {
           problems.push(
-            `${path}:${line(sourceFile, node)} compares \`process.argv[1]\` for equality (\`${text(sourceFile, node)}\`). Whatever it is compared against, that is the round-4 guard with the other half renamed. ${BROKEN_GUARD_ADVICE}`,
+            `${path}:${line(sourceFile, node)} compares an \`argv\` element for equality (\`${text(sourceFile, node)}\`). Whatever it is compared against, that is the round-4 guard with the other half renamed. ${BROKEN_GUARD_ADVICE}`,
           );
         }
       }
@@ -315,9 +391,9 @@ export function guardProblems(path, source) {
       problems.push(
         `${path} uses \`isMainModule\` in a guard without importing it from scripts/ci/${GUARD_MODULE}. A locally defined predicate of the same name is the fifteen-copies problem this file exists to end.`,
       );
-    } else if (!sources.every((specifier) => basename(specifier) === GUARD_MODULE)) {
+    } else if (!sources.every((specifier) => GUARD_SPECIFIER.test(specifier))) {
       problems.push(
-        `${path} imports \`isMainModule\` from ${sources.join(', ')} rather than from a path ending in ${GUARD_MODULE}.`,
+        `${path} imports \`isMainModule\` from ${sources.join(', ')}, which is not the shared predicate. It must be \`./${GUARD_MODULE}\` — or \`../\`-prefixed for a script in a subdirectory — and nothing else: \`./vendor/${GUARD_MODULE}\`, \`/tmp/${GUARD_MODULE}\` and a bare \`${GUARD_MODULE}\` (a *package* name in ESM) are all different modules that can return whatever they like, and a guard over one of them is green here and silent in CI.`,
       );
     }
     if (declaresPredicateLocally(sourceFile)) {
@@ -330,18 +406,33 @@ export function guardProblems(path, source) {
   return problems;
 }
 
-/** `process.argv[1]`, as an expression. */
-function isEntryArgv(node) {
-  return (
-    ts.isElementAccessExpression(node) &&
-    ts.isNumericLiteral(node.argumentExpression) &&
-    node.argumentExpression.text === '1' &&
-    ts.isPropertyAccessExpression(node.expression) &&
-    node.expression.name.text === 'argv' &&
-    ts.isIdentifier(node.expression.expression) &&
-    node.expression.expression.text === 'process'
-  );
+/**
+ * An element of *some* `argv`, however it is reached.
+ *
+ * Stated plainly: this half is a **denylist**, and a denylist has a bound. The
+ * allowlist above — `import.meta` may appear in exactly one place — is the real
+ * rule and needs no help; this exists only so that the round-4 comparison
+ * rewritten to avoid naming `import.meta` is still refused. The first version
+ * matched `process.argv[1]` literally, and a blind review measured the four
+ * spellings that walks past: `process['argv'][1]`, `process.argv[1+0]`,
+ * `globalThis.process.argv[1]`, `process.argv["1"]`. Rather than list four more,
+ * the object side is now "anything whose text names `argv`" and the index is not
+ * read at all — inside an equality comparison, that is never a thing anyone
+ * should be writing.
+ */
+function isEntryArgv(node, sourceFile) {
+  if (!ts.isElementAccessExpression(node)) return false;
+  // The *object*, not the index. `process.argv[1 + 0]` and `process.argv["1"]`
+  // both reach the entry path and constant-folding an index is a road with no
+  // end; a comparison against any element of `process.argv` is the shape.
+  // Rooted at `process` specifically, which is what keeps the twelve legitimate
+  // `argv[0] !== 'node'` comparisons in this repository's own shell parser out
+  // of it — measured: widening this to "anything naming argv" reported all
+  // twelve, which is how a denylist becomes a nuisance and then gets deleted.
+  return PROCESS_ARGV.test(node.expression.getText(sourceFile).replace(/\s+/g, ''));
 }
+
+const PROCESS_ARGV = /(?:^|\.)process(?:\.argv|\[['"]argv['"]\])$/;
 
 /**
  * The `x === 'file://…'` this `import.meta` sits inside, if it does.

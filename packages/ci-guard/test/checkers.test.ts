@@ -103,7 +103,63 @@ describe('the evasions round 5 accepted', () => {
     [
       'the predicate imported from somewhere else entirely',
       "import { isMainModule } from './evil.mjs';\nif (isMainModule(import.meta.url)) {\n  process.exit(main());\n}\n",
-      /rather than from a path ending in main-module\.mjs/,
+      /which is not the shared predicate/,
+    ],
+    // A blind cross-lineage review of round 6's first draft measured these four.
+    // The rule said "from scripts/ci/main-module.mjs" and the code compared the
+    // *basename*, so a lookalike beside it — or in /tmp — was accepted, and a
+    // lookalike that returns `false` restores the whole defect with the scanner
+    // green. A name was checked where a location was meant, which is the same
+    // class as `VITEST_RUN_START=` two files over.
+    [
+      'a lookalike predicate in a subdirectory',
+      "import { isMainModule } from './vendor/main-module.mjs';\nif (isMainModule(import.meta.url)) {\n  process.exit(main());\n}\n",
+      /which is not the shared predicate/,
+    ],
+    [
+      'a lookalike predicate by absolute path',
+      "import { isMainModule } from '/tmp/main-module.mjs';\nif (isMainModule(import.meta.url)) {\n  process.exit(main());\n}\n",
+      /which is not the shared predicate/,
+    ],
+    [
+      'a lookalike predicate one directory sideways',
+      "import { isMainModule } from '../attacker/main-module.mjs';\nif (isMainModule(import.meta.url)) {\n  process.exit(main());\n}\n",
+      /which is not the shared predicate/,
+    ],
+    [
+      'a bare specifier, which in ESM is a package name and not this file at all',
+      "import { isMainModule } from 'main-module.mjs';\nif (isMainModule(import.meta.url)) {\n  process.exit(main());\n}\n",
+      /which is not the shared predicate/,
+    ],
+    [
+      'the predicate called with `?.`, which is `undefined` if it is ever not a function',
+      `${IMPORT}if (isMainModule?.(import.meta.url)) {\n  process.exit(main());\n}\n`,
+      /condition is not exactly/,
+    ],
+    [
+      'a body that is punctuation: `void 0`',
+      `${IMPORT}if (isMainModule(import.meta.url)) {\n  void 0;\n}\n`,
+      /body is empty/,
+    ],
+    [
+      'a body that is punctuation: `debugger`',
+      `${IMPORT}if (isMainModule(import.meta.url)) {\n  debugger;\n}\n`,
+      /body is empty/,
+    ],
+    [
+      'the argv comparison with a computed property',
+      "if (process['argv'][1] === '/x/y.mjs') {\n  main();\n}\n",
+      /compares an `argv` element for equality/,
+    ],
+    [
+      'the argv comparison with an index that is an expression',
+      "if (process.argv[1 + 0] === '/x/y.mjs') {\n  main();\n}\n",
+      /compares an `argv` element for equality/,
+    ],
+    [
+      'the argv comparison rooted at globalThis',
+      "if (globalThis.process.argv[1] === '/x/y.mjs') {\n  main();\n}\n",
+      /compares an `argv` element for equality/,
     ],
     [
       'the round-4 comparison, re-introduced verbatim',
@@ -123,7 +179,7 @@ describe('the evasions round 5 accepted', () => {
     [
       'the same without naming `import.meta` at all',
       "if (process.argv[1] === '/x/y.mjs') {\n  main();\n}\n",
-      /compares `process\.argv\[1\]` for equality/,
+      /compares an `argv` element for equality/,
     ],
     [
       'a file the scanner cannot parse is a failure, not a skip',

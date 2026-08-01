@@ -634,7 +634,7 @@ const CASES = [
       utimesSync(path, monthAgo, monthAgo);
       return readFreshReport(path, 0, 'the test runner').problems;
     },
-    expect: /not a plausible epoch-milliseconds time/,
+    expect: /not this run.s start/,
   },
   {
     name: '`date +%s` instead of `date +%s%3N`, which is seconds and lands in 1970',
@@ -644,7 +644,23 @@ const CASES = [
       writeFileSync(path, JSON.stringify({ success: true }));
       return readFreshReport(path, Math.floor(Date.now() / 1000), 'the test runner').problems;
     },
-    expect: /not a plausible epoch-milliseconds time/,
+    expect: /not this run.s start/,
+  },
+  {
+    // The one a blind cross-lineage review measured against round 6's first
+    // draft, which bounded the timestamp by the calendar (after 2025-01-01, not
+    // in the future) rather than by recency. `$(date --date=@1748736000 +%s%3N)`
+    // is policy-clean — it does read a clock — and mid-2025 sat inside that
+    // window, so every report on disk post-dated it and every report was fresh.
+    // A calendar bound is a constant, and a constant is what this refuses.
+    name: 'a timestamp from a `date` that was told which date to print',
+    run: () => {
+      const dir = mkdtempSync(join(tmpdir(), 'atrium-gate-'));
+      const path = join(dir, 'report.json');
+      writeFileSync(path, JSON.stringify({ success: true }));
+      return readFreshReport(path, 1_748_736_000_000, 'the test runner').problems;
+    },
+    expect: /not this run.s start/,
   },
   {
     name: 'a clock a week ahead of this one, which would accept anything',
@@ -654,7 +670,7 @@ const CASES = [
       writeFileSync(path, JSON.stringify({ success: true }));
       return readFreshReport(path, Date.now() + 7 * 86400_000, 'the test runner').problems;
     },
-    expect: /not a plausible epoch-milliseconds time/,
+    expect: /not this run.s start/,
   },
   {
     name: 'the real thing: a fresh report and a timestamp from this second',
@@ -1621,7 +1637,7 @@ const CASES = [
     name: 'the same comparison with `import.meta.url` renamed out of it',
     run: () =>
       guardScanWith('assert-tables.mjs', () => "if (process.argv[1] === '/x/y.mjs') { main(); }\n"),
-    expect: /compares `process\.argv\[1\]` for equality/,
+    expect: /compares an `argv` element for equality/,
   },
   {
     name: 'a file the scanner cannot parse is a failure, not a skip',

@@ -503,7 +503,14 @@ const JOB_ENV_FILE = new Set(['$GITHUB_ENV', '${GITHUB_ENV}']);
  * `report-file.mjs` refuses it as implausible at runtime. Two halves, neither
  * of which can be satisfied by satisfying the other.
  */
-const COMPUTED_BY_DATE = /(?:\$\(|`)\s*date\b/;
+// The path prefix is not decoration: `$(/usr/bin/date +%s%3N)` is a legitimate
+// hardening spelling and the first version of this regex refused it, which a
+// blind review measured as a false red. And note what this rule does *not*
+// claim — `date --date=@1748736000 +%s%3N` reads a clock and satisfies it. That
+// value is refused by `report-file.mjs`, which requires the timestamp to be
+// within a day of now, so a literal stops working a day after it is written.
+// Neither half is sufficient; that is the point of there being two.
+const COMPUTED_BY_DATE = /(?:\$\(|`)\s*(?:[^\s()`]*\/)?date\b/;
 
 function exportsToJobEnv(name) {
   return command(
