@@ -1400,17 +1400,33 @@ function checkCommandShadowing(script, where, add, path) {
     // unquoted heredoc; a quoted one on any ordinary step of `verify` or `e2e`
     // was clean. So the shape is what is checked, in the polarity this round
     // has applied everywhere else: a command writing to the job's environment
-    // must say, in a literal word this engine can read, which variable it is
-    // setting. `echo NAME=…` and `printf 'NAME=%s\n' …` do; `cat` does not, and
-    // neither does `echo "$(…)"`.
+    // must be one of two commands, and must say — in a literal word this engine
+    // can read — which variable it is setting.
+    //
+    // Two commands rather than a payload test, because a payload test is
+    // another thing the writer chooses. The first version of this checked only
+    // "is the first operand shaped like an assignment", and `dd
+    // of="$GITHUB_ENV" oflag=append conv=notrunc` satisfies it three times over
+    // while writing the job environment from a pipe — the refusal fired, and it
+    // fired saying "writes `of=…`", which is a rule describing the wrong thing.
+    // `echo` and `printf` are the two whose first operand *is* the line that
+    // lands in the file. Everything else — `cat`, `dd`, `tee`, `sponge`, and
+    // whichever one is next — is refused without this engine having heard of it.
     if (namesJobFile(GITHUB_ENV_FILE, { redirections, words })) {
       const assignmentShaped = (word) => /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
       const payload = firstOperand(argv);
-      if (payload === undefined || !assignmentShaped(payload)) {
+      const writer = argv[0];
+      const sayable = writer === 'echo' || writer === 'printf';
+      if (!sayable || payload === undefined || !assignmentShaped(payload)) {
         add(
           'no-command-shadowing',
-          `${path}: the script at ${where} writes to \`$GITHUB_ENV\` — which sets variables for every later step in the job — without a literal \`NAME=\` this policy can read${payload === undefined ? '' : ` (its first operand is \`${payload}\`)`}. A here-document body is data to this parser and a command substitution is opaque to it, so \`cat >> "$GITHUB_ENV" <<'EOF'\` and \`echo "$(…)" >> "$GITHUB_ENV"\` both set a variable nothing here can name. Write it as \`echo NAME=value >> "$GITHUB_ENV"\` with \`NAME\` declared in DECLARED_VARIABLES, or do not write to the job environment.`,
+          `${path}: the script at ${where} writes to \`$GITHUB_ENV\` — which sets variables for every later step in the job — without a literal \`NAME=\` this policy can read. ${
+            sayable
+              ? `Its first operand is \`${payload ?? '(none)'}\`, and a command substitution is opaque to this parser, so \`echo "$(…)" >> "$GITHUB_ENV"\` sets a variable nothing here can name.`
+              : `\`${writer}\` is not one of the two commands that may write the job environment (\`echo\`, \`printf\`), whose first operand *is* the line that lands in the file. \`cat >> "$GITHUB_ENV" <<'EOF'\` writes a here-document body, which is data to this parser; \`dd of="$GITHUB_ENV"\` and \`tee -a "$GITHUB_ENV"\` write a pipe. None of the three says which variable it is setting.`
+          } Write it as \`echo NAME=value >> "$GITHUB_ENV"\` with \`NAME\` declared in DECLARED_VARIABLES, or do not write to the job environment.`,
         );
+        continue;
       }
       for (const word of raw) {
         const name = word.split('=')[0].trim();

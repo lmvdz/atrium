@@ -839,7 +839,7 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 166
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 167
   mutated copies of the real workflow and additionally asserts that every one of
   the 28 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules

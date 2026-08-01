@@ -2114,6 +2114,22 @@ const MUTATIONS = [
     message: /writes to `\$GITHUB_ENV`.*without a literal `NAME=`/s,
   },
   {
+    name: 'the same with the file named inside a longer word: `dd of="$GITHUB_ENV"`',
+    rule: 'no-command-shadowing',
+    // The `tee` fix compared the whole word, so a writer that takes its target
+    // as `of=<path>` named the file and matched nothing. The test is a
+    // substring now, which over-approximates in the safe direction.
+    mutate: (s) =>
+      insertAfter(s, '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"', [
+        '',
+        '      - name: Note the toolchain',
+        '        run: |',
+        `          printf '%s\\n' 'NODE_OPTIONS=--require /tmp/nobble.cjs' | dd of="$GITHUB_ENV" oflag=append conv=notrunc`,
+        '          true',
+      ]),
+    message: /writes to `\$GITHUB_ENV`.*without a literal `NAME=`/s,
+  },
+  {
     name: 'NODE_OPTIONS smuggled into $GITHUB_ENV through a here-document body',
     rule: 'no-command-shadowing',
     mutate: (s) =>
