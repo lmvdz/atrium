@@ -31,6 +31,14 @@ const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /**
  * Each entry: the defect being reintroduced, the exact edit that reintroduces
  * it, and the test file whose comments claim to catch it.
+ *
+ * `test` names a vitest file. `typecheck: true` runs `tsc --noEmit` instead,
+ * which is how a TYPE-level guarantee gets a ledger entry — vitest does not
+ * typecheck, so an `@ts-expect-error` assertion is invisible to it, and a
+ * guarantee whose only enforcement is the compiler needs the compiler to be the
+ * thing that runs. Added in round 4 for the entry brand: the round-3 defect was
+ * that a forged `AuthoredMessageEntry` literal COMPILED, so "it no longer
+ * compiles" is the claim, and only tsc can falsify it.
  */
 const LEDGER = [
   {
@@ -129,8 +137,8 @@ const LEDGER = [
   {
     name: 'an authored body stops being reconciled against its record',
     file: 'src/components/model/records.ts',
-    find: '    if (rendered !== record.text) {',
-    replace: '    if (false) {',
+    find: '    if (diverged !== null) throw new Error(diverged);',
+    replace: '    void diverged;',
     test: 'test/attribution.test.tsx',
   },
   {
@@ -274,6 +282,137 @@ const LEDGER = [
     replace: '',
     test: 'test/timeline-handlers.test.tsx',
   },
+
+  /* --- round 4 -------------------------------------------------------------
+   * The round-3 gauntlet's findings, each reintroduced by name. The first two
+   * are the same defect from opposite ends and both have to fire: un-brand the
+   * type and the forgery compiles again; delete the render-boundary check and
+   * a cast renders it. A fix that only holds when both are present is a fix
+   * with a single point of failure, which is what the last three rounds shipped.
+   * ---------------------------------------------------------------------- */
+  {
+    name: 'the message entry stops being branded and a forged literal compiles',
+    file: 'src/components/model/records.ts',
+    find: "  readonly [entryBrand]: 'message-entry';\n",
+    replace: '',
+    typecheck: true,
+    test: 'tsc --noEmit',
+  },
+  {
+    name: 'the render boundary stops re-deriving the body from the attribution',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: '  if (diverged !== null) throw new Error(diverged);',
+    replace: '  void diverged;',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the render-boundary check compares the body against itself',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: 'entry.body, entry.attribution.text, {',
+    replace:
+      "entry.body, entry.body.map((s) => (s.kind === 'mention' ? `@${s.text}` : s.text)).join(''), {",
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'system voice stops rejecting "X said" framing',
+    file: 'src/components/model/quotation.ts',
+    find: '    pattern:\n      /\\b(?:said|says|saying|say|tell|tells|told|telling|wrote|writes|writing|asked|asks|asking|replied|replies|remarked|remarks|commented|comments|quoted|quotes)\\b/i,',
+    replace: '    pattern: /^(?!)/,',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'system voice stops rejecting the first person',
+    file: 'src/components/model/quotation.ts',
+    find: "    pattern:\n      /\\b(?:I|I'm|I've|I'll|I'd|me|my|mine|myself|we|we're|we've|we'll|we'd|us|our|ours|ourselves)\\b/i,",
+    replace: '    pattern: /^(?!)/,',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the system-voice bans hold at the constructor but not at the JSON boundary',
+    file: 'src/components/model/quotation.ts',
+    find: '  return !SYSTEM_VOICE_BANS.some((ban) => ban.pattern.test(value.text as string));',
+    replace: '  return true;',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the composer suppresses its focus ring again',
+    file: 'src/components/frame/frame.module.css',
+    find: '.cbox textarea:focus-visible {\n  outline: 2px solid var(--tx1);',
+    replace: '.cbox textarea:focus-visible {\n  outline: none;',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'focusing the composer replaces the amber binding border with grey',
+    file: 'src/components/frame/frame.module.css',
+    find: '.cbox.cboxBound:focus-within {\n  border-color: var(--ambbd);\n}',
+    replace: '',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the ring audit goes back to skipping controls that paint no ring',
+    file: 'e2e/gallery.spec.ts',
+    find: "        if (style.outlineStyle === 'none' || parseFloat(style.outlineWidth) === 0) return none;",
+    replace:
+      "        if (style.outlineStyle === 'none' || parseFloat(style.outlineWidth) === 0) return null;",
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the claim underline goes back to a token below the 1.4.11 floor',
+    file: 'app/globals.css',
+    find: '  border-bottom: 1px dotted var(--tx2);',
+    replace: '  border-bottom: 1px dotted var(--line3);',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the rendered audit drops its non-text-graphic sweep',
+    file: 'e2e/audit.ts',
+    find: "    { what: 'claim underline', selector: '[data-claim=\"true\"]', side: 'borderBottomColor' },",
+    replace: '',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the hold progress bar goes back inside the button and into its name',
+    file: 'src/components/primitives/HoldToAct.tsx',
+    find: '      <span aria-hidden="true" className={styles.holdFill} />',
+    replace:
+      '      <span aria-label="hold progress" aria-valuemax={100} aria-valuemin={0} aria-valuenow={0} className={styles.holdFill} role="progressbar" />',
+    test: 'test/hold-to-act.test.tsx',
+  },
+  {
+    name: 'the surface chip welds its label to its count again',
+    file: 'src/components/frame/SurfaceIndicators.tsx',
+    find: '            aria-label={\n              surface.count === null ? surface.label : `${surface.label} — ${surface.count}`\n            }\n',
+    replace: '',
+    test: 'test/attention.test.tsx',
+  },
+  {
+    name: 'a rail room chip welds its name to its badge',
+    file: 'src/components/frame/Rail.tsx',
+    find: '      aria-label={name}\n',
+    replace: '',
+    test: 'test/attention.test.tsx',
+  },
+  {
+    name: 'the routine strip’s count, window and actors run together',
+    file: 'src/components/timeline/RoutineCollapse.tsx',
+    find: "        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${entry.actors.join(', ')} — ${entry.open ? 'click to hide' : 'click to peek'}`}\n",
+    replace: '',
+    test: 'test/attention.test.tsx',
+  },
+  {
+    name: 'the gallery frame drops the composer’s key and ref seams again',
+    file: 'app/gallery/RoomFrame.tsx',
+    find: '            onKeyDown={on.onComposerKeyDown}\n',
+    replace: '',
+    test: 'test/composer.test.tsx',
+  },
+  {
+    name: 'the workspace monogram goes back to a hardcoded LV',
+    file: 'app/gallery/RoomFrame.tsx',
+    find: '          initials={initials(props.viewer.name)}',
+    replace: '          initials="LV"',
+    test: 'test/composer.test.tsx',
+  },
 ];
 
 if (process.argv.includes('--list')) {
@@ -294,10 +433,11 @@ for (const entry of LEDGER) {
   writeFileSync(path, original.replace(entry.find, entry.replace));
   let failed = false;
   try {
-    execFileSync('pnpm', ['exec', 'vitest', 'run', entry.test], {
-      cwd: WEB,
-      stdio: 'ignore',
-    });
+    const argv =
+      entry.typecheck === true
+        ? ['exec', 'tsc', '--noEmit']
+        : ['exec', 'vitest', 'run', entry.test];
+    execFileSync('pnpm', argv, { cwd: WEB, stdio: 'ignore' });
   } catch {
     failed = true;
   } finally {

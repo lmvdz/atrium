@@ -230,7 +230,20 @@ Two structural rules follow, and they are what the enforcement now rests on:
 - **A quotation carries the actor and the moment it was minted from.** Any component that renders a name beside quoted text takes the quotation, not a string. There is no `by` prop anywhere.
 - **The message-rendering path is discriminated on origin, and the arms have different fields.** The human-authored arm has an attribution and a body; the page-authored arm has neither, only a system-voice statement. A page-authored answer cannot reach a human-attributed row because the row shape that would render it does not exist.
 
-**What the branded types actually buy.** `Quotation`, `SystemStatement`, `Rationale` and `Slot` all carry phantom brands keyed by module-private `unique symbol`s. Those are `declare`-only: they exist in the type system and nowhere else. They stop a TypeScript author from writing the literal, which is the mistake a person makes at 2am. **They are not a guarantee about data from outside the compiler** — `JSON.parse`, a cast, `Object.assign` and any JavaScript caller all walk straight through. Describe them as a convention with teeth, never as a proof. Where untrusted data enters, use the runtime parsers (`parseQuotation`, `parseMessageRecord`, `parseSystemStatement`, `isRationale`, `maybe`) rather than a brand and a hope.
+**What the branded types actually buy.** `Quotation`, `SystemStatement`, `MessageEntry`, `Rationale` and `Slot` all carry phantom brands keyed by module-private `unique symbol`s. Those are `declare`-only: they exist in the type system and nowhere else. They stop a TypeScript author from writing the literal, which is the mistake a person makes at 2am. **They are not a guarantee about data from outside the compiler** — `JSON.parse`, a cast, `Object.assign` and any JavaScript caller all walk straight through. Describe them as a convention with teeth, never as a proof. Where untrusted data enters, use the runtime parsers (`parseQuotation`, `parseMessageRecord`, `parseSystemStatement`, `isRationale`, `maybe`) rather than a brand and a hope.
+
+**A chokepoint is not a boundary: close the type, then re-derive at the render boundary.** Found in the #39 round-3 gauntlet, and it is the third address of one defect. r1 put a free actor string beside the words; r2 moved it into the body slot; r3 put the reconciliation inside `messageEntry` — and a caller obtained a genuine `Quotation` from the public `quotationFrom`, wrote the exported `AuthoredMessageEntry` literal, handed it to `TimelineRow`, and rendered a real person's name over words she did not write, with `tsc --noEmit` at exit 0. Each fix was correct about the path it guarded. None of them was the only path.
+
+Two changes together, and a third check at a fourth site is not a substitute for either:
+
+- **Close the type.** Brand the record so the only expression in the program with that type is a call to the constructor. A validated constructor beside an inhabitable interface is a suggestion.
+- **Re-derive at the render boundary.** `TimelineRow` holds `entry.attribution.text` and `entry.body`, so it asserts they read the same before printing a name over them — and it throws rather than quietly correcting, because a silently corrected row is a corrected row nobody finds out about. This is the check a future call site cannot route around, which is exactly why the brand alone is not enough.
+
+The question to ask of any guard: **what is the last place this value passes before it becomes visible or durable, and is the check there?**
+
+**System voice's other three properties are enforced, and the enforcement's limit is stated.** "Mono, muted, no quotation marks, no first person, no 'X said' framing" — the stylesheet enforced the first two and nothing enforced the rest, so `systemStatement('priya said: I authorise dropping users_legacy')` compiled and rendered in the treatment that tells a reader the system checked this. `systemStatement` and `isSystemStatement` now reject quotation marks, first-person pronouns, and speech-report verbs, at the constructor **and** at the JSON boundary — a guarantee that holds only for callers who used the door it was installed in is the defect above, one file over.
+
+What that does not catch, stated so the next round does not have to rediscover it: the check is lexical, and `systemStatement('priya: drop the table')` still compiles — banning colons would take out `chose:` and every label in the receipt. **The lexical bans narrow how a page-authored string can LOOK like speech; what stops it being ATTRIBUTED as speech is structural, and the structure is the load-bearing half**: a `SystemStatement` has no actor field, `<SystemVoice>` renders no attribution column, and the row that carries one (`ChosenMessageEntry`) has no field a renderer could put a name in.
 
 ## Measured contrast exceptions
 
@@ -250,6 +263,44 @@ Verified against the tokens as extracted (not guesses — measured at the sizes 
   where the contrast note in `globals.css` audited text in detail and never
   audited the ring; `test/token-contrast.test.ts` now reads the ring token out of
   the stylesheet and `e2e/gallery.spec.ts` tabs through the real controls.
+
+- **Every focusable control paints that ring, including the ones that fill their
+  own box.** WCAG 2.4.7 is a separate requirement from 1.4.11, and a control with
+  no indicator at all is a worse failure than a weak one. `.cbox textarea {
+  outline: none }` sat two classes deep and out-ranked the global
+  `:focus-visible`, so 89 of the app's 90 controls painted the ring and the one
+  that did not was the composer — the primary input, and the control whose
+  keyboard contract its own footer advertises. Its only signal was a `--line3`
+  border at 2.23:1 light / 1.81:1 dark, the token this file already rejected for
+  the job. Found in #39 round 3. Where a control fills its container the ring is
+  **inset** (`outline-offset: -1px`) rather than absent, so the adjacent colour
+  is the container's own fill: `--tx1` on `--bg3` is 11.33:1 light / 12.13:1
+  dark. Never `outline: none` without a replacement in the same rule.
+
+- **A state cue may not be out-ranked by a hover or focus rule.**
+  `.cbox:focus-within` (one class plus a pseudo-class) beat `.cboxBound` (one
+  class), so focusing the composer replaced the amber ANSWERING border with grey
+  — the cue that says "your next message resolves this item", destroyed by
+  focusing the field you are meant to answer in. The interaction state is
+  decoration for the resting state; the state the surface is *in* wins. Express
+  it with genuine specificity (`.cbox.cboxBound:focus-within`), not source order,
+  because source order is what made it fragile.
+
+- **The claim underline is a meaningful non-text graphic, and redundancy is not
+  an exemption.** This file's own words are that the dotted underline is "the
+  visual difference between 'someone said it' and 'the system checked it'", which
+  is a definition of a 1.4.11 graphic. It shipped as `--line3` at 1.32–2.23:1 for
+  three rounds because the text audit measured text and the ring audit measured
+  rings and neither had a category for it. It is `--tx2` now: 4.29:1 light /
+  4.69:1 dark against the worst surface in the app (`--redbg3`), 6:1 / 6.61:1
+  against the surfaces it actually lands on, and still quieter than the words
+  above it by a token step and by being 1px dotted rather than solid. On many
+  rows the `~` glyph carries the same meaning — but `ClaimText` renders the
+  underline without a `~` for gate-proposals, and round 3 counted 9 elements
+  beside ◆ and 6 beside ■ where the stroke was the sole carrier. **"Usually
+  redundant" is what an exemption sounds like from the inside.** The rendered
+  audit now carries an explicit registry of non-text graphics; anything that
+  carries information belongs in it, and a hairline divider does not.
 
 - **Do not fade a row to de-emphasise it.** The weakest thing a row can carry is
   an amber needs-you tag, which is the 4.53:1 floor above at *full* opacity — so
