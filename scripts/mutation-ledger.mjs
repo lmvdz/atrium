@@ -4,7 +4,7 @@
 // They must stay literal — turning one into a template string would make this
 // file edit something other than what ships.
 /**
- * The mutation ledger for #26, rounds 6 to 8, re-runnable.
+ * The mutation ledger for #26, rounds 6 to 9, re-runnable.
  *
  *   node scripts/mutation-ledger.mjs --list
  *   node scripts/mutation-ledger.mjs <name>      apply one mutation
@@ -504,6 +504,60 @@ const mutations = {
         [
           "export function describeUnknown(value: unknown): string {\n  try {\n    if (value instanceof Error) return value.message;\n  } catch {\n    // A hostile prototype chain or a throwing `message` getter. Fall through to\n    // the string conversion, which is guarded in its turn.\n  }\n  try {\n    return String(value);\n  } catch {\n    // `Object.create(null)`, a throwing `Symbol.toPrimitive`, a Proxy.\n  }\n  return '<a rejection value that cannot be converted to a string>';\n}",
           'export function describeUnknown(value: unknown): string {\n  const message = (value as { message?: unknown }).message;\n  return typeof message === "string" ? message : String(value);\n}',
+        ],
+      ]),
+  ],
+
+  // The timing family. Each widens exactly one configured duration by 4× and
+  // changes nothing else, which is the only honest way to ask whether a test
+  // measures its bound or merely observes that something eventually happened.
+  // `widen-sweep-window` has been here since round 8 and is the reason this
+  // family exists: it caught a *test*, not the code.
+
+  'widen-revalidate-ttl': [
+    'a positive session verdict is reused four times as long as configured',
+    'apps/server/test/ws-server.test.ts — the TTL test. Round 8 asserted this against a flat 2s ceiling and stayed green under this mutation.',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          '  const revalidateTtlMs = options.revalidateTtlMs ?? 5_000;',
+          '  const revalidateTtlMs = (options.revalidateTtlMs ?? 5_000) * 4;',
+        ],
+      ]),
+  ],
+
+  'widen-revalidate-backoff': [
+    'a failed session verdict is remembered four times as long as configured',
+    'apps/server/test/ws-server.test.ts — the back-off test. Same story: green under round 8, which used 30ms against 2s.',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          '  const revalidateBackoffMs = options.revalidateBackoffMs ?? 1_000;',
+          '  const revalidateBackoffMs = (options.revalidateBackoffMs ?? 1_000) * 4;',
+        ],
+      ]),
+  ],
+
+  'widen-report-deadline': [
+    'the cleanup reporter gets four times the deadline it was configured with',
+    'packages/auth/test/org.test.ts — 2. **Measured against round 8 and it caught this too**, but on the logged `timeoutMs: 40` rather than on the clock: the run took 165ms against a 2000ms ceiling, so the elapsed assertion never fired. The delta was right about what that assertion measured, and it was not the only thing pinning the number. `report-deadline-overruns` isolates the clock.',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          '  const reportTimeoutMs = input.cleanupReportTimeoutMs ?? DEFAULT_CLEANUP_REPORT_TIMEOUT_MS;',
+          '  const reportTimeoutMs = (input.cleanupReportTimeoutMs ?? DEFAULT_CLEANUP_REPORT_TIMEOUT_MS) * 4;',
+        ],
+      ]),
+  ],
+
+  'report-deadline-overruns': [
+    'the deadline is reported honestly and waited on for four times as long — the elapsed-time assertion, isolated from every field assertion around it',
+    'packages/auth/test/org.test.ts — 2 under round 9, including the deadline test itself. **Against round 8 it fails 1, and not that one**: the deadline test stayed green (165ms → 600ms, both under its 2000ms ceiling) and the incidental red is the sibling late-rejection test, which stops being late when the deadline quadruples. That is the polish finding measured rather than argued — round 8 pinned the number in a log field and never on the clock.',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          "    const timer = setTimeout(() => {\n      timedOut = true;\n      resolve('timed-out');\n    }, timeoutMs);",
+          "    const timer = setTimeout(\n      () => {\n        timedOut = true;\n        resolve('timed-out');\n      },\n      timeoutMs * 4,\n    );",
         ],
       ]),
   ],
