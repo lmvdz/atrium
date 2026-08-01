@@ -13,7 +13,14 @@
 
 import type { EpistemicState, Glyph, ObjectKind } from './glyph';
 import { glyphFor, needsViewer } from './glyph';
-import type { MessageId, Quotation, SystemStatement } from './quotation';
+import type {
+  MessageId,
+  MessageRecord,
+  QuotableOrigin,
+  Quotation,
+  SystemStatement,
+} from './quotation';
+import { chosenAct, quotationFrom } from './quotation';
 import type { Rationale } from './rationale';
 import type { Maybe } from './text';
 
@@ -64,33 +71,126 @@ export type BodySegment =
   | { readonly kind: 'code'; readonly text: string }
   | { readonly kind: 'mention'; readonly text: string };
 
-export interface ReplyContext {
-  readonly actor: string;
-  readonly at: string;
-  /** an excerpt of what is being replied to — a quotation, so it must be proven */
-  readonly excerpt: Quotation;
-}
+/* ---------------------------------------------------------------------------
+ * THE MESSAGE ROW, DISCRIMINATED ON ORIGIN.
+ *
+ * The round-1 gauntlet's central finding: the primary message path was
+ * `actor + body: string[]` with the origin thrown away, so the shipped gallery
+ * rendered a page-authored one-click answer (`origin: 'chosen'`) under lars's
+ * name, in the same slot as his own sentences. Every quotation guarantee in
+ * model/quotation.ts was defending the excerpts while the main path leaked.
+ *
+ * A message row is now a union with the origin as its discriminant, and the two
+ * arms have DIFFERENT FIELDS rather than a shared shape with a flag:
+ *
+ *   AuthoredMessageEntry — has `attribution` (a Quotation, which carries the
+ *     actor and the timestamp) and `body`. The name on screen is
+ *     `attribution.actor`; there is no free actor string to get wrong.
+ *
+ *   ChosenMessageEntry — has NEITHER. No attribution, no body: only a
+ *     `SystemStatement`. There is no field on this arm that a renderer could
+ *     put in the human-attributed actor column, so page-authored text cannot
+ *     reach a human-attributed row by construction rather than by care.
+ * ------------------------------------------------------------------------- */
 
-export interface MessageEntry {
+interface MessageEntryCommon {
   readonly type: 'message';
   readonly id: MessageId;
   readonly at: string;
-  readonly actor: string;
-  readonly body: readonly BodySegment[];
   /** the epistemic state of the object this message carries, when it carries one */
   readonly state: EpistemicState;
-  readonly fromViewer: boolean;
-  readonly replyTo: Maybe<ReplyContext>;
-  /**
-   * A system-voice note under the row — "chosen from the options on the card",
-   * "superseded". Typed as a SystemStatement so it cannot be a person's words.
-   */
-  readonly note: Maybe<SystemStatement>;
+  readonly replyTo: Maybe<Quotation>;
   readonly tag: Maybe<RowTag>;
   /** highlighted as the target of a cross-room jump */
   readonly targeted: boolean;
-  /** matches the active feed filter (rows that do not are dimmed, never hidden) */
+  /** matches the active feed filter (rows that do not are quieted, never hidden) */
   readonly matchesFilter: boolean;
+}
+
+/** A row whose words are the actor's own — typed here or already on the record. */
+export interface AuthoredMessageEntry extends MessageEntryCommon {
+  readonly origin: QuotableOrigin;
+  /** the proof: the words, the actor and the message id, from one record */
+  readonly attribution: Quotation;
+  readonly body: readonly BodySegment[];
+  readonly fromViewer: boolean;
+  /**
+   * A system-voice note under the row — "superseded", "answer-bound". Typed as
+   * a SystemStatement so it cannot be a person's words.
+   */
+  readonly note: Maybe<SystemStatement>;
+}
+
+/**
+ * A row the interface authored on somebody's behalf: the statement behind a
+ * one-click answer. It has no actor field and no body field — the person's name
+ * exists only inside the third-person system-voice sentence.
+ */
+export interface ChosenMessageEntry extends MessageEntryCommon {
+  readonly origin: 'chosen';
+  readonly statement: SystemStatement;
+}
+
+export type MessageEntry = AuthoredMessageEntry | ChosenMessageEntry;
+
+export function isAuthored(entry: MessageEntry): entry is AuthoredMessageEntry {
+  return entry.origin !== 'chosen';
+}
+
+export interface MessageEntryInput {
+  readonly state: EpistemicState;
+  /** overrides the record's flat text with inline runs; authored rows only */
+  readonly body?: readonly BodySegment[];
+  readonly note?: Maybe<SystemStatement>;
+  readonly tag?: Maybe<RowTag>;
+  readonly replyTo?: Maybe<Quotation>;
+  readonly targeted?: boolean;
+  readonly matchesFilter?: boolean;
+  /** the person reading the page, so `fromViewer` is derived and not asserted */
+  readonly viewer?: string;
+}
+
+/**
+ * The ONLY constructor for a feed row. It takes the message record itself, so
+ * the row's id, time, actor and words all come from one place and cannot drift
+ * apart — and it reads the origin rather than dropping it.
+ */
+export function messageEntry(record: MessageRecord, input: MessageEntryInput): MessageEntry {
+  const common = {
+    type: 'message' as const,
+    id: record.id,
+    at: record.at,
+    state: input.state,
+    replyTo: input.replyTo ?? null,
+    tag: input.tag ?? null,
+    targeted: input.targeted ?? false,
+    matchesFilter: input.matchesFilter ?? true,
+  };
+
+  const attribution = quotationFrom(record);
+  if (attribution === null) {
+    if (input.body !== undefined) {
+      throw new Error(
+        `messageEntry: ${record.id} is page-authored (origin ${record.origin}); it has no body of its own, only a system-voice statement of what was chosen`,
+      );
+    }
+    return {
+      ...common,
+      origin: 'chosen',
+      /* Third person, on purpose: "lars chose: …" is a fact about an act. It is
+         not "lars said", and it is not in his voice. */
+      statement: chosenAct(record.actor, record.text, record.id),
+    };
+  }
+
+  return {
+    ...common,
+    origin: attribution.origin,
+    attribution,
+    body: input.body ?? [{ kind: 'text', text: record.text }],
+    fromViewer: input.viewer !== undefined && record.actor === input.viewer,
+    note: input.note ?? null,
+  };
 }
 
 export interface RowTag {
@@ -243,19 +343,31 @@ export function stateForHappened(kind: HappenedKind): EpistemicState {
   }
 }
 
+/**
+ * A history line. `who` names the actor of an EVENT, and the line's words are a
+ * `SystemStatement` — third person, page-authored, visibly not speech. Nothing
+ * on this record is quoted, which is why the name may be a plain string here
+ * and may not be one on `ProvenanceEntry` below.
+ */
 export interface HappenedLine {
   readonly id: string;
   readonly kind: HappenedKind;
   readonly who: string;
   readonly at: string;
-  readonly text: string;
+  readonly statement: SystemStatement;
 }
 
+/**
+ * An excerpt in the receipt.
+ *
+ * There is no `who` and no `at`: both come off the excerpt itself. Round 1
+ * found that carrying them separately let priya's name sit beside a sentence
+ * minted from lars's message, and the receipt is the one artifact whose entire
+ * job is being the trustworthy record.
+ */
 export interface ProvenanceEntry {
   readonly id: string;
-  readonly who: string;
-  readonly at: string;
-  /** the excerpt IS a quotation — there is no way to show one that is not proven */
+  /** the excerpt IS a quotation — it carries the words, the actor and the time */
   readonly excerpt: Quotation;
   readonly note: Maybe<string>;
   readonly jump: Maybe<SourceRef>;
@@ -265,9 +377,12 @@ export interface ProvenanceEntry {
  * A correction has two voices and they never mix.
  *
  * SYSTEM: `was` → `now`, plus an optional `fact`. Mono, muted, no quotation
- *   marks, no first person, no "X said". Visibly not speech.
- * HUMAN: `reason`, present only when a person actually typed one. Rendered in
- *   <q>, attributed, and provably theirs because it is a Quotation.
+ *   marks, no first person, no "X said". Visibly not speech. `who`/`at` label
+ *   the correction EVENT and sit inside that system-voice header.
+ * HUMAN: `reason`, present only when a person actually typed one. It is a bare
+ *   `Quotation` — the attribution beside it is `reason.actor`, not a `by`
+ *   string the caller supplies. Round 1: a `by` beside a quotation is a name
+ *   nothing checks.
  */
 export interface CorrectionEntry {
   readonly id: string;
@@ -277,7 +392,7 @@ export interface CorrectionEntry {
   readonly was: SystemStatement;
   readonly now: SystemStatement;
   readonly fact: Maybe<SystemStatement>;
-  readonly reason: Maybe<{ readonly quotation: Quotation; readonly by: string }>;
+  readonly reason: Maybe<Quotation>;
   readonly link: Maybe<{ readonly label: string; readonly ref: SourceRef }>;
 }
 
@@ -318,7 +433,8 @@ export type ComposerBinding =
       readonly itemLabel: string;
       readonly objective: string;
     }
-  | { readonly mode: 'replying'; readonly to: ReplyContext };
+  /** the banner names whoever the quotation says wrote it, and nobody else */
+  | { readonly mode: 'replying'; readonly to: Quotation };
 
 /* --- derivations --------------------------------------------------------- */
 
@@ -342,6 +458,105 @@ export function hardestFirst(items: readonly AttentionItem[]): readonly Attentio
   );
 }
 
+/* --- derived aggregates -------------------------------------------------- */
+/* Round 1: several aggregates hard-coded ◆ beside a count. A hard-coded glyph
+   is a glyph that can disagree with the thing it labels — a pin holding one ■
+   and eight ✗ headed by a hand-written ◆ is a claim dressed as a fact, one
+   level up. Every aggregate glyph below is derived from the items it counts. */
+
+export interface GlyphCount {
+  readonly glyph: Glyph;
+  readonly n: number;
+}
+
+/** How many of each glyph, hardest first, zero-counts dropped. */
+export function glyphCounts(
+  items: readonly { readonly state: EpistemicState }[],
+): readonly GlyphCount[] {
+  const tally = new Map<Glyph, number>();
+  for (const item of items) {
+    const glyph = glyphFor(item.state);
+    tally.set(glyph, (tally.get(glyph) ?? 0) + 1);
+  }
+  return [...tally.entries()]
+    .map(([glyph, n]) => ({ glyph, n }))
+    .sort((a, b) => GLYPH_HARDNESS[a.glyph] - GLYPH_HARDNESS[b.glyph]);
+}
+
+/**
+ * The glyph that stands for a whole group: the hardest one in it. `null` when
+ * the group is empty — an empty group has no state, and a component that has to
+ * render something for nothing should say so in words, not in a borrowed glyph.
+ */
+export function hardestGlyph(items: readonly { readonly state: EpistemicState }[]): Maybe<Glyph> {
+  const counts = glyphCounts(items);
+  return counts[0]?.glyph ?? null;
+}
+
+/* --- the pin's own bound ------------------------------------------------- */
+
+/**
+ * BRIEF concept 3: "everything clean compresses to counts; folding hides noise
+ * but never signals; the pin folds rather than scrolls."
+ *
+ * Round 1 measured what the unbounded version did at 1440×900: 13 owed items
+ * left the feed 183px tall, 17 left it 55px, and at 19 the composer's bottom
+ * edge sat at 909 in a 900px viewport with `scrollHeight` still 900 — the
+ * composer was unreachable by any means. A room with twenty owed items is the
+ * exact load this surface exists for.
+ *
+ * The fold is derived HERE, from the items, not handed in by a caller. A
+ * `folded` boolean the component never sets is not a bound; it is a hope.
+ */
+
+/** One open card, then compressed rows, then the overflow line. Measured below. */
+export const PIN_COMPACT_BUDGET = 4;
+
+export interface PinFold {
+  /** the one item shown as a full card — always the hardest */
+  readonly open: Maybe<AttentionItem>;
+  /** compressed but present: glyph, title, rationale, primary action */
+  readonly compact: readonly AttentionItem[];
+  /** owed and over budget — counted, named by glyph, one click from being seen */
+  readonly overflow: readonly AttentionItem[];
+  /** not owed to this person: these compress to counts and never take a row */
+  readonly clean: readonly AttentionItem[];
+  readonly owedTotal: number;
+  readonly overflowCounts: readonly GlyphCount[];
+  readonly cleanCounts: readonly GlyphCount[];
+}
+
+/**
+ * `showAll` is the "N more owed" affordance having been used. It raises the
+ * budget; it does not remove it — the pin still folds rather than scrolling,
+ * and the cap that keeps the composer on screen is `PIN_HARD_CAP`.
+ */
+export const PIN_HARD_CAP = 9;
+
+export interface FoldOptions {
+  /** which item is open. Ignored when it is not owed — the pin opens what needs you. */
+  readonly openId?: string;
+  readonly showAll?: boolean;
+}
+
+export function foldPin(items: readonly AttentionItem[], options: FoldOptions = {}): PinFold {
+  const owed = hardestFirst(items.filter((item) => needsViewer(item.state)));
+  const clean = hardestFirst(items.filter((item) => !needsViewer(item.state)));
+  const budget = options.showAll === true ? PIN_HARD_CAP : PIN_COMPACT_BUDGET;
+
+  const open = owed.find((item) => item.id === options.openId) ?? owed[0] ?? null;
+  const rest = owed.filter((item) => item.id !== open?.id);
+  return {
+    open,
+    compact: rest.slice(0, budget),
+    overflow: rest.slice(budget),
+    clean,
+    owedTotal: owed.length,
+    overflowCounts: glyphCounts(rest.slice(budget)),
+    cleanCounts: glyphCounts(clean),
+  };
+}
+
 /**
  * The trailer's lead, derived from verification and attention rather than
  * written. "Everything else is green" may only be said when green is true of
@@ -358,11 +573,14 @@ export interface TrailerSummary {
   readonly failures: number;
 }
 
+/* No `lastCheck`: round 1 caught it being accepted and never read. A parameter
+   nothing consumes is a claim that the derivation depends on something it does
+   not, which is the same defect as a hard-coded glyph one level down. The
+   trailer renders the last-check time as its own prop. */
 export function trailerFor(input: {
   readonly objects: readonly StateObject[];
   readonly objectives: readonly ObjectiveRecord[];
   readonly overdue: number;
-  readonly lastCheck: string;
 }): TrailerSummary {
   const owed = input.objects.filter((o) => needsViewer(o.state));
   const owedIds = new Set(owed.map((o) => o.id));
