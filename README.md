@@ -32,14 +32,57 @@ first room.
 Everything in containers instead:
 
 ```bash
-docker compose up --build   # postgres, minio, migrate, server, app, proxy
+ATRIUM_DOMAIN=atrium.example.com    # in .env; required, no default
+docker compose up --build           # postgres, minio, migrate, server, app, proxy
 ```
 
-Same compose file locally and on the VPS (issue #18) — only `.env` differs.
-Everything arrives through the `proxy` service (Caddy, `deploy/Caddyfile`) on
-`WEB_PORT`: `/ws` goes to the realtime server, everything else to the app.
-Neither of those two publishes a port of its own, and that is load-bearing
-rather than tidy — see below.
+`docker-compose.yml` is the **production** stack and it is HTTPS-only. Point a
+hostname at the box, put it in `ATRIUM_DOMAIN`, and Caddy (`deploy/Caddyfile`)
+obtains and renews the certificate itself; `APP_URL` and `NEXT_PUBLIC_WS_URL`
+are derived from that one value as `https://` and `wss://` and are not
+separately settable. Everything arrives through the `proxy` service — `/ws` to
+the realtime server, everything else to the app — and it publishes 443 and 80
+(the second answers the ACME challenge and redirects). Neither `app` nor
+`server` publishes a port of its own, and that is load-bearing rather than tidy
+— see below.
+
+For the same topology on a laptop, over plaintext:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+```
+
+That override is development-only, says so at the top of the file, and also
+sets `NODE_ENV=development` — because under `NODE_ENV=production` both
+processes refuse to start with an `http://` origin at all. It is a second file
+rather than a variable for exactly that reason. The everyday loop needs neither:
+`pnpm infra:up && pnpm dev`.
+
+### HTTPS is a boot condition, not a recommendation
+
+Round 4 shipped this stack with the proxy on `:80`, an `http://` `APP_URL`
+default, and a comment in `deploy/Caddyfile` asking the operator to change it.
+Every session cookie, verification link and invitation link in that deployment
+crossed the network in cleartext. A comment is not a control, so there are now
+four:
+
+- compose refuses to interpolate an unset `ATRIUM_DOMAIN`;
+- Caddy refuses an empty site address, and a hostname is what switches its
+  automatic HTTPS on (an IP or a bare `:80` would switch it off);
+- `apps/web` and `apps/server` each refuse to serve production with an
+  `http://` `APP_URL` or a `ws://` `NEXT_PUBLIC_WS_URL`, and so does
+  `createAtriumAuth`, which both processes build through — the rule itself is
+  one function, `assertSecureTransport` in `packages/auth/src/transport.ts`, so
+  the two cannot end up with different ideas of "secure enough to serve";
+- session cookies carry `Secure` (and the `__Secure-` prefix), stated in the
+  config rather than inherited from a library default, and asserted against the
+  real instance's own options.
+
+There is deliberately **no override**. An escape hatch is the comment again with
+extra steps: the deployment that reaches for it is the one the check exists for.
+Development and test are untouched, and `next build` is exempt — it compiles
+route modules without serving a request, the same exemption the mailer gate
+makes.
 
 ### Why there is a proxy in front
 
@@ -58,8 +101,7 @@ count at all. (They do not then stop counting: an unresolvable caller shares one
 global bucket, `unresolvedIpKey` in `packages/auth/src/client-ip.ts`. That is a
 cap, and it is not a per-address cap.)
 
-TLS belongs there too: point a hostname at the box and replace `:80` in
-`deploy/Caddyfile` with it.
+TLS terminates there, automatically, from `ATRIUM_DOMAIN` — see above.
 
 ### The compose stack does not serve a page yet
 
@@ -74,6 +116,17 @@ Everything else comes up: postgres, minio, migrate, `server` and `proxy` are
 healthy, and the realtime upgrade routes through the proxy to its origin and
 session checks. `pnpm dev` is unaffected — it is `NODE_ENV=development`, where
 the console transport is exactly right.
+
+[#40](https://github.com/lmvdz/atrium/issues/40) owns the fix: a real transport
+plus a CI job that boots this stack and asserts a *page*, not a health endpoint.
+The gate itself is adjudicated correct and must not be weakened to make the
+stack come up. One consequence worth stating rather than glossing: the HTTPS
+rules above have not been observed serving real traffic either. What has been
+checked is that `caddy validate` accepts the Caddyfile (and reports
+"enabling automatic HTTP->HTTPS redirects"), that `docker compose config`
+refuses an unset `ATRIUM_DOMAIN`, and that both processes refuse an `http://`
+origin under `NODE_ENV=production` — the last by test, the first two by running
+the tools.
 
 ### The credentials in this repo are development-only
 
@@ -177,6 +230,19 @@ and nothing joins them. The guarantee is directional — revocations commit befo
 the library's write, grants only after it — so a partial failure leaves somebody
 a member with no rooms, never a non-member with every room.
 
+Every write to one member's room rows happens inside one advisory lock keyed on
+`(workspace, member)`, with a `lock_timeout` so a stalled holder fails that
+member's next mutation instead of hanging it forever. The lock also spans the
+*whole* of the invitation compensation: taking the room rows back and deleting
+the workspace member row are one transaction, so an acceptance racing the
+compensation either completes before it and is undone, or waits and then finds
+no member row to join on — `joinWorkspaceRooms` reads an absent member row as a
+refusal, never as a reason to fall back to the role it was handed. Round 4 did
+those two writes in two transactions, and the gap between them was long enough
+for a concurrent acceptance to re-grant every room the compensator had just
+taken away; `apps/web/e2e/role-sync.spec.ts` now holds that interleaving in
+place with a row lock and asserts it cannot happen.
+
 Only three of Better Auth's HTTP endpoints are actually mounted
 (`packages/auth/src/mounted.ts`): the verification link, the OAuth callback and
 the error page it redirects to. Everything else Atrium needs it calls in-process
@@ -186,7 +252,22 @@ the same terms Better Auth's own router does — the raw pathname, per segment,
 method included, percent-encoding refused outright — so the two cannot disagree
 about what a path means; the smuggling fixtures in `mounted.test.ts` assert the
 refusals at the guard rather than trusting a dependency to be stricter than we
-are. The organization plugin additionally enforces its own policy in
+are.
+
+One correction to what earlier rounds claimed about that guard's input.
+`rawPathname` exists because `new URL(...).pathname` resolves dot segments, and
+a guard handed a rewritten path answers about a request nobody sent. That is
+genuinely load-bearing **on the realtime server**, where `req.url` is the
+literal request target from Node's HTTP parser — `apps/server/test/ws-server.test.ts`
+writes `GET /nope/../ws` onto a raw socket and asserts the 404, so reverting
+that call site fails a test. It is **not** load-bearing on the Next route
+handler: constructing a `Request` already runs the WHATWG URL parser, so by the
+time a handler exists the dot segments are gone and both functions return the
+same string for every input. Next owns canonicalization there and `rawPathname`
+is defense-in-depth — said plainly, in the route file and in `mounted.ts`,
+because an unproved guard described as proved is worse than no guard.
+`mounted.test.ts` measures that premise, so if a runtime ever stops
+canonicalizing, the failing test says the web-side call has become load-bearing. The organization plugin additionally enforces its own policy in
 `beforeCreateInvitation`, and re-checks it in `afterCreateInvitation` — nobody
 can hand out a role they do not hold, and an inviter demoted in the gap between
 those two has the invitation voided.
