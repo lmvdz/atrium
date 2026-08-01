@@ -213,6 +213,11 @@ function readWord(source, start) {
   let index = start;
   let value = '';
   let expandable = false;
+  // Whether any part of the word was quoted or escaped. For most words this is
+  // noise; for a here-document's *delimiter* it decides whether the body is data
+  // or shell-expanded text — see `skipHeredocBodies` and the heredoc problem in
+  // `singleCommandProblems`.
+  let quoted = false;
   while (index < source.length) {
     const character = source[index];
     if (character === '\\') {
@@ -220,17 +225,20 @@ function readWord(source, start) {
         index += 2; // Line continuation: the word carries on over the newline.
         continue;
       }
+      quoted = true;
       value += source[index + 1] ?? '';
       index += 2;
       continue;
     }
     if (character === "'") {
+      quoted = true;
       const end = source.indexOf("'", index + 1);
       value += source.slice(index + 1, end === -1 ? source.length : end);
       index = end === -1 ? source.length : end + 1;
       continue;
     }
     if (character === '"') {
+      quoted = true;
       index += 1;
       while (index < source.length && source[index] !== '"') {
         if (source[index] === '\\') {
@@ -266,7 +274,7 @@ function readWord(source, start) {
     value += character;
     index += 1;
   }
-  return [{ value, expandable }, index];
+  return [{ value, expandable, quoted }, index];
 }
 
 /** Everything up to and including the newline, for a `#` comment. */
@@ -300,6 +308,7 @@ function skipHeredocBodies(source, index, pending) {
 /** `{type:'word'|'op'}` tokens for one script. */
 function tokenize(source) {
   const tokens = [];
+  const heredocs = [];
   const pendingHeredocs = [];
   let index = 0;
   let atTokenStart = true;
@@ -340,10 +349,18 @@ function tokenize(source) {
     tokens.push({ type: 'word', ...word });
     const previous = tokens.at(-2);
     if (previous?.type === 'op' && HEREDOCS.has(previous.op)) {
-      pendingHeredocs.push({ delimiter: word.value, strip: previous.op === '<<-' });
+      const heredoc = {
+        delimiter: word.value,
+        strip: previous.op === '<<-',
+        // An unquoted delimiter means the shell expands the body. This parser
+        // skips bodies as data, so an unquoted one is text it is not reading.
+        expands: !word.quoted,
+      };
+      pendingHeredocs.push(heredoc);
+      heredocs.push(heredoc);
     }
   }
-  return tokens;
+  return { tokens, heredocs };
 }
 
 function newCommand() {
@@ -373,7 +390,7 @@ function isSubstantial(command) {
  * @returns {{commands: object[], functions: string[], controls: string[], keywords: string[]}}
  */
 export function parseScript(script) {
-  const tokens = tokenize(String(script ?? ''));
+  const { tokens, heredocs } = tokenize(String(script ?? ''));
   const commands = [];
   const functions = [];
   const controls = [];
@@ -485,7 +502,7 @@ export function parseScript(script) {
   flush();
 
   for (const command of commands) Object.assign(command, unwrap(command.raw));
-  return { commands, functions, controls, keywords };
+  return { commands, functions, controls, keywords, heredocs };
 }
 
 /**
@@ -514,9 +531,32 @@ export function parseScript(script) {
  * @returns {string[]} human-readable problems; empty means it is canonical
  */
 export function singleCommandProblems(script) {
-  const { commands, functions, controls, keywords } = parseScript(script);
+  const { commands, functions, controls, keywords, heredocs } = parseScript(script);
   const problems = [];
   const unique = (values) => [...new Set(values)];
+
+  // ── AN UNQUOTED HERE-DOCUMENT IS NOT DATA (#40 round 4) ──────────────────
+  // Found by the blind review of this round's own fix, and it is a hole in this
+  // parser's *stated model* rather than in a rule: `skipHeredocBodies` treats a
+  // body as data, which is right — `cat <<'EOF'` followed by a line reading
+  // `git fetch …` is a file being written. With the delimiter unquoted the
+  // shell expands the body, so
+  //
+  //     cat > .env <<ENVIRONMENT
+  //     LOG_LEVEL=info$(echo "NODE_OPTIONS=--require ./nobble.cjs" >> "$GITHUB_ENV")
+  //     ENVIRONMENT
+  //
+  // runs a command this file never sees and poisons every later step in the
+  // job — the sixteenth bypass smuggled through the one construct the parser
+  // deliberately does not read. Verified clean against the engine before this.
+  // One quote closes it, and the deploy job's `.env` heredoc already had it.
+  for (const heredoc of heredocs ?? []) {
+    if (heredoc.expands) {
+      problems.push(
+        `it opens a here-document on \`${heredoc.delimiter}\` with the delimiter unquoted, so the shell expands the body — and this parser reads here-document bodies as data, which means a \`$( … )\` in there is a command nothing in this policy can see. Quote the delimiter (\`<<'${heredoc.delimiter}'\`)`,
+      );
+    }
+  }
 
   if (commands.length === 0) {
     problems.push('it runs no command at all');
@@ -806,11 +846,28 @@ export function launcherProblems(command) {
  * it neither loads code nor changes the exit status, and a measurement that
  * `node <flag> -e 'process.exit(3)'` still exits 3.
  *
- * The three that take a value must be written with `=`
- * (`--max-old-space-size=4096`). Spelled with a space, the value becomes the
- * first operand, the script is no longer where a matcher looks for it, and the
- * step reads as missing — which is the wrong error message for the right
- * reason, and fails closed either way.
+ * ── THE SEVENTEENTH BYPASS, MADE BY THIS TABLE ─────────────────────────────
+ * The first version of this list was a flat set of flag names, and the blind
+ * cross-lineage review of it found that three of the entries take a *value*.
+ * The comment here claimed that spelling one with a space "fails closed". For
+ * two of them it does — `node --max-old-space-size scripts/ci/assert-x.mjs`
+ * exits 9 with `illegal value for flag`. For the third it fails wide open:
+ *
+ *     $ node /tmp/fail7.mjs                              FAILED   exit=7
+ *     $ node --disable-warning /tmp/fail7.mjs                     exit=0
+ *
+ * Node takes the script path as the flag's value, is left with no entry point,
+ * reads an empty stdin, and exits 0 — while this parser, which does not know
+ * which flags consume an operand, still sees the script as the first operand
+ * and reports the step present. `run: node --disable-warning
+ * scripts/ci/assert-page-serves.mjs` was **policy-clean** and ran nothing.
+ *
+ * Introduced by the allowlist, in the same commit that argued allowlists are
+ * safer, and found by pointing somebody else at it. So the entry is not the
+ * flag — it is the flag *with its value attached*. A value-taking flag is
+ * admissible only as `--flag=value`; written with a space it is refused, which
+ * is the same rule the launcher table states as "being on this list is a
+ * property of the binary with these flags".
  *
  * And the environment is the other half of this table: `NODE_OPTIONS` applies
  * these same flags to every `node` process without appearing in any argv, which
@@ -818,15 +875,15 @@ export function launcherProblems(command) {
  * `workflow-policy.mjs`; an allowlist here with that variable unguarded would
  * have been decoration.
  */
-export const NODE_FLAGS_ALLOWED = new Set([
-  '--enable-source-maps',
-  '--no-warnings',
-  '--trace-warnings',
-  '--trace-uncaught',
-  '--disable-warning',
-  '--max-old-space-size',
-  '--stack-size',
-  '--use-strict',
+export const NODE_FLAGS_ALLOWED = new Map([
+  ['--enable-source-maps', { takesValue: false }],
+  ['--no-warnings', { takesValue: false }],
+  ['--trace-warnings', { takesValue: false }],
+  ['--trace-uncaught', { takesValue: false }],
+  ['--use-strict', { takesValue: false }],
+  ['--disable-warning', { takesValue: true }],
+  ['--max-old-space-size', { takesValue: true }],
+  ['--stack-size', { takesValue: true }],
 ]);
 
 /**
@@ -840,7 +897,11 @@ export function runsItsScript(argv) {
   for (const word of argv.slice(1)) {
     if (!word.startsWith('-') || word === '-' || word === '--') return true; // the script
     const equals = word.indexOf('=');
-    if (!NODE_FLAGS_ALLOWED.has(equals === -1 ? word : word.slice(0, equals))) return false;
+    const flag = NODE_FLAGS_ALLOWED.get(equals === -1 ? word : word.slice(0, equals));
+    if (flag === undefined) return false;
+    // `--disable-warning <script>` makes node swallow the script as the flag's
+    // value and exit 0 having run nothing. Only the `=` form is an entry here.
+    if (flag.takesValue && equals === -1) return false;
   }
   // Only flags, no operand: `node --no-warnings` runs a REPL, not a script.
   return false;

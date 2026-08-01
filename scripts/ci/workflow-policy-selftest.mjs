@@ -1530,6 +1530,43 @@ const MUTATIONS = [
       ),
     message: /reaches the command through `systemd-run`, which is not on the allowlist/,
   },
+  // ---- the seventeenth and eighteenth, both from this round's own review ---
+  // Both were introduced or left open by the round-4 fix itself, and both were
+  // clean against the engine when the reviewer was pointed at it.
+  {
+    name: 'a node flag that swallows the script as its value: `--disable-warning <script>`',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: node --disable-warning scripts/ci/assert-page-serves.mjs',
+      ),
+    // Measured: `node /tmp/fail7.mjs` exits 7 and
+    // `node --disable-warning /tmp/fail7.mjs` exits 0 — node takes the path as
+    // the flag's value, has no entry point, and reads an empty stdin. The
+    // honest verdict is that the assertion is not invoked at all.
+    message: /never runs the real-page assertion/,
+    also: ['compose-through-one-entrypoint'],
+  },
+  {
+    name: 'the `.env` heredoc with its delimiter unquoted, so the body is shell-expanded',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) => replaceOnce(s, "cat > .env <<'ENVIRONMENT'", 'cat > .env <<ENVIRONMENT'),
+    message: /with the delimiter unquoted, so the shell expands the body/,
+  },
+  {
+    name: 'the same, carrying the command substitution it exists to hide',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        replaceOnce(s, "cat > .env <<'ENVIRONMENT'", 'cat > .env <<ENVIRONMENT'),
+        '          LOG_LEVEL=info\n',
+        '          LOG_LEVEL=info$(echo "NODE_OPTIONS=--require ./nobble.cjs" >> "$GITHUB_ENV")\n',
+      ),
+    message: /with the delimiter unquoted, so the shell expands the body/,
+  },
+
   // ---- the sixteenth: the flags moved into the environment ----------------
   // Round 4 inverted the node-flag denylist, and its own blind review put the
   // flag in `NODE_OPTIONS` instead. Measured before the fix: a script that
