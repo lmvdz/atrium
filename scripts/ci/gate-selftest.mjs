@@ -205,6 +205,115 @@ function mutate(report, fn) {
   return copy;
 }
 
+/** Runs the expected-failure scanner over an in-memory file set. */
+function scanFixture(files, entries = ['x.test.ts']) {
+  return scanForExpectedFailures(entries, (path) => {
+    if (!Object.hasOwn(files, path)) throw new Error(`ENOENT: ${path}`);
+    return files[path];
+  });
+}
+
+/**
+ * Every spelling of an expected failure the scanner must see.
+ *
+ * The round-3 gauntlet's finding was that the line matcher missed
+ * `test.each([...]).fails(...)` — a form its own comment advertised — so the
+ * standing requirement is now a fixture per form rather than a claim per form.
+ * Anything added to Vitest's surface that means "this test is allowed to fail"
+ * belongs here with a line of its own.
+ *
+ * Seven of these were also written out as real test files and run under Vitest
+ * 4.1.10 before being frozen here, because a fixture nobody executed proves the
+ * scanner reads a string and not that the string is an evasion. All seven ran,
+ * produced 8 expected failures, and Vitest exited 0. Round 3's line matcher
+ * caught two of the seven. (One form below did *not* survive that check and is
+ * kept deliberately: `test.each([...]).fails(...)` is what round 3's comment
+ * advertised, and it is not a Vitest 4 API at all — `.each()` returns a plain
+ * function, so it throws `test.each(...).fails is not a function` and fails the
+ * run loudly. The real chained spelling is `test.fails.each([...])`, which is
+ * here too. Covering the advertised form costs nothing and stops the claim from
+ * being wrong a third time if the API ever grows it.)
+ */
+const EVADED_FORMS = {
+  'the chained-each form round 3 advertised and could not match (not a Vitest 4 API)':
+    "import { test } from 'vitest';\ntest.each([[1], [2]]).fails('parameterised and broken', () => {});\n",
+  'the chained-each form Vitest actually has':
+    "import { test } from 'vitest';\ntest.fails.each([[1], [2]])('parameterised and broken: %i', () => {});\n",
+  'computed member access, so the characters `.fails` never appear':
+    "import { it } from 'vitest';\nit['fails']('spelled as a subscript', () => {});\n",
+  'optional chaining between the runner and the annotation':
+    "import { it } from 'vitest';\nit?.fails('spelled with a question mark', () => {});\n",
+  'the chain spread across lines, so no single line carries it':
+    "import { test } from 'vitest';\ntest\n  .each([[1], [2]])\n  .fails('broken over three lines', () => {});\n",
+  'the annotation bound to a name of its own before it is called':
+    "import { it } from 'vitest';\nconst knownBroken = it.fails;\nknownBroken('aliased', () => {});\n",
+  'the annotation destructured straight off the runner':
+    "import { it } from 'vitest';\nconst { fails } = it;\nfails('destructured', () => {});\n",
+  'the runner renamed at the import, so `it` never appears':
+    "import { it as sanity } from 'vitest';\nsanity.fails('renamed at the import', () => {});\n",
+  'the runner reached through a namespace import':
+    "import * as vitest from 'vitest';\nvitest.it.fails('through the namespace', () => {});\n",
+  'a chained modifier before the annotation':
+    "import { it } from 'vitest';\nit.concurrent.fails('chained', () => {});\n",
+  'the options-object spelling':
+    "import { it } from 'vitest';\nit('sneaky', { fails: true }, () => {});\n",
+  'the options object hoisted into a variable':
+    "import { it } from 'vitest';\nconst options = { fails: true };\nit('sneakier', options, () => {});\n",
+};
+
+/**
+ * The same, but living in a helper module no report will ever name.
+ *
+ * This is the form the round-3 scanner could not reach even in principle: it
+ * read exactly the modules the CI reporter listed, and a helper is not a module
+ * in any report. The scan now starts from the test glob and follows relative
+ * imports, so the annotation is found where it physically is.
+ */
+const HELPER_FORMS = {
+  'an annotation exported from a helper the report never names': {
+    'x.test.ts':
+      "import { knownBroken } from './helpers';\nknownBroken('via a helper', () => {});\n",
+    'helpers.ts': "import { it } from 'vitest';\nexport const knownBroken = it.fails;\n",
+  },
+  'an annotation two relative hops away, behind a re-export': {
+    'x.test.ts':
+      "import { knownBroken } from './helpers';\nknownBroken('via a re-export', () => {});\n",
+    'helpers.ts': "export { knownBroken } from './deep/broken';\n",
+    'deep/broken.ts': "import { it } from 'vitest';\nexport const knownBroken = it.fails;\n",
+  },
+  'a helper that wraps the options-object spelling': {
+    'x.test.ts': "import { brokenTest } from './helpers';\nbrokenTest('wrapped', () => {});\n",
+    'helpers.ts':
+      "import { it } from 'vitest';\nexport const brokenTest = (name, fn) => it(name, { fails: true }, fn);\n",
+  },
+};
+
+/**
+ * Shapes that merely *mention* failing and must stay clean.
+ *
+ * A witness that fires on prose is a witness somebody turns off. The line
+ * matcher failed this too — `it('rejects it.fails …')` was a violation to it —
+ * which is the same bug as the misses, seen from the other side.
+ */
+const NOT_ANNOTATIONS = {
+  'prose about the rule in a comment': {
+    'x.test.ts':
+      "// never write it.fails('x') here\n/* nor { fails: true } */\nimport { it } from 'vitest';\nit('real', () => {});\n",
+  },
+  'the words inside a string literal, which is a test name and not a call': {
+    'x.test.ts':
+      "import { it } from 'vitest';\nit('rejects it.fails as coverage', () => {});\nit('fails closed when the file is missing', () => {});\n",
+  },
+  'a domain object that happens to have a `fails` property': {
+    'x.test.ts':
+      "import { it } from 'vitest';\nimport { validate } from './domain';\nit('counts', () => { expect(validate().fails).toBe(0); });\n",
+    'domain.ts': 'export const validate = () => ({ fails: 0 });\n',
+  },
+  'an explicit `fails: false`, which is the opposite of an annotation': {
+    'x.test.ts': "import { it } from 'vitest';\nit('normal', { fails: false }, () => {});\n",
+  },
+};
+
 const CASES = [
   {
     name: 'a clean vitest run passes',
@@ -414,45 +523,31 @@ const CASES = [
   },
 
   // ---- the second, reporter-independent witness for it.fails() ------------
-  {
-    name: 'an it.fails() in the source that the reporter is not counting',
-    run: () => {
-      const source = "import { it } from 'vitest';\nit.fails('knowingly broken', () => {});\n";
-      const findings = scanForExpectedFailures(['packages/core/test/a.test.ts'], () => source);
-      return checkExpectedFailureWitness(findings, 0);
-    },
-    expect: /expected-failure annotation/i,
-  },
+  //
+  // Every EVADED_FORMS / HELPER_FORMS / NOT_ANNOTATIONS fixture below is
+  // expanded into a case by `main()`. They were all run against round 3's line
+  // matcher first. Written out as real test files and executed under Vitest, it
+  // missed five of seven working evasions — the computed access, the optional
+  // chain, the chain broken over two lines, the destructuring, and the helper
+  // module — every one of which ran with the suite exiting 0. It also fired on
+  // `it('rejects it.fails …')`, prose inside a string literal, which is the same
+  // defect pointing the other way. That is what "parse rather than line-match"
+  // bought, and these fixtures are what stops it being re-bought.
   {
     name: 'the source witness and the reporter disagreeing about the same run',
-    run: () => {
-      const findings = scanForExpectedFailures(['x.test.ts'], () => "it.fails('a', () => {});\n");
-      return checkExpectedFailureWitness(findings, 2);
-    },
+    run: () =>
+      checkExpectedFailureWitness(scanFixture({ 'x.test.ts': "it.fails('a', () => {});\n" }), 2),
     expect: /two independent witnesses disagree/i,
   },
   {
-    name: 'the options-object spelling of an expected failure',
-    run: () => {
-      const source = "it('sneaky', { fails: true }, () => {});\n";
-      return checkExpectedFailureWitness(
-        scanForExpectedFailures(['x.test.ts'], () => source),
-        0,
-      );
-    },
-    expect: /expected-failure annotation/i,
+    name: 'a scanner that has been pointed at nothing agrees with any report',
+    run: () => checkExpectedFailureWitness(scanFixture({}, []), 0),
+    expect: /read no files at all/i,
   },
   {
-    name: 'prose about it.fails() in a comment is not an instance of it',
-    run: () => {
-      const source =
-        "// never write it.fails('x') here\n/* nor { fails: true } */\nit('real', () => {});\n";
-      return checkExpectedFailureWitness(
-        scanForExpectedFailures(['x.test.ts'], () => source),
-        0,
-      );
-    },
-    expect: 'clean',
+    name: 'a test file the parser cannot read is a blind spot, not an empty file',
+    run: () => checkExpectedFailureWitness(scanFixture({ 'x.test.ts': 'it.fails(((((\n' }), 0),
+    expect: /could not be parsed/i,
   },
 
   // ---- floors ratchet up --------------------------------------------------
@@ -589,9 +684,36 @@ const CASES = [
   },
 ];
 
+/** The fixture tables, expanded into ordinary cases. */
+function scannerCases() {
+  const cases = [];
+  for (const [name, source] of Object.entries(EVADED_FORMS)) {
+    cases.push({
+      name: `an expected failure spelled as: ${name}`,
+      run: () => checkExpectedFailureWitness(scanFixture({ 'x.test.ts': source }), 0),
+      expect: /expected-failure annotation/i,
+    });
+  }
+  for (const [name, files] of Object.entries(HELPER_FORMS)) {
+    cases.push({
+      name: `an expected failure hidden as: ${name}`,
+      run: () => checkExpectedFailureWitness(scanFixture(files), 0),
+      expect: /expected-failure annotation/i,
+    });
+  }
+  for (const [name, files] of Object.entries(NOT_ANNOTATIONS)) {
+    cases.push({
+      name: `not an expected failure: ${name}`,
+      run: () => checkExpectedFailureWitness(scanFixture(files), 0),
+      expect: 'clean',
+    });
+  }
+  return cases;
+}
+
 function main() {
   const failures = [];
-  for (const { name, run, expect } of CASES) {
+  for (const { name, run, expect } of [...CASES, ...scannerCases()]) {
     let problems;
     try {
       problems = run();
@@ -617,8 +739,9 @@ function main() {
     for (const failure of failures) console.error(`::error::Gate self-test: ${failure}`);
     return 1;
   }
+  const scanner = scannerCases().length;
   console.info(
-    `Gate self-test passed: ${CASES.length} cases, every fail-open shape rejected and every clean report accepted.`,
+    `Gate self-test passed: ${CASES.length + scanner} cases, every fail-open shape rejected and every clean report accepted — including ${Object.keys(EVADED_FORMS).length + Object.keys(HELPER_FORMS).length} spellings of \`it.fails\` the source scanner must see and ${Object.keys(NOT_ANNOTATIONS).length} lookalikes it must not.`,
   );
   return 0;
 }

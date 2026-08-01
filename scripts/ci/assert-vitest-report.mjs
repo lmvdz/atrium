@@ -29,7 +29,11 @@
 import { readFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import { fail, readFreshReport } from './report-file.mjs';
-import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
+import {
+  checkExpectedFailureWitness,
+  collectTestFiles,
+  scanForExpectedFailures,
+} from './scan-expected-failures.mjs';
 
 const STOCK = process.env.VITEST_REPORT ?? 'vitest-report.json';
 const DETAILED = process.env.VITEST_CI_REPORT ?? 'vitest-ci-report.json';
@@ -206,19 +210,19 @@ function main() {
   const stock = readFreshReport(STOCK, runStart, 'the test runner');
   const detailed = readFreshReport(DETAILED, runStart, 'the test runner');
   const problems = [...stock.problems, ...detailed.problems];
+  let scan;
 
   if (stock.json && detailed.json) {
     problems.push(...checkVitestReports(stock.json, detailed.json, manifest));
 
-    // The second, reporter-independent witness for `it.fails()`: read the test
-    // files this run actually executed and count the annotations ourselves.
+    // The second, reporter-independent witness for `it.fails()`. It starts from
+    // every test file on disk rather than from the modules the reporter chose to
+    // name — a witness whose field of view is set by the thing it is checking is
+    // not independent of it — and follows relative imports so a helper carrying
+    // the annotation is read even though no report will ever mention it.
     const modules = (detailed.json.modules ?? []).map((module) => module.moduleId);
-    problems.push(
-      ...checkExpectedFailureWitness(
-        scanForExpectedFailures(modules),
-        detailed.json.totals?.expectedFailure ?? 0,
-      ),
-    );
+    scan = scanForExpectedFailures([...new Set([...collectTestFiles(), ...modules])]);
+    problems.push(...checkExpectedFailureWitness(scan, detailed.json.totals?.expectedFailure ?? 0));
   }
   if (problems.length > 0) return fail(problems, LABEL);
 
@@ -226,7 +230,7 @@ function main() {
     .map(([name, counts]) => `${name} ${counts.tests}`)
     .join(', ');
   console.info(
-    `${LABEL} passed: ${stock.json.numPassedTests}/${stock.json.numTotalTests} tests across ${stock.json.numTotalTestSuites} suites (${perProject}); 0 skipped, 0 todo, 0 expected failures, and both reports agree test for test.`,
+    `${LABEL} passed: ${stock.json.numPassedTests}/${stock.json.numTotalTests} tests across ${stock.json.numTotalTestSuites} suites (${perProject}); 0 skipped, 0 todo, and both reports agree test for test. Expected failures: 0 by the reporter and 0 by an independent parse of ${scan.scanned.length} source file(s).`,
   );
   return 0;
 }
