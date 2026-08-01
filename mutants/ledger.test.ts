@@ -44,6 +44,10 @@ interface Mutant {
   apply?: string;
   restoreFrom?: string[];
   restorePrelude?: string[];
+  /** Which migration a `sql` mutant's restore statements come from. */
+  restoreMigration?: string;
+  /** `tests` (default), `build`, or `load` — which mechanism must refuse it. */
+  caughtBy?: 'tests' | 'build' | 'load';
   catches?: string[];
 }
 
@@ -51,18 +55,31 @@ const ledger = JSON.parse(readFileSync(join(HERE, 'mutants.json'), 'utf8')) as {
   mutants: Mutant[];
 };
 
-const MIGRATION = join(ROOT, 'packages/db/drizzle/0004_trusted_actor_and_append_boundary.sql');
-const migrationStatements = readFileSync(MIGRATION, 'utf8')
-  .split('--> statement-breakpoint')
-  .map((statement) => statement.trim())
-  .filter((statement) => statement.length > 0)
-  .map((statement) =>
-    statement
-      .split('\n')
-      .filter((line) => !line.trimStart().startsWith('--'))
-      .join('\n')
-      .trim(),
-  );
+const MIGRATIONS = join(ROOT, 'packages/db/drizzle');
+/**
+ * The migration a `sql` mutant restores from when it does not name one.
+ *
+ * Named per mutant rather than assumed, because 0004 and 0005 both define
+ * `atrium_append_core_event` and both carry a `REVOKE EXECUTE ON FUNCTION` for
+ * it. A bare marker matches in both, and restoring from the older one would
+ * quietly re-deploy the eight-argument function this round replaced — a restore
+ * that "succeeds" and leaves the database describing the previous round.
+ */
+const DEFAULT_RESTORE_MIGRATION = '0005_receipt_snapshot_and_canonical_subset.sql';
+
+function statementsOf(file: string): string[] {
+  return readFileSync(join(MIGRATIONS, file), 'utf8')
+    .split('--> statement-breakpoint')
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0)
+    .map((statement) =>
+      statement
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('--'))
+        .join('\n')
+        .trim(),
+    );
+}
 
 /** Every test title in the repo, from `it('…')` and `test('…')`. */
 function everyTestTitle(): Set<string> {
@@ -92,7 +109,7 @@ describe('the mutant ledger still describes this code', () => {
     // A ledger that emptied itself would pass every assertion below. Catches:
     // deleting entries, and the more likely accident of a `--suite` filter
     // getting committed into the file.
-    expect(ledger.mutants.length).toBeGreaterThanOrEqual(20);
+    expect(ledger.mutants.length).toBeGreaterThanOrEqual(30);
     expect(ledger.mutants.some((m) => m.suite === 'unit')).toBe(true);
     expect(ledger.mutants.some((m) => m.suite === 'integration')).toBe(true);
   });
@@ -131,9 +148,11 @@ describe('the mutant ledger still describes this code', () => {
       // marker that matches nothing would leave the database mutated for every
       // subsequent test in the run — and one that matches two would re-deploy an
       // ambiguous pair. Either way the *next* mutant's result is meaningless.
+      const file = mutant.restoreMigration ?? DEFAULT_RESTORE_MIGRATION;
+      const statements = statementsOf(file);
       for (const marker of mutant.restoreFrom ?? []) {
-        const matched = migrationStatements.filter((statement) => statement.startsWith(marker));
-        expect({ marker, matched: matched.length }).toEqual({ marker, matched: 1 });
+        const matched = statements.filter((statement) => statement.startsWith(marker));
+        expect({ marker, file, matched: matched.length }).toEqual({ marker, file, matched: 1 });
       }
     },
   );
@@ -151,11 +170,26 @@ describe('the mutant ledger still describes this code', () => {
     expect(missing).toEqual([]);
   });
 
-  it('claims at least one test for every mutant', () => {
+  it('claims at least one test for every mutant the tests are meant to catch', () => {
     // Without this, an entry with an empty `catches` is scored on "did anything
     // fail" — which is the weakest possible claim and exactly the one the
     // `catches` mechanism exists to replace.
-    const unclaimed = ledger.mutants.filter((m) => (m.catches ?? []).length === 0).map((m) => m.id);
+    //
+    // A mutant whose pin is the compiler or the module loader declares that
+    // instead, and the runner holds it to the declaration: one caught by `tsc`
+    // while claiming a test is an `error`, because the test it named went
+    // unmeasured and a tick for an unmeasured rule is the vacuity this whole
+    // ledger exists to rule out.
+    const unclaimed = ledger.mutants
+      .filter((m) => (m.caughtBy ?? 'tests') === 'tests')
+      .filter((m) => (m.catches ?? []).length === 0)
+      .map((m) => m.id);
     expect(unclaimed).toEqual([]);
+
+    const overclaimed = ledger.mutants
+      .filter((m) => (m.caughtBy ?? 'tests') !== 'tests')
+      .filter((m) => (m.catches ?? []).length > 0)
+      .map((m) => m.id);
+    expect(overclaimed).toEqual([]);
   });
 });

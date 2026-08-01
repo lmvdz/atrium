@@ -29,26 +29,41 @@
  * `finally`. Exactly the core runner's shape.
  *
  * **`sql`** — a statement executed against the live database, reverting a
- * deployed object to its round-2 behaviour. Migrations are journalled, so
- * editing `0004_…sql` after it has been applied changes nothing; the honest way
- * to demonstrate that the boundary is load-bearing is to *remove it from the
- * database that the tests are actually talking to*, and then put it back.
+ * deployed object to an earlier round's behaviour. Migrations are journalled, so
+ * editing an applied one changes nothing; the honest way to demonstrate that the
+ * boundary is load-bearing is to *remove it from the database that the tests are
+ * actually talking to*, and then put it back.
  *
  * Restoring is the part that could lie, so it does not use a copy: the restore
- * statements are extracted from `packages/db/drizzle/0004_…sql` at run time by
- * their leading marker, and re-executed. If the migration and the restore ever
- * disagreed, the restore would be re-deploying something this repo does not
- * ship — so it re-deploys exactly what the repo ships, or the run fails.
+ * statements are extracted from the migration files at run time by their leading
+ * marker, and re-executed. If the migration and the restore ever disagreed, the
+ * restore would be re-deploying something this repo does not ship — so it
+ * re-deploys exactly what the repo ships, or the run fails.
  *
- * ## The two ways a ledger like this lies, both closed
+ * A mutant names the migration it restores from (`restoreMigration`), because
+ * more than one migration now defines `atrium_append_core_event` and a bare
+ * marker would match both. Restoring the append function from 0004 would
+ * re-deploy the eight-argument version this branch replaced — a restore that
+ * "worked" and left the database describing the previous round.
+ *
+ * ## The three ways a ledger like this lies, all closed
  *
  *  1. **A mutant that no longer applies.** A `file` mutant's `find` must occur
  *     exactly once; a `sql` mutant's restore markers must each match exactly one
- *     statement. Anything else is reported as `error` and fails `--check`.
+ *     statement in the migration it names. Anything else is reported as `error`
+ *     and fails `--check`.
  *  2. **A mutant caught by the wrong test.** `catches` names the tests that must
  *     go red, and every one of them must actually have. A mutant that only trips
  *     something unrelated is recorded as an escape, because the claim is "this
  *     test pins this rule", not "something, somewhere, noticed".
+ *  3. **A mutant measured against a stale build.** #26 r6's lesson, applied
+ *     here: `packages/*` are consumed by their *built* `dist` in some suites
+ *     (`packages/ingest` and `apps/server` both resolve `@atrium/core` and
+ *     `@atrium/db` that way), so mutating a file under `packages/` without
+ *     rebuilding measures whatever was on disk. Every mutation of a file under
+ *     `packages/` triggers `pnpm --filter "./packages/*" build`, before the
+ *     suite and again after the restore. It costs a few seconds per mutant and
+ *     it is the difference between a receipt and a claim.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -62,7 +77,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 const LEDGER = join(HERE, 'mutants.json');
 const RESULTS = join(HERE, 'RESULTS.md');
-const MIGRATION = join(ROOT, 'packages/db/drizzle/0004_trusted_actor_and_append_boundary.sql');
+const MIGRATIONS = join(ROOT, 'packages/db/drizzle');
+/** The migration a `sql` mutant restores from when it does not name one. */
+const DEFAULT_RESTORE_MIGRATION = '0005_receipt_snapshot_and_canonical_subset.sql';
 
 const args = process.argv.slice(2);
 const check = args.includes('--check');
@@ -93,14 +110,24 @@ if (needsDatabase && !databaseUrl) {
 
 /* ── restoring SQL from the migration, never from a copy ───────────────────── */
 
-const migrationStatements = readFileSync(MIGRATION, 'utf8')
-  .split('--> statement-breakpoint')
-  .map((statement) => statement.trim())
-  .filter((statement) => statement.length > 0);
+const migrationCache = new Map();
 
-/** Every statement whose first non-comment line starts with `marker`. */
-function statementsFor(marker) {
-  return migrationStatements.filter((statement) => {
+function statementsOf(file) {
+  if (!migrationCache.has(file)) {
+    migrationCache.set(
+      file,
+      readFileSync(join(MIGRATIONS, file), 'utf8')
+        .split('--> statement-breakpoint')
+        .map((statement) => statement.trim())
+        .filter((statement) => statement.length > 0),
+    );
+  }
+  return migrationCache.get(file);
+}
+
+/** Every statement in `file` whose first non-comment line starts with `marker`. */
+function statementsFor(marker, file) {
+  return statementsOf(file).filter((statement) => {
     const body = statement
       .split('\n')
       .filter((line) => !line.trimStart().startsWith('--'))
@@ -109,6 +136,27 @@ function statementsFor(marker) {
     return body.startsWith(marker);
   });
 }
+
+/**
+ * Rebuild the workspace packages.
+ *
+ * Not optional bookkeeping — see note 3 in the header. A mutation under
+ * `packages/` that is not rebuilt is measured against the previous artifact,
+ * which is how #26 r6's ledger reported seven passing suites for a mutation the
+ * suites never saw.
+ */
+function rebuildPackages() {
+  const run = spawnSync('pnpm', ['--filter', './packages/*', 'build'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: process.env,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return run.status === 0;
+}
+
+const needsRebuild = (mutant) => mutant.kind === 'file' && mutant.file.startsWith('packages/');
 
 /* ── the test suites ───────────────────────────────────────────────────────── */
 
@@ -166,11 +214,12 @@ function readOnce(file) {
 }
 
 async function restoreSql(mutant) {
+  const file = mutant.restoreMigration ?? DEFAULT_RESTORE_MIGRATION;
   const statements = (mutant.restoreFrom ?? []).flatMap((marker) => {
-    const found = statementsFor(marker);
+    const found = statementsFor(marker, file);
     if (found.length !== 1) {
       throw new Error(
-        `restore marker "${marker}" matched ${found.length} statements in the migration, expected 1`,
+        `restore marker "${marker}" matched ${found.length} statements in ${file}, expected 1`,
       );
     }
     return found;
@@ -199,6 +248,16 @@ let exitCode = 0;
 
 async function main() {
   if (needsDatabase) sql = postgres(databaseUrl, { max: 2, onnotice: () => {} });
+
+  // The baseline is measured against a freshly built workspace for the same
+  // reason each mutant is: a green baseline over a stale `dist` is a green
+  // baseline for a tree that is not this one.
+  process.stdout.write('building packages… ');
+  if (!rebuildPackages()) {
+    console.error('\nthe workspace does not build; mutant results against it mean nothing.');
+    process.exit(1);
+  }
+  console.log('ok');
 
   const suites = [...new Set(mutants.map((m) => m.suite))];
   for (const suite of suites) {
@@ -253,21 +312,59 @@ async function main() {
         continue;
       }
       writeFileSync(path, source.replace(mutant.find, mutant.replace));
+      let restoredCleanly = true;
       try {
+        if (needsRebuild(mutant) && !rebuildPackages()) {
+          // A mutation that will not compile is refused before any test runs —
+          // real evidence, and evidence of a different kind, so the mutant has to
+          // have claimed it. A mutant that names a test and is instead caught by
+          // `tsc` is an `error`: the test it claims went unmeasured, and the
+          // ledger would otherwise print a tick for a rule nothing ran.
+          const claimed = mutant.caughtBy === 'build';
+          rows.push({
+            ...mutant,
+            verdict: claimed ? 'caught' : 'error',
+            detail: claimed
+              ? 'the workspace build refuses it — a compile-time parity assert, not a test'
+              : `the workspace build fails, but this mutant claims tests (${(mutant.catches ?? []).map((n) => `"${n}"`).join(', ')}) — set "caughtBy": "build" if the compiler is the pin, or make the mutation compile so the claim is measured`,
+            failures: [],
+          });
+          console.log(claimed ? 'caught (build refuses it)' : 'ERROR (build fails, tests claimed)');
+          if (!claimed) exitCode = 1;
+          continue;
+        }
         result = runSuite(mutant.suite);
       } finally {
         writeFileSync(path, source);
+        // Restored *and* rebuilt, or every mutant after this one is measured
+        // against this one's artifact. Recorded rather than thrown: a throw from
+        // a `finally` would swallow whatever the `try` was doing, including the
+        // interrupt handler's own unwinding.
+        if (needsRebuild(mutant) && !rebuildPackages()) restoredCleanly = false;
+      }
+      if (!restoredCleanly) {
+        console.error(
+          `\ncould not rebuild the workspace after restoring "${mutant.id}" — every later ` +
+            'result would be measured against a mutated artifact. Stopping.',
+        );
+        process.exit(1);
       }
     }
 
     if (result.loadError) {
+      // Same rule as the build failure above: a mutant caught by the loader
+      // rather than by the test it names has not measured that test.
+      const claimed = mutant.caughtBy === 'load';
       rows.push({
         ...mutant,
-        verdict: 'caught',
-        detail: 'the suite fails to load — the mutation is refused before any test runs',
+        verdict: claimed ? 'caught' : 'error',
+        detail: claimed
+          ? 'the suite fails to load — the mutation is refused before any test runs'
+          : `the suite fails to load, but this mutant claims tests (${(mutant.catches ?? []).map((n) => `"${n}"`).join(', ')}) — set "caughtBy": "load" if that is the pin`,
         failures: [],
       });
-      console.log('caught (suite fails to load)');
+      console.log(claimed ? 'caught (suite fails to load)' : 'ERROR (load fails, tests claimed)');
+      if (!claimed) exitCode = 1;
       continue;
     }
 
@@ -315,10 +412,16 @@ if (!only && !suiteFilter) {
     '',
     `**${rows.length} run, ${caught} caught.**`,
     '',
-    'Each row restores one round-2 behaviour and reports which tests went red.',
+    'Each row restores one earlier round‘s behaviour and reports which tests went red.',
     'A `sql` mutant is applied to the live database and undone from the migration',
-    'file itself, because migrations are journalled and editing an applied one',
+    'file it names, because migrations are journalled and editing an applied one',
     'changes nothing.',
+    '',
+    '**Every artifact the suites consume is rebuilt** — `pnpm --filter "./packages/*"',
+    'build` runs before the baseline, and again around any mutation of a file under',
+    '`packages/`, because `packages/ingest` and `apps/server` resolve `@atrium/core`',
+    'and `@atrium/db` through their built `dist`. A ledger that skips this measures',
+    'whatever was on disk (#26 r6).',
     '',
     '| mutant | suite | verdict | detail |',
     '| --- | --- | --- | --- |',
