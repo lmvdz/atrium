@@ -36,7 +36,9 @@ function ports(overrides: Partial<OrganizationPorts> = {}): OrganizationPorts {
 
 function options(
   overrides: Partial<OrganizationPorts> = {},
-  rest: Partial<Pick<OrganizationOptionsInput, 'logger' | 'onCleanupFailure'>> = {},
+  rest: Partial<
+    Pick<OrganizationOptionsInput, 'logger' | 'onCleanupFailure' | 'cleanupReportTimeoutMs'>
+  > = {},
 ) {
   return atriumOrganizationOptions({
     ports: ports(overrides),
@@ -457,6 +459,222 @@ describe('revocation hooks', () => {
       expect(logger.error.mock.calls[1]?.[1]).toMatchObject({
         event: 'room_cleanup_reporter_failed',
         error: 'pager webhook timed out',
+      });
+    });
+
+    /**
+     * The hole round 7 left one line upstream of its own guard.
+     *
+     * Round 7 normalized the port's rejection at the *call site*:
+     * `new Error(String(error))`, outside `reportCleanupFailure` and therefore
+     * outside everything that catches. `String()` is not a total function — it
+     * calls `toString`/`Symbol.toPrimitive` on the value — so a port that
+     * rejected with one of the two shapes below threw *there*, after the removal
+     * had already committed, and `afterRemoveMember` rejected. That is exactly
+     * the failure mode round 7 existed to close, reached through the code that
+     * formats the error rather than the code that reports it.
+     *
+     * Both shapes are real. `Object.create(null)` is what you get from a
+     * prototype-less parse of a JSON error body; a throwing `Symbol.toPrimitive`
+     * is what a hostile or merely clever wrapper object does.
+     */
+    describe('normalizing the rejection cannot itself become the failure', () => {
+      /** A port that rejects with something that is not an `Error`. */
+      function sweepRejectingWith(value: unknown) {
+        return {
+          revokeWorkspaceRooms: async () => {
+            throw value;
+          },
+        };
+      }
+
+      /** No `toString`, no `Symbol.toPrimitive`, no prototype at all. */
+      function nullPrototypeRejection(): object {
+        return Object.create(null) as object;
+      }
+
+      /** Converting it to a primitive is the thing that throws. */
+      function hostilePrimitiveRejection(): object {
+        return {
+          [Symbol.toPrimitive]() {
+            throw new Error('conversion refused');
+          },
+        };
+      }
+
+      for (const [shape, make] of [
+        ['a prototype-less object', nullPrototypeRejection],
+        ['an object whose Symbol.toPrimitive throws', hostilePrimitiveRejection],
+      ] as const) {
+        it(`survives a port rejecting with ${shape}`, async () => {
+          /**
+           * Catches: normalizing outside the guard — round 7's
+           * `error: error instanceof Error ? error : new Error(String(error))`
+           * at the `reportCleanupFailure` call site. Under that shape this test
+           * fails on the very first assertion, because the hook rejects.
+           *
+           * The assertions, in the order they matter: the removal is not turned
+           * into an error (the hook resolves), the process is not taken down (no
+           * unhandled rejection), and the operator still learns about it — a
+           * guard that swallowed the whole report would pass the first two.
+           */
+          const logger = { warn: vi.fn(), error: vi.fn() };
+          const seen: RoomCleanupFailure[] = [];
+          const hooks = options(sweepRejectingWith(make()), {
+            logger,
+            onCleanupFailure: (failure) => {
+              seen.push(failure);
+            },
+          }).organizationHooks;
+
+          const unhandled = await withUnhandledRejectionWatch(async () => {
+            await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
+          });
+
+          expect(unhandled).toEqual([]);
+          // The seam still fires, and it is handed a real `Error` rather than
+          // the raw value — `RoomCleanupFailure.error` is typed `Error`, and a
+          // reporter that reads `.message` off it must not be the next thing to
+          // throw on this path.
+          expect(seen).toHaveLength(1);
+          expect(seen[0]?.error).toBeInstanceOf(Error);
+          expect(typeof seen[0]?.error.message).toBe('string');
+          expect(logger.error).toHaveBeenCalledTimes(1);
+          expect(logger.error.mock.calls[0]?.[1]).toMatchObject({
+            event: 'room_cleanup_failed',
+          });
+        });
+      }
+
+      it('survives a reporter that rejects with a prototype-less object too', async () => {
+        /**
+         * The same hole, in the other formatter. Round 7's reporter catch read
+         * `reporterError instanceof Error ? … : String(reporterError)`, which is
+         * inside `logSafely`'s thunk and therefore guarded — so this passes
+         * against r7 and is here as the control that says so. What it protects
+         * is the guard *staying* total if anyone lifts that expression out of
+         * the thunk, which is precisely the move round 7 made one level up.
+         */
+        const logger = { warn: vi.fn(), error: vi.fn() };
+        const hooks = options(failingSweep(), {
+          logger,
+          onCleanupFailure: () => Promise.reject(nullPrototypeRejection()),
+        }).organizationHooks;
+
+        const unhandled = await withUnhandledRejectionWatch(async () => {
+          await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
+        });
+
+        expect(unhandled).toEqual([]);
+        expect(logger.error.mock.calls[1]?.[1]).toMatchObject({
+          event: 'room_cleanup_reporter_failed',
+        });
+      });
+    });
+
+    /**
+     * The availability half: a reporter that never answers.
+     *
+     * Round 7 fixed the crash by awaiting the reporter, and the await had no
+     * deadline — so the same seam that could once exit the process could now
+     * hang a removal that had already committed, and the request behind it, for
+     * as long as a pager or a queue chose not to answer. `org.ts:316`, per the
+     * round-7 delta.
+     */
+    describe('an unbounded reporter cannot hang a completed removal', () => {
+      it('gives up on a reporter that never settles, and says so', async () => {
+        /**
+         * Catches: removing the deadline from the `await` on
+         * `input.onCleanupFailure`. Under that mutation this test does not fail
+         * with a wrong value — it never finishes, which vitest reports as a
+         * timeout. The elapsed-time assertion is what makes the bound a
+         * measurement rather than a claim: it fails if the hook waited longer
+         * than the deadline it was given.
+         */
+        const logger = { warn: vi.fn(), error: vi.fn() };
+        const hooks = options(failingSweep(), {
+          logger,
+          cleanupReportTimeoutMs: 40,
+          // Never. Not slow — never.
+          onCleanupFailure: () => new Promise<void>(() => {}),
+        }).organizationHooks;
+
+        const started = Date.now();
+        await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
+        const elapsed = Date.now() - started;
+
+        // Generous upper bound, because a loaded CI box schedules timers late.
+        // It still fails by orders of magnitude against an undeadlined await,
+        // which never resolves at all.
+        expect(elapsed).toBeLessThan(2_000);
+        expect(logger.error).toHaveBeenCalledTimes(2);
+        expect(logger.error.mock.calls[1]?.[1]).toMatchObject({
+          event: 'room_cleanup_reporter_timed_out',
+          timeoutMs: 40,
+        });
+      });
+
+      it('still catches a rejection that arrives after the deadline', async () => {
+        /**
+         * The half a deadline is easiest to get wrong: stopping waiting is not
+         * the same as stopping listening. A reporter that rejects *after* losing
+         * the race is still a rejected promise, and an unhandled rejection is a
+         * process exit in `apps/server` — so trading the hang for a crash would
+         * be no trade at all.
+         *
+         * Catches: implementing the deadline as a bare `Promise.race` whose
+         * losing arm is left unhandled, or as an `AbortController` that drops
+         * the original promise. Both pass the test above and fail this one.
+         */
+        const logger = { warn: vi.fn(), error: vi.fn() };
+        const hooks = options(failingSweep(), {
+          logger,
+          cleanupReportTimeoutMs: 20,
+          onCleanupFailure: () =>
+            new Promise<void>((_, reject) => {
+              setTimeout(() => reject(new Error('pagerduty answered 504, eventually')), 60);
+            }),
+        }).organizationHooks;
+
+        const unhandled = await withUnhandledRejectionWatch(async () => {
+          await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
+          // Past the reporter's own 60ms, so the late rejection has happened
+          // inside the watch rather than after it.
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        });
+
+        expect(unhandled).toEqual([]);
+        expect(
+          logger.error.mock.calls.map((call) => (call[1] as { event?: string })?.event),
+        ).toContain('room_cleanup_reporter_failed_late');
+      });
+
+      it('does not deadline a reporter that answers in time', async () => {
+        /**
+         * The control. A deadline implemented as "resolve immediately and log a
+         * timeout" would satisfy both tests above and silently stop waiting for
+         * every reporter — so this asserts the normal path is untouched: the
+         * reporter finishes, the hook waited for it, and nothing is logged as a
+         * timeout.
+         */
+        const logger = { warn: vi.fn(), error: vi.fn() };
+        let finished = false;
+        const hooks = options(failingSweep(), {
+          logger,
+          cleanupReportTimeoutMs: 2_000,
+          onCleanupFailure: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            finished = true;
+          },
+        }).organizationHooks;
+
+        await hooks.afterRemoveMember(removal);
+
+        expect(finished).toBe(true);
+        expect(logger.error).toHaveBeenCalledTimes(1);
+        expect(
+          logger.error.mock.calls.map((call) => (call[1] as { event?: string })?.event),
+        ).not.toContain('room_cleanup_reporter_timed_out');
       });
     });
   });

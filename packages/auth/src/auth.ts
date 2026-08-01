@@ -81,9 +81,16 @@ export interface AtriumAuthOptions {
    *
    * May be `async`. Whatever it returns is awaited inside a catch-all, so a
    * reporter that rejects is reported and dropped rather than becoming an
-   * unhandled rejection in a process that exits on those.
+   * unhandled rejection in a process that exits on those — and awaited with a
+   * deadline, so one that never settles cannot hold a committed removal open.
    */
   onCleanupFailure?: (failure: RoomCleanupFailure) => void | Promise<void>;
+  /**
+   * How long `onCleanupFailure` gets. Defaults to five seconds; see
+   * {@link OrganizationOptionsInput.cleanupReportTimeoutMs} for why it has one
+   * at all.
+   */
+  cleanupReportTimeoutMs?: number;
 }
 
 export type AtriumAuth = ReturnType<typeof createAtriumAuth>;
@@ -373,6 +380,7 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
           schema: organizationSchemaOptions,
           logger,
           onCleanupFailure: options.onCleanupFailure,
+          cleanupReportTimeoutMs: options.cleanupReportTimeoutMs,
         }),
       ),
       ...(options.plugins ?? []),

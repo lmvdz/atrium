@@ -175,11 +175,132 @@ export interface OrganizationOptionsInput {
    * floor. `apps/server` exits on `unhandledRejection`, so that combination let
    * a completed removal crash the server; the call is now awaited inside a
    * catch-all.
+   *
+   * **Awaited with a deadline.** Awaiting it without one traded a crash for a
+   * hang: the realistic reporter is a POST to a pager or an enqueue onto a
+   * queue, and a promise that never settles would hold a *completed* removal —
+   * and the request behind it — open forever. See
+   * {@link OrganizationOptionsInput.cleanupReportTimeoutMs}.
    */
   onCleanupFailure?: (failure: RoomCleanupFailure) => void | Promise<void>;
+  /**
+   * How long `onCleanupFailure` gets before the hook stops waiting for it.
+   *
+   * Round 7 awaited the reporter with no deadline, which is the availability
+   * half of the same mistake round 6 made about the crash half: a seam whose
+   * entire job is to be wired to something remote and flaky was given unbounded
+   * authority over a post-commit path. A pager that never answers now costs this
+   * many milliseconds and is then logged and left behind.
+   *
+   * Leaving it behind is not the same as dropping it: the still-running promise
+   * keeps a rejection handler, so a reporter that rejects *after* the deadline
+   * is logged rather than becoming the unhandled rejection `apps/server` exits
+   * on. The deadline moves who waits, not who catches.
+   *
+   * Five seconds by default — long enough for a real HTTP round trip to a pager,
+   * short enough that nobody is watching a spinner because of it.
+   */
+  cleanupReportTimeoutMs?: number;
 }
 
 const noopLogger: OrganizationLogger = { warn: () => {}, error: () => {} };
+
+/** The default deadline on {@link OrganizationOptionsInput.onCleanupFailure}. */
+export const DEFAULT_CLEANUP_REPORT_TIMEOUT_MS = 5_000;
+
+/**
+ * Describe an unknown value as a string, and never throw doing it.
+ *
+ * This exists because round 7's crash guard had a hole one line upstream of
+ * itself: `new Error(String(error))` ran at the *call site*, outside the guard,
+ * on a value the guard was there to defend against. `String(x)` is not total —
+ * `Object.create(null)` has no `toString`, a `Symbol.toPrimitive` can throw
+ * whatever it likes, and a `Proxy` can throw from any trap — so a port that
+ * rejected with one of those made `afterRemoveMember` reject *after the removal
+ * had committed*, which is the exact failure the guard existed to close.
+ *
+ * Every conversion below is therefore attempted rather than assumed, including
+ * the `instanceof` (a proxy with a hostile `getPrototypeOf` throws from that
+ * too) and the `.message` read (a getter, on some implementations).
+ */
+function describeUnknown(value: unknown): string {
+  try {
+    if (value instanceof Error) return value.message;
+  } catch {
+    // A hostile prototype chain or a throwing `message` getter. Fall through to
+    // the string conversion, which is guarded in its turn.
+  }
+  try {
+    return String(value);
+  } catch {
+    // `Object.create(null)`, a throwing `Symbol.toPrimitive`, a Proxy.
+  }
+  return '<a rejection value that cannot be converted to a string>';
+}
+
+/**
+ * Normalize anything a port rejected with into an `Error`, totally.
+ *
+ * Total is the whole requirement. The code that formats an error on a
+ * post-commit path is as much a part of that path as the code that reports it,
+ * and this one is called from inside the guard for that reason.
+ */
+export function toReportableError(value: unknown): Error {
+  try {
+    if (value instanceof Error) return value;
+  } catch {
+    // See `describeUnknown`.
+  }
+  return new Error(describeUnknown(value));
+}
+
+/**
+ * Await `work`, but not for longer than `timeoutMs`.
+ *
+ * Two properties, and the second is the one that is easy to lose:
+ *
+ *  1. the returned promise settles within the deadline, whatever `work` does;
+ *  2. **`work` keeps a rejection handler either way.** A promise that rejects
+ *     after losing the race is still a rejected promise, and an unhandled
+ *     rejection is a process exit in `apps/server`. Trading a hang for a crash
+ *     would be no trade at all, so the late settlement is delivered to
+ *     `onLateRejection` instead of to nobody.
+ */
+function withDeadline(
+  work: Promise<unknown>,
+  timeoutMs: number,
+  onLateRejection: (reason: unknown) => void,
+): Promise<'settled' | 'timed-out'> {
+  let timedOut = false;
+
+  // Attached first and unconditionally: *this* is the handler that stops a
+  // rejection arriving after the deadline from becoming an unhandled one. It is
+  // not the race's leftover — the race stops caring once it has settled.
+  work.catch((reason: unknown) => {
+    if (timedOut) onLateRejection(reason);
+  });
+
+  return new Promise<'settled' | 'timed-out'>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      resolve('timed-out');
+    }, timeoutMs);
+    // A pending deadline must not be the reason a process stays alive.
+    (timer as { unref?: () => void }).unref?.();
+    work.then(
+      () => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        resolve('settled');
+      },
+      (reason: unknown) => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        reject(reason);
+      },
+    );
+  });
+}
 
 /**
  * Refuse a role string that is not exactly one role we know.
@@ -245,9 +366,19 @@ function mayInvite(inviterRole: string | null, requestedRole: string): boolean {
  * inviter and asserts the escalation is refused, which is a test of the
  * authorization decision rather than of Better Auth's routing.
  */
+/**
+ * A cleanup failure before it has been normalized.
+ *
+ * The `error` is whatever the port rejected with — which is to say, anything at
+ * all. It becomes an `Error` inside `reportCleanupFailure`'s guard and not
+ * before; see the note there.
+ */
+type UnnormalizedCleanupFailure = Omit<RoomCleanupFailure, 'error'> & { error: unknown };
+
 export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
   const { ports, baseURL, mailer, schema } = input;
   const logger = input.logger ?? noopLogger;
+  const reportTimeoutMs = input.cleanupReportTimeoutMs ?? DEFAULT_CLEANUP_REPORT_TIMEOUT_MS;
 
   /**
    * Log, without letting the logging become the failure.
@@ -292,8 +423,35 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
    * The two halves are deliberately independent rather than nested: a logger
    * that blows up must not also cost the operator seam, which is the half a
    * deployment actually pages on.
+   *
+   * **And awaited with a deadline**, because round 7's unbounded await traded
+   * the crash for a hang: a pager promise that never settles held a committed
+   * removal open forever. Stopping waiting is not stopping listening — the
+   * still-running promise keeps a rejection handler, so a late rejection is
+   * logged rather than becoming the unhandled one the process exits on.
+   *
+   * Nothing in this function may throw, including the lines that merely
+   * *format* something: normalization happens inside, and every conversion it
+   * does is attempted rather than assumed.
    */
-  const reportCleanupFailure = async (failure: RoomCleanupFailure): Promise<void> => {
+  const reportCleanupFailure = async (raw: UnnormalizedCleanupFailure): Promise<void> => {
+    /**
+     * Normalization is *inside* the guard, and that is the round-7 hole.
+     *
+     * Round 7 built the `Error` at the call site — `new Error(String(error))` —
+     * one line upstream of everything below. `String()` is not total, so a port
+     * rejecting with `Object.create(null)` or with a throwing
+     * `Symbol.toPrimitive` threw *there*, after the removal had committed, and
+     * `afterRemoveMember` rejected. Nothing on a post-commit path may throw,
+     * including the code that formats the error.
+     */
+    const failure: RoomCleanupFailure = {
+      operation: raw.operation,
+      phase: raw.phase,
+      workspaceId: raw.workspaceId,
+      userId: raw.userId,
+      error: toReportableError(raw.error),
+    };
     logSafely('room revocation sweep failed after member removal', () => ({
       event: 'room_cleanup_failed',
       operation: failure.operation,
@@ -309,15 +467,36 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
         'orphaned `memberships` rows remain and should be swept',
     }));
     try {
-      // `await` on a possibly-undefined possibly-sync call: it turns a sync
-      // throw, a returned rejected promise and a hostile thenable into the same
-      // caught value, which is the point — the catch has to be total, not
+      // A possibly-undefined, possibly-synchronous call. `Promise.resolve` on
+      // whatever comes back turns a returned rejected promise and a hostile
+      // thenable into the same awaited value; a synchronous throw lands in the
+      // catch below. The catch has to be total, not
       // total-for-the-shapes-we-thought-of.
-      await input.onCleanupFailure?.(failure);
+      const returned = input.onCleanupFailure?.(failure);
+      const outcome = await withDeadline(
+        Promise.resolve(returned),
+        reportTimeoutMs,
+        (late: unknown) => {
+          // The still-running reporter rejected after we stopped waiting. It is
+          // logged rather than dropped, because the alternative is an unhandled
+          // rejection and `apps/server` exits the process on those.
+          logSafely('the cleanup-failure reporter rejected after its deadline', () => ({
+            event: 'room_cleanup_reporter_failed_late',
+            timeoutMs: reportTimeoutMs,
+            error: describeUnknown(late),
+          }));
+        },
+      );
+      if (outcome === 'timed-out') {
+        logSafely('the cleanup-failure reporter did not answer in time', () => ({
+          event: 'room_cleanup_reporter_timed_out',
+          timeoutMs: reportTimeoutMs,
+        }));
+      }
     } catch (reporterError) {
       logSafely('the cleanup-failure reporter itself threw', () => ({
         event: 'room_cleanup_reporter_failed',
-        error: reporterError instanceof Error ? reporterError.message : String(reporterError),
+        error: describeUnknown(reporterError),
       }));
     }
   };
@@ -611,12 +790,18 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
           // this cannot reject — but a fire-and-forget call here would put the
           // reporter's rejection outside this hook's lifetime, which is exactly
           // the shape that made a completed removal able to exit the process.
+          //
+          // `error` is handed over **raw**. Round 7 normalized it here, with
+          // `new Error(String(error))`, and `String()` throws for a rejection
+          // that is `Object.create(null)` or carries a hostile
+          // `Symbol.toPrimitive` — so the guard had a hole at the one statement
+          // that ran before it. Normalization is inside the guard now.
           await reportCleanupFailure({
             operation: 'revokeWorkspaceRooms',
             phase: 'afterRemoveMember',
             workspaceId,
             userId: data.member.userId,
-            error: error instanceof Error ? error : new Error(String(error)),
+            error,
           });
         }
       },

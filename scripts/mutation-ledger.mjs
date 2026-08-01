@@ -4,11 +4,15 @@
 // They must stay literal — turning one into a template string would make this
 // file edit something other than what ships.
 /**
- * The mutation ledger for #26, rounds 6 and 7, re-runnable.
+ * The mutation ledger for #26, rounds 6 to 8, re-runnable.
  *
  *   node scripts/mutation-ledger.mjs --list
  *   node scripts/mutation-ledger.mjs <name>      apply one mutation
  *   node scripts/mutation-ledger.mjs --restore   put every touched file back
+ *
+ * `--restore` restores from a snapshot this script takes, not from git — see
+ * {@link SNAPSHOT}. It is safe to run on a dirty tree, and one mutation must be
+ * restored before the next is applied.
  *
  * Every "this test catches X" claim in the round-6 and round-7 receipts was
  * produced by running one of these and then the suite named beside it, rather
@@ -44,8 +48,8 @@
  *    saying so is part of the discipline: "no rebuild needed" is a claim about
  *    how a suite loads its subject, and it was checked.
  */
-import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const TOUCHED = [
   'packages/auth/src/room-access.ts',
@@ -57,6 +61,53 @@ const TOUCHED = [
   'docker-compose.yml',
   'deploy/Caddyfile.dev',
 ];
+
+/**
+ * Where the pre-mutation copies live, and why `--restore` is no longer git.
+ *
+ * Round 7 recorded this as a known limit and left it: `--restore` was
+ * `git checkout -- <TOUCHED>`, which restores from the *index*, not from what
+ * the file looked like a moment ago. Run mid-round — which is the only time
+ * anyone runs it — it silently reverted uncommitted work on every file it could
+ * reach. It did exactly that again in round 8, to the fix this ledger existed to
+ * measure, so it is fixed rather than named a third time.
+ *
+ * Applying a mutation now copies each touched file here first, and `--restore`
+ * puts those copies back. Two consequences worth stating: it works on a dirty
+ * tree, which is the normal state while a round is in flight; and it refuses to
+ * apply a second mutation over a first, because the snapshot would then be of
+ * already-mutated files. `node_modules/.cache` is never tracked, so the copies
+ * cannot be committed by accident.
+ */
+const SNAPSHOT = 'node_modules/.cache/atrium-mutation-ledger';
+
+/** Copy every touched file that exists, so `--restore` has something honest. */
+function snapshot() {
+  if (existsSync(SNAPSHOT)) {
+    throw new Error(
+      `a mutation is already applied (${SNAPSHOT} exists).\n` +
+        'Run `node scripts/mutation-ledger.mjs --restore` before applying another —\n' +
+        'snapshotting mutated files would make --restore restore the mutation.',
+    );
+  }
+  mkdirSync(SNAPSHOT, { recursive: true });
+  for (const file of TOUCHED) {
+    if (!existsSync(file)) continue;
+    writeFileSync(join(SNAPSHOT, file.split('/').join('%')), readFileSync(file));
+  }
+}
+
+function restore() {
+  if (!existsSync(SNAPSHOT)) {
+    console.info('nothing to restore: no mutation is applied');
+    return;
+  }
+  for (const entry of readdirSync(SNAPSHOT)) {
+    writeFileSync(entry.split('%').join('/'), readFileSync(join(SNAPSHOT, entry)));
+  }
+  rmSync(SNAPSHOT, { recursive: true, force: true });
+  console.info('restored; rebuild with `pnpm --filter @atrium/auth build` before re-running e2e');
+}
 
 function edit(file, pairs) {
   let source = readFileSync(file, 'utf8');
@@ -104,7 +155,7 @@ const mutations = {
     () =>
       edit('packages/auth/src/org.ts', [
         [
-          "          reportCleanupFailure({\n            operation: 'revokeWorkspaceRooms',\n            phase: 'afterRemoveMember',\n            workspaceId,\n            userId: data.member.userId,\n            error: error instanceof Error ? error : new Error(String(error)),\n          });",
+          "          await reportCleanupFailure({\n            operation: 'revokeWorkspaceRooms',\n            phase: 'afterRemoveMember',\n            workspaceId,\n            userId: data.member.userId,\n            error,\n          });",
           "          logger.error('room revocation sweep failed after member removal', {\n            userId: data.member.userId,\n            error: (error as Error).message,\n          });",
         ],
       ]),
@@ -208,6 +259,36 @@ const mutations = {
     },
   ],
 
+  // ── round 8 ────────────────────────────────────────────────────────────────
+
+  'normalize-outside-guard': [
+    "round 7's hole one line upstream of its own guard: `String(error)` at the call site",
+    'packages/auth/test/org.test.ts — 2 of 51',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          '            userId: data.member.userId,\n            error,\n          });',
+          '            userId: data.member.userId,\n            error: error instanceof Error ? error : new Error(String(error)),\n          });',
+        ],
+      ]),
+  ],
+
+  'drop-report-deadline': [
+    "round 7's unbounded await on the reporter — a pager that never answers hangs a committed removal",
+    'packages/auth/test/org.test.ts — 2 of 51 (one of them by never finishing)',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          '      const outcome = await withDeadline(\n        Promise.resolve(returned),\n        reportTimeoutMs,',
+          '      const outcome = await withoutDeadline(\n        Promise.resolve(returned),\n        reportTimeoutMs,',
+        ],
+        [
+          'function withDeadline(\n  work: Promise<unknown>,',
+          "async function withoutDeadline(\n  work: Promise<unknown>,\n  _timeoutMs: number,\n  _onLateRejection: (reason: unknown) => void,\n): Promise<'settled' | 'timed-out'> {\n  await work;\n  return 'settled';\n}\n\nfunction withDeadline(\n  work: Promise<unknown>,",
+        ],
+      ]),
+  ],
+
   'unbind-infra': [
     "round 5's production infra binding: postgres and minio on 0.0.0.0",
     'packages/auth/test/deployment.test.ts — 1 of 5',
@@ -223,13 +304,13 @@ const mutations = {
 const [name] = process.argv.slice(2);
 
 if (name === '--restore') {
-  execFileSync('git', ['checkout', '--', ...TOUCHED], { stdio: 'inherit' });
-  console.info('restored; rebuild with `pnpm --filter @atrium/auth build` before re-running e2e');
+  restore();
 } else if (name === '--list' || name === undefined) {
   for (const [key, [what, suite]] of Object.entries(mutations)) {
-    console.info(`${key.padEnd(14)} ${what}\n${' '.repeat(15)}-> ${suite}`);
+    console.info(`${key.padEnd(24)} ${what}\n${' '.repeat(25)}-> ${suite}`);
   }
 } else if (mutations[name]) {
+  snapshot();
   mutations[name][2]();
   console.info(`applied ${name} -> expect red in: ${mutations[name][1]}`);
 } else {
