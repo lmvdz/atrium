@@ -1,0 +1,439 @@
+{
+  "$comment": [
+    "The mutant ledger for @atrium/core.",
+    "",
+    "Standing campaign rule, from #21's round-2 gauntlet: a mutation claim ships",
+    "with a committed, re-runnable mutant list and its results, or it is not",
+    "evidence. Round 2's write-up claimed '25 run, 25 caught' with nothing in the",
+    "repo a reviewer could execute, and that is a number, not a receipt.",
+    "",
+    "Run it:   node packages/core/mutants/run.mjs",
+    "Gate it:  node packages/core/mutants/run.mjs --check   (exit 1 if any survives)",
+    "One:      node packages/core/mutants/run.mjs --only quote_bearing_disabled",
+    "",
+    "Each mutant is a single verbatim substitution in one source file. The runner",
+    "refuses a mutant whose `find` does not occur exactly once, so a mutant that",
+    "has drifted out of the code is a loud failure rather than a silent pass — the",
+    "failure mode a ledger like this actually has.",
+    "",
+    "`catches` names the tests that must go red. It is checked, not decorative:",
+    "the runner asserts every listed name appears among the failures, so a mutant",
+    "that is caught by some unrelated test counts as an escape."
+  ],
+  "mutants": [
+    {
+      "id": "boundary_parse_dropped_append",
+      "why": "r2's blocking finding, route 1: appendEvent folds whatever it is handed. Reverting to r2 lets a raw model claim with no quote through.",
+      "file": "src/reduce.ts",
+      "find": "  const parsed = CoreEvent.safeParse(event);\n  if (!parsed.success) {\n    return {\n      outcome: 'malformed',\n      event,\n      actor: trusted.actor,\n      detail: parseFailureDetail(parsed.error),\n      state,\n    };\n  }\n  const entry: AuthoredEvent = { ...trusted, event: parsed.data };\n  const rejection = rejectionFor(state, parsed.data);\n  if (rejection) {\n    return { outcome: 'rejected', event: parsed.data, actor: trusted.actor, ...rejection, state };\n  }",
+      "replace": "  const entry: AuthoredEvent = { ...trusted, event };\n  const rejection = rejectionFor(state, event);\n  if (rejection) {\n    return { outcome: 'rejected', event, actor: trusted.actor, ...rejection, state };\n  }",
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
+    },
+    {
+      "id": "boundary_parse_dropped_fold",
+      "why": "The same finding on the replay path: reduce/foldEvents fold unparsed rows.",
+      "file": "src/reduce.ts",
+      "find": "  for (const entry of log) {\n    const parsed = CoreEvent.safeParse(entry.event);\n    if (!parsed.success) {\n      outcomes.push({\n        outcome: 'malformed',\n        event: entry.event,\n        actor: entry.actor,\n        detail: parseFailureDetail(parsed.error),\n      });\n      continue;\n    }\n    rows.push({ ...entry, event: parsed.data });\n  }",
+      "replace": "  for (const entry of log) rows.push(entry);",
+      "catches": [
+        "refuses a raw model claim proposal that quotes nothing, and never records it",
+        "refuses a whitespace-only quote exactly as it refuses a missing one",
+        "folds the well-formed rows around a malformed one, and reports it"
+      ]
+    },
+    {
+      "id": "empty_window_reducer",
+      "why": "r2 gauntlet, empty presence: `messages: []` passes an undefined-only check and the receipt is skipped, not refused.",
+      "file": "src/authority.ts",
+      "find": "  if (input.messages === undefined || input.messages.length === 0) {",
+      "replace": "  if (input.messages === undefined) {",
+      "catches": ["refuses `messages: []` at the reducer, exactly as it refuses no messages"]
+    },
+    {
+      "id": "empty_window_engine",
+      "why": "The same hole in the acceptance engine, which the attention panel reads through.",
+      "file": "src/acceptance.ts",
+      "find": "  if (proposal.proposer.kind === 'model' && (messages === undefined || messages.length === 0)) {",
+      "replace": "  if (proposal.proposer.kind === 'model' && messages === undefined) {",
+      "catches": [
+        "refuses `messages: []` at the engine, exactly as it refuses no messages",
+        "refuses `messages: []` at the attention panel, with a receipt for the silence"
+      ]
+    },
+    {
+      "id": "reducer_quote_gate_dropped",
+      "why": "The reducer goes back to trusting the schema one layer up for the quote.",
+      "file": "src/authority.ts",
+      "find": "  const namesAPerson = object.type === 'claim' || object.type === 'commitment';\n  if (namesAPerson && (proposal.quote ?? '').trim().length === 0) {",
+      "replace": "  const namesAPerson = object.type === 'claim' || object.type === 'commitment';\n  if (false && namesAPerson && (proposal.quote ?? '').trim().length === 0) {",
+      "catches": [
+        "re-requires a non-empty quote at the reducer, not one layer up",
+        "names the missing-quote gate rather than folding it into the receipt"
+      ]
+    },
+    {
+      "id": "validator_quote_requirement_dropped",
+      "why": "The validator stops requiring a quote of a model reading that names somebody.",
+      "file": "src/escalation.ts",
+      "find": "  if (fromModel && namesAPerson && normalizedQuote.length === 0) {",
+      "replace": "  if (false && fromModel && namesAPerson && normalizedQuote.length === 0) {",
+      "catches": [
+        "does not let a padded citation list plus an empty quote flip attribution",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "attribution_fallback_restored",
+      "why": "r2's citation-list fallback comes back: with no bearing message, any cited author supports the attribution. This is the padding attack.",
+      "file": "src/escalation.ts",
+      "find": "    const supported = bearing\n      ? bearing.authorId === attributed\n      : fromModel\n        ? false\n        : cited.some((message) => message.authorId === attributed);",
+      "replace": "    const supported = bearing\n      ? bearing.authorId === attributed\n      : cited.some((message) => message.authorId === attributed);",
+      "catches": [
+        "does not let a padded citation list plus an empty quote flip attribution",
+        "rejects a quote elided with an ellipsis that is not verbatim anywhere"
+      ]
+    },
+    {
+      "id": "quote_bearing_disabled",
+      "why": "r2 gauntlet, major 1: the quote no longer has to carry the sentence being minted. Cite Bob's 'yes', mint 'Bob will deploy'.",
+      "file": "src/escalation.ts",
+      "find": "    const statement = subject.statement?.trim();\n    if (fromModel && statement) {",
+      "replace": "    const statement = subject.statement?.trim();\n    if (false && fromModel && statement) {",
+      "catches": [
+        "refuses a verbatim, correctly attributed quote that carries a different sentence",
+        "refuses the same thing at the reducer, where it is a trust boundary",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "min_quote_length_unenforced",
+      "why": "minQuoteLength goes back to being a blockquote-detection knob only.",
+      "file": "src/escalation.ts",
+      "find": "    if (fromModel && normalizedQuote.length < policy.minQuoteLength) {",
+      "replace": "    if (false && fromModel && normalizedQuote.length < policy.minQuoteLength) {",
+      "catches": [
+        "enforces minQuoteLength on the acceptance path, not only on blockquotes",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "ambiguous_quote_takes_the_first",
+      "why": "Several cited authors carry the quote and the first in window order wins — attribution decided by ingestion order.",
+      "file": "src/escalation.ts",
+      "find": "    const authors = new Set(inOwnText.map((message) => message.authorId));\n    if (authors.size > 1) {",
+      "replace": "    const authors = new Set(inOwnText.map((message) => message.authorId));\n    if (false && authors.size > 1) {",
+      "catches": [
+        "refuses as ambiguous when two cited authors both carry the quote",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "bearing_message_takes_the_first",
+      "why": "The same defect one level down: bearingMessage answers 'who said this' with whoever is first.",
+      "file": "src/escalation.ts",
+      "find": "  const authors = new Set(borne.map((message) => message.authorId));\n  return authors.size === 1 ? (borne[0] ?? null) : null;",
+      "replace": "  return borne[0] ?? null;",
+      "catches": [
+        "reports every bearing message, and names one only when one person wrote it",
+        "reads an undetermined author as third-party, never as self"
+      ]
+    },
+    {
+      "id": "receipt_policy_min_quote_lowered",
+      "why": "The pinned receipt minimum moves. A pin that is derived rather than literal would not notice.",
+      "file": "src/policy.ts",
+      "find": "  minQuoteLength: 24,",
+      "replace": "  minQuoteLength: 4,",
+      "catches": [
+        "is exactly this table",
+        "is the number the escalation config quotes by, not a second one",
+        "enforces minQuoteLength on the acceptance path, not only on blockquotes"
+      ]
+    },
+    {
+      "id": "receipt_policy_statement_support_lowered",
+      "why": "The statement-support threshold is loosened to nothing.",
+      "file": "src/policy.ts",
+      "find": "  minStatementSupport: 0.6,",
+      "replace": "  minStatementSupport: 0.0,",
+      "catches": [
+        "is exactly this table",
+        "refuses a verbatim, correctly attributed quote that carries a different sentence"
+      ]
+    },
+    {
+      "id": "dedup_threshold_moved",
+      "why": "The dedup threshold r2's gauntlet called a stray θ. It is policy now, so moving it must be visible.",
+      "file": "src/policy.ts",
+      "find": "  duplicateThreshold: 0.8,",
+      "replace": "  duplicateThreshold: 0.5,",
+      "catches": ["is exactly this table", "is the number `findDuplicate` discards on"]
+    },
+    {
+      "id": "claim_theta_auto_lowered",
+      "why": "r1's original escape: the θ table moves and every probe derived from it moves with it. The literal probes must catch this.",
+      "file": "src/policy.ts",
+      "find": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),",
+      "replace": "    claim: Object.freeze({ thetaAuto: 0.6, thetaMin: 0.5, autoAccept: true }),",
+      "catches": [
+        "is exactly this table",
+        "does not accept a hair under θ_auto (0.6999)",
+        "is the engine’s θ, not a second number under it"
+      ]
+    },
+    {
+      "id": "claim_theta_min_lowered",
+      "why": "The other end of the band, likewise.",
+      "file": "src/policy.ts",
+      "find": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),",
+      "replace": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.3, autoAccept: true }),",
+      "catches": ["is exactly this table", "discards a hair under θ_min (0.4999)"]
+    },
+    {
+      "id": "floor_decoupled_from_theta",
+      "why": "The reducer's floor goes back to being a second, lower set of numbers than the engine's θ.",
+      "file": "src/policy.ts",
+      "find": "      DEFAULT_ACCEPTANCE_RULES[type].autoAccept\n        ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto\n        : Number.POSITIVE_INFINITY,",
+      "replace": "      DEFAULT_ACCEPTANCE_RULES[type].autoAccept ? 0.5 : Number.POSITIVE_INFINITY,",
+      "catches": [
+        "is the same number the reducer folds against — one table, not two",
+        "is the engine’s θ, not a second number under it"
+      ]
+    },
+    {
+      "id": "payload_actor_guard_disabled",
+      "why": "The event schema stops refusing a payload-supplied actor.",
+      "file": "src/events.ts",
+      "find": "    if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
+      "replace": "    if (false && value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
+    },
+    {
+      "id": "receipt_skipped_entirely",
+      "why": "The reducer stops running the receipt on non-human acceptances at all — r1's blocking finding.",
+      "file": "src/reduce.ts",
+      "find": "      const refusal = acceptanceReceiptRefusal({",
+      "replace": "      const refusal = false && acceptanceReceiptRefusal({",
+      "catches": [
+        "refuses a model acceptance with no message window at all",
+        "refuses one whose quote is only inside somebody else’s blockquote",
+        "refuses `messages: []` at the reducer, exactly as it refuses no messages"
+      ]
+    },
+    {
+      "id": "payload_binding_disabled",
+      "why": "A machine may mint a payload nobody staged behind a citation that says a person could have checked it.",
+      "file": "src/authority.ts",
+      "find": "  if (canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
+      "replace": "  if (false && canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
+      "catches": ["refuses an acceptance whose payload is not the one that was staged"]
+    },
+    {
+      "id": "provenance_binding_disabled",
+      "why": "The citation set may change on the way through acceptance — which is what the attribution rules are computed over.",
+      "file": "src/authority.ts",
+      "find": "  if (canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
+      "replace": "  if (false && canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
+      "catches": ["refuses an acceptance that pads or drops cited messages on the way through"]
+    },
+    {
+      "id": "proposer_binding_disabled",
+      "why": "One interpreter may accept, reject or retire another's staged readings.",
+      "file": "src/authority.ts",
+      "find": "  if (actor.kind === 'model') return proposer.kind === 'model' && proposer.model === actor.model;",
+      "replace": "  if (actor.kind === 'model') return true;",
+      "catches": [
+        "refuses a second model accepting the first model’s proposal",
+        "refuses a model accepting a human’s proposal"
+      ]
+    },
+    {
+      "id": "confidence_floor_disabled",
+      "why": "A machine may mint an object from a reading it does not stand behind, at any confidence including zero.",
+      "file": "src/reduce.ts",
+      "find": "      if (proposal.proposal.confidence < floor) {",
+      "replace": "      if (false && proposal.proposal.confidence < floor) {",
+      "catches": [
+        "refuses a model accepting its own near-zero-confidence claim",
+        "is the engine’s θ, not a second number under it"
+      ]
+    },
+    {
+      "id": "decision_never_auto_disabled",
+      "why": "#4's one absolute: a decision never auto-accepts, at any confidence.",
+      "file": "src/reduce.ts",
+      "find": "  if (object.type === 'decision' && !isHuman(actor)) {",
+      "replace": "  if (false && object.type === 'decision' && !isHuman(actor)) {",
+      "catches": [
+        "refuses a model actor accepting a decision through its own proposal",
+        "reached every gate in the table — walking what the reducer said, not what the oracle predicts"
+      ]
+    },
+    {
+      "id": "claim_verification_gate_disabled",
+      "why": "`~` becomes `✓` on a machine's word.",
+      "file": "src/reduce.ts",
+      "find": "  if (object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
+      "replace": "  if (false && object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
+      "catches": ["refuses a claim born verified on a model actor’s word"]
+    },
+    {
+      "id": "direct_acceptance_gate_disabled",
+      "why": "A machine may skip the proposal entirely and emit the object — the whole acceptance boundary becomes optional.",
+      "file": "src/reduce.ts",
+      "find": "  if (proposalId === null && !isHuman(actor)) {",
+      "replace": "  if (false && proposalId === null && !isHuman(actor)) {",
+      "catches": [
+        "refuses a proposal-less acceptance from a model actor",
+        "refuses a proposal-less acceptance from a system actor too"
+      ]
+    },
+    {
+      "id": "answers_human_gate_disabled",
+      "why": "A machine may close a person's open question by pointing an arbitrary claim at it.",
+      "file": "src/reduce.ts",
+      "find": "    if (!isHuman(actor)) {\n      fail(\n        state,\n        event.id,\n        humanOnlyRefusal('answer_relation', actor, `relation \"${relation.id}\"`),\n      );\n      return false;\n    }",
+      "replace": "    if (false) return false;",
+      "catches": ["refuses a model answering an open question"]
+    },
+    {
+      "id": "supersession_policy_narrowed",
+      "why": "Supersession goes back to gating decisions only, so a machine may retire a human-accepted commitment.",
+      "file": "src/reduce.ts",
+      "find": "    if (decideSupersession(retired).authority === 'requires_human' && !isHuman(actor)) {",
+      "replace": "    if (retired === 'decision' && !isHuman(actor)) {",
+      "catches": ["refuses a model retiring a commitment", "refuses a model retiring an objective"]
+    },
+    {
+      "id": "corrections_human_gate_disabled",
+      "why": "Every correction verb is human-only in v1; a correction reaches backwards.",
+      "file": "src/reduce.ts",
+      "find": "  if (!isHuman(actor)) {\n    const verifying =",
+      "replace": "  if (false) {\n    const verifying =",
+      "catches": ["refuses a system actor correction as well"]
+    },
+    {
+      "id": "blockquote_stripping_neutered",
+      "why": "The spike's worst error: a quote that exists only inside somebody else's reply-blockquote.",
+      "file": "src/escalation.ts",
+      "find": "    .filter((line) => !BLOCKQUOTE_LINE.test(line))\n    .join('\\n');",
+      "replace": "    .join('\\n');",
+      "catches": ["refuses one whose quote is only inside somebody else’s blockquote"]
+    },
+    {
+      "id": "answer_binding_order_check_dropped",
+      "why": "The two answer-binding events share a timestamp; if the relation sorts first the question is left open beside its own answer.",
+      "file": "src/acceptance.ts",
+      "find": "  if (\n    compareCursor({ at: command.at, id: acceptEventId }, { at: command.at, id: relationEventId }) >=\n    0\n  ) {",
+      "replace": "  if (false) {",
+      "catches": ["refuses ids whose order would put the edge before the object"]
+    },
+    {
+      "id": "answer_binding_question_open_check_dropped",
+      "why": "Binding a second answer leaves two `answers` edges and one status.",
+      "file": "src/acceptance.ts",
+      "find": "  if (record.object.payload.status !== 'open') {",
+      "replace": "  if (false) {",
+      "catches": ["refuses a question that is already answered"]
+    },
+    {
+      "id": "attention_reads_its_own_theta",
+      "why": "The panel and the engine disagree about a proposal in the θ band — r1's major 9.",
+      "file": "src/attention.ts",
+      "find": "    if (verdict.visibility !== 'needs_you') continue;",
+      "replace": "    if (verdict.visibility === 'nowhere-at-all') continue;",
+      "catches": ["stays quiet about a decision the engine would not surface"]
+    },
+    {
+      "id": "attention_priority_tiers_swapped",
+      "why": "The hardest-first sort is the whole product of the panel.",
+      "file": "src/attention.ts",
+      "find": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 0,",
+      "replace": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 9,",
+      "catches": ["gives every class a tier, and every tier a distinct rank"]
+    },
+    {
+      "id": "ordering_gate_loosened",
+      "why": "An event that lands exactly on the cursor is admitted, so two payloads can claim one position.",
+      "file": "src/reduce.ts",
+      "find": "  if (state.cursor && compareCursor(cursor, state.cursor) <= 0) {",
+      "replace": "  if (state.cursor && compareCursor(cursor, state.cursor) < 0) {",
+      "catches": ["rejects an event that lands on exactly the cursor"]
+    },
+    {
+      "id": "consumed_ids_not_spent_on_failure",
+      "why": "A redelivery of an event that failed its business checks gets a second try against a state that has moved on.",
+      "file": "src/reduce.ts",
+      "find": "  state.consumedEventIds.push(event.id);",
+      "replace": "  if (applied) state.consumedEventIds.push(event.id);",
+      "catches": ["spends the id of an event that was consumed but did not apply"]
+    },
+    {
+      "id": "amend_may_touch_attribution",
+      "why": "Moving an obligation off a named person becomes a substring search over patches instead of a verb.",
+      "file": "src/reduce.ts",
+      "find": "  } else if (touchesAttribution) {",
+      "replace": "  } else if (false && touchesAttribution) {",
+      "catches": ["refuses an amend that would move the obligation instead"]
+    },
+    {
+      "id": "noop_amend_silent_again",
+      "why": "An amendment that changes nothing reports `applied` with nothing applied.",
+      "file": "src/reduce.ts",
+      "find": "  if (canonicalJson(patched.after) === canonicalJson(patched.before)) {\n    fail(",
+      "replace": "  if (canonicalJson(patched.after) === canonicalJson(patched.before)) {\n    return true;\n    fail(",
+      "catches": [
+        "treats an empty amend patch as a no-op — and says so rather than reporting success",
+        "folds the parsed value, not the raw one — so schema defaults are real"
+      ]
+    },
+    {
+      "id": "one_concession_marker_deleted",
+      "why": "A table driven from a constant cannot notice a row that stopped existing; the by-value pin must.",
+      "file": "src/escalation.ts",
+      "find": "  'i stand corrected',\n",
+      "replace": "",
+      "catches": ["is exactly this list"]
+    },
+    {
+      "id": "one_future_pattern_deleted",
+      "why": "Same, for the future-tense patterns.",
+      "file": "src/escalation.ts",
+      "find": "  /\\bplease\\s+(?:can|could|take|handle|own|pick up|review|land|ship)\\b/i,\n",
+      "replace": "",
+      "catches": ["is exactly these five patterns", "has a case for every pattern"]
+    },
+    {
+      "id": "escalation_scan_cap_loosened",
+      "why": "The per-call cost of the pre-model pass goes back to being chosen by whoever writes the messages.",
+      "file": "src/escalation.ts",
+      "find": "  const body = message.body.slice(0, config.maxScanChars);",
+      "replace": "  const body = message.body;",
+      "catches": ["bounds the work per call, so content cannot choose the cost"]
+    },
+    {
+      "id": "rationale_accepts_a_bare_string",
+      "why": "The attention rationale brand stops binding at runtime, so a store can hand back a sentence nobody's template produced.",
+      "file": "src/attention.ts",
+      "find": "export const RationaleReason = z.discriminatedUnion('kind', [",
+      "replace": "export const RationaleReason = z.union([z.string(), ...[]] as never) ?? z.discriminatedUnion('kind', [",
+      "catches": ["requires a structured reason — no unexplained attention, and no free text"]
+    },
+    {
+      "id": "subject_kind_default_restored",
+      "why": "An attention item that silently defaults to 'object' points #22's foreign key at a proposal id.",
+      "file": "src/attention.ts",
+      "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal']);",
+      "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal']).default('object');",
+      "catches": ["has no default for subjectKind — the wrong value there is unfalsifiable"]
+    },
+    {
+      "id": "counterexample_voice_reverted",
+      "why": "CONVENTIONS: the system never synthesizes speech. 'the room said' attributes a form field to people.",
+      "file": "src/corrections.ts",
+      "find": "correction note:",
+      "replace": "the room said:",
+      "catches": ["formats a block ready to inject, quoting the note as a note"]
+    }
+  ]
+}
