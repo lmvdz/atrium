@@ -1650,6 +1650,15 @@ const CASES = [
     expect: /Sole enforcer, sole exception/,
   },
   {
+    // The cheapest way to satisfy checker-graph.mjs without satisfying anything
+    // it is about: declare that the check reads nothing, and "an invoker outside
+    // the files it reads" is true of every invoker. Found attacking this round's
+    // own fix.
+    name: 'a registry row that declares no subjects at all',
+    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], subjects: [] }] }),
+    expect: /is in the registry with no subjects/,
+  },
+  {
     name: 'an invoker CI never runs is not a witness',
     run: () =>
       checkerGraphProblems({

@@ -310,6 +310,16 @@ export function checkerGraphProblems({
     }
 
     // --- the property the whole file exists for ------------------------------
+    // An empty `subjects` would make "at least one invoker outside the subjects"
+    // trivially true for every row, which is the cheapest way to satisfy this
+    // file without satisfying anything it is about. A check that reads nothing
+    // is not a check.
+    if (!Array.isArray(subjects) || subjects.length === 0) {
+      problems.push(
+        `${check} is in the registry with no subjects. "At least one invoker outside the files it reads" is satisfied by anything when the set of files it reads is empty — declare what it actually reads, or take the row out.`,
+      );
+      continue;
+    }
     const outside = declared.filter(
       (file) => !subjects.some((prefix) => file.startsWith(toPosix(prefix))),
     );
