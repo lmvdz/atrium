@@ -106,3 +106,14 @@ Procedure, per branch, in merge-train order:
 3. **Check for resurrected files.** `-X theirs`/`-X ours` does **not** suppress a delete or rename across unrelated histories: a file the branch renamed or deleted comes back from main's side, silently. Verified the hard way in #26 r7, where a renamed initial migration was resurrected — `0000_classy_shocker.sql` reappeared beside the branch's `0000_auth_and_workspaces.sql`, which would have meant two initial migrations and a broken database on any fresh boot. After every merge in this train, diff the merged tree against the branch tree and delete anything the branch had renamed or removed; check `packages/db/drizzle/` specifically.
 
 Do not `--allow-unrelated-histories` without steps 2 and 3: the strategy option silently reverts main's doctrine files to their branch-point state, and silently resurrects whatever the branch renamed away.
+
+## A parametrised test that runs the same case twice (#39 r3, 2026-08-01)
+
+`apps/web/test/token-contrast.test.ts` reads `design/tokens.css` and measures every colour pair in both themes. Its block finder was `TOKENS.indexOf(selector)` — and tokens.css names both selectors in its own provenance comment, "extracted verbatim from the `:root` and `html.atr-dark` blocks of …", at offsets 150 and 162. Both lookups landed in that comment, both walked forward to the same `{`, and **every "dark" assertion in the file had been measuring the light theme since it was written.** It passed for two rounds and reported `--bg3 on --red3 = 7.47:1` for dark, where the real number is 5.81. One assertion had a ceiling (`< 5.6`) that only held for light; the moment the parse was fixed, the dark case failed at 9.65 — the first time that value had ever been computed.
+
+Two lessons, both general:
+
+- **A parametrised test that silently collapses its cases is worse than one case**, because the extra rows read as coverage. When cases are derived by lookup — a selector, a fixture name, an env key — assert up front that the derived inputs actually differ, and fail loudly if they do not. A four-line guard beside the `describe` would have caught this on the day it was written.
+- **Anchor structural parsers, and never at a substring.** A file that documents itself contains its own selectors in prose. `^selector\s*\{` at line start is the difference between reading the stylesheet and reading the comment about it. The same shape recurs anywhere a test greps source for the construct it is checking; strip comments before matching, or the check reads its own documentation as evidence.
+
+Corollary for receipts: the r2 receipt quoted this test's dark numbers as measurements. They were real numbers from a real run of a test that was not measuring what its name said. **A number in a receipt inherits the scope of the harness that produced it** — if the harness's inputs were never verified to be distinct, neither was the number.
