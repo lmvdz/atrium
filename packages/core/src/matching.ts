@@ -523,11 +523,14 @@ export function sentencesOf(text: string): string[] {
  */
 export interface StatementBearing {
   /**
-   * True only when the statement is the quote with nothing removed but
-   * `RECEIPT_POLICY.droppableTokens`, in the order it was written — **and,
-   * since r6, that is a fact about the two texts and not only about their
-   * words.** `orderedTokens` loses nothing, so equal non-droppable token
-   * streams and equal spacing is equal text.
+   * True only when **the statement is the quote** — the same marks in the same
+   * order, with nothing removed at all.
+   *
+   * That sentence has been in this file since r4 with an exception attached to
+   * it, and r6 removed the last exception: `orderedTokens` loses nothing, so an
+   * equal token stream is an equal text, and `droppableTokens` is gone (see
+   * `policy.ts`), so there is nothing in front of the comparison either. `borne`
+   * is now exactly `normalizeForReceipt(quote) === normalizeForReceipt(statement)`.
    *
    * The invariant that keeps this honest: `borne` is true exactly when all three
    * of `unmatchedInQuote`, `unmatchedInStatement` and `whitespaceDiffers` are
@@ -555,6 +558,9 @@ export interface StatementBearing {
    * dropped full stop" — and a brute force over generated pairs broke both, the
    * second with `wa 'z` against `wa' z`. A list of the ways a thing can happen
    * is the instrument `RETRO.md` keeps recording, in prose as much as in code.
+   * (Both of those enumerations were artefacts of `droppableTokens`, which is
+   * gone; the fact is still stated as a fact, because the next reader should not
+   * have to trust that it stayed gone.)
    */
   whitespaceDiffers: boolean;
   /** Set when the check declined to run at all, rather than running and failing. */
@@ -573,55 +579,6 @@ const sameRun = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((token, index) => token === b[index]);
 
 /**
- * **The droppable tokens taken out, and the spacing they were holding open
- * closed behind them.**
- *
- * `droppableTokens` holds one entry, `.`, and the licence it grants is *a full
- * stop may differ*. Taking the mark out and leaving its neighbours untouched
- * does not grant that licence — it grants a narrower and stranger one, because
- * the spaces around the mark are tokens now. r6's first draft skipped the mark
- * inside the alignment loop and left the spaces, so
- *
- *     quote:     "While TypeScript is correct that ... after line 6"
- *     statement: "While TypeScript is correct that after line 6"
- *
- * came back as *the same words, spaced differently* — the ellipsis was forgiven
- * three times over as three full stops, and the space it had been sitting in was
- * reported as a re-spaced code literal. A true finding with a false reason
- * attached, which is the defect class this round is for.
- *
- * So the removal happens once, up front, on both streams: drop the droppable
- * tokens, and where dropping one leaves two spaces adjacent — or a space at
- * either end, which the input could not have had, since `normalizeForReceipt`
- * trims — close the gap. Nothing else is touched: `` `a  b` `` keeps both of its
- * spaces, because no mark was removed between them.
- */
-function stripDroppable(tokens: readonly string[], policy: ReceiptPolicy): string[] {
-  const out: string[] = [];
-  let removed = false;
-  for (const current of tokens) {
-    if (policy.droppableTokens.has(current)) {
-      removed = true;
-      continue;
-    }
-    const previous = out[out.length - 1];
-    const closesAGap =
-      removed &&
-      isWhitespaceToken(current) &&
-      previous !== undefined &&
-      isWhitespaceToken(previous);
-    removed = false;
-    if (closesAGap) continue;
-    out.push(current);
-  }
-  // A removal at either end leaves the space that was next to it exposed. The
-  // input was trimmed, so any whitespace here came from the removal.
-  while (out.length > 0 && isWhitespaceToken(out[out.length - 1] as string)) out.pop();
-  while (out.length > 0 && isWhitespaceToken(out[0] as string)) out.shift();
-  return out;
-}
-
-/**
  * The alignment itself, over tokens somebody else produced.
  *
  * Split out from `statementBearing` in r5 so the later-correction detector can
@@ -634,9 +591,12 @@ function stripDroppable(tokens: readonly string[], policy: ReceiptPolicy): strin
  *
  * ## The verdict and the diagnosis are computed separately, and r6 is why
  *
- * `borne` is `sameRun` over the two streams with `stripDroppable` applied: two
- * lists of tokens, equal length, equal element by element. That is the whole
- * definition, it is a total function of the inputs, and no heuristic reaches it.
+ * `borne` is `sameRun`: two lists of tokens, equal length, equal element by
+ * element, **and nothing else**. There is no forgiveness step in front of it any
+ * more — see `policy.ts` for the obituary of `droppableTokens`, which grok's
+ * blind pass broke on ``Load `.env` …`` bearing ``Load `env` …``. Since
+ * `orderedTokens` reassembles the text it came from, `borne` is now literally
+ * *the two normalized texts are the same string*.
  *
  * The three fields beside it are a **diagnosis** — greedy, with a one-sided
  * lookahead so that one interposed word ("not") is reported as one interposed
@@ -651,18 +611,15 @@ function stripDroppable(tokens: readonly string[], policy: ReceiptPolicy): strin
  * `escalation.ts` has a named problem for it rather than a silent pass.
  */
 export function alignTokens(
-  q: readonly string[],
-  s: readonly string[],
+  quote: readonly string[],
+  statement: readonly string[],
   policy: ReceiptPolicy = RECEIPT_POLICY,
 ): StatementBearing {
-  if (q.length === 0) return declined('empty_quote');
-  if (s.length === 0) return declined('empty_statement');
-  if (q.length > policy.maxAlignedTokens || s.length > policy.maxAlignedTokens) {
+  if (quote.length === 0) return declined('empty_quote');
+  if (statement.length === 0) return declined('empty_statement');
+  if (quote.length > policy.maxAlignedTokens || statement.length > policy.maxAlignedTokens) {
     return declined('too_long');
   }
-
-  const quote = stripDroppable(q, policy);
-  const statement = stripDroppable(s, policy);
 
   const unmatchedInQuote: string[] = [];
   const unmatchedInStatement: string[] = [];
@@ -748,10 +705,10 @@ export function alignTokens(
  * the check it replaced claimed something it could not deliver:
  *
  * > Every token of the statement appears in the quote, in the same order, and
- * > every token of the quote appears in the statement, in the same order, except
- * > for the full stop in `RECEIPT_POLICY.droppableTokens`. A token is a word in
- * > any script, or **any single code point** — a mark, a space, an apostrophe —
- * > after the differences `normalizeForReceipt` admits.
+ * > every token of the quote appears in the statement, in the same order, with
+ * > no exception. A token is a word in any script, or **any single code point**
+ * > — a mark, a space, an apostrophe — after the differences
+ * > `normalizeForReceipt` admits.
  *
  * ## Which is to say: the statement *is* the quote
  *
@@ -763,10 +720,12 @@ export function alignTokens(
  * will 'deploy' production 'Friday', promise.` `TOKEN` has the table.
  *
  * It is true now, and it is true *by construction* rather than by inspection:
- * `orderedTokens` is exhaustive, so `join('')` rebuilds the normalized text, so
- * two token streams that are equal after removing droppable tokens are two texts
- * that are equal after removing droppable tokens. `bearing.test.ts` pins the
- * reassembly property directly, which is the assertion that carries all of this.
+ * `orderedTokens` is exhaustive, so `join('')` rebuilds the normalized text, and
+ * nothing is removed before the comparison, so two equal token streams are two
+ * equal texts. `bearing.test.ts` asserts the equivalence directly —
+ * `borne === (normalizeForReceipt(quote) === normalizeForReceipt(statement))`,
+ * over a generated space rather than a corpus — which is the assertion that
+ * carries all of this.
  *
  * That is a **structural** claim about two strings. It is not entailment, and
  * nothing here can establish entailment — but combined with the checks around it
@@ -813,8 +772,7 @@ export function statementBearing(
  * ───────────────────────────────────────────────────────────────────────── */
 
 /**
- * The quote's tokens, with the ones a receipt may lose taken out — **and the
- * spacing between them.**
+ * The quote's tokens, with **the spacing between them** taken out.
  *
  * The two functions below ask *which marks, in which order*, over a text that
  * has been cut into sentences and reassembled; the cut throws the whitespace
@@ -825,10 +783,8 @@ export function statementBearing(
  * the quote to occur in the message body **verbatim** under
  * `normalizeForReceipt`, which passes code spans through byte for byte.
  */
-function significant(text: string, policy: ReceiptPolicy): string[] {
-  return orderedTokens(text).filter(
-    (token) => !policy.droppableTokens.has(token) && !isWhitespaceToken(token),
-  );
+function significant(text: string): string[] {
+  return orderedTokens(text).filter((token) => !isWhitespaceToken(token));
 }
 
 /**
@@ -859,14 +815,14 @@ export function quoteSpansWholeSentences(
   ownText: string,
   policy: ReceiptPolicy = RECEIPT_POLICY,
 ): boolean {
-  const wanted = significant(quote, policy);
+  const wanted = significant(quote);
   if (wanted.length === 0) return false;
 
   const sentences = sentencesOf(ownText);
   // Bounded, and refusing rather than degrading, for the same reason the
   // alignment is: the body is somebody else's input.
   if (sentences.length > policy.maxScannedSentences) return false;
-  const tokenized = sentences.map((sentence) => significant(sentence, policy));
+  const tokenized = sentences.map((sentence) => significant(sentence));
 
   for (let start = 0; start < tokenized.length; start += 1) {
     const run: string[] = [];
@@ -947,14 +903,10 @@ export function quoteSpansWholeSentences(
  * statement for a person to read, which is the disposition the whole third
  * severity exists for.
  */
-export function quoteCoversOwnText(
-  quote: string,
-  ownText: string,
-  policy: ReceiptPolicy = RECEIPT_POLICY,
-): boolean {
-  const wanted = significant(quote, policy);
+export function quoteCoversOwnText(quote: string, ownText: string): boolean {
+  const wanted = significant(quote);
   if (wanted.length === 0) return false;
-  return sameRun(significant(ownText, policy), wanted);
+  return sameRun(significant(ownText), wanted);
 }
 
 /**

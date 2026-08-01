@@ -719,12 +719,12 @@ export interface ProvenanceMessage {
  *  - `statement_respaces_the_quote` — **r6.** The two texts hold the same marks
  *    in the same order and space them differently, so the statement is not the
  *    text in the message. Stated as the fact rather than as a list of the ways
- *    it can arise, because two drafts of this entry tried the list and a brute
- *    force broke both. `normalizeForReceipt` has passed code segments through
- *    byte for byte since r5 on the argument that "two spaces in a password are a
- *    different password", and nothing at the comparison consulted it, because
- *    the tokenizer threw the spaces away: ``Run `rm -rf / tmp/cache` …`` bore
- *    ``Run `rm -rf /tmp/cache` …`` and auto-accepted.
+ *    it can arise, because three drafts of this entry tried the list and a brute
+ *    force broke all three. `normalizeForReceipt` has passed code segments
+ *    through byte for byte since r5 on the argument that "two spaces in a
+ *    password are a different password", and nothing at the comparison consulted
+ *    it, because the tokenizer threw the spaces away: ``Run `rm -rf / tmp/cache`
+ *    …`` bore ``Run `rm -rf /tmp/cache` …`` and auto-accepted.
  *  - `quote_is_a_fragment` — a span cut out of the middle of a sentence rather
  *    than a run of whole ones. r4's own blind review.
  *  - `quote_omits_surrounding_text` — **r5.** The quote is whole sentences and
@@ -1026,7 +1026,7 @@ export function validateProposalProvenance(
           detail: `the quote is a span cut out of the middle of a sentence in message "${bearing.id}" rather than one or more whole sentences of it — the words on either side of the cut may qualify or reverse it ("it is not true that …"), and nothing here can read them, so this reading is not accepted on a machine's word`,
           messageId: bearing.id,
         });
-      } else if (!quoteCoversOwnText(quote, bearing.body, policy)) {
+      } else if (!quoteCoversOwnText(quote, bearing.body)) {
         // ── …and the sentences either side of it are not somebody's scissors ──
         //
         // r5, and it is r4's own documented residue turned into a disposition.
@@ -1080,8 +1080,8 @@ export function validateProposalProvenance(
           kind: 'superseded_by_later_message',
           severity: 'refer',
           detail:
-            revisited.why === 'window_is_only_the_citations'
-              ? `the window supplied is nothing but the ${cited.length} message${cited.length === 1 ? '' : 's'} this proposal cites, so the correction scan had nothing to read that the proposal did not choose — whether a later message takes the quoted sentence back was never established, and a window the proposal selects is not a window (see \`AcceptanceContext.messages\`)`
+            revisited.why === 'window_ends_at_the_citations'
+              ? `the window carries nothing after the messages this proposal cites that the proposal did not itself choose, so the correction scan read no evidence it does not control — whether a later message takes the quoted sentence back was never established, and a window that ends where the citations end cannot answer that (see \`AcceptanceContext.messages\`)`
               : `the window carries more after this citation than this check will read (${policy.maxLaterMessagesScanned} messages, ${policy.maxScannedSentences} sentences each, ${policy.maxAlignedTokens} tokens a sentence), so whether one of them corrects the quoted sentence was never established — an unread window is not a clean one, and a check that declined to run is not a check that passed`,
           messageId: null,
         });
@@ -1186,19 +1186,20 @@ export function validateProposalProvenance(
             messageId: where,
           });
         } else if (bearingResult.whitespaceDiffers) {
-          // Same marks, same order, different spacing.
+          // The same non-whitespace marks, in the same order, spaced differently.
           //
-          // **The refusal names the fact and not the cause, and two of this
-          // round's own adversarial passes are why.** The first draft said the
-          // difference could only be inside a code span; a brute force over
-          // generated pairs produced 21,344 counterexamples in plain prose. The
-          // second draft named two causes — a code literal, and a droppable full
-          // stop standing where the other side has a space; the next pass
-          // produced a third (`wa 'z` against `wa' z`, a space and a mark
-          // trading places) and there is no reason to think it is the last. A
-          // list of the ways a thing can happen is the instrument `RETRO.md` has
-          // now recorded four times, and it does not stop being one for being
-          // written in prose. What is true of every case is the sentence above.
+          // **The refusal names the fact and not the cause, and three of this
+          // round's adversarial passes are why.** Draft one said the difference
+          // could only be inside a code span; a brute force over generated pairs
+          // produced 21,344 counterexamples in plain prose. Draft two named two
+          // causes — a code literal and a dropped full stop; the next pass
+          // produced a third (`wa 'z` against `wa' z`, a space and a mark trading
+          // places). Draft three said a code span was the only survivor once
+          // `droppableTokens` was emptied; `w .z` against `w. z` says otherwise.
+          // A list of the ways a thing can happen is the instrument `RETRO.md`
+          // has now recorded four times, and it does not stop being one for being
+          // written in prose. What is true of every case is the sentence above,
+          // and it is the only thing claimed.
           //
           // `reject` and not `refer`: this is a verdict, not a hesitation. The
           // statement carries a text its author did not write, and no reading of
@@ -1206,7 +1207,7 @@ export function validateProposalProvenance(
           problems.push({
             kind: 'statement_respaces_the_quote',
             severity: 'reject',
-            detail: `"${clip(statement, 60)}" holds every mark of the quote in the same order and spaces them differently, so it is not the text that is in the message — for instance a code literal respaced (\`rm -rf / tmp/cache\` is not \`rm -rf /tmp/cache\`), or a space standing where the quote ends a sentence`,
+            detail: `"${clip(statement, 60)}" holds the marks of the quote in the same order and spaces them differently, so it is not the text that is in the message — a code literal respaced is a literal changed (\`rm -rf / tmp/cache\` is not \`rm -rf /tmp/cache\`), and in prose the spacing is the only thing the fold has already forgiven, so what is left is a difference the author did not write`,
             messageId: where,
           });
         } else {
@@ -1297,7 +1298,7 @@ export type LaterRevision =
       kind: 'unscanned';
       why:
         | 'statement_too_long'
-        | 'window_is_only_the_citations'
+        | 'window_ends_at_the_citations'
         | 'too_many_messages'
         | 'too_many_sentences'
         | 'too_many_tokens_in_a_sentence';
@@ -1461,20 +1462,32 @@ export function laterRevision(
   }
   if (firstCited === -1) return scanned(0);
 
-  // ── The window has to be the room's, and this is the half that is checkable ─
+  // ── The window has to reach past the sentence, and that is checkable ──────
   //
-  // r6. Nothing required `messages` to reach past the citations, so a caller
+  // r6. Nothing required `messages` to extend past the citations, so a caller
   // supplying "the messages this receipt cites" — the natural reading, and what
   // `commitmentAttribution` does one function over — silently turned this whole
   // scan off: whole room ⇒ `receipt_not_certifiable`, cited only ⇒
   // `auto_accept`. The contract is written on `AcceptanceContext.messages`; this
-  // is the part of it a pure function can enforce. A window whose every message
-  // the proposal chose is a window the proposal controls, which is the shape of
-  // every padding attack this file has been through, and the answer to a scan
-  // that could not read anything is the one it gives everywhere else: not
-  // checked, therefore not passed.
-  if (messages.every((message) => cited.has(message.id))) {
-    return unscanned('window_is_only_the_citations');
+  // is the part of it a pure function can enforce.
+  //
+  // **The test is "did this scan read anything the proposal did not choose",
+  // and grok's blind pass is why it is not "does the window hold anything the
+  // proposal did not choose".** The first repair asked the second question, and
+  // a window of `[uncited, cited]` — an earlier message that cannot possibly
+  // correct a later one — satisfied it while the scan read exactly zero
+  // messages. A boundary the proposal controls is the shape of every padding
+  // attack this file has been through, and "the caller happened to include some
+  // earlier chatter" is not evidence about what came after.
+  //
+  // The cost, stated as a disposition: **a reading whose citation is the newest
+  // message in the window is never auto-accepted.** Nothing later exists to have
+  // corrected it, and core cannot tell that from a window that stops early — it
+  // has no message table and no clock. The honest answer to a question this
+  // function cannot ask is the one it gives everywhere else, and `refer` keeps
+  // the reading staged for a person rather than destroying it.
+  if (!messages.slice(firstCited + 1).some((message) => !cited.has(message.id))) {
+    return unscanned('window_ends_at_the_citations');
   }
 
   // **Cited messages are scanned, not skipped.** The first repair filtered them

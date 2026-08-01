@@ -712,34 +712,33 @@ describe('the receipt minima are policy, and are pinned by value', () => {
   it('is exactly this table', () => {
     expect(RECEIPT_POLICY).toEqual({
       minQuoteLength: 24,
-      droppableTokens: new Set(['.']),
       maxAlignedTokens: 800,
       maxScannedSentences: 200,
       maxLaterMessagesScanned: 200,
     });
+    // …and `droppableTokens` is not in it. Asserted as an absence, because a
+    // field that was removed is a rule somebody will otherwise re-add: every
+    // entry it ever held was broken by a reviewer, the last of them in r6.
+    expect('droppableTokens' in RECEIPT_POLICY).toBe(false);
   });
 
-  it('lets nothing but a full stop differ between a quote and its statement', () => {
-    // Catches: `receipt_policy_droppable_widened`, `ordered_tokens_drops_spaces`.
+  it('lets nothing at all differ between a quote and its statement', () => {
+    // Catches: `receipt_policy_droppable_restored`, `ordered_tokens_drops_spaces`.
     //
-    // **The title says "nothing but", and until r6 this test checked nine words
-    // somebody typed out.** A hand-written list is exactly the instrument this
-    // whole file exists to refuse — it pins the evasions somebody thought of, and
-    // the property in the title is a statement about *every* token. It was false
-    // in both directions while this test passed: the tokenizer discarded spaces
-    // and standalone apostrophes, so `We will 'deploy' production 'Friday'.` and
-    // ``rm -rf /tmp/cache`` for ``rm -rf / tmp/cache`` were borne, and no word on
-    // anybody's list would have found either.
+    // **The title said "nothing but a full stop" until r6's cross-lineage pass,
+    // and before that this test checked nine words somebody typed out.** Both
+    // were the same defect at different depths. The word list pinned the evasions
+    // somebody had thought of; the full stop pinned a licence whose justification
+    // — *"a full stop terminates a sentence and carries no other meaning"* — was
+    // a claim about context enforced by a `Set.has` over every `.` anywhere, so
+    // ``Load `.env` before the deploy tonight.`` bore ``Load `env` …``.
     //
-    // So the property is checked over the tokens themselves: take one apart, put
-    // it back a token at a time, and the *only* difference `borne` forgives must
-    // be a member of the set. The sentence carries a negation, a quantifier, an
-    // article, a one-letter name, a contraction, a code literal with a double
-    // space in it, a comma, an apostrophe-quoted term and a full stop, so the
-    // loop covers every class the round has argued about — but the assertion
-    // does not depend on that: it is *every* token, whatever they turn out to be.
-    expect([...RECEIPT_POLICY.droppableTokens].sort()).toEqual(['.']);
-
+    // What is checked is the property in the title, over the tokens themselves:
+    // take the sentence apart, and *every* single-token deletion and insertion
+    // must be refused. The sentence carries a negation, a quantifier, an article,
+    // a one-letter name, a contraction, a code literal with a double space in it,
+    // a comma, an apostrophe-quoted term and a full stop — but the assertion does
+    // not depend on that: it is every token, whatever they turn out to be.
     const quote =
       "A maintainer will not deploy 2 of the 'production' boxes on Friday, and `a  b` won't change that.";
     const tokens = orderedTokens(quote);
@@ -747,50 +746,39 @@ describe('the receipt minima are policy, and are pinned by value', () => {
 
     for (const [index, token] of tokens.entries()) {
       const dropped = [...tokens.slice(0, index), ...tokens.slice(index + 1)].join('');
-      const droppable = RECEIPT_POLICY.droppableTokens.has(token);
       expect(
         statementBearing(quote, dropped).borne,
-        `dropping ${JSON.stringify(token)} at ${index} must ${droppable ? 'be forgiven' : 'be refused'}`,
-      ).toBe(droppable);
-      // …and the same licence in the other direction: what may be dropped from
-      // the statement may be dropped from the quote.
+        `dropping ${JSON.stringify(token)} at ${index} must be refused`,
+      ).toBe(false);
       expect(
         statementBearing(dropped, quote).borne,
-        `dropping ${JSON.stringify(token)} from the quote must ${droppable ? 'be forgiven' : 'be refused'}`,
-      ).toBe(droppable);
+        `dropping ${JSON.stringify(token)} from the quote must be refused`,
+      ).toBe(false);
     }
 
-    // Insertion is the mirror image, and it is not symmetrical with deletion:
-    // a token added to the statement is a word the record does not carry.
-    // The licence is symmetric — `.` is forgiven whichever side carries it — so
-    // the expectation is the same membership test rather than a flat `false`.
     for (const inserted of ['not', "'", '?', '`', '.']) {
       const statement = [...tokens.slice(0, 6), inserted, ...tokens.slice(6)].join('');
-      const droppable = RECEIPT_POLICY.droppableTokens.has(inserted);
       expect(
         statementBearing(quote, statement).borne,
-        `inserting ${JSON.stringify(inserted)} must ${droppable ? 'be forgiven' : 'be refused'}`,
-      ).toBe(droppable);
+        `inserting ${JSON.stringify(inserted)} must be refused`,
+      ).toBe(false);
     }
 
-    // A *second* space is the one insertion the allowlist admits, and only in
-    // prose: "a client wraps a message and a quote copied out of it carries
-    // different line breaks". Inside a code literal it is admitted by nothing,
-    // and that asymmetry is the whole of `normalizeForReceipt`'s code-span rule —
-    // which nothing at this comparison consulted until r6.
+    // What *is* still admitted is `normalizeForReceipt`'s allowlist, and only
+    // that: a run of prose whitespace, a character with no rendering, and a
+    // typographic apostrophe. Those are differences the fold erases before this
+    // comparison ever sees them, so they are not differences at all.
     expect(statementBearing(quote, quote.replace('will not', 'will  not')).borne).toBe(true);
-    expect(statementBearing(quote, quote.replace('`a  b`', '`a b`')).borne).toBe(false);
-    // The other two entries of that allowlist, for the same reason: a character
-    // with no rendering and a typographic apostrophe are admitted by
-    // `normalizeForReceipt` before any of this runs, so they are not differences
-    // this set is being asked about.
     expect(statementBearing(quote, quote.replace('will', 'wi​ll')).borne).toBe(true);
     expect(statementBearing(quote, quote.replace("won't", 'won’t')).borne).toBe(true);
+    // …and inside a code literal even the whitespace is content.
+    expect(statementBearing(quote, quote.replace('`a  b`', '`a b`')).borne).toBe(false);
 
-    // …and the one that is forgiven, at the end of a sentence, where it lives.
-    expect(statementBearing('ship the flag.', 'ship the flag').borne).toBe(true);
-    expect(statementBearing('ship the flag', 'ship the flag.').borne).toBe(true);
-    // A question mark is not a full stop: an interrogative is not an assertion.
+    // The trailing full stop is the cost of emptying the set, stated as a
+    // disposition: it is refused, and refused as a *referral* rather than a
+    // discard, so the reading reaches a person rather than the bin.
+    expect(statementBearing('ship the flag.', 'ship the flag').borne).toBe(false);
+    expect(statementBearing('ship the flag', 'ship the flag.').borne).toBe(false);
     expect(statementBearing('ship the flag?', 'ship the flag').borne).toBe(false);
   });
 
@@ -807,7 +795,7 @@ describe('the receipt minima are policy, and are pinned by value', () => {
       {
         objectId: 'obj_1',
         type: 'claim' as const,
-        text: 'the migration is reversible and safe',
+        text: 'the migration is reversible and safe.',
         messageIds: ['msg_1'],
       },
     ];

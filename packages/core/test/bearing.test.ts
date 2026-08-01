@@ -398,15 +398,27 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     refuses('A will deploy production Friday', 'will deploy production Friday');
   });
 
-  it('accepts a difference of a full stop, and nothing else', () => {
-    // Catches: emptying `droppableTokens`, which would make the check refuse a
-    // statement for its punctuation and be useless in the opposite way.
+  it('refuses a difference of a full stop, like every other difference', () => {
+    // Catches: `receipt_policy_droppable_restored`.
+    //
+    // **This test asserted the opposite until r6's cross-lineage pass**, and it
+    // was right to, given the policy: `droppableTokens` held `.` because "a full
+    // stop terminates a sentence and carries no other meaning". That is a claim
+    // about *context*, enforced by a set-membership test over every `.` token
+    // anywhere — so a hidden file inside a code span went with it, and grok
+    // produced the pair. The set is empty now and the guarantee has no exception
+    // left in it.
     expect(statementBearing('ship the flag on Friday.', 'ship the flag on Friday').borne).toBe(
-      true,
+      false,
     );
     expect(statementBearing('ship the flag on Friday', 'ship the flag on Friday.').borne).toBe(
-      true,
+      false,
     );
+    // …and the refusal is the one that reaches a person rather than the one that
+    // destroys the reading: the quote says one mark more than the statement.
+    expect(
+      statementBearing('ship the flag on Friday.', 'ship the flag on Friday').unmatchedInQuote,
+    ).toEqual(['.']);
   });
 
   it('refuses a question minted as an assertion', () => {
@@ -638,7 +650,9 @@ describe('the quote must be whole sentences, not a span cut out of one', () => {
     // the bearing check then refuses on its own.
     const body = 'Bob will deploy production Friday under any circumstances.';
     const window: ProvenanceMessage[] = room({ id: 'msg_m', authorId: BOB, body });
-    const whole = 'Bob will deploy production Friday under any circumstances';
+    // The whole sentence **including its full stop**: since r6 nothing is
+    // droppable, so "the whole sentence" means all of it.
+    const whole = 'Bob will deploy production Friday under any circumstances.';
     expect(quoteSpansWholeSentences(whole, body)).toBe(true);
     expect(
       decideAcceptance(modelProposal({ statement: whole, quote: whole, provenance: ['msg_m'] }), {

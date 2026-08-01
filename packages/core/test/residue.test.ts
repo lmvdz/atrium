@@ -431,7 +431,11 @@ describe('r5 — a later correction is part of the receipt', () => {
           proposer: { kind: 'model' },
           attributedTo: ALICE,
         },
-        [
+        // The window runs past the last citation, and r6's own cross-lineage
+        // pass is why: the gate that refuses a window ending at the citations
+        // reports the same problem kind, so without a message after `msg_3` this
+        // test passed under the mutation it exists to catch.
+        room(
           { id: 'msg_1', authorId: ALICE, body: STATEMENT },
           {
             id: 'msg_2',
@@ -439,7 +443,7 @@ describe('r5 — a later correction is part of the receipt', () => {
             body: 'Correction: we will not deploy production Friday.',
           },
           { id: 'msg_3', authorId: BOB, body: 'The staging cluster is green.' },
-        ],
+        ),
       ),
     ).toEqual(['superseded_by_later_message']);
   });

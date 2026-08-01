@@ -496,7 +496,12 @@ function gateProbes(seed: number): AuthoredEvent[] {
    * again. That is the assertion earning its keep twice.
    */
   const claimWindow = (text: string): ProvenanceMessage[] => [
-    { id: `msg_${tag}`, authorId: BOB, body: `${text}.` },
+    // **The body is the text, with no terminator appended.** It read `${text}.`
+    // against a statement of `text` until r6's cross-lineage pass emptied
+    // `droppableTokens`, so these probes were riding the full-stop licence and
+    // `confidence_floor` went unreached the moment it was withdrawn — the third
+    // time this one assertion has caught a probe that stopped probing.
+    { id: `msg_${tag}`, authorId: BOB, body: text },
     UNCITED_TAIL,
   ];
 

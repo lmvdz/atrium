@@ -20,7 +20,7 @@ import {
   sortAttention,
   transitionAttention,
 } from '../src/index.js';
-import { ALICE, at, BOB, event, human, model, ROOM, sampleLog } from './fixtures.js';
+import { ALICE, at, BOB, event, human, model, ROOM, sampleLog, UNCITED_TAIL } from './fixtures.js';
 
 /**
  * #6's attention projection: four classes, hardest-first, and a rationale that
@@ -37,6 +37,10 @@ const MEMBERS = { [ROOM]: [ALICE, BOB, CAROL] };
 const MESSAGES: ProvenanceMessage[] = [
   { id: 'msg_1', authorId: ALICE, body: 'Reset narrowing on mutating method calls.' },
   { id: 'msg_bob', authorId: BOB, body: 'Land the narrowing fix, please.' },
+  // …and one nobody cites: `laterRevision` refuses a window that stops at the
+  // citations, so a fixture whose newest message is the cited one would exercise
+  // the referral path rather than the attention class it names.
+  UNCITED_TAIL,
 ];
 
 /** The context every test starts from: a window, so proposals can be judged. */
@@ -63,7 +67,7 @@ function decisionProposal(overrides: {
       roomId: ROOM,
       type: 'decision',
       payload: {
-        statement: 'Reset narrowing on mutating method calls',
+        statement: 'Reset narrowing on mutating method calls.',
         ...(overrides.decidedBy ? { decidedBy: overrides.decidedBy } : {}),
       },
       confidence: overrides.confidence ?? 0.9,
@@ -95,7 +99,7 @@ function thirdPartyCommitment(overrides: {
       // narrowing fix" quoted against "Land the narrowing fix, please" drops a
       // word, and a dropped word is the thing the receipt can no longer wave
       // through — so the fixture states what BOB actually wrote.
-      payload: { statement: 'Land the narrowing fix, please', owner: overrides.owner },
+      payload: { statement: 'Land the narrowing fix, please.', owner: overrides.owner },
       confidence: overrides.confidence ?? 0.9,
       proposer: { kind: 'model', model: 'test-model' },
       provenance: ['msg_bob'],
@@ -238,7 +242,7 @@ describe('class 1 — needs_decision', () => {
           id: 'obj_accepted_d',
           roomId: ROOM,
           type: 'decision',
-          payload: { statement: 'Reset narrowing on mutating method calls', decidedBy: BOB },
+          payload: { statement: 'Reset narrowing on mutating method calls.', decidedBy: BOB },
           provenance: { messageIds: ['msg_1'], proposalId: 'prop_d' },
           createdAt: at(10),
           updatedAt: at(10),

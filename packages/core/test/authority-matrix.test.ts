@@ -311,7 +311,12 @@ const windowWrittenBy = (authorId: string): ProvenanceMessage[] =>
   (Object.keys(TEXT) as AcceptedObjectType[]).map((type) => ({
     id: MSG_FOR[type],
     authorId,
-    body: /[.!?]$/.test(TEXT[type]) ? TEXT[type] : `${TEXT[type]}.`,
+    // **The body is the sentence, with no terminator added.** It used to append
+    // a full stop when `TEXT` did not carry one, and the payload statement did
+    // not — so every certifying cell of this matrix was riding
+    // `droppableTokens`, whose last entry r6's cross-lineage pass broke. The
+    // authority rules are what this file is about; the receipt has its own.
+    body: TEXT[type],
   }));
 
 /**

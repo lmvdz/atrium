@@ -125,32 +125,131 @@ describe('r6 — the token stream is the text, so token equality is text equalit
     }
   });
 
-  it('never reports borne for two texts that are not the same text', () => {
-    // The theorem the reassembly buys, checked over every ordered pair in the
-    // corpus: `borne` implies the two normalized texts are equal once the
-    // droppable tokens are taken out of each. Nothing here inspects *how* the
-    // alignment decided; it checks the claim the docblock makes.
+  it('is borne exactly when the two normalized texts are the same string', () => {
+    // **The whole guarantee, as an equivalence rather than an implication.**
     //
-    // **The comparison runs over `normalizeForReceipt` and not over the tokens.**
-    // Computing it from `orderedTokens` would be a probe made out of the thing
-    // under test — the class r4 was failed for and r6 found twice more — and it
-    // passes on `fix/core-engine-r5` for exactly that reason: r5's tokenizer
-    // drops the spaces on *both* sides, so a projection is compared with itself.
-    // The full stop is spelled out because it is the only member of the set, and
-    // the line above holds that to be true.
-    expect([...RECEIPT_POLICY.droppableTokens].sort()).toEqual(['.']);
-    const withoutDroppable = (text: string): string =>
-      normalizeForReceipt(text).replaceAll('.', '').replace(/\s+/gu, ' ').trim();
-
+    // Until the cross-lineage pass this test could only say "borne implies the
+    // texts match once the full stops are removed", and it compared two
+    // projections rather than two texts — a probe made out of the thing under
+    // test, the class r4 was failed for. With `droppableTokens` gone there is
+    // nothing left to project through: `borne` is the string comparison, in both
+    // directions, and that is asserted here over every ordered pair in the corpus
+    // and over a generated space besides.
     for (const quote of CORPUS) {
       for (const statement of CORPUS) {
         const result = statementBearing(quote, statement);
-        if (!result.borne) continue;
-        expect(withoutDroppable(quote), `"${quote}" was borne by "${statement}"`).toBe(
-          withoutDroppable(statement),
+        if (result.undecidable !== null) continue;
+        expect(result.borne, `${JSON.stringify([quote, statement])}`).toBe(
+          normalizeForReceipt(quote) === normalizeForReceipt(statement),
         );
       }
     }
+
+    // The generated half, so the corpus is not the only witness. Each piece is a
+    // class this file has been broken by: a space, a doubled space, a full stop,
+    // an ellipsis, both apostrophes, a backtick, a control character.
+    const pieces = ['a', ' ', '  ', '.', '...', "'", '’', '`', '\t', ''];
+    for (const p1 of pieces) {
+      for (const p2 of pieces) {
+        for (const q1 of pieces) {
+          for (const q2 of pieces) {
+            const quote = `w${p1}${p2}z`;
+            const statement = `w${q1}${q2}z`;
+            const result = statementBearing(quote, statement);
+            if (result.undecidable !== null) continue;
+            expect(result.borne, `${JSON.stringify([quote, statement])}`).toBe(
+              normalizeForReceipt(quote) === normalizeForReceipt(statement),
+            );
+          }
+        }
+      }
+    }
+  });
+
+  it('refuses the code literal a dropped full stop used to rewrite', () => {
+    // **grok's blind pass on r6, and codex's cut-off lead on the same line.**
+    // `droppableTokens` held `.` on the argument that "a full stop terminates a
+    // sentence and carries no other meaning" — a claim about context, enforced by
+    // a set-membership test over every `.` token anywhere. `normalizeForReceipt`
+    // preserves code spans byte for byte precisely because they are literals, and
+    // then the comparison deleted the dots back out of them.
+    //
+    // Every row here reached `auto_accept` and folded through `appendEvent`.
+    for (const [body, minted] of [
+      [
+        'Load `.env` before the deploy tonight, everyone.',
+        'Load `env` before the deploy tonight, everyone.',
+      ],
+      [
+        'Always cd to `..` before the deploy tonight.',
+        'Always cd to `` before the deploy tonight.',
+      ],
+      [
+        'Call the `foo.` method on the object tonight.',
+        'Call the `foo` method on the object tonight.',
+      ],
+      [
+        'Set the timeout to `3.` seconds for this job.',
+        'Set the timeout to `3` seconds for this job.',
+      ],
+      [
+        'We ship Monday. Then we celebrate with the team.',
+        'We ship Monday Then we celebrate with the team.',
+      ],
+      [
+        'We will deploy production Friday tonight.',
+        'We. will. deploy. production. Friday. tonight.',
+      ],
+      ['We will deploy production Friday tonight...', 'We will deploy production Friday tonight'],
+    ] as const) {
+      expect(statementBearing(body, minted).borne, minted).toBe(false);
+      expect(
+        kinds(
+          {
+            type: 'claim',
+            provenance: ['msg_1'],
+            quote: body,
+            statement: minted,
+            proposer: { kind: 'model' },
+            attributedTo: BOB,
+          },
+          room({ id: 'msg_1', authorId: BOB, body }),
+        ),
+        minted,
+      ).not.toEqual([]);
+      expect(
+        decideAcceptance(modelClaim(minted, body), {
+          messages: room({ id: 'msg_1', authorId: BOB, body }),
+        }).verdict,
+        minted,
+      ).not.toBe('auto_accept');
+    }
+  });
+
+  it('refers, rather than destroys, the model that drops the trailing full stop', () => {
+    // The cost of emptying the set, stated as a disposition. A model that quotes
+    // a whole message perfectly and leaves off the final `.` is no longer
+    // auto-accepted — and it is not thrown away either: the quote says one thing
+    // more than the statement, which is the case `refer` exists for.
+    const body = 'We will deploy production on Friday afternoon.';
+    const minted = 'We will deploy production on Friday afternoon';
+    const messages = room({ id: 'msg_1', authorId: BOB, body });
+    const problems = validateProposalProvenance(
+      {
+        type: 'claim',
+        provenance: ['msg_1'],
+        quote: body,
+        statement: minted,
+        proposer: { kind: 'model' },
+        attributedTo: BOB,
+      },
+      messages,
+    );
+    expect(problems.map((problem) => problem.kind)).toEqual(['quote_carries_more_than_statement']);
+    expect(problems[0]?.severity).toBe('refer');
+    const decision = decideAcceptance(modelClaim(minted, body), { messages });
+    expect(decision.verdict).toBe('pending');
+    expect(decision.visibility).toBe('quiet');
   });
 
   it('is borne by itself, for every text in the corpus that has content', () => {
@@ -197,10 +296,7 @@ describe('r6 — a receipt that refuses says what it found', () => {
                 proposer: { kind: 'model' },
                 attributedTo: BOB,
               },
-              [
-                { id: 'm0', authorId: ALICE, body: 'earlier unrelated chatter' },
-                { id: 'm1', authorId: BOB, body },
-              ],
+              room({ id: 'm1', authorId: BOB, body }),
             );
             if (!statementBearing(body, minted).borne) {
               expect(
@@ -236,10 +332,7 @@ describe('r6 — a receipt that refuses says what it found', () => {
             proposer: { kind: 'model' },
             attributedTo: BOB,
           },
-          [
-            { id: 'm0', authorId: ALICE, body: 'earlier unrelated chatter' },
-            { id: 'm1', authorId: BOB, body },
-          ],
+          room({ id: 'm1', authorId: BOB, body }),
         );
         expect(
           problems.map((problem) => problem.kind),
@@ -492,7 +585,7 @@ describe('r6 — the correction scan cannot be turned off by the window the call
     attributedTo: BOB,
   };
 
-  it('refuses a window that is nothing but the messages the proposal cites', () => {
+  it('refuses a window that stops where the citations stop', () => {
     // The demonstration, in one pair: the same proposal, refused against the room
     // and auto-accepted against "the messages this receipt cites" — which is the
     // natural reading of the field and what `commitmentAttribution` narrows to one
@@ -504,10 +597,27 @@ describe('r6 — the correction scan cannot be turned off by the window the call
     const problems = validateProposalProvenance(subject, citedOnly);
     expect(problems.map((problem) => problem.kind)).toEqual(['superseded_by_later_message']);
     expect(problems[0]?.severity).toBe('refer');
-    expect(problems[0]?.detail).toContain('nothing but');
+    expect(problems[0]?.detail).toContain('that the proposal did not itself choose');
 
     expect(
       decideAcceptance(modelClaim(STATEMENT, STATEMENT), { messages: citedOnly }).verdict,
+    ).toBe('pending');
+
+    // **And padding the window with something *earlier* does not satisfy it.**
+    // grok's blind pass on r6's first repair: that draft asked whether the
+    // window held anything the proposal did not choose, and `[uncited, cited]` —
+    // an earlier message, which cannot possibly correct a later one — said yes
+    // while the scan read exactly zero messages. The question is what the scan
+    // *read*, not what the window happened to contain.
+    const paddedBefore: ProvenanceMessage[] = [
+      { id: 'm_before', authorId: ALICE, body: 'starting the thread for everyone now' },
+      wholeRoom[0] as ProvenanceMessage,
+    ];
+    expect(validateProposalProvenance(subject, paddedBefore).map((p) => p.kind)).toEqual([
+      'superseded_by_later_message',
+    ]);
+    expect(
+      decideAcceptance(modelClaim(STATEMENT, STATEMENT), { messages: paddedBefore }).verdict,
     ).toBe('pending');
   });
 
@@ -528,7 +638,7 @@ describe('r6 — the correction scan cannot be turned off by the window the call
     expect(laterRevision(STATEMENT, ['msg_1'], wholeRoom)).toMatchObject({ kind: 'revision' });
     expect(laterRevision(STATEMENT, ['msg_1'], [wholeRoom[0] as ProvenanceMessage])).toEqual({
       kind: 'unscanned',
-      why: 'window_is_only_the_citations',
+      why: 'window_ends_at_the_citations',
     });
   });
 

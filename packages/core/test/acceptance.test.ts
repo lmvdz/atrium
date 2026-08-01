@@ -25,7 +25,7 @@ import {
   resolveAcceptanceConfig,
   serializeState,
 } from '../src/index.js';
-import { ALICE, at, BOB, event, human, model, ROOM, sampleLog } from './fixtures.js';
+import { ALICE, at, BOB, event, human, model, ROOM, room, sampleLog } from './fixtures.js';
 
 /**
  * #4's acceptance matrix, one test per cell.
@@ -82,7 +82,10 @@ const MESSAGE_ID: Record<AcceptedObjectType, string> = {
 };
 
 const windowWrittenBy = (authorId: string): ProvenanceMessage[] =>
-  OBJECT_TYPES.map((type) => ({ id: MESSAGE_ID[type], authorId, body: QUOTE[type] }));
+  // …and one message nobody cites, at the end. `laterRevision` refuses a window
+  // that stops at the citations, so the last type in this list would otherwise
+  // exercise the referral path instead of the cell it names.
+  room(...OBJECT_TYPES.map((type) => ({ id: MESSAGE_ID[type], authorId, body: QUOTE[type] })));
 
 /** ALICE wrote all of it, so a claim or commitment of ALICE's is self-stated. */
 const aliceMessages: ProvenanceMessage[] = windowWrittenBy(ALICE);
@@ -101,14 +104,21 @@ function proposal(overrides: {
     ({
       // r4: each statement is the sentence its `QUOTE` carries, word for word.
       // The receipt no longer measures how many words two texts share; it asks
-      // whether the statement is the quote with nothing dropped but articles, so
-      // "Land the migration" quoted against "I'll land the migration tomorrow"
-      // is a reading a person has to confirm rather than one a model may accept.
-      decision: { statement: 'Reset narrowing on mutating method calls' },
-      commitment: { statement: "I'll land the migration tomorrow", owner: ALICE },
-      open_question: { question: 'Do we keep the flag after launch?' },
-      claim: { statement: 'The migration is reversible', claimant: ALICE },
-      objective: { title: 'Ship the narrowing fix this quarter' },
+      // whether the statement **is** the quote, so "Land the migration" quoted
+      // against "I'll land the migration tomorrow" is a reading a person has to
+      // confirm rather than one a model may accept.
+      //
+      // **Word for word now includes the full stop, and r6's cross-lineage pass
+      // is why.** These read `'The migration is reversible'` against a body of
+      // `'The migration is reversible.'` until `droppableTokens` was emptied —
+      // its last entry, `.`, auto-accepted ``Load `env` …`` against ``Load
+      // `.env` …``. Every cell of #4's matrix was therefore exercising a licence
+      // rather than the cell it names; they carry the sentence exactly now.
+      decision: { statement: QUOTE.decision },
+      commitment: { statement: QUOTE.commitment, owner: ALICE },
+      open_question: { question: QUOTE.open_question },
+      claim: { statement: QUOTE.claim, claimant: ALICE },
+      objective: { title: QUOTE.objective },
     }[overrides.type] as Record<string, unknown>);
 
   return ProposalSchema.parse({
@@ -413,7 +423,7 @@ describe('#4 acceptance matrix — one test per cell', () => {
           {
             objectId: 'obj_1',
             type: 'claim',
-            text: 'The migration is reversible',
+            text: QUOTE.claim,
             messageIds: [MESSAGE_ID.claim],
           },
         ],
@@ -681,7 +691,10 @@ describe('deduplication against accepted state — the spike’s amendment 3', (
     {
       objectId: 'obj_existing',
       type: 'claim' as const,
-      text: 'The migration is reversible',
+      // The accepted object carries the sentence the proposal restates, full stop
+      // included: since r6 nothing is droppable, so a re-proposal is a re-proposal
+      // of the *same string*.
+      text: QUOTE.claim,
       messageIds: [MESSAGE_ID.claim],
     },
   ];
@@ -699,7 +712,7 @@ describe('deduplication against accepted state — the spike’s amendment 3', (
   it('requires both statement similarity and provenance overlap', () => {
     // Same words, different messages: not a duplicate. Two people can say the
     // same thing twice and both are real.
-    expect(findDuplicate('claim', 'The migration is reversible', ['msg_9'], accepted)).toBeNull();
+    expect(findDuplicate('claim', QUOTE.claim, ['msg_9'], accepted)).toBeNull();
     // Same message, different words: also not a duplicate. One message carries
     // several readings, which is the ordinary case.
     expect(
@@ -708,9 +721,7 @@ describe('deduplication against accepted state — the spike’s amendment 3', (
   });
 
   it('does not match across types', () => {
-    expect(
-      findDuplicate('open_question', 'The migration is reversible', ['msg_1'], accepted),
-    ).toBeNull();
+    expect(findDuplicate('open_question', QUOTE.claim, ['msg_1'], accepted)).toBeNull();
   });
 });
 

@@ -239,6 +239,52 @@ export function resolveAcceptanceConfig(
  * The receipt minima
  * ───────────────────────────────────────────────────────────────────────── */
 
+/**
+ * **`droppableTokens` is gone, and this is its obituary.**
+ *
+ * It was the answer to "what may differ between a quote and the statement it is
+ * supposed to carry", and the answer is now **nothing**. Kept here rather than
+ * deleted silently, because a field that has been removed is a rule somebody
+ * will otherwise re-derive.
+ *
+ * r3 answered "does this quote bear this sentence" with lexical overlap over a
+ * de-duplicated content-word set, with `not` on the stopword list, and r3's
+ * gauntlet inverted the product with it. The lesson was not that `not` was on
+ * the wrong list — it was that **a list of dangerous words is unbounded**. So r4
+ * built the other kind of list: not the tokens that must match, but the only
+ * ones that may differ. Four entries. Each one has now been broken by a
+ * reviewer, and each break had the same shape — the *justification* was about a
+ * context the *membership test* could not see:
+ *
+ * | entry        | round | the input that broke its argument                       |
+ * | ------------ | ----- | ------------------------------------------------------- |
+ * | `a`, `an`    | r4    | "**A** maintainer will deploy" bearing "**The** maintainer will deploy" — indefinite reference laundered into definite |
+ * | `the`        | r4    | "**A** will deploy production Friday" bearing "will deploy production Friday" — a one-letter name is spelled like an article |
+ * | `.`          | **r6** | ``Load `.env` before the deploy tonight.`` bearing ``Load `env` …``; ``cd to `..` `` bearing ``cd to `` ``; "We ship. Then we celebrate." bearing "We ship Then we celebrate." |
+ *
+ * The argument for `.` was *"a full stop terminates a sentence and carries no
+ * other meaning"*. True of a sentence-final full stop, and the check was a
+ * `Set.has` over every `.` token anywhere — including inside the code spans
+ * `normalizeForReceipt` preserves byte for byte precisely because they are
+ * literals. A hidden file, a parent directory, a trailing method dot, a decimal
+ * point and the period between two sentences are all "no other meaning" to a
+ * set-membership test. Found by grok's blind pass on r6, and independently by
+ * codex before its run was cut short.
+ *
+ * **What is left needed no justification: the statement is the quote.** `borne`
+ * is now exactly `normalizeForReceipt(quote) === normalizeForReceipt(statement)`
+ * — one sentence, no exceptions, and `bearing.test.ts` asserts the equivalence
+ * directly rather than sampling it.
+ *
+ * The cost, stated as a disposition and not as a residue: **a model that drops
+ * the trailing full stop from a sentence it otherwise quotes perfectly is no
+ * longer auto-accepted.** It is referred — `quote_carries_more_than_statement` —
+ * so a person reads two nearly identical sentences and clicks once. The cost is
+ * small for the reason r5 gave when it retired asterisk emphasis: since
+ * `quoteCoversOwnText`, a quote must be the **whole message body**, and a model
+ * reproducing a whole body verbatim carries its final full stop along.
+ */
+
 export interface ReceiptPolicy {
   /**
    * Shortest quoted span (normalized) that can serve as a receipt.
@@ -252,43 +298,6 @@ export interface ReceiptPolicy {
    * quoting anything" — so it is one constant now, read by both.
    */
   minQuoteLength: number;
-  /**
-   * **The only tokens the bearing check will let differ between a quote and the
-   * statement it is supposed to carry.**
-   *
-   * r3 answered "does this quote bear this sentence" with lexical overlap over a
-   * de-duplicated content-word set, with `not` on the stopword list. r3's
-   * gauntlet inverted the product with it: quote *"Bob will not deploy production
-   * Friday"*, mint *"Bob will deploy production Friday"*, score 100%,
-   * auto-accept. The lesson is not that `not` was on the wrong list. It is that
-   * **a list of dangerous words is unbounded** — polarity, quantifiers, modals,
-   * hedges, subordinators, and whatever the next reviewer thinks of — and a check
-   * built on one is wrong until somebody finds the next word.
-   *
-   * So this is the other kind of list: not the tokens that must match, but the
-   * *only* ones that may differ. Everything else in either text — every word,
-   * every mark, every emoji — is content that has to be accounted for.
-   *
-   * **It contains one entry, and it used to contain four.** r4's own blind
-   * cross-lineage review broke the argument for the other three. `a`, `an` and
-   * `the` were here on the grounds that adding or removing an article cannot
-   * change who, whether, how many or when — and the reviewers produced *"**A**
-   * maintainer will deploy production Friday"* bearing *"**The** maintainer will
-   * deploy production Friday"* (indefinite reference laundered into definite) and
-   * *"**A** will deploy production Friday"* bearing *"will deploy production
-   * Friday"* (the subject dropped entirely, because a one-letter name is spelled
-   * like an article). Both auto-accepted. The justification was wrong, so the
-   * entries went, and what is left is the sentence that needed no justification:
-   * **the statement is the quote.**
-   *
-   * `.` survives because a full stop terminates a sentence and carries no other
-   * meaning — `?` and `!` are *not* here, because "Bob will deploy Friday?" is a
-   * question and minting it as an assertion is the same defect in different
-   * clothes. Adding anything to this set changes what the product guarantees; the
-   * bar is an argument nobody can break, and three of the four entries that used
-   * to be here did not clear it.
-   */
-  droppableTokens: ReadonlySet<string>;
   /**
    * The most tokens the bearing alignment will compare on either side.
    *
@@ -345,7 +354,6 @@ export interface ReceiptPolicy {
 
 export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
   minQuoteLength: 24,
-  droppableTokens: Object.freeze(new Set(['.'])) as ReadonlySet<string>,
   maxAlignedTokens: 800,
   maxScannedSentences: 200,
   maxLaterMessagesScanned: 200,

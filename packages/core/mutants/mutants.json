@@ -539,16 +539,16 @@
       "catches": ["keeps two-letter words, because \"no\" inverts a sentence"]
     },
     {
-      "id": "receipt_policy_droppable_widened",
-      "why": "r3's defect as a one-word policy change: `not` becomes a token a statement may drop from the quote it rests on. The set held three articles until r4's own blind review laundered an indefinite reference through them.",
-      "file": "src/policy.ts",
-      "find": "  droppableTokens: Object.freeze(new Set(['.'])) as ReadonlySet<string>,",
-      "replace": "  droppableTokens: Object.freeze(new Set(['.', 'not'])) as ReadonlySet<string>,",
+      "id": "receipt_policy_droppable_restored",
+      "why": "Puts `droppableTokens` back, with the entry r6 removed. Every entry it ever held was broken by a reviewer on the same shape — a justification about *context* enforced by a set-membership test over a *character*. `.` was there because \"a full stop terminates a sentence and carries no other meaning\", and grok's blind pass produced ``Load `.env` before the deploy tonight.`` bearing ``Load `env` …``, `` `..` `` bearing `` `` ``, and \"We ship Monday. Then we celebrate.\" bearing \"We ship Monday Then we celebrate.\" — all auto-accepted and all folded through `appendEvent`.",
+      "file": "src/matching.ts",
+      "find": "  return {\n    borne: sameRun(quote, statement),",
+      "replace": "  const drop = (t: readonly string[]) => t.filter((x) => x !== '.');\n  return {\n    borne: sameRun(drop(quote), drop(statement)),",
       "catches": [
-        "is exactly this table",
-        "lets nothing but a full stop differ between a quote and its statement",
-        "refuses the exact pair from the gauntlet at the acceptance engine",
-        "refuses negation"
+        "lets nothing at all differ between a quote and its statement",
+        "refuses a difference of a full stop, like every other difference",
+        "refuses the code literal a dropped full stop used to rewrite",
+        "is borne exactly when the two normalized texts are the same string"
       ]
     },
     {
@@ -649,7 +649,7 @@
       "catches": [
         "refuses a question minted as an assertion",
         "refuses a symbol that carries the negation",
-        "lets nothing but a full stop differ between a quote and its statement",
+        "lets nothing at all differ between a quote and its statement",
         "reassembles the normalized text exactly, for every text"
       ]
     },
@@ -702,8 +702,8 @@
       "id": "quote_context_unchecked",
       "why": "Drops the rule that a certifiable quote is the whole of what its author wrote. This is r4's documented residue: \"We will deploy production Friday. Not.\" quoted as its first sentence is verbatim, whole-sentence, correctly attributed, and bears its own statement.",
       "file": "src/escalation.ts",
-      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body, policy)) {",
-      "replace": "      } else if (false && !quoteCoversOwnText(quote, bearing.body, policy)) {",
+      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body)) {",
+      "replace": "      } else if (false && !quoteCoversOwnText(quote, bearing.body)) {",
       "catches": [
         "does not certify a quote whose message carries a trailing inverter",
         "refers every other way a neighbouring sentence changes the force"
@@ -858,8 +858,8 @@
       "id": "coverage_reads_the_stripped_text",
       "why": "Points the coverage check at `stripReplyBlockquotes(body)` instead of the body, which is r5's first draft. `stripReplyBlockquotes` deletes every line beginning with `>` whether or not anybody else wrote it, so an author who writes \"We will deploy production Friday.\" and then \"> Not.\" has their own second line deleted and the first certifies.",
       "file": "src/escalation.ts",
-      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body, policy)) {",
-      "replace": "      } else if (!quoteCoversOwnText(quote, ownText, policy)) {",
+      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body)) {",
+      "replace": "      } else if (!quoteCoversOwnText(quote, ownText)) {",
       "catches": ["refers a quote whose author put the inverter in their own blockquote"]
     },
     {
@@ -943,21 +943,13 @@
       "replace": "    borne: unmatchedInQuote.length === 0 && unmatchedInStatement.length === 0,",
       "catches": [
         "refuses to mint a code literal the author did not write, at every layer",
-        "lets nothing but a full stop differ between a quote and its statement",
+        "lets nothing at all differ between a quote and its statement",
         "refuses every one of the four at the engine"
       ]
     },
     {
-      "id": "strip_droppable_leaves_the_spacing",
-      "why": "Removes the droppable tokens without closing the gap they leave, so an ellipsis dropped as three full stops leaves the space it was sitting in unpaired. The refusal is then a true finding with a false reason — `statement_respaces_the_quote` on a sentence with no code span in it.",
-      "file": "src/matching.ts",
-      "find": "    if (closesAGap) continue;",
-      "replace": "    if (false && closesAGap) continue;",
-      "catches": ["rejects a quote elided with an ellipsis that is not verbatim anywhere"]
-    },
-    {
       "id": "respacing_not_reported",
-      "why": "Drops the whitespace branch, so a statement that re-spaces a code literal falls through to the catch-all. The catch-all still refuses — that is what it is for — but the receipt stops saying what it found, and a refusal nobody can act on is the failure this file spends its length on.",
+      "why": "Drops the whitespace branch, so a statement holding the same marks in a different spacing falls through to the catch-all. The catch-all still refuses — that is what it is for — but the receipt stops saying what it found, and a refusal nobody can act on is the failure this file spends its length on. The branch says the fact and not the cause: three drafts of this round tried to enumerate the ways two texts can differ in spacing alone and a brute force broke all three.",
       "file": "src/escalation.ts",
       "find": "        } else if (bearingResult.whitespaceDiffers) {",
       "replace": "        } else if (false && bearingResult.whitespaceDiffers) {",
@@ -977,12 +969,12 @@
     },
     {
       "id": "later_revision_window_gate_removed",
-      "why": "Removes the check that the window holds something the proposal did not cite. A caller supplying \"the messages this receipt cites\" — the natural reading of the field — then turns the correction scan off in silence: whole room refuses, cited-only auto-accepts. Same fail-open as `messages: []` and `[{ body: '' }]`, one level out.",
+      "why": "Removes the check that the correction scan actually read something the proposal did not choose. A caller supplying 'the messages this receipt cites' — the natural reading of the field — then turns the scan off in silence: whole room refuses, cited-only auto-accepts. Same fail-open as messages: [] and [{ body: '' }], one level out. r6's first repair asked whether the *window* held an uncited message, and grok's blind pass padded it with an *earlier* one — which cannot correct a later message — so the question is what the scan read.",
       "file": "src/escalation.ts",
-      "find": "  if (messages.every((message) => cited.has(message.id))) {\n    return unscanned('window_is_only_the_citations');\n  }",
+      "find": "  if (!messages.slice(firstCited + 1).some((message) => !cited.has(message.id))) {\n    return unscanned('window_ends_at_the_citations');\n  }",
       "replace": "  // window gate removed",
       "catches": [
-        "refuses a window that is nothing but the messages the proposal cites",
+        "refuses a window that stops where the citations stop",
         "says how far it read, so \"found nothing\" is not \"read nothing\""
       ]
     },

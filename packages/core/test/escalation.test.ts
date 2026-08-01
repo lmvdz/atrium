@@ -475,11 +475,16 @@ describe('evaluateEscalation — the whole window', () => {
 /* ───────────────────────────────────────────────────────────────────────── */
 
 describe('validateProposalProvenance — the spike’s three post-checks', () => {
-  const messages = [messageOpener, messageQuotingOpener, messageDispute].map((message) => ({
-    id: message.id,
-    authorId: message.authorId,
-    body: message.body,
-  }));
+  // The three spike messages, plus one the proposals below never cite —
+  // `laterRevision` refuses a window that stops at the citations, because a scan
+  // that read nothing the proposal did not choose has established nothing.
+  const messages = room(
+    ...[messageOpener, messageQuotingOpener, messageDispute].map((message) => ({
+      id: message.id,
+      authorId: message.authorId,
+      body: message.body,
+    })),
+  );
 
   /**
    * The whole final sentence of `messageDispute`.
@@ -684,11 +689,18 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ),
-      // Two findings, not one, and the second is r3's: with no bearing message
-      // the attribution is *unsupported*, where round 2 fell back to "did the
-      // claimant write any cited message" and answered yes.
+      // Three findings, and each is its own fact about the reading. The second
+      // is r3's: with no bearing message the attribution is *unsupported*, where
+      // round 2 fell back to "did the claimant write any cited message" and
+      // answered yes. The third is r6's: the statement drops the ellipsis, and
+      // an ellipsis is three full stops — which used to be three droppable
+      // tokens, so the receipt said the two texts were the same sentence.
       // (`problemKinds` sorts, so this reads alphabetically.)
-    ).toEqual(['attributed_person_not_author', 'elided_quote']);
+    ).toEqual([
+      'attributed_person_not_author',
+      'elided_quote',
+      'quote_carries_more_than_statement',
+    ]);
   });
 
   it('reports a plain missing quote separately from an elided one', () => {
