@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -59,15 +59,17 @@ const MIGRATIONS = join(ROOT, 'packages/db/drizzle');
 /**
  * The migration a `sql` mutant restores from when it does not name one.
  *
- * Named per mutant rather than assumed, because 0004, 0005 and 0006 all define
- * `atrium_append_core_event` and each carries a `REVOKE EXECUTE ON FUNCTION` for
- * it. A bare marker matches in all three, and restoring from an older one would
- * quietly re-deploy a signature a later round replaced — including 0005's, whose
- * ninth argument is the caller-supplied receipt window round 5 removed. A restore
- * that "succeeds" and leaves the database describing the defect is the worst
- * failure available to a ledger whose whole claim is restoring faithfully.
+ * Named per mutant rather than assumed, because 0004, 0005, 0006 and 0007 all
+ * define `atrium_append_core_event` and each carries a `REVOKE EXECUTE ON
+ * FUNCTION` for it. A bare marker matches in all four, and restoring from an
+ * older one would quietly re-deploy a signature a later round replaced —
+ * including 0005's, whose ninth argument is the caller-supplied receipt window
+ * round 5 removed, and 0006's, whose room CHECK is the `coalesce` round 6
+ * removed. A restore that "succeeds" and leaves the database describing the
+ * defect is the worst failure available to a ledger whose whole claim is
+ * restoring faithfully.
  */
-const DEFAULT_RESTORE_MIGRATION = '0006_derived_receipt_snapshot.sql';
+const DEFAULT_RESTORE_MIGRATION = '0007_kind_discriminated_room.sql';
 
 function statementsOf(file: string): string[] {
   return readFileSync(join(MIGRATIONS, file), 'utf8')
@@ -193,5 +195,33 @@ describe('the mutant ledger still describes this code', () => {
       .filter((m) => (m.catches ?? []).length > 0)
       .map((m) => m.id);
     expect(overclaimed).toEqual([]);
+  });
+
+  it('refuses to report on a tree that is still mid-mutation', () => {
+    /**
+     * The half of the r5-delta polish finding that recovery cannot reach.
+     *
+     * > mutant SIGKILL recovery is best-effort, so between a kill and the next
+     * > run `pnpm test` can be green on a mutated tree.
+     *
+     * True, and it stays true of *recovery*, which only runs when the mutant
+     * runner next starts. What it stops being true of is the **gate**: a leftover
+     * `.inflight.json` is the one durable fact a killed run leaves, and while it
+     * is on disk `pnpm test` is measuring a tree somebody mutated. So the suite
+     * refuses rather than reporting green over it.
+     *
+     * Deliberately in *this* file. The runner excludes `ledger.test.ts` from
+     * every mutant's score, because it goes red under all of them by
+     * construction — which is exactly what a guard that fires during a live
+     * mutant run needs, so that "the tree is mid-mutation, as intended" can never
+     * be scored as "the mutant was caught". The same assertion anywhere else in
+     * the unit suite would credit every file mutant in the ledger.
+     *
+     * `mutants/inflight.test.ts` drives the recovery itself; this is only the
+     * refusal to report over one that has not happened yet.
+     */
+    const inflight = join(HERE, '.inflight.json');
+    const leftover = existsSync(inflight) ? readFileSync(inflight, 'utf8') : null;
+    expect({ inflight: leftover }).toEqual({ inflight: null });
   });
 });

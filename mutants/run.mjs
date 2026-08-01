@@ -75,11 +75,16 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
+import {
+  clearInFlight as clear,
+  markInFlight as mark,
+  recoverInterruptedRun as recoverInFlight,
+} from './inflight.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -87,7 +92,7 @@ const LEDGER = join(HERE, 'mutants.json');
 const RESULTS = join(HERE, 'RESULTS.md');
 const MIGRATIONS = join(ROOT, 'packages/db/drizzle');
 /** The migration a `sql` mutant restores from when it does not name one. */
-const DEFAULT_RESTORE_MIGRATION = '0006_derived_receipt_snapshot.sql';
+const DEFAULT_RESTORE_MIGRATION = '0007_kind_discriminated_room.sql';
 
 const args = process.argv.slice(2);
 const check = args.includes('--check');
@@ -221,59 +226,39 @@ let sql = null;
  * The three in the header are about a mutant that no longer applies, one caught
  * by the wrong test, and one measured against a stale build. This is the one that
  * bit during round 5 and is not in that list: **a run that dies between applying
- * a mutation and undoing it leaves the mutation in the working tree**. The signal
- * handlers below cover a clean SIGINT; they do not cover `kill -9`, an OOM, a
- * killed process group, or a laptop lid. What is left behind is a source file
- * silently reverted to an earlier round's behaviour — which the next `pnpm test`
- * may or may not notice, and which a later commit would ship.
+ * a mutation and undoing it leaves the mutation in the working tree**.
  *
- * The RETRO's standing form of this is "a ledger should assert a clean tree
- * before trusting its own output" (#40 r2), and a plain `git status` cannot: a
- * fix branch has legitimate uncommitted work by definition. So the record is
- * explicit rather than inferred — the in-flight mutation and the file's original
- * bytes, written before the mutation and deleted after the restore. On startup a
- * leftover record is put back automatically and reported loudly, because the
- * alternative is a person reading a diff and wondering which half is theirs.
+ * The mechanism is `mutants/inflight.mjs`, which is its own module for a reason
+ * the r5 delta gave: recovery was the one part of this instrument with no
+ * instrument of its own, because a script that does its work at import time
+ * cannot be unit-tested without running it. It is a pure function there,
+ * `mutants/inflight.test.ts` drives all four of its outcomes, and the mutant
+ * `inflight_recovery_is_a_no_op` makes that suite go red. The residual window a
+ * filesystem record cannot close, and what closes it from the other end, are
+ * written down in that module's header.
  */
 const INFLIGHT = join(HERE, '.inflight.json');
 
 function recoverInterruptedRun() {
-  if (!existsSync(INFLIGHT)) return;
-  let record;
-  try {
-    record = JSON.parse(readFileSync(INFLIGHT, 'utf8'));
-  } catch {
-    console.error(
-      `mutants/.inflight.json exists and does not parse. A previous run died mid-mutation and its\n` +
-        'record is unreadable; restore the working tree by hand (git diff will show the mutation)\n' +
-        'and delete the file before running again.',
-    );
+  const verdict = recoverInFlight({ path: INFLIGHT, root: ROOT });
+  if (verdict.status === 'clean') return;
+  if (verdict.status === 'refuse') {
+    console.error(verdict.reason);
     process.exit(1);
   }
-  if (record.kind === 'file') {
-    writeFileSync(join(ROOT, record.file), record.original);
-    console.error(
-      `recovered: a previous run died with "${record.id}" applied to ${record.file}. The file has\n` +
-        'been restored from the record. Rebuilding, then continuing.',
-    );
-    rebuildPackages();
-  } else {
-    console.error(
-      `a previous run died with the sql mutant "${record.id}" applied to the database. This run\n` +
-        'would measure a mutated schema, so it is refusing. Re-apply the migrations to a clean\n' +
-        `database (\`pnpm test:integration\` recreates one) and delete mutants/.inflight.json.`,
-    );
-    process.exit(1);
-  }
-  rmSync(INFLIGHT, { force: true });
+  console.error(
+    `recovered: a previous run died with "${verdict.id}" applied to ${verdict.file}. The file has\n` +
+      'been restored from the record. Rebuilding, then continuing.',
+  );
+  rebuildPackages();
 }
 
 function markInFlight(record) {
-  writeFileSync(INFLIGHT, JSON.stringify(record));
+  mark(INFLIGHT, record);
 }
 
 function clearInFlight() {
-  rmSync(INFLIGHT, { force: true });
+  clear(INFLIGHT);
 }
 
 function readOnce(file) {

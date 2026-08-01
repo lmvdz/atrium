@@ -5,6 +5,7 @@ import {
   acceptedObjects,
   attentionItems,
   coreEvents,
+  eventType,
   messages,
   proposals,
   users,
@@ -112,6 +113,140 @@ function ledgerRow(
 type LedgerRow = ReturnType<typeof ledgerRow>;
 
 /**
+ * One honest row per ledger event kind (#22 gauntlet r5 delta, blocking).
+ *
+ * `ledgerRow` only ever built a `message_posted`, which is why every fixture for
+ * the room check was a `message_posted` or an `object_accepted` and why the
+ * kind-blind `coalesce` survived a round: five of the eight kinds had never been
+ * appended through this suite at all.
+ *
+ * Each payload carries exactly the room key its own shape declares — the table in
+ * `declaredRoomId` (`apps/server/src/room-events.ts`) — and nothing else, so a
+ * test that wants a dishonest shape has to add the extra key itself and a reader
+ * can see it doing so.
+ *
+ * The payloads are minimal but structurally real: these rows are never folded by
+ * the reducer (the constraints suite talks to Postgres, not to `reduce`), and
+ * inventing fields the schema does not have would make a fixture that passes for
+ * a reason the product does not have.
+ */
+function kindRow(
+  type: string,
+  roomId: string,
+  subjects: { proposalId?: string; objectId?: string } = {},
+): LedgerRow {
+  const id = randomUUID();
+  const at = nextAt();
+  const proposalId = subjects.proposalId ?? randomUUID();
+  const objectId = subjects.objectId ?? randomUUID();
+  const base = { id, at, type };
+  let payload: Record<string, unknown>;
+  switch (type) {
+    case 'proposal_recorded':
+      payload = {
+        ...base,
+        proposal: {
+          id: proposalId,
+          roomId,
+          type: 'claim',
+          payload: { statement: 'ship it', claimant: null, verification: 'unverified' },
+          confidence: 0.9,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: { messageIds: [], proposalId: null, interpretationId: null },
+          quote: null,
+          status: 'pending',
+          createdAt: at,
+        },
+      };
+      break;
+    case 'object_accepted':
+      payload = {
+        ...base,
+        object: {
+          id: objectId,
+          roomId,
+          type: 'claim',
+          payload: { statement: 'ship it', claimant: null, verification: 'unverified' },
+          objectiveId: null,
+          provenance: { messageIds: [], proposalId: null, interpretationId: null },
+          createdAt: at,
+          updatedAt: at,
+        },
+      };
+      break;
+    case 'relation_added':
+      payload = {
+        ...base,
+        relation: {
+          id: randomUUID(),
+          roomId,
+          type: 'supersedes',
+          fromObjectId: objectId,
+          toObjectId: objectId,
+          createdAt: at,
+        },
+      };
+      break;
+    case 'message_posted':
+      payload = {
+        ...base,
+        roomId,
+        messageId: randomUUID(),
+        body: 'hello',
+        replyToId: null,
+        clientMessageId: null,
+        attachments: [],
+      };
+      break;
+    case 'attention_resolved':
+      payload = { ...base, roomId, attentionId: randomUUID(), status: 'resolved' };
+      break;
+    case 'proposal_rejected':
+      payload = { ...base, proposalId, reason: null };
+      break;
+    case 'proposal_superseded':
+      payload = { ...base, proposalId, supersededByProposalId: null, reason: null };
+      break;
+    case 'object_corrected':
+      payload = {
+        ...base,
+        objectId,
+        action: 'amend',
+        patch: {},
+        toType: null,
+        provenance: { messageIds: [], proposalId: null, interpretationId: null },
+        note: null,
+      };
+      break;
+    default:
+      // A ninth kind in the `event_type` enum with no fixture here would
+      // otherwise be exercised by nothing, silently.
+      throw new Error(`no ledger fixture for event kind "${type}"`);
+  }
+  return { roomId, id, type, actorKind: 'system', actorId: null, payload, occurredAt: at };
+}
+
+/** A `proposal_recorded` that mints a *named* proposal, so a later event can name it. */
+function recording(roomId: string, proposalId: string): LedgerRow {
+  return kindRow('proposal_recorded', roomId, { proposalId });
+}
+
+/** An `object_accepted` that mints a *named* object, for the same reason. */
+function acceptedObject(roomId: string, objectId: string): LedgerRow {
+  return kindRow('object_accepted', roomId, { objectId });
+}
+
+/** A `proposal_rejected` naming a proposal — one of the three room-less kinds. */
+function rejection(roomId: string, proposalId: string): LedgerRow {
+  return kindRow('proposal_rejected', roomId, { proposalId });
+}
+
+/** An `object_corrected` naming an object — another of the three. */
+function correction(roomId: string, objectId: string): LedgerRow {
+  return kindRow('object_corrected', roomId, { objectId });
+}
+
+/**
  * Append the way production appends: through the procedure, with the advisory
  * lock, on a real transaction.
  *
@@ -193,7 +328,14 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
 
   it('refuses a payload whose type disagrees with the lifted column', async () => {
     const row = ledgerRow(roomA);
-    row.payload.type = 'object_accepted';
+    // `attention_resolved`, not `object_accepted`. The two kinds spell their room
+    // the same way (a bare `roomId`), so this fixture violates the type rule and
+    // *only* the type rule — under r6's kind-discriminated room check, claiming to
+    // be an `object_accepted` while carrying `message_posted`'s room key is a
+    // second violation, and Postgres reports whichever constraint it evaluates
+    // first. A fixture that trips two rules is a test that names one of them by
+    // luck.
+    row.payload.type = 'attention_resolved';
     await violatesConstraint('core_events_payload_type_matches', () => append(row));
   });
 
@@ -1549,18 +1691,261 @@ describe('core_events — the receipt window is derived, not supplied', () => {
     await violatesConstraint('core_events_payload_room_matches', () =>
       append(acceptance(roomA, [], roomB)),
     );
-    // …and the three kinds that declare no room at all are still appendable, which
-    // is what makes the check total rather than a ban on half the union.
-    const roomless = ledgerRow(roomA);
-    roomless.type = 'proposal_rejected';
-    roomless.payload = {
-      id: roomless.id,
-      at: roomless.occurredAt,
-      type: 'proposal_rejected',
-      proposalId: randomUUID(),
-      reason: null,
-    };
-    await expect(append(roomless)).resolves.toBeDefined();
+    // …and the three kinds that declare no room at all are still appendable, so
+    // long as the room they are filed into is the one their subject lives in.
+    // That half moved into the append boundary in 0007 and has its own block
+    // below; here it is only the check being total rather than a ban on half the
+    // union.
+    const proposalId = randomUUID();
+    await append(recording(roomA, proposalId));
+    await expect(append(rejection(roomA, proposalId))).resolves.toBeDefined();
+  });
+});
+
+/**
+ * The room is decided by the event's **kind**, not by which room key happens to
+ * be in the payload (#22 gauntlet r5 delta, blocking).
+ *
+ * The finding, in full, because the exploit is the whole argument:
+ *
+ * > `core_events_payload_room_matches` coalesces over every nested room key a
+ * > payload might carry, and coalesce is order-of-keys rather than order-of-kind.
+ * > JSONB accepts extra keys; Zod strips them only after the row exists. So
+ * > `object_accepted` with `p_room_id = B`, a real `object.roomId = A`, and a
+ * > smuggled `proposal: {roomId: B}` passes on the smuggled key — fan-out uses B,
+ * > the fold uses A, and `since(B, n)` serves a row that folded into another room.
+ *
+ * Round 5's own test for this constraint is directly above, and it is why the
+ * defect survived a round: **it only ever exercised honest shapes.** Every case
+ * it drove had exactly the room key its kind declares, so a check that reads the
+ * *first* room key and a check that reads the *right* one are the same check
+ * against it. The mutant was no better — it dropped the constraint outright,
+ * which is the loud failure, and said nothing about the shape of what replaced it.
+ *
+ * So the fixtures here are the dishonest shapes, and they are exhaustive rather
+ * than illustrative: **every kind, crossed with every room key belonging to some
+ * other kind's shape.** A check that reads any key but its own fails at least one
+ * cell of that product, whichever key it happens to prefer.
+ *
+ * Both values are tried for each smuggled key — the row's own room and the other
+ * room — because the refusal is about the key being *present*, not about its
+ * value. A check that compared values and ignored provenance would pass the first
+ * half of every pair and leave the exploit intact for the second.
+ */
+describe('core_events — the room key is the one this kind declares, and no other', () => {
+  /** The four places a room can be spelled in a ledger payload. */
+  const ROOM_KEYS = ['proposal.roomId', 'object.roomId', 'relation.roomId', 'roomId'] as const;
+  type RoomKey = (typeof ROOM_KEYS)[number];
+
+  /**
+   * The room key each kind's shape actually carries, or `null` for the three that
+   * name a subject instead. This is `declaredRoomId` in
+   * `apps/server/src/room-events.ts`, as a table.
+   */
+  const OWN_KEY: Record<string, RoomKey | null> = {
+    proposal_recorded: 'proposal.roomId',
+    object_accepted: 'object.roomId',
+    relation_added: 'relation.roomId',
+    message_posted: 'roomId',
+    attention_resolved: 'roomId',
+    proposal_rejected: null,
+    proposal_superseded: null,
+    object_corrected: null,
+  };
+
+  /** Write a room key into a payload at one of the four spellings. */
+  function smuggle(payload: Record<string, unknown>, key: RoomKey, value: string): void {
+    if (key === 'roomId') {
+      payload.roomId = value;
+      return;
+    }
+    const [container] = key.split('.') as [string];
+    const existing = (payload[container] ?? {}) as Record<string, unknown>;
+    payload[container] = { ...existing, roomId: value };
+  }
+
+  /**
+   * The subjects the three room-less kinds name.
+   *
+   * They have to be real: 0007's boundary resolves a rejection or a correction
+   * back to the room its proposal or object was minted in, so a fixture with an
+   * invented subject would be refused for that reason and never reach the CHECK
+   * this block is about. Seeded in `roomA` once per test.
+   */
+  let proposalId: string;
+  let objectId: string;
+
+  beforeEach(async () => {
+    proposalId = randomUUID();
+    objectId = randomUUID();
+    await append(recording(roomA, proposalId));
+    await append(acceptedObject(roomA, objectId));
+  });
+
+  it('refuses every kind a room key smuggled from another kind’s shape', async () => {
+    /**
+     * The five kinds that declare a room, each crossed with the three room keys
+     * that belong to somebody else's shape, at both values.
+     *
+     * Catches: `payload_room_check_is_kind_blind` — r5's `coalesce`, which reads
+     * whichever key comes first in its list. Concretely, the first cell of this
+     * product is the finding's own exploit: an `object_accepted` whose real room
+     * is A, filed into A, carrying `proposal: {roomId: A}` — under the coalesce
+     * that row installs, and so does the version of it where the column says B.
+     */
+    let refused = 0;
+    for (const [type, own] of Object.entries(OWN_KEY)) {
+      if (own === null) continue;
+      for (const key of ROOM_KEYS) {
+        if (key === own) continue;
+        for (const value of [roomA, roomB]) {
+          const row = kindRow(type, roomA, { proposalId, objectId });
+          smuggle(row.payload as Record<string, unknown>, key, value);
+          await violatesConstraint('core_events_payload_room_matches', () => append(row));
+          refused += 1;
+        }
+      }
+    }
+    // Non-vacuous, and the count is the product: 5 kinds × 3 foreign keys × 2
+    // values. A loop that silently stopped iterating would otherwise pass.
+    expect(refused).toBe(30);
+  });
+
+  it('refuses a room key on the three kinds that declare none', async () => {
+    /**
+     * The other half, and the one r5's `coalesce` could not refuse at all:
+     * `proposal_rejected`, `proposal_superseded` and `object_corrected` reach the
+     * fall-through, so `room_id = room_id` held for *any* payload — including one
+     * carrying a room key naming another room entirely.
+     *
+     * Catches: `payload_room_check_is_kind_blind`.
+     */
+    let refused = 0;
+    for (const [type, own] of Object.entries(OWN_KEY)) {
+      if (own !== null) continue;
+      for (const key of ROOM_KEYS) {
+        for (const value of [roomA, roomB]) {
+          const row = kindRow(type, roomA, { proposalId, objectId });
+          smuggle(row.payload as Record<string, unknown>, key, value);
+          await violatesConstraint('core_events_payload_room_matches', () => append(row));
+          refused += 1;
+        }
+      }
+    }
+    // 3 kinds × 4 keys × 2 values.
+    expect(refused).toBe(24);
+  });
+
+  it('accepts every kind carrying exactly the room key its own shape declares', async () => {
+    /**
+     * The non-vacuity half, and it is load-bearing: a constraint that refused
+     * everything would satisfy both tests above. Every one of the eight kinds is
+     * appended honestly into `roomA` and lands.
+     *
+     * Catches: a check that requires a room key of the wrong kind, or requires one
+     * of the three room-less kinds to carry a room after all — the mirror-image
+     * mistake of the one this round fixed, and the one an over-tightened `CASE`
+     * would make.
+     */
+    let landed = 0;
+    for (const type of Object.keys(OWN_KEY)) {
+      const row = kindRow(type, roomA, { proposalId, objectId });
+      await expect(append(row)).resolves.toBeDefined();
+      landed += 1;
+    }
+    expect(landed).toBe(8);
+    // …and the whole union is covered rather than the half somebody remembered.
+    // Against the database's own enum, so a ninth kind added to `event_type`
+    // fails here rather than quietly going untested by both loops above.
+    expect(new Set(Object.keys(OWN_KEY))).toEqual(new Set(eventType.enumValues));
+  });
+
+  it('refuses a rejection filed into a room its proposal does not live in', async () => {
+    /**
+     * The half no CHECK can reach (#22 gauntlet r5 delta, major 2).
+     *
+     * > Room-less kinds still admit a `room_id` lie via direct SQL […]
+     * > `resolveRoomId` covers the command path only.
+     *
+     * "Which room is proposal P in" is a fact about *another row*, and a CHECK
+     * sees one row. So the boundary answers it: `atrium_append_core_event`
+     * resolves the named proposal back to the room its own `proposal_recorded`
+     * landed in. The proposal here is `roomA`'s; filing its rejection into `roomB`
+     * would give the fan-out one room and the fold another.
+     *
+     * Catches: `append_trusts_a_room_less_kind`.
+     */
+    await violatesConstraint('core_events_subject_room_matches', () =>
+      append(rejection(roomB, proposalId)),
+    );
+    // The superseding spelling of the same event takes the same path.
+    const superseded = rejection(roomB, proposalId);
+    superseded.type = 'proposal_superseded';
+    (superseded.payload as Record<string, unknown>).type = 'proposal_superseded';
+    await violatesConstraint('core_events_subject_room_matches', () => append(superseded));
+    // …and the honest one lands, so this is a check and not a ban.
+    await expect(append(rejection(roomA, proposalId))).resolves.toBeDefined();
+  });
+
+  it('refuses a correction filed into a room its object does not live in', async () => {
+    // The `object_corrected` arm of the same resolution — a separate branch in the
+    // boundary reading a separate index, so a test for one is not a test for the
+    // other. Catches: `append_trusts_a_room_less_kind`.
+    await violatesConstraint('core_events_subject_room_matches', () =>
+      append(correction(roomB, objectId)),
+    );
+    await expect(append(correction(roomA, objectId))).resolves.toBeDefined();
+  });
+
+  it('refuses a rejection whose proposal is not in the ledger at all', async () => {
+    /**
+     * An unresolvable subject is a refusal, not a default — the same answer
+     * `resolveRoomId` gives on the command path ("unknown proposal"), which the
+     * server already returns as a nack before the append. Falling back to the
+     * lifted column instead would be the fail-open: an event nobody can place
+     * would be placed wherever its caller said.
+     *
+     * Catches: `append_trusts_a_room_less_kind`.
+     */
+    await violatesConstraint('core_events_subject_room_matches', () =>
+      append(rejection(roomA, randomUUID())),
+    );
+    await violatesConstraint('core_events_subject_room_matches', () =>
+      append(correction(roomA, randomUUID())),
+    );
+  });
+
+  it('returns the window by RETURNING of the stored column, not the value it meant to store', async () => {
+    /**
+     * A **structural** pin, and it is called one because it cannot be anything
+     * else (#22 gauntlet r5 delta, polish).
+     *
+     * > the append returns the *intended* window rather than a `RETURNING` of the
+     * > stored column, which overclaims "returns what it stored".
+     *
+     * Granted, and fixed — but the two values are identical today, because nothing
+     * sits between the intent and the row: no BEFORE trigger rewrites
+     * `trusted_messages` and no DEFAULT applies to it. So no behavioural test can
+     * tell the corrected version from the overclaiming one, and a test that
+     * pretended to would be measuring something else. What is asserted is exactly
+     * what changed: the value leaves the function through the row.
+     *
+     * Read off `prosrc` — what the database has — rather than the migration text.
+     *
+     * Catches: `append_returns_the_window_it_meant_to_store`.
+     */
+    const [fn] = await handle.db.execute<{ src: string }>(
+      sql`SELECT prosrc AS src FROM pg_proc
+          WHERE proname = 'atrium_append_core_event'
+            AND pronamespace = 'public'::regnamespace`,
+    );
+    expect(fn?.src).toContain(
+      'RETURNING "core_events"."seq", "core_events"."trusted_messages" INTO v_seq, v_stored',
+    );
+    expect(fn?.src).toContain('"trusted_messages" := v_stored;');
+    // And the value it meant to store is not what leaves: `v_window` is written
+    // into the row and never assigned to the OUT parameter.
+    expect(fn?.src).not.toContain('"trusted_messages" := v_window;');
   });
 });
 
@@ -1633,6 +2018,27 @@ describe('canonical `at` — the type and the CHECK are one rule', () => {
      * moves the type, `at_check_is_shape_only` moves the deployed CHECK, and
      * `canonical_timestamp_edited_without_a_migration` moves the constant without
      * moving the database.
+     *
+     * ## What "exact parity" is, for the values nobody can represent
+     * (#22 gauntlet r5 delta, polish)
+     *
+     * > leap-second and non-Gregorian parity is exact only by joint refusal, not
+     * > correct acceptance — worth stating as the property it is.
+     *
+     * Correct, and the distinction is worth keeping because the two look identical
+     * in an empty `disagreements` array. `:60` as a seconds field is a real UTC
+     * value (`2016-12-31T23:59:60.000Z` happened); both sides refuse it, so they
+     * agree, and neither is *right* about it — the ledger simply cannot represent a
+     * leap second, and `Date` cannot either. Dates before the Gregorian cutover are
+     * the same shape: `1582-10-05` never existed in the calendar the pattern's
+     * leap-year rule describes, both sides accept it, and both are wrong together.
+     *
+     * So the property this asserts is **agreement, not correctness**, and the
+     * corpus deliberately contains cases where agreement is joint refusal (`:60`
+     * above, in the seconds sweep) and cases where it is joint acceptance of
+     * something the calendar never had. Neither is a defect in this test; claiming
+     * the test proves the pattern is *right about time* would be. What the ledger
+     * needs is that one spelling of one instant reaches both engines, and it does.
      */
     const candidates: string[] = [];
     const pad = (n: number, width: number) => String(n).padStart(width, '0');
