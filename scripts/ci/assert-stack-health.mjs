@@ -3,20 +3,30 @@
  *
  * ## Why this exists next to `docker compose up --wait`
  *
- * `--wait` is a wait, not an assertion. It returns 0 when every service reached
- * a settled state, and there are three ways that is weaker than it sounds:
+ * `--wait` is a wait, not an assertion. It settles once and reports the first
+ * thing that stopped it, and there are three ways that is weaker than it sounds:
  *
- *  1. A service with **no health check** only has to be *running*. Round 4's
- *     `app` was running. It answered 500 to every request for three rounds.
- *     So this asserts that every long-lived service *declares* a health check —
- *     deleting one would otherwise silently downgrade it from "healthy" to
- *     "the process has not exited yet".
- *  2. A container can be **restarting in a loop** and still be observed
+ *  1. A container can be **restarting in a loop** and still be observed
  *     "running" between crashes. `RestartCount` is read here, and a service
  *     that has restarted at all during a run this short is a failure.
- *  3. A **one-shot** service (`migrate`, `minio-init`) can exit non-zero; the
+ *  2. A **one-shot** service (`migrate`, `minio-init`) can exit non-zero; the
  *     dependents' `service_completed_successfully` catches it at start-up, but
  *     nothing re-checks the code afterwards. Both are asserted to have exited 0.
+ *  3. A **new service** can join the stack without anybody deciding what "well"
+ *     means for it. The two lists below are the stack's shape written down, and
+ *     a service in neither fails here — the same discipline
+ *     `assert-workspace-enrollment.mjs` applies to test workspaces.
+ *
+ * The health-check *declaration* rule below is deliberately belt-and-braces, and
+ * this comment used to have it the wrong way round. It claimed `--wait` "settles
+ * for running on a service with no health check"; measured against compose
+ * v2.39.1, `--wait` does no such thing — it fails the whole `up` with
+ * `container atrium-ci-app-1 has no healthcheck configured`. So a deleted health
+ * check is caught one step earlier than this file said it was. Which is worth
+ * knowing for a different reason: it means the pre-#40 `app`, which had no
+ * health check at all, could not have been brought up with `--wait` either. The
+ * rule stays because it costs a line and because "the boot step happens to catch
+ * it today" is a property of compose's behaviour rather than of this repository.
  *
  * ## The enrolment rule
  *

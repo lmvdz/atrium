@@ -66,11 +66,11 @@ const CASES = [
       },
     },
     expect: 'boot',
-    note: 'With no relay, `resolveMailer` refuses the console transport in production and both processes fail their boot condition. Before #40 the web app answered 500 to every request instead; `instrumentation.ts` turns that into a refusal to start, so this is caught at `up --wait` rather than by a page assertion. The 500 itself is the `serves-500` case below.',
+    note: 'With no relay, `resolveMailer` refuses the console transport in production and both processes fail their boot condition. Before #40 the web app answered 500 to every request instead; `instrumentation.ts` turns that into a refusal to start, so this is caught at `up --wait` rather than by a page assertion. What happens when the health check is not there to fail is the `up-but-not-serving` case below.',
   },
   {
-    id: 'serves-500',
-    what: "the same missing transport, with #40's boot guard and health check disabled",
+    id: 'up-but-not-serving',
+    what: "the same missing transport, with the app's health check disabled",
     catches: 'assert-page-serves',
     overlay: {
       services: {
@@ -88,7 +88,7 @@ const CASES = [
     expect: 'assertion',
     assertion: 'assert-page-serves.mjs',
     tolerateBootFailure: true,
-    note: 'This is the state #26 round 4 actually found: a web app that starts, reports nothing wrong, and answers 500 to every page. It is what the page assertion exists for.',
+    note: 'With no health check, compose has nothing to fail on and `app` reports "running" — the shape round 4 shipped, where a container looks fine and the product does not answer. What it answers *with* differs, and the difference is #40\'s: before, a 500 on every page; now, nothing at all, because `instrumentation.ts` exits rather than serving. Either way this is the assertion that notices, and it is the only one that does. The literal 500 needs `instrumentation.ts` deleted and the image rebuilt, which no overlay can express — that receipt is on the issue, run by hand.',
   },
   {
     id: 'hops-zero',
@@ -138,11 +138,29 @@ const CASES = [
   {
     id: 'no-health-check',
     what: "the app's health check disabled",
-    catches: 'assert-stack-health',
+    catches: 'the stack boot',
     overlay: { services: { app: { healthcheck: { disable: true } } } },
+    expect: 'boot',
+    note: 'This case was written expecting `assert-stack-health` to catch it, on the belief that `docker compose up --wait` settles for "running" when a service has no health check. It does not: compose v2.39.1 fails the whole `up` with `container … has no healthcheck configured`, so the mutation is caught a step earlier and the ledger\'s first run reported MISSED — correctly, because the check it *named* never got to run. The belief was wrong, the comment in assert-stack-health.mjs that stated it has been corrected, and this entry now names the step that really catches it. A note also worth keeping: the pre-#40 `app` had no health check at all, so it could not have been brought up with `--wait` either.',
+  },
+  {
+    id: 'unenrolled-service',
+    what: 'a new long-lived service joining the stack with nobody deciding what "well" means for it',
+    catches: 'assert-stack-health',
+    overlay: {
+      services: {
+        stowaway: {
+          image: 'alpine:3',
+          command: ['sleep', '600'],
+          // A health check that always passes, so `up --wait` is satisfied and
+          // the only thing left to object is the enrolment rule.
+          healthcheckTest: ['CMD', 'true'],
+        },
+      },
+    },
     expect: 'assertion',
     assertion: 'assert-stack-health.mjs',
-    note: '`docker compose up --wait` settles for "running" on a service with no health check, and reports success. Round 4\'s `app` was running.',
+    note: 'The mutation `assert-stack-health` catches that nothing else does. `--wait` is happy — the container is healthy — and every other assertion is about services it knows by name. Only the enrolment rule notices that something is running which no list accounts for.',
   },
   {
     id: 'teardown-keeps-volumes',
@@ -185,7 +203,17 @@ function writeOverlay(id, overlay) {
   ];
   for (const [service, body] of Object.entries(overlay.services)) {
     lines.push(`  ${service}:`);
+    if (body.image) lines.push(`    image: ${JSON.stringify(body.image)}`);
+    if (body.command) lines.push(`    command: ${JSON.stringify(body.command)}`);
     if (body.healthcheck?.disable) lines.push('    healthcheck:', '      disable: true');
+    if (body.healthcheckTest) {
+      lines.push(
+        '    healthcheck:',
+        `      test: ${JSON.stringify(body.healthcheckTest)}`,
+        '      interval: 5s',
+        '      retries: 3',
+      );
+    }
     if (body.environment) {
       lines.push('    environment:');
       for (const [key, value] of Object.entries(body.environment)) {
@@ -301,7 +329,23 @@ function runCase(entry) {
   return { entry, caught, detail };
 }
 
+/**
+ * The lines worth reading out of a failed run.
+ *
+ * `report()` in `stack-client.mjs` prints the stack's container logs when an
+ * assertion fails, which is right in CI and drowns this ledger's one-line
+ * summary in a hundred lines of Better Auth warnings. So when the output
+ * contains GitHub error annotations — which is what an assertion's own verdict
+ * looks like — those are the lines; only otherwise does it fall back to the
+ * tail.
+ */
 function lastLines(text, count) {
+  const annotations = String(text)
+    .split('\n')
+    .filter((line) => line.startsWith('::error::'));
+  if (annotations.length > 0) {
+    return annotations.slice(0, count).join(' | ').replaceAll('::error::', '').slice(0, 700);
+  }
   return String(text)
     .split('\n')
     .filter((line) => line.trim() !== '' && !line.startsWith('::group'))
