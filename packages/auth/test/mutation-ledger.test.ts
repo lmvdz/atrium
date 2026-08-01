@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error — a plain .mjs script with no declarations; the point of this
 // file is that the instrument is reachable by a test at all.
-import { flattenPlaywright, judge } from '../../../scripts/mutation-ledger.mjs';
+import { flattenPlaywright, judge, suiteDrift } from '../../../scripts/mutation-ledger.mjs';
 
 /**
  * The mutation ledger's own verdict rules, tested.
@@ -43,9 +43,14 @@ import { flattenPlaywright, judge } from '../../../scripts/mutation-ledger.mjs';
  *     passing before, which is the only version of the number worth quoting.
  *
  * Catches: any change to `judge` that lets one of those return `red`. There is
- * no mutation-ledger row for this file, deliberately — a mutation that broke
- * `judge` would be measured by the ledger that contains it, which is the
+ * no mutation-ledger row for **`judge`**, deliberately — a mutation that broke
+ * it would be measured by the ledger whose verdict it computes, which is the
  * circularity the whole exercise is about. It is pinned by value instead.
+ *
+ * Round 11 added a row for a *different* function in the same file
+ * (`ledger-unchecked-suite-passes`, over `suiteDrift`) and the block at the
+ * bottom of this file explains why that one is not circular: `suiteDrift` takes
+ * no part in deciding a row's verdict.
  */
 
 interface Run {
@@ -208,5 +213,62 @@ describe('flattenPlaywright — the e2e half is parsed, not inferred from an exi
     const out: { fullName: string; status: string }[] = [];
     flattenPlaywright({ specs: [{ title: 'never ran', tests: [{ results: [] }] }] }, [], out);
     expect(out).toEqual([{ fullName: 'never ran', status: 'failed' }]);
+  });
+});
+
+/**
+ * The *other* fail-open in the instrument, one level up from `judge`.
+ *
+ * `judge` decides whether a mutation was caught. `suiteDrift` decides whether
+ * that answer is still about this tree — and round 10 wrote it as
+ * `if (suite.suiteHash && suite.suiteHash !== current)`, so a receipt carrying
+ * **no** hash skipped the comparison entirely. Skipping a check is not passing
+ * it. `undescribable-describer` is credited to `auth:all`, whose `suiteHash` was
+ * `null` by construction, so the one row measured against a whole package was
+ * permanently exempt from the most common kind of staleness there is — and
+ * `--receipts` printed it identically to every row whose drift really had been
+ * checked, while a comment three functions away claimed the opposite.
+ *
+ * There *is* a ledger row for this one (`ledger-unchecked-suite-passes`), which
+ * the paragraph above deliberately refused for `judge`. The distinction is
+ * whether the mutation can bend the verdict that measures it: `judge` decides a
+ * row's red/not-red, so mutating it is circular; `suiteDrift` decides only how a
+ * *stored* receipt is described and takes no part in `--prove`'s verdict, so
+ * measuring it with the ledger is ordinary.
+ */
+describe('suiteDrift — a receipt with no hash was never checked, and says so', () => {
+  it('is current when the hash matches', () => {
+    expect(suiteDrift({ suite: 'auth:org', suiteHash: 'abc', verdict: 'red' }, 'abc')).toBe(
+      'current',
+    );
+  });
+
+  it('is stale when the suite that measured it has changed', () => {
+    // The round-9 lesson: the suite file moving is the most common staleness,
+    // and the one nothing noticed until a human read a number that said 14.
+    expect(suiteDrift({ suite: 'auth:org', suiteHash: 'abc', verdict: 'red' }, 'def')).toBe(
+      'stale',
+    );
+  });
+
+  it('is unchecked — not current — when the receipt carries no hash', () => {
+    /**
+     * The finding, as a value. Both spellings of "there was no hash" answer the
+     * same way, because a receipt written by an older round carries `null` and
+     * one written by a `suiteHashOf` that threw carries nothing at all.
+     */
+    expect(suiteDrift({ suite: 'auth:all', suiteHash: null, verdict: 'red' }, 'abc')).toBe(
+      'unchecked',
+    );
+    expect(suiteDrift({ suite: 'auth:all', verdict: 'red' }, null)).toBe('unchecked');
+  });
+
+  it('exempts only the suite that never ran', () => {
+    // `no-baseline` means the suite was already red or ran nothing, so the row
+    // claims nothing and there is nothing to have drifted. That is the one
+    // honest exemption, and it must not widen into "any missing hash".
+    expect(suiteDrift({ suite: 'auth:all', suiteHash: null, verdict: 'no-baseline' }, null)).toBe(
+      'current',
+    );
   });
 });

@@ -9,6 +9,9 @@ import {
   analyzeImportBoundary,
   type BoundaryRule,
   describeOffence,
+  describeUnmodelled,
+  describeUnparsed,
+  describeUnresolved,
 } from './support/import-boundary.js';
 
 /**
@@ -175,9 +178,18 @@ describe('room membership is not reachable outside @atrium/auth', () => {
       declaredIn: 'packages/db/src/schema.ts',
       exportName: 'memberships',
       forbiddenRoots: ['apps'],
-      // Wider than the forbidden root on purpose: a helper laundered through
-      // some other package is invisible unless the packages are in the graph.
-      graphRoots: ['apps', 'packages'],
+      /**
+       * Wider than the forbidden root on purpose: a helper laundered through
+       * some other package is invisible unless the packages are in the graph.
+       *
+       * `scripts` is here because round 11's own analysis asked for it —
+       * `packages/auth/test/mutation-ledger.test.ts` imports
+       * `../../../scripts/mutation-ledger.mjs`, which under round 10 resolved to
+       * a file nobody had parsed and was silently treated as taint-free. The
+       * graph has to contain what the graph reaches, and the `unresolved`
+       * channel is what says so when it does not.
+       */
+      graphRoots: ['apps', 'packages', 'scripts'],
       /**
        * The vetted holders. This list *is* the invariant, stated positively —
        * three files may name the table, and here is why each one may:
@@ -206,10 +218,59 @@ describe('room membership is not reachable outside @atrium/auth', () => {
         'packages/auth/src/workspace.ts',
         'packages/db/src/client.ts',
       ],
+      /**
+       * Files under `apps/` that may name the table anyway — and the reason
+       * round 11 had to invent the field.
+       *
+       * Round 10 excused these by skipping every directory called `e2e`, which
+       * excused `apps/web/app/test/route.ts` — an App Router route — in the same
+       * breath. A directory name is not a reason. These three are:
+       *
+       *  - the two Playwright specs are the suite that *proves* the join against
+       *    real Postgres, so they seed and count `memberships` rows on purpose;
+       *  - `ensure-database.mjs` migrates and truncates that database before the
+       *    suite runs, and takes the whole module to do it.
+       *
+       * None of them is served to a user: Playwright specs are not in the Next
+       * build, and the analysis reports an exemption that matches nothing, so
+       * the list cannot rot into a licence for a file that has since moved.
+       */
+      exempt: [
+        'apps/web/e2e/role-sync.spec.ts',
+        'apps/web/e2e/room-access.spec.ts',
+        'apps/web/e2e/support/ensure-database.mjs',
+      ],
+      /**
+       * The only directories outside the denominator, each an anchored path.
+       *
+       * Build output, and nothing else. `node_modules` is skipped by name
+       * wherever it occurs because it is a resolution boundary Node itself
+       * defines; every other exclusion is a full path, so nothing is excused for
+       * being *called* `dist` or `test` somewhere in the middle of a route.
+       */
+      excludedPaths: [
+        'apps/web/.next',
+        'apps/server/dist',
+        'packages/auth/dist',
+        'packages/core/dist',
+        'packages/db/dist',
+        'packages/ingest/dist',
+      ],
       forbiddenAccessName: 'memberships',
       ...overrides,
     };
   }
+
+  /**
+   * The repository analysis is identical for every assertion that does not
+   * override the rule, and it now parses 125 files across two fixpoints — so it
+   * is run once and read many times rather than rebuilt per test.
+   */
+  let repoAnalysisCache: ReturnType<typeof analyzeImportBoundary> | null = null;
+  const repoAnalysis = () => {
+    repoAnalysisCache ??= analyzeImportBoundary(repoRule());
+    return repoAnalysisCache;
+  };
 
   it('finds nothing under apps/ that can reach `memberships`', () => {
     /**
@@ -217,7 +278,7 @@ describe('room membership is not reachable outside @atrium/auth', () => {
      * it the fixtures below enumerate. Verified against the round-5 tree, where
      * it names `apps/web/lib/workspaces.ts` and `apps/server/src/index.ts`.
      */
-    const { offences } = analyzeImportBoundary(repoRule());
+    const { offences } = repoAnalysis();
 
     expect(
       offences.map(describeOffence),
@@ -232,7 +293,7 @@ describe('room membership is not reachable outside @atrium/auth', () => {
      * "it was fine". Catches: smuggling the table in behind a computed
      * specifier, which would otherwise be the last remaining syntactic escape.
      */
-    const { computed } = analyzeImportBoundary(repoRule());
+    const { computed } = repoAnalysis();
     expect(computed).toEqual([]);
   });
 
@@ -247,7 +308,7 @@ describe('room membership is not reachable outside @atrium/auth', () => {
      * in a page, a handler or a Server Action — the round-5 read, rewritten in
      * the one syntax the round-6 regex and the import graph both miss.
      */
-    const { accesses } = analyzeImportBoundary(repoRule());
+    const { accesses } = repoAnalysis();
     expect(
       accesses.map((access) => `${access.file}:${access.line} ${access.text}`),
       'an app is reaching room membership off a database handle by name',
@@ -263,15 +324,126 @@ describe('room membership is not reachable outside @atrium/auth', () => {
      * matters.
      */
     it('is looking at the right tree', () => {
-      const { scanned } = analyzeImportBoundary(repoRule());
+      const { scanned } = repoAnalysis();
       expect(scanned.length).toBeGreaterThan(10);
       expect(scanned).toContain('apps/web/lib/workspaces.ts');
       expect(scanned).toContain('apps/server/src/index.ts');
       expect(scanned).toContain('packages/auth/src/room-access.ts');
     });
 
+    /**
+     * **The denominator, which is the thing round 10 never re-derived.**
+     *
+     * Every assertion above this one is about what the analysis *found*. These
+     * are about what it *looked at*, and they exist because both round-10
+     * critics escaped the guard without touching its grammar at all: one dropped
+     * a `.js` route the file filter never matched, one used a directory whose
+     * name was on a skip list. A checker that scans the wrong set of files
+     * passes every test it has and protects nothing.
+     */
+    it('parses the files a directory-name skip list used to drop', () => {
+      /**
+       * `apps/web/e2e`, `apps/web/test`, `apps/server/test` and
+       * `packages/db/drizzle` were all outside the denominator under round 10,
+       * because `DEFAULT_SKIP` matched those *names* anywhere in a path. The
+       * same rule dropped `apps/web/app/test/route.ts` — which is the App Router
+       * route `/test` — and `apps/web/lib/build/anything.ts`.
+       *
+       * Catches: reinstating any name-based skip. Each of these is a real file
+       * in this repository whose directory carried one of those names.
+       */
+      const { scanned } = repoAnalysis();
+      expect(scanned).toContain('apps/web/e2e/room-access.spec.ts');
+      expect(scanned).toContain('apps/web/test/env.test.ts');
+      expect(scanned).toContain('apps/server/test/ws-server.test.ts');
+      expect(scanned).toContain('packages/auth/test/room-access.test.ts');
+    });
+
+    it('parses every module extension Next and Node execute, not only TypeScript', () => {
+      /**
+       * Finding A's first counterexample. `apps/web/tsconfig.json` sets
+       * `allowJs` and includes `**\/*.mjs`; Next serves `route.js` and
+       * `page.jsx`. Round 10's filter was `/\.(?:tsx?|mts|cts)$/`, so a planted
+       * `apps/web/app/leaky/route.js` reported nothing and `curl` with no cookie
+       * got every membership row in the database.
+       *
+       * Asserted on the two `.mjs` files this repository actually has, so the
+       * test is about the real tree rather than about a regex.
+       */
+      const { scanned } = repoAnalysis();
+      expect(scanned).toContain('apps/web/e2e/support/ensure-database.mjs');
+      expect(scanned).toContain('apps/web/e2e/support/config.mjs');
+      expect(scanned).toContain('scripts/mutation-ledger.mjs');
+    });
+
+    it('leaves nothing under a graph root unaccounted for', () => {
+      /**
+       * The one assertion that would have caught all three counterexamples at
+       * once, and the round's organizing rule stated as a test: every file is
+       * parsed or named, every specifier resolves or is reported, every
+       * expression form is modelled or reported.
+       *
+       * Catches: a new file type (`.mdx`, `.vue`) landing under `apps/`, a file
+       * that stopped parsing, an import nobody can resolve, and an expression
+       * form the handle walk has never seen.
+       */
+      const analysis = repoAnalysis();
+      expect(analysis.unparsed.map(describeUnparsed), 'a file nobody parsed').toEqual([]);
+      expect(
+        analysis.unresolved.map(describeUnresolved),
+        'a specifier that resolves to nothing this analysis read',
+      ).toEqual([]);
+      expect(
+        analysis.unmodelled.map(describeUnmodelled),
+        'an expression form the handle walk has no model of',
+      ).toEqual([]);
+    });
+
+    it('excludes only build output, by anchored path, and says which', () => {
+      /**
+       * The exclusions, read back out of the analysis rather than trusted.
+       *
+       * Two directions matter. Nothing may leave the denominator except by a
+       * rule a human wrote — so every excluded directory is either
+       * `node_modules` (a boundary Node defines) or a declared path. And a
+       * declared path that exists but was never reached is a rule pointing
+       * somewhere the walk does not go, which its author believes is excluded.
+       */
+      const analysis = repoAnalysis();
+      const declared = new Set(repoRule().excludedPaths ?? []);
+      for (const path of analysis.excluded) {
+        expect(
+          path.endsWith('/node_modules') || declared.has(path),
+          `${path} left the denominator without a rule saying so`,
+        ).toBe(true);
+      }
+      expect(analysis.unusedExclusions, 'an exclusion that excludes nothing').toEqual([]);
+      expect(analysis.unusedExemptions, 'an exemption for a file that has moved').toEqual([]);
+    });
+
+    it('resolves the `@/` alias the app actually writes', () => {
+      /**
+       * The fourth counterexample, and the one that was live: six app modules
+       * import through `@/…`, and a specifier that was neither relative nor
+       * `@atrium/…` was classified as a third-party package and dropped.
+       *
+       * The import half survived it — a file under `apps/` that names the table
+       * offends wherever its importers live — but the *handle* graph did not:
+       * `import { db } from '@/lib/db'` resolved to nothing, so `db()` was not a
+       * handle and `db().query.memberships` in a Server Action was reported by
+       * nobody. The fixture below proves that; this pins the resolution.
+       */
+      const { resolveSpecifier } = repoAnalysis();
+      expect(resolveSpecifier('@/lib/db', 'apps/web/app/app/actions.ts')).toBe(
+        'apps/web/lib/db.ts',
+      );
+      expect(resolveSpecifier('@/lib/session', 'apps/web/app/app/page.tsx')).toBe(
+        'apps/web/lib/session.ts',
+      );
+    });
+
     it('resolves the workspace specifiers the apps actually write', () => {
-      const { resolveSpecifier } = analyzeImportBoundary(repoRule());
+      const { resolveSpecifier } = repoAnalysis();
       expect(resolveSpecifier('@atrium/db', 'apps/web/lib/workspaces.ts')).toBe(
         'packages/db/src/index.ts',
       );
@@ -291,7 +463,7 @@ describe('room membership is not reachable outside @atrium/auth', () => {
     it('knows that `@atrium/db` exposes the table it is guarding', () => {
       // The vacuity guard. If the seed or the `export *` chain ever stopped
       // propagating, every assertion above would pass by knowing nothing.
-      const { exposureOf } = analyzeImportBoundary(repoRule());
+      const { exposureOf } = repoAnalysis();
       expect(exposureOf('packages/db/src/schema.ts').names).toContain('memberships');
       expect(exposureOf('packages/db/src/index.ts').names).toContain('memberships');
     });
@@ -300,7 +472,7 @@ describe('room membership is not reachable outside @atrium/auth', () => {
       // The allowlist doing its job, and the reason `apps/web/lib/workspaces.ts`
       // may import `listAuthorizedRooms` at all. `index.ts` star-re-exports all
       // three, so it is the assertion that the package's public surface is clean.
-      const { exposureOf } = analyzeImportBoundary(repoRule());
+      const { exposureOf } = repoAnalysis();
       expect(exposureOf('packages/auth/src/room-access.ts')).toEqual({ names: [], all: false });
       expect(exposureOf('packages/auth/src/workspace.ts')).toEqual({ names: [], all: false });
       expect(exposureOf('packages/auth/src/index.ts')).toEqual({ names: [], all: false });
@@ -1306,6 +1478,389 @@ describe('room membership is not reachable outside @atrium/auth', () => {
             '}\n',
         });
         expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+    });
+
+    /**
+     * **The denominator — every one of these was green on `fix/auth-r10`.**
+     *
+     * Both round-10 critics escaped the guard, from different lineages, without
+     * touching the expression grammar it had just finished re-deriving. That is
+     * the finding: round 10 asked "what can an initializer be?" and never asked
+     * "which files are in the graph at all?". Each fixture below is one answer
+     * to the second question, and each one is a file the round-10 analysis
+     * either never opened or never resolved.
+     *
+     * They are written as *evasions* rather than as unit tests of the file walk
+     * on purpose: the question a reader has is "could somebody do this", and the
+     * answer has to be a tree with a leak in it.
+     */
+    describe('evasions the round-10 denominator admitted', () => {
+      /** The evasion, spelled once per module extension Next and Node execute. */
+      for (const extension of ['js', 'jsx', 'mjs', 'cjs'] as const) {
+        it(`fires on a route written as .${extension}`, () => {
+          /**
+           * `apps/web/tsconfig.json` sets `allowJs: true` and includes
+           * `**\/*.mjs`; Next's App Router serves `route.js` and `page.jsx` as
+           * first-class routes. Round 10's file filter was
+           * `/\.(?:tsx?|mts|cts)$/`, so the executing critic planted
+           * `apps/web/app/leaky/route.js`, got `offences=[]` from the analyzer,
+           * then served it with `next dev` and read every room membership in the
+           * database out of a request that carried no cookie.
+           */
+          const rule = fixture({
+            [`apps/web/app/leaky/route.${extension}`]:
+              "import { memberships } from '@atrium/db';\n" +
+              'export async function GET() {\n' +
+              '  return Response.json({ leaked: memberships });\n' +
+              '}\n',
+          });
+          expect(offenders(rule)).toEqual([`apps/web/app/leaky/route.${extension}`]);
+        });
+      }
+
+      it('fires on the table reached off a handle in a .js route', () => {
+        // The access half of the same hole: no import of the table at all, which
+        // is the shape `next dev` actually served.
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/db.js':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function db() {\n' +
+            '  return createDatabase();\n' +
+            '}\n',
+          'apps/web/app/leaky/route.js':
+            "import { db } from '../../lib/db.js';\n" +
+            'export async function GET() {\n' +
+            '  return Response.json(await db().query.memberships.findMany());\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([
+          { file: 'apps/web/app/leaky/route.js', kind: 'property' },
+        ]);
+      });
+
+      /**
+       * One case per directory name round 10 dropped *anywhere in a path*.
+       *
+       * `apps/web/app/test/route.ts` is not a test — it is the route `/test`.
+       * `apps/web/lib/build/leak.ts` is not build output. `drizzle` and `e2e`
+       * are the same mistake with different words.
+       */
+      for (const directory of ['test', 'build', 'dist', 'e2e', 'drizzle', 'coverage'] as const) {
+        it(`fires on a file under a directory called ${directory}`, () => {
+          const rule = fixture({
+            [`apps/web/app/${directory}/route.ts`]:
+              "import { memberships } from '@atrium/db';\n" +
+              'export async function GET() {\n' +
+              '  return Response.json({ leaked: memberships });\n' +
+              '}\n',
+          });
+          expect(offenders(rule)).toEqual([`apps/web/app/${directory}/route.ts`]);
+        });
+      }
+
+      it('reports a specifier that resolves outside the graph instead of trusting it', () => {
+        /**
+         * Finding A's third counterexample. `graphRoots` is `['apps',
+         * 'packages']`, so a re-export through `toolbox/` was never parsed —
+         * `taintOf` had no entry for it, `exposesAnything` answered *false*, and
+         * the app that imported it was clean. Silently: not reported the way a
+         * computed specifier is.
+         *
+         * The file is now named, with the path it landed on, so the fix is
+         * either to widen the graph or to explain the edge.
+         */
+        const rule = fixture({
+          'toolbox/tables.ts': "export { memberships } from '../packages/db/src/schema.js';\n",
+          'apps/web/lib/rooms.ts':
+            "import { memberships } from '../../../toolbox/tables.js';\n" +
+            'export const t = memberships;\n',
+        });
+        const { unresolved, offences } = analyzeImportBoundary(rule);
+        expect(
+          unresolved.map((entry) => `${entry.file} ${entry.reason} ${entry.resolved}`),
+        ).toEqual(['apps/web/lib/rooms.ts outside-the-graph toolbox/tables.ts']);
+        // And with the graph widened to include it, the leak is an ordinary
+        // offence — which is what makes the report above actionable rather than
+        // decorative.
+        // (`toolbox/` itself is not under a forbidden root, so it is not an
+        // offender — the point is that the app importing from it becomes one.)
+        expect(offenders({ ...rule, graphRoots: ['apps', 'packages', 'toolbox'] })).toEqual([
+          'apps/web/lib/rooms.ts',
+        ]);
+        expect(offences).toEqual([]);
+      });
+
+      it('reports a bare specifier nobody declared, rather than assuming npm', () => {
+        /**
+         * How `@/lib/db` disappeared: anything that was neither relative nor
+         * `@atrium/…` was assumed to be a third-party package. A specifier is
+         * external now only if it is a Node builtin or is declared in a
+         * `package.json` on the way up to the root.
+         */
+        const rule = fixture({
+          'apps/web/lib/rooms.ts':
+            "import { rows } from 'not-a-real-package';\nexport const t = rows;\n",
+        });
+        expect(
+          analyzeImportBoundary(rule).unresolved.map(
+            (entry) => `${entry.file} ${entry.specifier} ${entry.reason}`,
+          ),
+        ).toEqual(['apps/web/lib/rooms.ts not-a-real-package undeclared-package']);
+      });
+
+      it('follows a `paths` alias into the handle graph', () => {
+        /**
+         * **The one that was live in this repository.** Six app modules import
+         * through `@/…`, `apps/web/lib/db.ts` is where both apps get their
+         * connection, and under round 10 `import { db } from '@/lib/db'`
+         * resolved to nothing at all — so `db()` was not a handle, and the
+         * receiver test that the entire access half rests on had nothing to root
+         * itself in.
+         *
+         * The alias is read from the app's own `tsconfig.json`, because a copy
+         * of it in the rule would be a second place to keep in step.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/tsconfig.json': JSON.stringify({
+            compilerOptions: { paths: { '@/*': ['./*'] } },
+          }),
+          'apps/web/lib/db.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function db() {\n' +
+            '  return createDatabase();\n' +
+            '}\n',
+          'apps/web/app/app/actions.ts':
+            "import { db } from '@/lib/db';\n" +
+            'export async function listRooms() {\n' +
+            '  return db().query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([
+          { file: 'apps/web/app/app/actions.ts', kind: 'property' },
+        ]);
+      });
+
+      it('reports a file type nobody has decided about', () => {
+        /**
+         * The rule that survives the next extension somebody invents. `.mdx` is
+         * executable in a Next app; `.vue` is executable somewhere else. Neither
+         * is parsed here, and the answer to "we do not know what this is" is a
+         * report, not silence.
+         */
+        const rule = fixture({
+          'apps/web/app/page.mdx': '# hello\n',
+        });
+        const { unparsed } = analyzeImportBoundary(rule);
+        expect(unparsed.map((entry) => `${entry.file} ${entry.reason}`)).toEqual([
+          'apps/web/app/page.mdx unknown-extension',
+        ]);
+      });
+
+      it('reports a file that did not parse, which otherwise reads as clean', () => {
+        /**
+         * A file that fails to parse produces an *empty* walk — no imports, no
+         * accesses — which is indistinguishable from a file that has nothing to
+         * hide. TypeScript's parser is error-tolerant and hands back a tree
+         * either way, so the diagnostics have to be asked for.
+         */
+        const rule = fixture({
+          'apps/web/lib/rooms.ts': "import { memberships } from '@atrium/db'\nfunction (((\n",
+        });
+        const { unparsed } = analyzeImportBoundary(rule);
+        expect(unparsed.map((entry) => entry.file)).toEqual(['apps/web/lib/rooms.ts']);
+        expect(unparsed[0]?.reason).toBe('parse-error');
+      });
+
+      it('reports an exemption that no longer matches a file', () => {
+        // An exemption is a licence with a name on it. When the file moves, the
+        // licence has to be re-justified rather than silently covering nothing.
+        const rule = fixture({
+          'apps/web/lib/rooms.ts': 'export const t = 1;\n',
+        });
+        const { unusedExemptions } = analyzeImportBoundary({
+          ...rule,
+          exempt: ['apps/web/e2e/moved-away.spec.ts'],
+        });
+        expect(unusedExemptions).toEqual(['apps/web/e2e/moved-away.spec.ts']);
+      });
+
+      it('exempts a named file without exempting its neighbours', () => {
+        /**
+         * The replacement for "skip every directory called `e2e`", measured: the
+         * named spec may hold the table, and the file beside it may not.
+         */
+        const rule = fixture({
+          'apps/web/e2e/room-access.spec.ts':
+            "import { memberships } from '@atrium/db';\nexport const seeded = memberships;\n",
+          'apps/web/e2e/sneaky.spec.ts':
+            "import { memberships } from '@atrium/db';\nexport const also = memberships;\n",
+        });
+        expect(offenders({ ...rule, exempt: ['apps/web/e2e/room-access.spec.ts'] })).toEqual([
+          'apps/web/e2e/sneaky.spec.ts',
+        ]);
+      });
+
+      it('reports an exclusion that exists and excludes nothing', () => {
+        /**
+         * A declared exclusion the walk never reaches is a rule whose author
+         * believes a directory is excluded when nothing excludes it. Build
+         * output that has not been built yet is *not* that — it is absent, and
+         * absent is not stale, which is why the report tests for existence.
+         */
+        const rule = fixture({
+          'apps/web/lib/rooms.ts': 'export const t = 1;\n',
+          'packages/db/dist/schema.js': 'export const memberships = {};\n',
+        });
+        expect(
+          analyzeImportBoundary({ ...rule, excludedPaths: ['packages/db/dist'] }).unusedExclusions,
+        ).toEqual([]);
+        expect(
+          analyzeImportBoundary({ ...rule, excludedPaths: ['packages/db/nope'] }).unusedExclusions,
+        ).toEqual([]);
+        expect(
+          // `packages/db/src` exists and is inside the walk, so an exclusion
+          // that never fired for it would mean the walk did not go there.
+          analyzeImportBoundary({ ...rule, excludedPaths: ['toolbox'] }).unusedExclusions,
+        ).toEqual([]);
+      });
+
+      it('does not descend into an excluded path, and says it did not', () => {
+        const rule = fixture({
+          'apps/web/lib/rooms.ts': 'export const t = 1;\n',
+          'apps/web/.next/server/leak.js':
+            "import { memberships } from '@atrium/db';\nexport const t = memberships;\n",
+        });
+        // Without the exclusion, generated output is judged like anything else…
+        expect(offenders(rule)).toEqual(['apps/web/.next/server/leak.js']);
+        // …and with it, the directory is named as excluded rather than absent.
+        const excluded = analyzeImportBoundary({ ...rule, excludedPaths: ['apps/web/.next'] });
+        expect(excluded.offences).toEqual([]);
+        expect(excluded.excluded).toEqual(['apps/web/.next']);
+      });
+    });
+
+    /**
+     * **Evasions of the expression grammar that round 10's own re-derivation
+     * missed**, which is the codex critic's finding and one of this round's own.
+     *
+     * Round 10 claimed at `import-boundary.ts:27` that it had enumerated "every
+     * expression form that passes a value through". It had not, and the proof is
+     * that `isHandle` ended in `return false` — a fall-through is the shape of a
+     * claim that cannot be true, because it answers "not a handle" for every form
+     * nobody thought of. There is no fall-through now: pass-through, declared
+     * terminal, or reported.
+     */
+    describe('evasions the round-10 grammar admitted', () => {
+      it('fires on a handle laundered through a tagged template', () => {
+        /**
+         * The codex critic injected exactly this, ran the full suite — **343
+         * tests green** — and removed it again. `` tag`ignored` `` is a *call* of
+         * `tag`, and round 10 had no `TaggedTemplateExpression` case, so the
+         * handle vanished and the "no app file naming `memberships`" assertion
+         * passed with the table being read off a connection two lines below it.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase as getDb } from '@atrium/db';\n" +
+            'const tag = () => getDb();\n' +
+            'const db = tag`ignored`;\n' +
+            'export const rows = db.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires on a handle taken through `import =` and `export =`', () => {
+        /**
+         * Two declaration forms outside the four gaps round 10's header
+         * enumerated: `ImportEqualsDeclaration` was recorded for the import half
+         * and wrote nothing to `handles.imported`, and `ExportAssignment` was
+         * skipped outright when `isExportEquals`.
+         *
+         * Today `tsc` refuses both under `module: ESNext` (TS1202/TS1203), which
+         * is a *dependency* this analysis now states rather than a redundancy —
+         * a package compiled as CommonJS makes them legal again.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'packages/helper/src/index.ts':
+            "import { createDatabase } from '@atrium/db';\n" + 'export = createDatabase();\n',
+          'apps/web/lib/rooms.ts':
+            "import handle = require('@atrium/helper');\n" +
+            'export const t = handle.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('reports an expression form it has no model of, and treats it as a handle', () => {
+        /**
+         * `yield` is the honest example: its value comes from whoever drives the
+         * iterator, which no syntactic pass can see. Round 10 would have answered
+         * "not a handle" — the same answer it gave a tagged template. The rule
+         * now is that an unclassified form is *reported* and answered yes, so the
+         * failure reads "this check does not understand your code" rather than
+         * "your code is fine".
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function* load() {\n' +
+            '  const db = yield createDatabase();\n' +
+            '  return db.query.memberships;\n' +
+            '}\n',
+        });
+        const analysis = analyzeImportBoundary({
+          ...rule,
+          allowed: ['packages/db/src/client.ts'],
+        });
+        expect(analysis.unmodelled.map((form) => `${form.file} ${form.kind}`)).toEqual([
+          'apps/web/lib/rooms.ts YieldExpression',
+        ]);
+        expect(analysis.accesses.map((access) => access.kind)).toEqual(['property']);
+      });
+
+      it('reports an `import =` of an entity name rather than dropping it', () => {
+        // The other half of `import =`: an alias for a namespace member, which
+        // has no specifier to resolve and no model here.
+        const rule = fixture({
+          'apps/web/lib/rooms.ts':
+            "import * as atrium from '@atrium/db';\n" +
+            'import rows = atrium.memberships;\n' +
+            'export const t = rows;\n',
+        });
+        expect(
+          analyzeImportBoundary(rule).unmodelled.map((form) => `${form.file} ${form.kind}`),
+        ).toEqual(['apps/web/lib/rooms.ts ImportEqualsDeclaration(entity)']);
+      });
+
+      it('keeps every declared terminal quiet, so the report means something', () => {
+        /**
+         * The control that pays for the no-fall-through rule. If literals,
+         * objects, `this`, `new`, unary operators and JSX all reported, the
+         * `unmodelled` channel would be noise and nobody would read it — which is
+         * how a fail-closed rule dies in practice.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.tsx':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export class Holder {\n' +
+            '  private readonly db = createDatabase();\n' +
+            '  read() {\n' +
+            '    return this.db;\n' +
+            '  }\n' +
+            '}\n' +
+            'const literals = [1, "two", `three`, /four/, true, null, {}, []];\n' +
+            'const built = new Holder();\n' +
+            'const unary = -1 + Number(!literals.length) + (typeof built === "object" ? 1 : 0);\n' +
+            'export const meta = import.meta.url;\n' +
+            'export const view = <div data-x={unary}>{literals.length}</div>;\n',
+        });
+        expect(analyzeImportBoundary(rule).unmodelled).toEqual([]);
       });
     });
 

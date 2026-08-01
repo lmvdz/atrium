@@ -4,7 +4,6 @@ import {
   commandPolicy,
   commandScope,
   isCommand,
-  isRole,
   mayGrantRole,
   parseRole,
   type Role,
@@ -198,17 +197,78 @@ describe('roleRank', () => {
 });
 
 describe('the policy table itself', () => {
+  /**
+   * The protocol, written out here rather than read out of the table.
+   *
+   * This list is the *second* statement of the same fact, and that is the whole
+   * point: a test that derives its expectation from the thing it is testing
+   * cannot fail. Adding a command means editing two files, which is the review
+   * moment deny-by-default is supposed to create.
+   */
+  const protocol = [
+    'room.join',
+    'room.leave',
+    'room.presence',
+    'message.send',
+    'proposal.accept',
+    'proposal.reject',
+    'object.correct',
+    'room.rename',
+    'room.archive',
+    'workspace.read',
+    'room.create',
+    'workspace.invite',
+    'workspace.invitation.revoke',
+    'workspace.member.remove',
+    'workspace.member.role',
+    'workspace.update',
+    'workspace.delete',
+  ] as const;
+
   it('names only roles and scopes that exist', () => {
+    // Against the literals, not against `isRole` — a predicate defined over the
+    // same table cannot disagree with it.
     for (const policy of Object.values(commandPolicy)) {
-      expect(isRole(policy.role)).toBe(true);
+      expect(['owner', 'admin', 'member']).toContain(policy.role);
       expect(['room', 'workspace']).toContain(policy.scope);
     }
+    expect([...roles]).toEqual(['owner', 'admin', 'member']);
   });
 
   it('is the single list of commands — nothing is authorized off-table', () => {
-    // Deny-by-default only means something if the table is the whole protocol.
-    // A new command must be added here, which is the review moment this exists for.
-    expect(Object.keys(commandPolicy)).toContain('room.join');
-    expect(Object.keys(commandPolicy).every((c) => isCommand(c))).toBe(true);
+    /**
+     * **Round 11 rewrote this test, because the round-10 gauntlet proved it
+     * passed for the wrong reason.** It used to assert
+     * `Object.keys(commandPolicy).every(isCommand)` — and `isCommand` *is*
+     * `Object.hasOwn(commandPolicy, value)`. That holds for every possible table
+     * and every possible implementation: a definition restated in an
+     * expectation. The critic proved it by replacing `isCommand` with
+     * `typeof value === 'string'` and watching this test, alone, stay green.
+     * `scripts/predicate-sweep.mjs` now runs exactly that stub against every
+     * predicate in the package, and its receipt for `isCommand` names the two
+     * tests that *do* notice — this one is no longer one of them by accident.
+     *
+     * The property is real and this is what it takes to assert it: the table's
+     * keys are the protocol, spelled out independently above.
+     */
+    expect(Object.keys(commandPolicy).sort()).toEqual([...protocol].sort());
+  });
+
+  it('authorizes nothing outside that list, whatever the role', () => {
+    // The claim stated as a decision rather than as a set: an owner is refused
+    // every name the protocol does not contain, including the ones that look
+    // like near-misses of real commands.
+    for (const name of [
+      'room.destroy',
+      'Room.join',
+      'room.join ',
+      'workspace.member.promote',
+      '__proto__',
+      'toString',
+      '',
+    ]) {
+      expect(authorize(name, owner), name).toMatchObject({ reason: 'unknown_command' });
+      expect(isCommand(name), name).toBe(false);
+    }
   });
 });

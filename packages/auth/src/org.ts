@@ -1,6 +1,6 @@
 import { APIError } from 'better-auth/api';
 import type { OrganizationOptions } from 'better-auth/plugins/organization';
-import { authorize, mayGrantRole, parseRole, roleRank } from './authz.js';
+import { authorize, isRole, mayGrantRole, parseRole, roleRank } from './authz.js';
 import { describeUnknown, guardedErrorLog, toReportableError } from './errors.js';
 import type { Mailer } from './mailer.js';
 import type { InvitationVoidOutcome } from './workspace.js';
@@ -258,16 +258,32 @@ function withDeadline(
 }
 
 /**
- * Refuse a role string that is not exactly one role we know.
+ * Refuse a role that is not exactly one role we know.
  *
  * Better Auth accepts `role` as a string or an array and stores the result as a
  * comma-separated list. Atrium has three roles and no notion of holding two at
- * once, so anything else — an unknown name, a list, an empty string — is
- * rejected rather than parsed into whichever component looks most familiar.
+ * once, so anything else — an unknown name, a list, an array, an empty string —
+ * is rejected rather than parsed into whichever component looks most familiar.
+ *
+ * **Round 11 made the code say that, because it did not.** The old body joined
+ * an array into a comma list and handed it to `parseRole`, which *deliberately*
+ * returns the strongest known component (`authz.ts`'s documented contract, and
+ * the right reading for the free-text column it was written for). So
+ * `assertKnownRole(['member','admin'])` returned `"member,admin"` and
+ * `assertKnownRole('owner,member')` returned normally, both of which the
+ * paragraph above said were rejected. No reachable escalation — the public
+ * actions restrict `role` to an enum and the raw organization routes are
+ * blocked — but "exactly one role" is the invariant three call sites are
+ * written against, and a documented invariant that the code does not hold is
+ * the thing this ticket keeps finding.
+ *
+ * Reading, not parsing: the value must *be* a role. It is returned canonical
+ * (trimmed), so what the caller passes on is the role rather than whatever
+ * spacing arrived with it.
  */
 export function assertKnownRole(raw: unknown): string {
-  const value = Array.isArray(raw) ? raw.join(',') : raw;
-  if (typeof value !== 'string' || parseRole(value) === null) {
+  const value = typeof raw === 'string' ? raw.trim() : null;
+  if (value === null || !isRole(value)) {
     throw new APIError('BAD_REQUEST', {
       message: 'Unknown role. Atrium workspaces have exactly three: owner, admin, member.',
     });

@@ -69,6 +69,13 @@ const TOUCHED = [
   'packages/auth/src/room-access.ts',
   'packages/auth/src/org.ts',
   'packages/auth/src/errors.ts',
+  'packages/auth/src/authz.ts',
+  // Round 11's `ledger-unchecked-suite-passes` mutates this file. Self-mutation
+  // is safe *because* the snapshot is taken before the edit and the process has
+  // already been read into memory — but it is the one entry here that would
+  // survive a careless `--restore` ordering, so it is called out rather than
+  // slipped in.
+  'scripts/mutation-ledger.mjs',
   'packages/auth/test/support/import-boundary.ts',
   'packages/auth/test/room-access.test.ts',
   'apps/server/src/ws-server.ts',
@@ -282,9 +289,14 @@ const mutations = {
       mutations['boundary-no-helpers'][2]();
       mutations['boundary-no-access'][2]();
       edit('packages/auth/test/support/import-boundary.ts', [
+        // The lenient resolver: an invented subpath answers "not our problem"
+        // instead of inheriting its package's taint. **Repointed in round 11**,
+        // which rewrote `resolveSpecifier` into a classifier — the old
+        // `return root ? rel(root) : null` is now `fromDisk(found ?? root)`, and
+        // `--verify` is what said so.
         [
-          '    if (found) return rel(found);\n    return root ? rel(root) : null;',
-          '    if (found) return rel(found);\n    return null;',
+          '        return fromDisk(found ?? root);',
+          "        return found ? fromDisk(found) : { kind: 'external' };",
         ],
       ]);
     },
@@ -700,6 +712,122 @@ const mutations = {
         ],
       ]),
   ],
+
+  // ── round 11: the denominator ──────────────────────────────────────────────
+  //
+  // Every row here reverts *one* of the round-11 rules and nothing else, because
+  // the finding was that six separate holes shared one cause. Six separate
+  // measurements is how a reader checks that claim rather than taking it.
+
+  'boundary-typescript-only': [
+    "round 10's file filter: only `.ts`, `.tsx`, `.mts`, `.cts` are modules — so a Next `route.js` is not in the graph at all",
+    'packages/auth/test/room-access.test.ts — the extension fixtures and the denominator premises',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          'const MODULE = /\\.(?:tsx?|mts|cts|jsx?|mjs|cjs)$/;',
+          'const MODULE = /\\.(?:tsx?|mts|cts)$/;',
+        ],
+      ]),
+  ],
+
+  'boundary-skip-by-name': [
+    "round 10's skip list: any directory *named* `test`, `build`, `dist`, `e2e`, `drizzle` or `coverage`, anywhere in the path — which excused the App Router route `/test`",
+    'packages/auth/test/room-access.test.ts — the directory fixtures and the denominator premises',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          "      if (entry.name === 'node_modules' || context.isExcluded(path)) {",
+          "      const byName = ['node_modules', 'dist', 'build', '.next', '.turbo', 'coverage', 'test-results', 'test', 'e2e', 'drizzle'];\n" +
+            '      if (byName.includes(entry.name) || context.isExcluded(path)) {',
+        ],
+      ]),
+  ],
+
+  'boundary-silent-resolution': [
+    "round 10's resolver: a specifier that lands outside the parsed set, or on nothing at all, is silently not-our-problem",
+    'packages/auth/test/room-access.test.ts — the out-of-graph and undeclared-package fixtures',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          "    return { kind: 'unresolved', reason: 'outside-the-graph', resolved: path };",
+          "    return { kind: 'external' };",
+        ],
+        [
+          "      if (declaredDependencies(fromPath).has(packageNameOf(specifier))) return { kind: 'external' };\n" +
+            "      return { kind: 'unresolved', reason: 'undeclared-package' };",
+          "      return { kind: 'external' };",
+        ],
+      ]),
+  ],
+
+  'boundary-alias-blind': [
+    "round 10's specifier classifier: `@/lib/db` is neither relative nor `@atrium/…`, so it is assumed to be a package on npm and the handle graph loses the edge",
+    'packages/auth/test/room-access.test.ts — the alias premise and the alias fixture',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          '      for (const alias of aliasesFor(fromPath)) {',
+          '      for (const alias of [] as ReturnType<typeof aliasesFor>) {',
+        ],
+      ]),
+  ],
+
+  'boundary-grammar-fallthrough': [
+    "round 10's `isHandle`: no tagged-template case and a `return false` fall-through, so every form nobody enumerated answers *not a handle*",
+    'packages/auth/test/room-access.test.ts — the tagged-template, `import =`/`export =` and unmodelled fixtures',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        ['      if (ts.isTaggedTemplateExpression(node)) return isHandle(node.tag);', ''],
+        ['      if (TERMINAL_KINDS.has(node.kind)) return false;', '      if (true) return false;'],
+      ]),
+  ],
+
+  'boundary-ignores-parse-errors': [
+    'a file that does not parse contributes an empty walk, which reads exactly like a clean one',
+    'packages/auth/test/room-access.test.ts — the parse-error fixture',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        ['    if (parseError !== null) {', '    if (false && parseError !== null) {'],
+      ]),
+  ],
+
+  'ledger-unchecked-suite-passes': [
+    "round 10's drift check: a receipt carrying no suite hash skips the comparison, which is not the same as passing it",
+    'packages/auth/test/mutation-ledger.test.ts — the suite-drift tests',
+    () =>
+      edit('scripts/mutation-ledger.mjs', [
+        [
+          "  if (!suite.suiteHash) return 'unchecked';",
+          "  if (!suite.suiteHash) return 'current';",
+        ],
+      ]),
+  ],
+
+  'role-assert-joins-lists': [
+    "round 10's `assertKnownRole`: an array is joined into a comma list and handed to `parseRole`, which returns its strongest known component — so `['member','admin']` is accepted as `\"member,admin\"`",
+    'packages/auth/test/org.test.ts — the exactly-one-role tests',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          "  const value = typeof raw === 'string' ? raw.trim() : null;\n  if (value === null || !isRole(value)) {",
+          "  const value = Array.isArray(raw) ? raw.join(',') : raw;\n" +
+            "  if (typeof value !== 'string' || parseRole(value) === null) {",
+        ],
+      ]),
+  ],
+
+  'command-predicate-fail-open': [
+    'the critic\'s own stub: `isCommand` becomes `typeof value === "string"`, so every name is a command',
+    'packages/auth/test/authz.test.ts — and **this is finding D measured**: under round 10 the "single list of commands" test passed alone against this stub, because it asserted `isCommand` using `isCommand`\'s own definition',
+    () =>
+      edit('packages/auth/src/authz.ts', [
+        [
+          "  return typeof value === 'string' && Object.hasOwn(commandPolicy, value);",
+          "  return typeof value === 'string';",
+        ],
+      ]),
+  ],
 };
 
 /**
@@ -792,6 +920,13 @@ const SUITES = {
     build: [],
   },
   'auth:org': { runner: 'vitest', cwd: 'packages/auth', file: 'test/org.test.ts', build: [] },
+  'auth:authz': { runner: 'vitest', cwd: 'packages/auth', file: 'test/authz.test.ts', build: [] },
+  'auth:ledger': {
+    runner: 'vitest',
+    cwd: 'packages/auth',
+    file: 'test/mutation-ledger.test.ts',
+    build: [],
+  },
   'auth:errors': { runner: 'vitest', cwd: 'packages/auth', file: 'test/errors.test.ts', build: [] },
   'auth:deployment': {
     runner: 'vitest',
@@ -869,6 +1004,15 @@ const CREDITED = {
   'unbind-infra': ['auth:deployment'],
   'boundary-initializer-walk': ['auth:room-access'],
   'describer-returns-raw-message': ['auth:errors'],
+  'boundary-typescript-only': ['auth:room-access'],
+  'boundary-skip-by-name': ['auth:room-access'],
+  'boundary-silent-resolution': ['auth:room-access'],
+  'boundary-alias-blind': ['auth:room-access'],
+  'boundary-grammar-fallthrough': ['auth:room-access'],
+  'boundary-ignores-parse-errors': ['auth:room-access'],
+  'ledger-unchecked-suite-passes': ['auth:ledger'],
+  'role-assert-joins-lists': ['auth:org'],
+  'command-predicate-fail-open': ['auth:authz'],
 };
 
 for (const key of Object.keys(mutations)) {
@@ -890,12 +1034,47 @@ function sha(text) {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
 
-/** The content hash of a suite's own file, or null where the suite is a whole package. */
+/**
+ * The content hash of what a suite actually runs.
+ *
+ * **Round 11 made this total, because round 10's comment claimed a branch that
+ * did not exist.** The header at `proveOne` said `suiteHash` is "`null` for a
+ * whole-package suite, and `--receipts` says so rather than implying a check it
+ * did not make" — and `describeReceipt` had no such branch, so
+ * `undescribable-describer` (credited to `auth:all`, `suiteHash: null`) printed
+ * exactly like every row whose suite drift *had* been checked. `receiptState`
+ * then skipped the comparison entirely on a falsy hash, so a whole-package row
+ * could never go stale however much its suite changed.
+ *
+ * Two fixes, and the second is the one that matters. A whole-package suite now
+ * hashes the *file set* it would run — every file under `test/`, path and
+ * content, sorted — so there is nothing left to be null about. And a receipt
+ * that carries no hash is `unchecked-suite` rather than silently proved, which
+ * is the round's rule applied to its own instrument: "we could not tell" must
+ * not read as "it was fine".
+ *
+ * A whole-package hash moves whenever any test in the package changes, which
+ * over-invalidates: every round of this ticket would have re-measured
+ * `undescribable-describer`. That is the cheap direction to be wrong in, and the
+ * same trade `subjectHash` already makes one comment down.
+ */
 function suiteHashOf(suiteName) {
   const suite = SUITES[suiteName];
-  if (!suite.file) return null;
   try {
-    return sha(readFileSync(join(suite.cwd, suite.file), 'utf8'));
+    if (suite.file) return sha(readFileSync(join(suite.cwd, suite.file), 'utf8'));
+    const root = join(suite.cwd, 'test');
+    const files = [];
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else files.push(path);
+      }
+    };
+    walk(root);
+    if (files.length === 0) return null;
+    files.sort();
+    return sha(files.map((file) => `${file}\n${readFileSync(file, 'utf8')}`).join('\n'));
   } catch {
     return null;
   }
@@ -1333,8 +1512,9 @@ function proveOne(key, baselines) {
        * this ticket did it — and it is what turned round 7's "3 of 40" into
        * round 9's "14 of 52" with nothing anywhere marking the first as stale.
        *
-       * `null` for a whole-package suite, and `--receipts` says so rather than
-       * implying a check it did not make.
+       * A whole-package suite hashes the file set it would run rather than one
+       * file — see `suiteHashOf`, and see round 11's finding E for what this
+       * comment used to promise and `describeReceipt` never did.
        */
       suiteFile: SUITES[suiteName].file
         ? join(SUITES[suiteName].cwd, SUITES[suiteName].file)
@@ -1407,6 +1587,25 @@ function readReceipt(key) {
  * claims the receipts exist to check, so a paragraph rewritten around a number
  * is exactly the moment to re-measure it.
  */
+/**
+ * Has the suite that measured this row moved since it was measured?
+ *
+ * Pure, and exported, so `packages/auth/test/mutation-ledger.test.ts` can pin
+ * the one answer round 10 got wrong: a receipt with **no** hash had its drift
+ * check *skipped*, and skipping a check is not passing it. `if (suite.suiteHash
+ * && …)` meant every whole-package row was permanently exempt from the most
+ * common kind of staleness there is — and `undescribable-describer`, the only
+ * such row, printed identically to rows whose drift really had been checked.
+ *
+ * `no-baseline` is the one honest exemption: that suite never ran, so there was
+ * nothing to hash and nothing being claimed.
+ */
+export function suiteDrift(suite, currentHash) {
+  if (suite.verdict === 'no-baseline') return 'current';
+  if (!suite.suiteHash) return 'unchecked';
+  return suite.suiteHash === currentHash ? 'current' : 'stale';
+}
+
 function receiptState(key) {
   const receipt = readReceipt(key);
   if (!receipt) return { state: 'missing', receipt: null };
@@ -1414,9 +1613,9 @@ function receiptState(key) {
     return { state: 'stale-mutation', receipt };
   }
   for (const suite of receipt.suites ?? []) {
-    if (suite.suiteHash && suite.suiteHash !== suiteHashOf(suite.suite)) {
-      return { state: 'stale-suite', receipt };
-    }
+    const drift = suiteDrift(suite, suiteHashOf(suite.suite));
+    if (drift === 'unchecked') return { state: 'unchecked-suite', receipt };
+    if (drift === 'stale') return { state: 'stale-suite', receipt };
     if (!suite.files || !suite.subjectHash) continue;
     let current;
     try {
@@ -1444,10 +1643,21 @@ function describeReceipt(key) {
     .join(', ');
   const when = String(receipt.recordedAt).slice(0, 10);
   const at = String(receipt.commit).slice(0, 8);
-  if (state === 'proved') return `proved ${when} @${at} — ${suites} (${caught} caught)`;
+  if (state === 'proved') {
+    // Name the *kind* of suite behind the number, so a row measured against a
+    // whole package does not read like one measured against a single file.
+    const packages = (receipt.suites ?? [])
+      .filter((suite) => suite.suiteFile === null)
+      .map((suite) => suite.suite);
+    const scope = packages.length > 0 ? `, whole package: ${packages.join(', ')}` : '';
+    return `proved ${when} @${at} — ${suites} (${caught} caught${scope})`;
+  }
   if (state === 'stale-mutation') return `STALE (the mutation was repointed since ${when})`;
   if (state === 'stale-subject') return `STALE (the code it measured changed since ${when})`;
   if (state === 'stale-suite') return `STALE (the suite that measured it changed since ${when})`;
+  if (state === 'unchecked-suite') {
+    return `UNCHECKED (${when} receipt carries no suite hash, so suite drift was never checked)`;
+  }
   return `NOT PROVED ${when} @${at} — ${suites}`;
 }
 

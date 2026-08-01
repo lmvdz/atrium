@@ -1306,4 +1306,39 @@ describe('assertKnownRole', () => {
     expect(() => assertKnownRole(undefined)).toThrow();
     expect(() => assertKnownRole(42)).toThrow();
   });
+
+  it('rejects a list of roles it *does* know, which is the whole point', () => {
+    /**
+     * **The round-10 gauntlet's finding F, and the case the old test just
+     * missed.** `['admin','billing']` threw — but only because `billing` is
+     * unknown. The old body joined an array into `"member,admin"` and asked
+     * `parseRole`, whose documented contract is to return the *strongest known
+     * component*; so every list of real roles came back accepted, while the
+     * paragraph above `assertKnownRole` said lists were rejected outright.
+     *
+     * No reachable escalation — the public actions restrict `role` to an enum
+     * and the raw organization routes are blocked — but "exactly one role" is
+     * the invariant three call sites are written against, and this ticket is
+     * about invariants the code does not hold.
+     *
+     * Catches: `role-assert-joins-lists`, which is the old body exactly.
+     */
+    expect(() => assertKnownRole('owner,member')).toThrow();
+    expect(() => assertKnownRole('member,admin')).toThrow();
+    expect(() => assertKnownRole(['member', 'admin'])).toThrow();
+    expect(() => assertKnownRole(['admin'])).toThrow();
+    expect(() => assertKnownRole([])).toThrow();
+  });
+
+  it('returns the role, canonical, rather than whatever spacing arrived', () => {
+    // It reads a role rather than parsing a value, so what the caller passes on
+    // is the role. `parseRole` still trims, so this is a narrowing, not a
+    // change of vocabulary.
+    expect(assertKnownRole(' admin ')).toBe('admin');
+    expect(() => assertKnownRole('')).toThrow();
+    expect(() => assertKnownRole('   ')).toThrow();
+    expect(() => assertKnownRole('Admin')).toThrow();
+    expect(() => assertKnownRole(null)).toThrow();
+    expect(() => assertKnownRole({ role: 'admin' })).toThrow();
+  });
 });
