@@ -38,9 +38,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import styles from './primitives.module.css';
 
-/** What the hold put on the record. */
+/**
+ * What the hold put on the record: WHO armed it, WHEN, and HOW LONG they held.
+ *
+ * Round 2's gauntlet found this record claiming all three in its comment while
+ * carrying two — there was no actor field at all, and the card boundary then
+ * dropped `heldMs` on the way out, handing consumers a bare `armedAt` string.
+ * CONVENTIONS is explicit: "the action records who armed it and when". A record
+ * of an irreversible act with nobody on it is not a record of who did it.
+ */
 export interface Arming {
   readonly actionId: string;
+  /** the person whose press this was — required, because the convention is */
+  readonly actor: string;
   /** wall clock, ISO — the "when" the convention requires be recorded */
   readonly armedAt: string;
   /** measured, not assumed: how long the control was actually held */
@@ -51,6 +61,8 @@ export const DEFAULT_HOLD_MS = 2000;
 
 export interface HoldToActProps {
   readonly actionId: string;
+  /** who is pressing. Not optional: an arming with no actor records nothing. */
+  readonly actor: string;
   readonly label: string;
   /** what the hold will do, in words. Shown as the control's description. */
   readonly describe: string;
@@ -64,6 +76,7 @@ type Phase = 'idle' | 'holding' | 'armed';
 
 export function HoldToAct({
   actionId,
+  actor,
   label,
   describe,
   holdMs = DEFAULT_HOLD_MS,
@@ -109,12 +122,12 @@ export function HoldToAct({
     stop();
     paint(1);
     setPhase('armed');
-    const arming: Arming = { actionId, armedAt: new Date().toISOString(), heldMs };
+    const arming: Arming = { actionId, actor, armedAt: new Date().toISOString(), heldMs };
     /* Arm first, act second. The record of who armed it and when must exist
        before the irreversible thing happens, not after it succeeded. */
     onArm?.(arming);
     onAct?.(arming);
-  }, [actionId, onAct, onArm, paint, stop]);
+  }, [actionId, actor, onAct, onArm, paint, stop]);
 
   const tick = useCallback(() => {
     const started = startRef.current;
@@ -144,6 +157,7 @@ export function HoldToAct({
       data-armed={phase === 'armed' ? 'true' : undefined}
       data-hold={String(holdMs)}
       data-hold-action={actionId}
+      data-hold-actor={actor}
       data-hold-progress="0.000"
       data-holding={phase === 'holding' ? 'true' : undefined}
       onBlur={cancel}

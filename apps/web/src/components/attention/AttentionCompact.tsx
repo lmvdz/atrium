@@ -23,17 +23,21 @@ import type { NoGlyph } from '../model/glyph';
 import type { AttentionItem } from '../model/records';
 import { list } from '../model/text';
 import { Glyph } from '../primitives/Glyph';
+import type { Arming } from '../primitives/HoldToAct';
 import { HoldToAct } from '../primitives/HoldToAct';
 import styles from './attention.module.css';
 
 export type AttentionCompactProps = {
   readonly item: AttentionItem;
+  /** whose press an arming records — same requirement as the open card */
+  readonly viewer: string;
   readonly onOpen?: (itemId: string) => void;
   readonly onAct?: (itemId: string, actionId: string) => void;
-  readonly onArm?: (itemId: string, actionId: string, armedAt: string) => void;
+  /** the whole measured record, not a timestamp cut out of it */
+  readonly onArm?: (itemId: string, arming: Arming) => void;
 } & NoGlyph;
 
-export function AttentionCompact({ item, onOpen, onAct, onArm }: AttentionCompactProps) {
+export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: AttentionCompactProps) {
   const primary = item.actions[0];
   const facts = list(item.facts.slice(0, 2));
 
@@ -68,15 +72,12 @@ export function AttentionCompact({ item, onOpen, onAct, onArm }: AttentionCompac
         {primary === undefined ? null : item.state.irreversible ? (
           <HoldToAct
             actionId={primary.id}
+            actor={viewer}
             className={styles.acompHold}
             describe={primary.label}
             label={primary.label}
             onAct={onAct === undefined ? undefined : () => onAct(item.id, primary.id)}
-            onArm={
-              onArm === undefined
-                ? undefined
-                : (arming) => onArm(item.id, primary.id, arming.armedAt)
-            }
+            onArm={onArm === undefined ? undefined : (arming) => onArm(item.id, arming)}
           />
         ) : (
           <button

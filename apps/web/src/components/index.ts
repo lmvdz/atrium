@@ -9,7 +9,7 @@
 export { AttentionCard } from './attention/AttentionCard';
 export { AttentionCompact } from './attention/AttentionCompact';
 export { CrossRoomJump } from './attention/CrossRoomJump';
-export { Pin } from './attention/Pin';
+export { nextPageLabel, Pin } from './attention/Pin';
 export { Trailer } from './attention/Trailer';
 export { AppFrame, WorkspaceSpacer, WorkspaceTile, WorkspaceYou } from './frame/AppFrame';
 export { Composer } from './frame/Composer';

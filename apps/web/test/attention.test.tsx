@@ -91,6 +91,7 @@ describe('the rationale requirement', () => {
           },
           rationale: rationale(why),
         })}
+        viewer="lars"
       />,
     );
     expect(screen.getByText('WHY YOU')).toBeDefined();
@@ -143,7 +144,7 @@ describe('the pin', () => {
   /* CATCHES: turning the empty pin into a hidden element or an empty box.
      Silence is a result the reader wanted, not an absence to hide. */
   it('an empty pin says so as an answer', () => {
-    render(<Pin items={[]} lastCheck="13:41" trailer={EMPTY_TRAILER} />);
+    render(<Pin items={[]} lastCheck="13:41" trailer={EMPTY_TRAILER} viewer="lars" />);
     expect(screen.getByText(/THAT IS A RESULT, NOT AN ABSENCE/)).toBeDefined();
   });
 
@@ -177,6 +178,7 @@ describe('the pin', () => {
         ]}
         lastCheck="12:29"
         trailer={EMPTY_TRAILER}
+        viewer="lars"
       />,
     );
     const hold = screen.getByRole('button', { name: /Authorise — hold/ });

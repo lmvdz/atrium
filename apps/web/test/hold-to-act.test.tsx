@@ -62,6 +62,7 @@ describe('press and hold', () => {
     render(
       <HoldToAct
         actionId="drop"
+        actor="lars"
         describe="drop the table"
         label="Drop"
         onAct={() => acts.push('act')}
@@ -83,6 +84,7 @@ describe('press and hold', () => {
     render(
       <HoldToAct
         actionId="drop"
+        actor="lars"
         describe="drop the table"
         label="Drop"
         onAct={() => events.push('act')}
@@ -108,6 +110,7 @@ describe('press and hold', () => {
     render(
       <HoldToAct
         actionId="drop"
+        actor="lars"
         describe="drop the table"
         label="Drop"
         onAct={() => order.push('act')}
@@ -126,6 +129,9 @@ describe('press and hold', () => {
     expect(record.actionId).toBe('drop');
     expect(record.heldMs).toBeGreaterThanOrEqual(2000);
     expect(Number.isNaN(Date.parse(record.armedAt))).toBe(false);
+    /* CONVENTIONS: "the action records WHO armed it and when". Round 2's record
+       had no actor at all while its own comment claimed one. */
+    expect(record.actor).toBe('lars');
     expect(button.getAttribute('data-armed')).toBe('true');
     expect(button.textContent).toContain('armed');
   });
@@ -137,6 +143,7 @@ describe('press and hold', () => {
     render(
       <HoldToAct
         actionId="drop"
+        actor="lars"
         describe="drop"
         holdMs={2000}
         label="Drop"
@@ -156,7 +163,13 @@ describe('press and hold', () => {
   it('the keyboard holds too, and cancels on release', () => {
     const events: string[] = [];
     render(
-      <HoldToAct actionId="drop" describe="drop" label="Drop" onAct={() => events.push('act')} />,
+      <HoldToAct
+        actionId="drop"
+        actor="lars"
+        describe="drop"
+        label="Drop"
+        onAct={() => events.push('act')}
+      />,
     );
     const button = screen.getByRole('button');
     fireEvent.keyDown(button, { key: ' ' });
@@ -173,7 +186,7 @@ describe('press and hold', () => {
   /* CATCHES: a progress indicator that is decorative rather than driven by the
      same clock as the gate. What fills must be what is being measured. */
   it('the indicator fills from the clock that gates the action', () => {
-    render(<HoldToAct actionId="drop" describe="drop" label="Drop" />);
+    render(<HoldToAct actionId="drop" actor="lars" describe="drop" label="Drop" />);
     const button = screen.getByRole('button');
     fireEvent.pointerDown(button);
     advance(1000);
@@ -190,7 +203,7 @@ describe('friction follows the action, not the layout', () => {
   /* CATCHES: an irreversible primary rendering as a plain one-click button on
      the open card. */
   it('the open card holds an irreversible primary', () => {
-    render(<AttentionCard item={destructive()} />);
+    render(<AttentionCard item={destructive()} viewer="lars" />);
     const button = screen.getByRole('button', { name: /Authorise the drop — hold/ });
     expect(button.getAttribute('data-hold')).toBe('2000');
   });
@@ -199,7 +212,7 @@ describe('friction follows the action, not the layout', () => {
      hold into a one-click destruction: the compressed row had no destructive
      variant at all. */
   it('the compressed row holds it too', () => {
-    render(<AttentionCompact item={destructive()} />);
+    render(<AttentionCompact item={destructive()} viewer="lars" />);
     const button = screen.getByRole('button', { name: /Authorise the drop — hold/ });
     expect(button.getAttribute('data-hold')).toBe('2000');
     expect(button.getAttribute('data-hold-action')).toBe('authorise');
@@ -220,9 +233,66 @@ describe('friction follows the action, not the layout', () => {
             irreversible: false,
           },
         }}
+        viewer="lars"
       />,
     );
     const button = screen.getByRole('button', { name: 'Authorise the drop' });
     expect(button.getAttribute('data-hold')).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE ARMING RECORD CROSSES THE BOUNDARY WHOLE.
+ *
+ * Round 2's gauntlet: `Arming` carried `{actionId, armedAt, heldMs}` under a
+ * comment claiming "who, when, how long held" — there was no actor field — and
+ * the card and compressed row then flattened it to `(itemId, actionId,
+ * armedAt)`, dropping the measured hold on the way out. A consumer putting an
+ * irreversible act on the record got a timestamp and no evidence.
+ * ------------------------------------------------------------------------- */
+describe('the arming record reaches the consumer whole', () => {
+  /* CATCHES: the card or the row re-flattening the record. Everything the
+     control measured has to survive the boundary, or the measurement was for
+     nobody. Against r2 this does not compile, and with the types loosened it
+     fails on the missing `actor` and `heldMs`. */
+  it.each([
+    [
+      'the open card',
+      (armed: (id: string, arming: Arming) => void) => (
+        <AttentionCard item={destructive()} onArm={armed} viewer="priya" />
+      ),
+    ],
+    [
+      'the compressed row',
+      (armed: (id: string, arming: Arming) => void) => (
+        <AttentionCompact item={destructive()} onArm={armed} viewer="priya" />
+      ),
+    ],
+  ])('%s hands over actor, wall clock and measured hold', (_name, build) => {
+    let seen: { id: string; arming: Arming } | null = null;
+    render(
+      build((id, arming) => {
+        seen = { id, arming };
+      }),
+    );
+    const button = screen.getByRole('button', { name: /Authorise the drop — hold/ });
+    fireEvent.pointerDown(button);
+    advance(2100);
+    expect(seen).not.toBeNull();
+    const record = seen as unknown as { id: string; arming: Arming };
+    expect(record.id).toBe('X1');
+    expect(record.arming.actionId).toBe('authorise');
+    expect(record.arming.actor).toBe('priya');
+    expect(record.arming.heldMs).toBeGreaterThanOrEqual(2000);
+    expect(Number.isNaN(Date.parse(record.arming.armedAt))).toBe(false);
+  });
+
+  /* CATCHES: the actor being invented by the control rather than supplied by
+     the surface that knows who is looking. It is on the DOM as well, so a
+     browser can check the record the page would write. */
+  it('the actor on the control is the viewer it was given', () => {
+    render(<AttentionCard item={destructive()} viewer="dana" />);
+    const button = screen.getByRole('button', { name: /Authorise the drop — hold/ });
+    expect(button.getAttribute('data-hold-actor')).toBe('dana');
   });
 });

@@ -30,14 +30,22 @@ import { slot } from '../model/slot';
 import { list } from '../model/text';
 import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
+import type { Arming } from '../primitives/HoldToAct';
 import { HoldToAct } from '../primitives/HoldToAct';
 import styles from './attention.module.css';
 
 export type AttentionCardProps = {
   readonly item: AttentionItem;
+  /** whose press an arming records. Required wherever a hold can be rendered. */
+  readonly viewer: string;
   readonly onAct?: (itemId: string, actionId: string) => void;
-  /** the arming of an irreversible action, recorded before the act */
-  readonly onArm?: (itemId: string, actionId: string, armedAt: string) => void;
+  /**
+   * The arming of an irreversible action, recorded before the act. Round 2
+   * flattened this to `(itemId, actionId, armedAt)` and dropped the measured
+   * hold on the floor; the whole record crosses now, actor included, because
+   * what the caller puts on the record should be what the control measured.
+   */
+  readonly onArm?: (itemId: string, arming: Arming) => void;
   readonly onJumpToSource?: (itemId: string) => void;
 } & NoGlyph;
 
@@ -47,7 +55,7 @@ const EMPHASIS_CLASS: Readonly<Record<AttentionAction['emphasis'], string>> = {
   ghost: 'atr-btn atr-btn-ghost atr-btn-sm',
 };
 
-export function AttentionCard({ item, onAct, onArm, onJumpToSource }: AttentionCardProps) {
+export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: AttentionCardProps) {
   const glyph = glyphFor(item.state);
   const facts = list(item.facts);
   /* `text()` is the runtime boundary for Maybe: `undefined` reaching this from a
@@ -113,14 +121,11 @@ export function AttentionCard({ item, onAct, onArm, onJumpToSource }: AttentionC
               item.state.irreversible && action.emphasis === 'primary' ? (
                 <HoldToAct
                   actionId={action.id}
+                  actor={viewer}
                   describe={action.label}
                   key={action.id}
                   onAct={onAct === undefined ? undefined : () => onAct(item.id, action.id)}
-                  onArm={
-                    onArm === undefined
-                      ? undefined
-                      : (arming) => onArm(item.id, action.id, arming.armedAt)
-                  }
+                  onArm={onArm === undefined ? undefined : (arming) => onArm(item.id, arming)}
                   label={action.label}
                 />
               ) : (
