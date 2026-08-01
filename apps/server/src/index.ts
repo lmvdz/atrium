@@ -1,7 +1,10 @@
 import { createDatabase } from '@atrium/db';
+import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
+import { createLedger } from './ledger.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
+import { createMembershipAuthorizer, createStubSessionAuthenticator } from './session.js';
 import { createRealtimeServer } from './ws-server.js';
 
 /**
@@ -18,6 +21,18 @@ async function main(): Promise<void> {
 
   const database = createDatabase({ url: env.DATABASE_URL, debug: env.LOG_LEVEL === 'debug' });
 
+  // The live core state is a fold of the ledger, so it is rebuilt from the
+  // ledger — before the socket opens, because a client that connected to a
+  // half-hydrated server would be told a `head` the state does not yet reflect.
+  const ledger = createLedger({ db: database.db, logger });
+  await ledger.hydrate();
+
+  const commands = createCommandService({
+    db: database.db,
+    ledger,
+    authorizer: createMembershipAuthorizer(database.db),
+  });
+
   let ready = false;
   const realtime = createRealtimeServer({
     host: env.SERVER_HOST,
@@ -25,6 +40,10 @@ async function main(): Promise<void> {
     heartbeatIntervalMs: env.WS_HEARTBEAT_INTERVAL_MS,
     logger,
     isReady: () => ready,
+    commands,
+    ledger,
+    // #26 replaces this and nothing else. See `session.ts`.
+    session: createStubSessionAuthenticator(),
   });
 
   await realtime.listen();
