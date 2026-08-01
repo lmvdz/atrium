@@ -1,10 +1,12 @@
 import { expect, test } from '@playwright/test';
 import { serverPort } from './support/config.mjs';
 import {
-  browserAvailable,
   createWorkspace,
   invite,
+  openLiveSocket,
+  requireBrowser,
   sendCommand,
+  sendOnLiveSocket,
   signUpAndVerify,
   uniqueEmail,
 } from './support/flows';
@@ -28,10 +30,7 @@ async function joinedRoomId(page: import('@playwright/test').Page): Promise<stri
 }
 
 test.describe('websocket authorization', () => {
-  test.skip(
-    !browserAvailable(),
-    'Playwright browsers are not installed — run `pnpm exec playwright install chromium`',
-  );
+  requireBrowser();
 
   test('refuses the upgrade for a visitor with no session', async ({ browser }) => {
     const anonymous = await browser.newContext();
@@ -116,6 +115,103 @@ test.describe('websocket authorization', () => {
     // because owning a *room* is not owning the workspace.
     const result = await sendCommand(page, { command: 'workspace.delete', roomId });
     expect(result.reply).toMatchObject({ type: 'command_error', reason: 'wrong_scope' });
+  });
+
+  /**
+   * Revocation, all the way through, on a socket that was already open.
+   *
+   * Round 1 had no removal path and no reconciliation behind one: workspace
+   * membership was Better Auth's table, room membership was ours, and nothing
+   * connected them in the *removing* direction. A removed person kept every room
+   * and every live connection. This test removes somebody mid-connection and
+   * asserts the very next command over that same socket is refused.
+   */
+  test('a removed member’s open socket loses its authority on the next command', async ({
+    browser,
+  }) => {
+    const ownerEmail = uniqueEmail('revoke-owner');
+    const memberEmail = uniqueEmail('revoke-member');
+
+    const ownerContext = await browser.newContext();
+    const owner = await ownerContext.newPage();
+    await signUpAndVerify(owner, { email: ownerEmail, name: 'RevokeOwner' });
+    const slug = await createWorkspace(owner, 'Revocation');
+    const invitationUrl = await invite(owner, { slug, email: memberEmail, role: 'member' });
+
+    const memberContext = await browser.newContext();
+    const member = await memberContext.newPage();
+    await signUpAndVerify(member, { email: memberEmail, name: 'RevokeMember' });
+    await member.goto(invitationUrl);
+    await member.getByTestId('accept-invitation').click();
+    await member.waitForURL('**/app');
+
+    await member.goto(`/app/${slug}/general`);
+    const roomId = await joinedRoomId(member);
+
+    // The socket is open and the member genuinely has authority over the room.
+    expect(await openLiveSocket(member)).toBe(true);
+    const before = await sendOnLiveSocket(member, { command: 'room.join', roomId });
+    expect(before.reply).toMatchObject({ type: 'joined' });
+
+    // The owner removes them, in the app, while that socket is still open.
+    await owner.goto(`/app/${slug}`);
+    await owner.getByTestId(`member-remove-${memberEmail}`).click();
+    await expect(owner.getByTestId('member-removed')).toBeVisible();
+    await expect(owner.getByTestId('member-list')).not.toContainText(memberEmail);
+
+    // Same socket, next command. The membership row is gone, so the answer is.
+    const after = await sendOnLiveSocket(member, { command: 'room.join', roomId });
+    expect(after.reply).toMatchObject({ type: 'command_error', reason: 'not_a_member' });
+
+    // And the workspace itself is gone from their account.
+    await member.goto('/app');
+    await expect(member.getByTestId('no-workspaces')).toBeVisible();
+
+    await ownerContext.close();
+    await memberContext.close();
+  });
+
+  /**
+   * Demotion is a revocation too. An admin who becomes a plain member has to
+   * stop being able to do admin things in the workspace's rooms — which only
+   * happens if the role change is carried down into room membership.
+   */
+  test('a demoted member’s open socket loses the admin commands', async ({ browser }) => {
+    const ownerEmail = uniqueEmail('demote-owner');
+    const adminEmail = uniqueEmail('demote-admin');
+
+    const ownerContext = await browser.newContext();
+    const owner = await ownerContext.newPage();
+    await signUpAndVerify(owner, { email: ownerEmail, name: 'DemoteOwner' });
+    const slug = await createWorkspace(owner, 'Demotion');
+    const invitationUrl = await invite(owner, { slug, email: adminEmail, role: 'admin' });
+
+    const adminContext = await browser.newContext();
+    const admin = await adminContext.newPage();
+    await signUpAndVerify(admin, { email: adminEmail, name: 'DemoteAdmin' });
+    await admin.goto(invitationUrl);
+    await admin.getByTestId('accept-invitation').click();
+    await admin.waitForURL('**/app');
+
+    await admin.goto(`/app/${slug}/general`);
+    const roomId = await joinedRoomId(admin);
+    expect(await openLiveSocket(admin)).toBe(true);
+
+    // `room.archive` is an admin command; unimplemented, so an authorized caller
+    // gets the same opaque denial as an unknown one. What matters is the
+    // *difference* between the two runs below.
+    const asAdmin = await sendOnLiveSocket(admin, { command: 'room.archive', roomId });
+    expect(asAdmin.reply).toMatchObject({ reason: 'unknown_command' });
+
+    await owner.goto(`/app/${slug}`);
+    await owner.getByTestId(`member-role-${adminEmail}`).click();
+    await expect(owner.getByTestId('member-role-changed')).toBeVisible();
+
+    const asMember = await sendOnLiveSocket(admin, { command: 'room.archive', roomId });
+    expect(asMember.reply).toMatchObject({ reason: 'insufficient_role' });
+
+    await ownerContext.close();
+    await adminContext.close();
   });
 
   test('serves health without a session, and nothing else', async ({ request }) => {

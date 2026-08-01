@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test';
 import {
-  browserAvailable,
   createWorkspace,
   invite,
   password,
+  requireBrowser,
   signIn,
   signUpAndVerify,
   uniqueEmail,
@@ -22,10 +22,7 @@ import { countMail, waitForMail } from './support/mail';
  */
 
 test.describe('auth and workspaces', () => {
-  test.skip(
-    !browserAvailable(),
-    'Playwright browsers are not installed — run `pnpm exec playwright install chromium`',
-  );
+  requireBrowser();
 
   test('signup, verification, workspace, invitation, shared room and presence', async ({
     browser,
@@ -119,14 +116,30 @@ test.describe('auth and workspaces', () => {
     await expect(invitee.getByTestId('invitation-state')).toHaveAttribute('data-state', 'used');
     await expect(invitee.getByTestId('invitation-state')).toContainText('already been accepted');
 
-    // And the same link in a third browser, signed in as somebody else: still
-    // spent, and it does not leak the recipient's membership either way.
+    // And the same link in a third browser, signed in as somebody else. They
+    // learn nothing: not the workspace, not who it was sent to, not whether the
+    // id was even real. An invitation id arrives by email and travels — a
+    // forward, a shared screen, a bug report — so anybody holding one who is not
+    // the recipient gets one sentence with no nouns in it.
     const strangerEmail = uniqueEmail('stranger');
     const strangerContext = await browser.newContext();
     const stranger = await strangerContext.newPage();
     await signUpAndVerify(stranger, { email: strangerEmail, name: 'Stranger' });
     await stranger.goto(invitationUrl);
-    await expect(stranger.getByTestId('invitation-state')).toHaveAttribute('data-state', 'used');
+    const state = stranger.getByTestId('invitation-state');
+    await expect(state).toHaveAttribute('data-state', 'unavailable');
+    await expect(state).not.toContainText('Single Use');
+    await expect(state).not.toContainText(inviteeEmail);
+    await expect(stranger.getByRole('button', { name: 'Accept invitation' })).toHaveCount(0);
+    const forSomebodyElse = await state.textContent();
+
+    // A made-up id is answered identically — same state, same words — so
+    // guessing ids does not even tell you which ones exist.
+    await stranger.goto('/invite/00000000-0000-4000-8000-000000000000');
+    const madeUp = stranger.getByTestId('invitation-state');
+    await expect(madeUp).toHaveAttribute('data-state', 'unavailable');
+    expect(await madeUp.textContent()).toBe(forSomebodyElse);
+
     await stranger.goto('/app');
     await expect(stranger.getByTestId('no-workspaces')).toBeVisible();
 

@@ -75,13 +75,46 @@ Drizzle adapter. Three decisions are worth knowing before you touch it:
 The WebSocket upgrade is authenticated in `apps/server/src/ws-auth.ts` —
 `authenticateUpgrade(request) → session | null`, before the handshake completes,
 so there is no "connected but anonymous" state. That is the seam the realtime
-protocol (#22) builds on.
+protocol (#22) builds on. Two things happen alongside it:
 
-Email verification and invitations both go through the dev mailer
-(`packages/auth/src/mailer.ts`), which prints to the console and, when
-`ATRIUM_MAIL_OUTBOX` is set, appends one JSON object per message to a file. The
-e2e suite reads its links from there. It refuses to write that file when
-`NODE_ENV=production`.
+- **The `Origin` header is checked first**, against the same `APP_URL` Better
+  Auth trusts. A WebSocket handshake ignores the same-origin policy and still
+  carries cookies, so without this any page a signed-in person visits could open
+  an authenticated socket as them — and the valid session is what would make it
+  work. A client that sends no `Origin` at all is refused too, unless
+  `WS_ALLOW_ORIGINLESS=true` says the deployment has real non-browser clients.
+- **A socket does not outlive its session.** Each command re-validates, cached
+  for `WS_REVALIDATE_TTL_MS` (5s), so a revoked session loses its socket within
+  that window. Room membership is read per command with no cache at all, so
+  removing somebody takes effect on their very next frame.
+
+Removing or demoting a workspace member reconciles room membership in the same
+operation (`packages/auth/src/org.ts`, `workspace.ts`) — room membership is what
+the realtime server authorizes against, so it is what removal has to remove.
+
+Only two of Better Auth's HTTP endpoints are actually mounted
+(`packages/auth/src/mounted.ts`): the verification link and the OAuth callback.
+Everything else Atrium needs it calls in-process from a Server Action, where
+`authorize()` and the sign-in throttle live, so publishing the rest would only
+provide a way around both. The organization plugin additionally enforces its own
+policy in `beforeCreateInvitation` — nobody can hand out a role they do not hold
+themselves — so the rule holds even for a caller who does reach the API.
+
+Email verification and invitations both go through the mailer
+(`packages/auth/src/mailer.ts`). In development it prints to the console and,
+when `ATRIUM_MAIL_OUTBOX` is set, appends one JSON object per message to a file;
+the e2e suite reads its links from there. **There is no production transport
+yet, and the process refuses to boot with `NODE_ENV=production` until one is
+passed** — those links are one-click account takeovers and belong in an inbox,
+not in a log aggregator.
+
+Sign-in, sign-up and resend are throttled per address *and* per IP
+(`packages/auth/src/throttle.ts`). The IP dimension believes forwarded headers
+only as far as `ATRIUM_TRUSTED_PROXY_HOPS` tells it to — `1` behind a single
+reverse proxy, `0` (the default) meaning "trust no header", in which case the
+address dimension carries the load rather than a spoofable one pretending to.
+Counters are per-process and reset on restart, which is honest for the one-node
+deployment in issue #18 and must move to Postgres or Redis if that changes.
 
 One OAuth provider (GitHub) is wired but optional: set `GITHUB_CLIENT_ID` and
 `GITHUB_CLIENT_SECRET` and the button appears, leave them blank and it does not.

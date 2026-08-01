@@ -53,5 +53,20 @@ export function serverEnvironment() {
     SERVER_PORT: String(serverPort),
     SERVER_HOST: '127.0.0.1',
     LOG_LEVEL: 'warn',
+    /**
+     * Next appends the socket address to `X-Forwarded-For` when nothing else
+     * has, so it is the one trusted hop here. Setting it means the sign-in
+     * throttle's IP dimension is genuinely live during the suite rather than
+     * silently inert — a rate limiter nobody has ever seen count is a rate
+     * limiter nobody has tested.
+     */
+    ATRIUM_TRUSTED_PROXY_HOPS: '1',
+    /**
+     * A removed member's socket has to lose authority *within* this window, and
+     * the suite should not have to wait five seconds to watch it happen.
+     * Membership is re-read per command regardless; this bounds the session
+     * half of the same question.
+     */
+    WS_REVALIDATE_TTL_MS: '1000',
   };
 }

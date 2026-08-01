@@ -1,11 +1,8 @@
 import { expect, test } from '@playwright/test';
-import { browserAvailable } from './support/flows';
+import { requireBrowser } from './support/flows';
 
 test.describe('shell', () => {
-  test.skip(
-    !browserAvailable(),
-    'Playwright browsers are not installed — run `pnpm exec playwright install chromium`',
-  );
+  requireBrowser();
 
   test('renders the three regions', async ({ page }) => {
     await page.goto('/');

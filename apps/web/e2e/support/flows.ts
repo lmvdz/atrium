@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chromium, expect, type Page } from '@playwright/test';
+import { chromium, expect, type Page, test } from '@playwright/test';
 import { serverPort } from './config.mjs';
 import { waitForMail } from './mail';
 
@@ -33,6 +33,41 @@ export function browserAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+const isCI = !!process.env.CI;
+
+/**
+ * The browser guard, and the reason it is a function rather than a `test.skip`
+ * copied into every spec.
+ *
+ * That courtesy stops at CI. Round 1 used a bare `test.skip(!browserAvailable())`
+ * in all three auth specs, which meant a CI runner with no browser produced a
+ * fully skipped suite and a **green** run — zero authentication flows exercised,
+ * reported as a pass. A skipped suite that proves nothing is the exact failure
+ * CI exists to catch, so in CI the missing browser is a hard error.
+ *
+ * `apps/web/e2e/smoke.spec.ts` on the CI branch already had this shape; the auth
+ * specs now share it, from one place, so the next spec cannot forget the second
+ * half of it.
+ *
+ * Call it inside a `test.describe` body.
+ */
+export function requireBrowser(): void {
+  test.skip(
+    !isCI && !browserAvailable(),
+    'Playwright browsers are not installed — run `pnpm exec playwright install chromium`',
+  );
+
+  test.beforeAll(() => {
+    if (!browserAvailable()) {
+      throw new Error(
+        'Playwright browsers are not installed. In CI this is a failure, not a skip: ' +
+          'a browser suite that silently declines to run reports success it never earned. ' +
+          'Run `pnpm exec playwright install chromium`.',
+      );
+    }
+  });
 }
 
 /** Signs up, opens the emailed link, and lands signed in on /app. */
@@ -127,5 +162,78 @@ export async function sendCommand(
         });
       }),
     { ...frame, url: wsUrl },
+  );
+}
+
+/**
+ * A socket that stays open across several commands.
+ *
+ * `sendCommand` opens one socket per call, which answers "would this be
+ * refused?" and nothing about "does an *already open* socket lose its authority
+ * when the person behind it is removed?" — a fresh socket would just be refused
+ * at the handshake, which proves nothing about the live one. So this keeps the
+ * connection on `window` and lets a test send, revoke, and send again.
+ */
+export async function openLiveSocket(page: Page): Promise<boolean> {
+  return page.evaluate(
+    (url) =>
+      new Promise<boolean>((resolve) => {
+        const holder = window as unknown as {
+          __atriumLive?: { socket: WebSocket; replies: Record<string, unknown>[] };
+        };
+        const socket = new WebSocket(url);
+        const replies: Record<string, unknown>[] = [];
+        holder.__atriumLive = { socket, replies };
+
+        socket.addEventListener('message', (event: MessageEvent<string>) => {
+          const message = JSON.parse(event.data) as Record<string, unknown>;
+          // Roster broadcasts arrive unprompted; they are not answers.
+          if (message.type === 'welcome' || message.type === 'presence') return;
+          replies.push(message);
+        });
+        socket.addEventListener('open', () => resolve(true));
+        socket.addEventListener('error', () => resolve(false));
+        socket.addEventListener('close', () => resolve(false));
+      }),
+    wsUrl,
+  );
+}
+
+/** Sends one command over the socket `openLiveSocket` left open. */
+export async function sendOnLiveSocket(
+  page: Page,
+  frame: { command: string; roomId: string },
+): Promise<{ closed: boolean; reply: Record<string, unknown> | null }> {
+  return page.evaluate(
+    ({ command, roomId }) =>
+      new Promise<{ closed: boolean; reply: Record<string, unknown> | null }>((resolve) => {
+        const holder = window as unknown as {
+          __atriumLive?: { socket: WebSocket; replies: Record<string, unknown>[] };
+        };
+        const live = holder.__atriumLive;
+        if (!live || live.socket.readyState !== WebSocket.OPEN) {
+          resolve({ closed: true, reply: null });
+          return;
+        }
+
+        live.replies.length = 0;
+        live.socket.send(JSON.stringify({ type: 'command', command, roomId, requestId: 'live' }));
+
+        const startedAt = Date.now();
+        const tick = setInterval(() => {
+          const next = live.replies.shift();
+          if (next) {
+            clearInterval(tick);
+            resolve({ closed: false, reply: next });
+          } else if (live.socket.readyState !== WebSocket.OPEN) {
+            clearInterval(tick);
+            resolve({ closed: true, reply: null });
+          } else if (Date.now() - startedAt > 8000) {
+            clearInterval(tick);
+            resolve({ closed: false, reply: null });
+          }
+        }, 25);
+      }),
+    frame,
   );
 }
