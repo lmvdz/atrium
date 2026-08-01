@@ -5,6 +5,7 @@ import {
   type AppendResult,
   type AuthoredEvent,
   appendEvent,
+  authored,
   type CoreEvent,
   type CoreEventInput,
   CoreEvent as CoreEventSchema,
@@ -48,11 +49,28 @@ export function event(
     actor: Actor;
     messages?: readonly ProvenanceMessage[];
   };
-  return {
+  return authored(CoreEventSchema.parse(rest), {
     actor,
     ...(messages === undefined ? {} : { messages }),
-    event: CoreEventSchema.parse(rest),
-  };
+  });
+}
+
+/**
+ * A ledger row whose payload is **not parsed** — the shape a command layer
+ * actually hands over when the event came off a wire, out of a jsonb column, or
+ * through any call site TypeScript could not see.
+ *
+ * This is the one deliberate cast in the test suite, and it exists because r2's
+ * gauntlet found that its absence was the whole gap: `event()` above parses
+ * every fixture, so the tests proved the *schemas* refuse things while proving
+ * nothing about whether the reducer ever runs them. Rows built here go in raw,
+ * exactly as an untyped caller's would.
+ */
+export function rawEvent(
+  payload: unknown,
+  trusted: { actor: Actor; messages?: readonly ProvenanceMessage[] },
+): AuthoredEvent {
+  return authored(payload as CoreEvent, trusted);
 }
 
 /** `appendEvent` for a ledger row — the payload and its trusted context, split. */

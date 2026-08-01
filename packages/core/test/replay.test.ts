@@ -3,6 +3,7 @@ import {
   type Actor,
   type AuthoredEvent,
   appendEvent,
+  authored,
   type CoreEvent,
   CoreEvent as CoreEventSchema,
   type CoreState,
@@ -82,7 +83,7 @@ function parse(input: unknown): CoreEvent {
 
 /** One ledger row: the payload, plus the columns the command layer filled in. */
 function row(input: unknown, actor: Actor, messages?: readonly ProvenanceMessage[]): AuthoredEvent {
-  return { event: parse(input), actor, ...(messages === undefined ? {} : { messages }) };
+  return authored(parse(input), { actor, ...(messages === undefined ? {} : { messages }) });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,7 +199,11 @@ function generateLog(seed: number, size: number): AuthoredEvent[] {
       // acceptance in the corpus is sometimes one the floor must refuse.
       const proposalId = `prop_${index}`;
       const preBlessed = rng() < 0.25;
-      const text = `proposed ${index}`;
+      // Long enough to clear `RECEIPT_POLICY.minQuoteLength`, because the quote
+      // *is* this text and since r3 a short quote is a rejected receipt. A
+      // corpus of two-word statements would have quietly turned every model
+      // acceptance into a receipt failure and stopped testing the clean path.
+      const text = `proposed ${index} on the shared migration plan`;
       const messageId = `msg_${index}`;
       const staged: Staged = {
         id: proposalId,
@@ -597,26 +602,31 @@ function gateProbes(seed: number): AuthoredEvent[] {
     //
     // A low-confidence claim proposal, staged by MODEL, that both acceptance
     // gates are aimed at in turn.
-    modelClaimProposal(18, `pprop_low_${seed}`, `${tag} unsure`, 0.05),
+    modelClaimProposal(18, `pprop_low_${seed}`, `${tag} is unsure about the migration plan`, 0.05),
     // Gate: a model may not accept a reading it does not stand behind.
     object(
       19,
       'claim',
-      { statement: `${tag} unsure`, claimant: BOB },
+      { statement: `${tag} is unsure about the migration plan`, claimant: BOB },
       MODEL,
       `pprop_low_${seed}`,
-      claimWindow(`${tag} unsure`),
+      claimWindow(`${tag} is unsure about the migration plan`),
     ),
     // A well-founded proposal, staged by MODEL…
-    modelClaimProposal(20, `pprop_own_${seed}`, `${tag} confident`, 0.95),
+    modelClaimProposal(
+      20,
+      `pprop_own_${seed}`,
+      `${tag} is confident about the migration plan`,
+      0.95,
+    ),
     // Gate: …that a *different* model tries to accept.
     object(
       21,
       'claim',
-      { statement: `${tag} confident`, claimant: BOB },
+      { statement: `${tag} is confident about the migration plan`, claimant: BOB },
       OTHER_MODEL,
       `pprop_own_${seed}`,
-      claimWindow(`${tag} confident`),
+      claimWindow(`${tag} is confident about the migration plan`),
     ),
     // Gate: …and tries to reject.
     row(
@@ -664,17 +674,17 @@ function gateProbes(seed: number): AuthoredEvent[] {
     // ── #21 r2's additions: the receipt, as a condition of folding ─────────
     //
     // Gate: the payload that lands is not the payload that was staged.
-    modelClaimProposal(25, `pprop_bind_${seed}`, `${tag} as staged`, 0.95),
+    modelClaimProposal(25, `pprop_bind_${seed}`, `${tag} is the reading that was staged`, 0.95),
     object(
       26,
       'claim',
       { statement: `${tag} something else entirely`, claimant: BOB },
       MODEL,
       `pprop_bind_${seed}`,
-      claimWindow(`${tag} as staged`),
+      claimWindow(`${tag} is the reading that was staged`),
     ),
     // Gate: the citation set changed on the way through acceptance.
-    modelClaimProposal(27, `pprop_cite_${seed}`, `${tag} cited`, 0.95),
+    modelClaimProposal(27, `pprop_cite_${seed}`, `${tag} is the reading that was cited`, 0.95),
     row(
       {
         id: `${tag}_28`,
@@ -684,7 +694,7 @@ function gateProbes(seed: number): AuthoredEvent[] {
           id: `pobj_${seed}_28`,
           roomId: room,
           type: 'claim',
-          payload: { statement: `${tag} cited`, claimant: BOB },
+          payload: { statement: `${tag} is the reading that was cited`, claimant: BOB },
           provenance: {
             messageIds: [`msg_${tag}`, `msg_${tag}_extra`],
             proposalId: `pprop_cite_${seed}`,
@@ -694,23 +704,23 @@ function gateProbes(seed: number): AuthoredEvent[] {
         },
       },
       MODEL,
-      claimWindow(`${tag} cited`),
+      claimWindow(`${tag} is the reading that was cited`),
     ),
     // Gate: no window at all, so the receipt cannot be checked.
-    modelClaimProposal(29, `pprop_blind_${seed}`, `${tag} unchecked`, 0.95),
+    modelClaimProposal(29, `pprop_blind_${seed}`, `${tag} is the reading nobody checked`, 0.95),
     object(
       31,
       'claim',
-      { statement: `${tag} unchecked`, claimant: BOB },
+      { statement: `${tag} is the reading nobody checked`, claimant: BOB },
       MODEL,
       `pprop_blind_${seed}`,
     ),
     // Gate: the claimant wrote none of it — the spike's worst error.
-    modelClaimProposal(32, `pprop_wrong_${seed}`, `${tag} misattributed`, 0.95),
+    modelClaimProposal(32, `pprop_wrong_${seed}`, `${tag} is the reading attributed wrongly`, 0.95),
     object(
       33,
       'claim',
-      { statement: `${tag} misattributed`, claimant: BOB },
+      { statement: `${tag} is the reading attributed wrongly`, claimant: BOB },
       MODEL,
       `pprop_wrong_${seed}`,
       [{ id: `msg_${tag}`, authorId: ALICE, body: `it is true that ${tag} misattributed` }],
@@ -725,11 +735,11 @@ function gateProbes(seed: number): AuthoredEvent[] {
           id: `pprop_third_${seed}`,
           roomId: room,
           type: 'commitment',
-          payload: { statement: `${tag} land it`, owner: BOB },
+          payload: { statement: `${tag} land it on Friday afternoon`, owner: BOB },
           confidence: 0.95,
           proposer: MODEL,
           provenance: [`msg_${tag}`],
-          quote: `${tag} will land it`,
+          quote: `${tag} will land it on Friday afternoon`,
           createdAt: stamp(34),
         },
       },
@@ -744,14 +754,20 @@ function gateProbes(seed: number): AuthoredEvent[] {
           id: `pobj_${seed}_35`,
           roomId: room,
           type: 'commitment',
-          payload: { statement: `${tag} land it`, owner: BOB },
+          payload: { statement: `${tag} land it on Friday afternoon`, owner: BOB },
           provenance: { messageIds: [`msg_${tag}`], proposalId: `pprop_third_${seed}` },
           createdAt: stamp(35),
           updatedAt: stamp(35),
         },
       },
       MODEL,
-      [{ id: `msg_${tag}`, authorId: ALICE, body: `${tag} will land it, I think` }],
+      [
+        {
+          id: `msg_${tag}`,
+          authorId: ALICE,
+          body: `${tag} will land it on Friday afternoon, I think`,
+        },
+      ],
     ),
     // Gate: only a human declares a question answered.
     row(

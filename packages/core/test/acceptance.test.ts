@@ -46,7 +46,7 @@ const BODY = [
   "I'll land the migration tomorrow.",
   'The migration is reversible.',
   'Reset narrowing on mutating method calls.',
-  'Ship the narrowing fix.',
+  'Ship the narrowing fix this quarter.',
   'Do we keep the flag after launch?',
 ].join(' ');
 
@@ -60,7 +60,7 @@ const QUOTE: Record<AcceptedObjectType, string> = {
   commitment: "I'll land the migration tomorrow.",
   open_question: 'Do we keep the flag after launch?',
   claim: 'The migration is reversible.',
-  objective: 'Ship the narrowing fix.',
+  objective: 'Ship the narrowing fix this quarter.',
 };
 
 function proposal(overrides: {
@@ -104,17 +104,32 @@ interface Cell {
   awaitingConfirmFrom?: string | null;
 }
 
-/** A confidence squarely inside each band, derived from the config not guessed. */
+/**
+ * A confidence squarely inside each band — **written out, not derived**.
+ *
+ * Round 2's gauntlet kept finding the same shape here, and it kept being right:
+ * these numbers used to be computed from `DEFAULT_ACCEPTANCE_RULES`, which makes
+ * the whole matrix invariant under a change to the table. Move θ_auto for a claim
+ * from 0.7 to 0.6 and every probe moved with it, so the suite proved the *rules*
+ * and said nothing about the *thresholds*. r1 patched that with one pin-by-value
+ * test; r2's delta found the derivation still here and the single pin still
+ * carrying all of it alone.
+ *
+ * So the probes are literals, and `pinsMatchTheTable` below checks — from the
+ * table, once, in one place — that each literal really is in the band its label
+ * claims. A θ change now breaks the probe *and* the pin, and both say why.
+ */
+const PROBE: Record<AcceptedObjectType, Record<Cell['band'], number>> = {
+  //                 below θ_min   in the band   at or above θ_auto
+  decision: { below: 0.4, between: 0.6, above: 0.7 },
+  commitment: { below: 0.4, between: 0.62, above: 0.75 },
+  open_question: { below: 0.3, between: 0.5, above: 0.6 },
+  claim: { below: 0.4, between: 0.6, above: 0.7 },
+  objective: { below: 0.4, between: 0.62, above: 0.75 },
+};
+
 function confidenceFor(type: AcceptedObjectType, band: Cell['band']): number {
-  const rule = DEFAULT_ACCEPTANCE_RULES[type];
-  switch (band) {
-    case 'below':
-      return Math.max(0, rule.thetaMin - 0.1);
-    case 'between':
-      return (rule.thetaMin + rule.thetaAuto) / 2;
-    case 'above':
-      return rule.thetaAuto;
-  }
+  return PROBE[type][band];
 }
 
 const CELLS: Cell[] = [];
@@ -258,6 +273,20 @@ describe('#4 acceptance matrix — one test per cell', () => {
     expect(covered.size).toBe(3 * 3 + 2 * 3 + 3);
     // One extra row: decision at 1.0, pinning that "never" is not a threshold.
     expect(CELLS).toHaveLength(19);
+  });
+
+  it('probes the band each literal claims to be in', () => {
+    // The one place the literals above are compared to the table. Without it a
+    // θ change could move a band out from under a probe and every cell test
+    // would still pass by landing in the wrong cell for the right reason.
+    for (const type of Object.keys(PROBE) as AcceptedObjectType[]) {
+      const rule = DEFAULT_ACCEPTANCE_RULES[type];
+      const probe = PROBE[type];
+      expect(probe.below).toBeLessThan(rule.thetaMin);
+      expect(probe.between).toBeGreaterThanOrEqual(rule.thetaMin);
+      expect(probe.between).toBeLessThan(rule.thetaAuto);
+      expect(probe.above).toBeGreaterThanOrEqual(rule.thetaAuto);
+    }
   });
 
   it('reaches every rule name the type declares', () => {
@@ -447,36 +476,35 @@ describe('the θ table itself — pinned by value, not derived', () => {
 describe('the θ boundaries are inclusive at θ_auto and exclusive at θ_min', () => {
   const context = { messages: aliceMessages };
 
-  it('accepts exactly at θ_auto', () => {
-    const rule = DEFAULT_ACCEPTANCE_RULES.claim;
-    expect(
-      decideAcceptance(proposal({ type: 'claim', confidence: rule.thetaAuto }), context).verdict,
-    ).toBe('auto_accept');
+  /**
+   * Every number below is a literal. Round 2's delta: this suite probed with
+   * `rule.thetaAuto` and `rule.thetaMin`, so it pinned the *shape* of the
+   * inequality — inclusive here, exclusive there — against a table it read at
+   * run time, and would have gone on passing at any θ whatsoever. A claim's
+   * θ_auto is 0.7 and its θ_min is 0.5, and this suite now says so out loud.
+   */
+  it('accepts exactly at θ_auto (0.7 for a claim)', () => {
+    expect(decideAcceptance(proposal({ type: 'claim', confidence: 0.7 }), context).verdict).toBe(
+      'auto_accept',
+    );
   });
 
-  it('does not accept a hair under θ_auto', () => {
-    const rule = DEFAULT_ACCEPTANCE_RULES.claim;
-    const decision = decideAcceptance(
-      proposal({ type: 'claim', confidence: rule.thetaAuto - 0.0001 }),
-      context,
-    );
+  it('does not accept a hair under θ_auto (0.6999)', () => {
+    const decision = decideAcceptance(proposal({ type: 'claim', confidence: 0.6999 }), context);
     expect(decision.verdict).toBe('pending');
     expect(decision.visibility).toBe('quiet');
   });
 
-  it('keeps a proposal exactly at θ_min rather than discarding it', () => {
-    const rule = DEFAULT_ACCEPTANCE_RULES.claim;
-    expect(
-      decideAcceptance(proposal({ type: 'claim', confidence: rule.thetaMin }), context).verdict,
-    ).toBe('pending');
+  it('keeps a proposal exactly at θ_min (0.5) rather than discarding it', () => {
+    expect(decideAcceptance(proposal({ type: 'claim', confidence: 0.5 }), context).verdict).toBe(
+      'pending',
+    );
   });
 
-  it('discards a hair under θ_min', () => {
-    const rule = DEFAULT_ACCEPTANCE_RULES.claim;
-    expect(
-      decideAcceptance(proposal({ type: 'claim', confidence: rule.thetaMin - 0.0001 }), context)
-        .verdict,
-    ).toBe('discard');
+  it('discards a hair under θ_min (0.4999)', () => {
+    expect(decideAcceptance(proposal({ type: 'claim', confidence: 0.4999 }), context).verdict).toBe(
+      'discard',
+    );
   });
 });
 

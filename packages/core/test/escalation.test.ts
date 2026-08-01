@@ -546,7 +546,11 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ),
-    ).toEqual(['elided_quote']);
+      // Two findings, not one, and the second is r3's: with no bearing message
+      // the attribution is *unsupported*, where round 2 fell back to "did the
+      // claimant write any cited message" and answered yes.
+      // (`problemKinds` sorts, so this reads alphabetically.)
+    ).toEqual(['attributed_person_not_author', 'elided_quote']);
   });
 
   it('reports a plain missing quote separately from an elided one', () => {
@@ -561,13 +565,18 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ),
-    ).toEqual(['quote_not_found']);
+    ).toEqual(['attributed_person_not_author', 'quote_not_found']);
   });
 
   it('catches a cited message that is not in the window', () => {
     expect(
       problemKinds(
-        { type: 'claim', provenance: ['msg_nowhere'], proposer: { kind: 'model' } },
+        {
+          type: 'claim',
+          provenance: ['msg_nowhere'],
+          quote: 'I just ran into a problem with this for the first time',
+          proposer: { kind: 'model' },
+        },
         messages,
       ),
     ).toEqual(['unknown_message']);
@@ -590,8 +599,11 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       {
         type: 'commitment',
         provenance: [messageDispute.id],
+        quote:
+          "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
         proposer: { kind: 'model' },
         attributedTo: DHLOLO,
+        statement: 'TypeScript is correct that this.state must be online immediately after line 5',
       },
       messages,
     );
@@ -647,15 +659,18 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     // case #4 designs the confirm flow for, and killing it would delete the flow.
     const subject = {
       provenance: [messageDispute.id],
+      quote:
+        "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
+      statement: 'TypeScript is correct that this.state is online after line 6',
       proposer: { kind: 'model' as const },
       attributedTo: DHLOLO,
     };
     const asClaim = validateProposalProvenance({ ...subject, type: 'claim' }, messages);
     const asCommitment = validateProposalProvenance({ ...subject, type: 'commitment' }, messages);
 
-    expect(asClaim[0]?.kind).toBe('attributed_person_not_author');
+    expect(asClaim.map((problem) => problem.kind)).toEqual(['attributed_person_not_author']);
     expect(asClaim[0]?.severity).toBe('reject');
-    expect(asCommitment[0]?.kind).toBe('attributed_person_not_author');
+    expect(asCommitment.map((problem) => problem.kind)).toEqual(['attributed_person_not_author']);
     expect(asCommitment[0]?.severity).toBe('reclassify');
   });
 
@@ -683,27 +698,55 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
 
   it('covers every problem kind it declares', () => {
     // A taxonomy with an unreachable member is a taxonomy that has drifted.
+    // Written out by hand rather than read off the type, so a kind that stops
+    // being reachable fails here instead of quietly shrinking both sides.
     const declared: ProvenanceProblemKind[] = [
       'no_provenance',
       'unknown_message',
+      'missing_quote',
       'quote_not_found',
       'quote_only_in_reply_blockquote',
       'elided_quote',
+      'quote_too_short',
+      'quote_does_not_bear_statement',
+      'ambiguous_quote',
       'attributed_person_not_author',
     ];
     const seen = new Set<ProvenanceProblemKind>();
     const cases: Parameters<typeof validateProposalProvenance>[] = [
+      // no_provenance
       [{ type: 'claim', provenance: [], proposer: { kind: 'model' } }, messages],
-      [{ type: 'claim', provenance: ['nope'], proposer: { kind: 'model' } }, messages],
+      // unknown_message
       [
         {
           type: 'claim',
-          provenance: [messageDispute.id],
-          quote: 'never written',
+          provenance: ['nope'],
+          quote: 'I just ran into a problem with this for the first time',
           proposer: { kind: 'model' },
         },
         messages,
       ],
+      // missing_quote — a model claim that names somebody and quotes nothing
+      [
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          proposer: { kind: 'model' },
+          attributedTo: JORDAN,
+        },
+        messages,
+      ],
+      // quote_not_found
+      [
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          quote: 'never written anywhere in this whole thread',
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ],
+      // quote_only_in_reply_blockquote
       [
         {
           type: 'claim',
@@ -713,6 +756,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ],
+      // elided_quote
       [
         {
           type: 'claim',
@@ -722,10 +766,58 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ],
+      // quote_too_short — real words of the cited author, too few to name a sentence
+      [
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          quote: 'line 6',
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ],
+      // quote_does_not_bear_statement — verbatim, right author, wrong sentence
+      [
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          quote:
+            "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
+          statement: 'the release is blocked until the flag ships',
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ],
+      // ambiguous_quote — two cited authors, both saying it in their own words
+      [
+        {
+          type: 'claim',
+          provenance: ['m_a', 'm_b'],
+          quote: 'we should reset narrowing on mutating method calls',
+          proposer: { kind: 'model' },
+        },
+        [
+          {
+            id: 'm_a',
+            authorId: JORDAN,
+            body: 'we should reset narrowing on mutating method calls',
+          },
+          {
+            id: 'm_b',
+            authorId: DHLOLO,
+            body: 'we should reset narrowing on mutating method calls',
+          },
+        ],
+      ],
+      // attributed_person_not_author
       [
         {
           type: 'commitment',
           provenance: [messageDispute.id],
+          quote:
+            "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
+          statement:
+            'TypeScript is correct that this.state must be online immediately after line 5',
           proposer: { kind: 'model' },
           attributedTo: DHLOLO,
         },

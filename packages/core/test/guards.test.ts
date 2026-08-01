@@ -39,7 +39,7 @@ type TestActor =
   | { kind: 'system' };
 
 /** The claim these fixtures quote, and the person who wrote it. */
-const CLAIM_TEXT = 'the build is green';
+const CLAIM_TEXT = 'the build is green on main';
 const MSG_9: ProvenanceMessage[] = [{ id: 'msg_9', authorId: ALICE, body: CLAIM_TEXT }];
 
 function proposalEvent(
@@ -848,7 +848,12 @@ describe('the actor floor — gate 7: a machine may not accept below the confide
     ]);
     expect(state.objects).toEqual({});
     expect(state.issues[0]?.reason).toContain('below the floor of 0.7');
-    expect(MODEL_ACCEPTANCE_FLOOR.claim).toBe(DEFAULT_ACCEPTANCE_RULES.claim.thetaAuto);
+    // Both sides literal. Comparing the floor to `DEFAULT_ACCEPTANCE_RULES` —
+    // which is what round 2 did here — asserts they are derived from each other
+    // and nothing about what either of them is; move θ_auto to 0.6 and the
+    // equality still holds while the product's behaviour has changed.
+    expect(MODEL_ACCEPTANCE_FLOOR.claim).toBe(0.7);
+    expect(DEFAULT_ACCEPTANCE_RULES.claim.thetaAuto).toBe(0.7);
   });
 });
 
@@ -884,7 +889,11 @@ describe('the actor floor — gate 8: a machine may only accept the reading it s
     // and a person may fix the wording as they accept it.
     const state = reduce([
       proposalEvent({ type: 'claim', confidence: 0.9 }),
-      acceptEvent({ type: 'claim', actor: human(), statement: 'the build is green, on main' }),
+      acceptEvent({
+        type: 'claim',
+        actor: human(),
+        statement: 'the build is green, on main and on the release branch',
+      }),
     ]);
     expect(state.issues).toEqual([]);
     expect(state.objects.obj_x).toBeDefined();
@@ -1962,7 +1971,9 @@ describe('the ordering gate — an out-of-order event is rejected, not recorded'
       proposalEvent({ id: 'ev_coerced', proposalId: 'prop_c', at: at(9), status: 'accepted' }),
       late,
     ]);
-    const byId = new Map(outcomes.map((o) => [o.event.id, o.outcome]));
+    const byId = new Map(
+      outcomes.map((o) => [o.outcome === 'malformed' ? '<malformed>' : o.event.id, o.outcome]),
+    );
     expect(byId.get('ev_01')).toBe('applied');
     expect(byId.get('ev_coerced')).toBe('applied_with_issue');
     // `late` sorts into position 3 of the batch, so in a full replay it is in

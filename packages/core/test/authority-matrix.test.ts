@@ -3,6 +3,7 @@ import {
   type AcceptedObjectType,
   type Actor,
   type AuthoredEvent,
+  authored,
   type CoreEvent,
   CoreEvent as CoreEventSchema,
   type CoreState,
@@ -27,11 +28,18 @@ import { ALICE, BOB } from './fixtures.js';
  * receipt) every one of those too — and a table written from #4 and
  * `authority.ts`'s doc comment says what each cell should do.
  *
- * **The oracle imports nothing from `../src` except types.** It does not call
- * `isHuman`, `actorMatchesProposer`, `MODEL_ACCEPTANCE_FLOOR` or
- * `acceptanceReceiptRefusal`; it restates them. A shared predicate would make
- * the two sides agree by construction, which is exactly the defect the replay
- * suite's own oracle exists to avoid.
+ * **The oracle restates every rule; it never calls one.** It does not call
+ * `isHuman`, `actorMatchesProposer`, `MODEL_ACCEPTANCE_FLOOR`,
+ * `acceptanceReceiptRefusal` or `RECEIPT_POLICY` — the expectations below are
+ * written out from #4 and `authority.ts`'s doc comment. A shared predicate would
+ * make the two sides agree by construction, which is exactly the defect the
+ * replay suite's own oracle exists to avoid.
+ *
+ * The four values it does import from `../src` are the machinery under test and
+ * its plumbing — `CoreEvent` (to parse a payload), `authored` (to pair one with
+ * its trusted columns), `reduce` and `serializeState`. None of them encodes an
+ * authority decision, which is the property that matters; "imports only types"
+ * is what round 2 claimed here and it was never true.
  *
  * Two things round 2 fixed in the harness itself, both found by the r1 gauntlet:
  *
@@ -232,20 +240,28 @@ function row(
   actor: ActorKind,
   messages?: readonly ProvenanceMessage[],
 ): AuthoredEvent {
-  return {
-    event: parse(input),
+  return authored(parse(input), {
     actor: actorOf(actor),
     ...(messages === undefined ? {} : { messages }),
-  };
+  });
 }
 
 /** The sentence each type is read out of, and who wrote it. */
+/**
+ * The sentence each type is read out of.
+ *
+ * Every one is at least `RECEIPT_POLICY.minQuoteLength` characters once
+ * normalized, and every one is quoted verbatim as its own statement — because
+ * since r3 the receipt requires both, and a matrix built out of "a claim" would
+ * be testing the length rule instead of the authority rules. The oracle does not
+ * import the number; these are simply written long.
+ */
 const TEXT: Record<AcceptedObjectType, string> = {
-  decision: 'a decision',
-  commitment: 'a commitment',
-  open_question: 'a question?',
-  claim: 'a claim',
-  objective: 'an objective',
+  decision: 'we adopt the watermark contract',
+  commitment: 'wire the flag into the server tomorrow',
+  open_question: 'do we keep the flag after launch?',
+  claim: 'the build is green on main today',
+  objective: 'ship the narrowing fix this quarter',
 };
 
 /** BOB wrote all of it, and BOB is the claimant and the owner. */
@@ -498,7 +514,7 @@ describe('authority matrix — the receipt, every actor × shape', () => {
         // has to strip the key rather than pass undefined through.
         if (shape === 'no_window') {
           const accept = events[1] as AuthoredEvent;
-          events[1] = { event: accept.event, actor: accept.actor };
+          events[1] = authored(accept.event, { actor: accept.actor });
         }
 
         const state = reduce(events);

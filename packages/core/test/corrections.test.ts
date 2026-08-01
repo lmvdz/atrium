@@ -43,7 +43,7 @@ const corrected = (
 
 /** A claim accepted by a model, through its own proposal — so it starts at `~`. */
 function modelAcceptedClaim(): AuthoredEvent[] {
-  const messages = [{ id: 'msg_1', authorId: BOB, body: 'the build is green' }];
+  const messages = [{ id: 'msg_1', authorId: BOB, body: 'the build is green on main' }];
   return [
     event({
       id: 'ev_mp',
@@ -54,11 +54,11 @@ function modelAcceptedClaim(): AuthoredEvent[] {
         id: 'prop_m',
         roomId: ROOM,
         type: 'claim',
-        payload: { statement: 'the build is green', claimant: BOB },
+        payload: { statement: 'the build is green on main', claimant: BOB },
         confidence: 0.9,
         proposer: { kind: 'model', model: 'test-model' },
         provenance: ['msg_1'],
-        quote: 'the build is green',
+        quote: 'the build is green on main',
         createdAt: at(1),
       },
     }),
@@ -72,7 +72,7 @@ function modelAcceptedClaim(): AuthoredEvent[] {
         id: 'obj_model_claim',
         roomId: ROOM,
         type: 'claim',
-        payload: { statement: 'the build is green', claimant: BOB },
+        payload: { statement: 'the build is green on main', claimant: BOB },
         provenance: { messageIds: ['msg_1'], proposalId: 'prop_m' },
         createdAt: at(2),
         updatedAt: at(2),
@@ -498,7 +498,7 @@ describe('epistemic state — `~` until a person touches it', () => {
         at: at(3),
         objectId: 'obj_model_claim',
         action: 'amend',
-        patch: { statement: 'the build is green on main' },
+        patch: { statement: 'the build is green on main and on the release branch' },
       }),
     ]);
     const record = state.objects.obj_model_claim;
@@ -533,7 +533,7 @@ describe('epistemic state — `~` until a person touches it', () => {
         at: at(4),
         objectId: 'obj_model_claim',
         action: 'amend',
-        patch: { statement: 'the build is green on main' },
+        patch: { statement: 'the build is green on main and on the release branch' },
       }),
     ]);
     const touchedRecord = touched.objects.obj_model_claim;
