@@ -130,22 +130,48 @@ export function proxyStrategy(): ProxyStrategy {
 }
 
 /**
+ * The URL the browser is told to open a socket against, validated.
+ *
+ * ## Why this is not `NEXT_PUBLIC_WS_URL` any more
+ *
+ * It was, and it was a build-time constant wearing a runtime variable's name.
+ * `NEXT_PUBLIC_*` is substituted into the bundle by `next build`, and
+ * `next.config.ts` compounded it with an `env:` block that inlined the same
+ * value a second time. Measured on this branch: a build with
+ * `NEXT_PUBLIC_WS_URL=wss://probe.example/ws` writes that literal into
+ * `.next/standalone/apps/web/server.js`. `docker-compose.yml` sets the real
+ * value at *runtime*, so the running container read the build machine's
+ * `ws://localhost:4000/ws` fallback, `assertSecureTransport` refused it — the
+ * correct call — and every page 500'd.
+ *
+ * So the variable lost the prefix. Nothing reads it in client code: the room
+ * page reads it here, on the server, on the request path, and passes the string
+ * to `<Presence>` as an ordinary prop. That is what makes one image deployable
+ * at any hostname.
+ *
+ * Judged on the raw value, before the scheme is mapped: `wss://` is the secure
+ * form, and mapping it to `https://` first would launder a `ws://` setting into
+ * an origin that passes the check. A socket carrying a session cookie over
+ * `ws://` is the same exposure as a page served over `http://`, so in production
+ * this refuses to serve.
+ */
+export function realtimeUrl(): string | null {
+  const raw = process.env.ATRIUM_WS_URL?.trim();
+  if (!raw) return null;
+  assertSecureTransport([{ name: 'ATRIUM_WS_URL', value: raw }]);
+  return raw;
+}
+
+/**
  * The realtime server's public origin, if it differs from the app's.
  *
  * Passed to Better Auth as a trusted origin in both processes so the two agree
- * about who "us" is; derived from `NEXT_PUBLIC_WS_URL` because that is the value
- * the browser is actually told to connect to.
- *
- * And judged on the raw value, before the scheme is mapped: `wss://` is the
- * secure form, and mapping it to `https://` first would launder a `ws://`
- * setting into an origin that passes the check. A socket carrying a session
- * cookie over `ws://` is the same exposure as a page served over `http://`, so
- * in production this refuses to start too.
+ * about who "us" is; derived from the same `ATRIUM_WS_URL` the browser is told
+ * to connect to, and validated by `realtimeUrl` before the scheme is mapped.
  */
 export function realtimeOrigin(): string | null {
-  const raw = process.env.NEXT_PUBLIC_WS_URL?.trim();
+  const raw = realtimeUrl();
   if (!raw) return null;
-  assertSecureTransport([{ name: 'NEXT_PUBLIC_WS_URL', value: raw }]);
   try {
     const url = new URL(raw);
     const scheme = url.protocol === 'wss:' ? 'https:' : 'http:';

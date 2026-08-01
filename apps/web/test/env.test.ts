@@ -83,7 +83,7 @@ describe('realtimeOrigin — the socket the browser is told to open', () => {
      */
     serving({
       APP_URL: 'https://atrium.example.com',
-      NEXT_PUBLIC_WS_URL: 'ws://atrium.example.com/ws',
+      ATRIUM_WS_URL: 'ws://atrium.example.com/ws',
     });
     expect(() => realtimeOrigin()).toThrow(/TLS/);
   });
@@ -91,20 +91,20 @@ describe('realtimeOrigin — the socket the browser is told to open', () => {
   it('accepts wss:// and hands back the https origin Better Auth trusts', () => {
     serving({
       APP_URL: 'https://atrium.example.com',
-      NEXT_PUBLIC_WS_URL: 'wss://atrium.example.com/ws',
+      ATRIUM_WS_URL: 'wss://atrium.example.com/ws',
     });
     expect(realtimeOrigin()).toBe('https://atrium.example.com');
   });
 
   it('is null when there is no realtime URL at all, rather than throwing', () => {
     // One OAuth-shaped rule: an unset optional value is not a misconfiguration.
-    serving({ APP_URL: 'https://atrium.example.com', NEXT_PUBLIC_WS_URL: '' });
+    serving({ APP_URL: 'https://atrium.example.com', ATRIUM_WS_URL: '' });
     expect(realtimeOrigin()).toBeNull();
   });
 
   it('leaves a development ws:// URL alone', () => {
     vi.stubEnv('NODE_ENV', 'development');
-    vi.stubEnv('NEXT_PUBLIC_WS_URL', 'ws://localhost:4000/ws');
+    vi.stubEnv('ATRIUM_WS_URL', 'ws://localhost:4000/ws');
     expect(realtimeOrigin()).toBe('http://localhost:4000');
   });
 });

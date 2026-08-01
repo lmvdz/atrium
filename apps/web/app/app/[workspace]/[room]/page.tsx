@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { realtimeUrl } from '@/lib/env';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
 import styles from '../../workspace.module.css';
@@ -30,7 +31,14 @@ export default async function RoomPage({
   const room = await loadRoom(workspace.id, roomSlug, session.userId);
   if (!room) notFound();
 
-  const wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:4000/ws';
+  // Read here, on the server, on the request path — and handed to the client as
+  // a prop. `ATRIUM_WS_URL` deliberately has no `NEXT_PUBLIC_` prefix: that
+  // prefix means "substitute me at build time", which is how the shipped image
+  // ended up carrying the build machine's `ws://localhost:4000/ws` instead of
+  // the deployment's `wss://…`. There is no fallback either, for the same
+  // reason `appUrl()` has none in production: a localhost default here is a
+  // browser told to open a socket to itself, quietly, forever.
+  const wsUrl = realtimeUrl();
 
   return (
     <main className={styles.page}>

@@ -1,0 +1,82 @@
+# A mail catcher, and the SMTP wiring that points the stack at it.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mailpit.yml up
+#
+# ┌─ WHAT THIS IS FOR ─────────────────────────────────────────────────────────
+# │ `packages/auth/src/mailer.ts` refuses to start a production process with no
+# │ mail transport, because the console transport prints verification links and
+# │ a verification link is a single-use account takeover. That refusal is
+# │ correct and issue #40 was explicitly forbidden to weaken it. What it means
+# │ in practice is that *any* stack running the production images needs a relay
+# │ to send through — including a laptop and including CI.
+# │
+# │ Mailpit is that relay. It speaks real SMTP on 1025, accepts everything, and
+# │ keeps what it receives behind an HTTP API on 8025 that a test can read. So
+# │ the mail in these stacks is genuinely sent through the genuine transport and
+# │ is genuinely inspectable, which is what makes "signup sends a verification
+# │ mail and the link verifies" an assertion about the product rather than about
+# │ a stub.
+# │
+# │ One file rather than two because both consumers need exactly this and must
+# │ not drift:
+# │   - `docker-compose.dev.yml` — the local stack.
+# │   - `.github/workflows/ci.yml`'s `deploy` job — which runs the *production*
+# │     file plus this one and nothing else, so that everything it asserts is
+# │     asserted against the shipped configuration. This file adds a service and
+# │     four variables; it changes no origin, no NODE_ENV and no proxy setting.
+# │     `scripts/ci/assert-stack-config.mjs` re-reads those from the running
+# │     containers and fails if any of them drifted, so that claim is checked
+# │     rather than promised.
+# └────────────────────────────────────────────────────────────────────────────
+#
+# NEVER on a public box. Mailpit has no authentication here, it stores every
+# message in the clear, and every message contains a link that signs somebody in.
+
+name: atrium
+
+services:
+  mailpit:
+    image: axllent/mailpit:v1.28
+    restart: unless-stopped
+    environment:
+      # Keep everything in memory: nothing here should outlive the stack, and a
+      # volume of verification links is a volume of account takeovers.
+      MP_MAX_MESSAGES: 5000
+      MP_DATABASE: ''
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      # The HTTP API and web UI, bound to loopback — a human reads it locally, a
+      # CI assertion reads it to prove the verification mail genuinely arrived.
+      # The SMTP port on 1025 is deliberately NOT published: nothing outside this
+      # network has any business injecting mail into the stack.
+      - '127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '-', 'http://127.0.0.1:8025/readyz']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    depends_on:
+      mailpit:
+        condition: service_healthy
+    environment:
+      ATRIUM_MAIL_TRANSPORT: smtp
+      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-Atrium <no-reply@atrium.test>}
+      SMTP_URL: smtp://mailpit:1025
+      SMTP_REQUIRE_TLS: 'false'
+
+  app:
+    depends_on:
+      mailpit:
+        condition: service_healthy
+    environment:
+      ATRIUM_MAIL_TRANSPORT: smtp
+      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-Atrium <no-reply@atrium.test>}
+      SMTP_URL: smtp://mailpit:1025
+      # Plain SMTP, on the deployment's own private network, to a relay that
+      # offers no TLS at all — the same trust assumption this stack already
+      # makes for Postgres and MinIO. An off-box relay wants `smtps://` or
+      # `SMTP_REQUIRE_TLS=true`; see packages/auth/src/smtp.ts.
+      SMTP_REQUIRE_TLS: 'false'

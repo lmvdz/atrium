@@ -49,7 +49,7 @@ export function serverEnvironment() {
     BETTER_AUTH_SECRET: authSecret,
     APP_URL: appUrl,
     ATRIUM_MAIL_OUTBOX: mailOutbox,
-    NEXT_PUBLIC_WS_URL: `ws://localhost:${serverPort}/ws`,
+    ATRIUM_WS_URL: `ws://localhost:${serverPort}/ws`,
     SERVER_PORT: String(serverPort),
     SERVER_HOST: '127.0.0.1',
     LOG_LEVEL: 'warn',

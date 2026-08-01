@@ -1,14 +1,18 @@
 import { appendFileSync } from 'node:fs';
 
 /**
- * The mailer. In development it is a console transport: every message Atrium
- * would have sent is printed, link and all, so a developer can finish a signup
- * or accept an invitation without an SMTP server anywhere in the picture.
+ * The mailer port, and the gate in front of it.
  *
- * There is no production transport yet, and that is on purpose — wiring one
- * belongs with the notification work, not with auth. `createMailer` takes a
- * `send` function so swapping the console for Postmark/SES later is a one-line
- * change at the composition root and nothing in this package moves.
+ * In development it is a console transport: every message Atrium would have
+ * sent is printed, link and all, so a developer can finish a signup or accept an
+ * invitation without an SMTP server anywhere in the picture. In production that
+ * transport is refused — see `resolveMailer` at the bottom of this file.
+ *
+ * The real transport is `smtp.ts`, selected by `ATRIUM_MAIL_TRANSPORT=smtp` and
+ * built from the `SMTP_*` variables. It lands *behind* this port rather than
+ * beside it: `createAtriumAuth` asks the environment for a transport and then
+ * hands whatever it got — including nothing — to `resolveMailer`, which is still
+ * the only thing that decides whether a process without one may start.
  */
 
 export type MailKind = 'email-verification' | 'workspace-invitation';
@@ -105,7 +109,11 @@ export const nullMailer: Mailer = async () => {};
  *    failing there would only mean "you cannot build an image without SMTP
  *    credentials on the build machine".
  *  - An explicit transport passed by the composition root wins outright; that
- *    is the seam a real Postmark/SES sender lands on.
+ *    is the seam `smtp.ts`'s SMTP sender lands on.
+ *
+ * The second exemption is why `mailerFromEnv` never returns `consoleMailer`:
+ * an environment variable that produced an "explicit" console transport would
+ * be an override for this refusal, and this refusal deliberately has none.
  */
 export interface MailerSource {
   NODE_ENV?: string | undefined;

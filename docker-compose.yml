@@ -7,7 +7,7 @@
 # ┌─ THIS FILE IS THE PRODUCTION STACK, AND IT IS HTTPS-ONLY ──────────────────
 # │ `ATRIUM_DOMAIN` is required — a hostname pointed at this box. Caddy takes
 # │ it as its site address and obtains a certificate over ACME on its own;
-# │ APP_URL and NEXT_PUBLIC_WS_URL below are derived from it as `https://` and
+# │ APP_URL and ATRIUM_WS_URL below are derived from it as `https://` and
 # │ `wss://` and are not separately settable, because two variables that must
 # │ agree are two chances to disagree.
 # │
@@ -72,32 +72,47 @@
 # │ yourself, because APP_URL still has to be https:// or nothing boots.
 # └────────────────────────────────────────────────────────────────────────────
 #
-# ┌─ THIS FILE DOES NOT SERVE A REQUEST YET, AND HERE IS WHY ──────────────────
-# │ `app` runs NODE_ENV=production, and `resolveMailer`
-# │ (packages/auth/src/mailer.ts) refuses to hand out the console transport
-# │ there — deliberately, because it prints verification links and those links
-# │ are single-use account takeovers. There is no production transport in this
-# │ repository yet; wiring one belongs with the notification work.
+# ┌─ WHY THIS FILE DID NOT SERVE A REQUEST UNTIL #40, AND WHAT CHANGED ────────
+# │ Round 4 of issue #26 brought this stack up for the first time and found
+# │ every page and every route in `app` answering 500. Three separate causes,
+# │ all of the same shape — a value fixed at build time pretending to be one
+# │ settable at run time, or a gate with nothing behind it:
 # │
-# │ The consequence, which round 4 found by actually bringing this stack up:
-# │ every page and every route in `app` answers 500. A runtime override does not
-# │ help, because `next build` inlines `process.env.NODE_ENV` into the
-# │ standalone bundle. `server`, `postgres`, `minio`, `migrate` and `proxy` all
-# │ come up healthy; the realtime upgrade routes through the proxy and reaches
-# │ its origin and session checks.
+# │  1. No mail transport existed. `resolveMailer` refuses the console transport
+# │     under NODE_ENV=production — correctly, because it prints verification
+# │     links and those links are single-use account takeovers — so
+# │     `createAtriumAuth` threw on construction. `AccountBar` is in the root
+# │     layout, so that threw on *every* page, not only the auth ones.
+# │     Fixed by packages/auth/src/smtp.ts: a real SMTP transport, selected by
+# │     ATRIUM_MAIL_TRANSPORT and configured below. The gate is unchanged and
+# │     must stay unchanged; a stack with no relay still refuses to start.
+# │  2. `next.config.ts` carried an `env:` block that inlined NEXT_PUBLIC_WS_URL
+# │     into the standalone bundle at build time. The `wss://` value this file
+# │     sets at run time never reached the process, which used the build
+# │     machine's `ws://localhost:4000/ws` instead — and `assertSecureTransport`
+# │     refused that, again on every request. Fixed by deleting the block and
+# │     dropping the `NEXT_PUBLIC_` prefix: the value is now ATRIUM_WS_URL, read
+# │     on the request path and handed to the browser as a prop.
+# │  3. Neither Dockerfile copied `packages/ingest/package.json`, so no image had
+# │     built at all since that package landed. Fixed on the auth branch; both
+# │     Dockerfiles carry the line and the CI deploy job builds both images.
 # │
-# │ It is stated here rather than filed and forgotten because the fix is a real
-# │ transport at the composition root, not a change to this file — and because
-# │ three previous rounds described this stack as the deployment without anyone
-# │ running it.
+# │ On NODE_ENV specifically, because the old text here was imprecise in a way
+# │ that matters: it is not that `next build` inlines it. It is that the
+# │ standalone entrypoint *assigns* it — `.next/standalone/apps/web/server.js`
+# │ line 11 is literally `process.env.NODE_ENV = 'production'`, executed before
+# │ any application code. No runtime override of any spelling can survive that,
+# │ dynamic reads included. A Next standalone image is a production artifact and
+# │ there is no environment variable that makes it anything else, which is why
+# │ `app` is not given one below.
 # │
-# │ Issue #40 owns it: a real transport plus a CI job that boots this stack and
-# │ asserts a page, not a health endpoint. The mailer gate is adjudicated
-# │ correct and must not be weakened to make this file come up. The HTTPS rules
-# │ added above are therefore *also* unproven against a fully-serving stack;
-# │ what has been checked is that `caddy validate` accepts this Caddyfile, that
-# │ `docker compose config` refuses an unset ATRIUM_DOMAIN, and that both
-# │ processes refuse an http:// origin under NODE_ENV=production (tested).
+# │ What proves this file serves is `.github/workflows/ci.yml`'s `deploy` job:
+# │ it builds both images, brings this stack up with `--wait`, and asserts a
+# │ real page, a signup whose verification mail arrives through the configured
+# │ SMTP transport and whose link verifies, an authenticated `wss://` upgrade,
+# │ and that `docker compose down -v` leaves nothing behind. Not a health
+# │ endpoint — the health checks are how the containers report, and the whole
+# │ lesson of round 4 is that a healthy container is not a serving one.
 # └────────────────────────────────────────────────────────────────────────────
 
 name: atrium
@@ -243,6 +258,25 @@ services:
       # both of these — the development fallback does not apply here.
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header}
+      # ── Mail ────────────────────────────────────────────────────────────────
+      # This process builds the same Better Auth instance the web app does, so
+      # it passes the same mail gate and needs the same answer. Both services
+      # read these; `packages/auth/src/smtp.ts` is the contract.
+      #
+      # `ATRIUM_MAIL_TRANSPORT` has no default on purpose, exactly like the
+      # three secrets above: "which relay does this deployment send verification
+      # links through?" is a question somebody has to answer out loud, and
+      # `console` is a real answer that means "none, and therefore this stack
+      # will refuse to start" (packages/auth/src/mailer.ts, the gate #40 was
+      # forbidden to weaken).
+      ATRIUM_MAIL_TRANSPORT: ${ATRIUM_MAIL_TRANSPORT:?set ATRIUM_MAIL_TRANSPORT in .env — `smtp` with the SMTP_* variables below, or `console` which is not a production transport and makes both application processes refuse to start}
+      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-}
+      SMTP_URL: ${SMTP_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-}
     # No published port, deliberately. `ATRIUM_TRUSTED_PROXY_HOPS=1` is a claim
     # that every request arrived through the proxy; a second, un-proxied way in
     # would make that claim false for anyone who used it — and a caller who
@@ -276,9 +310,15 @@ services:
       # Through the proxy, on the app's own origin — there is no separately
       # published realtime port any more. `wss://`, and not settable to
       # anything else here: a socket carrying a session cookie over `ws://` is
-      # the same exposure as a page served over `http://`, and
-      # `realtimeOrigin()` refuses it in production for that reason.
-      NEXT_PUBLIC_WS_URL: wss://${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env — the hostname pointed at this box; Caddy gets its certificate for it and both apps refuse to serve production over http://}/ws
+      # the same exposure as a page served over `http://`, and `realtimeUrl()`
+      # refuses it in production for that reason.
+      #
+      # Deliberately NOT `NEXT_PUBLIC_*`. That prefix means "substitute me into
+      # the bundle at build time", and until #40 this variable had it — so the
+      # value set here never reached the running process, which used the build
+      # machine's `ws://localhost:4000/ws` fallback and refused to serve. It is
+      # read on the request path now and passed to the browser as a prop.
+      ATRIUM_WS_URL: wss://${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env — the hostname pointed at this box; Caddy gets its certificate for it and both apps refuse to serve production over http://}/ws
       # No default password here either: this service reads and writes the same
       # tables the others do, so a fallback would reopen the hole the other two
       # close.
@@ -299,9 +339,38 @@ services:
       ATRIUM_TRUSTED_PROXY_CIDRS: ${ATRIUM_TRUSTED_PROXY_CIDRS:-172.28.0.10/32}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      # The same mail configuration the server gets, and required for the same
+      # reason: this is the process that sends the verification link. See the
+      # block on `server` above.
+      ATRIUM_MAIL_TRANSPORT: ${ATRIUM_MAIL_TRANSPORT:?set ATRIUM_MAIL_TRANSPORT in .env — `smtp` with the SMTP_* variables, or `console` which is not a production transport and makes both application processes refuse to start}
+      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-}
+      SMTP_URL: ${SMTP_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-}
     # No published port, for the reason given on `server`. The browser reaches
     # this app through `proxy`, which is what gives a Server Action a caller
     # address it can believe.
+    #
+    # The health check fetches `/` — a real page, rendered by the root layout,
+    # which constructs `auth()` through `AccountBar` and therefore exercises the
+    # mail gate, the secure-origin rule and a session lookup against Postgres.
+    # Deliberately not a `/health` route: the entire lesson of #26 round 4 is
+    # that this container reported healthy for three rounds while answering 500
+    # to every page, and a health check that cannot tell those apart is the
+    # instrument that let it. `--fail` on a 500, so it can.
+    #
+    # `instrumentation.ts` means a misconfigured process usually never gets far
+    # enough to answer at all; this catches the case where it starts and then
+    # cannot render.
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # The single entrypoint, and where TLS terminates. See the two headers at the
   # top of this file.
@@ -330,6 +399,14 @@ services:
       # rather than being re-issued into a rate limit.
       - '${HTTPS_PORT:-443}:443'
       - '${HTTP_PORT:-80}:80'
+    # Answers on the container's own loopback interface only — see the block at
+    # the bottom of deploy/Caddyfile for why the proxy has a health endpoint at
+    # all, and why it is not reachable from the network.
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '-', 'http://localhost:2019/caddy-health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       default:
         # Fixed, so ATRIUM_TRUSTED_PROXY_CIDRS can name this process exactly

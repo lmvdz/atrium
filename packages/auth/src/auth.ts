@@ -10,6 +10,7 @@ import {
   type OrganizationPorts,
 } from './org.js';
 import { resolveAuthSecret } from './secret.js';
+import { mailerFromEnv } from './smtp.js';
 import { assertSecureTransport, useSecureCookies } from './transport.js';
 import {
   createDefaultRoom,
@@ -43,9 +44,13 @@ export interface AtriumAuthOptions {
   /** Signing secret. Defaults to `resolveAuthSecret()` over `process.env`. */
   secret?: string;
   /**
-   * Transport for verification and invitation mail. Omitted, the console
-   * transport is used — and `resolveMailer` refuses to boot in production
-   * without a real one rather than printing links into a log.
+   * Transport for verification and invitation mail.
+   *
+   * Omitted, the environment is asked (`mailerFromEnv` — `ATRIUM_MAIL_TRANSPORT`
+   * and the `SMTP_*` variables in `smtp.ts`), and if it configures none then
+   * `resolveMailer` decides: the console transport in development, a refusal to
+   * boot in production. Passing one explicitly is the test seam and the escape
+   * hatch for a composition root with a transport of its own.
    */
   mailer?: Mailer;
   /** GitHub OAuth, when it is configured. Omitted entirely when it is not. */
@@ -141,6 +146,12 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
    * processes build their instance from this function, so neither can end up
    * with the laxer half of a rule the other enforces.
    *
+   * The same argument is why `mailerFromEnv()` is called *here* rather than in
+   * each app's composition root: two call sites reading the same variables are
+   * two chances for the web app and the realtime server to disagree about
+   * whether this deployment has a relay — and they must agree, because the gate
+   * they feed is the thing that decides whether either process starts at all.
+   *
    * Every origin, not just `baseURL`: `trustedOrigins` is where the web app
    * declares the realtime URL (`NEXT_PUBLIC_WS_URL`) and the realtime server
    * re-declares the app's. A `wss://` app with a `ws://` socket is still a
@@ -156,7 +167,7 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
     })),
   );
 
-  const mailer = resolveMailer(options.mailer);
+  const mailer = resolveMailer(options.mailer ?? mailerFromEnv());
   const secret = options.secret ?? resolveAuthSecret();
   const proxy = options.proxyStrategy ?? trustedProxyStrategy();
 

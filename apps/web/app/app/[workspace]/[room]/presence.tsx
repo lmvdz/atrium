@@ -22,14 +22,24 @@ interface Member {
   displayName: string;
 }
 
-type Status = 'connecting' | 'live' | 'denied' | 'offline';
+type Status = 'connecting' | 'live' | 'denied' | 'offline' | 'unconfigured';
 
-export function Presence({ roomId, wsUrl }: { roomId: string; wsUrl: string }) {
+export function Presence({ roomId, wsUrl }: { roomId: string; wsUrl: string | null }) {
   const [members, setMembers] = useState<Member[]>([]);
-  const [status, setStatus] = useState<Status>('connecting');
+  const [status, setStatus] = useState<Status>(wsUrl ? 'connecting' : 'unconfigured');
   const [denial, setDenial] = useState<string | null>(null);
 
   useEffect(() => {
+    // `null` means the deployment declared no realtime URL. The old code had a
+    // `ws://localhost:4000/ws` fallback baked in at build time for exactly this
+    // case, which is how a production browser ended up being told to open a
+    // socket against itself. Saying "unconfigured" out loud is the honest
+    // version of that, and it is a state the page can render.
+    if (!wsUrl) {
+      setStatus('unconfigured');
+      return;
+    }
+
     let socket: WebSocket;
     try {
       socket = new WebSocket(wsUrl);

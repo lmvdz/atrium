@@ -1,63 +1,85 @@
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  DEVELOPMENT ONLY — THIS OVERRIDE SERVES CLEARTEXT HTTP ON localhost.      ║
+# ║  LOCAL OVERRIDE — the production topology on a laptop, on `localhost`.     ║
 # ║                                                                           ║
-# ║      docker compose -f docker-compose.yml -f docker-compose.dev.yml up     ║
+# ║    docker compose -f docker-compose.yml \                                 ║
+# ║                   -f docker-compose.mailpit.yml \                         ║
+# ║                   -f docker-compose.dev.yml up --build                    ║
 # ║                                                                           ║
 # ║  It must be named explicitly. It is NOT `docker-compose.override.yml`,     ║
-# ║  which compose would load on its own — a plaintext override that applies   ║
-# ║  by default is the round-4 defect with a different filename.               ║
+# ║  which compose would load on its own — an override that applies by         ║
+# ║  default is a production stack nobody chose.                               ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 #
-# What this is for, and what it is not
-# ------------------------------------
-# For: reproducing the *proxy topology* on a laptop — one proxy appending to
-# `X-Forwarded-For`, `ATRIUM_TRUSTED_PROXY_HOPS=1`, no published ports on `app`
-# or `server`. That arrangement is what the rate limiter's per-address dimension
-# depends on, and the only honest way to exercise it is to run it. Round 4's
-# per-address demonstration ran against exactly this shape.
+# What changed in #40, and why
+# ----------------------------
+# This file used to serve **cleartext HTTP on `:80`** and set
+# `NODE_ENV=development` on `app`. Both of those were wrong, and one of them was
+# not even possible:
 #
-# Not for: anything reachable from a network you do not own. It sets
-# NODE_ENV=development, which switches on the published development credential
-# fallbacks in `apps/server/src/env.ts` as well as the console mail transport.
+#  - `next build` produces a standalone entrypoint whose line 11 is literally
+#    `process.env.NODE_ENV = 'production'`, executed before any application code.
+#    So `app` was *never* development here whatever this file said; it was a
+#    production process being handed a cleartext origin, which
+#    `assertSecureTransport` refused — and that refusal, plus the missing mail
+#    transport, is why the old header admitted "`app` still cannot serve a page
+#    in compose". Half of this override did not work and said so in a comment.
+#  - A file that serves session cookies and verification links in the clear is
+#    one `cp` away from being somebody's production Caddyfile. Round 4 shipped
+#    exactly that mistake in `deploy/Caddyfile`.
 #
-# Why the plaintext lives here rather than behind a variable in the main file:
-# under NODE_ENV=production both processes refuse to start with an `http://`
-# APP_URL or a `ws://` realtime URL at all (packages/auth/src/transport.ts).
-# There is no override for that, so a cleartext stack is only reachable by
-# *also* declaring the environment development — two deliberate acts, in a file
-# that says what it is, instead of one edited character.
+# Both are gone. Caddy issues a certificate for `localhost` from its own
+# internal CA — no ACME, no public DNS, no cleartext — so this override now runs
+# the *same* production images over the *same* TLS-only rules as
+# `docker-compose.yml`, on a hostname a laptop already has. The one thing it
+# still relaxes is `server`'s `NODE_ENV`, so the published MinIO development
+# credentials apply and a laptop boots with no setup. That relaxation is
+# deliberate, it is on one service, and it does not touch any public origin.
 #
-# `app` still cannot serve a page in compose: `next build` inlined
-# NODE_ENV=production into its standalone bundle, so `resolveMailer` refuses the
-# console transport regardless of what this file sets at runtime. That is issue
-# #40's, and it is why the useful half of this override is `server` + `proxy`.
-# The everyday local loop needs none of this: `pnpm infra:up && pnpm dev`.
+# Your browser will not trust the certificate until you install Caddy's root:
+#
+#   docker compose -p atrium cp proxy:/data/caddy/pki/authorities/local/root.crt /tmp/atrium-root.crt
+#
+# and add it to your trust store (or click through, or use
+# `curl --cacert /tmp/atrium-root.crt`). That friction is the honest cost of the
+# thing being genuinely encrypted; the alternative was a stack that taught you a
+# cleartext deployment works.
+#
+# `ATRIUM_DOMAIN` must still be set in `.env` — `docker-compose.yml` interpolates
+# `${ATRIUM_DOMAIN:?…}` before either file is merged. Set it to `localhost`.
+#
+# The everyday inner loop needs none of this: `pnpm infra:up && pnpm dev` runs
+# both apps directly on :3000 and :4000 with the console mailer.
 
 name: atrium
 
 services:
   server:
     environment:
+      # The one genuine development setting, and the reason this file exists at
+      # all: it switches on the published MinIO credential fallback in
+      # apps/server/src/env.ts. It changes no origin.
       NODE_ENV: development
-      APP_URL: http://localhost:${WEB_PORT:-3000}
+      APP_URL: https://localhost:${WEB_PORT:-3000}
 
   app:
+    # No NODE_ENV here. A Next standalone image assigns `production` to itself
+    # before this file's value could ever be read; writing one would be a
+    # setting that looks effective and is not, which is the class of defect #40
+    # exists to close.
     environment:
-      NODE_ENV: development
-      APP_URL: http://localhost:${WEB_PORT:-3000}
-      NEXT_PUBLIC_WS_URL: ws://localhost:${WEB_PORT:-3000}/ws
+      APP_URL: https://localhost:${WEB_PORT:-3000}
+      ATRIUM_WS_URL: wss://localhost:${WEB_PORT:-3000}/ws
 
   proxy:
     environment:
-      # Caddyfile.dev never reads it. It is still needed in `.env`, because the
-      # base file interpolates `${ATRIUM_DOMAIN:?...}` before either file is
-      # merged — set `ATRIUM_DOMAIN=localhost` there for this override. That is
-      # the honest cost of making the guard unconditional in the base file, and
-      # the guard is worth more than the convenience.
+      # Caddyfile.dev takes `localhost` as its site address literally rather
+      # than reading this, but the base file requires the variable and compose
+      # interpolates before merging. Keep them the same value to avoid teaching
+      # anybody that they can differ.
       ATRIUM_DOMAIN: localhost
     volumes:
       - ./deploy/Caddyfile.dev:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     ports: !override
-      - '${WEB_PORT:-3000}:80'
+      - '${WEB_PORT:-3000}:443'
