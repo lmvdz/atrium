@@ -1320,22 +1320,45 @@ function checkCommandShadowing(script, where, add, path) {
     }
     // `echo "NODE_OPTIONS=--require ./nobble.cjs" >> "$GITHUB_ENV"` is the same
     // thing for the variables above, and this workflow legitimately writes to
-    // `$GITHUB_ENV` (the run-start timestamps), so the *payload* is what decides
-    // rather than the destination. Every word of the command is inspected, which
-    // covers `echo NAME=…`, `printf 'NAME=%s\n' …` and a heredoc's delimiter
-    // line alike — anything naming one of these variables in an assignment
-    // heading for the job's environment.
+    // `$GITHUB_ENV` (the run-start timestamps), so the *payload* decides rather
+    // than the destination.
+    //
+    // ── FOUND BY ATTACKING THIS ROUND'S OWN ALLOWLIST ────────────────────────
+    // Reading the *words* of the command is not enough, and the hole is one
+    // line wide. A here-document body is data to this parser (deliberately —
+    // see `skipHeredocBodies`), so
+    //
+    //     cat >> "$GITHUB_ENV" <<'EOF'
+    //     NODE_OPTIONS=--require ./nobble.cjs
+    //     EOF
+    //
+    // is a `cat` with no words at all, and every gate in the job is disarmed
+    // from the next step onwards. Only *protected* steps are refused an
+    // unquoted heredoc; a quoted one on any ordinary step of `verify` or `e2e`
+    // was clean. So the shape is what is checked, in the polarity this round
+    // has applied everywhere else: a command writing to the job's environment
+    // must say, in a literal word this engine can read, which variable it is
+    // setting. `echo NAME=…` and `printf 'NAME=%s\n' …` do; `cat` does not, and
+    // neither does `echo "$(…)"`.
     if (
       redirections.some(
         ({ target }) => target.expandable && /^\$\{?GITHUB_ENV\}?$/.test(target.value),
       )
     ) {
+      const assignmentShaped = (word) => /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
+      const payload = firstOperand(argv);
+      if (payload === undefined || !assignmentShaped(payload)) {
+        add(
+          'no-command-shadowing',
+          `${path}: the script at ${where} writes to \`$GITHUB_ENV\` — which sets variables for every later step in the job — without a literal \`NAME=\` this policy can read${payload === undefined ? '' : ` (its first operand is \`${payload}\`)`}. A here-document body is data to this parser and a command substitution is opaque to it, so \`cat >> "$GITHUB_ENV" <<'EOF'\` and \`echo "$(…)" >> "$GITHUB_ENV"\` both set a variable nothing here can name. Write it as \`echo NAME=value >> "$GITHUB_ENV"\` with \`NAME\` declared in DECLARED_VARIABLES, or do not write to the job environment.`,
+        );
+      }
       for (const word of raw) {
         const name = word.split('=')[0].trim();
         // A word is an assignment only if it is *shaped* like one. `--foo=bar`
         // contains an `=` and names no variable, and an allowlist that read it
         // as one would be a false red on the first ordinary flag.
-        if (!/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word)) continue;
+        if (!assignmentShaped(word)) continue;
         const problem = variableProblem(name);
         if (problem !== undefined) {
           add(
@@ -1717,7 +1740,13 @@ export function checkWorkflow(source, path = '<workflow>') {
     // round 4's `uses:` guard was written for one job only.
     if (Object.hasOwn(RUNTIME_KEYS, key)) {
       const { allowed, why } = RUNTIME_KEYS[key];
-      if (!allowed.includes(value)) {
+      // `runs-on: [ubuntu-latest]` is the documented list form of the same
+      // label and means exactly the same machine. Refusing it would be a false
+      // red on a legitimate spelling, which is how rules get deleted; a list of
+      // *two* labels is a runner selected by capability rather than by name and
+      // is refused, along with the `{group:…, labels:…}` object form.
+      const asked = Array.isArray(value) && value.length === 1 ? value[0] : value;
+      if (!allowed.includes(asked)) {
         add(
           'no-runtime-override',
           `${path}: \`${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}\` at ${where}. ${allowed.length === 0 ? `\`${key}\` may not appear in this workflow at all` : `\`${key}\` may only be ${allowed.map((one) => `\`${one}\``).join(' or ')}`} — ${why}. Two verifiers that disagree about *where* a command ran is the same defect as two that disagree about whether it ran.`,

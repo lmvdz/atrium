@@ -129,15 +129,37 @@ export function forgeLike(value, random = (bound) => randomInt(bound)) {
   }
 }
 
-/** Every `/_next/static/…` URL a rendered page references, deduplicated. */
+/**
+ * Every `/_next/static/…` URL a rendered page references, deduplicated.
+ *
+ * Two ways to get this wrong, and the first draft of it managed both in turn.
+ *
+ * Round 4's `[^"'\s)]+` captured the escaping around the copy Next embeds in
+ * its RSC payload — `self.__next_f.push([1,"…HL[\"/_next/static/css/x.css\"…"])`
+ * yields `…/x.css\`, a URL the deployment is right to 404 — so a checker that
+ * fetched what it found would have gone red on a healthy stack.
+ *
+ * The obvious repair, an allowlist of filename characters, is wrong in the
+ * other direction *in this repository specifically*: `apps/web/app` contains
+ * `(auth)/sign-in`, `app/[workspace]/[room]` and `api/auth/[...all]`, and Next
+ * puts those segments in the chunk path — `(` and `)` literally, `[` and `]`
+ * percent-encoded. A class of letters-digits-dots-slashes truncates every one
+ * of them at the first bracket, and the truncated prefix quietly fails the
+ * extension test below, so the assets would go unchecked while the check
+ * reported clean. That is this ticket's own defect, committed by its fix.
+ *
+ * So: everything up to a character that cannot be *inside* a URL in HTML, then
+ * trailing punctuation that cannot *end* a filename removed — which is what
+ * takes the `)` off a `url(/_next/static/media/x.woff2)` in a `<style>` block
+ * without touching the `)` in `(auth)`.
+ */
 export function buildAssets(html) {
-  // Deliberately a strict character class rather than "anything but a quote".
-  // Next embeds these paths inside its RSC payload as JSON strings, so the
-  // loose version captured the escaping too — `…/x.css\` — and would have
-  // fetched a URL the deployment is right to 404. Chunk, stylesheet, font and
-  // manifest names are letters, digits, `.`, `_`, `-`, `~` and `/`.
   return [
-    ...new Set([...String(html).matchAll(/\/_next\/static\/[A-Za-z0-9._~/-]+/g)].map((m) => m[0])),
+    ...new Set(
+      [...String(html).matchAll(/\/_next\/static\/[^"'\s<>\\`]+/g)].map((match) =>
+        match[0].replace(/[)\],;}]+$/, ''),
+      ),
+    ),
   ].sort();
 }
 

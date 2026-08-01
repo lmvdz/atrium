@@ -266,6 +266,14 @@ const ACCEPTED_FORMS = {
     LINT_RUN,
     '        env:\n          NODE_VERSION: "22"\n        run: pnpm lint\n',
   ],
+  // `runs-on:` from the accepting side. The list form of one label is the same
+  // machine written differently, and a rule that refused it would be a false
+  // red on a legitimate spelling — which is how rules get deleted. Two labels,
+  // or the `{group:…}` object, are still refused.
+  'the runner named in the documented list form': [
+    '  verify:\n    name: lint · typecheck · test · build\n    runs-on: ubuntu-latest\n',
+    '  verify:\n    name: lint · typecheck · test · build\n    runs-on: [ubuntu-latest]\n',
+  ],
 };
 
 /**
@@ -1994,6 +2002,43 @@ const MUTATIONS = [
     rule: 'no-command-shadowing',
     mutate: (s) => rewriteFetch(s, [`ATRIUM_SOMETHING_NEW=1 ${FETCH}`]),
     message: /assigns `ATRIUM_SOMETHING_NEW` for one command/,
+  },
+  // ---- and the hole the allowlist still had, found by attacking it ---------
+  // A here-document body is data to this parser, deliberately, so a `cat` into
+  // `$GITHUB_ENV` is a command with no words: the round-5 allowlist read every
+  // word of the command and there were none to read. Only *protected* steps are
+  // refused an unquoted heredoc, and this needs no unquoted one — a quoted
+  // delimiter on any ordinary step of `verify` was clean. The fix is the same
+  // polarity as everything else this round: a write to the job environment must
+  // name its variable in a word this engine can read.
+  {
+    name: 'NODE_OPTIONS smuggled into $GITHUB_ENV through a here-document body',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      insertAfter(s, '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"', [
+        '',
+        '      - name: Note the toolchain',
+        '        run: |',
+        `          cat >> "$GITHUB_ENV" <<'EOF'`,
+        '          NODE_OPTIONS=--require ./nobble.cjs',
+        '          EOF',
+      ]),
+    message: /writes to `\$GITHUB_ENV`.*without a literal `NAME=`/s,
+  },
+  {
+    name: 'the same through a command substitution, which is opaque to this parser',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n',
+        `        run: echo "$(printf 'NODE_OPTIONS=--require ./nobble.cjs')" >> "$GITHUB_ENV"\n`,
+      ),
+    message: /writes to `\$GITHUB_ENV`.*without a literal `NAME=`/s,
+    // It replaces the run-start timestamp, so the vitest freshness gate loses
+    // the prerequisite it reads. Both are true: the timestamp is gone and the
+    // environment is being written by something nothing here can read.
+    also: ['required-step-prerequisites'],
   },
 
   // Every entry in REJECTED_FORMS, as a mutation of the baseline fetch step.

@@ -1476,6 +1476,36 @@ const CASES = [
     },
     expect: 'clean',
   },
+  // The other direction, and the one this round's first draft got wrong.
+  // `apps/web/app` has `(auth)/sign-in`, `app/[workspace]/[room]` and
+  // `api/auth/[...all]`; Next puts those segments in the chunk path, the
+  // parentheses literally and the brackets percent-encoded. An allowlist of
+  // filename characters truncates every one at the first bracket, and the
+  // truncated prefix silently fails the extension test — assets unchecked,
+  // check reporting clean. Each shape below must come back whole.
+  ...Object.entries({
+    'a route group, which this app has three of': [
+      '<script src="/_next/static/chunks/app/(auth)/sign-in/page-9f8e7d.js"></script>',
+      '/_next/static/chunks/app/(auth)/sign-in/page-9f8e7d.js',
+    ],
+    'a dynamic segment, percent-encoded by Next': [
+      '<script src="/_next/static/chunks/app/app/%5Bworkspace%5D/%5Broom%5D/page-1a2b.js"></script>',
+      '/_next/static/chunks/app/app/%5Bworkspace%5D/%5Broom%5D/page-1a2b.js',
+    ],
+    'a font inside a css url(), whose closing paren is not part of the name': [
+      '<style>@font-face{src:url(/_next/static/media/inter-abc.woff2) format("woff2")}</style>',
+      '/_next/static/media/inter-abc.woff2',
+    ],
+  }).map(([name, [html, wanted]]) => ({
+    name: `a chunk path this repo really produces: ${name}`,
+    run: () => {
+      const found = buildAssets(html);
+      return found.includes(wanted)
+        ? []
+        : [`buildAssets returned ${JSON.stringify(found)}; the page names ${wanted}`];
+    },
+    expect: 'clean',
+  })),
 
   // ---- the forged cookie is not separable from a real one -----------------
   {
