@@ -91,9 +91,11 @@ html.atr-dark {
  *   The amber button is --amb2 fill (bg3-on-amb2 = 5.14 light / 10.96 dark),
  *   which is also why it no longer needs a per-theme override.
  *
- *   TYPE FLOOR: nothing below 10px. LABEL IDIOM: exactly one — `.lbl`,
- *   10px / .14em / uppercase / mono. `letter-spacing` appears nowhere else in
- *   this stylesheet; that is greppable.
+ *   TYPE FLOOR: nothing below 10px. LABEL IDIOM: exactly one — 10px / .14em /
+ *   uppercase / mono. Round 2 claimed `letter-spacing` appeared nowhere but
+ *   `.lbl`; it appeared in nine other rules. It is now declared exactly once,
+ *   in the grouped rule below, for every element that wears the label idiom.
+ *   Exactly one rule in this stylesheet sets it; the rest inherit the idiom.
  * ======================================================================== */
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -116,11 +118,16 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 
 .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
 
+/* THE ONLY `letter-spacing` DECLARATION IN THIS STYLESHEET.
+   Every element that wears the label idiom is listed here; nothing else is
+   tracked. Round 2's comment claimed this and nine other rules contradicted it. */
+.lbl, .surf .lbl, .pin-head .fold, .acard .why::before,
+.st, .rc-back, .corr .hd, .empty, .ctxbar b { letter-spacing: .14em; }
+
 /* the single label idiom: 10px / .14em / written uppercase */
 .lbl {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 10px;
-  letter-spacing: .14em;
   color: var(--tx2);
   line-height: 1;
 }
@@ -279,24 +286,30 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 600; color: var(--tx2);
 }
 
-/* the three surfaces are all on screen at once — these focus, they do not navigate */
+/* the three surfaces are all on screen at once — these focus, they do not
+   navigate. That fact lives in the group's accessible name and in the toast the
+   buttons raise; round 2 printed it into the product header as commentary. */
 .surfaces { display: flex; align-items: center; gap: 3px; margin-top: 5px; min-width: 0; overflow: hidden; }
 .surf {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 9px 5px;
   border-bottom: 2px solid transparent;
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
-  color: var(--tx2);
   transition: color .12s ease, border-color .12s ease, background .12s ease;
 }
-.surf:hover { color: var(--tx0); background: var(--bg7); }
-.surf[aria-pressed="true"] { color: var(--tx0); border-bottom-color: var(--tx1); }
+.surf .lbl { transition: color .12s ease; }
+.surf:hover .lbl { color: var(--tx0); }
+.surf[aria-pressed="true"] { border-bottom-color: var(--tx1); }
+.surf[aria-pressed="true"] .lbl { color: var(--tx0); }
+.surf:hover { background: var(--bg7); }
+.surf[disabled] { cursor: default; opacity: .55; }
+.surf[disabled]:hover { background: none; }
+.surf[disabled]:hover .lbl { color: var(--tx2); }
 .surf .n {
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: normal; color: var(--tx2);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   background: var(--bg7); border: 1px solid var(--line); border-radius: 7px; padding: 0 4px;
 }
 .surf.warn .n { color: var(--amb2); background: var(--ambbg); border-color: var(--ambbd); }
-.surf-note { margin-left: 8px; padding-bottom: 1px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.surf.warn[disabled] .n { color: var(--tx2); background: var(--bg7); border-color: var(--line); }
 
 /* --- attention pin ------------------------------------------------------- */
 /* corpus turn 17: owed floats up and opens, clean compresses to a count,
@@ -307,7 +320,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .pin-head .lbl { color: var(--amb2); }
 .pin-head .rule { flex: 1; height: 1px; background: var(--line); }
 .pin-head .fold {
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px;
   color: var(--tx2); padding: 1px 6px 2px; border-radius: 4px; border: 1px solid transparent;
   transition: background .12s ease, color .12s ease, border-color .12s ease;
 }
@@ -331,9 +344,15 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 }
 .acard .why::before {
   content: "WHY YOU"; flex: none;
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px;
   color: var(--amb2); padding-top: 1px;
 }
+/* a proposal is still a claim even while it is also a gate: show the ◆ AND the
+   dotted underline. Round 2 let the owed glyph suppress the claim treatment. */
+.acard .ttl .claim { border-bottom: 1px dotted var(--line3); padding-bottom: 1px; }
+/* the source of an owed item can live in another room; it says so and jumps */
+.acard .xroom, .acomp .xroom { color: var(--blu2); border-bottom: 1px solid var(--filebd); white-space: nowrap; }
+.acard .xroom:hover, .acomp .xroom:hover { color: var(--tx0); border-bottom-color: var(--line3); }
 .acard .foot { margin-top: 4px; display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
 .acard .mt {
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
@@ -383,6 +402,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 }
 .pin-trailer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pin-trailer .g { color: var(--grn2); }
+.pin-trailer .g.warn { color: var(--amb2); }
+.pin-trailer .g.bad { color: var(--red2); }
 .pin-trailer b { color: var(--tx1); font-weight: 500; }
 
 /* --- feed ---------------------------------------------------------------- */
@@ -409,7 +430,12 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 }
 .mrow .m { font-size: 12px; color: var(--tx1); min-width: 0; }
 
-.mrow.gv .g { color: var(--grn2); }
+/* --grn2 is the darkest green in the token set, and on --bg1 it measures
+   4.48:1 — under AA at this size. Every other verified glyph in the shell
+   already sits on --bg3 (the pin, the lens, the receipt), where the same
+   colour clears it. This is a usage fix, not a new colour: the feed's ✓ gets
+   the same surface the rest of them stand on. */
+.mrow.gv .g { color: var(--grn2); background: var(--bg3); border-radius: 2px; }
 .mrow.ga .g { color: var(--amb2); }
 .mrow.gr .g { color: var(--red2); }
 .mrow.sys .m { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx2); }
@@ -478,13 +504,13 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .vbox input:focus { outline: none; border-color: var(--line3); }
 .vbox .hint { margin-top: 5px; font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 
-/* since-you-left divider */
+/* since-you-left / since-you-returned dividers */
 .syl { padding: 13px 16px 9px 12px; }
 .syl .bar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .syl .rule { flex: 1; min-width: 20px; height: 1px; background: var(--ambbd); }
-.syl.seen .rule { background: var(--line); }
+.syl.seen .rule, .syl.ret .rule { background: var(--line); }
 .syl .lbl { color: var(--amb2); flex: none; }
-.syl.seen .lbl { color: var(--tx2); }
+.syl.seen .lbl, .syl.ret .lbl { color: var(--tx2); }
 .syl .counts { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .cnt {
   font-family: "IBM Plex Mono", monospace; font-size: 10px;
@@ -495,6 +521,10 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .cnt:hover { border-color: var(--line3); color: var(--tx0); }
 .cnt.need { border-color: var(--ambbd); background: var(--ambbg); color: var(--amb2); }
 .cnt[aria-pressed="true"] { background: var(--tx1); border-color: var(--tx1); color: var(--bg1); }
+/* a chip that counts nothing filters nothing: it is disabled, not a no-op */
+.cnt[disabled] { cursor: default; border-style: dashed; border-color: var(--line); background: transparent; }
+.cnt[disabled]:hover { border-color: var(--line); color: var(--tx2); }
+.syl .own { color: var(--blu2); }
 .syl .when {
   margin-top: 5px; padding-left: 2px;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -531,7 +561,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
   font-family: "IBM Plex Mono", monospace; font-size: 10px;
 }
 .ctxbar.reply { border-color: var(--filebd); background: var(--replybg); color: var(--blu2); }
-.ctxbar b { font-weight: 600; letter-spacing: .14em; font-size: 10px; }
+.ctxbar b { font-weight: 600; font-size: 10px; }
 .ctxbar .in { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
 .ctxbar .x { color: inherit; padding: 0 2px; }
 
@@ -591,7 +621,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .obj-head .ct { display: block; margin-top: 3px; font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 .obj-head .ct .warn { color: var(--amb2); }
 .st {
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px;
   border: 1px solid var(--line); background: var(--bg1); color: var(--tx2);
   border-radius: 3px; padding: 1px 4px 1px 5px; white-space: nowrap;
 }
@@ -628,7 +658,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .receipt { padding: 0 0 30px; }
 .rc-top { position: sticky; top: 0; z-index: 2; background: var(--bg3); border-bottom: 1px solid var(--line); padding: 8px 14px 10px; }
 .rc-back {
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em; color: var(--tx2);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 3px 4px; border-radius: 4px;
   transition: background .12s ease, color .12s ease;
 }
@@ -680,24 +710,34 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .prov:hover .full, .prov:focus-visible .full { max-height: 44px; opacity: 1; margin-top: 4px; }
 
 .corr { border-left: 2px solid var(--line2); padding: 2px 0 2px 9px; margin-bottom: 7px; }
-.corr .hd { font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em; color: var(--tx2); }
+.corr .hd { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 .corr .bd { font-size: 11px; color: var(--tx1); margin-top: 2px; }
 .corr .bd q { font-style: italic; }
 .corr .lnk { color: var(--blu2); border-bottom: 1px solid var(--filebd); font-family: "IBM Plex Mono", monospace; font-size: 10px; }
 .corr .lnk:hover { color: var(--tx0); border-bottom-color: var(--line3); }
 
-.rc-foot { margin: 10px 14px 0; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; align-items: center; gap: 8px; }
+/* the receipt's own action stays reachable: a long correction chain used to push
+   Reopen past the bottom of the pane, which is a dead end by scroll position */
+.rc-foot {
+  position: sticky; bottom: 0; z-index: 2;
+  margin: 10px 0 0; padding: 10px 14px 10px; border-top: 1px dashed var(--line);
+  background: var(--bg3);
+  display: flex; align-items: center; gap: 8px;
+}
 .rc-foot .note { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); flex: 1; line-height: 1.4; }
 
 .empty {
   padding: 12px; margin: 0; border: 1px dashed var(--line); border-radius: 5px;
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px;
   color: var(--tx2); text-align: center;
 }
 
-/* --- toast (live region: stays in the a11y tree, fades visually) --------- */
+/* --- toast (live region: stays in the a11y tree, fades visually) ---------
+   Anchored over the CONVERSATION column, clear of the lens: round 2 parked it
+   on top of the Current state pane it was reporting changes to. Its right edge
+   stops at the lens boundary at every supported width. */
 .toast {
-  position: fixed; right: 20px; bottom: 92px;
+  position: fixed; right: 392px; bottom: 96px; max-width: 380px;
   background: var(--bg3); border: 1px solid var(--line3); border-radius: 5px;
   padding: 6px 12px 7px; z-index: 40;
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx1);
@@ -706,19 +746,25 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
   opacity: 0; pointer-events: none; transition: opacity .12s ease;
 }
 .toast.show { opacity: 1; }
+/* the glyph reports the OUTCOME — round 2 stamped ✓ on every one of them */
 .toast .g { color: var(--grn2); }
+.toast.warn .g { color: var(--amb2); }
+.toast.bad .g { color: var(--red2); }
+.toast.info .g { color: var(--tx2); }
 
 /* --- responsive: laptop ------------------------------------------------- */
 /* the topic survives to the narrowest supported width — it is what the room
    is for, and dropping it was a round-1 defect. */
 @media (max-width: 1439px) {
   .app { grid-template-columns: 48px 216px minmax(500px,1fr) 344px; }
+  .toast { right: 360px; max-width: 340px; }
 }
 @media (max-width: 1279px) {
   .app { grid-template-columns: 44px 198px minmax(440px,1fr) 316px; }
   .mrow { grid-template-columns: 40px 14px 68px 1fr; }
   .pin { padding: 7px 12px 8px; }
   .roomhead .faces { display: none; }
+  .toast { right: 332px; max-width: 312px; }
 }
 </style>
 </head>
@@ -773,11 +819,12 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
         <div class="topic" id="roomTopic"></div>
         <div class="faces" id="roomFaces"></div>
       </div>
-      <div class="surfaces" role="group" aria-label="Surface focus">
-        <button class="surf" id="surfConv" aria-pressed="true">CONVERSATION</button>
-        <button class="surf warn" id="surfNeeds" aria-pressed="false">NEEDS YOU <span class="n" id="surfNeedsN">0</span></button>
-        <button class="surf" id="surfState" aria-pressed="false">CURRENT STATE <span class="n" id="surfStateN">0</span></button>
-        <span class="surf-note meta">all three are on screen at once — these focus, they do not navigate</span>
+      <div class="surfaces" role="group"
+           aria-label="Surface focus — all three surfaces are on screen at once; these focus them, they do not navigate"
+           title="All three surfaces are on screen at once. These focus them; they do not navigate.">
+        <button class="surf" id="surfConv" aria-pressed="true"><span class="lbl">CONVERSATION</span></button>
+        <button class="surf warn" id="surfNeeds" aria-pressed="false"><span class="lbl">NEEDS YOU</span> <span class="n" id="surfNeedsN">0</span></button>
+        <button class="surf" id="surfState" aria-pressed="false"><span class="lbl">CURRENT STATE</span> <span class="n" id="surfStateN">0</span></button>
       </div>
     </header>
 
@@ -838,7 +885,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
   </aside>
 </div>
 
-<div class="toast" id="toast" role="status" aria-live="polite"><span class="g" aria-hidden="true">✓</span><span id="toastMsg"></span></div>
+<div class="toast" id="toast" role="status" aria-live="polite"><span class="g" id="toastGlyph" aria-hidden="true">✓</span><span id="toastMsg"></span></div>
 
 <script>
 "use strict";
@@ -872,13 +919,16 @@ const S = {
     { id: "mateo",  presence: "away", note: "2h" }
   ],
   ui: {
-    /* a filter carries its SCOPE as well as its class, because a count is only
-       honest next to the set it counts. The since-you-left chips filter the
-       since-you-left group (which is what they count); the NEEDS YOU surface
-       button filters the whole room (which is what the pin counts). Round 1
-       labelled one set and highlighted another. */
-    feedFilter: null,      // null | { k: 'need'|'change'|'discussion'|'routine', scope: 'since'|'room' }
+    /* A filter carries its SCOPE as well as its class, because a count is only
+       honest next to the set it counts. Round 3 also fixes what the two numbers
+       ARE: the pin and every badge count owed OBJECTS; the feed filter
+       highlights every ROW LINKED to an owed object. Those are different
+       cardinalities on purpose — one object can be carried by four rows, and an
+       object whose source message lives in another room has none here. No copy
+       on this page claims they are the same set. */
+    feedFilter: null,      // null | { k: 'need'|'change'|'discussion'|'routine', scope: 'absence'|'return'|'room' }
     routineOpen: false,
+    routineOpenedByFilter: false,
     pinFolded: false,
     pinOpen: null,         // which owed item is expanded (turn-17: one open, rest compressed)
     lensFocus: false,
@@ -903,6 +953,13 @@ const S = {
  * ----------------------------------------------------------------------- */
 const GLYPH_CLASS = { "✓": "gv", "◆": "ga", "?": "ga", "✗": "gr", "~": "", "·": "" };
 
+/* the three verification states that mean "nothing outside the claimant has
+   checked this". They drive the dotted underline INDEPENDENTLY of the glyph:
+   a proposal that is also a gate is still a claim, so it renders ◆ *and*
+   dotted. Round 2 derived the underline from the glyph, so being owed to you
+   silently dressed a proposal as settled prose. */
+const UNSETTLED = ["proposed", "unverified", "self_reported"];
+
 function glyphOf(o) {
   if (o.verification === "failed") return "✗";
   if (o.owedTo === S.me && o.verification !== "accepted" && o.verification !== "verified") {
@@ -910,11 +967,11 @@ function glyphOf(o) {
   }
   if (o.verification === "open") return "?";
   if (o.verification === "verified" || o.verification === "accepted") return "✓";
-  if (o.verification === "proposed" || o.verification === "unverified" || o.verification === "self_reported") return "~";
+  if (UNSETTLED.includes(o.verification)) return "~";
   return "·";
 }
-function isClaim(o) { return glyphOf(o) === "~"; }
-function needsYou(o) { return o.owedTo === S.me && o.verification !== "accepted" && o.verification !== "verified" && o.verification !== "reassigned" && o.verification !== "rescheduled"; }
+function isClaim(o) { return !!o && UNSETTLED.includes(o.verification); }
+function needsYou(o) { return o.owedTo === S.me && o.verification !== "accepted" && o.verification !== "verified"; }
 function gclass(g) { return GLYPH_CLASS[g] || ""; }
 
 /* history entries carry a semantic kind; their glyph derives from it too */
@@ -1070,8 +1127,9 @@ S.rooms["users-migration"] = {
       id: "Q1", kind: "question", objectives: ["o1", "o2"], text: "Does legal approve 90-day retention of users_legacy?",
       claimant: "priya", verification: "open", askedBy: "priya", askedAt: "09:11", openFor: "3h", assignee: null,
       owedTo: "lars", priority: 10, sourceMsg: "m11",
+      answerHint: "retention is 90 days", reassignTo: "justin",
       why: "blocking — the retention answer gates “Retire the legacy identity path,” the objective you own.",
-      facts: ["open 3h", "asked by priya", "blocks o2"],
+      facts: ["open 3h", "asked by priya", "blocks retiring the legacy path"],
       history: [{ k: "question", who: "priya", tm: "09:11", text: "raised it as the one thing gating the drop — nobody has been assigned" }],
       provenance: [{ who: "priya", tm: "09:11", msg: "m11", ex: "Nobody has confirmed whether legal is fine keeping users_legacy around for 90 days. That gates the drop.", note: "message · seq 9111 · open question, no assignee" }],
       corrections: [],
@@ -1125,11 +1183,16 @@ S.rooms["users-migration"] = {
     {
       id: "D2", kind: "decision", objectives: ["o2"], text: "Legacy opaque tokens are refused after the retention window closes",
       claimant: "lars", verification: "accepted", acceptedBy: "lars", acceptedAt: "22 Jul",
-      facts: ["accepted by lars", "22 Jul"],
+      /* the source message for this object is in the OTHER room. Nothing in
+         #users-migration carries it, so when this object is owed to you the pin
+         says where it lives and jumps there, instead of counting an item the
+         feed filter can never highlight. */
+      sourceMsg: "n0", sourceRoom: "identity-service",
+      facts: ["accepted by lars", "22 Jul", "source in #identity-service"],
       history: [{ k: "accepted", who: "lars", tm: "22 Jul 15:40", text: "accepted directly in #identity-service — answer-bound" }],
-      provenance: [{ who: "lars", tm: "22 Jul 15:40", msg: null, ex: "Once retention is up, the gateway refuses opaque tokens outright. No grace period.", note: "answer-bound reply · #identity-service · seq 7710" }],
+      provenance: [{ who: "lars", tm: "22 Jul 15:40", msg: "n0", room: "identity-service", ex: "Once retention is up, the gateway refuses opaque tokens outright. No grace period.", note: "answer-bound reply · #identity-service · seq 7710" }],
       corrections: [],
-      note: "Accepted a week before this room's window opens; the source message is in another room."
+      note: "Accepted a week before this room's window opens; the source message is in another room, and every surface that points at it says so."
     },
     {
       id: "K4", kind: "commitment", objectives: ["o2"], text: "Drop users_legacy once retention clears",
@@ -1213,6 +1276,35 @@ S.rooms["identity-service"] = {
       note: "Same machinery, different room. Answering here does not touch #users-migration."
     },
     {
+      /* An owed item whose SOURCE MESSAGE IS IN THE OTHER ROOM. It is counted
+         here because the call is this room's to make, and no row in this room
+         can ever carry it — so the pin gives it a jump to #users-migration
+         instead of a highlight that would never land. This is the case round 2
+         counted and then highlighted nothing for. */
+      id: "X1", kind: "decision", objectives: ["p2"],
+      text: "Opaque-token issuance stops the day the users cutover lands",
+      question: "Stop issuing opaque tokens the day the users cutover lands, or hold issuance open until the 14 Aug freeze?",
+      claimant: "justin", verification: "proposed", confidence: ".58",
+      owedTo: "lars", priority: 18, askedBy: "justin", askedAt: "08:33",
+      sourceMsg: "m5b", sourceRoom: "users-migration",
+      waiting: 1, blocks: "1 objective",
+      why: "needs you specifically — it is the same trade you owe #users-migration, and it was put to you over there, so this room has the decision without the line that raised it.",
+      facts: ["proposed · not accepted", "conf .58", "source in #users-migration"],
+      options: [
+        { label: "Stop with the cutover", statement: "Opaque-token issuance stops the day the users cutover lands" },
+        { label: "Hold until the freeze", statement: "Opaque-token issuance stays open until the 14 Aug freeze, whatever the users cutover does" }
+      ],
+      history: [
+        { k: "claim", who: "justin", tm: "08:33", text: "objected in #users-migration that a Friday cutover breaks 4.7% of logins — read here as a decision this room owes, not as a decision made" },
+        { k: "gate",  who: "atrium", tm: "08:34", text: "routed to lars: issuance is this room's to stop, the cutover date is not" }
+      ],
+      provenance: [{ who: "justin", tm: "08:33", msg: "m5b", room: "users-migration",
+        ex: "Then a Friday cutover breaks 4.7% of logins. That is not a rounding error.",
+        note: "message · #users-migration · seq 9102 · the objection this decision answers · cross-room, nothing in this room carries it" }],
+      corrections: [],
+      note: "One object, two rooms. The decision belongs to #identity-service; the sentence that raised it is in #users-migration and stays there. The pin says so and goes there rather than pretending a row here exists."
+    },
+    {
       id: "R2", kind: "claim", objectives: ["p1"], text: "Rotation load test: 12,000 req/s sustained, p99 41ms",
       claimant: "checks", verification: "verified", verifiedBy: "the load harness", verifiedAt: "08:22", sourceMsg: "n5",
       facts: ["checks", "verified 08:22", "run #91"],
@@ -1232,6 +1324,11 @@ S.rooms["identity-service"] = {
     }
   ],
   messages: [
+    /* the source message for D2, an object that lives in #users-migration. A
+       message can carry an object from another room; the tag says which room,
+       and the pin over there jumps here. */
+    { id: "n0", t: "22 Jul", actor: "lars", body: ["Once retention is up, the gateway refuses opaque tokens outright. No grace period."],
+      objectId: "D2", objectRoom: "users-migration" },
     { id: "n1", t: "17:55", actor: "priya",  body: ["Rotation branch is up for review."] },
     { id: "n2", t: "18:20", actor: "justin", body: ["Looking at it in the morning."] },
     /* --- seen cursor sits here (room.seenAfter = "n2") --- */
@@ -1247,6 +1344,12 @@ S.rooms["identity-service"] = {
   ]
 };
 
+/* The absence window freezes the moment you return. `absenceEnd` is pinned here,
+   at boot, to the last message that existed while you were away, and nothing
+   moves it again — so no message written after you got back can ever be counted
+   as something that happened while you were gone. */
+Object.values(S.rooms).forEach(r => { r.absenceEnd = r.messages[r.messages.length - 1].id; });
+
 /* ===========================================================================
  * DERIVED SELECTORS — every count on this page comes through one of these.
  * ======================================================================== */
@@ -1254,72 +1357,191 @@ S.rooms["identity-service"] = {
 function room(id) { return S.rooms[id || S.roomId]; }
 function obj(r, id) { return r.objects.find(o => o.id === id) || null; }
 function msg(r, id) { return r.messages.find(m => m.id === id) || null; }
+function idx(r, id) { return r.messages.findIndex(m => m.id === id); }
 
-/* owed items for the pin, hardest first: failures > gates > overdue > questions */
-function owedItems(r) {
+/* ---------------------------------------------------------------------------
+ * ONE ATTENTION COLLECTION.
+ *
+ * `attention(r)` is the collection. It holds owed OBJECTS, hardest first, and
+ * it is the only thing any count on this page counts: the pin header, the rail
+ * pill, the NEEDS YOU badge, the lens summary, the objective sub-counts.
+ *
+ * `linkedObject(r, m)` is the other half: the object a row is LINKED to. The
+ * NEED class — and therefore the highlight — is exactly "this row is linked to
+ * an object in the attention collection". A single object can own four rows
+ * (its source, your answer, and the two system rows recording the transitions),
+ * and an object whose source lives in another room owns none here. Both are
+ * correct; neither is a bug; and no string on this page says the counts and the
+ * highlights are the same set.
+ * ------------------------------------------------------------------------ */
+function attention(r) {
   return r.objects.filter(needsYou).sort((a, b) => (b.priority || 0) - (a.priority || 0));
 }
+/* an object may be carried by a message in ANOTHER room (D2's source lives in
+   #identity-service), so resolution follows the message's declared room. */
+function linkedObject(r, m) {
+  const id = m.boundTo || m.objectId || m.sysFor;
+  if (!id) return null;
+  const home = m.objectRoom ? S.rooms[m.objectRoom] : r;
+  return home ? obj(home, id) : null;
+}
+function isAttentionRow(r, m) { const o = linkedObject(r, m); return !!o && needsYou(o); }
+
+/* rows in THIS room linked to an object in the attention collection */
+function attentionRows(r) { return r.messages.filter(m => isAttentionRow(r, m)); }
+/* attention items whose source message is not in this room — they can never be
+   highlighted here, so the pin gives them a jump instead of a phantom row */
+function offRoomItems(r) {
+  return attention(r).filter(o => !r.messages.some(m => linkedObject(r, m) === o));
+}
+function sourceRoomOf(o) { return o.sourceRoom && o.sourceRoom !== S.roomId ? o.sourceRoom : null; }
 
 /* a message's glyph is derived from the object it carries — never written down.
    When that object changes (accepted, reopened, verified), this row changes. */
 function msgGlyph(r, m) {
-  if (m.system && !m.objectId) return "·";
+  const o = linkedObject(r, m);
+  if (!o) return "·";
+  /* ANSWER-ROW IDENTITY (round 2 blocker 2): only the message whose id is the
+     object's CURRENT answerMsg may wear the settled treatment. Every earlier
+     answer to the same object is a superseded answer and renders as one, no
+     matter what state the object is in now. */
   if (m.boundTo) {
-    const o = obj(r, m.boundTo);
-    return o && (o.verification === "accepted" || o.verification === "verified") ? "✓" : "~";
+    if (o.answerMsg !== m.id) return "~";
+    return (o.verification === "accepted" || o.verification === "verified") ? "✓" : "~";
   }
-  if (m.objectId) {
-    const o = obj(r, m.objectId);
-    if (o) return glyphOf(o);
-  }
-  return "·";
+  return glyphOf(o);
+}
+/* the dotted claim treatment, per row: an answer that is no longer the answer
+   is a claim about what was once decided. */
+function msgIsClaim(r, m) {
+  const o = linkedObject(r, m);
+  if (!o) return false;
+  if (m.boundTo && o.answerMsg !== m.id) return true;
+  return isClaim(o);
 }
 
 /* the four classes partition the group: they add up to the total, by construction */
 function msgClass(r, m) {
   if (m.routine) return "routine";
-  if (m.system && m.sysFor) return "change";     // a recorded state transition IS a change
-  if (m.objectId || m.boundTo) {
-    const o = obj(r, m.boundTo || m.objectId);
-    if (o && needsYou(o)) return "need";
-    return "change";
-  }
+  const o = linkedObject(r, m);
+  if (o) return needsYou(o) ? "need" : "change";
+  if (m.system) return "change";          // a recorded transition IS a change
   return "discussion";
 }
 
-function sinceMessages(r) {
-  const i = r.messages.findIndex(m => m.id === r.seenAfter);
-  return i < 0 ? [] : r.messages.slice(i + 1);
+/* --- DIGEST SEMANTICS ----------------------------------------------------
+ * Three rules, all of which round 2 broke by treating "after the seen cursor"
+ * as "since you left":
+ *   1. Your own activity is never unseen. You wrote it; you were here.
+ *   2. The absence window FREEZES at the moment you return. `absenceEnd` is
+ *      pinned at boot and never moves, so nothing that happens while you are
+ *      sitting in the room can join the group labelled SINCE YOU LEFT.
+ *   3. Everything after that accrues to a separate, differently-labelled group
+ *      — SINCE YOU RETURNED, or SINCE YOU MARKED THIS SEEN once the cursor has
+ *      moved past the absence window.
+ * ------------------------------------------------------------------------ */
+function isMine(m) { return m.actor === S.me || m.byMe === true; }
+
+function groupStart(r, scope) {
+  const cur = idx(r, r.seenAfter), abs = idx(r, r.absenceEnd);
+  if (scope === "absence") return cur + 1;
+  if (scope === "return")  return Math.max(cur, abs) + 1;
+  return 0;                                  // room
 }
-function isSince(r, m) {
-  return r.messages.indexOf(m) > r.messages.findIndex(x => x.id === r.seenAfter);
+function groupEnd(r, scope) {
+  const abs = idx(r, r.absenceEnd);
+  if (scope === "absence") return abs;
+  return r.messages.length - 1;              // return | room
 }
-/* one predicate, used by both the render and the count */
+function groupMessages(r, scope) {
+  const a = groupStart(r, scope), b = groupEnd(r, scope);
+  if (b < a) return [];
+  const slice = r.messages.slice(a, b + 1);
+  return scope === "room" ? slice : slice.filter(m => !isMine(m));
+}
+/* how much of the group is yours — reported, never counted as unseen */
+function ownInGroup(r, scope) {
+  const a = groupStart(r, scope), b = groupEnd(r, scope);
+  if (b < a) return 0;
+  return r.messages.slice(a, b + 1).filter(isMine).length;
+}
+function hasAbsenceGroup(r) { return idx(r, r.seenAfter) < idx(r, r.absenceEnd); }
+function counts(r, scope) {
+  const c = { need: 0, change: 0, discussion: 0, routine: 0 };
+  groupMessages(r, scope).forEach(m => { c[msgClass(r, m)]++; });
+  c.total = c.need + c.change + c.discussion + c.routine;
+  return c;
+}
+/* one predicate, used by both the render and the count — a row is highlighted
+   if and only if it is counted by the chip that was pressed */
 function matchesFilter(r, m) {
   const f = S.ui.feedFilter;
   if (!f) return false;
   if (msgClass(r, m) !== f.k) return false;
-  return f.scope === "room" ? true : isSince(r, m);
+  return groupMessages(r, f.scope).indexOf(m) >= 0;
 }
-function sinceCounts(r) {
-  const c = { need: 0, change: 0, discussion: 0, routine: 0 };
-  sinceMessages(r).forEach(m => { c[msgClass(r, m)]++; });
-  c.total = c.need + c.change + c.discussion + c.routine;
-  return c;
+/* the rail: unseen means unseen by you, so your own messages never count */
+function unseenCount(r) {
+  const cur = idx(r, r.seenAfter);
+  return r.messages.slice(cur + 1).filter(m => !isMine(m)).length;
 }
-function unseenCount(r) { return sinceMessages(r).length; }
 
-/* the "everything else is green" trailer — counted, not typed */
+/* the trailer — counted, not typed, INCLUDING its lead clause and its glyph.
+   Round 2 hardcoded "everything else is green" over derived numbers, so a room
+   with a failure in it would still have announced that everything was green. */
 function clearSummary(r) {
-  const owed = owedItems(r).map(o => o.id);
+  const owed = attention(r).map(o => o.id);
   const objectivesOnTrack = r.objectives.filter(ob =>
     !r.objects.some(o => o.objectives.includes(ob.id) && owed.includes(o.id))).length;
   /* the trailer describes what is NOT in the pin — anything owed is above it */
   const commitments = r.objects.filter(o => o.kind === "commitment" && !needsYou(o));
   const overdue = commitments.filter(o => o.overdue).length;
   const failures = r.objects.filter(o => o.verification === "failed").length;
-  return { objectivesOnTrack, objectivesTotal: r.objectives.length,
+  const lead = failures ? `${failures} failure${failures === 1 ? "" : "s"} outside your list`
+             : overdue ? `nothing has failed, ${overdue} thing${overdue === 1 ? " is" : "s are"} late`
+             : "everything else is green";
+  const glyph = failures ? "✗" : overdue ? "◆" : "✓";
+  return { objectivesOnTrack, objectivesTotal: r.objectives.length, lead, glyph,
            commitments: commitments.length, overdue, failures, lastVerified: r.lastVerified };
+}
+
+/* --- THE ATTENTION INVARIANT --------------------------------------------
+ * No attention item exists without an action path and a rationale. This is
+ * checked at render time rather than asserted in a receipt: if a future change
+ * mints a dead item, the console says so on the very first paint.
+ * ---------------------------------------------------------------------- */
+const DEV = true;   /* prototype build — a shipping build would strip this */
+function checkAttentionInvariant(r) {
+  if (!DEV) return;
+  attention(r).forEach(o => {
+    if (!pinActions(o)) console.error("[atrium invariant] owed item has no action path — it is a dead end:", o.id, o);
+    if (!whyOf(r, o).trim()) console.error("[atrium invariant] owed item has no rationale under WHY YOU:", o.id, o);
+    if (!r.messages.some(m => linkedObject(r, m) === o) && !sourceRoomOf(o))
+      console.error("[atrium invariant] owed item is unreachable — no row in this room and no cross-room source declared:", o.id, o);
+  });
+}
+
+/* WHY YOU is never empty. When the seed carries a rationale, that is the
+   rationale; when it does not — a reopened decision, say — one is synthesized
+   from the object's own history, which is the only honest source for it. */
+function whyOf(r, o) {
+  if (o.why) return o.why;
+  const bits = [];
+  if (o.reopenedAt) bits.push(`you reopened this at ${o.reopenedAt}, so it is pending again and only you can settle it`);
+  else if (o.kind === "decision") bits.push("it is a decision routed to you — decisions never auto-accept");
+  else if (o.kind === "commitment") bits.push(`it is ${o.owner === S.me ? "yours" : o.owner + "'s"} and it is waiting on you`);
+  else bits.push("it was routed to you and nobody else has picked it up");
+  /* one supporting clause, drawn from the object's own record — the prior call
+     if there is one, otherwise the objective it sits under. Two clauses keep it
+     readable inside the pin's line budget; a rationale that gets clipped is not
+     a rationale. */
+  const prior = [...o.history].reverse().find(h => h.k === "accepted" || h.k === "verified");
+  if (prior) bits.push(`the prior call was ${prior.who}'s at ${prior.tm}, still on the record below`);
+  else {
+    const titles = o.objectives.map(id => (r.objectives.find(ob => ob.id === id) || {}).title).filter(Boolean);
+    if (titles.length) bits.push(`it sits under “${titles[0]}”`);
+  }
+  return bits.join(" · ") + ".";
 }
 /* ===========================================================================
  * RENDER HELPERS — all interpolation goes through esc(). Nothing typed by a
@@ -1360,7 +1582,7 @@ function renderRail() {
   rooms.innerHTML = "";
   ids.forEach(id => {
     const r = S.rooms[id];
-    const owed = owedItems(r).length;
+    const owed = attention(r).length;      // items, not rows — everywhere
     const unseen = unseenCount(r);
     const b = document.createElement("button");
     b.className = "rrow" + (id === S.roomId ? " on" : "") + (unseen ? " unread" : "");
@@ -1369,7 +1591,7 @@ function renderRail() {
       `<span class="hash" aria-hidden="true">#</span><span class="nm">${esc(r.name)}</span>` +
       (owed ? `<span class="pill"><span aria-hidden="true">◆</span>${owed}</span>`
             : unseen ? `<span class="ct">${unseen}</span>` : "");
-    b.title = `#${r.name} — ${owed} needing you · ${unseen} unseen`;
+    b.title = `#${r.name} — ${owed} item${owed === 1 ? "" : "s"} needing you · ${unseen} message${unseen === 1 ? "" : "s"} you have not seen`;
     b.addEventListener("click", () => switchRoom(id));
     rooms.appendChild(b);
   });
@@ -1396,9 +1618,17 @@ function renderHead() {
   $("roomTopic").title = r.topic;
   $("roomFaces").innerHTML = r.members.map(m => `<span class="av" title="${esc(m)}">${esc(initials(m))}</span>`).join("");
 
-  const owed = owedItems(r).length;
+  const items = attention(r);
+  const owed = items.length;
+  const rows = attentionRows(r).length;
   $("surfNeedsN").textContent = String(owed);
   $("surfStateN").textContent = String(r.objects.length);
+  /* the badge counts ITEMS; the filter it turns on highlights ROWS. The
+     accessible name says which is which rather than implying one number. */
+  $("surfNeeds").title = owed
+    ? `${owed} item${owed === 1 ? "" : "s"} need you in this room. Filtering highlights the ${rows} row${rows === 1 ? "" : "s"} linked to them.`
+    : "Nothing needs you in this room, so there is nothing to filter to.";
+  $("surfNeeds").disabled = owed === 0;
   const f = S.ui.feedFilter;
   $("surfConv").setAttribute("aria-pressed", String(f === null));
   $("surfNeeds").setAttribute("aria-pressed", String(!!f && f.k === "need" && f.scope === "room"));
@@ -1416,12 +1646,19 @@ function renderHead() {
 
 function renderPin() {
   const r = room();
-  const items = owedItems(r);
+  const items = attention(r);
   const list = $("pinList"), trailer = $("pinTrailer");
+  checkAttentionInvariant(r);
 
-  $("pinCount").textContent = items.length
-    ? `${items.length} item${items.length > 1 ? "s" : ""} · hardest first`
-    : "nothing owed — this is the whole list";
+  /* the pin counts ITEMS. When a need filter is on, it also says how many rows
+     those items produced, because that is the other number on the screen. */
+  const f = S.ui.feedFilter;
+  const rows = f && f.k === "need" ? groupMessages(r, f.scope).filter(m => msgClass(r, m) === "need").length : 0;
+  $("pinCount").textContent = !items.length
+    ? "nothing owed — this is the whole list"
+    : (f && f.k === "need")
+      ? `${items.length} item${items.length > 1 ? "s" : ""} · ${rows} linked row${rows === 1 ? "" : "s"} highlighted below`
+      : `${items.length} item${items.length > 1 ? "s" : ""} · hardest first`;
   $("pinFold").setAttribute("aria-pressed", String(S.ui.pinFolded));
   $("pinFold").textContent = S.ui.pinFolded ? "UNFOLD" : "FOLD";
   list.hidden = S.ui.pinFolded;
@@ -1442,10 +1679,20 @@ function renderPin() {
 
   const c = clearSummary(r);
   trailer.innerHTML =
-    `<span class="g" aria-hidden="true">✓</span>` +
-    `<span>everything else is green — <b>${c.objectivesOnTrack}/${c.objectivesTotal} objectives</b> clear of you · ` +
+    `<span class="g ${c.failures ? "bad" : c.overdue ? "warn" : ""}" aria-hidden="true">${c.glyph}</span>` +
+    `<span>${esc(c.lead)} — <b>${c.objectivesOnTrack}/${c.objectivesTotal} objectives</b> clear of you · ` +
     `<b>${c.commitments} commitment${c.commitments === 1 ? "" : "s"}</b>, ${c.overdue} overdue · ` +
     `<b>${c.failures} failure${c.failures === 1 ? "" : "s"}</b> · last check ${esc(c.lastVerified)}</span>`;
+}
+
+/* an owed item whose source message is not in this room says where it is and
+   goes there. Round 2 counted it and highlighted nothing. */
+function sourceChip(r, o, compact) {
+  const xr = sourceRoomOf(o);
+  if (xr) return `<span aria-hidden="true">·</span><button class="xroom" data-jump="${esc(o.sourceMsg || "")}" data-jumproom="${esc(xr)}">source in #${esc(xr)} →</button>`;
+  if (!o.sourceMsg) return "";
+  /* the time already appears in the facts beside this, so the link is the link */
+  return `<span aria-hidden="true">·</span><button class="lnk" data-jump="${esc(o.sourceMsg)}">${compact ? "source →" : "jump to source →"}</button>`;
 }
 
 function pinCard(r, o) {
@@ -1453,16 +1700,13 @@ function pinCard(r, o) {
   const el = document.createElement("article");
   el.className = "acard" + (g === "◆" ? " gate" : "") + (o.fresh ? " rise" : "");
   const facts = (o.facts || []).map(esc).join(" · ");
-  const src = o.sourceMsg
-    ? `<span aria-hidden="true">·</span><button class="lnk" data-jump="${esc(o.sourceMsg)}">${esc(o.askedAt || o.due || "source")} · jump to source</button>`
-    : "";
   el.innerHTML =
     `<div class="g" aria-hidden="true">${g}</div>
      <div>
-       <div class="ttl">${esc(o.question || o.text)}</div>
-       <div class="why">${esc(o.why || "")}</div>
+       <div class="ttl"><span class="${isClaim(o) ? "claim" : ""}">${esc(o.question || o.text)}</span></div>
+       <div class="why">${esc(whyOf(r, o))}</div>
        <div class="foot">
-         <div class="mt">${facts}${src}</div>
+         <div class="mt">${facts}${sourceChip(r, o)}</div>
          <div class="acts">${pinActions(o)}</div>
        </div>
      </div>`;
@@ -1476,26 +1720,36 @@ function pinCompact(r, o) {
   const el = document.createElement("div");
   el.className = "acomp";
   const primary = pinActions(o, true);
+  const xr = sourceRoomOf(o);
   el.innerHTML =
     `<span class="g" aria-hidden="true">${g}</span>
      <button class="ct" data-open="${esc(o.id)}" title="Expand this item">${esc(o.question || o.text)}</button>
-     <span class="mt">${esc((o.facts || []).slice(0, 2).join(" · "))}${primary}</span>`;
+     <span class="mt">${esc((o.facts || []).slice(0, xr ? 1 : 2).join(" · "))}${xr ? sourceChip(r, o, true) : ""}${primary}</span>`;
   el.querySelector("[data-open]").addEventListener("click", () => { S.ui.pinOpen = o.id; render(); });
   wireActions(el, o);
   return el;
 }
 
+/* NO DEAD ATTENTION ITEMS. Every pending decision offers the bound composer,
+   whether or not it ever carried one-click options; reopening one that had
+   options keeps them, and reopening one that never had any mints the single
+   honest option there is — re-affirming the statement already on the record.
+   checkAttentionInvariant() shouts if this ever returns nothing. */
 function pinActions(o, primaryOnly) {
   let acts = [];
-  if (o.kind === "decision" && o.options) {
-    acts = o.options.map((opt, i) => `<button class="btn ${i === 0 ? "amber" : ""}" data-opt="${i}">${esc(opt.label)}</button>`);
+  if (o.kind === "decision") {
+    acts = (o.options || []).map((opt, i) =>
+      `<button class="btn ${i === 0 ? "amber" : ""}" data-opt="${i}" title="${esc(opt.statement)}">${esc(opt.label)}</button>`);
     acts.push(`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`);
   } else if (o.kind === "commitment") {
     acts = [`<button class="btn sm" data-fx="signed">Mark signed off</button>`,
             `<button class="btn ghost sm" data-fx="resched">Reschedule</button>`];
   } else if (o.kind === "question") {
-    acts = [`<button class="btn sm" data-fx="answered">Answer — retention is 90 days</button>`,
-            `<button class="btn ghost sm" data-fx="reassign">Ask justin instead</button>`];
+    acts = [`<button class="btn sm" data-fx="answered">${o.answerHint ? "Answer — " + esc(o.answerHint) : "Answer it"}</button>`,
+            `<button class="btn ghost sm" data-fx="reassign">Ask ${esc(o.reassignTo || "someone else")} instead</button>`];
+  } else {
+    /* anything else that ends up owed still gets a way out */
+    acts = [`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`];
   }
   return primaryOnly ? (acts[0] || "") : acts.join("");
 }
@@ -1503,12 +1757,14 @@ function pinActions(o, primaryOnly) {
 function wireActions(el, o) {
   el.querySelectorAll("[data-opt]").forEach(b => b.addEventListener("click", () => {
     const opt = o.options[Number(b.dataset.opt)];
-    answerDecision(o.id, opt.statement, "one-click answer · reversible gate · the button's statement recorded verbatim · no model in the path");
+    answerDecision(o.id, opt.statement, opt.synthesized
+      ? "one-click re-affirmation · the statement already on the record, recorded again verbatim · no model in the path"
+      : "one-click answer · reversible gate · the button's statement recorded verbatim · no model in the path");
   }));
   const bind = el.querySelector("[data-bind]");
   if (bind) bind.addEventListener("click", () => bindComposer(o.id));
   el.querySelectorAll("[data-fx]").forEach(b => b.addEventListener("click", () => applyEffect(o.id, b.dataset.fx)));
-  el.querySelectorAll("[data-jump]").forEach(b => b.addEventListener("click", () => jumpTo(b.dataset.jump)));
+  el.querySelectorAll("[data-jump]").forEach(b => b.addEventListener("click", () => jumpTo(b.dataset.jump, b.dataset.jumproom)));
 }
 
 /* ===========================================================================
@@ -1524,7 +1780,13 @@ function renderFeed() {
   feed.innerHTML = "";
   feed.classList.toggle("filtered", !!S.ui.feedFilter);
 
-  const cursorIdx = r.messages.findIndex(m => m.id === r.seenAfter);
+  /* two dividers, never one: the absence window (frozen at return) and whatever
+     has landed since. They are different groups with different labels and
+     separately-scoped chips, which is what stops your own post-return typing
+     from being reported back to you as something you missed. */
+  const cursorI = idx(r, r.seenAfter);
+  const returnI = Math.max(cursorI, idx(r, r.absenceEnd));
+  const absence = hasAbsenceGroup(r);
   let routineBuffer = [];
 
   const flushRoutine = () => {
@@ -1534,21 +1796,22 @@ function renderFeed() {
   };
 
   r.messages.forEach((m, i) => {
-    if (cursorIdx >= 0 && i === cursorIdx + 1) { flushRoutine(); feed.appendChild(sylDivider(r)); }
+    if (absence && i === cursorI + 1) { flushRoutine(); feed.appendChild(sylDivider(r, "absence")); }
+    if (i === returnI + 1) { flushRoutine(); feed.appendChild(sylDivider(r, "return")); }
     if (m.routine) { routineBuffer.push(m); return; }
     flushRoutine();
     feed.appendChild(messageRow(r, m));
   });
   flushRoutine();
-  if (cursorIdx === r.messages.length - 1) feed.appendChild(sylDivider(r));
+  if (cursorI === r.messages.length - 1) feed.appendChild(sylDivider(r, "seen"));
   feed.scrollTop = keepTop;
 }
 
 function messageRow(r, m) {
   const g = msgGlyph(r, m);
-  const o = m.objectId || m.boundTo ? obj(r, m.boundTo || m.objectId) : null;
+  const o = linkedObject(r, m);
   const cls = msgClass(r, m);
-  const seen = r.messages.findIndex(x => x.id === m.id) <= r.messages.findIndex(x => x.id === r.seenAfter);
+  const seen = idx(r, m.id) <= idx(r, r.seenAfter);
   const row = document.createElement("div");
   row.className = ["mrow", gclass(g), m.system ? "sys" : "", m.actor === S.me ? "me" : "",
                    seen ? "dim" : "", matchesFilter(r, m) ? "hit" : "",
@@ -1561,20 +1824,25 @@ function messageRow(r, m) {
     const t = msg(r, m.replyTo);
     if (t) inner += `<span class="mreply">↩ ${esc(t.actor)} ${esc(t.t)} · ${esc(plain(t.body)).slice(0, 60)}</span>`;
   }
-  const claimWrap = g === "~";
+  /* the dotted treatment is derived from the object's epistemic state, not from
+     the glyph — so a proposal that is ALSO a gate renders ◆ and dotted. */
+  const claimWrap = msgIsClaim(r, m);
   inner += claimWrap ? `<span class="claim">${bodyHtml(m.body)}</span>` : bodyHtml(m.body);
   if (m.note) inner += `<span class="mnote">${esc(m.note)}</span>`;
-  if (o) inner += objectTag(r, m, o);
+  if (o && !m.sysFor) inner += objectTag(r, m, o);
 
   row.innerHTML =
     `<div class="t">${esc(m.t)}</div><div class="g" aria-hidden="true">${g}</div><div class="a">${esc(m.actor)}</div>
      <div class="m">${inner}<div class="acts">${rowActions(r, m, o)}</div></div>`;
 
-  row.querySelectorAll("[data-receipt]").forEach(b => b.addEventListener("click", () => openReceipt(b.dataset.receipt)));
+  row.querySelectorAll("[data-receipt]").forEach(b => b.addEventListener("click", () => openReceipt(b.dataset.receipt, b.dataset.rcroom)));
   row.querySelectorAll("[data-reply]").forEach(b => b.addEventListener("click", () => startReply(m.id)));
   row.querySelectorAll("[data-verify]").forEach(b => b.addEventListener("click", () => { S.ui.verifying = b.dataset.verify; render(); focusVerify(); }));
   row.querySelectorAll("[data-fx]").forEach(b => b.addEventListener("click", () => applyEffect(b.dataset.obj, b.dataset.fx)));
-  row.querySelectorAll("[data-pin]").forEach(b => b.addEventListener("click", () => { S.ui.pinOpen = b.dataset.pin; render(); scrollIntoView($("pin"), "nearest"); }));
+  row.querySelectorAll("[data-pin]").forEach(b => b.addEventListener("click", () => {
+    if (b.dataset.pinroom) switchRoom(b.dataset.pinroom, true);
+    S.ui.pinOpen = b.dataset.pin; render(); scrollIntoView($("pin"), "nearest");
+  }));
 
   if (o && S.ui.verifying === o.id) row.appendChild(verifyBox(o));
   return row;
@@ -1587,18 +1855,30 @@ function plain(body) { return body.map(s => typeof s === "string" ? s : (s.code 
    tag text and tone all downgrade together. (Round-1 defect B2.) */
 function objectTag(r, m, o) {
   const g = glyphOf(o);
+  const home = m.objectRoom && m.objectRoom !== r.id ? m.objectRoom : null;
+  const rc = `data-receipt="${esc(o.id)}"${home ? ` data-rcroom="${esc(home)}"` : ""}`;
+  const where = home ? ` · in #${esc(home)} →` : "";
+
+  /* ANSWER-ROW IDENTITY. Exactly one message — the one whose id is o.answerMsg
+     — may carry the resolves/answer-bound tag, and only while the object is
+     actually settled. Every other answer-bound row to the same object is a
+     historical answer and says so, with the time it stopped being the answer.
+     Round 2 compared nothing: answer → reopen → answer left the FIRST answer
+     still dressed as the resolution. */
   if (m.boundTo) {
-    const settled = o.verification === "accepted";
-    return settled
-      ? `<button class="tag green" data-receipt="${esc(o.id)}">resolves ◆ · answer-bound · nothing inferred</button>`
-      : `<button class="tag amber" data-receipt="${esc(o.id)}">answer superseded · reopened ${esc(o.reopenedAt || "")} · kept on the record</button>`;
+    const current = o.answerMsg === m.id;
+    if (current && o.verification === "accepted")
+      return `<button class="tag green" ${rc}>resolves ◆ · answer-bound · nothing inferred${where}</button>`;
+    if (current)
+      return `<button class="tag amber" ${rc}>answer superseded · reopened ${esc(o.reopenedAt || "")} · kept on the record${where}</button>`;
+    return `<button class="tag amber" ${rc}>superseded answer · replaced ${esc(m.supersededAt || "")} · kept on the record${where}</button>`;
   }
-  if (needsYou(o)) return `<button class="tag amber" data-pin="${esc(o.id)}">${g === "?" ? "? open question · needs lars" : "◆ needs lars"}</button>`;
-  if (o.verification === "verified") return `<button class="tag green" data-receipt="${esc(o.id)}">verified · ${esc(o.verifiedBy)}</button>`;
-  if (o.verification === "accepted") return `<button class="tag green" data-receipt="${esc(o.id)}">accepted · ${esc(o.acceptedBy)}</button>`;
-  if (o.kind === "commitment") return `<button class="tag" data-receipt="${esc(o.id)}">commitment · ${esc(o.owner)} · ${esc(o.due)} ~</button>`;
-  if (o.kind === "claim") return `<button class="tag" data-receipt="${esc(o.id)}">claim · unverified</button>`;
-  return `<button class="tag" data-receipt="${esc(o.id)}">${esc(o.kind)} · ${esc(o.verification)}</button>`;
+  if (needsYou(o)) return `<button class="tag amber" data-pin="${esc(o.id)}"${home ? ` data-pinroom="${esc(home)}"` : ""}>${g === "?" ? "? open question · needs " + esc(S.me) : "◆ needs " + esc(S.me)}${where}</button>`;
+  if (o.verification === "verified") return `<button class="tag green" ${rc}>verified · ${esc(o.verifiedBy)}${where}</button>`;
+  if (o.verification === "accepted") return `<button class="tag green" ${rc}>accepted · ${esc(o.acceptedBy)}${where}</button>`;
+  if (o.kind === "commitment") return `<button class="tag" ${rc}>commitment · ${esc(o.owner)} · ${esc(o.due)} ~${where}</button>`;
+  if (o.kind === "claim") return `<button class="tag" ${rc}>claim · unverified${where}</button>`;
+  return `<button class="tag" ${rc}>${esc(o.kind)} · ${esc(o.verification)}${where}</button>`;
 }
 
 /* Only actions that do something are rendered. Round 1 shipped 32 inert
@@ -1606,10 +1886,12 @@ function objectTag(r, m, o) {
 function rowActions(r, m, o) {
   const acts = [];
   if (!m.system) acts.push(`<button data-reply="1">Reply</button>`);
-  if (o && isClaim(o) && o.claimant !== S.me && o.kind !== "commitment") {
+  /* you verify CLAIMS. A decision is answered, not verified, and a commitment is
+     signed off — offering Verify on either would be a control that lies. */
+  if (o && o.kind === "claim" && isClaim(o) && o.claimant !== S.me && !m.sysFor) {
     acts.push(`<button data-verify="${esc(o.id)}">Verify</button>`);
   }
-  if (o && o.kind === "question" && o.verification === "open") {
+  if (o && o.kind === "question" && o.verification === "open" && !m.sysFor) {
     acts.push(`<button data-obj="${esc(o.id)}" data-fx="answered">Answer</button>`);
   }
   return acts.join("");
@@ -1639,28 +1921,58 @@ function focusVerify() { const i = $("vinput"); if (i) i.focus(); }
 
 /* --- since you left ------------------------------------------------------ */
 
-function sylDivider(r) {
-  const c = sinceCounts(r);
-  const seen = r.seenAfter === r.messages[r.messages.length - 1].id;
+/* mode: "absence" — the frozen window you were away for
+ *       "return"  — everything that has landed since you got back / marked seen
+ *       "seen"    — the caught-up marker at the end of the room
+ * A chip counts MESSAGES in its own group; the pin above counts the ITEMS those
+ * messages are about. The when-line says so, and a chip that counts nothing is
+ * disabled rather than a clickable no-op. */
+function sylDivider(r, mode) {
   const el = document.createElement("div");
-  el.className = "syl" + (seen ? " seen" : "");
-  el.id = "syl";
-  const chips = seen ? "" : ["need", "change", "discussion", "routine"].map(k =>
-    `<button class="cnt${k === "need" && c[k] ? " need" : ""}" data-filter="${k}" aria-pressed="${!!S.ui.feedFilter && S.ui.feedFilter.k === k && S.ui.feedFilter.scope === "since"}">${c[k]} ${FILTER_LABEL[k]}</button>`).join("");
+  el.className = "syl" + (mode === "seen" ? " seen" : mode === "return" ? " ret" : "");
+  if (mode === "absence" || (mode === "seen" && !hasAbsenceGroup(r))) el.id = "syl";
+
+  if (mode === "seen") {
+    el.innerHTML =
+      `<div class="bar"><span class="lbl">SEEN FROM HERE</span><span class="rule"></span></div>
+       <div class="when"><span>caught up — ${r.readGroup || 0} message${r.readGroup === 1 ? "" : "s"} read · ${esc(r.away.len)} away · the seen cursor sits at the end of #${esc(r.name)}, and only this room's</span></div>`;
+    return el;
+  }
+
+  const scope = mode === "absence" ? "absence" : "return";
+  const c = counts(r, scope);
+  const own = ownInGroup(r, scope);
+  const cursorPastAbsence = idx(r, r.seenAfter) > idx(r, r.absenceEnd);
+  const label = mode === "absence" ? "SINCE YOU LEFT"
+              : cursorPastAbsence ? "SINCE YOU MARKED THIS SEEN" : "SINCE YOU RETURNED";
+
+  const chips = ["need", "change", "discussion", "routine"].map(k => {
+    const n = c[k], on = !!S.ui.feedFilter && S.ui.feedFilter.k === k && S.ui.feedFilter.scope === scope;
+    const title = n
+      ? `${n} message${n === 1 ? "" : "s"} in this group are ${k === "need" ? "linked to something that needs you — the pin counts the items, this counts the rows" : FILTER_LABEL[k].toLowerCase()}`
+      : `no ${FILTER_LABEL[k].toLowerCase()} messages in this group — nothing to filter to`;
+    return `<button class="cnt${k === "need" && n ? " need" : ""}" data-filter="${k}" data-scope="${scope}"` +
+           `${n ? "" : " disabled"} title="${esc(title)}" aria-pressed="${on}">${n} ${FILTER_LABEL[k]}</button>`;
+  }).join("");
+
+  const when = mode === "absence"
+    ? `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages · frozen at return</span>
+       <span aria-hidden="true">·</span>
+       <span>chips count rows · NEEDS YOU counts the items behind them</span>
+       <span aria-hidden="true">·</span>
+       <button class="mark" id="markSeen">mark this group seen</button>`
+    : `<span>${c.total} unseen since ${esc(cursorPastAbsence ? "you marked this seen" : r.away.to)}</span>` +
+      (own ? `<span aria-hidden="true">·</span><span class="own">${own} row${own === 1 ? " here is yours" : "s here are yours"} — your own activity is never counted back to you as unseen</span>` : "") +
+      (c.total ? `<span aria-hidden="true">·</span><button class="mark" id="markSeen">mark this group seen</button>` : "");
+
   el.innerHTML =
     `<div class="bar">
-       <span class="lbl">${seen ? "SEEN FROM HERE" : "SINCE YOU LEFT"}</span>
+       <span class="lbl">${label}</span>
        <div class="counts">${chips}</div>
        <span class="rule"></span>
      </div>
-     <div class="when">
-       ${seen
-         ? `<span>caught up — ${r.readGroup || 0} message${r.readGroup === 1 ? "" : "s"} read · ${esc(r.away.len)} away · seen cursor sits at the end of #${esc(r.name)}, and only this room's</span>`
-         : `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages</span>
-            <span aria-hidden="true">·</span>
-            <button class="mark" id="markSeen">mark this group seen</button>`}
-     </div>`;
-  el.querySelectorAll(".cnt").forEach(b => b.addEventListener("click", () => setFilter(b.dataset.filter)));
+     <div class="when">${when}</div>`;
+  el.querySelectorAll(".cnt").forEach(b => b.addEventListener("click", () => setFilter(b.dataset.filter, b.dataset.scope)));
   const mk = el.querySelector("#markSeen");
   if (mk) mk.addEventListener("click", markSeen);
   return el;
@@ -1685,7 +1997,12 @@ function routineStrip(r, rows) {
      <span aria-hidden="true">·</span><span>${esc(rows[0].t)}–${esc(rows[rows.length - 1].t)}</span>
      <span aria-hidden="true">·</span><span>${esc(actors.join(", "))}</span>
      <span class="peek">${open ? "click to collapse" : "click to peek"}</span>`;
-  strip.addEventListener("click", () => { S.ui.routineOpen = !open; if (!S.ui.routineOpen && routineFilter) S.ui.feedFilter = null; render(); });
+  strip.addEventListener("click", () => {
+    S.ui.routineOpen = !open;
+    S.ui.routineOpenedByFilter = false;      // opened or closed by hand from here on
+    if (!S.ui.routineOpen && routineFilter) S.ui.feedFilter = null;
+    render();
+  });
   wrap.appendChild(strip);
 
   if (open) {
@@ -1717,10 +2034,10 @@ function renderLens() {
   const body = $("lensBody");
 
   const accepted = r.objects.filter(o => o.verification === "accepted" || o.verification === "verified").length;
-  const owed = owedItems(r).length;
+  const owed = attention(r).length;
   const claims = r.objects.filter(isClaim).length;
   $("lensSummary").textContent =
-    `${r.objects.length} objects · ${accepted} settled · ${claims} unverified · ${owed} awaiting you · updated ${S.now}`;
+    `${r.objects.length} objects · ${accepted} settled · ${claims} unverified · ${owed} item${owed === 1 ? "" : "s"} awaiting you · updated ${S.now}`;
 
   if (S.ui.receiptId && obj(r, S.ui.receiptId)) { renderReceipt(obj(r, S.ui.receiptId)); return; }
 
@@ -1777,7 +2094,9 @@ function receiptState(o) {
   if (o.verification === "proposed") return ["PROPOSED", "not accepted", `confidence ${o.confidence || "—"}`, "renders as a claim until a human answers"];
   if (o.verification === "open") return ["OPEN", "question", `open ${o.openFor || "—"}`, o.assignee ? `assigned to ${o.assignee}` : "nobody assigned"];
   if (o.verification === "self_reported") return ["SELF-REPORTED", o.kind, `${o.owner || o.claimant}`, "nothing other than the claimant has checked it"];
-  if (o.verification === "reassigned") return ["REASSIGNED", o.kind, `now ${o.assignee}'s`, "still open"];
+  /* round 2 carried a REASSIGNED branch here and never wrote that value: an
+     assignment changes who owes the answer, not whether it is verified. The
+     assignee is reported by the OPEN branch above, where it actually lives. */
   return ["CLAIM", "unverified", `claimant: ${o.claimant}`];
 }
 
@@ -1794,8 +2113,8 @@ function renderReceipt(o) {
   }).join("");
 
   const prov = o.provenance.map(p =>
-    `<button class="prov"${p.msg ? ` data-jump="${esc(p.msg)}"` : ""}>
-       <span class="hd"><span class="who">${esc(p.who)}</span><span>${esc(p.tm)}</span>${p.msg ? `<span class="jump">jump to source →</span>` : `<span class="jump">another room</span>`}</span>
+    `<button class="prov"${p.msg ? ` data-jump="${esc(p.msg)}"${p.room ? ` data-jumproom="${esc(p.room)}"` : ""}` : ""}>
+       <span class="hd"><span class="who">${esc(p.who)}</span><span>${esc(p.tm)}</span>${p.msg ? `<span class="jump">jump to source${p.room ? " in #" + esc(p.room) : ""} →</span>` : `<span class="jump">not in the loaded window</span>`}</span>
        <span class="ex">“${esc(p.ex)}”</span>
        <span class="full">${esc(p.note)}</span>
      </button>`).join("");
@@ -1803,7 +2122,7 @@ function renderReceipt(o) {
   const corr = o.corrections.length
     ? o.corrections.map(c =>
         `<div class="corr"><div class="hd">${esc(c.hd)} · ${esc(c.who)} · ${esc(c.tm)}</div>
-         <div class="bd"><q>${esc(c.text)}</q> → now: ${esc(c.after)}${c.msg ? ` · <button class="lnk" data-jump="${esc(c.msg)}">the prior answer is still in the room →</button>` : ""}</div></div>`).join("")
+         <div class="bd"><q>${esc(c.text)}</q> → now: ${esc(c.after)}${c.msg ? ` · <button class="lnk" data-jump="${esc(c.msg)}"${c.room ? ` data-jumproom="${esc(c.room)}"` : ""}>${esc(c.link || "the prior answer is still in the room →")}</button>` : ""}</div></div>`).join("")
     : `<div class="corr"><div class="bd">no corrections — this object has never been amended</div></div>`;
 
   const canReopen = o.verification === "accepted" || o.verification === "verified";
@@ -1831,10 +2150,19 @@ function renderReceipt(o) {
   el.querySelector("#rcBack").addEventListener("click", () => { S.ui.receiptId = null; render(); });
   const rb = el.querySelector("#rcReopen");
   if (rb) rb.addEventListener("click", () => reopen(o.id));
-  el.querySelectorAll("[data-jump]").forEach(p => p.addEventListener("click", () => jumpTo(p.dataset.jump)));
+  el.querySelectorAll("[data-jump]").forEach(p => p.addEventListener("click", () => jumpTo(p.dataset.jump, p.dataset.jumproom)));
 }
 
-function openReceipt(id) { S.ui.receiptId = id; render(); }
+/* a receipt can be opened from a row in another room; the lens follows the
+   object home rather than rendering an empty pane. */
+function openReceipt(id, roomId) {
+  if (roomId && roomId !== S.roomId && S.rooms[roomId] && obj(S.rooms[roomId], id)) {
+    switchRoom(roomId, true);
+    toast("#" + roomId + " — that object lives in this room's Current state", "info");
+  }
+  S.ui.receiptId = id;
+  render();
+}
 
 /* ===========================================================================
  * TRANSITIONS
@@ -1853,8 +2181,11 @@ function tick() {
 function nextId(p) { return p + (++S.seq); }
 
 function appendMessage(r, m) { r.messages.push(m); return m; }
+/* a transition row is your activity — you caused it, watching. `byMe` keeps it
+   out of every unseen count, and `sysFor` lets it derive its glyph from the
+   object it reports on instead of flattening to the routine dot. */
 function appendSystem(r, text, objectId) {
-  return appendMessage(r, { id: nextId("s"), t: S.now, actor: "atrium", system: true, fresh: true,
+  return appendMessage(r, { id: nextId("s"), t: S.now, actor: "atrium", system: true, fresh: true, byMe: true,
                             body: [text], objectId: null, sysFor: objectId });
 }
 function clearFresh() {
@@ -1876,7 +2207,17 @@ function answerDecision(objectId, statement, provenanceNote) {
 
   const m = appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [statement], boundTo: o.id });
 
-  o.proposedText = o.proposedText || o.text;
+  /* the answer that WAS the answer stops being it, on the message itself. That
+     is what makes the resolves/answer-bound tag identity-checked rather than
+     state-checked: answer → reopen → answer leaves exactly one settled row. */
+  const prior = o.answerMsg ? msg(r, o.answerMsg) : null;
+  const priorText = prior ? plain(prior.body) : null;
+  if (prior) { prior.supersededAt = t; prior.supersededBy = m.id; }
+
+  const proposal = o.proposedText || o.text;
+  const contradicts = statement !== proposal;
+
+  o.proposedText = proposal;
   o.text = statement;                       // the decision statement is the answer, verbatim
   o.verification = "accepted";
   o.acceptedBy = S.me;
@@ -1888,15 +2229,33 @@ function answerDecision(objectId, statement, provenanceNote) {
   o.history.push({ k: "accepted", who: S.me, tm: t,
     text: "answered it directly — the resolution was recorded from the answer, not interpreted from it" });
   o.provenance.unshift({ who: S.me, tm: t, msg: m.id, ex: statement, note: provenanceNote });
-  o.note = "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. " +
-           (o.proposedText !== statement ? "It is not the same as what was proposed — that is allowed. Your answer is the decision." : "");
 
-  appendSystem(r, `decision ${o.id} · proposed → accepted · recorded verbatim from lars' answer · nothing inferred`, o.id);
+  /* an answer that is not the proposal is a correction to the record, and the
+     correction chain is where corrections live. Round 2 recorded the
+     contradiction in the note and left the chain empty. */
+  if (prior || contradicts) {
+    o.corrections.push({
+      hd: prior ? "RE-ANSWERED · PRIOR ANSWER SUPERSEDED" : "ANSWERED · PROPOSAL → DECISION",
+      who: S.me, tm: t,
+      text: prior ? priorText : proposal,
+      after: statement + (contradicts && !prior ? " — not what was proposed; your answer is the decision" : ""),
+      msg: prior ? prior.id : (o.sourceMsg || null),
+      room: prior ? null : sourceRoomOf(o),
+      link: prior ? "the superseded answer is still in the room →" : "the proposal it replaced is still in the room →"
+    });
+  }
+
+  o.note = "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. " +
+           (contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
+           (prior ? "It replaces your earlier answer, which is still on the record and still in the room." : "");
+
+  appendSystem(r, `decision ${o.id} · ${prior ? "re-answered" : "proposed → accepted"} · recorded verbatim from ${S.me}' answer · nothing inferred`, o.id);
   S.ui.bound = null; S.ui.replyTo = null; S.ui.pinOpen = null;
   $("cinput").value = "";
   render();
   scrollFeedToEnd();
-  toast("recorded as a decision · answer-bound, your wording verbatim");
+  toast(prior ? "re-answered · the earlier answer is now marked superseded, not deleted"
+              : "recorded as a decision · answer-bound, your wording verbatim");
 }
 
 /* --- B2: reopen re-renders EVERYTHING, including the historical row ------ */
@@ -1910,8 +2269,18 @@ function reopen(objectId) {
   o.verification = wasDecision ? "proposed" : "unverified";
   o.reopenedAt = t;
   o.fresh = true;
-  if (wasDecision) { o.owedTo = S.me; o.priority = 20; }
-  o.facts = ["reopened by " + S.me, "prior answer kept", "pending again"];
+  if (wasDecision) {
+    o.owedTo = S.me; o.priority = 20;
+    /* NO DEAD ATTENTION ITEMS. Options that existed survive the reopen. A
+       decision that never carried options gets the one option that is not
+       invented — re-affirming the statement already on the record — plus the
+       bound composer, which pinActions() offers on every pending decision. */
+    if (!o.options || !o.options.length) {
+      o.options = [{ label: "Re-affirm the prior call", statement: o.text, synthesized: true }];
+    }
+  }
+  o.facts = ["reopened by " + S.me, "prior answer kept", "pending again"]
+    .concat(sourceRoomOf(o) ? ["source in #" + o.sourceRoom] : []);
   o.history.push({ k: "gate", who: S.me, tm: t,
     text: "reopened it — the prior answer stays on the record and is still reachable from here" });
   o.corrections.push({
@@ -1919,14 +2288,21 @@ function reopen(objectId) {
     who: S.me, tm: t,
     text: "Reopening — the evidence under this was never checked and the whole call rests on it.",
     after: wasDecision ? "Proposal (prior answer preserved on the record)" : "Claim (prior verification preserved)",
-    msg: o.answerMsg || (o.provenance[0] && o.provenance[0].msg) || null
+    msg: o.answerMsg || o.sourceMsg || (o.provenance[0] && o.provenance[0].msg) || null,
+    room: o.answerMsg ? null : sourceRoomOf(o),
+    link: o.answerMsg ? "the prior answer is still in the room →" : "the source is still in the room →"
   });
   o.note = "Reopening is append-only. The answer at " + (o.acceptedAt || o.verifiedAt || "") +
            " is still in the conversation, still in this history, and the row that carried it now renders as superseded rather than settled.";
 
-  appendSystem(r, `${o.kind} ${o.id} · ${wasDecision ? "accepted → proposed" : "verified → unverified"} · reopened by lars · prior answer kept`, o.id);
+  appendSystem(r, `${o.kind} ${o.id} · ${wasDecision ? "accepted → proposed" : "verified → unverified"} · reopened by ${S.me} · prior answer kept`, o.id);
   render();
-  toast("reopened · the item is back in Needs you, the prior answer is on record");
+  /* the toast reports what actually happened to THIS object, not a fixed line:
+     reopening a decision routes it back to you, reopening a verified claim does
+     not put it in anyone's list. */
+  toast(needsYou(o)
+    ? "reopened · back in Needs you as a pending decision, the prior answer on record"
+    : "reopened · it is a ~ claim again and owes nobody an answer — nothing was added to your list", "warn");
 }
 
 /* --- the ~ → ✓ pair ----------------------------------------------------- */
@@ -1934,8 +2310,8 @@ function doVerify(objectId, evidence) {
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
-  if (!evidence) { toast("verification needs a note — green means something checked it, and this records what"); focusVerify(); return; }
-  if (o.claimant === S.me) { toast("you cannot verify your own claim — that is what ~ is for"); return; }
+  if (!evidence) { toast("verification needs a note — green means something checked it, and this records what", "bad"); focusVerify(); return; }
+  if (o.claimant === S.me) { toast("you cannot verify your own claim — that is what ~ is for", "bad"); return; }
   const t = tick();
   o.verification = "verified";
   o.verifiedBy = S.me;
@@ -1960,42 +2336,55 @@ function applyEffect(objectId, fx) {
   const o = obj(r, objectId);
   if (!o) return;
   const t = tick();
-  let line = "", msgText = "";
+  let line = "", msgText = "", kind = "ok";
+
+  /* everything a transition writes about itself is derived: the actor is S.me,
+     the objectives are the object's own, the assignee is the object's own.
+     Round 2 typed "lars", "justin" and "o2" into these strings. */
+  const blocked = o.objectives.length;
+  const blocks = `${blocked} objective${blocked === 1 ? "" : "s"}`;
 
   if (fx === "signed") {
+    const wasDue = o.due;
     o.verification = "self_reported"; o.owedTo = null; o.overdue = null;
     o.facts = [S.me, "marked done " + t, "self-reported"];
     o.history.push({ k: "claim", who: S.me, tm: t, text: "marked it signed off — your own word, nothing has checked it" });
     o.note = "You signed your own sign-off. Nobody verifies their own commitment, so this stays ~.";
-    line = `commitment ${o.id} · marked signed off by lars · self-reported, not verified`;
-    msgText = "signed off · recorded as self-reported, not verified";
+    line = `commitment ${o.id} · marked signed off by ${S.me} · was due ${wasDue} · self-reported, not verified`;
+    msgText = "signed off · recorded as self-reported, not verified — nobody verifies their own commitment";
+    kind = "info";
   } else if (fx === "resched") {
+    const wasDue = o.due;
     o.verification = "self_reported"; o.owedTo = null; o.overdue = null; o.due = "today 17:00";
     o.facts = [S.me, "due today 17:00", "rescheduled " + t];
-    o.history.push({ k: "claim", who: S.me, tm: t, text: "moved the due date to today 17:00 — the original date stays above" });
+    o.history.push({ k: "claim", who: S.me, tm: t, text: `moved the due date from ${wasDue} to today 17:00 — the original date stays above` });
     o.note = "Rescheduling never erases the original date; both are in the history.";
-    line = `commitment ${o.id} · due yesterday 17:00 → today 17:00 · rescheduled by lars`;
+    line = `commitment ${o.id} · due ${wasDue} → today 17:00 · rescheduled by ${S.me}`;
     msgText = "rescheduled · the original due date stays on the record";
+    kind = "info";
   } else if (fx === "answered") {
     o.verification = "unverified"; o.owedTo = null;
-    o.facts = ["answered by lars " + t, "legal sign-off not attached", "still blocks o2"];
-    o.history.push({ k: "claim", who: S.me, tm: t, text: "answered from memory — legal's written sign-off is not attached, so it stays a claim" });
-    o.note = "Answering a question is not the same as verifying the answer. It stays ~ until legal's sign-off is attached, which is why the objective it blocks is still blocked.";
-    line = `question ${o.id} · open → answered by lars · unverified (no sign-off attached) · o2 stays blocked`;
-    msgText = "answered · stays ~ until legal's sign-off is attached";
+    o.facts = ["answered by " + S.me + " " + t, "no sign-off attached", "still blocks " + blocks];
+    o.history.push({ k: "claim", who: S.me, tm: t, text: "answered from memory — no written sign-off is attached, so it stays a claim" });
+    o.note = "Answering a question is not the same as verifying the answer. It stays ~ until a sign-off is attached, which is why the objectives it blocks are still blocked.";
+    line = `question ${o.id} · open → answered by ${S.me} · unverified (no sign-off attached) · still blocking ${blocks}`;
+    msgText = `answered · stays ~ with no sign-off attached, and still blocks ${blocks}`;
+    kind = "warn";
   } else if (fx === "reassign") {
-    o.owedTo = null; o.assignee = "justin";
-    o.facts = ["asked by " + o.askedBy, "now justin's", "still open"];
-    o.history.push({ k: "question", who: S.me, tm: t, text: "reassigned it to justin — out of your list, unchanged in the record" });
-    o.note = "Reassigning moves it off your surface. It is still open and still blocking the objective it blocked.";
-    line = `question ${o.id} · reassigned to justin by lars · still open · still blocking o2`;
-    msgText = "reassigned to justin · out of your list, still in the record";
+    const to = o.reassignTo || "justin";
+    o.owedTo = null; o.assignee = to;
+    o.facts = ["asked by " + o.askedBy, "now " + to + "'s", "still open"];
+    o.history.push({ k: "question", who: S.me, tm: t, text: `reassigned it to ${to} — out of your list, unchanged in the record` });
+    o.note = "Reassigning moves it off your surface. It is still open and still blocking the objectives it blocked.";
+    line = `question ${o.id} · reassigned to ${to} by ${S.me} · still open · still blocking ${blocks}`;
+    msgText = `reassigned to ${to} · out of your list, still open, still blocking ${blocks}`;
+    kind = "warn";
   }
   o.fresh = true;
   appendSystem(r, line, o.id);
   S.ui.pinOpen = null;
   render();
-  toast(msgText);
+  toast(msgText, kind);
 }
 
 /* ===========================================================================
@@ -2055,7 +2444,7 @@ function send() {
   const input = $("cinput");
   const v = input.value.trim();
   if (S.ui.bound) {
-    if (!v) { toast("type your answer — the composer records what you write, not what the card suggested"); input.focus(); return; }
+    if (!v) { toast("type your answer — the composer records what you write, not what the card suggested", "bad"); input.focus(); return; }
     answerDecision(S.ui.bound, v, "answer-bound reply · typed by lars and recorded verbatim · no model in the path");
     return;
   }
@@ -2066,48 +2455,70 @@ function send() {
   S.ui.replyTo = null;
   render();
   scrollFeedToEnd();
-  toast("sent · interpretation queued — anything derived lands as ~");
+  toast("sent · your own message, so it is never counted back to you as unseen", "info");
 }
 
 /* ===========================================================================
  * NAVIGATION / FILTERS / MISC WIRING
  * ======================================================================== */
 
-function setFilter(k) {
+function setFilter(k, scope) {
   const f = S.ui.feedFilter;
-  S.ui.feedFilter = (f && f.k === k && f.scope === "since") ? null : { k, scope: "since" };
-  if (S.ui.feedFilter && S.ui.feedFilter.k === "routine") S.ui.routineOpen = true;
+  const off = f && f.k === k && f.scope === scope;
+  S.ui.feedFilter = off ? null : { k, scope };
+  /* the routine chip opens the collapse; turning it off closes it again unless
+     you had already opened it by hand. Round 2 left the peek hanging open. */
+  if (!off && k === "routine" && !S.ui.routineOpen) { S.ui.routineOpen = true; S.ui.routineOpenedByFilter = true; }
+  if ((off || k !== "routine") && S.ui.routineOpenedByFilter) { S.ui.routineOpen = false; S.ui.routineOpenedByFilter = false; }
   render();
   const syl = $("syl");
   if (syl) scrollIntoView(syl, "start");
 }
 
-function markSeen() {
-  const r = room();
-  r.readGroup = sinceCounts(r).total;            // what the cursor just swallowed
-  r.seenAfter = r.messages[r.messages.length - 1].id;
-  render();
-  toast("seen cursor moved for #" + r.name + " only — every other room keeps its own");
+/* a filter whose group no longer contains anything of that class cannot stay on
+   — otherwise a cleared pin leaves a filter highlighting nothing. */
+function normalizeFilter() {
+  const f = S.ui.feedFilter;
+  if (!f) return;
+  const n = groupMessages(room(), f.scope).filter(m => msgClass(room(), m) === f.k).length;
+  if (!n) S.ui.feedFilter = null;
 }
 
-function switchRoom(id) {
+function markSeen() {
+  const r = room();
+  const scope = hasAbsenceGroup(r) ? "absence" : "return";
+  r.readGroup = counts(r, scope).total;          // what the cursor just swallowed
+  r.seenAfter = r.messages[r.messages.length - 1].id;
+  render();
+  toast("seen cursor moved for #" + r.name + " only — every other room keeps its own", "info");
+}
+
+function switchRoom(id, quiet) {
   if (id === S.roomId) return;
   S.roomId = id;
   S.ui.feedFilter = null; S.ui.receiptId = null; S.ui.bound = null;
-  S.ui.replyTo = null; S.ui.verifying = null; S.ui.pinOpen = null; S.ui.routineOpen = false;
+  S.ui.replyTo = null; S.ui.verifying = null; S.ui.pinOpen = null;
+  S.ui.routineOpen = false; S.ui.routineOpenedByFilter = false;
   $("cinput").value = "";
+  if (quiet) return;                              // caller renders and reports
   render();
   bootScroll();
   const r = room();
-  toast("#" + r.name + " · " + unseenCount(r) + " unseen here · this room keeps its own cursor");
+  toast("#" + r.name + " · " + unseenCount(r) + " unseen here · this room keeps its own cursor", "info");
 }
 
 let tgtTimer = null;
-function jumpTo(msgId) {
-  if (!msgId) { toast("that source is in another room — this prototype seeds two"); return; }
+function jumpTo(msgId, roomId) {
+  if (!msgId) { toast("that source is in another room and this prototype does not seed it", "warn"); return; }
+  if (roomId && roomId !== S.roomId) {
+    const target = S.rooms[roomId];
+    if (!target || !msg(target, msgId)) { toast("that source is outside the loaded window", "warn"); return; }
+    switchRoom(roomId, true);
+    toast("#" + roomId + " — the source of that item lives here, not in the room you came from", "info");
+  }
   const r = room();
   const m = msg(r, msgId);
-  if (!m) { toast("that message is outside the loaded window"); return; }
+  if (!m) { toast("that message is outside the loaded window", "warn"); return; }
   if (m.routine) S.ui.routineOpen = true;
   S.ui.jumpTo = msgId;
   render();
@@ -2117,11 +2528,16 @@ function jumpTo(msgId) {
   tgtTimer = setTimeout(() => { S.ui.jumpTo = null; render(); }, 2200);
 }
 
+/* the toast reports the OUTCOME, glyph included — round 2 stamped ✓ on every
+   one of them, including the ones announcing that something was reopened. */
+const TOAST_GLYPH = { ok: "✓", warn: "◆", bad: "✗", info: "·" };
 let toastTimer = null;
-function toast(m) {
+function toast(m, kind) {
+  const k = kind || "ok";
   const t = $("toast");
   $("toastMsg").textContent = m;
-  t.classList.add("show");
+  $("toastGlyph").textContent = TOAST_GLYPH[k] || "·";
+  t.className = "toast show" + (k === "ok" ? "" : " " + k);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
 }
@@ -2137,6 +2553,7 @@ function scrollFeedToEnd() {
  * ======================================================================== */
 
 function render() {
+  normalizeFilter();
   renderRail();
   renderHead();
   renderPin();
@@ -2150,7 +2567,7 @@ function render() {
 $("themeBtn").addEventListener("click", () => {
   const dark = document.documentElement.classList.toggle("atr-dark");
   $("themeBtn").title = dark ? "Switch to light" : "Switch to dark";
-  toast(dark ? "dark theme" : "light theme");
+  toast(dark ? "dark theme" : "light theme", "info");
 });
 $("pinFold").addEventListener("click", () => { S.ui.pinFolded = !S.ui.pinFolded; render(); });
 $("ctxCancel").addEventListener("click", cancelContext);
@@ -2163,15 +2580,29 @@ $("cinput").addEventListener("input", e => {
   e.target.style.height = "auto";
   e.target.style.height = Math.min(e.target.scrollHeight, 140) + "px";
 });
-$("surfConv").addEventListener("click", () => { S.ui.feedFilter = null; render(); scrollIntoView($("syl"), "start"); });
+$("surfConv").addEventListener("click", () => {
+  S.ui.feedFilter = null;
+  if (S.ui.routineOpenedByFilter) { S.ui.routineOpen = false; S.ui.routineOpenedByFilter = false; }
+  render();
+  scrollIntoView($("syl"), "start");
+  toast("conversation · unfiltered. All three surfaces stay on screen — these focus them, they do not navigate", "info");
+});
 $("surfNeeds").addEventListener("click", () => {
+  const r = room();
   const f = S.ui.feedFilter;
   S.ui.feedFilter = (f && f.k === "need" && f.scope === "room") ? null : { k: "need", scope: "room" };
   render();
   scrollIntoView($("pin"), "nearest");
-  toast(S.ui.feedFilter
-    ? "needs you · the feed is filtered to every row in this room that owes you something — same set the pin counts"
-    : "filter cleared");
+  if (!S.ui.feedFilter) { toast("filter cleared", "info"); return; }
+  /* the exact relationship between the two numbers, out loud. Round 2 said
+     "same set the pin counts", which is the claim that made the miscount
+     invisible: one item can own four rows, and an item sourced in another room
+     owns none here. */
+  const items = attention(r).length;
+  const rows = attentionRows(r).length;
+  const off = offRoomItems(r);
+  toast(`needs you · ${items} item${items === 1 ? "" : "s"} owe you here · ${rows} row${rows === 1 ? " in this room is" : "s in this room are"} linked to them` +
+        (off.length ? ` · ${off.length} ${off.length === 1 ? "has its source" : "have their sources"} in another room — jump from the pin` : ""), "warn");
 });
 $("surfState").addEventListener("click", () => {
   S.ui.lensFocus = !S.ui.lensFocus;
@@ -2179,7 +2610,9 @@ $("surfState").addEventListener("click", () => {
   if (S.ui.lensFocus) room().objectives.forEach(o => o.open = true);
   render();
   $("lensBody").scrollTop = 0;
-  toast(S.ui.lensFocus ? "current state focused — every objective expanded, right-hand pane" : "lens focus released");
+  toast(S.ui.lensFocus
+    ? "current state focused — every objective expanded in the right-hand pane, which never left the screen"
+    : "lens focus released", "info");
 });
 
 /* --- boot ---------------------------------------------------------------- */
