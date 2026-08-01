@@ -7,6 +7,23 @@ name: CI
 # *counts* and *sets* rather than trusting an exit code, and why nothing here is
 # allowed to degrade gracefully.
 #
+# ┌─ WHAT THIS DEFENDS AGAINST ───────────────────────────────────────────────┐
+# │ Accident and drift. A step deleted during a rebase, a floor lowered to    │
+# │ make a red build go green, an action tag that moved under us, a workspace │
+# │ that stopped contributing tests, a suite that skipped its way to silence. │
+# │ Every rule below is aimed at the mistake nobody meant to make.            │
+# │                                                                          │
+# │ NOT a malicious author with write access, and it cannot be. The policy    │
+# │ engine, its self-test, the reporters, the gates and the floors all run    │
+# │ from the revision under test: whoever can edit this file can edit what    │
+# │ checks it. The presence and ratchet rules make that expensive and loud —  │
+# │ they do not make it impossible.                                          │
+# │                                                                          │
+# │ Adversarial closure is governance, not YAML: required-check rulesets,     │
+# │ pull requests, and code-owner review. The condition for turning those on  │
+# │ is written down in the README under "Governance trigger (recorded)".     │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
 # ┌───────────────────────────────────────────────────────────────────────────┐
 # │ `gate` IS THE ONLY CHECK THAT MAY BE MARKED REQUIRED.                     │
 # │                                                                           │
@@ -28,6 +45,11 @@ name: CI
 #   - no `|| true`, `set +e`, or other swallowed exit codes
 #   - every action pinned to a full commit SHA, with the release in a comment
 #   - `gate.needs` must name every other job in the file
+#   - no reusable workflows: a job body that is not in this file cannot be
+#     checked by anything in this file, and a remote one can change without a
+#     commit here
+#   - `verify` and `e2e` must still *contain* the steps that do the checking —
+#     the policy step, both self-tests, and every assert script by name
 # A new job that forgets any of that fails policy at the edit, not six months
 # later in production.
 
@@ -158,6 +180,22 @@ jobs:
         # A package added without tests must fail here rather than disappear into
         # a global count that its neighbours keep above the floor.
         run: node scripts/ci/assert-workspace-enrollment.mjs
+
+      - name: Fetch the baseline manifest from main
+        # Depth 1 is enough: the ratchet reads one file out of one commit.
+        # actions/checkout leaves a shallow clone with no other branches in it,
+        # so without this there is nothing to compare against — and "nothing to
+        # compare against" must be a fact the next step reports, not a silence
+        # it inherits.
+        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: Assert the CI floors have not been ratcheted down
+        # The cheapest way to make a failing count gate pass is to lower the
+        # number it counts against. Every floor is compared against the same
+        # file on main; a decrease needs a written justification keyed to
+        # exactly what came down. Until a manifest exists on main there is no
+        # baseline, which this says out loud rather than passing quietly.
+        run: node scripts/ci/assert-floor-ratchet.mjs
 
       - name: Assert dev toolchain binaries resolve
         # A missing binary must fail the job, not be quietly stepped over.

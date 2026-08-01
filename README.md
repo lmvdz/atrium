@@ -251,7 +251,7 @@ no attempt to reconcile a stored corpus against later upstream history, and
 | --- | --- |
 | `pnpm dev` | Build packages, then web + server in watch mode |
 | `pnpm build` | Build packages, then both apps |
-| `pnpm test` | Vitest across `packages/*` |
+| `pnpm test` | Vitest across `packages/*` and `apps/server` |
 | `pnpm ingest <source>` | Fetch a conversation into `corpora/` (see Replay ingest) |
 | `pnpm test:e2e` | Playwright smoke test in `apps/web` |
 | `pnpm lint` | Biome lint + format check |
@@ -273,6 +273,20 @@ and every push to `main`. Three jobs: `verify` (lint, typecheck, migrations
 against a real Postgres, unit tests, build), `e2e` (Playwright on chromium), and
 `gate`.
 
+**What this defends against: accident and drift.** A step deleted during a
+rebase, a floor lowered to make a red build go green, an action tag that moved
+under us, a workspace that stopped contributing tests, a suite that skipped its
+way to silence. Every rule below is aimed at the mistake nobody meant to make.
+
+It does **not** defend against a malicious author with write access, and it
+cannot. The policy engine, its self-test, the reporters, the gates and the
+floors all execute from the revision under test: whoever can edit those files
+can edit what they check. The presence rules and the ratchet make that expensive
+and loud — they do not make it impossible. **Adversarial closure is the
+governance trigger below**, not anything in the workflow: required-check
+rulesets, pull requests, and code-owner review. Reading any part of this CI as
+protection against a hostile contributor is reading it wrong.
+
 **`gate` is the only check that should ever be marked required.** GitHub scores
 a *skipped* required check as a *successful* one, so marking `verify` required
 means a pull request can bypass it wholesale by adding `if: ${{ false }}` to the
@@ -281,31 +295,53 @@ one reported literally `success` — skipped, cancelled and failed are all red
 there. One required check, and it cannot be skipped into a pass.
 
 The gates count rather than trust an exit code, because a runner that collected
-zero tests exits 0 just like one that passed 85:
+zero tests exits 0 just like one that passed 315:
 
 - Per-project floors live in `.github/ci-manifest.json`. Every workspace pnpm
   resolves must be enrolled there with a floor, or exempted with a written
   reason; a new package that has no tests fails the build instead of hiding
   inside a global count. Adding tests means raising a floor — a deliberate,
   reviewable edit.
+- **Floors ratchet up.** `assert-floor-ratchet.mjs` reads the same manifest from
+  `origin/main` and fails if any floor here is lower, including the quiet
+  version where an enrolled workspace is demoted to `exempt`. A decrease needs a
+  written justification keyed to exactly what came down, and a justification
+  that matches no actual decrease fails too — nobody pre-authorises next month's
+  cut. Until a manifest exists on `main` the script says `no baseline` out loud
+  and checks only that every floor is at least 1.
 - Skipped, todo and *expected-failure* tests all fail the gate. That last one is
-  invisible in the stock reports: Vitest records `it.fails()` as `passed`, and
-  Playwright records `test.fail()` as `expected`, i.e. green. Both are caught
-  here.
+  invisible in the stock reports: Vitest records `it.fails()` as `passed` with an
+  empty `failureMessages`, and Playwright records `test.fail()` as `expected`,
+  i.e. green. Because the stock Vitest report genuinely cannot witness `fails` at
+  any level of effort, `scan-expected-failures.mjs` provides a second witness
+  from outside the reporting path: it reads the test files that ran and counts
+  the annotations itself. A reporter that lied about the flag while keeping every
+  total honest is caught by the two witnesses disagreeing.
+- The two Vitest reports must describe the same run — every status, the file
+  count, and the identity of every individual test, not just the total. Matching
+  totals prove little; a gutted reporter cannot invent 315 test names that agree
+  file for file with Vitest's own.
 - The database is proven by set equality against the schema, derived from
   `@atrium/db`'s built export — a missing table and an unexpected extra one both
   fail.
 - Reports are deleted immediately before each runner starts and rejected unless
   their mtime post-dates that moment, so a leftover file cannot stand in for a
   run.
-- `scripts/ci/workflow-policy.mjs` enforces the house rules over the parsed
+- `scripts/ci/workflow-policy.mjs` enforces 21 house rules over the parsed
   workflow: no `continue-on-error`, no job conditions, no step conditions beyond
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
-  action pinned to a commit SHA, and `gate.needs` covering every job in the file.
-  `actionlint` runs alongside it. Both self-tests
-  (`workflow-policy-selftest.mjs`, `gate-selftest.mjs`) run in CI: they feed the
-  policy mutated copies of the real workflow and the gates deliberately broken
-  reports, and fail if anything goes unnoticed.
+  action pinned to a commit SHA, no reusable workflows (a job body that is not in
+  the file cannot be checked by anything in the file), `gate.needs` covering every
+  job, and — self-referentially — `verify` and `e2e` still *containing* the steps
+  that do the checking, each assert script named. `actionlint` runs alongside it.
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 36
+  mutated copies of the real workflow and additionally asserts that every one of
+  the 21 declared rules has a mutation proving it fires — coverage derived from
+  the engine's own rule list rather than counted by hand, which is how four rules
+  went unexercised through round 2. `gate-selftest.mjs` runs 40 cases, including
+  extracting the `gate` job's verdict script from the workflow and **executing
+  it** against synthetic `needs` payloads: a parser reads shapes, and a shape can
+  be right while the logic is wrong.
 
 ### Governance trigger (recorded)
 
