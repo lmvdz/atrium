@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { humanOnlyRefusal, isHuman } from './authority.js';
 import type { CoreEvent } from './events.js';
 import {
   type AcceptedObject,
@@ -22,9 +23,16 @@ import {
 
 /** Why an event was refused entry. Both are properties of position, not content. */
 export type RejectionReason =
-  /** It sorts before `state.cursor`: consuming it would rewrite settled history. */
+  /**
+   * It does not sort strictly after `state.cursor`: consuming it would rewrite
+   * settled history, or would put two events at one position.
+   */
   | 'out_of_order'
-  /** Its id has already been applied. At-least-once delivery, made a no-op. */
+  /**
+   * Its id has already been consumed, and it arrived *ahead* of the cursor —
+   * a redelivery whose timestamp was re-minted. At-least-once delivery, made a
+   * no-op.
+   */
   | 'duplicate';
 
 /**
@@ -39,7 +47,7 @@ export type RejectionReason =
  *
  * A **rejected** event was never consumed. It is not history; it is a command
  * the reducer declined to accept, and it leaves *nothing* behind: no `issues`
- * entry, no cursor movement, no `appliedEventIds` entry. The state handed back
+ * entry, no cursor movement, no `consumedEventIds` entry. The state handed back
  * is the state handed in, byte for byte and reference for reference.
  */
 export type EventOutcome =
@@ -69,15 +77,16 @@ export interface FoldResult {
  * 1. `appendEvent` never mutates the state it is given. On `applied` /
  *    `applied_with_issue` the result carries a new state; on `rejected` it
  *    carries the *same object*, untouched.
- * 2. An event is **rejected** if it sorts before `state.cursor` in the
- *    canonical `(at, id)` order, or if its id has already been applied.
+ * 2. An event is **rejected** if it does not sort strictly after `state.cursor`
+ *    in the canonical `(at, id)` order, or if its id has already been consumed.
  *    Rejection is total: no issue, no cursor move, no watermark move, no
- *    applied id. A rejected event must not be persisted (see below).
+ *    consumed id. A rejected event must not be persisted (see below).
  * 3. Any other event is **consumed**: `state.cursor` advances to it, its room's
- *    watermark advances to it, and it either applies or records one or more
- *    `ReducerIssue`s. Business validity is judged here — the proposal boundary,
- *    the actor gate, the correction and relation guards — and none of those
- *    judgements depend on when the event arrived, only on the log before it.
+ *    watermark advances to it, its id is spent in `consumedEventIds`, and it
+ *    either applies or records one or more `ReducerIssue`s. Business validity
+ *    is judged here — the proposal boundary, the actor floor, the correction
+ *    and relation guards — and none of those judgements depend on when the
+ *    event arrived, only on the log before it.
  * 4. Therefore the consumed sequence is in canonical order **by construction**.
  *    Write `L` for the events a state consumed, in the order it consumed them.
  *    Then, whatever order those events *arrived* in:
@@ -85,7 +94,7 @@ export interface FoldResult {
  *        serializeState(state) === serializeState(reduce(L))
  *
  *    because `reduce` sorts `L` and `L` is already sorted. `issues` and
- *    `appliedEventIds` are included in that — they are built in consumption
+ *    `consumedEventIds` are included in that — they are built in consumption
  *    order on one side and in sorted order on the other, and those are the same
  *    order. This is the whole live≡replay guarantee, and the only one claimed:
  *    it says nothing about rejected events, which is the point — they are in
@@ -132,8 +141,9 @@ export function appendEvent(state: CoreState, event: CoreEvent): AppendResult {
  *  - Trust-preserving. The proposal → acceptance boundary is enforced here, not
  *    upstream: a recorded proposal is always `proposed`; an acceptance that
  *    cites a proposal must cite one that exists, is still open, has not already
- *    been spent, and matches the object's type; and an acceptance that cites no
- *    proposal at all must come from a human actor.
+ *    been spent, and matches the object's type; and the actor floor of #4's
+ *    acceptance matrix holds regardless of what any layer above did — see
+ *    `authority.ts`.
  *
  * `reduce(events)` sorts, so nothing in a fresh replay is ever out of order and
  * nothing is rejected but a duplicate id. `reduce(events, state)` is the same
@@ -237,27 +247,50 @@ function resolveRoomId(state: CoreState, event: CoreEvent): string | null {
  * The command-layer gate. Returns why the event may not be consumed, or `null`
  * if it may.
  *
- * Order matters: out-of-order is checked *first*. An event that is both stale
- * and a duplicate must be rejected as stale, because the duplicate branch is
- * about an id already spent at a position, and the stale branch is about the
- * position itself. Getting this backwards is how a re-delivered event with an
- * older timestamp would sneak past the ordering gate.
+ * ## Two checks, and why they run in this order
+ *
+ * **Position first.** An event must sort *strictly after* `state.cursor`.
+ * Strictly, because `(at, id)` is a total order: two distinct events cannot
+ * occupy one position, so an event that lands exactly on the cursor is either a
+ * redelivery or a forged id, and admitting it would let two different payloads
+ * claim the same place in the log — which is the same divergence the ordering
+ * gate exists to prevent, just harder to see.
+ *
+ * **Identity second.** An id that has already been consumed can never be
+ * consumed again, whatever timestamp it now carries.
+ *
+ * The order cannot change what the state *becomes* — both branches reject, and
+ * a rejection leaves the state untouched either way. What it decides is the
+ * reason reported, and the reason is a diagnosis, so it should name the
+ * strongest fact. Position is the stronger one: it holds on the log's terms
+ * alone, whether or not the id was ever seen, which means the ordering gate's
+ * correctness does not depend on `consumedEventIds` being complete. Running
+ * identity first would invert that — every stale event whose id happened to be
+ * spent would be reported as a redelivery, and the ordering guarantee would
+ * quietly become a property of the id set. That is the r3 lesson, kept.
+ *
+ * The detail says when both are true, so a caller is never told "you lost the
+ * ordering race, re-mint and retry" about an event that is already in the log.
  */
 function rejectionFor(
   state: CoreState,
   event: CoreEvent,
 ): { reason: RejectionReason; detail: string } | null {
   const cursor = cursorOf(event);
-  if (state.cursor && compareCursor(cursor, state.cursor) < 0) {
+  const spent = state.consumedEventIds.includes(event.id);
+  if (state.cursor && compareCursor(cursor, state.cursor) <= 0) {
+    const also = spent
+      ? '; its id was consumed already too, so this is a redelivery — do not re-mint it'
+      : '';
     return {
       reason: 'out_of_order',
-      detail: `event (${event.at}, ${event.id}) sorts before the consumed position (${state.cursor.at}, ${state.cursor.id}) — rejected, not applied and not recorded`,
+      detail: `event (${event.at}, ${event.id}) does not sort strictly after the consumed position (${state.cursor.at}, ${state.cursor.id}) — rejected, not applied and not recorded${also}`,
     };
   }
-  if (state.appliedEventIds.includes(event.id)) {
+  if (spent) {
     return {
       reason: 'duplicate',
-      detail: `event "${event.id}" has already been applied — rejected as a redelivery`,
+      detail: `event "${event.id}" was consumed already — rejected as a redelivery, whatever timestamp it now carries and whatever the first delivery made of it`,
     };
   }
   return null;
@@ -277,7 +310,18 @@ function consume(state: CoreState, event: CoreEvent): EventOutcome {
   // Advances whether or not the event applied: it is the log position this
   // room's state reflects, not a success count.
   if (roomId !== null) state.watermarks[roomId] = cursorOf(event);
-  if (applied) state.appliedEventIds.push(event.id);
+  // Spent by being consumed, not by succeeding. An event that failed its
+  // business checks got its one delivery; a redelivery must not get a second
+  // one against a state that has since moved on. See `consumedEventIds`.
+  state.consumedEventIds.push(event.id);
+
+  // A refusal that records no reason is a fact that vanished — the object did
+  // not change, nothing says why, and `applied_with_issue` degrades to
+  // `applied`. Every `dispatch` path that returns false calls `fail` first;
+  // this keeps that true for the next one somebody writes.
+  if (!applied && state.issues.length === issuesBefore) {
+    fail(state, event.id, `event "${event.id}" did not apply and recorded no reason`);
+  }
 
   const issues = state.issues.slice(issuesBefore);
   return issues.length > 0
@@ -366,25 +410,44 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
     return false;
   }
 
+  // ── The actor floor (see `authority.ts` for #4's matrix) ──
+  //
+  // Checked before the proposal citation, because authority is a property of
+  // the event and citation is a property of what it points at: a model that may
+  // not accept this object at all should be told that, not sent to fix its
+  // provenance first.
+  const { actor } = event;
+  const subject = `object "${object.id}"`;
+
+  // A decision is the type #4 bans inference at, by name: "that sounds good" is
+  // where the ambiguity lives. A model may propose one; only a human accepts
+  // it. Note this gate does not care whether a proposal was cited — an
+  // interpreter accepting *its own* decision proposal is exactly the move.
+  if (object.type === 'decision' && !isHuman(actor)) {
+    fail(state, event.id, humanOnlyRefusal('decision_acceptance', actor, subject));
+    return false;
+  }
+
+  // `~` vs `✓`, as data. A claim may be model-accepted — that is #4's
+  // auto-accept path and it stays open — but it arrives unverified. Verified is
+  // the room asserting the claim is true, and nothing model-accepted ever
+  // renders as fact.
+  if (object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {
+    fail(state, event.id, humanOnlyRefusal('claim_verification', actor, subject));
+    return false;
+  }
+
   // An object may be born without a proposal — but only from a human. That is
   // the answer-binding path: a person writes a decision, or binds an answer,
   // and a person's word is not an interpretation that needs accepting.
   //
   // A model or a system actor has exactly one way to mint a fact: propose it,
-  // and have a human accept the proposal. Without this gate the whole
-  // acceptance boundary is optional — an interpreter that cannot hand itself a
+  // and have the proposal accepted. Without this gate the whole acceptance
+  // boundary is optional — an interpreter that cannot hand itself a
   // pre-accepted proposal can simply skip the proposal and emit the object.
-  //
-  // This is the one actor rule the scaffold enforces. Per-type acceptance rules
-  // (confidence thresholds, which types a model may propose at all) and the
-  // correction verbs are #21's, and they layer on top of this, not around it.
   const proposalId = object.provenance.proposalId;
-  if (proposalId === null && event.actor.kind !== 'human') {
-    fail(
-      state,
-      event.id,
-      `object "${object.id}" was accepted with no proposal by a ${event.actor.kind} actor — only a human may accept an object directly; a ${event.actor.kind} actor must record a proposal and have it accepted`,
-    );
+  if (proposalId === null && !isHuman(actor)) {
+    fail(state, event.id, humanOnlyRefusal('direct_acceptance', actor, subject));
     return false;
   }
 
@@ -449,6 +512,34 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
   const record = state.objects[event.objectId];
   if (!record) {
     fail(state, event.id, `unknown object "${event.objectId}"`);
+    return false;
+  }
+
+  // Every correction verb is human-only in v1 (#4, and the correction verbs
+  // #21 will grow are the same shape). A correction rewrites, withdraws or
+  // restores something the room already accepted — it is the one operation that
+  // reaches backwards, and an interpreter must never reach backwards on its own
+  // authority. A model that thinks an object is wrong proposes a supersession.
+  //
+  // The claim-verification gate is repeated here rather than left to the
+  // blanket rule above it. Today it is unreachable — a model cannot amend
+  // anything — but the two rules have different lifetimes: #21 may hand a model
+  // some correction verb, and "a claim only becomes ✓ by a human" must not
+  // depend on that never happening.
+  if (!isHuman(event.actor)) {
+    const verifying =
+      record.object.type === 'claim' &&
+      event.action === 'amend' &&
+      event.patch.verification === 'verified';
+    fail(
+      state,
+      event.id,
+      humanOnlyRefusal(
+        verifying ? 'claim_verification' : 'correction',
+        event.actor,
+        `object "${event.objectId}"`,
+      ),
+    );
     return false;
   }
 
@@ -594,6 +685,20 @@ function applyRelationAdded(state: CoreState, event: EventOf<'relation_added'>):
   }
 
   if (relation.kind === 'supersedes' && target) {
+    // #4 splits supersession by what is being retired: retiring a claim or an
+    // open question auto-accepts (a newer reading replacing an older one is
+    // cheap to correct), but retiring an accepted *decision* needs the same
+    // human hand that accepting one needed. Otherwise the decision gate is a
+    // front door with the back door open: a model that may not accept a
+    // decision could still supersede every decision in the room.
+    if (target.object.type === 'decision' && !isHuman(event.actor)) {
+      fail(
+        state,
+        event.id,
+        humanOnlyRefusal('decision_supersession', event.actor, `relation "${relation.id}"`),
+      );
+      return false;
+    }
     if (target.supersededById !== null) {
       fail(
         state,

@@ -80,12 +80,27 @@ export interface CoreState {
   proposals: Record<Id, ProposalRecord>;
   corrections: CorrectionRecord[];
   issues: ReducerIssue[];
-  /** Event ids in the order they were applied. */
-  appliedEventIds: Id[];
+  /**
+   * Every event id this state consumed, in consumption order — whether it
+   * applied cleanly or recorded a business issue on the way.
+   *
+   * "Consumed", not "applied", is the load-bearing word. An id is spent by
+   * taking a position in the log, not by succeeding at what it asked for: an
+   * event that failed its business checks still happened, and letting it back
+   * in later would let a redelivery retry against a state that has moved on
+   * (an amendment to an object that did not exist yet, an acceptance whose
+   * proposal has since arrived) and flip failure into success. One delivery,
+   * one outcome, forever. This is what the duplicate gate checks.
+   */
+  consumedEventIds: Id[];
   /**
    * The canonical position of the last event this state consumed, or `null`
-   * before the first one. This is the gate: an event that sorts *before* the
-   * cursor is rejected outright and changes nothing at all. Consumption
+   * before the first one. This is the gate: an event that does not sort
+   * **strictly after** the cursor is rejected outright and changes nothing at
+   * all. Strictly — an event landing on exactly the consumed position is
+   * refused too, because `(at, id)` is the total order and two distinct events
+   * cannot share a position; something that claims to is a re-delivery or a
+   * forged id, and admitting it would make the order a partial one. Consumption
    * therefore only ever moves forward, so the consumed sequence is in canonical
    * order by construction — which is exactly what makes a live fold and a full
    * replay of that sequence land on the same bytes. See `appendEvent`.
@@ -94,7 +109,7 @@ export interface CoreState {
   /**
    * Per-room record of the last position each room consumed. Derived
    * bookkeeping, not a gate — the gate is `cursor`, and it is global because
-   * `issues`, `corrections` and `appliedEventIds` are global ordered lists: a
+   * `issues`, `corrections` and `consumedEventIds` are global ordered lists: a
    * per-room gate would let two rooms interleave those lists one way live and
    * another way on replay. Kept because a room's own position is what #22's
    * `core_events.room_seq` maps onto.
@@ -109,7 +124,7 @@ export function emptyState(): CoreState {
     proposals: {},
     corrections: [],
     issues: [],
-    appliedEventIds: [],
+    consumedEventIds: [],
     cursor: null,
     watermarks: {},
   };

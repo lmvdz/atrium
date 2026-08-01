@@ -50,8 +50,27 @@ describe('reduce — determinism', () => {
     expect(rejected).toHaveLength(events.length);
     for (const outcome of rejected) {
       if (outcome.outcome !== 'rejected') throw new Error('unreachable');
+      // `reduce` sorts, so each verbatim copy lands on exactly the cursor its
+      // twin just set: the position gate is what refuses it, and the detail
+      // says the id was spent too.
+      expect(outcome.reason).toBe('out_of_order');
+      expect(outcome.detail).toContain('do not re-mint it');
+    }
+  });
+
+  it('rejects a redelivery that re-minted its timestamp, and says so', () => {
+    const events = sampleLog();
+    const reminted = events.map((e) => ({ ...e, at: at(20 + Number(e.id.slice(3))) }));
+    const { state, outcomes } = foldEvents([...events, ...reminted]);
+    const rejected = outcomes.filter((o) => o.outcome === 'rejected');
+
+    expect(rejected).toHaveLength(events.length);
+    for (const outcome of rejected) {
+      if (outcome.outcome !== 'rejected') throw new Error('unreachable');
       expect(outcome.reason).toBe('duplicate');
     }
+    // Nothing the re-minted copies carried reached the state.
+    expect(serializeState(state)).toBe(serializeState(reduce(events)));
   });
 });
 
@@ -197,7 +216,8 @@ describe('reduce — correction replay', () => {
       }),
     ]);
     expect(state.issues).toEqual([{ eventId: 'ev_x', reason: 'unknown object "nope"' }]);
-    expect(state.appliedEventIds).toEqual([]);
+    // It did not apply, but it was consumed: one delivery, one outcome.
+    expect(state.consumedEventIds).toEqual(['ev_x']);
   });
 });
 
