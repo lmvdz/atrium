@@ -743,7 +743,7 @@ zero tests exits 0 just like one that passed 315:
   subshells — and yields simple commands; a rule is a predicate over the words
   of one command, and `echo exec node x` is an `echo` with two arguments however
   it is spaced. Both polarities are fixtures: the evasions are mutations that
-  must go red, and 20 legitimate rewrites of the real steps must leave the whole
+  must go red, and 21 legitimate rewrites of the real steps must leave the whole
   file clean, because a guard that is wrong in that direction is one somebody
   deletes.
 - **Recognising a command is not proving it runs.** Six rounds asked whether a
@@ -861,18 +861,73 @@ zero tests exits 0 just like one that passed 315:
   policy mutations plus 142 gate cases) with the workflow policy clean, biome
   clean, both steps green, and no output at all under `CI=true`.
   `scripts/ci/checker-graph.mjs` makes that a property with a test: an
-  invocation graph of 5 enforcement checks — what each one reads and every place
+  invocation graph of 14 enforcement checks — what each one reads and every place
   it is called from, its size read back out of this sentence because a deleted
   row is a check that quietly stops being in the graph — and three assertions
-  over it: the discovered call sites must equal the declared ones, every
-  declared invoker must be something CI actually runs, and
-  **at least one invoker must lie outside the files the check reads**.
+  over it: the discovered witnesses must equal the declared ones, every
+  declared witness must be something CI actually runs, and
+  **at least one witness must lie outside the files the check reads**.
   `packages/ci-guard` is that outside caller: a Vitest project, not under
   `scripts/`, with a floor in `.github/ci-manifest.json` that ratchets against
   `origin/main`. This does not make the harness hostile-proof — nothing that
   runs from the revision under test can be, see the four numbered paragraphs in
   the governance trigger — it moves the cost of the *accident* from one edit to
   four, in three files and a manifest.
+- **Centralising a decision concentrates its failure, and the tests do not
+  follow it.** The fix above replaced fifteen copies of the guard with one shared
+  predicate — and `packages/ci-guard` went on testing the *shape of the guard in
+  the callers*, which is what the fifteen copies had needed. Nothing anywhere ran
+  the predicate. A blind critic added one statement to
+  `scripts/ci/main-module.mjs`, `if (process.env.GITHUB_JOB === 'verify') return
+  false;`, and measured it on the real stack: `GITHUB_JOB` is set by GitHub per
+  job, so the whole `verify` job went silent while `deploy` kept working — eleven
+  of twenty-one CI entry points down to `exit=0 bytes=0`, 176 gate cases and 182
+  policy mutations gone, `vitest run --project ci-guard` reporting **0, 49
+  passed**, and a completely green build. 358 assertions for one statement in one
+  file, where round 5 cost 316 for two `&&` in two files: *the fix for round 5
+  made the blast radius bigger*. **Every refactor that replaces N copies with one
+  shared implementation converts N independent failures into one total failure,
+  and the tests written for the N copies do not transfer.** So that is a rule
+  rather than a sweep: `sharedModuleProblems` fails the build when a module under
+  `scripts/ci/` is imported by three or more scripts and has no row in the
+  registry, and a row must carry a behavioural contract, a deliberate replacement
+  that contract rejects, and a witness outside `scripts/`. Twelve shared
+  decisions have one today — the predicate, the reporter that decides six deploy
+  scripts' exit status, the compose file list, the shell parser, the report
+  freshness check, and the rest.
+- **A fixture that reaches for its check can probe a different one.** The
+  registry's headline row was `check: 'mainGuardProblems'` with a fixture that
+  called `guardProblems`, and nothing compared the two. Gutting the function the
+  row *named* to `return []` left ci-guard at 49 passed. A row does not choose
+  what to probe any more: its contract is **handed** the implementation, and is
+  then run again against declared mutants. A contract that ignores what it was
+  handed and calls the module binding by name answers identically for a mutant
+  and for the real thing, which is the failure — so the mismatch is caught by
+  construction rather than by convention.
+- **Presence is not use — and that applies to the witness, not only the check.**
+  The graph asked whether a check is *called*. Stripping four `expect(…)`
+  wrappers from `packages/ci-guard` while keeping every call, and putting round
+  4's broken guard back into `assert-tables.mjs`, left the suite at 49 passed
+  with the main-module rule entirely gone and every count claim in the receipt
+  still true. `assertedNames` asks about assertions: a result counts when it
+  reaches an `expect`, a `run`/`expect` case-table entry, a `for … of` drain, or
+  the body of the main-module guard itself — four shapes, and the complement is
+  refused. That also retired a four-shape denylist of dead call positions that
+  nineteen more shapes walked through (`while (false)`, `describe.each([])`,
+  `xit`, an aliased `const t = it`, a never-called function, a labelled break);
+  the denylist is now a *test* of the allowlist rather than the rule.
+- **A rule about a statement's kind is not a rule about the exit status.** The
+  guard body had to contain one unconditional statement that called something.
+  Moving the gate into the argument of the exit walked straight through it —
+  `process.exit(process.env.CI === undefined ? await main() : 0)` — as did a
+  `&&` in the same place, the gate moved into the assignment the exit reads,
+  `main().catch(() => {})`, a bare `process.exit(0)`, and cheapest of all an
+  unconditional `console.info` written above a fully gated body, which satisfies
+  a statement-kind rule while touching the gate not at all. Twelve spellings,
+  all accepted by round 6 and all refused now, because the rule is about the
+  value: the body's last statement must be `process.exit(<work>)` or the shared
+  `report('…')`, and every exit in it must carry either the result of a call or
+  a non-zero literal.
 - **A union is not a per-item assertion.** `buildAssetProblems` is handed all
   four page bodies joined, so its "names nothing servable" branch is satisfied
   by one chunk anywhere in the union. Round 5 deleted round 4's per-response
@@ -920,7 +975,7 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 182
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 195
   mutated copies of the real workflow and additionally asserts that every one of
   the 28 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
@@ -929,7 +984,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 176 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 181 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

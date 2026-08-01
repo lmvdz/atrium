@@ -13,13 +13,18 @@
     "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
     "target: the point is to catch a suite that shrank, not to go red every time a test is",
     "renamed away. Counted from a real run of this tree (fix/ci-r6 merged into fix/auth-r5,",
-    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 49 — 691",
-    "tests across 31 files.",
+    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 119 — 761",
+    "tests across 31 files. Round 7 took ci-guard from 49 to 119: the outside witness now",
+    "tests the *behaviour* of every shared decision under scripts/ci/, not only the shape of",
+    "the guard in its callers — see scripts/ci/checker-graph.mjs. Its floor moved 40 -> 110,",
+    "because a floor 9 under a real count is a loss detector and one 9 under half the count",
+    "is a place four tests can be deleted from.",
     "packages/ci-guard is #40 round 6. It exists to run checks from *outside* scripts/: the",
     "main-module guard scanner was enforced only from gate-selftest.mjs, a file it scans, so",
     "one `&&` in that file removed 316 assertions with every gate green. Its floor is what",
     "makes deleting those tests loud — see scripts/ci/checker-graph.mjs, which requires every",
-    "enforcement check to have an invoker that is not one of its own subjects.",
+    "enforcement check to have a witness that is not one of its own subjects, and requires that",
+    "witness to assert on the result rather than merely call it.",
     "apps/web left `exempt` and acquired a floor in #40's merge: fix/auth-r5 gave it a Vitest",
     "project for its server-side modules (the boot conditions in `lib/env.ts`, and #40's",
     "rules about build-time constants in `next.config.ts`), which a browser suite cannot",
@@ -37,7 +42,7 @@
       },
       "packages/ci-guard": {
         "project": "ci-guard",
-        "minTests": 40
+        "minTests": 110
       },
       "packages/auth": {
         "project": "auth",
@@ -57,7 +62,7 @@
       }
     },
     "exempt": {},
-    "minTotalTests": 640
+    "minTotalTests": 730
   },
   "playwright": {
     "projects": {

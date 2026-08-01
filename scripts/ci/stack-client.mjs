@@ -596,14 +596,39 @@ function dumpStackLogs() {
   }
 }
 
-/** Print every failure as a GitHub annotation and exit accordingly. */
-export function report(what) {
+/**
+ * Print every failure as a GitHub annotation and *return* the exit status.
+ *
+ * ── WHY THE VERDICT IS SEPARATE FROM THE EXIT (#40 round 7) ─────────────────
+ * `report` is the last statement of six of the deploy job's assertion scripts,
+ * so this two-line decision — "were there failures?" — is the exit status of all
+ * six. Round 6 centralised the *guard*; this was already centralised and nothing
+ * outside these scripts tested it, which is the same defect one function over: a
+ * `report` that always exits 0 turns six red gates green with one edit, and
+ * every count claim in every receipt stays true.
+ *
+ * A function that calls `process.exit` cannot be tested by anything in the
+ * process that calls it. So the decision is a value here, `report` is the thin
+ * wrapper that acts on it, and `packages/ci-guard` asserts the decision from
+ * outside `scripts/` with a registry row in `checker-graph.mjs` behind it.
+ */
+export function verdict(what) {
   if (failures.length > 0) {
     for (const failure of failures) console.error(`::error::${what}: ${failure}`);
     console.error(`${what}: ${failures.length} assertion(s) failed.`);
     dumpStackLogs();
-    process.exit(1);
+    return 1;
   }
   console.info(`${what}: passed.`);
-  process.exit(0);
+  return 0;
+}
+
+/** Every assertion recorded so far, forgotten. Only the tests need this. */
+export function resetFailures() {
+  failures.length = 0;
+}
+
+/** Print every failure as a GitHub annotation and exit accordingly. */
+export function report(what) {
+  process.exit(verdict(what));
 }

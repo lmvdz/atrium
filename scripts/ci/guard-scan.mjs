@@ -104,12 +104,48 @@ export const CANONICAL_GUARD = [
  * subdirectory of `scripts/ci/`.
  *
  * This is a path rule, not a proof. Replacing `scripts/ci/main-module.mjs`
- * itself still defeats it — and that is a one-line edit to the shared file every
- * entry point imports, which is the loud kind of change. Adding a lookalike
- * beside it was the quiet kind.
+ * itself still defeats *this file* — nothing here reads that module's body.
+ *
+ * ── AND THAT SENTENCE USED TO END "WHICH IS THE LOUD KIND OF CHANGE" ────────
+ * It said so, and it was false. A blind critic added one statement to
+ * `main-module.mjs`:
+ *
+ *     if (process.env.GITHUB_JOB === 'verify') return false;
+ *
+ * `GITHUB_JOB` is set by GitHub per job, so that kills the whole `verify` job
+ * and leaves `deploy` working — 176 gate cases and 182 policy mutations gone,
+ * eleven of twenty-one CI entry points down to `exit=0 bytes=0`, and every gate
+ * green. Nothing anywhere went red, because round 6 had replaced fifteen copies
+ * of a predicate with one and then tested the *shape of the guard in the
+ * callers*. A claim about how loud a change is has to be a claim about something
+ * that makes noise.
+ *
+ * It is loud now, and by a rule rather than by a hope: `checker-graph.mjs`
+ * carries a row for `isMainModule` whose contract puts the predicate through
+ * synthetic `argv` — a plain path, a path with a space in it, a symlink, a
+ * missing entry point — and then asks the same questions again with every
+ * variable GitHub sets, requiring the same answers. `packages/ci-guard` runs the
+ * same table from outside `scripts/`, plus a real child process that must exit 3
+ * when node is given the file and 0 when the file is imported. The statement
+ * above fails eight assertions in a project whose floor ratchets against
+ * origin/main. Adding a lookalike beside the module is still the quiet kind, and
+ * still what the path rule below is for.
  */
 const GUARD_MODULE = 'main-module.mjs';
 const GUARD_SPECIFIER = /^(?:\.\/|(?:\.\.\/)+)main-module\.mjs$/;
+
+/**
+ * The other terminator a guard body may end on, and where it must come from.
+ *
+ * `report(what)` prints every recorded failure and exits 1, or prints "passed"
+ * and exits 0 — so it is an exit status derived from the work, in the one
+ * spelling six of the stack assertions here use. It is held to the same path
+ * rule as the predicate for the same reason: a `report` imported from anywhere
+ * else is an unconditional `process.exit(0)` under a reassuring name.
+ */
+const REPORTER = 'report';
+const REPORTER_MODULE = 'stack-client.mjs';
+const REPORTER_SPECIFIER = /^(?:\.\/|(?:\.\.\/)+)stack-client\.mjs$/;
 
 const EQUALITY = new Set([
   ts.SyntaxKind.EqualsEqualsToken,
@@ -160,16 +196,9 @@ function isImportMetaUrl(node) {
 /**
  * A body that does something.
  *
- * Deliberately weak, and the weakness is the honest boundary. Six of the
- * fifteen entry points here do their whole job inside the guard and exit
- * through `report()` or `check()` rather than through a literal
- * `process.exit(main())`, so "must call `process.exit`" would be a rule about
- * this repository's punctuation rather than about the defect. What *is*
- * checkable is that the branch is not empty: `if (isMainModule(import.meta.url))
- * {}` passes any condition-only check, runs, asserts nothing and exits 0.
- * Whether a non-empty body asserts anything is semantics, and semantics is the
- * boundary the SCOPE block in workflow-policy.mjs owns — a `main()` replaced
- * with `() => 0` is out of reach of every check that reads this revision.
+ * `{}` passes any condition-only check, runs, asserts nothing and exits 0. This
+ * is the cheapest shape of that and is kept as its own message because it is the
+ * one a reader recognises; everything subtler is the exit-status rule below.
  */
 function isEmptyBody(statement) {
   const body = ts.isBlock(statement) ? statement.statements : [statement];
@@ -177,69 +206,200 @@ function isEmptyBody(statement) {
 }
 
 /**
- * The body must *do* something, unconditionally.
+ * How the guard body ends, and with what status.
  *
- * ── THE DEFECT (found by a blind review of round 6's own fix) ───────────────
- * The first version of this file checked the shape of the *condition* and, for
- * the body, only that it was not empty. A second lineage pointed straight at the
- * gap: "the AST scanner checks condition shape but not guard-body reachability".
- * Measured, and every one of these was accepted:
+ * ── THE DEFECT (#40 round 7, measured on r6 as committed) ───────────────────
+ * Round 6 checked the body by *statement kind*: it required at least one
+ * top-level statement that is not a branch and that calls something. A blind
+ * critic moved the conjunct one level further in — into the argument of the exit
+ * — and the whole family went through:
  *
- *     if (isMainModule(import.meta.url)) {
- *       if (process.env.CI === undefined) { process.exit(await main()); }   ← the
- *     }                                    r5 attack, one line further in
+ *     process.exit(process.env.CI === undefined ? await main() : 0);   accepted
+ *     process.exit(process.env.CI === undefined && (await main()));    accepted
+ *     const code = process.env.CI ? 0 : await main();                  accepted
+ *     process.exit(code);
+ *     console.info('starting');                                        accepted
+ *     if (process.env.CI === undefined) { process.exit(await main()); }
+ *     main().catch(() => {});                                          accepted
+ *     process.exit(0);                                                 accepted
  *
- *     if (isMainModule(import.meta.url)) { if (false) { … } }
- *     if (isMainModule(import.meta.url)) { try { … } catch {} }             ← failure
- *                                                                            becomes 0
+ * Applied to `gate-selftest.mjs` and `workflow-policy-selftest.mjs` that is two
+ * files and one insertion each: biome 0, gate 0 (0 bytes), wps 0 (0 bytes),
+ * policy 0, ci-guard 0 (49 passed), `CI=true pnpm test` 0 (691 passed). Round 5
+ * cost 316 assertions for two `&&` in two files; this is the same price for the
+ * same two files, because the rule was about the *shape of a statement* and the
+ * defect is about the *value the process exits with*. A statement-kind rule is
+ * satisfied by an unconditional decoy written beside a fully gated body, which
+ * is the cheapest evasion in the list and touches the gate not at all.
  *
- * Moving the conjunct from the condition into the body defeats a condition-shape
- * rule completely, and it is a *smaller* edit than the one that started this
- * ticket. So the body is checked too: it must contain at least one statement, at
- * its own top level, that is not itself a branch and that actually calls
- * something. A body whose every top-level statement is an `if`, a `try` or a
- * loop is a body behind a second gate.
+ * ── THE RULE, AS AN ALLOWLIST OVER EXIT STATUS ──────────────────────────────
+ * Denylisting evasions is unbounded — that is this file's own argument for the
+ * condition, and round 6 failed to apply it to the body. So the body's *last*
+ * top-level statement must be one of exactly two unconditional terminators:
+ *
+ *     process.exit(<work>)     `<work>` is `f(…)` or `await f(…)`, a call on a
+ *                              plain identifier, or a name bound to one at the
+ *                              body's top level and never reassigned
+ *     report('<name>')         the reporter imported from ./stack-client.mjs,
+ *                              which exits 1 on any recorded failure and 0
+ *                              otherwise — the shape six of these scripts use
+ *
+ * and every `process.exit` anywhere in the body must carry either an allowed
+ * `<work>` or a **non-zero integer literal**. `process.exit(2)` on a usage error
+ * is a real failure exit and stays legal; `process.exit(0)`, a ternary, a `&&`,
+ * a comparison, a `.catch(…)` chain, an unbound name, and a name bound to any of
+ * those are all refused, because each is a way to spell "exit 0 on a machine
+ * where nobody looks". A body whose last statement is an `if`, a `try`, a loop
+ * or a `console.info` never reaches an unconditional terminator and is refused
+ * for that reason rather than for its punctuation.
  *
  * ── WHERE THIS STOPS, EXACTLY ───────────────────────────────────────────────
- * `{ const x = f(); if (process.env.CI) { … } }` satisfies this and is still
- * conditional. No shape check reaches that, and pretending otherwise would be
- * the fourth version of the same mistake. What moved is the price: the r5 attack
- * was one relocated `&&`, and now it needs an unconditional decoy call written
- * beside it. Semantics — whether the work the body does is the work it should —
- * is the boundary the SCOPE block in workflow-policy.mjs owns and always will.
+ * `main()` itself replaced by `() => 0` is out of reach and always will be: this
+ * reads one revision's syntax, and what the work *means* is the boundary the
+ * SCOPE block in workflow-policy.mjs owns. Arguments passed to `main` are data
+ * and are not read — `main(process.env.CI ? 'a' : 'b')` is accepted, because the
+ * status still comes from `main`. What moved is that there is no longer a
+ * spelling of "the exit status is 0 because of a condition in this file" that
+ * this accepts.
  */
-function isEntirelyConditional(statement) {
+function exitProblem(statement, sourceFile) {
   const body = ts.isBlock(statement) ? statement.statements : [statement];
-  return !body.some((child) => isUnconditionalWork(child));
-}
+  const bindings = topLevelBindings(body);
 
-const BRANCHES = new Set([
-  ts.SyntaxKind.IfStatement,
-  ts.SyntaxKind.TryStatement,
-  ts.SyntaxKind.SwitchStatement,
-  ts.SyntaxKind.ForStatement,
-  ts.SyntaxKind.ForOfStatement,
-  ts.SyntaxKind.ForInStatement,
-  ts.SyntaxKind.WhileStatement,
-  ts.SyntaxKind.DoStatement,
-  ts.SyntaxKind.LabeledStatement,
-  ts.SyntaxKind.Block,
-]);
-
-/** A statement that is not a branch and that calls something. */
-function isUnconditionalWork(statement) {
-  if (BRANCHES.has(statement.kind)) return false;
-  let calls = false;
+  // Every exit in the body, wherever it sits: the terminator rule below governs
+  // how the body *ends*, and this governs what any exit it does reach may say.
+  let badStatus;
   const visit = (node) => {
-    if (calls) return;
-    if (ts.isCallExpression(node) || ts.isNewExpression(node) || ts.isAwaitExpression(node)) {
-      calls = true;
+    if (badStatus !== undefined) return;
+    if (isProcessExit(node)) {
+      const problem = statusProblem(node.arguments[0], bindings, sourceFile);
+      if (problem !== undefined) badStatus = problem;
       return;
     }
     node.forEachChild(visit);
   };
-  visit(statement);
-  return calls;
+  for (const child of body) visit(child);
+  if (badStatus !== undefined) return badStatus;
+
+  const last = body[body.length - 1];
+  if (last === undefined) return undefined; // `isEmptyBody` owns that message
+  if (ts.isExpressionStatement(last)) {
+    const expression = unwrap(last.expression);
+    if (isProcessExit(expression)) return undefined; // its status is checked above
+    if (isReporterCall(expression)) return undefined;
+  }
+  return `it never reaches an unconditional exit: its last statement is \`${text(sourceFile, last).slice(0, 60)}\`, not \`process.exit(main())\` or \`report('…')\`. A body that ends in an \`if\`, a \`try\`, a loop or a log runs the gate and then decides whether to do the work — which is the round-5 conjunct moved one line further in, and the cheapest spelling of it is an unconditional harmless statement written above a fully gated body, which satisfies any rule about statement *kind* while touching the gate not at all`;
+}
+
+/** `process.exit(…)`, however it is parenthesised. */
+function isProcessExit(node) {
+  return (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === 'process' &&
+    node.expression.name.text === 'exit'
+  );
+}
+
+/** `report('assert-x')` — the terminator the stack assertions use. */
+function isReporterCall(node) {
+  return (
+    ts.isCallExpression(node) &&
+    node.questionDotToken === undefined &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === REPORTER
+  );
+}
+
+/**
+ * The work whose result may become an exit status: a call on a plain identifier,
+ * optionally awaited.
+ *
+ * A *plain* identifier, so a member chain is not one. That is what refuses
+ * `process.exit(await main().catch(() => 0))` — a `.catch` handler that returns
+ * a number turns every failure into that number, and enumerating the handler
+ * shapes that do would be a denylist. `main()` and `await main(process.argv)`
+ * are what the fifteen entry points here actually write.
+ */
+function isWorkExpression(node) {
+  const inner = unwrap(node);
+  if (ts.isAwaitExpression(inner)) return isWorkExpression(inner.expression);
+  return (
+    ts.isCallExpression(inner) &&
+    inner.questionDotToken === undefined &&
+    ts.isIdentifier(inner.expression)
+  );
+}
+
+/**
+ * Names the guard body binds at its own top level, and why each is or is not an
+ * exit status this rule will accept.
+ *
+ * A name reassigned anywhere in the body is refused whatever it was bound to:
+ * `let code = await main(); if (process.env.CI) code = 0; process.exit(code);`
+ * is the ternary with more lines.
+ */
+function topLevelBindings(body) {
+  const bindings = new Map();
+  for (const statement of body) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) continue;
+      bindings.set(
+        declaration.name.text,
+        declaration.initializer !== undefined && isWorkExpression(declaration.initializer)
+          ? undefined
+          : `binds \`${declaration.name.text}\` to something other than the result of the work, and then exits with it`,
+      );
+    }
+  }
+  for (const statement of body) {
+    const visit = (node) => {
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left) &&
+        bindings.has(node.left.text)
+      ) {
+        bindings.set(
+          node.left.text,
+          `reassigns \`${node.left.text}\` after binding it, so what it exits with is decided somewhere between the two`,
+        );
+      }
+      node.forEachChild(visit);
+    };
+    visit(statement);
+  }
+  return bindings;
+}
+
+/** Whether one `process.exit(x)` argument is a status this rule accepts. */
+function statusProblem(argument, bindings, sourceFile) {
+  const say = (what) =>
+    `${what}. The exit status of an entry point must be the result of its work or a non-zero literal: \`process.exit(main())\`, \`process.exit(await main())\`, or \`process.exit(2)\` on a usage error. \`process.exit(0)\`, \`process.exit(cond ? await main() : 0)\` and \`process.exit(cond && main())\` all keep the sound predicate, keep an unconditional call in the body, satisfy every rule about statement *kind*, and exit 0 having asserted nothing`;
+  if (argument === undefined) {
+    return say('it calls `process.exit()` with no status at all, which is `process.exit(0)`');
+  }
+  const node = unwrap(argument);
+  if (ts.isNumericLiteral(node)) {
+    return node.text === '0' || Number(node.text) === 0
+      ? say('it exits with the literal `0`, unconditionally')
+      : undefined;
+  }
+  if (ts.isIdentifier(node)) {
+    if (!bindings.has(node.text)) {
+      return say(
+        `it exits with \`${node.text}\`, which this rule cannot follow to the work: bind it at the guard body's own top level, as \`const ${node.text} = main();\``,
+      );
+    }
+    const problem = bindings.get(node.text);
+    return problem === undefined ? undefined : say(`it ${problem}`);
+  }
+  if (isWorkExpression(node)) return undefined;
+  return say(
+    `it exits with \`${text(sourceFile, node)}\`, whose value is decided by something other than the work`,
+  );
 }
 
 /** An empty `catch` in an entry point turns every failure into exit 0. */
@@ -340,12 +500,9 @@ function guardShape(statement) {
         'its body is empty, so the script establishes that it was run and then does nothing and exits 0 — which passes any check that reads the condition alone',
     };
   }
-  if (isEntirelyConditional(statement.thenStatement)) {
-    return {
-      node: statement,
-      reason:
-        'every statement in its body is a branch, so the work is behind a second gate and the guard is decoration. `{ if (process.env.CI === undefined) { process.exit(await main()); } }` is the exact conjunct this rule refuses in the condition, moved one line further in, and it is a *smaller* edit; `{ if (false) { … } }` and `{ try { … } catch {} }` are the same idea. The body needs at least one unconditional statement that calls something',
-    };
+  const exit = exitProblem(statement.thenStatement, statement.getSourceFile());
+  if (exit !== undefined) {
+    return { node: statement, reason: exit };
   }
   if (swallowsFailure(statement.thenStatement)) {
     return {
@@ -360,15 +517,18 @@ function guardShape(statement) {
   return { node: statement, call: condition };
 }
 
-/** Every `isMainModule` binding this file imports, and where from. */
-function importedPredicateSources(sourceFile) {
+/** Every binding of `name` this file imports, and where from. */
+function importedSources(sourceFile, name) {
   const sources = [];
   for (const statement of sourceFile.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     const clause = statement.importClause;
     if (clause?.namedBindings === undefined || !ts.isNamedImports(clause.namedBindings)) continue;
     for (const element of clause.namedBindings.elements) {
-      if (element.name.text !== 'isMainModule') continue;
+      // `import { report as r }` binds `r`; `import { x as report }` binds
+      // `report` to whatever `x` is. The *local* name is what the guard body
+      // calls, so that is the one this asks about.
+      if (element.name.text !== name) continue;
       const specifier = statement.moduleSpecifier;
       sources.push(ts.isStringLiteral(specifier) ? specifier.text : '(computed)');
     }
@@ -376,8 +536,8 @@ function importedPredicateSources(sourceFile) {
   return sources;
 }
 
-/** A local `isMainModule` — the predicate replaced by one that says what you like. */
-function declaresPredicateLocally(sourceFile) {
+/** A local declaration of `name` — the shared thing replaced by a local one. */
+function declaresLocally(sourceFile, name) {
   let found = false;
   const visit = (node) => {
     if (found) return;
@@ -386,7 +546,7 @@ function declaresPredicateLocally(sourceFile) {
       ts.isVariableDeclaration(node) ||
       ts.isClassDeclaration(node);
     if (named && node.name !== undefined && ts.isIdentifier(node.name)) {
-      if (node.name.text === 'isMainModule') {
+      if (node.name.text === name) {
         found = true;
         return;
       }
@@ -395,6 +555,34 @@ function declaresPredicateLocally(sourceFile) {
   };
   sourceFile.forEachChild(visit);
   return found;
+}
+
+/**
+ * Where a shared binding a guard depends on must come from.
+ *
+ * The same path rule as `GUARD_SPECIFIER`, and for the same reason: a *name* was
+ * checked where a *location* was meant once already in this file, and `report`
+ * is now load-bearing — it is the terminator six of these scripts end on, and a
+ * `report` from somewhere else is `process.exit(0)` with a friendly name.
+ */
+function sharedBindingProblems(sourceFile, path, name, module, specifierPattern) {
+  const problems = [];
+  const sources = importedSources(sourceFile, name);
+  if (sources.length === 0) {
+    problems.push(
+      `${path} calls \`${name}\` in its main-module guard without importing it from scripts/ci/${module}. Whatever it resolves to then, it is not the shared one, and the guard body's whole meaning rests on it.`,
+    );
+  } else if (!sources.every((specifier) => specifierPattern.test(specifier))) {
+    problems.push(
+      `${path} imports \`${name}\` from ${sources.join(', ')}, which is not the shared module. It must be \`./${module}\` — or \`../\`-prefixed for a script in a subdirectory — and nothing else: \`./vendor/${module}\`, \`/tmp/${module}\` and a bare \`${module}\` (a *package* name in ESM) are all different modules that can return whatever they like, and a guard over one of them is green here and silent in CI.`,
+    );
+  }
+  if (declaresLocally(sourceFile, name)) {
+    problems.push(
+      `${path} declares its own \`${name}\`, shadowing the imported one. The guard then means whatever this file wants it to.`,
+    );
+  }
+  return problems;
 }
 
 /**
@@ -479,26 +667,36 @@ export function guardProblems(path, source) {
   };
   sourceFile.forEachChild(argvVisit);
 
-  // The predicate has to be the shared one.
+  // The predicate has to be the shared one — and so does the reporter, when the
+  // guard body ends on it. `report` from anywhere else is `process.exit(0)`
+  // wearing the name of the thing that decides the exit status for six of these
+  // scripts, which is the lookalike-module defect one function over.
   if (guards.length > 0) {
-    const sources = importedPredicateSources(sourceFile);
-    if (sources.length === 0) {
+    problems.push(
+      ...sharedBindingProblems(sourceFile, path, 'isMainModule', GUARD_MODULE, GUARD_SPECIFIER),
+    );
+    if (usesReporterAsTerminator(guards)) {
       problems.push(
-        `${path} uses \`isMainModule\` in a guard without importing it from scripts/ci/${GUARD_MODULE}. A locally defined predicate of the same name is the fifteen-copies problem this file exists to end.`,
-      );
-    } else if (!sources.every((specifier) => GUARD_SPECIFIER.test(specifier))) {
-      problems.push(
-        `${path} imports \`isMainModule\` from ${sources.join(', ')}, which is not the shared predicate. It must be \`./${GUARD_MODULE}\` — or \`../\`-prefixed for a script in a subdirectory — and nothing else: \`./vendor/${GUARD_MODULE}\`, \`/tmp/${GUARD_MODULE}\` and a bare \`${GUARD_MODULE}\` (a *package* name in ESM) are all different modules that can return whatever they like, and a guard over one of them is green here and silent in CI.`,
-      );
-    }
-    if (declaresPredicateLocally(sourceFile)) {
-      problems.push(
-        `${path} declares its own \`isMainModule\`, shadowing the imported predicate. The guard then means whatever this file wants it to.`,
+        ...sharedBindingProblems(sourceFile, path, REPORTER, REPORTER_MODULE, REPORTER_SPECIFIER),
       );
     }
   }
 
   return problems;
+}
+
+/** True when some sound guard's body ends on `report('…')`. */
+function usesReporterAsTerminator(guards) {
+  return guards.some((call) => {
+    const body = call.parent.thenStatement;
+    const statements = ts.isBlock(body) ? body.statements : [body];
+    const last = statements[statements.length - 1];
+    return (
+      last !== undefined &&
+      ts.isExpressionStatement(last) &&
+      isReporterCall(unwrap(last.expression))
+    );
+  });
 }
 
 /**

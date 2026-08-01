@@ -29,6 +29,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { checkHostNetworkPolicy } from './assert-deploy-preflight.mjs';
 import { checkRatchet, readBaseline } from './assert-floor-ratchet.mjs';
@@ -38,7 +39,12 @@ import { checkPlaywrightReport } from './assert-playwright-report.mjs';
 import { checkSchema, readSchema } from './assert-stack-schema.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
-import { calledNames, checkerGraphProblems, ENFORCEMENT } from './checker-graph.mjs';
+import {
+  assertedNames,
+  checkerGraphProblems,
+  ENFORCEMENT,
+  sharedModuleProblems,
+} from './checker-graph.mjs';
 import { notAVerdict } from './child-verdict.mjs';
 import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
@@ -1635,7 +1641,7 @@ const CASES = [
         () =>
           `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  if (${CI_CONJUNCT}) {\n    process.exit(main());\n  }\n}\n`,
       ),
-    expect: /every statement in its body is a branch/,
+    expect: /never reaches an unconditional exit/,
   },
   {
     name: 'the whole body behind `if (false)`',
@@ -1645,7 +1651,7 @@ const CASES = [
         () =>
           `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  if (false) {\n    process.exit(main());\n  }\n}\n`,
       ),
-    expect: /every statement in its body is a branch/,
+    expect: /never reaches an unconditional exit/,
   },
   {
     name: 'the work swallowed by an empty catch, so failure exits 0',
@@ -1655,7 +1661,7 @@ const CASES = [
         () =>
           `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  const code = main();\n  try {\n    process.exit(code);\n  } catch {}\n}\n`,
       ),
-    expect: /empty `catch` in its body/,
+    expect: /never reaches an unconditional exit/,
   },
   {
     // The other polarity, because a body rule that refuses real entry points is
@@ -1713,65 +1719,143 @@ const CASES = [
       }),
     expect: /Sole enforcer, sole exception/,
   },
-  // ---- presence is not use (a blind review of this round's own fix) --------
-  // A second lineage named both of these before its run ended: "the AST scanner
-  // checks condition shape but not guard-body reachability, and the checker
-  // graph counts syntactic calls even when they are under a dead branch."
-  // Measured: putting the outside witness's two calls inside `if (false)` left
-  // both self-tests exit 0 — the fix for the critical finding, defeated by four
-  // characters.
+  // ---- presence is not use, applied to the WITNESS (#40 round 7) ----------
+  // Round 6 asked whether a check is *called*. A blind critic stripped four
+  // `expect(…)` wrappers from packages/ci-guard while keeping every call, put
+  // round 4's broken guard back into assert-tables.mjs, and got ci-guard 0 → 49
+  // passed with every count claim still true and the rule entirely gone. And its
+  // four-shape dead-code denylist had eighteen more shapes walking past it.
+  // `assertedNames` names the assertion shapes and refuses the complement; the
+  // full table of twenty-six refused positions lives in packages/ci-guard, which
+  // is not one of this scanner's subjects.
   {
-    name: 'a call under a constantly false branch is not an invocation',
+    name: 'a call whose result is discarded is not a witness',
     run: () =>
-      calledNames('f.test.ts', 'if (false) { mainGuardProblems("scripts"); }').has(
+      assertedNames('f.test.ts', 'it("x", () => { mainGuardProblems("scripts"); });').has(
         'mainGuardProblems',
       )
-        ? ['a call inside `if (false)` counted as an invoker']
+        ? ['a call with no assertion counted as a witness']
         : [],
     expect: 'clean',
   },
   {
-    name: 'nor is one in a skipped test, after a return, or in a dead ternary arm',
+    name: 'nor is one in a dead branch, a skipped test, an alias or a never-called function',
     run: () => {
       const dead = {
-        'it.skip': 'it.skip("x", () => { mainGuardProblems("scripts"); });',
-        'after return': 'function f() { return 1; mainGuardProblems("scripts"); }',
-        'after process.exit': '{ process.exit(1); mainGuardProblems("scripts"); }',
-        'false ternary arm': 'const x = false ? mainGuardProblems("scripts") : 1;',
+        'if (false)': 'it("x", () => { if (false) { expect(mainGuardProblems("s")); } });',
+        'while (false)': 'it("x", () => { while (false) { expect(mainGuardProblems("s")); } });',
+        'it.skip': 'it.skip("x", () => { expect(mainGuardProblems("s")); });',
+        xit: 'xit("x", () => { expect(mainGuardProblems("s")); });',
+        'describe.each([])':
+          'describe.each([])("x", () => { it("y", () => { expect(mainGuardProblems("s")); }); });',
+        'an aliased runner':
+          'const t = it; t.skip("x", () => { expect(mainGuardProblems("s")); });',
+        'after return': 'it("x", () => { return; expect(mainGuardProblems("s")); });',
+        'a never-called function': 'function f() { expect(mainGuardProblems("s")); }',
+        'a .then callback':
+          'it("x", () => { Promise.resolve().then(() => expect(mainGuardProblems("s"))); });',
       };
       return Object.entries(dead)
-        .filter(([, source]) => calledNames('f.test.ts', source).has('mainGuardProblems'))
-        .map(([what]) => `${what} counted as an invoker`);
+        .filter(([, source]) => assertedNames('f.test.ts', source).has('mainGuardProblems'))
+        .map(([what]) => `${what} counted as a witness`);
     },
     expect: 'clean',
   },
   {
-    name: 'a live call in a real test still counts, or the rule is a ban on calls',
+    name: 'an assertion in a real test still counts, or the rule is a ban on witnesses',
     run: () =>
-      calledNames('f.test.ts', 'it("x", () => { mainGuardProblems("scripts"); });').has(
-        'mainGuardProblems',
-      )
+      assertedNames(
+        'f.test.ts',
+        'it("x", () => { expect(mainGuardProblems("scripts")).toEqual([]); });',
+      ).has('mainGuardProblems')
         ? []
-        : ['a call inside a live `it()` was not counted'],
+        : ['an `expect` over a live call was not counted'],
     expect: 'clean',
   },
   {
     // The general form, and the one that closes what dead-code analysis cannot:
     // a check gutted to `return []` has a *perfect* invocation graph.
     name: 'a check with a flawless graph that no longer does anything',
-    run: () =>
-      checkerGraphProblems({
-        registry: [{ ...ENFORCEMENT[0], violate: () => [] }],
-      }),
-    expect: /reported nothing about an input that violates it/,
+    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], fn: () => [] }] }),
+    expect: /does not satisfy its own contract/,
   },
   {
-    name: 'a registry row with no violate fixture at all',
+    // #40 round 7's D3. The row named `mainGuardProblems` and its fixture called
+    // `guardProblems`, so gutting the named function left ci-guard at 49 passed.
+    // A contract that reaches for the module binding instead of using what it
+    // was handed answers the same for a mutant as for the real one.
+    name: 'a contract that ignores the implementation it was handed',
+    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], contract: () => [] }] }),
+    expect: /does not reject the mutant/,
+  },
+  {
+    name: 'a registry row with no contract at all',
+    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], contract: undefined }] }),
+    expect: /has no `contract`/,
+  },
+  {
+    name: 'a registry row whose contract nothing could fail',
+    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], mutants: [] }] }),
+    expect: /has no mutants declared/,
+  },
+  // ---- the shared predicate itself (#40 round 7's critical finding) ---------
+  // One statement in scripts/ci/main-module.mjs, `if (process.env.GITHUB_JOB ===
+  // 'verify') return false;`, killed 176 gate cases and 182 policy mutations in a
+  // completely green build. These are its behaviour, from inside scripts/; the
+  // outside witness carries the same table plus a real child-process run.
+  {
+    name: 'isMainModule answers only from its arguments, not from the environment',
+    run: () => {
+      // A real file, reached by a path rather than by `import.meta` — which
+      // this file may not say outside its own guard, by its own rule.
+      const entry = resolve('scripts/ci/main-module.mjs');
+      const url = pathToFileURL(entry).href;
+      const ask = () => [
+        isMainModule(url, ['node', entry]),
+        isMainModule(url, ['node', `${entry}x`]),
+        isMainModule(url, ['node']),
+        isMainModule(url, ['node', '']),
+      ];
+      const honest = ask();
+      const before = { ...process.env };
+      Object.assign(process.env, { CI: 'true', GITHUB_JOB: 'verify', GITHUB_ACTIONS: 'true' });
+      let poisoned;
+      try {
+        poisoned = ask();
+      } finally {
+        for (const key of ['CI', 'GITHUB_JOB', 'GITHUB_ACTIONS']) {
+          if (before[key] === undefined) delete process.env[key];
+          else process.env[key] = before[key];
+        }
+      }
+      const problems = [];
+      if (honest.join() !== [true, false, false, false].join()) {
+        problems.push(`isMainModule got the wrong answers from plain argv: ${honest.join()}`);
+      }
+      if (honest.join() !== poisoned.join()) {
+        problems.push(
+          `isMainModule changed its answer under CI's own environment: ${honest.join()} became ${poisoned.join()}`,
+        );
+      }
+      return problems;
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'every shared module under scripts/ci is described by the registry',
+    run: () => sharedModuleProblems(),
+    expect: 'clean',
+  },
+  {
+    name: 'the shared predicate with its registry row removed',
     run: () =>
-      checkerGraphProblems({
-        registry: [{ ...ENFORCEMENT[0], violate: undefined }],
-      }),
-    expect: /has no `violate` fixture/,
+      sharedModuleProblems(
+        process.cwd(),
+        undefined,
+        undefined,
+        ENFORCEMENT.filter((entry) => entry.definedIn !== 'scripts/ci/main-module.mjs'),
+      ),
+    expect: /main-module\.mjs is imported by \d+ other scripts/,
   },
   {
     // The cheapest way to satisfy checker-graph.mjs without satisfying anything
@@ -1803,7 +1887,7 @@ const CASES = [
           },
         ],
       }),
-    expect: /calls mainGuardProblems, which the registry/,
+    expect: /asserts on mainGuardProblems, which the registry/,
   },
 
   // ---- the build's assets, actually fetched (#40 round 5) ------------------

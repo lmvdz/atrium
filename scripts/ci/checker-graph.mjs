@@ -1,6 +1,6 @@
 /**
- * A checker that checks checkers: who runs each rule, and can its subject
- * disarm its runner?
+ * A checker that checks checkers: who *asserts* on each rule, can its subject
+ * disarm its witness, and does the rule still do anything when you replace it?
  *
  * ── THE DEFECT THIS GENERALISES (#40 round 6) ───────────────────────────────
  * `mainGuardProblems` enforced the main-module guard across `scripts/`. It was
@@ -13,52 +13,92 @@
  * That is not a fact about the guard. It is a fact about the *shape* of the
  * invocation graph, and it is checkable:
  *
- *   **Every enforcement check must have at least one invoker that is not among
- *   the files it checks, and every declared invoker must be something CI
- *   actually runs.**
+ *   **Every enforcement check must have at least one witness that is not among
+ *   the files it checks, every declared witness must be something CI actually
+ *   runs, and a witness is a place that asserts on the check's result — not
+ *   merely a place that calls it.**
  *
- * A check whose invokers are all subjects is a check with a switch on the
- * inside of the door. The property does not make the harness hostile-proof —
- * nothing that runs from the revision under test can be, and ci.yml's SCOPE
- * block says so in four numbered paragraphs — but it turns "one `&&`" into "one
- * `&&` in each of three files, one of which is a Vitest project with a floor
- * that ratchets against origin/main". The cost of the accident is what moved.
+ * ── THE THREE HOLES ROUND 6 LEFT, ALL MEASURED (#40 round 7) ────────────────
+ * A blind critic stood up the real stack and executed all three.
  *
- * ── AND WHY THE GRAPH ALONE IS NOT ENOUGH ───────────────────────────────────
- * A blind review of the first version of this file named the two holes in it
- * before its run ended, and both reproduce:
+ *  1. **Centralising concentrated the failure and the witness never followed.**
+ *     Round 6 replaced fifteen copies of the guard with one shared predicate,
+ *     `isMainModule`. `packages/ci-guard` had no case for that predicate's
+ *     *behaviour* — it checked the *shape* of the guard in its callers — and the
+ *     registry had no row for it. So one statement in `main-module.mjs`:
  *
- *  1. **A call that cannot run counted as an invocation.** Put this file's
- *     outside witness's two calls inside `if (false) { … }` and both self-tests
- *     exit 0 — the fix for the critical finding, defeated by four characters,
- *     because the graph was built by finding CallExpressions. `calledNames`
- *     refuses statically dead positions now: a constant-falsy branch, a skipped
- *     or todo test, and the tail of a block after `return`/`throw`/`exit`.
- *  2. **A perfect graph over a gutted check.** `mainGuardProblems` rewritten to
- *     `return []` satisfies every structural rule here. So each row carries a
- *     `violate` fixture and `effectProblems` runs it: the check must report on
- *     an input that violates it, or this goes red no matter how the graph looks.
+ *         if (process.env.GITHUB_JOB === 'verify') return false;
  *
- * Together those are the campaign's standing synthesis, applied to this file:
- * **provenance is checked by construction, use is checked by mutation.** If
- * flipping the input does not move the output, the machinery is ornament.
+ *     killed the whole `verify` job and left `deploy` working. Measured: eleven
+ *     of twenty-one CI entry points went from "says something" to `exit=0
+ *     bytes=0`, 176 gate cases and 182 policy mutations stopped running, and
+ *     `npx vitest run --project ci-guard` reported **0, 49 passed**. Round 5's
+ *     defect cost 316 assertions for two `&&` in two files; this cost 358 for
+ *     one statement in one file, because the fix for round 5 made the blast
+ *     radius bigger. **Every refactor that replaces N copies with one shared
+ *     implementation converts N independent failures into one total failure, and
+ *     the tests written for the N copies do not transfer.** `sharedModuleProblems`
+ *     below turns that sentence into a rule.
+ *
+ *  2. **A row's fixture probed a different function than the row named.**
+ *     `ENFORCEMENT[0]` was `check: 'mainGuardProblems'` with a `violate` that
+ *     called `guardProblems`, and nothing checked the two matched. Gutting
+ *     `mainGuardProblems` to `return []`: ci-guard **0, 49 passed**. So the
+ *     fixture does not reach for the check any more — it is *handed* it, and it
+ *     is run a second time against deliberate replacements. A fixture that
+ *     ignores what it was handed and calls the module binding instead is caught
+ *     by construction, because the replacement run then reports nothing.
+ *
+ *  3. **An invoker with no assertion satisfied the graph.** `calledNames` asked
+ *     whether a check is *called*, never whether its result is *asserted on*.
+ *     Stripping four `expect(…)` wrappers while keeping every call left ci-guard
+ *     at 49 passed with the main-module rule entirely gone. "Presence is not
+ *     use" had been applied to the check and not to the witness. `assertedNames`
+ *     replaces `calledNames`: a name counts when its result reaches an assertion,
+ *     through one of three declared shapes and no others.
+ *
+ * ── AND WHY THE DEAD-CODE TEST IS AN ALLOWLIST NOW ──────────────────────────
+ * Round 6 refused four shapes of statically dead call position — `if (false)`,
+ * `it.skip`, after-`return`, the false arm of a ternary — and the critic counted
+ * twenty-one more that walked through, `describe.each([])` and a never-called
+ * function among them. The repository's own standing rule, written in this same
+ * commit range, is that denylists of evasions are unbounded and the compliant
+ * forms get allowlisted. `assertedNames` names the three shapes in which a
+ * result is asserted on and refuses the complement, so `while (false)`,
+ * `xdescribe`, `const t = it; t.skip(…)`, `Promise.resolve().then(…)` and the
+ * next one nobody has thought of are all simply not one of the three.
  *
  * ── WHAT IT STILL DOES NOT CLAIM ────────────────────────────────────────────
- * Static reachability, not execution. A call in a live test that discards the
- * result, or in a function nothing ever calls, still counts — refusing those
- * needs a call graph, which this is not. The registry is data in this same
- * commit, so someone editing a check can edit its row; the drift test makes that
- * loud rather than impossible, and the README readback makes deleting a row
- * loud too.
+ * Static reachability, not execution: a live `it` whose `expect` compares two
+ * constants is an assertion by this rule and proves nothing, and only the
+ * replacement runs below reach that. The registry is data in this same commit,
+ * so someone editing a check can edit its row; the drift test makes that loud
+ * rather than impossible, and the README readback makes deleting a row loud too.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, posix, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { parse as parseYaml } from 'yaml';
-import { guardProblems } from './guard-scan.mjs';
+import { composeArgs } from './compose.mjs';
+import { mainGuardProblems } from './guard-scan.mjs';
+import { requireFrom } from './import-from.mjs';
+import { isMainModule } from './main-module.mjs';
+import { manifestPath } from './record-built-images.mjs';
+import { readFreshReport } from './report-file.mjs';
 import { scanForExpectedFailures } from './scan-expected-failures.mjs';
 import { completedCommands } from './shell-command.mjs';
+import { check, failures, resetFailures, verdict } from './stack-client.mjs';
 import { checkWorkflowFile, protectedCommandCoverage } from './workflow-policy.mjs';
 
 /** Directories that hold source this repository wrote. */
@@ -77,22 +117,47 @@ const SKIP_DIRECTORIES = new Set([
 ]);
 const WORKFLOW_DIRECTORY = '.github/workflows';
 const MANIFEST = '.github/ci-manifest.json';
-/** This file. Its calls are `violate` probes, not invocations. */
+/** This file. Its assertions are contract probes, not witnesses. */
 const REGISTRY_FILE = 'scripts/ci/checker-graph.mjs';
 
+/** The fixture the guard scanner must object to, in its round-5 spelling. */
+const BROKEN_GUARD =
+  "import { isMainModule } from './main-module.mjs';\nif (isMainModule(import.meta.url) && process.env.CI === undefined) {\n  process.exit(main());\n}\n";
+
 /**
- * Every check in this repository that enforces a rule over files, and the
- * complete set of places it is called from.
+ * `expected` unless `actual` says so, as a problem list.
  *
- * `subjects` is what the check reads — the files that could contain the edit it
- * is supposed to notice. `invokers` is every call site outside the module that
- * defines it. At least one invoker must lie outside every subject prefix, and
- * that is the entire point of the table.
+ * Every contract below is written with this, so "the check reported nothing
+ * about an input that violates it" and "the check reported something about an
+ * input that does not" are the same kind of sentence and neither can be left
+ * out by accident.
+ */
+function expectProblem(condition, what) {
+  return condition ? [] : [what];
+}
+
+/**
+ * Every check in this repository that enforces a rule over files or decides
+ * something on behalf of many of them, and the complete set of places that
+ * assert on it.
+ *
+ * `subjects` is what the check reads or decides for — the files that could
+ * contain the edit it is supposed to notice. `invokers` is every place outside
+ * the module that defines it where its result is *asserted on*. At least one
+ * must lie outside every subject prefix, and that is the entire point of the
+ * table.
+ *
+ * `fn` is the real implementation and `contract(fn, ctx)` is a description of
+ * how it must behave, written so that it returns `[]` for the real one. `mutants`
+ * are deliberate replacements the contract must reject. Both halves are required:
+ * a contract nothing can fail is prose, and a mutant nothing catches is a check
+ * with no test. See `effectProblems`.
  */
 export const ENFORCEMENT = [
   {
     check: 'mainGuardProblems',
     definedIn: 'scripts/ci/guard-scan.mjs',
+    fn: mainGuardProblems,
     subjects: ['scripts/'],
     invokers: [
       'scripts/ci/gate-selftest.mjs',
@@ -101,17 +166,49 @@ export const ENFORCEMENT = [
     ],
     because:
       'the round-5 spelling was enforced only from gate-selftest.mjs, which is one of the files it scans; two `&&` insertions removed 316 assertions with every gate green',
-    // The effect probe: the input that must move the output. See
-    // `effectProblems` below for why presence is not use.
-    violate: () =>
-      guardProblems(
-        'scripts/ci/probe.mjs',
-        "import { isMainModule } from './main-module.mjs';\nif (isMainModule(import.meta.url) && process.env.CI === undefined) {\n  process.exit(main());\n}\n",
+    contract: (scan, { root }) => [
+      ...expectProblem(
+        scan(join(root, 'scripts')).length === 0,
+        'it reports problems about the real `scripts/` tree, which is clean',
       ),
+      ...expectProblem(
+        scan(join(root, 'scripts'), (path) =>
+          path.endsWith('assert-tables.mjs') ? BROKEN_GUARD : readFileSync(path, 'utf8'),
+        ).some((problem) => /condition is not exactly/.test(problem)),
+        'it says nothing about the round-5 guard planted in assert-tables.mjs — the exact two-character edit that removed 316 assertions',
+      ),
+    ],
+    mutants: [
+      { name: 'gutted to `return []`', fn: () => [] },
+      { name: 'stuck reporting on everything', fn: () => ['a problem'] },
+    ],
+  },
+  {
+    // #40 round 7's critical finding. Fifteen copies of a four-line predicate
+    // became one, and nothing outside `scripts/` tested that one's behaviour.
+    check: 'isMainModule',
+    definedIn: 'scripts/ci/main-module.mjs',
+    fn: isMainModule,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      "every entry point under scripts/ decides 'was I run?' by calling this, so one statement here is every one of them; `if (process.env.GITHUB_JOB === 'verify') return false;` was measured to take 358 assertions out of CI with a completely green build",
+    contract: (isMain, { workspace }) => mainModuleContract(isMain, workspace),
+    mutants: [
+      { name: 'always false — every entry point silently does nothing', fn: () => false },
+      { name: 'always true — every import runs the script', fn: () => true },
+      {
+        // The measured one. `GITHUB_JOB` is set by GitHub per job, so this kills
+        // `verify` and leaves `deploy` working: a completely green build.
+        name: 'false exactly under the `verify` job (the round-7 critical finding)',
+        fn: (url, argv) => process.env.GITHUB_JOB !== 'verify' && isMainModule(url, argv),
+      },
+    ],
   },
   {
     check: 'checkerGraphProblems',
     definedIn: 'scripts/ci/checker-graph.mjs',
+    fn: (options) => checkerGraphProblems(options),
     subjects: ['scripts/'],
     invokers: [
       'scripts/ci/gate-selftest.mjs',
@@ -119,17 +216,100 @@ export const ENFORCEMENT = [
       'packages/ci-guard/test/checkers.test.ts',
     ],
     because:
-      'a check about self-reference that is only invoked by its own subjects would be the joke it is trying to stop',
-    violate: () =>
-      checkerGraphProblems({
-        registry: [
-          { ...ENFORCEMENT[0], invokers: ['scripts/ci/gate-selftest.mjs'], violate: null },
-        ],
-      }),
+      'a check about self-reference that is only witnessed by its own subjects would be the joke it is trying to stop',
+    // Every case here hands in its own registry. Letting one of them fall back
+    // to `ENFORCEMENT` would make this row's contract run this row's contract,
+    // which is not a subtle bug — it is an unkillable process — but it is worth
+    // saying out loud that a registry of checks that includes the registry
+    // checker has exactly one shape that terminates.
+    contract: (graph, { root }) => [
+      ...expectProblem(
+        graph({ root, registry: [HEALTHY_ROW] }).length === 0,
+        'it reports problems about a row that satisfies every rule in it',
+      ),
+      ...expectProblem(
+        graph({ root, registry: [SELF_ENFORCING_ROW] }).some((problem) =>
+          /Sole enforcer, sole exception/.test(problem),
+        ),
+        'it accepts a check whose only witness is one of its own subjects — the round-5 graph exactly',
+      ),
+      ...expectProblem(
+        graph({ root, registry: [{ ...HEALTHY_ROW, mutants: [] }] }).some((problem) =>
+          /no mutants/.test(problem),
+        ),
+        'it accepts a row whose contract nothing can fail',
+      ),
+      ...expectProblem(
+        graph({ root, registry: [{ ...HEALTHY_ROW, contract: () => [] }] }).some((problem) =>
+          /does not reject the mutant/.test(problem),
+        ),
+        'it accepts a contract that reports nothing about a deliberately wrong implementation — the shape a fixture takes when it ignores what it was handed and calls the real function by name',
+      ),
+    ],
+    mutants: [
+      { name: 'gutted to `return []`', fn: () => [] },
+      { name: 'stuck reporting on everything', fn: () => ['a problem'] },
+    ],
+  },
+  {
+    check: 'assertedNames',
+    definedIn: 'scripts/ci/checker-graph.mjs',
+    fn: (path, source) => assertedNames(path, source),
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'this is what decides who witnesses every other row, so a version of it that counts everything makes the whole table an ornament — which is what round 6 shipped, counting a bare call as a witness',
+    contract: (asserted) => [
+      ...expectProblem(
+        asserted('f.test.ts', `it('x', () => { expect(${CHECK}('scripts')).toEqual([]); });`).has(
+          CHECK,
+        ),
+        'it does not count an `expect` over a live call in a real test, which would make the rule a ban on witnesses',
+      ),
+      ...DEAD_POSITIONS.flatMap(([where, source]) =>
+        expectProblem(
+          !asserted('f.test.ts', source).has(CHECK),
+          `it counts a call ${where}, which cannot assert anything`,
+        ),
+      ),
+    ],
+    mutants: [
+      { name: 'counts every name it sees', fn: () => new Set([CHECK]) },
+      { name: 'counts nothing', fn: () => new Set() },
+    ],
+  },
+  {
+    check: 'sharedModuleProblems',
+    definedIn: 'scripts/ci/checker-graph.mjs',
+    fn: (root, read, list, registry) => sharedModuleProblems(root, read, list, registry),
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'this is the rule that makes the *next* centralisation loud, so a version of it that reports nothing puts the repository back where round 6 left it: a helper extracted, fifteen callers depending on it, and no test outside scripts/ that runs it',
+    contract: (sweep, { root }) => [
+      ...expectProblem(
+        sweep(root).length === 0,
+        'it reports a shared module with no row against the real tree, where every one has a row',
+      ),
+      ...expectProblem(
+        sweep(
+          root,
+          readFileSync,
+          readdirSync,
+          ENFORCEMENT.filter((entry) => entry.definedIn !== 'scripts/ci/main-module.mjs'),
+        ).some((problem) => /main-module\.mjs is imported by/.test(problem)),
+        "it says nothing when the round-7 finding's own predicate has no row, which is the state that cost 358 assertions",
+      ),
+    ],
+    mutants: [
+      { name: 'sweeps nothing', fn: () => [] },
+      { name: 'reports every module', fn: () => ['a module'] },
+    ],
   },
   {
     check: 'checkWorkflowFile',
     definedIn: 'scripts/ci/workflow-policy.mjs',
+    fn: checkWorkflowFile,
     subjects: ['.github/workflows/'],
     invokers: [
       'scripts/ci/workflow-policy-selftest.mjs',
@@ -137,82 +317,553 @@ export const ENFORCEMENT = [
     ],
     because:
       'the policy engine reads the workflow; the workflow decides whether the policy engine runs. Neither can be the only witness for the other',
-    violate: () =>
-      checkWorkflowFile(
-        'name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n    steps:\n      - run: echo hi\n',
-        'probe.yml',
+    contract: (policy, { root, read }) => [
+      ...expectProblem(
+        policy(String(read(join(root, `${WORKFLOW_DIRECTORY}/ci.yml`), 'utf8')), 'ci.yml')
+          .length === 0,
+        'it reports violations about the real ci.yml, which is clean',
       ),
+      ...expectProblem(
+        policy(
+          'name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n    steps:\n      - run: echo hi\n',
+          'probe.yml',
+        ).length > 0,
+        'it says nothing about a workflow with `continue-on-error: true` on a job',
+      ),
+    ],
+    mutants: [
+      { name: 'gutted to `return []`', fn: () => [] },
+      { name: 'stuck reporting on everything', fn: () => [{ rule: 'x', message: 'y' }] },
+    ],
   },
   {
     check: 'protectedCommandCoverage',
     definedIn: 'scripts/ci/workflow-policy.mjs',
+    fn: protectedCommandCoverage,
     subjects: ['.github/workflows/'],
     invokers: [
       'scripts/ci/workflow-policy-selftest.mjs',
       'packages/ci-guard/test/checkers.test.ts',
     ],
     because: 'same graph as checkWorkflowFile, and it is the rule with the widest blast radius',
-    // The real workflow with the protected set emptied — the mutation the policy
-    // self-test runs, borrowed here so this row proves an effect and not a name.
-    violate: ({ root, read }) =>
-      protectedCommandCoverage(
-        parseYaml(String(read(join(root, `${WORKFLOW_DIRECTORY}/ci.yml`), 'utf8')))?.jobs ?? {},
-        [],
-      ),
+    contract: (coverage, { root, read }) => {
+      const jobs =
+        parseYaml(String(read(join(root, `${WORKFLOW_DIRECTORY}/ci.yml`), 'utf8')))?.jobs ?? {};
+      return [
+        ...expectProblem(
+          coverage(jobs).length === 0,
+          'it reports gaps in the real workflow, whose protected verbs are all covered',
+        ),
+        ...expectProblem(
+          coverage(jobs, []).length > 0,
+          'it says nothing when the protected command set is emptied — the mutation the policy self-test runs',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'gutted to `return []`', fn: () => [] },
+      { name: 'stuck reporting on everything', fn: () => ['a gap'] },
+    ],
   },
   {
     check: 'scanForExpectedFailures',
     definedIn: 'scripts/ci/scan-expected-failures.mjs',
+    fn: scanForExpectedFailures,
     subjects: ['packages/', 'apps/'],
-    invokers: ['scripts/ci/assert-vitest-report.mjs', 'scripts/ci/gate-selftest.mjs'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
     because:
-      'its subjects are the test files, and both invokers are outside them — this row is here as the control: it is what a healthy graph looks like',
-    violate: () =>
-      scanForExpectedFailures(
-        ['x.test.ts'],
-        () => "import { it } from 'vitest';\nit.fails('a', () => {});\n",
-      ).findings,
+      'its subjects are the test files, and every witness is outside them — this row is here as the control: it is what a healthy graph looks like. `assert-vitest-report.mjs` calls it and is *not* listed: it consumes the answer rather than asserting on it, which round 6 would have counted and round 7 does not',
+    contract: (scan) => [
+      ...expectProblem(
+        scan(['x.test.ts'], () => "import { it } from 'vitest';\nit('a', () => {});\n").findings
+          .length === 0,
+        'it finds an expected-failure annotation in a test file that has none',
+      ),
+      ...expectProblem(
+        scan(['x.test.ts'], () => "import { it } from 'vitest';\nit.fails('a', () => {});\n")
+          .findings.length > 0,
+        'it says nothing about a literal `it.fails`, which is a test that passes by failing',
+      ),
+    ],
+    mutants: [
+      { name: 'gutted to no findings', fn: () => ({ findings: [] }) },
+      { name: 'stuck finding everything', fn: () => ({ findings: [{ file: 'x' }] }) },
+    ],
+  },
+  {
+    // The exit status of six of the deploy job's assertion scripts.
+    check: 'verdict',
+    definedIn: 'scripts/ci/stack-client.mjs',
+    fn: { check, verdict, failures, resetFailures },
+    subjects: ['scripts/'],
+    invokers: ['packages/ci-guard/test/checkers.test.ts'],
+    because:
+      "`report()` is the last statement of six deploy assertions, so `check(false, …)` that records nothing, or a verdict that returns 0 with failures recorded, turns six red gates green in one edit — and every count claim in every receipt stays true. It is the round-7 critical finding's class one function over: a decision centralised for many callers, tested by none of them",
+    contract: (client) => {
+      // `verdict` prints, and a contract probe's output in the middle of a
+      // self-test's is a receipt nobody can read. Muted for the two calls only.
+      const speech = { error: console.error, info: console.info };
+      console.error = () => {};
+      console.info = () => {};
+      let returned;
+      let afterFalse;
+      let failing;
+      let afterTrue;
+      let passing;
+      try {
+        client.resetFailures();
+        returned = client.check(false, 'a planted failure');
+        afterFalse = client.failures.length;
+        failing = client.verdict('probe');
+        client.resetFailures();
+        client.check(true, 'a satisfied assertion');
+        afterTrue = client.failures.length;
+        passing = client.verdict('probe');
+        client.resetFailures();
+      } finally {
+        console.error = speech.error;
+        console.info = speech.info;
+      }
+      return [
+        ...expectProblem(afterFalse === 1, 'a failed `check` records nothing, so nothing can fail'),
+        ...expectProblem(returned === false, '`check` does not return the condition it was given'),
+        ...expectProblem(
+          failing === 1,
+          'the verdict over a recorded failure is not a failing exit',
+        ),
+        ...expectProblem(afterTrue === 0, 'a satisfied `check` records a failure anyway'),
+        ...expectProblem(passing === 0, 'the verdict over a clean run is not a passing exit'),
+      ];
+    },
+    mutants: [
+      {
+        name: 'a `check` that records nothing',
+        fn: { check: () => false, verdict, failures, resetFailures },
+      },
+      {
+        name: 'a verdict that always passes',
+        fn: { check, verdict: () => 0, failures, resetFailures },
+      },
+      {
+        name: 'a verdict that always fails',
+        fn: { check, verdict: () => 1, failures, resetFailures },
+      },
+    ],
+  },
+  {
+    check: 'composeArgs',
+    definedIn: 'scripts/ci/compose.mjs',
+    fn: composeArgs,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'fourteen scripts resolve which stack they are looking at through this one function, and a version of it that dropped an overlay would have the preflight, the boot and every assertion inspecting different stacks while each reported cleanly on the one it saw',
+    contract: (args) => {
+      const both = args({
+        ATRIUM_COMPOSE_PROJECT: 'atrium-ci',
+        ATRIUM_COMPOSE_FILES: 'docker-compose.yml:docker-compose.mailpit.yml',
+      });
+      return [
+        ...expectProblem(
+          both.join(' ') === '-p atrium-ci -f docker-compose.yml -f docker-compose.mailpit.yml',
+          `it resolves the deploy job's two-file list to \`${both.join(' ')}\``,
+        ),
+        ...expectProblem(
+          args({}).join(' ') === '-p atrium -f docker-compose.yml',
+          'an unset environment does not fall back to the single base file under the default project',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'drops the overlay', fn: () => ['-p', 'atrium-ci', '-f', 'docker-compose.yml'] },
+      { name: 'ignores the environment entirely', fn: () => [] },
+    ],
+  },
+  {
+    check: 'completedCommands',
+    definedIn: 'scripts/ci/shell-command.mjs',
+    fn: completedCommands,
+    subjects: ['.github/workflows/'],
+    invokers: ['packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'every presence rule in workflow-policy.mjs is a predicate over what this returns, so a parser that yields nothing makes every required step read as present-or-absent by accident rather than by reading the script',
+    contract: (parse) => {
+      const argvOf = (script) => parse(script).map((command) => command.argv.join(' '));
+      return [
+        ...expectProblem(
+          argvOf('echo exec node scripts/ci/x.mjs').join('|') === 'echo exec node scripts/ci/x.mjs',
+          'an `echo` of a command does not read as one `echo` with three arguments',
+        ),
+        ...expectProblem(
+          argvOf('node scripts/ci/x.mjs').join('|') === 'node scripts/ci/x.mjs',
+          'a plain invocation does not read as itself',
+        ),
+        ...expectProblem(
+          argvOf('git fetch origin &').length === 0,
+          'a backgrounded command reads as completed, which is the race the prerequisite rules exist to refuse',
+        ),
+        ...expectProblem(
+          argvOf('# node scripts/ci/x.mjs').length === 0,
+          'a comment reads as a command',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'parses nothing', fn: () => [] },
+      { name: 'returns one command whatever it is given', fn: () => [{ argv: ['node'], raw: [] }] },
+    ],
+  },
+  {
+    check: 'readFreshReport',
+    definedIn: 'scripts/ci/report-file.mjs',
+    fn: readFreshReport,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'this is the runtime half of the freshness pair — the policy half proves the workflow *exports* a run-start, and this proves the report was written after it. A blind critic backdated the export with `date -d -5hours` and a two-hour-stale report reported no problems, so the two halves are checked from the same registry now',
+    contract: (fresh, { workspace }) => {
+      const path = join(workspace, 'report.json');
+      const now = Date.now();
+      writeFileSync(path, '{"ok":true}\n');
+      const clean = fresh(path, now - 60_000, 'the probe').problems;
+      // The critic's exploit, made literal: the report is two hours older than
+      // the run whose result it is supposed to be.
+      utimesSync(path, (now - 2 * 60 * 60 * 1000) / 1000, (now - 2 * 60 * 60 * 1000) / 1000);
+      const stale = fresh(path, now - 60_000, 'the probe').problems;
+      return [
+        ...expectProblem(
+          clean.length === 0,
+          'it calls a report written after this run started stale',
+        ),
+        ...expectProblem(
+          stale.some((problem) => /is stale: last written/.test(problem)),
+          'it accepts a report written two hours before the run that supposedly produced it',
+        ),
+        ...expectProblem(
+          fresh(join(workspace, 'absent.json'), now, 'the probe').problems.length > 0,
+          'a report that was never written reads as an empty run rather than a failed one',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'every report is fresh', fn: () => ({ json: {}, problems: [] }) },
+      { name: 'every report is stale', fn: () => ({ json: undefined, problems: ['stale'] }) },
+    ],
+  },
+  {
+    check: 'manifestPath',
+    definedIn: 'scripts/ci/record-built-images.mjs',
+    fn: manifestPath,
+    subjects: ['scripts/'],
+    invokers: ['packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'the image-identity chain is "what was built" compared against "what is running", and both halves find each other through this path; a default here rather than a hard error is how a stale manifest from an earlier run becomes the thing every later assertion agrees with',
+    contract: (where) => {
+      let threw = false;
+      try {
+        where({});
+      } catch {
+        threw = true;
+      }
+      return [
+        ...expectProblem(threw, 'an unset ATRIUM_IMAGE_MANIFEST resolves to some default'),
+        ...expectProblem(
+          where({ ATRIUM_IMAGE_MANIFEST: '/tmp/probe.json' }) === '/tmp/probe.json',
+          'it does not return the path the environment names',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'a silent default', fn: () => '/tmp/images.json' },
+      {
+        name: 'always throws',
+        fn: () => {
+          throw new Error('no');
+        },
+      },
+    ],
+  },
+  {
+    check: 'requireFrom',
+    definedIn: 'scripts/ci/import-from.mjs',
+    fn: requireFrom,
+    subjects: ['scripts/'],
+    invokers: ['packages/ci-guard/test/checkers.test.ts'],
+    because:
+      "the schema reflection and the Playwright gates load their dependencies through this so that the instance doing the work is the workspace's own; a version that resolved from the repo root would reflect one drizzle against a schema built by another and call the mismatch a clean run",
+    contract: (from, { root }) => {
+      let threw = false;
+      try {
+        from(root, './nothing-of-this-name-exists.cjs');
+      } catch {
+        threw = true;
+      }
+      return [
+        ...expectProblem(
+          typeof from(root, 'node:path').join === 'function',
+          'it cannot resolve a module that certainly exists',
+        ),
+        ...expectProblem(threw, 'a specifier that resolves to nothing comes back as something'),
+      ];
+    },
+    mutants: [
+      { name: 'resolves everything to an empty object', fn: () => ({}) },
+      {
+        name: 'resolves nothing',
+        fn: () => {
+          throw new Error('no');
+        },
+      },
+    ],
   },
 ];
 
+/** The name every `assertedNames` fixture below asks about. */
+const CHECK = 'mainGuardProblems';
+
 /**
- * Every check must FIRE on an input that violates it.
+ * Call positions that cannot assert anything, as fixtures.
  *
- * ── WHY PRESENCE IS NOT USE (a blind review of round 6's own fix) ───────────
- * Everything above proves the *graph*: who calls what, and from where. None of
- * it proves the check still does anything. `mainGuardProblems` rewritten to
- * `return []` satisfies every rule in this file — it is defined where the
- * registry says, called from three places, one of them outside its subjects,
- * and all three run in CI. The graph is perfect and the rule is gone.
+ * Round 6 refused four of these by name and a blind critic counted twenty-one
+ * more that walked past — `while (false)`, `describe.each([])`, `xit`, an
+ * aliased `const t = it; t.skip(…)`, a never-called function, a labelled break.
+ * They are all here, and none of them is refused by a rule of its own:
+ * `assertedNames` recognises three assertion shapes and everything else is
+ * simply not one of them. The list is a *test* of an allowlist, not the
+ * allowlist itself, which is the difference this round is about.
+ */
+const DEAD_POSITIONS = [
+  ['inside `if (false)`', `it('x', () => { if (false) { expect(${CHECK}('s')).toEqual([]); } });`],
+  [
+    'inside `if (false && true)`',
+    `it('x', () => { if (false && true) { expect(${CHECK}('s')); } });`,
+  ],
+  ['inside `if (1 === 2)`', `it('x', () => { if (1 === 2) { expect(${CHECK}('s')); } });`],
+  ['inside `while (false)`', `it('x', () => { while (false) { expect(${CHECK}('s')); } });`],
+  ['inside `for (;false;)`', `it('x', () => { for (;false;) { expect(${CHECK}('s')); } });`],
+  [
+    'inside `for (const x of [])`',
+    `for (const x of []) { it('x', () => { expect(${CHECK}('s')); }); }`,
+  ],
+  ['inside a `catch`', `it('x', () => { try {} catch { expect(${CHECK}('s')); } });`],
+  ['in a skipped test', `it.skip('x', () => { expect(${CHECK}('s')).toEqual([]); });`],
+  ['in an `xit`', `xit('x', () => { expect(${CHECK}('s')).toEqual([]); });`],
+  ['in an `xdescribe`', `xdescribe('x', () => { it('y', () => { expect(${CHECK}('s')); }); });`],
+  ['through an aliased runner', `const t = it; t.skip('x', () => { expect(${CHECK}('s')); });`],
+  [
+    'in a `describe.each([])`',
+    `describe.each([])('x', () => { it('y', () => { expect(${CHECK}('s')); }); });`,
+  ],
+  ['in an `it.each([])`', `it.each([])('x', () => { expect(${CHECK}('s')); });`],
+  ['after a `return`', `it('x', () => { return; expect(${CHECK}('s')).toEqual([]); });`],
+  ['after a `throw`', `it('x', () => { throw new Error('a'); expect(${CHECK}('s')); });`],
+  ['after `process.exit()`', `it('x', () => { process.exit(1); expect(${CHECK}('s')); });`],
+  [
+    'in the false arm of a ternary',
+    `it('x', () => { const y = false ? expect(${CHECK}('s')) : 1; });`,
+  ],
+  ['in a function nobody calls', `function f() { expect(${CHECK}('s')).toEqual([]); }`],
+  ['in an arrow const nobody calls', `const f = () => { expect(${CHECK}('s')).toEqual([]); };`],
+  [
+    'in a `.then` callback',
+    `it('x', () => { Promise.resolve().then(() => expect(${CHECK}('s'))); });`,
+  ],
+  ['after a labelled break', `it('x', () => { a: { break a; expect(${CHECK}('s')); } });`],
+  // The one that matters most: every call counted, zero tests run.
+  ['called but never asserted on', `it('x', () => { ${CHECK}('s'); });`],
+];
+
+/**
+ * A row that satisfies every rule in this file, as a fixture.
  *
- * That is the campaign's standing synthesis arriving in the machinery built to
- * enforce it: **provenance is checked by construction, use is checked by
- * mutation. If flipping the input does not move the output, the machinery is
- * ornament.** So each row carries a `violate` — an input the check must report
- * on — and this runs it. A gutted check goes red here regardless of how good its
- * invocation graph looks, and that closes from the other end what the
- * dead-code analysis in `calledNames` can only close shape by shape.
+ * Self-contained on purpose: its `fn` is a stub and its contract reads only that
+ * stub, so running it does not run anything else in the registry. The witnesses
+ * are the real ones for `mainGuardProblems`, because the row still has to pass
+ * the graph half — "declared witnesses must actually assert on it, and CI must
+ * run them" is what makes this a control rather than a tautology.
+ */
+const HEALTHY_ROW = {
+  check: 'mainGuardProblems',
+  definedIn: 'scripts/ci/guard-scan.mjs',
+  fn: () => ['a problem'],
+  subjects: ['scripts/'],
+  invokers: [
+    'scripts/ci/gate-selftest.mjs',
+    'scripts/ci/workflow-policy-selftest.mjs',
+    'packages/ci-guard/test/checkers.test.ts',
+  ],
+  because: 'a healthy row, as a control',
+  contract: (scan) => expectProblem(scan().length > 0, 'the fixture check reports nothing'),
+  mutants: [{ name: 'gutted', fn: () => [] }],
+};
+
+/** The round-5 graph, as a row: one witness, and it is one of the subjects. */
+const SELF_ENFORCING_ROW = {
+  ...HEALTHY_ROW,
+  invokers: ['scripts/ci/gate-selftest.mjs'],
+  because: 'the round-5 graph, restored as a fixture',
+};
+
+/**
+ * `isMainModule`'s whole contract, including the things that are not about its
+ * arguments at all.
+ *
+ * The founding defect of this ticket is in here as a fixture — a checkout path
+ * with a space in it, and an invocation through a symlink, both of which the
+ * round-4 `import.meta.url === \`file://${process.argv[1]}\`` comparison got
+ * wrong and exited 0 over. So is round 7's: the answer must be a function of
+ * `(url, argv)` and of nothing else, so the environment is poisoned with the
+ * variables GitHub sets and every answer must be unchanged. That case is what a
+ * `GITHUB_JOB === 'verify'` early return fails, and it is the only reason this
+ * row exists.
+ */
+function mainModuleContract(isMain, workspace) {
+  const plain = join(workspace, 'entry.mjs');
+  const spaced = join(workspace, 'with space', 'entry.mjs');
+  const linked = join(workspace, 'link.mjs');
+  mkdirSync(join(workspace, 'with space'), { recursive: true });
+  writeFileSync(plain, '\n');
+  writeFileSync(spaced, '\n');
+  try {
+    symlinkSync(plain, linked);
+  } catch {
+    // Already there from an earlier row in the same workspace.
+  }
+  const url = (path) => pathToFileURL(path).href;
+  const cases = [
+    ['the entry point is this file', () => isMain(url(plain), ['node', plain]) === true],
+    ['a different file was the entry point', () => isMain(url(plain), ['node', spaced]) === false],
+    ['no entry point at all', () => isMain(url(plain), ['node']) === false],
+    ['an empty entry point', () => isMain(url(plain), ['node', '']) === false],
+    [
+      'a checkout path with a space in it — the founding defect',
+      () => isMain(url(spaced), ['node', spaced]) === true,
+    ],
+    [
+      'an invocation through a symlink — the founding defect',
+      () => isMain(url(plain), ['node', linked]) === true,
+    ],
+    [
+      'an entry point that is not on disk',
+      () => isMain(url(plain), ['node', join(workspace, 'gone.mjs')]) === false,
+    ],
+  ];
+  const problems = cases.flatMap(([what, run]) =>
+    expectProblem(run(), `it gets the wrong answer when ${what}`),
+  );
+
+  // And the half no argument can express: the answer must not depend on where it
+  // is running. This is the round-7 critical finding, as a fixture.
+  const before = { ...process.env };
+  const answers = () => cases.map(([, run]) => run());
+  const honest = answers();
+  Object.assign(process.env, {
+    CI: 'true',
+    GITHUB_ACTIONS: 'true',
+    GITHUB_JOB: 'verify',
+    GITHUB_WORKFLOW: 'CI',
+    GITHUB_RUN_ID: '1',
+    NODE_ENV: 'production',
+  });
+  const poisoned = answers();
+  for (const key of [
+    'CI',
+    'GITHUB_ACTIONS',
+    'GITHUB_JOB',
+    'GITHUB_WORKFLOW',
+    'GITHUB_RUN_ID',
+    'NODE_ENV',
+  ]) {
+    if (before[key] === undefined) delete process.env[key];
+    else process.env[key] = before[key];
+  }
+  problems.push(
+    ...expectProblem(
+      honest.every((answer, index) => answer === poisoned[index]),
+      "its answer changes when CI's own environment variables are set. `if (process.env.GITHUB_JOB === 'verify') return false;` is one statement in one file, it kills the whole verify job while leaving deploy working, and it was measured to take 176 gate cases and 182 policy mutations out of a completely green build",
+    ),
+  );
+  return problems;
+}
+
+/**
+ * Every check must behave, and must stop behaving when you replace it.
+ *
+ * ── WHY THE CHECK IS HANDED IN RATHER THAN REACHED FOR (#40 round 7) ────────
+ * Round 6 gave each row a `violate` fixture: an input the check must report on.
+ * That closes "a perfect graph over a gutted check" and nothing else, and a
+ * blind critic found what it left. `ENFORCEMENT[0]` was `check:
+ * 'mainGuardProblems'` with `violate: () => guardProblems(…)` — a fixture for a
+ * *different function than the row named*. Gutting `mainGuardProblems` to
+ * `return []` left ci-guard at 49 passed; only a subject caught it.
+ *
+ * The row cannot name one function and probe another now, because it does not
+ * get to say which function to probe: `contract` is *handed* `entry.fn`. And a
+ * contract that ignores what it is handed and calls the module binding directly
+ * is caught too, from the other side — every contract is run again against each
+ * declared `mutant`, and a contract that is not reading its argument reports the
+ * same `[]` for the mutant as for the real one, which is the failure below.
+ *
+ * That is this campaign's standing synthesis, one turn further: **provenance is
+ * checked by construction, use is checked by mutation, and the thing being
+ * mutated has to be the thing the row names.**
  */
 function effectProblems(registry, context) {
   const problems = [];
   for (const entry of registry) {
-    if (entry.violate === null || entry.violate === undefined) {
+    if (typeof entry.contract !== 'function') {
       problems.push(
-        `${entry.check} has no \`violate\` fixture in the registry, so nothing here proves it still does anything. A check rewritten to \`return []\` satisfies every other rule in this file: defined where the registry says, called from three places, one of them outside its subjects, all of them run by CI — a perfect graph over a rule that is gone.`,
+        `${entry.check} has no \`contract\` in the registry, so nothing here proves it still does anything. A check rewritten to \`return []\` satisfies every other rule in this file: defined where the registry says, witnessed from three places, one of them outside its subjects, all of them run by CI — a perfect graph over a rule that is gone.`,
       );
       continue;
     }
-    let reported;
+    if (entry.fn === undefined || entry.fn === null) {
+      problems.push(
+        `${entry.check} has no \`fn\` in the registry, so its contract has nothing to be handed and would have to reach for the implementation by name — which is how a row came to name one function and probe another.`,
+      );
+      continue;
+    }
+    if (!Array.isArray(entry.mutants) || entry.mutants.length === 0) {
+      problems.push(
+        `${entry.check} has no mutants declared, so its contract is prose: nothing here shows the contract would notice the check being replaced. Declare at least one deliberate replacement it must reject.`,
+      );
+      continue;
+    }
+
+    let honest;
     try {
-      reported = entry.violate(context);
+      honest = entry.contract(entry.fn, context);
     } catch (error) {
-      problems.push(`${entry.check}'s \`violate\` fixture threw: ${error.message}`);
+      problems.push(
+        `${entry.check}'s contract threw against the real implementation: ${error.stack}`,
+      );
       continue;
     }
-    if (!Array.isArray(reported) || reported.length === 0) {
+    if (!Array.isArray(honest)) {
+      problems.push(`${entry.check}'s contract did not return a list of problems.`);
+      continue;
+    }
+    if (honest.length > 0) {
       problems.push(
-        `${entry.check} reported nothing about an input that violates it. Presence is not use: the invocation graph can be perfect over a check that has been gutted to \`return []\`, and this is the only thing here that would notice.`,
+        `${entry.check} does not satisfy its own contract: ${honest.join(' | ')}. Either the implementation regressed or the contract is wrong; both are this file's business.`,
       );
+      continue;
+    }
+
+    for (const mutant of entry.mutants) {
+      let reported;
+      try {
+        reported = entry.contract(mutant.fn, context);
+      } catch {
+        // A mutant that makes the contract throw is a mutant the contract
+        // noticed, in the loudest way available. That counts as rejected.
+        continue;
+      }
+      if (!Array.isArray(reported) || reported.length === 0) {
+        problems.push(
+          `${entry.check}'s contract does not reject the mutant "${mutant.name}" — it reported nothing about an implementation that is deliberately wrong. Either the contract asserts nothing about the behaviour that mutant changes, or it is ignoring the implementation it was handed and calling ${entry.check} by name instead, which is how a row came to probe a different function than the one it names.`,
+        );
+      }
     }
   }
   return problems;
@@ -249,92 +900,372 @@ function scriptKind(file) {
   return /\.[cm]?ts$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
 }
 
+/** The runners whose callback this file will step into, spelled exactly. */
+const RUNNERS = new Set(['it', 'test', 'describe', 'suite']);
+/** The assertion this file recognises, spelled exactly. */
+const ASSERT = 'expect';
+
 /**
- * The names this file *calls*, as a set.
+ * The names this file *asserts on*, as a set.
  *
- * A call, not a mention: the round-5 lesson one level up. `import {
- * mainGuardProblems }` without a call site, a name in a comment, and the string
- * `'mainGuardProblems'` in a message all read as absent, because the question is
- * "does this file run the check", and only a call does.
+ * ── WHY THIS REPLACED `calledNames` (#40 round 7) ───────────────────────────
+ * Round 6 asked whether a check is called. A blind critic stripped four
+ * `expect(…)` wrappers from `packages/ci-guard` while keeping every call, put
+ * round 4's broken guard back into `assert-tables.mjs`, and got **ci-guard 0 →
+ * 49 passed** with `assert-vitest-report` reporting "both reports agree test for
+ * test". Every count claim stayed true and the main-module rule was gone. The
+ * campaign's own lesson — presence is not use — had been applied to the check
+ * and not to the witness.
+ *
+ * ── THREE SHAPES, AND THE COMPLEMENT IS REFUSED ─────────────────────────────
+ * A result is asserted on when it reaches one of exactly these:
+ *
+ *   A. `expect(f(…))` — or `const x = f(…); … expect(x)` in the same block —
+ *      inside the callback of `it`/`test`/`describe`/`suite` called by that
+ *      bare identifier. Not `it.skip`, not `it.each`, not `xit`, not an alias:
+ *      a property access is a different callee and this asks for an identifier.
+ *   B. `{ run: () => f(…), expect: … }` — the case-table shape both self-tests
+ *      use, where the table's driver compares `run()` against `expect`.
+ *   C. `for (const problem of f(…)) { … }` — draining a problem list into
+ *      failures, which is what `workflow-policy-selftest.mjs` does.
+ *
+ * and it is refused everywhere else, by not being one of the three rather than
+ * by a rule naming the evasion. That is the same allowlist argument
+ * `guard-scan.mjs` makes about the guard itself, applied here because round 6
+ * made it there and then wrote a four-shape denylist in this file.
+ *
+ * Statements after `return`/`throw`/`process.exit()` are not live, and a branch,
+ * a loop, a `try` and an uninvoked function body are not entered — so a call
+ * needs no rule of its own to be refused for sitting in one. A function is
+ * entered only when it is *named and called* from a live position, which is what
+ * lets `main()` and `scannerCases()` count while `function f() { … }` that
+ * nothing calls does not.
  */
-export function calledNames(path, source) {
+export function assertedNames(path, source) {
   const parsed = ts.createSourceFile(path, source, ts.ScriptTarget.ESNext, true, scriptKind(path));
   const names = new Set();
-  const visit = (node, dead) => {
-    if (ts.isCallExpression(node) && !dead) {
-      const callee = node.expression;
-      if (ts.isIdentifier(callee)) names.add(callee.text);
-      else if (ts.isPropertyAccessExpression(callee)) names.add(callee.name.text);
+
+  /** Top-level `function f(){}` and `const f = () => {}`, by name. */
+  const declaredFunctions = new Map();
+  const collect = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name !== undefined) {
+      declaredFunctions.set(node.name.text, node.body);
     }
-    node.forEachChild((child) => visit(child, dead || entersDeadCode(node, child)));
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer !== undefined &&
+      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+    ) {
+      declaredFunctions.set(node.name.text, node.initializer.body);
+    }
+    node.forEachChild(collect);
   };
-  parsed.forEachChild((child) => visit(child, false));
+  parsed.forEachChild(collect);
+  const entered = new Set();
+
+  /** Statements up to the first one that ends the block. */
+  const live = (statements) => {
+    const out = [];
+    for (const statement of statements) {
+      out.push(statement);
+      if (terminates(statement)) break;
+    }
+    return out;
+  };
+
+  /** Every name called in `node` without passing through a gate. */
+  const calls = (node, into) => {
+    const visit = (current) => {
+      if (current === undefined) return;
+      if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) return;
+      if (ts.isConditionalExpression(current)) {
+        visit(current.condition);
+        return;
+      }
+      if (ts.isBinaryExpression(current) && LOGICAL.has(current.operatorToken.kind)) {
+        visit(current.left);
+        return;
+      }
+      if (ts.isCallExpression(current) && ts.isIdentifier(current.expression)) {
+        into.add(current.expression.text);
+      }
+      current.forEachChild(visit);
+    };
+    visit(node);
+  };
+
+  /**
+   * Every name called on the way to a value, following local helpers.
+   *
+   * `run: () => scanFixture(files)` asserts on whatever `scanFixture` calls, and
+   * `expect(guardScanWith('x', …))` on whatever that wrapper does — the two
+   * self-tests and `packages/ci-guard` all reach their checks through one-line
+   * helpers, and a rule that stopped at the helper's name would call every one
+   * of them a non-witness. The widening is real and stated: a helper's *other*
+   * calls are counted too. What closes it is the other half of this file — a row
+   * whose check is replaced must make its contract fail, and no amount of
+   * incidental call-counting satisfies that.
+   */
+  const transitiveCalls = (node, into, seen = new Set()) => {
+    const local = new Set();
+    calls(node, local);
+    for (const name of local) {
+      into.add(name);
+      if (!declaredFunctions.has(name) || seen.has(name)) continue;
+      seen.add(name);
+      const body = declaredFunctions.get(name);
+      if (body === undefined) continue;
+      if (ts.isBlock(body)) {
+        for (const statement of live(body.statements)) transitiveCalls(statement, into, seen);
+      } else {
+        transitiveCalls(body, into, seen);
+      }
+    }
+  };
+
+  const walkBody = (body, bindings) => {
+    if (body === undefined) return;
+    if (!ts.isBlock(body)) {
+      walkExpression(body, bindings);
+      return;
+    }
+    walkStatements(body.statements, bindings);
+  };
+
+  const walkStatements = (statements, outer) => {
+    const bindings = new Map(outer);
+    for (const statement of live(statements)) {
+      if (!ts.isVariableStatement(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+        const bound = new Set();
+        calls(declaration.initializer, bound);
+        bindings.set(declaration.name.text, { calls: bound, initializer: declaration.initializer });
+      }
+    }
+    for (const statement of live(statements)) walkStatement(statement, bindings);
+  };
+
+  const walkStatement = (statement, bindings) => {
+    if (ts.isExpressionStatement(statement)) {
+      walkExpression(statement.expression, bindings);
+      return;
+    }
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        walkExpression(declaration.initializer, bindings);
+      }
+      return;
+    }
+    if (ts.isReturnStatement(statement)) {
+      walkExpression(statement.expression, bindings);
+      return;
+    }
+    if (ts.isBlock(statement)) {
+      walkStatements(statement.statements, bindings);
+      return;
+    }
+    // Shape C: draining a problem list. The loop body has to do something with
+    // it — an empty body is a call whose result is thrown away.
+    if (ts.isForOfStatement(statement)) {
+      const iterated = statement.expression;
+      if (
+        ts.isCallExpression(iterated) &&
+        ts.isIdentifier(iterated.expression) &&
+        doesSomething(statement.statement)
+      ) {
+        names.add(iterated.expression.text);
+        return;
+      }
+      // Shape E: a table driven over a literal list. `for (const [name, source]
+      // of evasions) { it(name, …) }` is how both self-tests and
+      // `packages/ci-guard` register most of their cases, and a rule that could
+      // not see through it would call all of them non-witnesses. The list has to
+      // be a *non-empty* array literal, written here or bound at this block's
+      // own top level — which is exactly what refuses `for (const x of []) { it(…) }`
+      // and, one shape over, `describe.each([])`: zero tests run, and round 6
+      // counted every call inside them.
+      const table = nonEmptyArray(iterated, bindings);
+      if (table) {
+        const body = statement.statement;
+        walkStatements(ts.isBlock(body) ? body.statements : [body], bindings);
+      }
+      return;
+    }
+    // Shape D: the main-module guard's body. An `if` is a gate and this file
+    // enters none of them — except this one, whose exact spelling
+    // `guard-scan.mjs` enforces over every file under `scripts/` and whose
+    // condition is true precisely when the script is the one node was given. A
+    // `.mjs` entry point keeps its whole body in here, so without this shape the
+    // two self-tests witness nothing at all; with it, they witness what runs
+    // when CI runs them and nothing else. It is an allowlist entry that another
+    // rule pins the spelling of, which is the only reason it is safe.
+    if (ts.isIfStatement(statement) && isMainModuleGuard(statement)) {
+      const body = statement.thenStatement;
+      walkStatements(ts.isBlock(body) ? body.statements : [body], bindings);
+      return;
+    }
+    // Everything else — `if`, `while`, `for`, `try`, `switch`, a label, a
+    // declaration — is a gate, a loop or an uninvoked body. Not entered.
+  };
+
+  const walkExpression = (node, bindings) => {
+    if (node === undefined) return;
+    if (ts.isParenthesizedExpression(node) || ts.isAwaitExpression(node)) {
+      walkExpression(node.expression, bindings);
+      return;
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      for (const element of node.elements) walkExpression(element, bindings);
+      return;
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      walkObjectLiteral(node, bindings);
+      return;
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      if (ts.isIdentifier(callee) && callee.text === ASSERT) {
+        // Shape A's payload: whatever is inside `expect(…)` is asserted on, and
+        // so is anything a name in there was bound to in this block.
+        for (const argument of node.arguments) {
+          transitiveCalls(argument, names);
+          const mentioned = new Set();
+          collectIdentifiers(argument, mentioned);
+          for (const name of mentioned) {
+            for (const bound of bindings.get(name)?.calls ?? []) names.add(bound);
+          }
+        }
+        return;
+      }
+      if (ts.isIdentifier(callee) && RUNNERS.has(callee.text)) {
+        for (const argument of node.arguments) {
+          if (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)) {
+            walkBody(argument.body, bindings);
+          }
+        }
+        return;
+      }
+      if (ts.isIdentifier(callee) && declaredFunctions.has(callee.text)) {
+        if (!entered.has(callee.text)) {
+          entered.add(callee.text);
+          walkBody(declaredFunctions.get(callee.text), new Map());
+        }
+      }
+      // `expect(f()).toEqual([])` is a call on a call, so the receiver of a
+      // member call is walked as well as the arguments. That is also why
+      // `Promise.resolve().then(() => f())` is *not* an assertion: the receiver
+      // is walked, and the arrow it is handed is a body nothing here enters.
+      if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
+        walkExpression(callee.expression, bindings);
+      }
+      for (const argument of node.arguments) walkExpression(argument, bindings);
+      return;
+    }
+    // A literal, a template, an uninvoked function — nothing this recognises.
+  };
+
+  /** Shape B: `{ run: () => f(…), expect: … }`. */
+  const walkObjectLiteral = (node, bindings) => {
+    const property = (name) =>
+      node.properties.find(
+        (one) =>
+          (ts.isPropertyAssignment(one) || ts.isMethodDeclaration(one)) &&
+          ts.isIdentifier(one.name) &&
+          one.name.text === name,
+      );
+    const run = property('run');
+    const compared = property('expect');
+    if (run !== undefined && compared !== undefined) {
+      const body = ts.isMethodDeclaration(run)
+        ? run.body
+        : ts.isArrowFunction(run.initializer) || ts.isFunctionExpression(run.initializer)
+          ? run.initializer.body
+          : undefined;
+      if (body !== undefined) {
+        if (ts.isBlock(body)) {
+          for (const statement of live(body.statements)) transitiveCalls(statement, names);
+        } else {
+          transitiveCalls(body, names);
+        }
+      }
+    }
+    for (const one of node.properties) {
+      if (ts.isPropertyAssignment(one)) walkExpression(one.initializer, bindings);
+    }
+  };
+
+  walkStatements(parsed.statements, new Map());
   return names;
 }
 
-/**
- * Stepping from `parent` into `child` enters code that cannot run.
- *
- * ── THE DEFECT (found by a blind review of round 6's own fix) ───────────────
- * A second lineage named it before it finished its run: "the checker graph
- * counts syntactic calls even when they are under a dead branch." Measured, and
- * it defeats the fix for the critical finding outright — put the outside
- * witness's two calls inside `if (false) { … }`:
- *
- *     node scripts/ci/gate-selftest.mjs            exit 0
- *     node scripts/ci/workflow-policy-selftest.mjs exit 0
- *
- * The graph proved "`mainGuardProblems` has an invoker that is not one of its
- * subjects" by finding a CallExpression. **An invoker that cannot execute is not
- * an invoker**, and a proof of presence is not a proof of use — which is this
- * campaign's standing lesson arriving in the machinery built to enforce it.
- *
- * Full reachability needs a control-flow graph and is not what this is. These
- * are the shapes that make a call statically unreachable, and each one is
- * refused by construction: a constant-falsy branch, a skipped or todo test, and
- * the tail of a block after `return`/`throw`. Anything subtler is out of scope
- * and stated as such — but the *effect probe* below closes the general case from
- * the other end, by requiring each check to actually fire on a violating input.
- */
-function entersDeadCode(parent, child) {
-  if (ts.isIfStatement(parent)) {
-    const value = constantTruthiness(parent.expression);
-    if (value === false && child === parent.thenStatement) return true;
-    if (value === true && child === parent.elseStatement) return true;
-    return false;
-  }
-  if (ts.isConditionalExpression(parent)) {
-    const value = constantTruthiness(parent.condition);
-    if (value === false && child === parent.whenTrue) return true;
-    if (value === true && child === parent.whenFalse) return true;
-    return false;
-  }
-  // `it.skip('…', () => { … })` and `it.todo(…)` never run their callback.
-  if (ts.isCallExpression(parent) && isSkippedTest(parent.expression)) {
-    return parent.arguments.includes(child);
-  }
-  // Everything after a `return`/`throw`/`process.exit()` in the same block.
-  if (ts.isBlock(parent) || ts.isSourceFile(parent) || ts.isCaseClause(parent)) {
-    const statements = parent.statements;
-    const index = statements.indexOf(child);
-    if (index <= 0) return false;
-    return statements.slice(0, index).some((earlier) => terminates(earlier));
+const LOGICAL = new Set([
+  ts.SyntaxKind.AmpersandAmpersandToken,
+  ts.SyntaxKind.BarBarToken,
+  ts.SyntaxKind.QuestionQuestionToken,
+]);
+
+/** A non-empty array literal, written out or bound to a name in this block. */
+function nonEmptyArray(node, bindings) {
+  if (ts.isArrayLiteralExpression(node)) return node.elements.length > 0;
+  if (ts.isIdentifier(node)) {
+    const bound = bindings.get(node.text);
+    const initializer = bound?.initializer;
+    return (
+      initializer !== undefined &&
+      ts.isArrayLiteralExpression(initializer) &&
+      initializer.elements.length > 0
+    );
   }
   return false;
 }
 
-const SKIPPED = new Set(['skip', 'todo', 'skipIf', 'runIf', 'fails']);
-const RUNNERS = new Set(['it', 'test', 'describe', 'suite', 'bench']);
+/**
+ * A loop body that does something with what it was handed.
+ *
+ * `for (const problem of check()) {}` calls the check and throws the answer
+ * away, which is the "presence is not use" defect wearing a loop. Any call, any
+ * assignment or any `throw` counts; an empty body does not.
+ */
+function doesSomething(node) {
+  let found = false;
+  const visit = (current) => {
+    if (found) return;
+    if (
+      ts.isCallExpression(current) ||
+      ts.isNewExpression(current) ||
+      ts.isThrowStatement(current) ||
+      (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+    ) {
+      found = true;
+      return;
+    }
+    current.forEachChild(visit);
+  };
+  visit(node);
+  return found;
+}
 
-function isSkippedTest(callee) {
-  if (!ts.isPropertyAccessExpression(callee)) return false;
-  if (!SKIPPED.has(callee.name.text)) return false;
-  const root = ts.isIdentifier(callee.expression)
-    ? callee.expression.text
-    : ts.isPropertyAccessExpression(callee.expression)
-      ? callee.expression.expression.getText?.()
-      : undefined;
-  return typeof root === 'string' && RUNNERS.has(root.split('.')[0] ?? '');
+/** `if (isMainModule(import.meta.url))`, exactly — the shape guard-scan pins. */
+function isMainModuleGuard(statement) {
+  const condition = statement.expression;
+  return (
+    ts.isCallExpression(condition) &&
+    condition.questionDotToken === undefined &&
+    ts.isIdentifier(condition.expression) &&
+    condition.expression.text === 'isMainModule' &&
+    condition.arguments.length === 1 &&
+    ts.isPropertyAccessExpression(condition.arguments[0]) &&
+    condition.arguments[0].name.text === 'url' &&
+    ts.isMetaProperty(condition.arguments[0].expression) &&
+    statement.elseStatement === undefined
+  );
+}
+
+function collectIdentifiers(node, into) {
+  if (ts.isIdentifier(node)) into.add(node.text);
+  node.forEachChild((child) => collectIdentifiers(child, into));
 }
 
 function terminates(statement) {
@@ -348,22 +1279,6 @@ function terminates(statement) {
     call.expression.expression.text === 'process' &&
     call.expression.name.text === 'exit'
   );
-}
-
-/** `true`/`false` when an expression is a compile-time constant, else undefined. */
-function constantTruthiness(expression) {
-  const node = ts.isParenthesizedExpression(expression) ? expression.expression : expression;
-  if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
-  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
-  if (node.kind === ts.SyntaxKind.NullKeyword) return false;
-  if (ts.isIdentifier(node) && node.text === 'undefined') return false;
-  if (ts.isNumericLiteral(node)) return node.text !== '0';
-  if (ts.isStringLiteralLike(node)) return node.text !== '';
-  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken) {
-    const inner = constantTruthiness(node.operand);
-    return inner === undefined ? undefined : !inner;
-  }
-  return undefined;
 }
 
 /**
@@ -436,6 +1351,84 @@ function enrolledWorkspaces(root, read) {
 const isTestFile = (path) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path);
 
 /**
+ * How many other scripts must import a module before it needs a registry row.
+ *
+ * Three, because two callers is a pair and three is a habit — and because the
+ * three-caller line is where the arithmetic in `sharedModuleProblems` starts
+ * being about a *class* of failure rather than about one file. `main-module.mjs`
+ * has seventeen.
+ */
+const SHARED_MODULE_THRESHOLD = 3;
+
+/**
+ * Every module many scripts depend on that nothing in the registry describes.
+ *
+ * ── THE RULE THE ROUND-7 CRITICAL FINDING GENERALISES TO ────────────────────
+ * Round 6 replaced fifteen copies of the main-module guard with one shared
+ * predicate, and the tests written for the fifteen copies did not transfer: they
+ * checked the *shape of the guard in the callers*, and the thing that now made
+ * the decision was a function nothing outside `scripts/` ever ran. One statement
+ * in `main-module.mjs` was measured to take 358 assertions out of a green build.
+ *
+ * **Every refactor that replaces N copies with one shared implementation
+ * converts N independent failures into one total failure.** That sentence is
+ * true of every future centralisation too, and a sweep done once by hand is a
+ * sweep that is wrong the next time somebody extracts a helper. So it is a rule:
+ * a module under `scripts/ci/` imported by three or more other scripts is a
+ * single point of failure for all of them and must appear in `ENFORCEMENT` —
+ * where the machinery above then forces it to have a behavioural contract, a
+ * mutant that contract rejects, and a witness outside `scripts/`.
+ *
+ * The honest boundary: this counts *import specifiers*, so a module reached some
+ * other way is not seen, and the threshold is a judgement rather than a
+ * derivation. What it removes is the possibility of the next extraction landing
+ * with no outside test and nobody noticing, which is exactly what happened here.
+ */
+export function sharedModuleProblems(
+  root = process.cwd(),
+  read = readFileSync,
+  list = readdirSync,
+  registry = ENFORCEMENT,
+) {
+  const problems = [];
+  const importers = new Map();
+  for (const file of sourceFiles(root, list)) {
+    if (!file.startsWith('scripts/')) continue;
+    let source;
+    try {
+      source = String(read(join(root, file), 'utf8'));
+    } catch {
+      continue;
+    }
+    const parsed = ts.createSourceFile(
+      file,
+      source,
+      ts.ScriptTarget.ESNext,
+      true,
+      scriptKind(file),
+    );
+    for (const statement of parsed.statements) {
+      if (!ts.isImportDeclaration(statement)) continue;
+      const specifier = statement.moduleSpecifier;
+      if (!ts.isStringLiteral(specifier)) continue;
+      const match = /^(?:\.\/|(?:\.\.\/)+)([A-Za-z0-9._-]+\.mjs)$/.exec(specifier.text);
+      if (match === null) continue;
+      const target = `scripts/ci/${match[1]}`;
+      if (!importers.has(target)) importers.set(target, new Set());
+      importers.get(target).add(file);
+    }
+  }
+  const described = new Set(registry.map((entry) => entry.definedIn));
+  for (const [module, files] of [...importers].sort()) {
+    if (files.size < SHARED_MODULE_THRESHOLD || described.has(module)) continue;
+    problems.push(
+      `${module} is imported by ${files.size} other scripts (${[...files].sort().join(', ')}) and has no row in the registry in ${REGISTRY_FILE}. A module this many scripts depend on decides something on behalf of all of them: replacing N copies of a decision with one shared implementation converts N independent failures into one total failure, and the tests written for the N copies do not transfer. Round 6 learned that by centralising the main-module guard and leaving its predicate untested, which one statement then took 358 assertions out of CI over. Give it a row with a behavioural contract, a mutant that contract rejects, and a witness outside scripts/.`,
+    );
+  }
+  return problems;
+}
+
+/**
  * Every way the invocation graph is not what the registry says it is.
  *
  * @param {object} [options]
@@ -444,8 +1437,8 @@ const isTestFile = (path) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path);
  *   feed this a graph with a known hole without editing the real one
  * @param {(path: string, encoding: string) => string} [options.read]
  * @param {typeof readdirSync} [options.list]
- * @returns {string[]} human-readable problems; empty means every check has an
- *   invoker outside its own subjects and CI runs all of them
+ * @returns {string[]} human-readable problems; empty means every check has a
+ *   witness outside its own subjects and CI runs all of them
  */
 export function checkerGraphProblems({
   root = process.cwd(),
@@ -455,16 +1448,16 @@ export function checkerGraphProblems({
 } = {}) {
   const problems = [];
   const files = sourceFiles(root, list);
-  const callers = new Map();
+  const witnesses = new Map();
   for (const file of files) {
     let names;
     try {
-      names = calledNames(file, String(read(join(root, file), 'utf8')));
+      names = assertedNames(file, String(read(join(root, file), 'utf8')));
     } catch (error) {
       problems.push(`${file} could not be read for the invocation graph: ${error.message}`);
       continue;
     }
-    callers.set(file, names);
+    witnesses.set(file, names);
   }
 
   const runScripts = workflowRunScripts(root, read, list);
@@ -474,16 +1467,16 @@ export function checkerGraphProblems({
     const { check, definedIn, subjects, invokers } = entry;
     if (!files.includes(definedIn)) {
       problems.push(
-        `${check} is declared as living in ${definedIn}, which is not a source file this scan found. The registry in scripts/ci/checker-graph.mjs and the tree have drifted.`,
+        `${check} is declared as living in ${definedIn}, which is not a source file this scan found. The registry in ${REGISTRY_FILE} and the tree have drifted.`,
       );
       continue;
     }
 
-    // --- who actually calls it, excluding the module that defines it ---------
-    // And excluding this file: every call here is a `violate` probe, which is a
-    // test of the check rather than a use of it. Counting a probe as an invoker
+    // --- who actually asserts on it, excluding the module that defines it -----
+    // And excluding this file: every assertion here is a contract probe, which is
+    // a test of the check rather than a use of it. Counting a probe as a witness
     // would let the registry satisfy itself.
-    const found = [...callers]
+    const found = [...witnesses]
       .filter(([file, names]) => file !== definedIn && file !== REGISTRY_FILE && names.has(check))
       .map(([file]) => file)
       .sort();
@@ -491,26 +1484,26 @@ export function checkerGraphProblems({
     for (const file of found) {
       if (!declared.includes(file)) {
         problems.push(
-          `${file} calls ${check}, which the registry in scripts/ci/checker-graph.mjs does not list as one of its invokers. Add it — the list is how "who runs this check" stays a fact rather than a memory.`,
+          `${file} asserts on ${check}, which the registry in ${REGISTRY_FILE} does not list as one of its witnesses. Add it — the list is how "who runs this check" stays a fact rather than a memory.`,
         );
       }
     }
     for (const file of declared) {
       if (!found.includes(file)) {
         problems.push(
-          `the registry says ${file} invokes ${check}, and it does not (any more). ${entry.because}. Restore the call, or explain in the registry why the graph is allowed to be thinner.`,
+          `the registry says ${file} witnesses ${check}, and it does not (any more): it either never calls it, or calls it in a position that cannot assert anything — a dead branch, an uninvoked function, or a call whose result is discarded. ${entry.because}. Restore the assertion, or explain in the registry why the graph is allowed to be thinner.`,
         );
       }
     }
 
     // --- the property the whole file exists for ------------------------------
-    // An empty `subjects` would make "at least one invoker outside the subjects"
+    // An empty `subjects` would make "at least one witness outside the subjects"
     // trivially true for every row, which is the cheapest way to satisfy this
     // file without satisfying anything it is about. A check that reads nothing
     // is not a check.
     if (!Array.isArray(subjects) || subjects.length === 0) {
       problems.push(
-        `${check} is in the registry with no subjects. "At least one invoker outside the files it reads" is satisfied by anything when the set of files it reads is empty — declare what it actually reads, or take the row out.`,
+        `${check} is in the registry with no subjects. "At least one witness outside the files it reads" is satisfied by anything when the set of files it reads is empty — declare what it actually reads, or take the row out.`,
       );
       continue;
     }
@@ -519,7 +1512,7 @@ export function checkerGraphProblems({
     );
     if (outside.length === 0) {
       problems.push(
-        `every invoker of ${check} (${declared.join(', ') || 'none at all'}) is itself among the files it checks (${subjects.join(', ')}). Sole enforcer, sole exception: an edit to the subject disarms the only thing that would have noticed the edit. Give it a call site outside those paths — packages/ci-guard exists for exactly this.`,
+        `every witness of ${check} (${declared.join(', ') || 'none at all'}) is itself among the files it checks (${subjects.join(', ')}). Sole enforcer, sole exception: an edit to the subject disarms the only thing that would have noticed the edit. Give it a call site outside those paths — packages/ci-guard exists for exactly this.`,
       );
     }
 
@@ -529,13 +1522,22 @@ export function checkerGraphProblems({
       const workspace = workspaces.find((prefix) => file.startsWith(prefix));
       if (workspace !== undefined && isTestFile(file)) continue;
       problems.push(
-        `nothing in ${WORKFLOW_DIRECTORY} runs ${file}, and it is not a test file in a workspace enrolled in ${MANIFEST}. It is listed as an invoker of ${check}, so if CI never reaches it the check has one fewer witness than the registry claims.`,
+        `nothing in ${WORKFLOW_DIRECTORY} runs ${file}, and it is not a test file in a workspace enrolled in ${MANIFEST}. It is listed as a witness of ${check}, so if CI never reaches it the check has one fewer witness than the registry claims.`,
       );
     }
   }
+
+  // Every shared decision has to be in the table at all.
+  // The real registry, not the injected one: this asks "is every shared module
+  // described *at all*", which is a question about the repository rather than
+  // about whatever fixture registry a self-test happened to hand in. Passing the
+  // fixture here would make every one-row fixture report twelve missing modules.
+  problems.push(...sharedModuleProblems(root, read, list));
+
   // And the half none of the above can reach: does each check still *do*
-  // anything? A perfect graph over a gutted rule is the failure this whole file
-  // is about, one level up.
-  problems.push(...effectProblems(registry, { root, read }));
+  // anything, and would its own fixture notice if it stopped? A perfect graph
+  // over a gutted rule is the failure this whole file is about, one level up.
+  const workspace = mkdtempSync(join(tmpdir(), 'atrium-checker-graph-'));
+  problems.push(...effectProblems(registry, { root, read, workspace }));
   return problems;
 }

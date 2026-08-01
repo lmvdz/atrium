@@ -142,20 +142,37 @@ export function composeStackArgv(verb, env = process.env) {
   return ['compose', ...composeArgs(env), ...definition.args(env)];
 }
 
-if (isMainModule(import.meta.url)) {
+/**
+ * The whole entry point, as a function that *returns* an exit status.
+ *
+ * ── WHY THIS IS A `main()` NOW (#40 round 7) ────────────────────────────────
+ * This body used to run inline inside the guard and end on a `try`/`catch`,
+ * falling off the end to an implicit 0 when nothing threw. That is a correct
+ * program and an unreadable rule: `guard-scan.mjs` now requires a guard body to
+ * end on an *unconditional* exit whose status comes from the work, because round
+ * 6's "the body must contain an unconditional statement" was satisfied by a
+ * decoy `console.info` written above a fully gated body. A body that ends by
+ * falling off the end is indistinguishable, to any reader and to any scanner,
+ * from a body whose last statement quietly stopped mattering.
+ *
+ * So the status is returned rather than fallen into, and every path says which
+ * one it is: 2 for a usage error, 1 for a docker that failed, 0 for the verb
+ * having run.
+ */
+function main() {
   const [verb, ...rest] = process.argv.slice(2);
   if (rest.length > 0) {
     console.error(
       `::error::compose-stack: extra arguments ${JSON.stringify(rest)}. This takes exactly one verb, so that what runs is decided here rather than at every call site.`,
     );
-    process.exit(2);
+    return 2;
   }
   let argv;
   try {
     argv = composeStackArgv(verb);
   } catch (error) {
     console.error(`::error::compose-stack: ${error.message}`);
-    process.exit(2);
+    return 2;
   }
   const definition = VERBS[verb];
   definition.before?.(process.env);
@@ -166,9 +183,14 @@ if (isMainModule(import.meta.url)) {
       maxBuffer: 64 * 1024 * 1024,
       stdio: definition.streams ? 'inherit' : ['ignore', 'inherit', 'inherit'],
     });
-    definition.after?.(process.env);
   } catch (error) {
     console.error(`::error::compose-stack: \`docker ${argv.join(' ')}\` failed — ${error.message}`);
-    process.exit(1);
+    return 1;
   }
+  definition.after?.(process.env);
+  return 0;
+}
+
+if (isMainModule(import.meta.url)) {
+  process.exit(main());
 }

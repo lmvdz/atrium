@@ -92,7 +92,16 @@ export function imageNames(env = process.env) {
   return names;
 }
 
-if (isMainModule(import.meta.url)) {
+/**
+ * Record every built image's ID, and *return* whether that worked.
+ *
+ * The body used to run inline in the guard and fall off its end to an implicit
+ * 0. `guard-scan.mjs` requires an unconditional exit whose status comes from the
+ * work now (#40 round 7) — because a body that ends by falling off the end reads
+ * the same as one whose last statement stopped mattering, which is exactly the
+ * evasion round 6's statement-kind rule accepted.
+ */
+function main() {
   const path = manifestPath();
   const manifest = {};
   for (const [service, image] of Object.entries(imageNames())) {
@@ -101,7 +110,7 @@ if (isMainModule(import.meta.url)) {
       console.error(
         `::error::record-built-images: \`docker image inspect ${image}\` gave ${JSON.stringify(id)}, which is not an image ID`,
       );
-      process.exit(1);
+      return 1;
     }
     manifest[service] = { image, id };
   }
@@ -110,4 +119,9 @@ if (isMainModule(import.meta.url)) {
     console.info(`${service}: ${image} = ${id}`);
   }
   console.info(`Recorded ${Object.keys(manifest).length} built image IDs in ${path}.`);
+  return 0;
+}
+
+if (isMainModule(import.meta.url)) {
+  process.exit(main());
 }
