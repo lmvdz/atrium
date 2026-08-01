@@ -287,6 +287,17 @@ governance trigger below**, not anything in the workflow: required-check
 rulesets, pull requests, and code-owner review. Reading any part of this CI as
 protection against a hostile contributor is reading it wrong.
 
+Precisely where that line falls, because "not against a malicious author" is too
+vague to act on: the presence rules pin the **invocation shape** of every gate —
+that the script is named, invoked as a command rather than mentioned, in the
+right job, and after the steps it depends on. They say nothing about what the
+script does once it starts. `echo node scripts/ci/assert-tables.mjs` no longer
+satisfies them; replacing `assert-tables.mjs`'s body with `process.exit(0)`
+satisfies all of them and always will, because the rule and the script are read
+out of the same commit. That is malicious editing rather than drift, and it
+belongs to the governance trigger. A green policy run is a claim about the
+workflow's shape, never about its gates' semantics.
+
 **`gate` is the only check that should ever be marked required.** GitHub scores
 a *skipped* required check as a *successful* one, so marking `verify` required
 means a pull request can bypass it wholesale by adding `if: ${{ false }}` to the
@@ -314,9 +325,29 @@ zero tests exits 0 just like one that passed 315:
   empty `failureMessages`, and Playwright records `test.fail()` as `expected`,
   i.e. green. Because the stock Vitest report genuinely cannot witness `fails` at
   any level of effort, `scan-expected-failures.mjs` provides a second witness
-  from outside the reporting path: it reads the test files that ran and counts
-  the annotations itself. A reporter that lied about the flag while keeping every
+  from outside the reporting path: it parses the test sources and counts the
+  annotations itself. A reporter that lied about the flag while keeping every
   total honest is caught by the two witnesses disagreeing.
+- That scanner **parses**, and it starts from the test glob rather than from the
+  report. Both matter. A line-oriented matcher cannot see
+  `test.each([...]).fails(...)`, `it['fails']`, `it?.fails`, a chain spread over
+  three lines, or an annotation aliased into a helper — and it fires on
+  `it('rejects it.fails', …)`, which is prose. Reading the TypeScript AST fixes
+  both directions at once: `.fails` counts when it is a member access rooted at a
+  test runner, however it is spelled, and a string that merely contains the text
+  is not one. And because the scan starts from every `*.{test,spec}.*` on disk
+  and follows relative imports transitively, an annotation living in a helper —
+  a file no report will ever name — is still read. Fifteen spellings and four
+  lookalikes are fixtures in `gate-selftest.mjs`.
+- **Prerequisites are enforced as pairs.** A gate can be present, named, invoked
+  and useless because the step it depends on is gone. `assert-floor-ratchet.mjs`
+  is the case: without the `git fetch` of `origin/main` before it, the shallow
+  clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
+  floor lowered in the same pull request sails through. So required steps declare
+  their setup, and `required-step-prerequisites` fails the build unless the
+  prerequisite is in the same job *and earlier*. Five pairs are declared: the
+  ratchet's fetch, both report resets, the migration's wait for Postgres and the
+  schema assertion's migration, and the browser install the e2e suite needs.
 - The two Vitest reports must describe the same run — every status, the file
   count, and the identity of every individual test, not just the total. Matching
   totals prove little; a gutted reporter cannot invent 315 test names that agree
@@ -327,18 +358,19 @@ zero tests exits 0 just like one that passed 315:
 - Reports are deleted immediately before each runner starts and rejected unless
   their mtime post-dates that moment, so a leftover file cannot stand in for a
   run.
-- `scripts/ci/workflow-policy.mjs` enforces 21 house rules over the parsed
+- `scripts/ci/workflow-policy.mjs` enforces 22 house rules over the parsed
   workflow: no `continue-on-error`, no job conditions, no step conditions beyond
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
   action pinned to a commit SHA, no reusable workflows (a job body that is not in
   the file cannot be checked by anything in the file), `gate.needs` covering every
   job, and — self-referentially — `verify` and `e2e` still *containing* the steps
-  that do the checking, each assert script named. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 36
+  that do the checking, each assert script named and each one's setup ordered
+  before it. `actionlint` runs alongside it.
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 46
   mutated copies of the real workflow and additionally asserts that every one of
-  the 21 declared rules has a mutation proving it fires — coverage derived from
+  the 22 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
-  went unexercised through round 2. `gate-selftest.mjs` runs 40 cases, including
+  went unexercised through round 2. `gate-selftest.mjs` runs 58 cases, including
   extracting the `gate` job's verdict script from the workflow and **executing
   it** against synthetic `needs` payloads: a parser reads shapes, and a shape can
   be right while the logic is wrong.
