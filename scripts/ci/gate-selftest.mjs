@@ -1458,6 +1458,15 @@ const CASES = [
     expect: /200 with an empty body/,
   },
   {
+    name: 'a catch-all answering every chunk with the page, which is a 200 the browser cannot run',
+    run: () =>
+      servedAssets(PAGE_WITH_ASSETS, () => ({
+        status: 200,
+        body: '<!DOCTYPE html><html><body>the app shell</body></html>',
+      })),
+    expect: /200 with an HTML document in it/,
+  },
+  {
     name: 'four lines of `respond` in the Caddyfile, which name no chunk at all',
     run: () =>
       servedAssets('<html><body><p>the page</p></body></html>', () => ({ status: 200, body: 'x' })),

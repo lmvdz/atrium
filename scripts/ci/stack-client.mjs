@@ -218,9 +218,21 @@ export async function buildAssetProblems(target, html, get = (path) => once(targ
       );
       continue;
     }
-    if (String(response.body ?? '').length === 0) {
+    const body = String(response.body ?? '');
+    if (body.length === 0) {
       problems.push(
         `GET ${path} returned 200 with an empty body, so whatever is answering for the build's assets is not the build.`,
+      );
+      continue;
+    }
+    // A 200 is not enough on its own: a catch-all route, or a proxy answering
+    // every path with the app shell, returns the *page* for a missing chunk and
+    // the browser gets a 200 it cannot execute. A real chunk or stylesheet
+    // never begins with a document. Deliberately this narrow — anything about
+    // the content-type header would be a constant the mutation writes.
+    if (/^\s*(?:<!doctype html|<html\b)/i.test(body) && /\.(?:js|mjs|css|map)$/.test(path)) {
+      problems.push(
+        `GET ${path} returned 200 with an HTML document in it, so something is answering for the build's assets with a page. A chunk the browser cannot execute is a chunk that is not there, and a 200 makes it quieter than a 404 rather than better.`,
       );
     }
   }
