@@ -2,8 +2,11 @@ import type { Actor, Id, Timestamp } from './common.js';
 import {
   bearingMessage,
   contentTokens,
+  hasContent,
+  isBlank,
   type ProvenanceMessage,
   type ProvenanceProblem,
+  referringProblems,
   rejectingProblems,
   validateProposalProvenance,
 } from './escalation.js';
@@ -79,6 +82,12 @@ export type AcceptanceVisibility =
 export type AcceptanceRuleName =
   | 'missing_message_context'
   | 'provenance_failed'
+  /**
+   * The receipt could not be ruled on either way — the quote contains the whole
+   * statement, in order, and says more. Never auto-accepted, never discarded:
+   * it stays staged with its quote attached, for a person to read.
+   */
+  | 'receipt_not_certifiable'
   | 'duplicate_of_accepted'
   | 'below_theta_min'
   | 'theta_band'
@@ -191,8 +200,9 @@ export function commitmentAttribution(
   messages: readonly ProvenanceMessage[] | undefined,
   quote: string | null | undefined,
 ): CommitmentAttribution {
-  if (!messages || messages.length === 0) return 'third_party';
-  if (!quote || quote.trim().length === 0) return 'third_party';
+  // Absent, empty, and empty-of-content are one state: nobody supplied the words.
+  if (!messages || !messages.some((message) => hasContent(message.body))) return 'third_party';
+  if (isBlank(quote)) return 'third_party';
   const cited = new Set(citedMessageIds);
   const citedMessages = messages.filter((message) => cited.has(message.id));
   const bearing = bearingMessage(quote, citedMessages);
@@ -252,6 +262,11 @@ export function findDuplicate(
  * alternative — an empty problem set read as a clean receipt — is how a wrong
  * citation becomes an accepted fact.
  *
+ * …and one cell across all of them, above θ_min: **a receipt nothing can rule
+ * on is pending, quiet**. Not accepted, because a machine may not act on a
+ * quote it cannot certify; not discarded, because the discrepancy is exactly
+ * what a person needs to see. `receipt_not_certifiable`.
+ *
  * Two cells are worth defending.
  *
  * **Decision at c ≥ θ_auto is Needs-you, not quiet.** #4 says a pending
@@ -298,7 +313,14 @@ export function decideAcceptance(
   // and everything downstream then found nothing wrong because there was nothing
   // to look in. The two spellings describe the same state of the world — nobody
   // supplied the messages this reading cites — so they get the same answer.
-  if (proposal.proposer.kind === 'model' && (messages === undefined || messages.length === 0)) {
+  //
+  // **And empty of content counts as empty.** Round 3's gauntlet found the
+  // `length`-only form: one message whose `body` is `""` makes the array
+  // non-empty and supplies nothing, which is the same trick one level in. The
+  // question is whether anybody supplied words, so the test is `hasContent`.
+  const windowIsAbsent =
+    messages === undefined || messages.length === 0 || !messages.some((m) => hasContent(m.body));
+  if (proposal.proposer.kind === 'model' && windowIsAbsent) {
     return {
       ...base,
       verdict: 'discard',
@@ -307,7 +329,9 @@ export function decideAcceptance(
       reason:
         messages === undefined
           ? 'no message window was supplied, so the receipt could not be checked — a model reading is never accepted on trust; supply the messages it cites'
-          : 'an empty message window was supplied, so the receipt could not be checked — an empty window is not a window; a model reading is never accepted on trust',
+          : messages.length === 0
+            ? 'an empty message window was supplied, so the receipt could not be checked — an empty window is not a window; a model reading is never accepted on trust'
+            : `a message window of ${messages.length} message${messages.length === 1 ? '' : 's'} was supplied and not one of them has any words in it, so the receipt could not be checked — a window with nothing in it is not a window; a model reading is never accepted on trust`,
     };
   }
 
@@ -415,6 +439,28 @@ export function decideAcceptance(
     proposal.type === 'commitment'
       ? commitmentAttribution(attributedTo ?? '', proposal.provenance, messages, proposal.quote)
       : null;
+
+  // ── The receipt this check declines to rule on ───────────────────────────
+  //
+  // Placed here on purpose: **below** the θ_min discard, so a weak reading is
+  // still dropped rather than promoted into the panel by a receipt problem, and
+  // **above** everything that can accept, so there is no path from here to
+  // `auto_accept`. It is the whole of r3's gauntlet finding, at the engine:
+  // "Bob will not deploy production Friday" quoted, "Bob will deploy production
+  // Friday" minted. The reading is not discarded — a person looking at the quote
+  // beside the statement sees the inversion immediately, and deleting it would
+  // hide the very discrepancy the receipt exists to show.
+  const referring = referringProblems(problems);
+  if (referring.length > 0) {
+    return {
+      ...base,
+      attribution,
+      verdict: 'pending',
+      visibility: 'quiet',
+      rule: 'receipt_not_certifiable',
+      reason: `not accepted on a machine's word, and not thrown away: ${referring.map((problem) => problem.detail).join('; ')}`,
+    };
+  }
 
   // ── The band: θ_min ≤ c < θ_auto ─────────────────────────────────────────
   //

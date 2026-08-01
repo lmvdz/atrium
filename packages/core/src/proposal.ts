@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Id, Timestamp } from './common.js';
+import { isBlank } from './escalation.js';
 import {
   ClaimPayload,
   CommitmentPayload,
@@ -71,16 +72,25 @@ const ProposalShape = z.discriminatedUnion('type', [
  * acceptance boundary exists to refuse. A *human* proposer may cite nothing —
  * a person staging their own reading is the receipt.
  *
- * **2. A model proposal that puts a name on somebody must quote them.** Claims
- * and commitments are the two types that name a person — "X said Y", "X will
- * do Y" — and r1's gauntlet found the attribution check was satisfied by the
- * owner having authored *any* cited message, so padding `provenance` with one
- * message the owner happened to write flipped a third-party commitment into a
- * self-statement. The fix binds attribution to the message that carries the
- * sentence, and the only thing that identifies that message is the quote. So
- * the quote is mandatory here rather than "checked when present": without it
- * there is no answer to "which message committed them", and the honest reading
- * of no answer is that nobody did.
+ * **2. A model proposal must quote the message it was read out of — every type.**
+ * r1's gauntlet found the attribution check was satisfied by the owner having
+ * authored *any* cited message, so padding `provenance` with one message the
+ * owner happened to write flipped a third-party commitment into a self-statement.
+ * The fix binds attribution to the message that carries the sentence, and the
+ * only thing that identifies that message is the quote.
+ *
+ * That argument scoped the rule to claims and commitments, the two types that put
+ * a name on somebody, and **r3's gauntlet found the scope was the hole**: a model
+ * objective with `quote: null` cited one message with an empty body and reached
+ * accepted state with no receipt check running at all. Attribution is one thing
+ * the quote answers; the other is "which sentence, in which message", and every
+ * type is minted from a sentence. So the quote is mandatory for all five —
+ * without it there is no answer to what this reading rests on, and the honest
+ * reading of no answer is that it rests on nothing.
+ *
+ * Emptiness is `isBlank`: a quote of `"​"` or `"…"` carries no words and is
+ * the same absence as `null`, checked in the one place that decides what content
+ * is rather than by a `trim()` that only knows about spaces.
  */
 export const Proposal = ProposalShape.superRefine((proposal, ctx) => {
   if (proposal.proposer.kind !== 'model') return;
@@ -92,14 +102,11 @@ export const Proposal = ProposalShape.superRefine((proposal, ctx) => {
         'a model proposal must cite at least one source message — a reading with no receipt cannot be checked, and an unbacked `~` is an assertion',
     });
   }
-  if (
-    (proposal.type === 'claim' || proposal.type === 'commitment') &&
-    (proposal.quote ?? '').trim().length === 0
-  ) {
+  if (isBlank(proposal.quote)) {
     ctx.addIssue({
       code: 'custom',
       path: ['quote'],
-      message: `a model ${proposal.type} proposal must quote the message that carries it — attribution is decided from the message bearing the sentence, and without the quote there is nothing to identify it`,
+      message: `a model ${proposal.type} proposal must quote the message that carries it — a receipt names the sentence it rests on, and without the quote there is nothing to identify it`,
     });
   }
 });

@@ -225,22 +225,37 @@ export interface ReceiptPolicy {
    */
   minQuoteLength: number;
   /**
-   * How much of the *asserted sentence*'s content the quote must carry, 0..1.
+   * **The only words the bearing check will let differ between a quote and the
+   * statement it is supposed to carry.**
    *
-   * The other half of major 1, and the half that matters more: a quote can be
-   * long, verbatim, and correctly attributed while having nothing to do with the
-   * statement being minted. The receipt has to bear the payload, not merely come
-   * from the same conversation. Containment relative to the statement, so a long
-   * quote carrying a short statement scores 1 — the direction that must be
-   * permissive is "quoted more than the sentence", never "asserted more than the
-   * quote".
+   * r3 answered "does this quote bear this sentence" with lexical overlap over a
+   * de-duplicated content-word set, with `not` on the stopword list. r3's
+   * gauntlet inverted the product with it: quote *"Bob will not deploy production
+   * Friday"*, mint *"Bob will deploy production Friday"*, score 100%,
+   * auto-accept. The lesson is not that `not` was on the wrong list. It is that
+   * **a list of dangerous words is unbounded** — polarity, quantifiers, modals,
+   * hedges, subordinators, and whatever the next reviewer thinks of — and a check
+   * built on one is wrong until somebody finds the next word.
    *
-   * 0.6 rather than 1.0 because the statement is a *normalization* of the
-   * sentence, not a copy of it: the pass drops fillers, fixes tense, and expands
-   * a pronoun. Requiring every content word would reject correct readings; the
-   * measured failure this defends against scores 0.
+   * So this is the other kind of list: not the words that must match, but the
+   * *only* ones that may differ. Everything else in either text is content that
+   * has to be accounted for. The three articles are here because adding or
+   * removing one cannot change **who**, **whether**, **how many**, or **when** —
+   * which is the whole of what the receipt claims. Nothing else has cleared that
+   * bar, and adding a word here is a change to what the product guarantees, not a
+   * tuning knob.
    */
-  minStatementSupport: number;
+  droppableWords: ReadonlySet<string>;
+  /**
+   * The most tokens the bearing alignment will compare on either side.
+   *
+   * The alignment resynchronises with a lookahead, so it is O(n·m) in the worst
+   * case and `quote` arrives from the same untrusted place every other field
+   * does. Above this the check does not degrade, it **refuses** — an input too
+   * large to align is an input that has not been checked, and the honest answer
+   * to that is the same as every other unanswerable question here.
+   */
+  maxAlignedTokens: number;
   /**
    * Fraction of content words two texts must share to be the same reading.
    *
@@ -253,7 +268,8 @@ export interface ReceiptPolicy {
 
 export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
   minQuoteLength: 24,
-  minStatementSupport: 0.6,
+  droppableWords: Object.freeze(new Set(['a', 'an', 'the'])) as ReadonlySet<string>,
+  maxAlignedTokens: 400,
   duplicateThreshold: 0.8,
 });
 

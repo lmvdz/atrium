@@ -489,6 +489,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         provenance: [messageQuotingOpener.id],
         quote:
           'I just ran into a problem with this for the first time despite using TypeScript for years.',
+        statement:
+          'I just ran into a problem with this for the first time despite using TypeScript for years.',
         proposer: { kind: 'model' },
         attributedTo: JORDAN,
       },
@@ -510,6 +512,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           provenance: [messageOpener.id],
           quote:
             'I just ran into a problem with this for the first time despite using TypeScript for years.',
+          statement:
+            'I just ran into a problem with this for the first time despite using TypeScript for years.',
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
@@ -526,6 +530,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           provenance: [messageDispute.id],
           // The source says *should not* and `this.state`; the model dropped both.
           quote: 'so TypeScript should not be so confident that this.state is still',
+          statement: 'so TypeScript should not be so confident that this.state is still',
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
@@ -541,6 +546,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           type: 'claim',
           provenance: [messageDispute.id],
           quote: 'While TypeScript is correct that ... after line 6',
+          statement: 'While TypeScript is correct that after line 6',
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
@@ -560,6 +566,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           type: 'claim',
           provenance: [messageDispute.id],
           quote: 'nobody in this thread ever wrote this sentence',
+          statement: 'nobody in this thread ever wrote this sentence',
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
@@ -603,7 +610,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
         proposer: { kind: 'model' },
         attributedTo: DHLOLO,
-        statement: 'TypeScript is correct that this.state must be online immediately after line 5',
+        statement:
+          'While TypeScript is correct that this.state must be online immediately after line 5',
       },
       messages,
     );
@@ -628,6 +636,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       type: 'commitment' as const,
       provenance: ['m_pad', 'm_commit'],
       quote: '@dhlolo will land the narrowing fix on Friday.',
+      statement: '@dhlolo will land the narrowing fix on Friday.',
       proposer: { kind: 'model' as const },
       attributedTo: DHLOLO,
     };
@@ -643,6 +652,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         {
           ...subject,
           quote: "I'll land the narrowing fix on Friday.",
+          statement: "I'll land the narrowing fix on Friday.",
           provenance: ['m_pad', 'm_self'],
         },
         [
@@ -661,7 +671,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       provenance: [messageDispute.id],
       quote:
         "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
-      statement: 'TypeScript is correct that this.state is online after line 6',
+      statement:
+        'While TypeScript is correct that this.state must be online immediately after line 5',
       proposer: { kind: 'model' as const },
       attributedTo: DHLOLO,
     };
@@ -680,6 +691,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         type: 'claim',
         provenance: [messageQuotingOpener.id],
         quote: 'I just ran into a problem with this for the first time despite using TypeScript',
+        statement: 'I just ran into a problem with this for the first time despite using TypeScript',
         proposer: { kind: 'model' },
       },
       messages,
@@ -687,13 +699,41 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     expect(rejecting.map((problem) => problem.severity)).toEqual(['reject']);
   });
 
-  it('does not police attribution on types that name nobody', () => {
+  it('does not police attribution on types that name nobody — but still requires their receipt', () => {
+    // Catches: re-scoping `missing_quote` to `claim || commitment`. A type that
+    // names nobody has no attribution to police and still has a sentence, and
+    // r3's gauntlet minted a model objective through the version of this rule
+    // that read "no name, no receipt".
+    const quoted = 'so TypeScript should not be so confident that this.state is still';
+    expect(
+      problemKinds(
+        {
+          type: 'open_question',
+          provenance: [messageDispute.id],
+          quote: quoted,
+          statement: quoted,
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ),
+    ).toEqual([]);
     expect(
       problemKinds(
         { type: 'open_question', provenance: [messageDispute.id], proposer: { kind: 'model' } },
         messages,
       ),
-    ).toEqual([]);
+    ).toEqual(['missing_quote']);
+    expect(
+      problemKinds(
+        {
+          type: 'objective',
+          provenance: [messageDispute.id],
+          quote: null,
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ),
+    ).toEqual(['missing_quote']);
   });
 
   it('covers every problem kind it declares', () => {
@@ -709,6 +749,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       'elided_quote',
       'quote_too_short',
       'quote_does_not_bear_statement',
+      'quote_carries_more_than_statement',
+      'statement_uncheckable',
       'ambiguous_quote',
       'attributed_person_not_author',
     ];
@@ -784,6 +826,31 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           quote:
             "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
           statement: 'the release is blocked until the flag ships',
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ],
+      // quote_carries_more_than_statement — every word of the statement is in
+      // the quote, in order, and the quote says more. r3's gauntlet lives here.
+      [
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          quote:
+            "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
+          statement: 'TypeScript is correct that this.state must be online after line 5',
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ],
+      // statement_uncheckable — a model reading with a real quote and nothing
+      // to check it against. Refused, not skipped.
+      [
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          quote:
+            "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
           proposer: { kind: 'model' },
         },
         messages,

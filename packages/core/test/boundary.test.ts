@@ -16,6 +16,7 @@ import {
   type ProvenanceMessage,
   projectAttention,
   RECEIPT_POLICY,
+  statementBearing,
   reduce,
   type StoredProposal,
   trustedContext,
@@ -386,6 +387,54 @@ describe('absent or empty — the receipt inputs that are refused, not skipped',
     }
   });
 
+  it('names that gate for every model-minted type, not only the two that name a person', () => {
+    // Catches: `reducer_quote_gate_rescoped`. The scoped version is not a
+    // fail-open on its own — the validator's own `missing_quote` still refuses
+    // the acceptance one check later, as `receipt_failed`. That is precisely why
+    // it needs its own test: **a boundary held up by another boundary is not
+    // one**, and the ledger recorded this mutant as an escape until the gate was
+    // asserted by name rather than by its effect.
+    const payloads: Record<string, Record<string, unknown>> = {
+      decision: { statement: CLAIM, decidedBy: null, status: 'active' },
+      commitment: { statement: CLAIM, owner: ALICE, due: null, status: 'open' },
+      open_question: { question: CLAIM, status: 'open' },
+      claim: { statement: CLAIM, claimant: ALICE, verification: 'unverified' },
+      objective: { title: CLAIM, status: 'open' },
+    };
+    for (const [type, payload] of Object.entries(payloads)) {
+      const refusal = acceptanceReceiptRefusal({
+        actor: model(),
+        proposalId: 'prop_q',
+        proposal: {
+          id: 'prop_q',
+          roomId: ROOM,
+          type,
+          payload,
+          confidence: 0.95,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['msg_1'],
+          quote: '​',
+          interpretationId: null,
+          createdAt: at(1),
+        } as unknown as StoredProposal,
+        object: {
+          id: 'obj_q',
+          roomId: ROOM,
+          objectiveId: null,
+          type,
+          payload,
+          provenance: { messageIds: ['msg_1'], proposalId: 'prop_q', interpretationId: null },
+          createdAt: at(2),
+          updatedAt: at(2),
+        } as unknown as AcceptedObject,
+        messages: WINDOW,
+      });
+      expect(refusal?.gate, `${type} must be refused by the missing-quote gate`).toBe(
+        'missing_quote',
+      );
+    }
+  });
+
   it('does not let a padded citation list plus an empty quote flip attribution', () => {
     /**
      * The reopened padding attack, stated as one case. Round 1 closed "the owner
@@ -470,7 +519,8 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
 
     expect(decision.verdict).toBe('discard');
     expect(decision.rule).toBe('provenance_failed');
-    expect(decision.reason).toContain('not the sentence being asserted');
+    expect(decision.reason).toContain('which the quote does not say');
+    expect(decision.reason).toContain('somewhere that does not say this');
   });
 
   it('refuses the same thing at the reducer, where it is a trust boundary', () => {
@@ -511,11 +561,33 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
     ]);
 
     expect(state.objects).toEqual({});
-    expect(state.issues[0]?.reason).toContain('not the sentence being asserted');
+    expect(state.issues[0]?.reason).toContain('which the quote does not say');
   });
 
   it('accepts the same shape once the quote carries the sentence', () => {
     // The check is not "refuse commitments": with the right receipt this lands.
+    // r4 narrowed what "the right receipt" means — the statement is the quoted
+    // span, article-for-article, not a paraphrase of it.
+    const promise = 'I will deploy the service on Friday afternoon';
+    const decision = decideAcceptance(
+      modelProposal({
+        statement: 'I will deploy the service on Friday afternoon',
+        claimant: BOB,
+        quote: promise,
+        provenance: ['msg_p'],
+      }),
+      { messages: [{ id: 'msg_p', authorId: BOB, body: promise }] },
+    );
+    expect(decision.verdict).toBe('auto_accept');
+  });
+
+  it('refers a paraphrase of the quote to a person instead of accepting it', () => {
+    // Catches: making `quote_carries_more_than_statement` a pass, or giving it
+    // `reject` severity. The statement is every word of the quote in order, and
+    // the quote says more — "afternoon", "I", "will". Those extra words are
+    // harmless here and are "not" in r3's gauntlet, and nothing in a string
+    // comparison distinguishes the two, so the honest answer is neither
+    // "accepted" nor "discarded".
     const promise = 'I will deploy the service on Friday afternoon';
     const decision = decideAcceptance(
       modelProposal({
@@ -526,7 +598,10 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
       }),
       { messages: [{ id: 'msg_p', authorId: BOB, body: promise }] },
     );
-    expect(decision.verdict).toBe('auto_accept');
+    expect(decision.verdict).toBe('pending');
+    expect(decision.visibility).toBe('quiet');
+    expect(decision.rule).toBe('receipt_not_certifiable');
+    expect(decision.reason).toContain('a person has to read the quote');
   });
 
   it('enforces minQuoteLength on the acceptance path, not only on blockquotes', () => {
@@ -612,9 +687,27 @@ describe('the receipt minima are policy, and are pinned by value', () => {
   it('is exactly this table', () => {
     expect(RECEIPT_POLICY).toEqual({
       minQuoteLength: 24,
-      minStatementSupport: 0.6,
+      droppableWords: new Set(['a', 'an', 'the']),
+      maxAlignedTokens: 400,
       duplicateThreshold: 0.8,
     });
+  });
+
+  it('lets nothing but the three articles differ between a quote and its statement', () => {
+    // Catches: adding a word to `droppableWords`. Every entry here is a licence
+    // for a model to drop a word from the sentence it is quoting, so the list is
+    // pinned by value and by behaviour — `not`, `all`, `will` and `only` must
+    // each still break the bearing check.
+    expect([...RECEIPT_POLICY.droppableWords].sort()).toEqual(['a', 'an', 'the']);
+    for (const word of ['not', 'no', 'never', 'all', 'some', 'will', 'might', 'only', 'unless']) {
+      expect(
+        statementBearing(`bob ${word} deploys production`, 'bob deploys production').borne,
+        `"${word}" must not be droppable`,
+      ).toBe(false);
+    }
+    // …and the three that are, in both directions.
+    expect(statementBearing('ship the flag', 'ship flag').borne).toBe(true);
+    expect(statementBearing('ship flag', 'ship the flag').borne).toBe(true);
   });
 
   it('is the number the escalation config quotes by, not a second one', () => {

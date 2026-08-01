@@ -1,6 +1,9 @@
 import type { Actor } from './common.js';
 import {
+  hasContent,
+  isBlank,
   type ProvenanceMessage,
+  referringProblems,
   rejectingProblems,
   validateProposalProvenance,
 } from './escalation.js';
@@ -222,20 +225,28 @@ export type AcceptanceReceiptGate =
   /** The object's cited messages are not the proposal's. */
   | 'provenance_binding'
   /**
-   * No message window — **absent or empty** — so the receipt cannot be checked
-   * at all. The two were one check away from each other in round 2 and are one
-   * check now: `messages: []` is not a window somebody supplied, it is the same
-   * absence spelled differently.
+   * No message window — **absent, empty, or carrying no message with any content
+   * in it** — so the receipt cannot be checked at all. The three were separate
+   * checks away from each other across rounds 2 and 3 and are one check now:
+   * `messages: []` and `[{body: ''}]` are not windows somebody supplied, they are
+   * the same absence spelled differently.
    */
   | 'missing_receipt_context'
   /**
-   * A machine reading that names somebody and quotes nothing. Re-required here
-   * rather than trusted from the schema a layer up — round 2's gauntlet found
-   * that layer was never reached.
+   * A machine reading that quotes nothing. Re-required here rather than trusted
+   * from the schema a layer up — round 2's gauntlet found that layer was never
+   * reached — and required for **every** model-minted type since r4, because
+   * round 3's gauntlet minted an objective through the hole where it was not.
    */
   | 'missing_quote'
-  /** The receipt is wrong: the quote, or who is named in it. */
+  /** The receipt is wrong: the quote, who is named in it, or what it says. */
   | 'receipt_failed'
+  /**
+   * The receipt could not be judged either way, so a machine may not act on it.
+   * The quote contains every word of the statement, in order, and says more —
+   * and those extra words may be an aside or may be "not". A person decides.
+   */
+  | 'receipt_not_certifiable'
   /** A commitment somebody else's sentence put a name on. It needs their word. */
   | 'third_party_confirm';
 
@@ -263,20 +274,21 @@ export interface AcceptanceReceiptRefusal {
  *     acceptance may not add or drop cited messages on the way through, because
  *     the citation set is what the attribution rules below are computed over.
  *  3. **A window at all.** No messages, no auto-acceptance, ever — and `[]` is
- *     no messages. Round 2's gauntlet found the `undefined`-only check: a caller
- *     that passed an empty array got past the door marked "required" and every
- *     check downstream found nothing wrong, because there was nothing to find
- *     anything wrong in. Absent and empty are the same fact about the world.
- *  4. **A quote at all**, for the two types that put a name on somebody. The
- *     schema requires it; this re-requires it, because round 2's gauntlet found
- *     the schema was never run on the fold path. An empty quote is the same
- *     absence as a missing one, and it is the input the whole attribution rule
- *     is computed from.
+ *     no messages, and so is one message with nothing in it. Round 2's gauntlet
+ *     found the `undefined`-only check; round 3's found the `length`-only one.
+ *     Absent, empty, and empty-of-content are the same fact about the world.
+ *  4. **A quote at all**, for every model-minted type. The schema requires it;
+ *     this re-requires it, because round 2's gauntlet found the schema was never
+ *     run on the fold path. An empty quote is the same absence as a missing one,
+ *     and it is the input the bearing and attribution rules are computed from.
  *  5. **The receipt itself** — the quote is long enough to identify a sentence,
  *     it is in a cited message, it is that author's own text rather than
- *     something they were quoting, exactly one author carries it, and it bears
- *     the statement being minted.
- *  6. **Third-party attribution.** A commitment whose owner did not write the
+ *     something they were quoting, exactly one author carries it, and the
+ *     statement being minted is that quote with nothing dropped but articles.
+ *  6. **Certifiability.** A quote that says *more* than the statement is not
+ *     refused as wrong and is not accepted as right: nothing here can tell an
+ *     aside from a "not", so a machine may not act on it and a person must.
+ *  7. **Third-party attribution.** A commitment whose owner did not write the
  *     message bearing it is not a self-statement, and #4 is unambiguous that
  *     nobody gets committed by someone else's sentence. It is a real reading and
  *     it goes to the named person to confirm — through a human acceptance, not
@@ -311,22 +323,41 @@ export function acceptanceReceiptRefusal(input: {
     };
   }
 
-  if (input.messages === undefined || input.messages.length === 0) {
+  // ── A window at all, and emptiness as a property of the content ───────────
+  //
+  // Round 2 closed `undefined`; round 2's gauntlet reopened it with `[]`; round
+  // 3's gauntlet reopened it again with `[{ id, authorId, body: '' }]` — one
+  // message, so `length === 0` is false, and nothing in it. All three are the
+  // same fact: nobody supplied the messages this reading cites. The test is
+  // therefore about content, not about the array, and `hasContent` is the one
+  // place that decides what content is (a letter or a digit — not a list of the
+  // invisible characters somebody has thought of).
+  const window = input.messages;
+  if (window === undefined || window.length === 0 || !window.some((m) => hasContent(m.body))) {
     const how =
-      input.messages === undefined
+      window === undefined
         ? 'no message window supplied'
-        : 'an empty message window supplied';
+        : window.length === 0
+          ? 'an empty message window supplied'
+          : `a message window of ${window.length} message${window.length === 1 ? '' : 's'} with nothing in any of their bodies`;
     return {
       gate: 'missing_receipt_context',
-      detail: `${who} accepted proposal "${proposalId}" with ${how}, so its receipt could not be checked — a reading whose citation cannot be verified is refused, never accepted on trust; an empty window is not a window, it is the same absence written differently`,
+      detail: `${who} accepted proposal "${proposalId}" with ${how}, so its receipt could not be checked — a reading whose citation cannot be verified is refused, never accepted on trust; a window with no words in it is not a window, it is the same absence written differently`,
     };
   }
 
-  const namesAPerson = object.type === 'claim' || object.type === 'commitment';
-  if (namesAPerson && (proposal.quote ?? '').trim().length === 0) {
+  // ── A quote at all, for every model-minted type ───────────────────────────
+  //
+  // Scoped to claims and commitments until r4, on the argument that they are the
+  // two that put a name on somebody. That is true and it is not the whole job:
+  // r3's gauntlet minted a model *objective* with `quote: null` against a window
+  // of empty bodies, and no quote-length, bearing or attribution check ran on it
+  // at all. The quote is what answers "which sentence, in which message" — every
+  // type needs that answer, and a type with no quote has no receipt to check.
+  if (isBlank(proposal.quote)) {
     return {
       gate: 'missing_quote',
-      detail: `${who} accepted ${object.type} proposal "${proposalId}", which quotes nothing — attribution is decided from the message bearing the sentence and only the quote identifies it, so a ${object.type} with an absent or empty quote is refused rather than attributed to whoever happens to be in the citation list`,
+      detail: `${who} accepted ${object.type} proposal "${proposalId}", which quotes nothing — a receipt names the sentence it rests on and only the quote identifies it, so a model-minted ${object.type} with an absent or empty quote is refused rather than resting on whoever happens to be in the citation list`,
     };
   }
 
@@ -358,6 +389,19 @@ export function acceptanceReceiptRefusal(input: {
     return {
       gate: 'receipt_failed',
       detail: `${who} accepted proposal "${proposalId}" on a receipt that does not hold: ${rejecting.map((problem) => problem.detail).join('; ')}`,
+    };
+  }
+
+  // A receipt the check declines to rule on is not a receipt that passed. The
+  // acceptance is refused with its own gate name so the log distinguishes "the
+  // citation is wrong" from "the citation may be right and nothing here can say
+  // so" — the second one is a question for a person, and a person accepting it
+  // runs none of this.
+  const referring = referringProblems(problems);
+  if (referring.length > 0) {
+    return {
+      gate: 'receipt_not_certifiable',
+      detail: `${who} accepted proposal "${proposalId}" on a receipt this check declines to rule on: ${referring.map((problem) => problem.detail).join('; ')}`,
     };
   }
 

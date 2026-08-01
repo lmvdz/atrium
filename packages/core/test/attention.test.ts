@@ -91,7 +91,11 @@ function thirdPartyCommitment(overrides: {
       id: overrides.id,
       roomId: ROOM,
       type: 'commitment',
-      payload: { statement: 'Land the narrowing fix', owner: overrides.owner },
+      // r4: the statement is the quoted span, word for word. "Land the
+      // narrowing fix" quoted against "Land the narrowing fix, please" drops a
+      // word, and a dropped word is the thing the receipt can no longer wave
+      // through — so the fixture states what BOB actually wrote.
+      payload: { statement: 'Land the narrowing fix, please', owner: overrides.owner },
       confidence: overrides.confidence ?? 0.9,
       proposer: { kind: 'model', model: 'test-model' },
       provenance: ['msg_bob'],

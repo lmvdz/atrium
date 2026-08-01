@@ -92,6 +92,7 @@ describe('proposal schema', () => {
     confidence: 0.5,
     proposer: { kind: 'model', model: 'test-model' },
     provenance: ['msg_1'],
+    quote: 'do it',
     createdAt: at(1),
   };
 
@@ -99,7 +100,7 @@ describe('proposal schema', () => {
     const parsed = Proposal.parse(valid);
     expect(parsed.status).toBe('proposed');
     expect(parsed.provenance).toEqual(['msg_1']);
-    expect(parsed.quote).toBeNull();
+    expect(parsed.quote).toBe('do it');
     expect(parsed.interpretationId).toBeNull();
   });
 
@@ -123,20 +124,22 @@ describe('proposal schema', () => {
     expect(parsed.provenance).toEqual([]);
   });
 
-  it('carries an optional verbatim quote, for provenance checking', () => {
+  it('carries a verbatim quote, for provenance checking', () => {
     const parsed = Proposal.parse({ ...valid, quote: 'we should ship it behind a flag' });
     expect(parsed.quote).toBe('we should ship it behind a flag');
   });
 
-  it('requires that quote when a model puts a name on somebody', () => {
-    // Attribution is decided from the message *bearing* the sentence, and the
-    // quote is the only thing that identifies it. Without the quote there is no
-    // answer to "which message committed them", so there is no proposal either.
+  it('requires that quote from a model on every type, not only the two that name a person', () => {
+    // Catches: scoping the schema's quote requirement back to
+    // `claim || commitment`. r3's gauntlet minted a model *objective* with
+    // `quote: null` through exactly that scope, and nothing downstream ran a
+    // single receipt check on it — the citation array was non-empty, so the
+    // window looked supplied, and no quote meant no quote check.
     const claim = { ...valid, type: 'claim', payload: { statement: 'x said y', claimant: BOB } };
-    const unquoted = Proposal.safeParse(claim);
+    const unquoted = Proposal.safeParse({ ...claim, quote: null });
     expect(unquoted.success).toBe(false);
     expect(unquoted.error?.issues[0]?.path).toEqual(['quote']);
-    expect(unquoted.error?.issues[0]?.message).toContain('bearing the sentence');
+    expect(unquoted.error?.issues[0]?.message).toContain('names the sentence it rests on');
     expect(Proposal.safeParse({ ...claim, quote: '   ' }).success).toBe(false);
     expect(Proposal.safeParse({ ...claim, quote: 'x said y' }).success).toBe(true);
 
@@ -144,26 +147,52 @@ describe('proposal schema', () => {
       ...valid,
       type: 'commitment',
       payload: { statement: 'land it', owner: BOB },
+      quote: null,
     };
     expect(Proposal.safeParse(commitment).success).toBe(false);
     expect(Proposal.safeParse({ ...commitment, quote: "I'll land it" }).success).toBe(true);
+
+    // The three that name nobody, which r3 exempted.
+    for (const shape of [
+      { type: 'decision', payload: { statement: 'do it' } },
+      { type: 'open_question', payload: { question: 'do we?' } },
+      { type: 'objective', payload: { title: 'ship the thing' } },
+    ] as const) {
+      expect(Proposal.safeParse({ ...valid, ...shape, quote: null }).success).toBe(false);
+      expect(Proposal.safeParse({ ...valid, ...shape, quote: 'we agreed to' }).success).toBe(true);
+    }
   });
 
-  it('does not require a quote from a human proposer, or on a type that names nobody', () => {
+  it('treats a quote of invisible characters as no quote at all', () => {
+    // Catches: replacing `isBlank` with `.trim().length === 0`. A zero-width
+    // space is not whitespace, so `trim()` keeps it and the proposal parses —
+    // r3's gauntlet: the refusal downstream then happens for the wrong reason
+    // ("not found in any cited message"), which is one refactor from no refusal.
+    const claim = { ...valid, type: 'claim', payload: { statement: 'x said y', claimant: BOB } };
+    for (const quote of ['​', '​ ‍', '﻿', '­', '…', '...', '    ']) {
+      const result = Proposal.safeParse({ ...claim, quote });
+      expect(result.success, `quote ${JSON.stringify(quote)} must not parse`).toBe(false);
+      expect(result.error?.issues[0]?.path).toEqual(['quote']);
+    }
+  });
+
+  it('does not require a quote from a human proposer', () => {
     expect(
       Proposal.safeParse({
         ...valid,
         type: 'claim',
         payload: { statement: 'x said y', claimant: BOB },
         proposer: { kind: 'human', userId: ALICE },
+        quote: null,
       }).success,
     ).toBe(true);
-    expect(Proposal.safeParse({ ...valid, type: 'open_question' as const }).success).toBe(false);
     expect(
       Proposal.safeParse({
         ...valid,
         type: 'open_question',
         payload: { question: 'do we?' },
+        proposer: { kind: 'human', userId: ALICE },
+        quote: null,
       }).success,
     ).toBe(true);
   });

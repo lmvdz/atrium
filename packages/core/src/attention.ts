@@ -405,6 +405,15 @@ function proposalItems(
       });
       continue;
     }
+    // A receipt the engine declines to rule on silences the panel too, and the
+    // silence gets a receipt of its own. Round 3's gauntlet is the case: the
+    // quote carries the whole statement and says more, so the extra words may be
+    // "not" — asking somebody to confirm a commitment that may be the negation of
+    // what they wrote is worse than asking them nothing.
+    if (verdict.rule === 'receipt_not_certifiable') {
+      refusals.push({ proposalId: proposal.id, reason: verdict.reason });
+      continue;
+    }
     if (verdict.visibility !== 'needs_you') continue;
 
     if (proposal.type === 'decision') {

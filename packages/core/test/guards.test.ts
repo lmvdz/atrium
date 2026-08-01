@@ -40,7 +40,16 @@ type TestActor =
 
 /** The claim these fixtures quote, and the person who wrote it. */
 const CLAIM_TEXT = 'the build is green on main';
-const MSG_9: ProvenanceMessage[] = [{ id: 'msg_9', authorId: ALICE, body: CLAIM_TEXT }];
+/**
+ * …and the decision they quote. r4 requires a quote from a model proposal of
+ * every type, not only the two that name a person, so ALICE's message has to
+ * contain both sentences — a decision fixture that quotes nothing no longer
+ * parses.
+ */
+const DECISION_TEXT = 'adopt the watermark contract';
+const MSG_9: ProvenanceMessage[] = [
+  { id: 'msg_9', authorId: ALICE, body: `${CLAIM_TEXT}, so let us ${DECISION_TEXT}` },
+];
 
 function proposalEvent(
   overrides: {
@@ -70,11 +79,11 @@ function proposalEvent(
       payload:
         type === 'claim'
           ? { statement: CLAIM_TEXT, claimant: ALICE }
-          : { statement: 'Adopt the watermark contract' },
+          : { statement: DECISION_TEXT },
       confidence: overrides.confidence ?? 0.9,
       proposer: overrides.proposer ?? { kind: 'model', model: 'test-model' },
       provenance: ['msg_9'],
-      ...(type === 'claim' ? { quote: CLAIM_TEXT } : {}),
+      quote: type === 'claim' ? CLAIM_TEXT : DECISION_TEXT,
       createdAt: minute,
       ...(overrides.status ? { status: overrides.status } : {}),
     },
@@ -957,7 +966,7 @@ describe('the actor floor — gate 9: no receipt, no acceptance', () => {
           id: 'prop_c',
           roomId: ROOM,
           type: 'commitment',
-          payload: { statement: 'Wire the flag in', owner: BOB },
+          payload: { statement: 'Bob will wire the flag in tomorrow', owner: BOB },
           confidence: 0.95,
           proposer: { kind: 'model', model: 'test-model' },
           provenance: ['msg_c'],
@@ -975,7 +984,7 @@ describe('the actor floor — gate 9: no receipt, no acceptance', () => {
           id: 'obj_c',
           roomId: ROOM,
           type: 'commitment',
-          payload: { statement: 'Wire the flag in', owner: BOB },
+          payload: { statement: 'Bob will wire the flag in tomorrow', owner: BOB },
           provenance: { messageIds: ['msg_c'], proposalId: 'prop_c' },
           createdAt: at(2),
           updatedAt: at(2),
@@ -1001,7 +1010,7 @@ describe('the actor floor — gate 9: no receipt, no acceptance', () => {
           id: 'prop_c',
           roomId: ROOM,
           type: 'commitment',
-          payload: { statement: 'Wire the flag in', owner: BOB },
+          payload: { statement: "I'll wire the flag in tomorrow", owner: BOB },
           confidence: 0.95,
           proposer: { kind: 'model', model: 'test-model' },
           provenance: ['msg_c'],
@@ -1019,7 +1028,7 @@ describe('the actor floor — gate 9: no receipt, no acceptance', () => {
           id: 'obj_c',
           roomId: ROOM,
           type: 'commitment',
-          payload: { statement: 'Wire the flag in', owner: BOB },
+          payload: { statement: "I'll wire the flag in tomorrow", owner: BOB },
           provenance: { messageIds: ['msg_c'], proposalId: 'prop_c' },
           createdAt: at(2),
           updatedAt: at(2),

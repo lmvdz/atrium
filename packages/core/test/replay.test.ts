@@ -546,6 +546,11 @@ function gateProbes(seed: number): AuthoredEvent[] {
           confidence: 0.99,
           proposer: MODEL,
           provenance: [`msg_${tag}`],
+          // r4: a model proposal of *any* type must quote. Before r4 the rule
+          // was scoped to claims and commitments, and this decision carried no
+          // quote at all — which is exactly the hole r3's gauntlet minted an
+          // objective through.
+          quote: `${tag} proposed`,
           createdAt: stamp(12),
         },
       },
@@ -735,7 +740,7 @@ function gateProbes(seed: number): AuthoredEvent[] {
           id: `pprop_third_${seed}`,
           roomId: room,
           type: 'commitment',
-          payload: { statement: `${tag} land it on Friday afternoon`, owner: BOB },
+          payload: { statement: `${tag} will land it on Friday afternoon`, owner: BOB },
           confidence: 0.95,
           proposer: MODEL,
           provenance: [`msg_${tag}`],
@@ -754,7 +759,7 @@ function gateProbes(seed: number): AuthoredEvent[] {
           id: `pobj_${seed}_35`,
           roomId: room,
           type: 'commitment',
-          payload: { statement: `${tag} land it on Friday afternoon`, owner: BOB },
+          payload: { statement: `${tag} will land it on Friday afternoon`, owner: BOB },
           provenance: { messageIds: [`msg_${tag}`], proposalId: `pprop_third_${seed}` },
           createdAt: stamp(35),
           updatedAt: stamp(35),

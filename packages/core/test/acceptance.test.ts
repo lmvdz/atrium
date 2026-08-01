@@ -73,11 +73,16 @@ function proposal(overrides: {
   const payload =
     overrides.payload ??
     ({
+      // r4: each statement is the sentence its `QUOTE` carries, word for word.
+      // The receipt no longer measures how many words two texts share; it asks
+      // whether the statement is the quote with nothing dropped but articles, so
+      // "Land the migration" quoted against "I'll land the migration tomorrow"
+      // is a reading a person has to confirm rather than one a model may accept.
       decision: { statement: 'Reset narrowing on mutating method calls' },
-      commitment: { statement: 'Land the migration', owner: ALICE },
+      commitment: { statement: "I'll land the migration tomorrow", owner: ALICE },
       open_question: { question: 'Do we keep the flag after launch?' },
       claim: { statement: 'The migration is reversible', claimant: ALICE },
-      objective: { title: 'Ship the narrowing fix' },
+      objective: { title: 'Ship the narrowing fix this quarter' },
     }[overrides.type] as Record<string, unknown>);
 
   return ProposalSchema.parse({
