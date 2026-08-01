@@ -29,6 +29,12 @@ Standing record of what this project's process gets wrong and right, kept so fut
 
 ---
 
+## Closed-ticket entries
+
+**#20 Build: replay ingest** (closed 2026-08-01, 2 rounds). r1 (codex) caught the silent-truncation class: pagination could write a valid-shaped partial corpus; r2 added four throw paths + whole-fetch dedup + per-parent-comment count reconciliation, and proved its new tests against staged round-1 code (which silently dropped 3 of 4 replies in the fixture). r2 delta (grok, rotated lens) passed with zero blocking. Findings refuted: 0; findings re-scoped: 1 (the "verbatim any path" claim was scoped to API bodies — the markdown converter is a parser and normalizes as part of tokenization). Mid-build discovery: GitHub issues carry no reply threading — demo corpus swapped to a threaded discussion via amendment on closed #2. Lesson kept: **absolute claims ("any path", "every secret") attract correct refutations — scope claims to exactly what is guaranteed, in the artifact itself.**
+
+**Process note — interpretation spike** (research, 2026-08-01). Measured on 6 live runs: model confidence carries no signal (0.937 on wrong vs 0.928 on right), so θ-band escalation routing was dead code as designed; #8 amended to deterministic pre-call text triggers. Lesson kept: **route on signals you compute, not signals the model self-reports; and test the cheap tier before building infrastructure around its assumed failure modes.**
+
 ## Anti-staleness doctrine
 
 Nothing in this project is allowed to be true only at time of writing. Rules:
