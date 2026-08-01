@@ -2,6 +2,7 @@ import { cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ClaimText, Glyph, ObjectRow, TimelineRow } from '../src/components';
 import type { EpistemicState, MessageEntry } from '../src/components/model';
+import { messageEntry as buildEntry, slot } from '../src/components/model';
 
 afterEach(cleanup);
 
@@ -20,20 +21,10 @@ const VERIFIED: EpistemicState = {
 };
 
 function messageEntry(state: EpistemicState): MessageEntry {
-  return {
-    type: 'message',
-    id: 'm1',
-    at: '11:02',
-    actor: 'priya',
-    body: [{ kind: 'text', text: 'Cut over Friday.' }],
-    state,
-    fromViewer: false,
-    replyTo: null,
-    note: null,
-    tag: null,
-    targeted: false,
-    matchesFilter: true,
-  };
+  return buildEntry(
+    { id: 'm1', at: '11:02', actor: 'priya', text: 'Cut over Friday.', origin: 'seeded' },
+    { state },
+  );
 }
 
 describe('the glyph cannot be handed in', () => {
@@ -65,12 +56,11 @@ describe('the glyph cannot be handed in', () => {
     cleanup();
     render(
       <ClaimText
+        content={slot('text')}
         state={VERIFIED}
         // @ts-expect-error — and the hue is derived too: no `tone` override.
         tone="verified"
-      >
-        text
-      </ClaimText>,
+      />,
     );
   });
 

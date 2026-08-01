@@ -17,12 +17,7 @@ function item(input: Partial<AttentionItem> & Pick<AttentionItem, 'id' | 'state'
   };
 }
 
-const EMPTY_TRAILER: TrailerSummary = trailerFor({
-  objects: [],
-  objectives: [],
-  overdue: 0,
-  lastCheck: '13:00',
-});
+const EMPTY_TRAILER: TrailerSummary = trailerFor({ objects: [], objectives: [], overdue: 0 });
 
 describe('the rationale requirement', () => {
   /* CATCHES: relaxing rationale() to accept an empty or whitespace string. The
@@ -148,7 +143,7 @@ describe('the pin', () => {
   /* CATCHES: turning the empty pin into a hidden element or an empty box.
      Silence is a result the reader wanted, not an absence to hide. */
   it('an empty pin says so as an answer', () => {
-    render(<Pin folded={false} items={[]} lastCheck="13:41" trailer={EMPTY_TRAILER} />);
+    render(<Pin items={[]} lastCheck="13:41" trailer={EMPTY_TRAILER} />);
     expect(screen.getByText(/THAT IS A RESULT, NOT AN ABSENCE/)).toBeDefined();
   });
 
@@ -159,7 +154,6 @@ describe('the pin', () => {
   it('an irreversible item holds; a reversible one is one click', () => {
     render(
       <Pin
-        folded={false}
         items={[
           item({
             id: 'destructive',
@@ -215,7 +209,6 @@ describe('the trailer', () => {
       ],
       objectives: [{ id: 'o1', title: 'o', status: 'active', open: true }],
       overdue: 0,
-      lastCheck: '12:00',
     });
     expect(summary.lead).toBe('1 of 1 still unverified');
     expect(summary.state.verification).toBe('self_reported');
@@ -243,7 +236,6 @@ describe('the trailer', () => {
       ],
       objectives: [],
       overdue: 3,
-      lastCheck: '12:29',
     });
     expect(summary.lead).toBe('1 failure outside your list');
   });

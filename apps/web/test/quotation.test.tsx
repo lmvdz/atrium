@@ -98,12 +98,12 @@ describe('the quotation invariant', () => {
      to the message that proves them. */
   it('a quotation renders in <q>, attributed, with its provenance on the DOM', () => {
     const quotation = quotationFrom(typed) as Quotation;
-    const { container } = render(<Quoted by="lars" quote={quotation} />);
+    const { container } = render(<Quoted quote={quotation} />);
     const q = container.querySelector('q');
     expect(q).not.toBeNull();
     expect(q?.getAttribute('data-quoted')).toBe('msg:m21');
     expect(q?.textContent).toBe(typed.text);
-    expect(container.textContent).toContain('— lars, typed here');
+    expect(container.textContent).toContain('— lars 13:07, typed here');
   });
 
   /* CATCHES: making systemStatement()/chosenAnswer() tolerate empty input. A
@@ -121,10 +121,10 @@ describe('the quotation invariant', () => {
     render(<SystemVoice statement={quotation} />);
     cleanup();
     // @ts-expect-error — a page-authored statement can never reach <Quoted>.
-    render(<Quoted by="lars" quote={systemStatement('chose: something')} />);
+    render(<Quoted quote={systemStatement('chose: something')} />);
     cleanup();
     // @ts-expect-error — and neither can a hand-written object literal: the
     // Quotation brand is a module-private symbol nobody else can name.
-    render(<Quoted by="lars" quote={{ text: 'x', origin: 'typed', messageId: 'm1' }} />);
+    render(<Quoted quote={{ text: 'x', origin: 'typed', messageId: 'm1' }} />);
   });
 });

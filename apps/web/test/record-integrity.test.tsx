@@ -105,21 +105,32 @@ describe('no synthesized speech, checked against the rendered DOM', () => {
     expect(strayQuotes(container)).toEqual([]);
   });
 
-  /* CATCHES: rendering a chosen answer's own text as the row's note without
-     routing it through system voice. The row body is the person's recorded
-     answer; the note beside it must say the answer was CHOSEN, in the page's
-     voice, with no quotation marks — that is the round-4 finding in one row. */
-  it("a chosen answer's row says it was chosen, in system voice", () => {
+  /* CATCHES the round-1 cardinal defect: rendering a page-authored answer as
+     the actor's own words. The whole row must be system voice ("lars chose: …",
+     third person, mono, unquoted) and the ATTRIBUTION COLUMN MUST BE EMPTY —
+     round 1 shipped this record under lars's name in the same slot as his
+     typed sentences. Also catches reintroducing an `actor` field on the chosen
+     arm of the union, which is what would make that renderable again. */
+  it("a chosen answer's row is system voice and attributed to nobody", () => {
     const chosen = f
       .timeline({ seen: false, filter: null, routineOpen: false })
       .find((entry) => entry.type === 'message' && entry.id === 'm-chosen');
     expect(chosen).toBeDefined();
     if (chosen === undefined || chosen.type !== 'message') return;
+    expect(chosen.origin).toBe('chosen');
+    expect('attribution' in chosen).toBe(false);
+    expect('body' in chosen).toBe(false);
+
     const { container } = render(<TimelineRow entry={chosen} />);
-    const note = container.querySelector('[data-voice="system"]');
-    expect(note?.textContent).toMatch(/^chose: /);
+    const voice = container.querySelector('[data-voice="system"]');
+    expect(voice?.textContent).toMatch(/^lars chose: /);
+    /* the actor cell exists (the grid keeps its columns) and holds nothing */
+    const attribution = container.querySelector('[data-attribution]');
+    expect(attribution?.getAttribute('data-attribution')).toBe('none');
+    expect(attribution?.textContent).toBe('');
     expect(strayQuotes(container)).toEqual([]);
     expect(container.querySelector('q')).toBeNull();
+    expect(container.querySelector('[data-quoted]')).toBeNull();
   });
 
   /* CATCHES: every quotation the gallery renders losing its provenance token.
