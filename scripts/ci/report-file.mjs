@@ -29,8 +29,7 @@ const CLOCK_SLACK_MS = 1000;
  * point — the policy engine requires the value to come from `date`, and this
  * requires it to be a *millisecond* one from roughly now. Neither half can be
  * satisfied by satisfying the other.
- */
-/**
+ *
  * ── AND WHY A FIXED WINDOW WAS NOT ENOUGH (blind review of r6) ──────────────
  * The first version of this bound was "after 2025-01-01 and not in the future",
  * and a cross-lineage review measured what that still accepts:
@@ -43,12 +42,17 @@ const CLOCK_SLACK_MS = 1000;
  * spelling. A calendar bound is a *constant*, and a constant is exactly what
  * this is trying to refuse.
  *
- * So the bound is relative: a run this gate is reading the report of started
- * *recently*. A GitHub job cannot exceed six hours; a day is generous and still
- * refuses any timestamp somebody typed and left there, because a literal stops
- * being "within a day" a day after it is written.
+ * So the bound is relative: the run whose report this gate is reading started
+ * *recently*. A literal stops being recent shortly after it is written, which
+ * is the property a calendar bound cannot have.
+ *
+ * A day was the first relative bound and the same review called it far wider
+ * than anything real — this workflow's steps time out in minutes. Six hours is
+ * GitHub's hard ceiling on a job, so no legitimate run-start can be older than
+ * that when the gate reads it. Taken from the platform rather than from a
+ * step's current timeout, which is a number that moves.
  */
-const MAX_RUN_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_RUN_AGE_MS = 6 * 60 * 60 * 1000;
 /** A runner whose clock is an hour ahead of ours is a broken runner, loudly. */
 const FUTURE_SLACK_MS = 60 * 60 * 1000;
 

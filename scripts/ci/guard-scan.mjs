@@ -177,6 +177,87 @@ function isEmptyBody(statement) {
 }
 
 /**
+ * The body must *do* something, unconditionally.
+ *
+ * ── THE DEFECT (found by a blind review of round 6's own fix) ───────────────
+ * The first version of this file checked the shape of the *condition* and, for
+ * the body, only that it was not empty. A second lineage pointed straight at the
+ * gap: "the AST scanner checks condition shape but not guard-body reachability".
+ * Measured, and every one of these was accepted:
+ *
+ *     if (isMainModule(import.meta.url)) {
+ *       if (process.env.CI === undefined) { process.exit(await main()); }   ← the
+ *     }                                    r5 attack, one line further in
+ *
+ *     if (isMainModule(import.meta.url)) { if (false) { … } }
+ *     if (isMainModule(import.meta.url)) { try { … } catch {} }             ← failure
+ *                                                                            becomes 0
+ *
+ * Moving the conjunct from the condition into the body defeats a condition-shape
+ * rule completely, and it is a *smaller* edit than the one that started this
+ * ticket. So the body is checked too: it must contain at least one statement, at
+ * its own top level, that is not itself a branch and that actually calls
+ * something. A body whose every top-level statement is an `if`, a `try` or a
+ * loop is a body behind a second gate.
+ *
+ * ── WHERE THIS STOPS, EXACTLY ───────────────────────────────────────────────
+ * `{ const x = f(); if (process.env.CI) { … } }` satisfies this and is still
+ * conditional. No shape check reaches that, and pretending otherwise would be
+ * the fourth version of the same mistake. What moved is the price: the r5 attack
+ * was one relocated `&&`, and now it needs an unconditional decoy call written
+ * beside it. Semantics — whether the work the body does is the work it should —
+ * is the boundary the SCOPE block in workflow-policy.mjs owns and always will.
+ */
+function isEntirelyConditional(statement) {
+  const body = ts.isBlock(statement) ? statement.statements : [statement];
+  return !body.some((child) => isUnconditionalWork(child));
+}
+
+const BRANCHES = new Set([
+  ts.SyntaxKind.IfStatement,
+  ts.SyntaxKind.TryStatement,
+  ts.SyntaxKind.SwitchStatement,
+  ts.SyntaxKind.ForStatement,
+  ts.SyntaxKind.ForOfStatement,
+  ts.SyntaxKind.ForInStatement,
+  ts.SyntaxKind.WhileStatement,
+  ts.SyntaxKind.DoStatement,
+  ts.SyntaxKind.LabeledStatement,
+  ts.SyntaxKind.Block,
+]);
+
+/** A statement that is not a branch and that calls something. */
+function isUnconditionalWork(statement) {
+  if (BRANCHES.has(statement.kind)) return false;
+  let calls = false;
+  const visit = (node) => {
+    if (calls) return;
+    if (ts.isCallExpression(node) || ts.isNewExpression(node) || ts.isAwaitExpression(node)) {
+      calls = true;
+      return;
+    }
+    node.forEachChild(visit);
+  };
+  visit(statement);
+  return calls;
+}
+
+/** An empty `catch` in an entry point turns every failure into exit 0. */
+function swallowsFailure(statement) {
+  let found = false;
+  const visit = (node) => {
+    if (found) return;
+    if (ts.isCatchClause(node) && node.block.statements.length === 0) {
+      found = true;
+      return;
+    }
+    node.forEachChild(visit);
+  };
+  visit(statement);
+  return found;
+}
+
+/**
  * A statement that cannot have an effect however it is reached.
  *
  * `{}` was the only shape the first version refused; a blind review pointed out
@@ -257,6 +338,20 @@ function guardShape(statement) {
       node: statement,
       reason:
         'its body is empty, so the script establishes that it was run and then does nothing and exits 0 — which passes any check that reads the condition alone',
+    };
+  }
+  if (isEntirelyConditional(statement.thenStatement)) {
+    return {
+      node: statement,
+      reason:
+        'every statement in its body is a branch, so the work is behind a second gate and the guard is decoration. `{ if (process.env.CI === undefined) { process.exit(await main()); } }` is the exact conjunct this rule refuses in the condition, moved one line further in, and it is a *smaller* edit; `{ if (false) { … } }` and `{ try { … } catch {} }` are the same idea. The body needs at least one unconditional statement that calls something',
+    };
+  }
+  if (swallowsFailure(statement.thenStatement)) {
+    return {
+      node: statement,
+      reason:
+        'it has an empty `catch` in its body, which turns every failure the script can have into exit 0 — the fail-open this whole file is about, spelled as error handling',
     };
   }
   // The unwrapped call, not `statement.expression`: with parentheses round the

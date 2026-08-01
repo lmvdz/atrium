@@ -38,7 +38,7 @@ import { checkPlaywrightReport } from './assert-playwright-report.mjs';
 import { checkSchema, readSchema } from './assert-stack-schema.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
-import { checkerGraphProblems, ENFORCEMENT } from './checker-graph.mjs';
+import { calledNames, checkerGraphProblems, ENFORCEMENT } from './checker-graph.mjs';
 import { notAVerdict } from './child-verdict.mjs';
 import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
@@ -1623,6 +1623,54 @@ const CASES = [
       guardScanWith('assert-tables.mjs', () => `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n}\n`),
     expect: /body is empty/,
   },
+  // ---- the same conjunct, moved one line further in ------------------------
+  // A condition-shape rule is defeated by putting the second gate in the body,
+  // and that is a *smaller* edit than the one that started this ticket. Named by
+  // a blind review of this round's own fix; all three were accepted when it was.
+  {
+    name: 'the round-5 conjunct relocated from the condition into the body',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  if (${CI_CONJUNCT}) {\n    process.exit(main());\n  }\n}\n`,
+      ),
+    expect: /every statement in its body is a branch/,
+  },
+  {
+    name: 'the whole body behind `if (false)`',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  if (false) {\n    process.exit(main());\n  }\n}\n`,
+      ),
+    expect: /every statement in its body is a branch/,
+  },
+  {
+    name: 'the work swallowed by an empty catch, so failure exits 0',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  const code = main();\n  try {\n    process.exit(code);\n  } catch {}\n}\n`,
+      ),
+    expect: /empty `catch` in its body/,
+  },
+  {
+    // The other polarity, because a body rule that refuses real entry points is
+    // a body rule somebody deletes: six of the fifteen scripts here do their
+    // whole job inside the guard, and a conditional exit *after* unconditional
+    // work is exactly what argument validation looks like.
+    name: 'work first and a conditional exit after it, which is what real scripts do',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  const verb = parse(process.argv.slice(2));\n  if (verb === undefined) {\n    process.exit(2);\n  }\n  process.exit(main(verb));\n}\n`,
+      ),
+    expect: 'clean',
+  },
   {
     name: 'the guard nested inside a branch that is never taken',
     run: () =>
@@ -1664,6 +1712,66 @@ const CASES = [
         registry: [{ ...ENFORCEMENT[0], invokers: ['scripts/ci/gate-selftest.mjs'] }],
       }),
     expect: /Sole enforcer, sole exception/,
+  },
+  // ---- presence is not use (a blind review of this round's own fix) --------
+  // A second lineage named both of these before its run ended: "the AST scanner
+  // checks condition shape but not guard-body reachability, and the checker
+  // graph counts syntactic calls even when they are under a dead branch."
+  // Measured: putting the outside witness's two calls inside `if (false)` left
+  // both self-tests exit 0 — the fix for the critical finding, defeated by four
+  // characters.
+  {
+    name: 'a call under a constantly false branch is not an invocation',
+    run: () =>
+      calledNames('f.test.ts', 'if (false) { mainGuardProblems("scripts"); }').has(
+        'mainGuardProblems',
+      )
+        ? ['a call inside `if (false)` counted as an invoker']
+        : [],
+    expect: 'clean',
+  },
+  {
+    name: 'nor is one in a skipped test, after a return, or in a dead ternary arm',
+    run: () => {
+      const dead = {
+        'it.skip': 'it.skip("x", () => { mainGuardProblems("scripts"); });',
+        'after return': 'function f() { return 1; mainGuardProblems("scripts"); }',
+        'after process.exit': '{ process.exit(1); mainGuardProblems("scripts"); }',
+        'false ternary arm': 'const x = false ? mainGuardProblems("scripts") : 1;',
+      };
+      return Object.entries(dead)
+        .filter(([, source]) => calledNames('f.test.ts', source).has('mainGuardProblems'))
+        .map(([what]) => `${what} counted as an invoker`);
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'a live call in a real test still counts, or the rule is a ban on calls',
+    run: () =>
+      calledNames('f.test.ts', 'it("x", () => { mainGuardProblems("scripts"); });').has(
+        'mainGuardProblems',
+      )
+        ? []
+        : ['a call inside a live `it()` was not counted'],
+    expect: 'clean',
+  },
+  {
+    // The general form, and the one that closes what dead-code analysis cannot:
+    // a check gutted to `return []` has a *perfect* invocation graph.
+    name: 'a check with a flawless graph that no longer does anything',
+    run: () =>
+      checkerGraphProblems({
+        registry: [{ ...ENFORCEMENT[0], violate: () => [] }],
+      }),
+    expect: /reported nothing about an input that violates it/,
+  },
+  {
+    name: 'a registry row with no violate fixture at all',
+    run: () =>
+      checkerGraphProblems({
+        registry: [{ ...ENFORCEMENT[0], violate: undefined }],
+      }),
+    expect: /has no `violate` fixture/,
   },
   {
     // The cheapest way to satisfy checker-graph.mjs without satisfying anything

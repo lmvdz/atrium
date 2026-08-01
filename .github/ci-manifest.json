@@ -13,7 +13,7 @@
     "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
     "target: the point is to catch a suite that shrank, not to go red every time a test is",
     "renamed away. Counted from a real run of this tree (fix/ci-r6 merged into fix/auth-r5,",
-    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 27 — 669",
+    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 49 — 691",
     "tests across 31 files.",
     "packages/ci-guard is #40 round 6. It exists to run checks from *outside* scripts/: the",
     "main-module guard scanner was enforced only from gate-selftest.mjs, a file it scans, so",
@@ -37,7 +37,7 @@
       },
       "packages/ci-guard": {
         "project": "ci-guard",
-        "minTests": 20
+        "minTests": 40
       },
       "packages/auth": {
         "project": "auth",
@@ -57,7 +57,7 @@
       }
     },
     "exempt": {},
-    "minTotalTests": 620
+    "minTotalTests": 640
   },
   "playwright": {
     "projects": {

@@ -33,7 +33,11 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
-import { checkerGraphProblems, ENFORCEMENT } from '../../../scripts/ci/checker-graph.mjs';
+import {
+  calledNames,
+  checkerGraphProblems,
+  ENFORCEMENT,
+} from '../../../scripts/ci/checker-graph.mjs';
 import { guardProblems, mainGuardProblems } from '../../../scripts/ci/guard-scan.mjs';
 import {
   checkWorkflowFile,
@@ -161,6 +165,24 @@ describe('the evasions round 5 accepted', () => {
       "if (globalThis.process.argv[1] === '/x/y.mjs') {\n  main();\n}\n",
       /compares an `argv` element for equality/,
     ],
+    // A blind review named this one before its run ended: a rule about the
+    // *condition* is defeated by moving the second gate into the *body*, and
+    // that is a smaller edit than the one that started this ticket.
+    [
+      'the round-5 conjunct relocated from the condition into the body',
+      `${IMPORT}if (isMainModule(import.meta.url)) {\n  if (process.env.CI === undefined) {\n    process.exit(main());\n  }\n}\n`,
+      /every statement in its body is a branch/,
+    ],
+    [
+      'the whole body behind `if (false)`',
+      `${IMPORT}if (isMainModule(import.meta.url)) {\n  if (false) {\n    process.exit(main());\n  }\n}\n`,
+      /every statement in its body is a branch/,
+    ],
+    [
+      'the work swallowed by an empty catch, so failure exits 0',
+      `${IMPORT}if (isMainModule(import.meta.url)) {\n  const code = main();\n  try {\n    process.exit(code);\n  } catch {}\n}\n`,
+      /empty `catch` in its body/,
+    ],
     [
       'the round-4 comparison, re-introduced verbatim',
       'if (import.meta.url === `file://${process.argv[1]}`) {\n  process.exit(main());\n}\n',
@@ -232,6 +254,58 @@ describe('a fixture is not a guard', () => {
 
   it('a module with no entry-point decision needs no guard and gets no exemption', () => {
     expect(guardProblems('fixture.mjs', 'export function f() {\n  return 1;\n}\n')).toEqual([]);
+  });
+
+  it('work first and a conditional exit after it is what real scripts do', () => {
+    const source = `${IMPORT}if (isMainModule(import.meta.url)) {\n  const verb = parse(process.argv.slice(2));\n  if (verb === undefined) {\n    process.exit(2);\n  }\n  process.exit(main(verb));\n}\n`;
+    expect(guardProblems('fixture.mjs', source)).toEqual([]);
+  });
+});
+
+/**
+ * Presence is not use.
+ *
+ * The graph above proves who calls what. None of it proves the check still does
+ * anything — `mainGuardProblems` rewritten to `return []` has a *perfect*
+ * invocation graph. And a call site is only an invocation if it can run: a blind
+ * review pointed out that putting this file's two calls inside `if (false)` left
+ * both self-tests exit 0, which defeats the fix for the critical finding with
+ * four characters. Both halves are checked, from outside `scripts/`.
+ */
+describe('a call that cannot run is not an invocation', () => {
+  const dead: Array<[string, string]> = [
+    ['inside `if (false)`', 'if (false) { mainGuardProblems("scripts"); }'],
+    ['in a skipped test', 'it.skip("x", () => { mainGuardProblems("scripts"); });'],
+    ['after a `return`', 'function f() { return 1; mainGuardProblems("scripts"); }'],
+    ['after `process.exit()`', '{ process.exit(1); mainGuardProblems("scripts"); }'],
+    ['in the false arm of a ternary', 'const x = false ? mainGuardProblems("scripts") : 1;'],
+  ];
+
+  for (const [where, source] of dead) {
+    it(`does not count a call ${where}`, () => {
+      expect(calledNames('f.test.ts', source).has('mainGuardProblems')).toBe(false);
+    });
+  }
+
+  it('still counts a live call in a real test, or the rule is a ban on calls', () => {
+    const source = 'it("x", () => { mainGuardProblems("scripts"); });';
+    expect(calledNames('f.test.ts', source).has('mainGuardProblems')).toBe(true);
+  });
+
+  it('reports a check with a flawless graph that no longer does anything', () => {
+    const problems = checkerGraphProblems({
+      root: REPO,
+      registry: [{ ...ENFORCEMENT[0], violate: () => [] }],
+    });
+    expect(problems.join(' | ')).toMatch(/reported nothing about an input that violates it/);
+  });
+
+  it('reports a row with no violation fixture at all', () => {
+    const problems = checkerGraphProblems({
+      root: REPO,
+      registry: [{ ...ENFORCEMENT[0], violate: undefined }],
+    });
+    expect(problems.join(' | ')).toMatch(/has no `violate` fixture/);
   });
 });
 
