@@ -1,0 +1,48 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# next.js
+.next/
+.turbo/
+next-env.d.ts
+
+# test / tooling artifacts
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+playwright/.cache/
+
+# env — .env.example is committed, real env files are not
+.env
+.env.*
+!.env.example
+
+# docker volumes / local infra state
+.docker-data/
+
+# editor + os
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# harness-managed agent worktrees and session state
+.claude/

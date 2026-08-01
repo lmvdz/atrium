@@ -1,0 +1,229 @@
+/*
+ * Shell layout. Every value here is a token from design/tokens.css — no
+ * hardcoded colours, ever. When the design/tokens branch lands this file keeps
+ * working unchanged.
+ */
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  background: var(--bg0);
+  color: var(--tx0);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--strip);
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark {
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--stileac);
+}
+
+.roomName {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--fs-row);
+  color: var(--stx);
+}
+
+.themeToggle {
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--stbd);
+  border-radius: var(--radius-pill);
+  background: var(--stile);
+  color: var(--stx);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.themeToggle:hover {
+  color: var(--stileac);
+}
+
+.regions {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr);
+  min-height: 0;
+}
+
+.region {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--bg1);
+}
+
+.region:last-child {
+  border-right: none;
+  background: var(--bg2);
+}
+
+.regionTitle {
+  margin: 0;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx3);
+}
+
+.regionNote {
+  margin: var(--sp-1) 0 var(--sp-5);
+  font-size: var(--fs-row);
+  color: var(--tx4);
+}
+
+/* ── conversation ─────────────────────────────────────────────────────── */
+
+.feed {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.message {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: var(--sp-3);
+  align-items: baseline;
+  padding: var(--sp-1) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-row);
+}
+
+.timestamp {
+  color: var(--tx4);
+}
+
+.author {
+  color: var(--blu);
+  font-weight: 500;
+}
+
+.body {
+  color: var(--tx1);
+}
+
+.composer {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-pill);
+  background: var(--bg3);
+  color: var(--tx4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-row);
+}
+
+/* ── current state ────────────────────────────────────────────────────── */
+
+.stateList,
+.attentionList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stateItem {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: var(--sp-3);
+  align-items: baseline;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg3);
+}
+
+.markAccepted {
+  color: var(--grn);
+  font-family: var(--font-mono);
+}
+
+.markProposed {
+  color: var(--tx3);
+  font-family: var(--font-mono);
+}
+
+.stateKind {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx4);
+}
+
+.stateText {
+  font-size: var(--fs-row);
+  color: var(--tx1);
+}
+
+/* ── needs you ────────────────────────────────────────────────────────── */
+
+.attentionItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--ambbd);
+  border-radius: var(--radius-card);
+  background: var(--ambbg);
+}
+
+.attentionLabel {
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--amb);
+}
+
+.attentionText {
+  font-size: var(--fs-base);
+  color: var(--tx0);
+}
+
+/* Every attention item must say why it needs *this* person. */
+.attentionRationale {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--tx3);
+}
+
+.trailer {
+  margin-top: var(--sp-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--tx4);
+}
+
+@media (width <= 900px) {
+  .regions {
+    grid-template-columns: 1fr;
+  }
+
+  .region {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+}
