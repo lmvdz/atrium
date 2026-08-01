@@ -5,9 +5,17 @@
  * isolation. Density, hairlines and the vertical rhythm only mean anything
  * against a whole screen, so every gallery entry is a complete rail | workspace
  * | lens frame with real content in all three surfaces.
+ *
+ * EVERY HANDLER THE LIBRARY EXPOSES IS FORWARDED. Round 2's gauntlet: this
+ * component passed none of them, so `/` — the page whose job is to show the
+ * library working — was a screen of controls that did nothing when clicked. The
+ * props existed, so nobody was forced to fork anything; the demo was simply not
+ * a demo. The gallery's six frames stay static on purpose (they are states, not
+ * a session); `/` drives the same component through `RoomSession`.
  * ------------------------------------------------------------------------- */
 
 import { Fragment } from 'react';
+import type { Arming } from '../../src/components';
 import {
   AppFrame,
   Composer,
@@ -24,6 +32,7 @@ import {
   WorkspaceYou,
 } from '../../src/components';
 import type {
+  AttentionClass,
   AttentionItem,
   ComposerBinding,
   CrossRoomJumpRecord,
@@ -39,6 +48,30 @@ import type {
 } from '../../src/components/model';
 import { ThemeToggle } from '../theme-toggle';
 import { surfaces } from './fixtures';
+
+/**
+ * Every seam the library offers, in one place. Optional throughout: the
+ * gallery's frames are stills and pass none of them; `/` passes all of them.
+ */
+export interface RoomFrameHandlers {
+  readonly onFocusSurface?: (surface: SurfaceId) => void;
+  readonly onFilter?: (attentionClass: AttentionClass) => void;
+  readonly onTogglePeek?: (entryId: string) => void;
+  readonly onRowAction?: (entryId: string, actionId: string) => void;
+  readonly onOpenTag?: (entryId: string) => void;
+  readonly onMarkSeen?: (entryId: string) => void;
+  readonly onUnmarkSeen?: (entryId: string) => void;
+  readonly onOpenAttention?: (itemId: string) => void;
+  readonly onAct?: (itemId: string, actionId: string) => void;
+  readonly onArm?: (itemId: string, arming: Arming) => void;
+  readonly onJumpToSource?: (itemId: string) => void;
+  readonly onPagePin?: (page: number, pageCount: number) => void;
+  readonly onFoldPin?: (folded: boolean) => void;
+  readonly composerValue?: string;
+  readonly onComposerChange?: (draft: string) => void;
+  readonly onSend?: (draft: string) => void;
+  readonly onCancelBinding?: () => void;
+}
 
 export interface RoomFrameProps {
   readonly room: RoomHeadRecord;
@@ -62,9 +95,11 @@ export interface RoomFrameProps {
   readonly receipt?: Slot;
   readonly boxed?: boolean;
   readonly label?: string;
+  readonly handlers?: RoomFrameHandlers;
 }
 
 export function RoomFrame(props: RoomFrameProps) {
+  const on = props.handlers ?? {};
   return (
     <AppFrame
       boxed={props.boxed ?? true}
@@ -104,26 +139,47 @@ export function RoomFrame(props: RoomFrameProps) {
         <Fragment key="workspace">
           <RoomHead
             room={props.room}
-            surfaces={
+            surfaces={slot(
               <SurfaceIndicators
                 key="surfaces"
                 focused={props.focused}
+                onFocus={on.onFocusSurface}
                 surfaces={surfaces(props.attention.length, props.objects.length)}
-              />
-            }
+              />,
+            )}
           />
           {props.jump === undefined ? <div /> : <CrossRoomJump jump={props.jump} />}
           <Pin
             items={props.attention}
             lastCheck={props.lastCheck}
+            onAct={on.onAct}
+            onArm={on.onArm}
+            onFold={on.onFoldPin}
+            onJumpToSource={on.onJumpToSource}
+            onOpen={on.onOpenAttention}
+            onPage={on.onPagePin}
             openId={props.openAttentionId}
             trailer={props.trailer}
+            viewer={props.viewer.name}
           />
-          <Timeline entries={props.entries} filtered={props.filtered} />
+          <Timeline
+            entries={props.entries}
+            filtered={props.filtered}
+            onFilter={on.onFilter}
+            onMarkSeen={on.onMarkSeen}
+            onOpenTag={on.onOpenTag}
+            onRowAction={on.onRowAction}
+            onTogglePeek={on.onTogglePeek}
+            onUnmarkSeen={on.onUnmarkSeen}
+          />
           <Composer
             binding={props.binding}
             footNote={props.composerNote}
+            onCancelBinding={on.onCancelBinding}
+            onChange={on.onComposerChange}
+            onSend={on.onSend}
             roomName={props.room.name}
+            value={on.composerValue}
           />
         </Fragment>,
       ])}

@@ -7,33 +7,15 @@
  * that `/` is now the actual three-surface product (init.md §3): Conversation
  * on the left, what the group now understands in the middle-right, what needs
  * *you* pinned above the feed.
+ *
+ * Round 2's gauntlet found it forwarding no handlers, which made the page a
+ * screen of dead controls. `RoomSession` is the consumer that drives it: it
+ * owns the interaction state the components deliberately do not, and every
+ * control on this page now does the thing it says it does.
  * ------------------------------------------------------------------------- */
 
-import * as f from './gallery/fixtures';
-import { RoomFrame } from './gallery/RoomFrame';
+import { RoomSession } from './RoomSession';
 
 export default function HomePage() {
-  return (
-    <RoomFrame
-      attention={f.ATTENTION}
-      binding={f.BOUND}
-      boxed={false}
-      composerNote="nothing is inferred from a message unless you bind it"
-      entries={f.timeline({ seen: false, filter: null, routineOpen: false })}
-      filtered={false}
-      focused="conversation"
-      humans={f.HUMANS}
-      label="home"
-      lastCheck="12:29"
-      objectives={f.OBJECTIVES}
-      objects={f.OBJECTS}
-      openAttentionId="X1"
-      room={f.ROOM}
-      rooms={f.ROOMS}
-      trailer={f.TRAILER}
-      updatedAt="13:41"
-      viewer={f.VIEWER}
-      viewerNote="here · 4 owed to you"
-    />
-  );
+  return <RoomSession />;
 }
