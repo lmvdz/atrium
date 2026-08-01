@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { CommandService } from './commands.js';
 import type { EventBus } from './event-bus.js';
+import { createHeadAcks } from './head-acks.js';
 import { createHub, type Hub } from './hub.js';
 import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
 import type { Logger } from './logger.js';
@@ -101,6 +102,11 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   const { logger, heartbeatIntervalMs, commands, ledger, session, bus } = options;
   const connections = new WeakMap<WebSocket, Connection>();
   const hub = createHub<ServerFrame>();
+  /**
+   * What each socket has acknowledged holding, per room. The head frame's only
+   * stopping condition — see `head-acks.ts` for why an attempt is not one.
+   */
+  const headAcks = createHeadAcks();
 
   const httpServer = createServer((req, res) => {
     if (req.url === '/health') {
@@ -193,6 +199,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
 
     socket.on('close', (code) => {
       hub.drop(connection.id);
+      // Or the map grows one entry per connection for the life of the process.
+      headAcks.forget(connection.id);
       logger.info('ws disconnected', { connectionId: connection.id, code });
     });
 
@@ -272,7 +280,15 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         return;
       case 'unsubscribe':
         hub.unsubscribe(frame.data.roomId, connection.id);
+        headAcks.forgetRoom(connection.id, frame.data.roomId);
         send(socket, { type: 'unsubscribed', roomId: frame.data.roomId });
+        return;
+      case 'ack_head':
+        // No reply, and no membership check: this is a statement a socket makes
+        // about itself, it is only ever read to decide whether to send that same
+        // socket a `head` frame, and answering it would be one more frame in the
+        // loop this exists to terminate.
+        headAcks.record(connection.id, frame.data.roomId, frame.data.roomSeq);
         return;
       case 'since':
         await handleSince(socket, connection, frame.data);
@@ -299,6 +315,10 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     try {
       const membership = await commands.requireMembership(connection.session, roomId);
       hub.subscribe(roomId, subscriberFor(socket, connection));
+      // A fresh subscription has acknowledged nothing, whatever a previous one
+      // on this connection said. The client's own `since` and the `ack_head`
+      // that follows it are what move this.
+      headAcks.reset(connection.id, roomId);
       send(socket, {
         type: 'subscribed',
         roomId,
@@ -488,8 +508,22 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         intervalMs: options.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS,
         subscribedRooms: () => hub.activeRooms(),
         onEntries: fanOut,
+        /**
+         * Per socket, not per room, and gated on acknowledgement rather than on
+         * attempt — #22 r3 delta, blocking 1.
+         *
+         * The reconciler now reports every subscribed room's head on every pass,
+         * because it has no evidence about who received what and r3's bug was
+         * acting as though it did. This is where the evidence is: a socket is
+         * told the head until it has said it holds a position at or past it. A
+         * `hub.broadcast` here would be the old shape again — one room-wide
+         * decision standing in for one decision per socket.
+         */
         onHead: (roomId, head) => {
-          hub.broadcast(roomId, { type: 'head', roomId, head });
+          for (const subscriber of hub.subscribers(roomId)) {
+            if (!headAcks.behind(subscriber.id, roomId, head)) continue;
+            subscriber.send({ type: 'head', roomId, head });
+          }
         },
       })
     : null;

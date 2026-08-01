@@ -6,16 +6,23 @@ import type { RoomEvent } from '../src/room-events.js';
 
 /**
  * The reconciler's contract, without a database (#22 gauntlet r2 delta,
- * blocking 1).
+ * blocking 1; corrected by the r3 delta's blocking 1).
  *
- * The finding was that `LISTEN/NOTIFY` was consumed once at startup and never
+ * The r2 finding was that `LISTEN/NOTIFY` was consumed once at startup and never
  * again, so a lost notification stranded every subscriber on that instance. The
  * fix is a loop that does not care whether a notification ever arrived, and
- * these tests are about that indifference: what it delivers, what it announces,
- * and — the part a "just poll it" implementation gets wrong — what it does *not*
- * repeat.
+ * these tests are about that indifference: what it delivers and what it reports.
  *
- * The real thing against a real Postgres, with the listener severed mid-run, is
+ * The r3 delta found the second half of it wrong in the other direction. This
+ * module used to decide *not* to send a head frame, on bookkeeping that treated
+ * a successful broadcast as a successful delivery — so the one failure the head
+ * frame exists for was the one it could not cover. It now reports every
+ * subscribed room's head every pass and makes no delivery decision at all; who
+ * still needs to hear it is `head-acks.test.ts`'s subject, decided by what each
+ * socket has acknowledged.
+ *
+ * The real thing against a real Postgres — the listener severed mid-run, and an
+ * event frame dropped after a successful fan-out — is
  * `integration/server/reconcile.test.ts`.
  */
 
@@ -101,29 +108,60 @@ describe('reconciliation delivers without a doorbell', () => {
     ]);
   });
 
-  it('does not re-announce a head it has already announced', async () => {
-    // Catches: dropping the `announcedHeads` bookkeeping. Without it every tick
-    // broadcasts a head frame to every subscribed room forever — a heartbeat
-    // nobody asked for, which trains a client to ignore the one signal that
-    // exists to be believed.
+  it('reports the head again on a pass where nothing changed', async () => {
+    /**
+     * The r3-delta correction, from the reconciler's side (#22 gauntlet r3
+     * delta, blocking 1). Round 3 kept an `announcedHeads` map here and skipped
+     * a room whose head it had already announced — which reads as thrift and is
+     * actually the server deciding, with no evidence, that a frame it sent
+     * arrived. Whether a *socket* still needs telling is `head-acks.ts`'s
+     * question and is answered by that socket; this module's job is to say where
+     * the room is, every pass, so that answer has something to gate.
+     *
+     * Catches: reinstating any bookkeeping here that suppresses a repeat — the
+     * `announcedHeads` map, a "only when it moved" guard, a per-room latch.
+     * Under r3 the second and third passes are silent, so a socket that dropped
+     * the frame carrying the first one is never told again.
+     */
     const h = harness({ rooms: [ROOM_A] });
     h.headsOf.mockResolvedValue(new Map([[ROOM_A, 4]]));
     await h.reconciler.reconcile();
     await h.reconciler.reconcile();
     await h.reconciler.reconcile();
-    expect(h.heads).toEqual([{ roomId: ROOM_A, head: 4 }]);
+    expect(h.heads).toEqual([
+      { roomId: ROOM_A, head: 4 },
+      { roomId: ROOM_A, head: 4 },
+      { roomId: ROOM_A, head: 4 },
+    ]);
   });
 
-  it('says nothing about a room it just delivered every row of', async () => {
-    // A row folded on this pass has already been sent to this room's
-    // subscribers, so its head is announced by construction. Catches: announcing
-    // the head unconditionally after a sync, which sends a `head` frame
-    // immediately after the `event` frame that reached the same position.
+  it('reports the head of a room it just delivered every row of', async () => {
+    /**
+     * The same finding at its sharpest. r3 said a room it had just fanned rows
+     * out to needed no head frame, "because its head is announced by
+     * construction" — but the fan-out is precisely the send that may have been
+     * lost, so the room that just received rows is the one most in need of being
+     * told where it is. The `head` frame exists for exactly that failure and r3
+     * suppressed it on the evidence of the failure itself.
+     *
+     * Catches: skipping `onHead` for a room named in this pass's `sync` result.
+     */
     const h = harness({ rooms: [ROOM_A] });
     h.sync.mockResolvedValueOnce([entry(ROOM_A, 1), entry(ROOM_A, 2)]);
     h.headsOf.mockResolvedValue(new Map([[ROOM_A, 2]]));
     await h.reconciler.reconcile();
     expect(h.delivered.map((e) => e.roomSeq)).toEqual([1, 2]);
+    expect(h.heads).toEqual([{ roomId: ROOM_A, head: 2 }]);
+  });
+
+  it('says nothing about a room with no history at all', async () => {
+    // `head: 0` tells a client at 0 that it is up to date, which it already
+    // believes — a frame that can only ever be a no-op. Catches: dropping the
+    // `head === 0` guard, which puts one useless frame per empty room per pass
+    // on every socket in it.
+    const h = harness({ rooms: [ROOM_A] });
+    h.headsOf.mockResolvedValue(new Map());
+    await h.reconciler.reconcile();
     expect(h.heads).toEqual([]);
   });
 

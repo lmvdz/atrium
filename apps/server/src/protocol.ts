@@ -30,6 +30,22 @@ export const ClientFrame = z.discriminatedUnion('type', [
     roomSeq: z.number().int().min(0),
     limit: z.number().int().min(1).max(1000).optional(),
   }),
+  /**
+   * "I hold up to `roomSeq` in this room."
+   *
+   * The only evidence the server accepts that a `head` frame arrived (#22
+   * gauntlet r3 delta, blocking 1). Round 3 retired the head frame when it had
+   * *sent* one — or, worse, when it had merely broadcast the events — which is
+   * the send that may have failed being taken as proof it did not. A head frame
+   * is now repeated to a socket until that socket says otherwise.
+   *
+   * Deliberately **not** `advance_seen`. That is a person's read cursor, it is
+   * durable, it is broadcast to the room, and it moves for reasons that have
+   * nothing to do with delivery — a client that has every event but has not
+   * looked at the room must not be told it is behind, and a client that marked a
+   * room read must not thereby claim to hold events it never received.
+   */
+  z.object({ type: z.literal('ack_head'), roomId: Id, roomSeq: z.number().int().min(0) }),
   z.object({ type: z.literal('command'), commandId: z.string().min(1).max(128), command: Command }),
 ]);
 export type ClientFrame = z.infer<typeof ClientFrame>;
@@ -80,6 +96,11 @@ export type ServerFrame =
    * trust it beyond comparing it with its own cursor — which is the same
    * arithmetic the catch-up loop already does — and a client already at the head
    * does nothing at all.
+   *
+   * Repeated to a socket every reconciliation pass until that socket replies
+   * `ack_head` with a cursor at or past it (r3 delta, blocking 1). A client that
+   * is already caught up answers once and hears nothing more; a client whose
+   * event frame was lost hears it again next pass, which is the whole recovery.
    */
   | { type: 'head'; roomId: string; head: number }
   /**

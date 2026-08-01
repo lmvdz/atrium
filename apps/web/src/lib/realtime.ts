@@ -75,7 +75,8 @@ export type ServerFrame =
    *
    * A gap signal that does not depend on any frame having arrived. The client
    * treats it as it treats every other statement about the head: compare it with
-   * its own cursor, and ask for the gap if it is behind.
+   * its own cursor, and ask for the gap if it is behind — and answers with
+   * `ack_head`, which is the only thing that stops the server repeating it.
    */
   | { type: 'head'; roomId: string; head: number }
   | {
@@ -505,6 +506,25 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     send(frame);
   }
 
+  /**
+   * Tell the server what this client actually holds.
+   *
+   * The server repeats its `head` frame to this socket until it hears this, and
+   * that is deliberate (#22 gauntlet r3 delta, blocking 1): round 3 stopped
+   * sending the head once it had *attempted* delivery, so a socket that dropped
+   * an event frame in a room that then went quiet had its cursor and its stale
+   * head agree, and never asked. The one thing that can distinguish "sent" from
+   * "held" is the holder saying so.
+   *
+   * Sent from two places, and both are needed. On every `head` frame, so the
+   * server learns the truth even when the catch-up that follows fails or stalls;
+   * and again when a catch-up loop finishes caught up, so the steady state is
+   * silent rather than one frame per interval forever.
+   */
+  function acknowledgeHead(roomId: string): void {
+    send({ type: 'ack_head', roomId, roomSeq: view(roomId).lastSeq });
+  }
+
   function handleFrame(frame: ServerFrame): void {
     switch (frame.type) {
       case 'subscribed': {
@@ -534,6 +554,11 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         const room = view(frame.roomId);
         room.head = Math.max(room.head, frame.head);
         if (room.lastSeq < room.head) requestSince(frame.roomId);
+        // Answered whether or not there was a gap. "I am at 37, you said 40" is
+        // as useful to the server as "I have 40": both retire nothing until the
+        // cursor reaches the head, and an unanswered frame is the server's cue
+        // to say it again.
+        acknowledgeHead(frame.roomId);
         changed(frame.roomId);
         return;
       }
@@ -567,6 +592,10 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
           }
         } else {
           stalled.delete(frame.roomId);
+          // Caught up, and the server is told so. Without this the server would
+          // keep repeating `head` every reconciliation pass for a client that
+          // has everything — correct, and noisy forever.
+          acknowledgeHead(frame.roomId);
         }
         changed(frame.roomId);
         return;

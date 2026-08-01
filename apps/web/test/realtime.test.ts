@@ -494,6 +494,80 @@ describe('an unsolicited head frame closes a gap the client could not see', () =
     latest().deliver({ type: 'head', roomId: ROOM, head: 1 });
     expect(latest().framesOfType('since').length).toBe(before);
   });
+
+  /**
+   * The client half of #22 gauntlet r3 delta, blocking 1.
+   *
+   * The server repeats a `head` frame to a socket until that socket says what it
+   * holds, because the alternative — retiring it when the server has *sent*
+   * something — is the send that may have failed being read as proof it did not.
+   * That only works if the client answers.
+   */
+  it('tells the server what it holds every time it is told a head', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 1, seenSeq: 0 });
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 1,
+      head: 1,
+      more: false,
+      entries: [messageEvent(1, 'a')],
+    });
+    const before = latest().framesOfType('ack_head').length;
+
+    // Behind: it asks for the gap *and* answers, because "I am at 1, you said
+    // 3" is what stops the server guessing. Catches: acknowledging only when
+    // caught up, which leaves a client that is mid-catch-up indistinguishable
+    // from one whose socket is dead.
+    latest().deliver({ type: 'head', roomId: ROOM, head: 3 });
+    expect(latest().framesOfType('ack_head').length).toBe(before + 1);
+    expect(latest().framesOfType('ack_head').at(-1)).toEqual({
+      type: 'ack_head',
+      roomId: ROOM,
+      roomSeq: 1,
+    });
+
+    // Caught up: answers again, with the position that retires the frame.
+    // Catches: dropping the acknowledgement entirely, which leaves the server
+    // sending one head frame per room per pass forever.
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 1,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(2, 'b'), messageEvent(3, 'c')],
+    });
+    expect(latest().framesOfType('ack_head').at(-1)).toEqual({
+      type: 'ack_head',
+      roomId: ROOM,
+      roomSeq: 3,
+    });
+  });
+
+  it('does not acknowledge a catch-up it is still in the middle of', () => {
+    // A page that says `more` is not a position worth retiring a head frame on.
+    // Catches: acknowledging on every catch-up frame rather than on the one that
+    // ends the loop — the server would then stop telling a client that is still
+    // several pages behind, which is exactly the premature silence this whole
+    // finding is about.
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 4, seenSeq: 0 });
+    const before = latest().framesOfType('ack_head').length;
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 2,
+      head: 4,
+      more: true,
+      entries: [messageEvent(1, 'a'), messageEvent(2, 'b')],
+    });
+    expect(latest().framesOfType('ack_head').length).toBe(before);
+  });
 });
 
 describe('the cursor is the only thing that decides', () => {

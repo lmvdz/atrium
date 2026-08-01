@@ -1,6 +1,7 @@
 import type { DatabaseHandle } from '@atrium/db';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { ServerFrame } from '../../apps/server/src/protocol.js';
 import { createRealtimeClient, type RealtimeClient } from '../../apps/web/src/lib/realtime.js';
 import {
   nodeSocketFactory,
@@ -74,13 +75,17 @@ afterAll(async () => {
   await handle?.close();
 });
 
-function productionClient(url: string, userId: string): RealtimeClient {
+function productionClient(
+  url: string,
+  userId: string,
+  options: { dropFrame?: (frame: ServerFrame) => boolean } = {},
+): RealtimeClient {
   const client = createRealtimeClient({
     userId,
     url,
     reconnect: { initialDelayMs: 10, maxDelayMs: 40, factor: 1 },
     catchUpPageSize: 5,
-    socketFactory: nodeSocketFactory(),
+    socketFactory: nodeSocketFactory({ dropFrame: options.dropFrame }),
   });
   clients.push(client);
   return client;
@@ -283,10 +288,10 @@ describe('a lost doorbell costs latency, never delivery', () => {
     // ledger to hand over, so the only thing that closes the gap is being told
     // where the room is.
     //
-    // Simulated honestly rather than by dropping a frame in the transport: a
-    // second client subscribes with a cursor the server has no reason to send
-    // anything for, having already been told `head` at subscribe time. The
-    // reconciler's head frame is what moves it.
+    // A client that joins after the fact, having been told `head` at subscribe
+    // time and having nothing sent to it since. The reconciler's head frame is
+    // what moves it. This is the *easy* half — the hard one is the next test,
+    // which the r3 delta found this one was standing in for and could not cover.
     const a = await startSecondInstance();
     teardown.push(a.close);
 
@@ -305,5 +310,168 @@ describe('a lost doorbell costs latency, never delivery', () => {
     // because its cursor and its (stale) head agree.
     const head = await watcher.waitFor((f) => f.type === 'head' && f.roomId === room.roomId);
     expect(head).toMatchObject({ type: 'head', roomId: room.roomId, head: 3 });
+  });
+
+  /**
+   * A frame lost **after a successful fan-out**, in a room that then goes quiet
+   * (#22 gauntlet r3 delta, blocking 1).
+   *
+   * The finding, and it is about the test as much as about the code:
+   *
+   * > `reconciler.ts:109–116` sets `announcedHeads` from a successful
+   * > `onEntries` and `:127–129` then skips `onHead` when `announcedHeads >=
+   * > head`. That treats "we called broadcast" as "the client received it" […]
+   * > **The pin is theatre** (`reconcile.test.ts:280–308` waits for a head after
+   * > subscribe and never drops an event frame); r4's test must drop an event
+   * > frame after a successful fan-out and assert convergence.
+   *
+   * Every clause of that is right, including the last. The test above waits for a
+   * head frame that r3 was always going to send, because nothing had been fanned
+   * out to that room on that instance — so it passed under the very code whose
+   * defect it was supposed to describe.
+   *
+   * ## The shape, and why each piece is necessary
+   *
+   * **The writer is on B and the reader is on A**, so the rows reach A through
+   * `ledger.sync()` and leave it through `onEntries`. That is the only path that
+   * sets r3's `announcedHeads` from an attempt; an instance appending its own
+   * rows never took it, which is how the bug survived a suite full of
+   * single-instance tests.
+   *
+   * **Every `event` frame is dropped at the reader's socket.** Not the catch-up
+   * frames: the recovery has to be able to happen, or the test measures nothing.
+   * The server genuinely broadcasts — `hub.broadcast` runs, `ws.send` succeeds —
+   * and the client genuinely does not receive, which is exactly a frame lost on
+   * the wire and exactly the case `sync` cannot help with, because A has already
+   * folded those rows.
+   *
+   * **The room goes quiet.** Dropping frames in a *busy* room proves nothing: the
+   * next live event arrives across a gap and `applyEntry` asks for it. The
+   * permanent loss needs the burst to end, which is why the writes finish before
+   * the assertion and nothing writes again.
+   *
+   * **The reader sends no command.** As everywhere else in this file: a client
+   * recovers from what it can detect, and this one can detect nothing.
+   *
+   * **All six rows are folded by one pass, and the pass is triggered by hand.**
+   * This is the difference between a test that fails under r3 and one that
+   * happens to. r3 set `announcedHeads` from the fold and then compared it with a
+   * *fresh* head read — so a pass that folded rows 1–2 while the writer was
+   * already at 4 announced 2, saw 4, and sent a head frame after all. Mid-burst,
+   * r3 recovers. The defect is only the defect once the burst has ended, so the
+   * two instances share an id (deaf to each other's doorbell, by the origin
+   * filter), the timer is set past the life of the test, every write lands, and
+   * then exactly one reconciliation runs against a room that is already quiet.
+   *
+   * Under r3 that pass folds six, fans out six, sets `announcedHeads` to 6, finds
+   * the head at 6, and says nothing — for ever, because every later pass finds
+   * the same thing. The reader sits at 0 with six durable, folded, broadcast,
+   * unreachable rows. Under r4 the same pass reports the head, the reader has
+   * acknowledged nothing, and it is told.
+   */
+  it('converges after an event frame is lost following a fan-out, in a room that goes quiet', async () => {
+    const shared = 'deaf-to-its-own-echo';
+    const a = await startSecondInstance({ instanceId: shared, reconcileIntervalMs: 600_000 });
+    const b = await startSecondInstance({ instanceId: shared });
+    teardown.push(a.close, b.close);
+
+    const droppedEvents: number[] = [];
+    const reader = productionClient(a.server.url, room.people.bob as string, {
+      dropFrame: (frame) => {
+        if (frame.type !== 'event') return false;
+        droppedEvents.push(frame.entry.roomSeq);
+        return true;
+      },
+    });
+    await reader.connect();
+    reader.join(room.roomId);
+    await until(() => reader.room(room.roomId).subscribed, 15_000, 'the reader to subscribe');
+
+    const writer = await TestClient.connect(b.server.url, room.people.alice as string);
+    open.push(writer);
+    await writer.subscribe(room.roomId);
+    for (let i = 0; i < 6; i += 1) await post(writer, `lost-${i}`);
+
+    // Asserted, not assumed: A has heard nothing yet, so the single pass below
+    // really is the whole of the fan-out and the room really is quiet by then.
+    expect(a.server.ledger.lastSeq()).toBe(0);
+    expect(reader.lastSeq(room.roomId)).toBe(0);
+
+    // One pass. It folds all six and broadcasts all six — and the reader's socket
+    // eats every frame.
+    await a.server.realtime.reconcile();
+    expect(a.server.ledger.lastSeq()).toBeGreaterThanOrEqual(6);
+    expect(droppedEvents).toEqual([1, 2, 3, 4, 5, 6]);
+
+    await until(
+      () => reader.lastSeq(room.roomId) === 6,
+      20_000,
+      'the reader to converge on the head frame alone, with every event frame lost',
+    );
+
+    // Byte-identical history, not a count. The recovery has to be the same rows
+    // in the same order — what a UI renders — and it arrived entirely through
+    // catch-up, because no `event` frame ever reached this client.
+    const entries = await a.server.ledger.since(room.roomId, 0);
+    expect(
+      JSON.stringify(
+        reader.room(room.roomId).events.map((e) => ({ roomSeq: e.roomSeq, event: e.event })),
+      ),
+    ).toBe(JSON.stringify(entries.map((e) => ({ roomSeq: e.roomSeq, event: e.event }))));
+    // Nothing arrived live: every one of the six was lost and every one was
+    // recovered. Catches a version of this test where the drop stopped working.
+    expect(droppedEvents).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  /**
+   * The head frame is retired by acknowledgement, and by nothing else.
+   *
+   * The correction's second half. Repeating the head every pass is what makes the
+   * recovery above possible; stopping when — and only when — the client says it
+   * holds the position is what keeps that from being a permanent per-room
+   * heartbeat. Both halves are asserted here, in that order, because either alone
+   * is satisfiable by a wrong implementation: "always send" passes the first,
+   * "never send" passes the second.
+   *
+   * A raw `TestClient` is the right instrument precisely because it does *not*
+   * behave like the production client — it acknowledges only when this test tells
+   * it to, so the two régimes are separated by one frame rather than by a race.
+   *
+   * Catches: retiring the head on anything the server did (a broadcast, a
+   * previous head frame, a catch-up it answered), and ignoring `ack_head`.
+   */
+  it('repeats the head until the socket acknowledges it, then stops', async () => {
+    const a = await startSecondInstance({ reconcileIntervalMs: 100 });
+    teardown.push(a.close);
+
+    const writer = await TestClient.connect(a.server.url, room.people.alice as string);
+    open.push(writer);
+    await writer.subscribe(room.roomId);
+
+    const watcher = await TestClient.connect(a.server.url, room.people.bob as string);
+    open.push(watcher);
+    await watcher.subscribe(room.roomId);
+    for (let i = 0; i < 3; i += 1) await post(writer, `ack-${i}`);
+
+    const heads = () => watcher.frames.filter((f) => f.type === 'head').length;
+
+    // Unacknowledged: told again, and again. This is the safe direction — an old
+    // client, or one whose acknowledgement was itself lost, degrades to the
+    // unconditional heartbeat rather than to silence.
+    await until(() => heads() >= 3, 15_000, 'the head to be repeated to an unanswering socket');
+
+    watcher.send({ type: 'ack_head', roomId: room.roomId, roomSeq: 3 });
+    // One in-flight pass may already have been decided, so the count is allowed
+    // to move once more before it must settle.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const settled = heads();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(heads()).toBe(settled);
+
+    // And it starts again the moment the room moves past what was acknowledged —
+    // otherwise "stops" would mean "stops forever", which is r3 with an extra
+    // step.
+    await post(writer, 'ack-3');
+    await until(() => heads() > settled, 15_000, 'the head to resume once the room moved');
   });
 });

@@ -32,6 +32,21 @@ export interface Hub<T> {
    * is nobody on this instance to tell.
    */
   activeRooms: () => string[];
+  /**
+   * The room's subscribers, so a caller can decide per socket rather than per
+   * room.
+   *
+   * `broadcast` is the right shape for an event — every subscriber wants it, by
+   * definition. It is the wrong shape for a `head` frame, whose whole question is
+   * *which* socket still needs telling (#22 r3 delta, blocking 1): a room-wide
+   * broadcast is how r3's bookkeeping came to be keyed by room, and a per-room
+   * key cannot say "bob has it, alice does not".
+   *
+   * A snapshot array rather than the live map, because the caller sends into
+   * these and a `send` that closes a socket would otherwise mutate the map
+   * mid-iteration.
+   */
+  subscribers: (roomId: string) => Subscriber<T>[];
   broadcast: (roomId: string, frame: T) => number;
   /**
    * Everyone in the room except one subscriber. Used for nothing today — the
@@ -92,6 +107,7 @@ export function createHub<T>(): Hub<T> {
     // `unsubscribe` deletes a room's map when its last member leaves, so the
     // keys of `rooms` are exactly the rooms with a live subscriber.
     activeRooms: () => [...rooms.keys()],
+    subscribers: (roomId) => [...(rooms.get(roomId)?.values() ?? [])],
     broadcast: (roomId, frame) => {
       const members = rooms.get(roomId);
       if (!members) return 0;
