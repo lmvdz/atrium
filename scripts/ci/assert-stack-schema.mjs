@@ -219,7 +219,15 @@ export function expectedSchema(metaDir = META) {
   return { migrations: entries.length, tables, snapshot: file };
 }
 
-/** Postgres normalises a key's column order to the index's, so both sides sort. */
+/**
+ * Postgres normalises a key's column order to the index's, so both sides sort.
+ *
+ * Named rather than implied: this collapses `primary key (a, b)` and
+ * `primary key (b, a)` onto one string. They are the same constraint — the same
+ * rows are rejected either way — and they differ only in the column order of the
+ * backing index, which is a performance property this file has never claimed to
+ * compare.
+ */
 function renderPrimaryKey(columns) {
   return `primary key (${[...columns].sort().join(', ')})`;
 }
@@ -234,9 +242,16 @@ function renderPrimaryKey(columns) {
  */
 function renderForeignKey({ columnsFrom = [], tableTo, columnsTo = [], onDelete }) {
   const action = String(onDelete ?? 'no action').toLowerCase();
-  return `foreign key (${[...columnsFrom].join(', ')}) references ${tableTo} (${[...columnsTo].join(
-    ', ',
-  )}) on delete ${action}`;
+  // Both column lists are sorted, on both sides, because the two sources order
+  // them differently: drizzle's snapshot keeps declaration order and the
+  // `pg_constraint` query aggregates by column name. Every foreign key in this
+  // tree is single-column today, so the difference is invisible — which is
+  // exactly the kind of latent false red that shows up the week somebody adds a
+  // composite key. The cost is that a key's column *order* is not compared, and
+  // for a foreign key that is not a property with consequences.
+  return `foreign key (${[...columnsFrom].sort().join(', ')}) references ${tableTo} (${[...columnsTo]
+    .sort()
+    .join(', ')}) on delete ${action}`;
 }
 
 function renderIndex(name, unique, columns) {
