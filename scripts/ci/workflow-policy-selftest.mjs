@@ -1530,6 +1530,80 @@ const MUTATIONS = [
       ),
     message: /reaches the command through `systemd-run`, which is not on the allowlist/,
   },
+  // ---- the sixteenth: the flags moved into the environment ----------------
+  // Round 4 inverted the node-flag denylist, and its own blind review put the
+  // flag in `NODE_OPTIONS` instead. Measured before the fix: a script that
+  // `process.exit(1)`s exits **0** under
+  // `NODE_OPTIONS="--require /tmp/nobble.cjs"`, with its `::error::` annotation
+  // still printed. Every gate in this repository is a `node` process, so one
+  // line disarms all of them. All four spellings below were clean against the
+  // engine an hour before this comment was written.
+  {
+    name: 'NODE_OPTIONS on the whole workflow, which loads code into every gate',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(s, "  NODE_VERSION: '22'\n", "  NODE_VERSION: '22'\n  NODE_OPTIONS: --require /tmp/nobble.cjs\n"),
+    message: /`env:` at .* sets `NODE_OPTIONS`/,
+  },
+  {
+    name: 'the same on the deploy job, where every assertion runs',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+        '      NODE_OPTIONS: --require /tmp/nobble.cjs\n      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+      ),
+    message: /`env:` at .* sets `NODE_OPTIONS`/,
+  },
+  {
+    name: 'the same as a one-shot assignment on the page assertion itself',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: NODE_OPTIONS=--require=/tmp/nobble.cjs node scripts/ci/assert-page-serves.mjs',
+      ),
+    message: /assigns `NODE_OPTIONS` for one command/,
+  },
+  {
+    name: 'the same written into `$GITHUB_ENV`, so it applies to every later step',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n',
+        '        run: echo "NODE_OPTIONS=--require /tmp/nobble.cjs" >> "$GITHUB_ENV"\n',
+      ),
+    message: /writes `NODE_OPTIONS=…` to `\$GITHUB_ENV`/,
+    // The step it replaces is the run-start timestamp the vitest freshness gate
+    // depends on, so its pair breaks too. Both are true; the timestamp is gone
+    // and the environment is poisoned.
+    also: ['required-step-prerequisites'],
+  },
+  {
+    name: 'BASH_ENV, which bash sources before every non-interactive script',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+        '      BASH_ENV: /tmp/nobble.sh\n      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+      ),
+    message: /`env:` at .* sets `BASH_ENV`/,
+  },
+  {
+    name: 'LD_PRELOAD, the same injection one level below the interpreter',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+        '      LD_PRELOAD: /tmp/nobble.so\n      ATRIUM_STACK_DOMAIN: atrium.localhost\n',
+      ),
+    message: /`env:` at .* sets `LD_PRELOAD`/,
+  },
   {
     name: 'PATH redefined in a step `env:` rather than in a script',
     rule: 'no-command-shadowing',

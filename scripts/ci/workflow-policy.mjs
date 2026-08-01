@@ -972,6 +972,60 @@ export function protectedCommandCoverage(jobs, protectedCommands = PROTECTED_COM
 const SHADOWING_BUILTINS = new Set(['alias', 'export', 'declare', 'typeset', 'readonly', 'local']);
 
 /**
+ * Environment variables that decide what code a protected command runs.
+ *
+ * ── THE SIXTEENTH BYPASS (#40 round 4, from this round's own blind review) ──
+ * Round 4 inverted the node-flag denylist into `NODE_FLAGS_ALLOWED`, so
+ * `node --require ./nobble.cjs scripts/ci/assert-x.mjs` reads as *missing*. A
+ * blind cross-lineage review of that fix went one step sideways and put the flag
+ * in the environment instead. Measured, exactly as written:
+ *
+ *     $ node /tmp/fake-assert.mjs                                   # exits 1
+ *     $ NODE_OPTIONS="--require /tmp/nobble.cjs" node /tmp/fake-assert.mjs
+ *     ::error::pretend assertion failed
+ *     exit=0
+ *
+ * where `/tmp/nobble.cjs` is two lines: `process.exit = () => {}` and an `exit`
+ * listener setting `process.exitCode = 0`. The annotation still prints. The step
+ * goes green. Every gate in this repository is a `node` process, so one
+ * `env: NODE_OPTIONS:` on the workflow, the job or the step disarms all of them
+ * at once — and all three spellings were clean against the engine as committed
+ * an hour earlier.
+ *
+ * ── WHY THIS IS A LIST, WHEN THE ROUND'S LESSON IS "DON'T LIST" ─────────────
+ * Because this list is bounded and the others were not. "Ways to write a shell
+ * command that does not run" is a space of spellings with no edge; the next one
+ * always exists. "Environment variables that make a program execute code it was
+ * not asked to" is a documented property of three programs — Node, bash, and the
+ * dynamic loader — and each of them publishes its own set. The entries below are
+ * that union, with the sentence of documentation that puts each one there. A
+ * variable belongs here when the program's own manual says it loads or locates
+ * code; nothing else qualifies, and `ATRIUM_STACK_DOMAIN` never will.
+ *
+ * Stated where it will be read: this is the same boundary `no-command-shadowing`
+ * has always drawn. It makes the documented injection points loud. It does not
+ * prove that the `node` on PATH is Node.
+ */
+const INJECTING_VARIABLES = {
+  PATH: 'PATH decides which binary every command word in this policy resolves to, so prepending a directory redefines every gate at once.',
+  NODE_OPTIONS:
+    'Node applies NODE_OPTIONS to every `node` process as if the flags had been written on the command line, which is exactly the allowlist in `NODE_FLAGS_ALLOWED` reached through the environment: `NODE_OPTIONS="--require ./nobble.cjs"` loads code into the assertion before its first line and can make a failing gate exit 0 (measured).',
+  NODE_PATH:
+    "NODE_PATH prepends directories to the CommonJS module search path, so a gate's `require` can be answered by somebody else's file.",
+  NODE_REPL_EXTERNAL_MODULE:
+    'Node loads the named module in place of its REPL, and it is documented as ignored only when the process is hardened — an injection point by construction.',
+  BASH_ENV:
+    'bash sources the file named by BASH_ENV before running a non-interactive script, which is every `run:` block in this file.',
+  ENV: 'the POSIX equivalent of BASH_ENV, sourced by `sh`.',
+  SHELLOPTS:
+    'bash applies SHELLOPTS at startup, so it can turn off the `-e` that makes a failing command fail the step.',
+  LD_PRELOAD:
+    'the dynamic loader loads the named objects into every process started, ahead of libc — code injection one level below the interpreter.',
+  LD_LIBRARY_PATH:
+    'the dynamic loader searches it first, so a shared object of somebody else’s choosing answers for a real one.',
+};
+
+/**
  * Obvious redefinitions of a protected command word.
  *
  * ── WHAT THIS DOES AND DOES NOT PROVE ───────────────────────────────────────
@@ -1013,27 +1067,29 @@ function checkCommandShadowing(script, where, add, path) {
     for (const assignment of via?.flatMap(({ name, assignments: words }) =>
       name === 'env' ? words : [],
     ) ?? []) {
-      if (assignment.startsWith('PATH=')) {
+      const name = assignment.split('=')[0];
+      if (Object.hasOwn(INJECTING_VARIABLES, name)) {
         add(
           'no-command-shadowing',
-          `${path}: the script at ${where} runs \`env PATH=…\`. That is an assignment the shell never sees — it is an argument to \`env\` — and it decides which binary every command word after it resolves to, which is the same bypass as redefining the command outright.`,
+          `${path}: the script at ${where} runs \`env ${name}=…\`. That is an assignment the shell never sees — it is an argument to \`env\` — and ${INJECTING_VARIABLES[name]}`,
         );
       }
     }
     for (const { name } of assignments) {
-      if (name === 'PATH') {
+      if (Object.hasOwn(INJECTING_VARIABLES, name)) {
         add(
           'no-command-shadowing',
-          `${path}: the script at ${where} assigns \`PATH\`. Prepending a directory to PATH decides which binary every command word in this file resolves to, which is the same bypass as redefining the command outright.`,
+          `${path}: the script at ${where} assigns \`${name}\` for one command. ${INJECTING_VARIABLES[name]}`,
         );
       }
     }
     if (SHADOWING_BUILTINS.has(raw[0])) {
       for (const word of raw.slice(1)) {
-        if (word.startsWith('PATH=') || word === 'PATH') {
+        const name = word.split('=')[0];
+        if (Object.hasOwn(INJECTING_VARIABLES, name)) {
           add(
             'no-command-shadowing',
-            `${path}: the script at ${where} runs \`${raw[0]} PATH=…\`. Prepending a directory to PATH decides which binary every command word in this file resolves to.`,
+            `${path}: the script at ${where} runs \`${raw[0]} ${name}=…\`. ${INJECTING_VARIABLES[name]}`,
           );
         }
         if (raw[0] === 'alias' && protectedWord(word.split('=')[0])) {
@@ -1061,6 +1117,28 @@ function checkCommandShadowing(script, where, add, path) {
         'no-command-shadowing',
         `${path}: the script at ${where} writes to \`$GITHUB_PATH\`, which prepends a directory to PATH for every later step in the job. Invoke the binary by its full path instead.`,
       );
+    }
+    // `echo "NODE_OPTIONS=--require ./nobble.cjs" >> "$GITHUB_ENV"` is the same
+    // thing for the variables above, and this workflow legitimately writes to
+    // `$GITHUB_ENV` (the run-start timestamps), so the *payload* is what decides
+    // rather than the destination. Every word of the command is inspected, which
+    // covers `echo NAME=…`, `printf 'NAME=%s\n' …` and a heredoc's delimiter
+    // line alike — anything naming one of these variables in an assignment
+    // heading for the job's environment.
+    if (
+      redirections.some(
+        ({ target }) => target.expandable && /^\$\{?GITHUB_ENV\}?$/.test(target.value),
+      )
+    ) {
+      for (const word of raw) {
+        const name = word.split('=')[0].trim();
+        if (word.includes('=') && Object.hasOwn(INJECTING_VARIABLES, name)) {
+          add(
+            'no-command-shadowing',
+            `${path}: the script at ${where} writes \`${name}=…\` to \`$GITHUB_ENV\`, which sets it for every later step in the job. ${INJECTING_VARIABLES[name]}`,
+          );
+        }
+      }
     }
   }
 }
@@ -1418,11 +1496,17 @@ export function checkWorkflow(source, path = '<workflow>') {
     // not, because it only ever read `run:` scripts. GitHub applies it to the
     // step, the job or the whole workflow depending on where it sits, so it is
     // the same bypass as `export PATH=…` with a longer reach and no shell.
-    if (key === 'env' && isPlainObject(value) && Object.hasOwn(value, 'PATH')) {
-      add(
-        'no-command-shadowing',
-        `${path}: \`env:\` at ${where} sets \`PATH\`. Every rule in this file recognises a command by its word, and PATH decides which binary that word resolves to — the same bypass as \`export PATH=…\` inside a script, which this rule already refuses. Invoke the binary by its full path instead.`,
-      );
+    // Round 4 widened it from PATH to every variable in INJECTING_VARIABLES —
+    // see that table for why `NODE_OPTIONS` belongs beside it.
+    if (key === 'env' && isPlainObject(value)) {
+      for (const name of Object.keys(value)) {
+        if (Object.hasOwn(INJECTING_VARIABLES, name)) {
+          add(
+            'no-command-shadowing',
+            `${path}: \`env:\` at ${where} sets \`${name}\`. ${INJECTING_VARIABLES[name]} Set it nowhere, or invoke the binary by its full path with the flags written in the step.`,
+          );
+        }
+      }
     }
   }
 
