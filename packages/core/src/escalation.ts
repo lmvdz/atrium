@@ -1,3 +1,16 @@
+import {
+  alignTokens,
+  hasContent,
+  isAssertion,
+  isBlank,
+  normalizeForReceipt,
+  normalizeForRouting,
+  quoteCoversOwnText,
+  quoteSpansWholeSentences,
+  routingTokens,
+  sentencesOf,
+  statementBearing,
+} from './matching.js';
 import type { AcceptedObjectType } from './objects.js';
 import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
 
@@ -34,7 +47,13 @@ import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
  */
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Text normalization — shared by the triggers and the provenance checks
+ * Whose words are these?
+ *
+ * The text policy itself lives in `matching.ts` since r5, split into the two
+ * questions it was answering with one function: **which model reads this
+ * window** (lossy on purpose) and **is this quote that message** (an allowlist
+ * of the differences a quote may have). Everything below reads one or the other
+ * and never both, and every call site says which.
  * ───────────────────────────────────────────────────────────────────────── */
 
 /** A line is a blockquote line when its first non-space character is `>`. */
@@ -81,88 +100,6 @@ export function replyBlockquotes(text: string): string[] {
 /** True when the text contains at least one blockquote line. */
 export function hasReplyBlockquote(text: string): boolean {
   return text.split('\n').some((line) => BLOCKQUOTE_LINE.test(line));
-}
-
-/**
- * **Is there anything here at all?** — the one emptiness test, used before every
- * required receipt input.
- *
- * r3's gauntlet, as a polish note that is really a principle: zero-width
- * characters were refused only *incidentally*. `"​"` is not `""`, so it
- * walked past every `trim()` check marked "required" and died three checks later
- * as not-found or too-short. The refusal was accidental, and an accidental
- * refusal is one code change away from an accidental acceptance.
- *
- * The fix is not a list of invisible characters — that list is unbounded in
- * exactly the way a stopword list is, and Unicode adds to it. It is the
- * complement: **content is a letter or a digit.** Everything else — spaces of
- * every width, zero-width joiners, format and control codes, unassigned code
- * points, lone combining marks, punctuation on its own — is absence, whether or
- * not anybody has enumerated it. A quote of `"…"`, a message body of `"​"`,
- * and `""` are the same fact about the world and get the same answer.
- */
-const CONTENTFUL = /[\p{L}\p{N}]/u;
-
-/** True when `text` carries at least one letter or digit. */
-export function hasContent(text: string | null | undefined): boolean {
-  return text !== null && text !== undefined && CONTENTFUL.test(text);
-}
-
-/** `hasContent`, negated — reads better at the gates, which are all refusals. */
-export function isBlank(text: string | null | undefined): boolean {
-  return !hasContent(text);
-}
-
-/**
- * Format and control characters, which render as nothing and must not survive
- * into a comparison. `\p{Cf}` covers U+200B–U+200F, U+2060–U+2064, U+00AD and
- * U+FEFF; `\p{Cc}` covers the C0/C1 controls. Whitespace of every width is
- * handled by `\s`, which in JavaScript already includes NBSP, the en/em spaces
- * and U+3000.
- */
-const INVISIBLE = /[\p{Cf}\p{Cc}]/gu;
-
-/**
- * Fold away the formatting both tiers drop when they quote.
- *
- * Markdown links collapse to their text, emphasis/code/strike markers vanish,
- * invisible characters are deleted, whitespace collapses, case folds. Measured
- * need, not defensiveness: three of the eight apparent provenance failures in the
- * spike were pure formatting artifacts — the model had dropped `**` or `[…](…)`
- * while quoting correctly — and without this the checker generates false failures
- * on correct output.
- *
- * The invisible-character step is r3's gauntlet: without it a zero-width space
- * spliced into a quote makes it a different string from the message it came out
- * of, so `"ship​ it"` is "not found" in a message that says `ship it`. That
- * is the right verdict for the wrong reason, and the wrong reason is the kind
- * that stops being right.
- */
-export function normalizeForMatch(text: string): string {
-  return (
-    text
-      // NFKC folds the compatibility forms of a character onto the character —
-      // fullwidth `ｎｏｔ` becomes `not`. r4's blind review: without it a
-      // fullwidth or otherwise decorated negation is a *different word*, which
-      // the tokenizer below then drops as punctuation, and the affirmative is
-      // minted from a quote that denies it.
-      .normalize('NFKC')
-      // A typographic apostrophe is an apostrophe. `won’t` and `won't` are the
-      // same word, and treating them as different ones produces a refusal for a
-      // reason that has nothing to do with what was said.
-      .replace(/[’ʼ]/g, "'")
-      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-      // Emphasis and code markers, which both tiers drop while quoting
-      // correctly. **`~` is not here**: `~~struck through~~` is a *retraction*,
-      // not emphasis, and folding it away let a withdrawn sentence bear its own
-      // assertion — r4's blind review, and the reason this set is enumerated
-      // rather than "all punctuation".
-      .replace(/[*_`]+/g, ' ')
-      .replace(INVISIBLE, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase()
-  );
 }
 
 /** Ellipsis characters a model uses when it silently shortens a quote. */
@@ -397,7 +334,7 @@ const STOPWORDS: ReadonlySet<string> = new Set([
 /** Content words: normalized, ≥3 characters, not a stopword. Deduplicated. */
 export function contentTokens(text: string): Set<string> {
   const tokens = new Set<string>();
-  for (const raw of normalizeForMatch(text).split(/[^a-z0-9']+/)) {
+  for (const raw of normalizeForRouting(text).split(/[^a-z0-9']+/)) {
     if (raw.length < 3) continue;
     if (STOPWORDS.has(raw)) continue;
     tokens.add(raw);
@@ -448,273 +385,6 @@ function overlapOf(
 /* ─────────────────────────────────────────────────────────────────────────
  * Does the quote bear the statement?
  * ───────────────────────────────────────────────────────────────────────── */
-
-/**
- * A word in any script: letters, digits and combining marks, with apostrophes
- * *inside* it. Anything else visible is one token of its own.
- *
- * The alternation is the whole design. r4's first version split on
- * `/[^a-z0-9']+/`, which is a **denylist of the characters that may carry
- * meaning** wearing a tokenizer's clothes, and r4's own blind review walked
- * through it four ways in one pass: `Bob will ｎｏｔ deploy` (fullwidth — not
- * `[a-z]`, so deleted), `Bob will не deploy` (Cyrillic — deleted), `❌ Bob will
- * deploy` (emoji — deleted), and `Bob will deploy Friday?` (the question mark —
- * deleted). Each one bore its own affirmative and auto-accepted. A Russian
- * sentence, meanwhile, tokenized to *nothing at all* and was refused as empty.
- *
- * So the rule is inverted: a token is a word, or it is a visible character, and
- * `RECEIPT_POLICY.droppableTokens` is the only thing that may go missing.
- */
-const TOKEN = /[\p{L}\p{N}\p{M}]+(?:'[\p{L}\p{N}\p{M}]+)*|[^\s']/gu;
-
-/**
- * Every token of a text, in the order it was written.
- *
- * Deliberately unlike `contentTokens` in all four ways that matter, and each
- * one is a defect the gauntlets exploited or could have:
- *
- *  - **No stopword list.** `not`, `all`, `some`, `will`, `might`, `unless` and
- *    every word nobody has thought of yet are content here. There is no list to
- *    get wrong because there is no list.
- *  - **No de-duplication.** "not not" is two tokens. A `Set` cannot tell double
- *    negation from single.
- *  - **No length floor.** `no` is two characters and inverts a sentence.
- *  - **No character class of "real" words.** Every script, every mark and every
- *    emoji is content; see `TOKEN`.
- *
- * Apostrophes are kept *inside* a word, so `won't` is one token and is not
- * `will`. A standalone apostrophe is dropped rather than tokenized — it is a
- * quotation mark, `'online'` is the word `online`, and an apostrophe cannot
- * negate, quantify, or change a modal.
- */
-export function orderedTokens(text: string): string[] {
-  return normalizeForMatch(text).match(TOKEN) ?? [];
-}
-
-/**
- * A text split into sentences: on a terminator followed by space, or a newline.
- *
- * Deliberately crude, and crude in the safe direction — it splits *less* than a
- * linguist would (an abbreviation keeps its sentence whole), and the check that
- * uses it requires the quote to cover whole sentences, so under-splitting can
- * only make that harder to satisfy.
- */
-export function sentencesOf(text: string): string[] {
-  return text
-    .split(/(?<=[.!?…。？！])\s+|\n+/u)
-    .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.length > 0);
-}
-
-/**
- * **Is the quote a run of whole sentences of this text, rather than a span cut
- * out of the middle of one?**
- *
- * r4's own blind review found the defect this exists for, and it is the round's
- * finding one layer out. Making the *statement vs quote* comparison exact does
- * nothing if the *quote vs message* relation is still "any substring", because
- * the model chooses the span:
- *
- * | message body                                              | quote = statement                         |
- * | --------------------------------------------------------- | ----------------------------------------- |
- * | It is not true that Bob will deploy production Friday …    | Bob will deploy production Friday …       |
- * | Nobody thinks Bob will deploy production Friday this week   | Bob will deploy production Friday this week |
- * | I doubt Bob will deploy production Friday this coming week  | Bob will deploy production Friday this coming week |
- *
- * Every one of those quotes is verbatim, correctly attributed, long enough, and
- * borne word-for-word by its own statement — because the inverter was left
- * outside the span. Quote-mining is the same defect as the stopword list with
- * the scissors moved.
- *
- * The compliant form, allowlisted rather than enumerated against: **the quote is
- * one or more whole sentences, contiguous, of the author's own text.** Trailing
- * full stops do not matter (`droppableTokens`); anything else does.
- *
- * The residue is stated rather than hidden: polarity that lives in a *different
- * sentence* ("I will deploy Friday. Not.") is not visible to this and is not
- * visible to any span rule, because the span really is the whole sentence. That
- * is a limit of what a receipt can prove about a quote, and it is why the
- * guarantee is written as "somebody wrote this sentence", not "somebody meant
- * it".
- */
-export function quoteSpansWholeSentences(
-  quote: string,
-  ownText: string,
-  policy: ReceiptPolicy = RECEIPT_POLICY,
-): boolean {
-  const significant = (text: string) =>
-    orderedTokens(text).filter((token) => !policy.droppableTokens.has(token));
-
-  const wanted = significant(quote);
-  if (wanted.length === 0) return false;
-
-  const sentences = sentencesOf(ownText);
-  // Bounded, and refusing rather than degrading, for the same reason the
-  // alignment is: the body is somebody else's input.
-  if (sentences.length > policy.maxScannedSentences) return false;
-  const tokenized = sentences.map(significant);
-
-  for (let start = 0; start < tokenized.length; start += 1) {
-    const run: string[] = [];
-    for (let end = start; end < tokenized.length; end += 1) {
-      run.push(...(tokenized[end] ?? []));
-      if (run.length > wanted.length) break;
-      if (run.length === wanted.length && run.every((token, index) => token === wanted[index])) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-/**
- * What the bearing check found. **`borne` is the only affirmative answer** —
- * every other shape of this result is a refusal, and the two lists say which
- * refusal it is.
- */
-export interface StatementBearing {
-  /**
-   * True only when the statement is the quote with nothing removed but
-   * `RECEIPT_POLICY.droppableTokens`, in the order it was written.
-   */
-  borne: boolean;
-  /** Tokens the statement asserts that the quote does not contain, in order. */
-  unmatchedInStatement: string[];
-  /** Tokens the quote contains that the statement drops, in order. */
-  unmatchedInQuote: string[];
-  /** Set when the check declined to run at all, rather than running and failing. */
-  undecidable: 'empty_quote' | 'empty_statement' | 'too_long' | null;
-}
-
-/**
- * **Is the asserted statement a word-for-word reduction of this quote?**
- *
- * ## What this proves, stated in the terms it actually holds
- *
- * `borne === true` means exactly one thing, and it is worth writing out because
- * the check it replaced claimed something it could not deliver:
- *
- * > Every token of the statement appears in the quote, in the same order, and
- * > every token of the quote appears in the statement, in the same order, except
- * > for the full stop in `RECEIPT_POLICY.droppableTokens`. A token is a word in
- * > any script, or a visible mark.
- *
- * That is a **structural** claim about two strings. It is not entailment, and
- * nothing here can establish entailment — but combined with the checks around it
- * (the quote occurs verbatim in a cited message, outside any reply-blockquote,
- * written by exactly one identifiable author) it supports the sentence the
- * product actually needs to be able to say: *the sentence being asserted is one
- * somebody in this room wrote, in these words.*
- *
- * ## Why not the softer test
- *
- * r3 asked "how many of the statement's content words does the quote contain",
- * over a de-duplicated set, with `not` dropped as a stopword. The answer for
- * *"Bob will not deploy production Friday"* → *"Bob will deploy production
- * Friday"* was 100%, and that acceptance was automatic. Every softening of the
- * test above reopens it somewhere:
- *
- *  - A **set** cannot see order, so "A blocks B" and "B blocks A" are the same.
- *  - A **threshold** licenses dropping whatever falls under it, and one dropped
- *    word is all a negation needs.
- *  - A **stopword list** decides in advance which words cannot matter, which is
- *    the assumption that failed.
- *  - Checking only the **covering span** of the statement inside the quote misses
- *    the prefix ("I don't think ") and the suffix (" unless CI is red"), which is
- *    where a qualifier lives. So the *whole* quote must be accounted for.
- *
- * The cost is stated rather than hidden: a model reading that paraphrases —
- * expands a pronoun, fixes a tense, tightens the wording — is no longer
- * auto-acceptable. It is not destroyed; it goes to a person, which is where a
- * reading that is not in the record in these words belongs.
- *
- * ## The alignment
- *
- * Greedy, with a one-sided lookahead so a single extra word resynchronises
- * instead of scrambling the rest of the comparison. Deterministic, total, and
- * bounded by `RECEIPT_POLICY.maxAlignedTokens` — an input too big to align is
- * refused, not approximated.
- */
-export function statementBearing(
-  quote: string,
-  statement: string,
-  policy: ReceiptPolicy = RECEIPT_POLICY,
-): StatementBearing {
-  const empty = (undecidable: StatementBearing['undecidable']): StatementBearing => ({
-    borne: false,
-    unmatchedInStatement: [],
-    unmatchedInQuote: [],
-    undecidable,
-  });
-
-  if (isBlank(quote)) return empty('empty_quote');
-  if (isBlank(statement)) return empty('empty_statement');
-
-  const q = orderedTokens(quote);
-  const s = orderedTokens(statement);
-  if (q.length === 0) return empty('empty_quote');
-  if (s.length === 0) return empty('empty_statement');
-  if (q.length > policy.maxAlignedTokens || s.length > policy.maxAlignedTokens) {
-    return empty('too_long');
-  }
-
-  const droppable = (token: string | undefined): boolean =>
-    token !== undefined && policy.droppableTokens.has(token);
-
-  const unmatchedInQuote: string[] = [];
-  const unmatchedInStatement: string[] = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < q.length && j < s.length) {
-    const qt = q[i];
-    const st = s[j];
-    if (qt === st) {
-      i += 1;
-      j += 1;
-      continue;
-    }
-    // A full stop on either side may be skipped silently — that is the entire
-    // licence this check grants, and `droppableTokens` says why.
-    if (droppable(qt)) {
-      i += 1;
-      continue;
-    }
-    if (droppable(st)) {
-      j += 1;
-      continue;
-    }
-    // A real disagreement. Resynchronise towards whichever side can still be
-    // matched, so one interposed word ("not") is reported as one interposed word
-    // rather than knocking every later token out of alignment.
-    if (st !== undefined && q.indexOf(st, i + 1) !== -1) {
-      if (qt !== undefined) unmatchedInQuote.push(qt);
-      i += 1;
-    } else {
-      if (st !== undefined) unmatchedInStatement.push(st);
-      j += 1;
-    }
-  }
-
-  // Whatever is left over on either side is unaccounted for — a trailing
-  // "unless CI is red" is exactly this case, and it is why the tail is not
-  // forgiven.
-  for (; i < q.length; i += 1) {
-    const token = q[i];
-    if (!droppable(token) && token !== undefined) unmatchedInQuote.push(token);
-  }
-  for (; j < s.length; j += 1) {
-    const token = s[j];
-    if (!droppable(token) && token !== undefined) unmatchedInStatement.push(token);
-  }
-
-  return {
-    borne: unmatchedInQuote.length === 0 && unmatchedInStatement.length === 0,
-    unmatchedInStatement,
-    unmatchedInQuote,
-    undecidable: null,
-  };
-}
 
 /** An accepted decision, as the trigger needs it: an id and its statement. */
 export interface AcceptedDecisionRef {
@@ -804,7 +474,7 @@ export function triggersForMessage(
   // thread, so demanding a match would drop the chains this exists to catch.
   // The match is evidence for a human reading the log, not a condition.
   for (const quoted of replyBlockquotes(body)) {
-    const normalized = normalizeForMatch(quoted);
+    const normalized = normalizeForRouting(quoted);
     if (normalized.length < config.minQuoteLength) continue;
     found.push({
       kind: 'reply_blockquote',
@@ -819,7 +489,7 @@ export function triggersForMessage(
   // blockquote is somebody else's concession being quoted back at them, and the
   // trigger above has already fired on that message anyway.
   const own = stripReplyBlockquotes(body);
-  const normalizedOwn = normalizeForMatch(own);
+  const normalizedOwn = normalizeForRouting(own);
 
   // ── 2. concession markers ────────────────────────────────────────────────
   for (const marker of CONCESSION_MARKERS) {
@@ -886,7 +556,9 @@ function matchEarlier(
   for (let index = earlier.length - 1; index >= stop; index -= 1) {
     const candidate = earlier[index];
     if (!candidate) continue;
-    if (normalizeForMatch(candidate.body.slice(0, config.maxScanChars)).includes(normalizedQuote)) {
+    if (
+      normalizeForRouting(candidate.body.slice(0, config.maxScanChars)).includes(normalizedQuote)
+    ) {
       return candidate.id;
     }
   }
@@ -927,77 +599,87 @@ export interface ProvenanceMessage {
   body: string;
 }
 
-export type ProvenanceProblemKind =
-  /** A model proposal citing nothing. Schema-blocked; checked again here. */
-  | 'no_provenance'
-  /** Cites a message id that is not in the window. */
-  | 'unknown_message'
-  /**
-   * A model reading that puts a name on somebody and quotes nothing.
-   *
-   * Schema-blocked on `Proposal`, and checked again here because r2's gauntlet
-   * found the schema was never reached: `appendEvent`/`reduce` folded whatever
-   * object they were handed. A check that only runs one layer up is not a
-   * check — this one runs inside the validator both the engine and the reducer
-   * call.
-   */
-  | 'missing_quote'
-  /** The quote is in no cited message at all. */
-  | 'quote_not_found'
-  /**
-   * The quote is only in a cited message's *reply-blockquote* — text the cited
-   * author did not write. The spike's worst error, at 0.98 confidence.
-   */
-  | 'quote_only_in_reply_blockquote'
-  /** The quote was silently shortened with `…` and does not appear verbatim. */
-  | 'elided_quote'
-  /**
-   * Too short to identify anything. "yes", "ok", "+1" occur in every thread, so
-   * a citation resting on one is a citation to the conversation rather than to a
-   * sentence.
-   */
-  | 'quote_too_short'
-  /**
-   * The quote is real and correctly attributed, and the sentence being minted
-   * asserts words the quote does not contain. r2's gauntlet, major 1: cite Bob's
-   * unrelated "yes", mint "Bob will deploy". Every other check passes on that.
-   * Since r4 this also covers a quantifier or modal *substitution* — quote
-   * "all services restart", mint "some services restart" — because `some` is a
-   * word the quote does not carry.
-   */
-  | 'quote_does_not_bear_statement'
-  /**
-   * Every word of the statement is in the quote, in order, and the quote carries
-   * more. r3's gauntlet: quote "Bob will **not** deploy production Friday", mint
-   * "Bob will deploy production Friday". The dropped word may be decorative or it
-   * may invert the sentence, and **nothing here can tell which** — so this is not
-   * a verdict that the reading is wrong, it is a refusal to have an opinion, and
-   * the reading goes to a person.
-   */
-  | 'quote_carries_more_than_statement'
-  /**
-   * The quote is a span cut out of the middle of a sentence rather than a run of
-   * whole sentences. r4's own blind review: making the statement/quote
-   * comparison exact does nothing when the model also chooses where to put the
-   * scissors — *"It is not true that Bob will deploy production Friday"* quoted
-   * from `Bob will deploy…` onwards is verbatim, correctly attributed, and bears
-   * its own statement perfectly.
-   */
-  | 'quote_is_a_fragment'
-  /**
-   * The bearing check could not run: no quote, no statement, or an input too
-   * large to align. Fails closed for the same reason every other missing input
-   * does — an unchecked receipt is not a passed one.
-   */
-  | 'statement_uncheckable'
-  /**
-   * Two or more cited messages, by different people, contain the quote. Taking
-   * the first in window order picks an author by accident, and the author is the
-   * whole answer to "who said this".
-   */
-  | 'ambiguous_quote'
-  /** A Claim's claimant / Commitment's owner authored none of the cited messages. */
-  | 'attributed_person_not_author';
+/**
+ * **Every way a receipt can be wrong, or unjudgeable — as data.**
+ *
+ * A `const` tuple rather than a bare union, because r4's blind review found the
+ * shape this closes: `acceptance.test.ts` carried a test titled "reaches every
+ * rule name the type declares" whose supposedly complete list *omitted* a rule,
+ * so the test passed while the engine behaviour it named could have been
+ * deleted. A restated list only catches removals; a derived one only catches
+ * additions. Deriving the type from the data catches both, because the list and
+ * the type are then the same object and a test can iterate it.
+ *
+ * What each kind means:
+ *
+ *  - `no_provenance` — a model proposal citing nothing. Schema-blocked on
+ *    `Proposal`, and checked again here because r2's gauntlet found the schema
+ *    was never reached: `appendEvent`/`reduce` folded whatever object they were
+ *    handed. A check that only runs one layer up is not a check.
+ *  - `unknown_message` — cites a message id that is not in the window.
+ *  - `missing_quote` — a model reading that quotes nothing. r3's gauntlet minted
+ *    a model *objective* with `quote: null` through the version of this that was
+ *    scoped to claims and commitments; it covers every model-minted type now.
+ *  - `quote_not_found` — the quote is in no cited message at all.
+ *  - `quote_only_in_reply_blockquote` — the quote is only in a cited message's
+ *    reply-blockquote, text the cited author did not write. The spike's worst
+ *    error, at 0.98 confidence.
+ *  - `elided_quote` — silently shortened with `…`, and not verbatim anywhere.
+ *  - `quote_too_short` — "yes", "ok", "+1" occur in every thread, so a citation
+ *    resting on one identifies the conversation rather than the sentence.
+ *  - `quote_does_not_bear_statement` — the sentence being minted asserts words
+ *    the quote does not contain. r2's gauntlet, major 1: cite Bob's unrelated
+ *    "yes", mint "Bob will deploy". Since r4 it also covers a quantifier or
+ *    modal *substitution* — quote "all services restart", mint "some services
+ *    restart".
+ *  - `quote_carries_more_than_statement` — every word of the statement is in the
+ *    quote, in order, and the quote says more. r3's gauntlet: quote "Bob will
+ *    **not** deploy production Friday", mint the affirmative. The dropped word
+ *    may be decorative or it may invert the sentence, and nothing here can tell
+ *    which.
+ *  - `quote_is_a_fragment` — a span cut out of the middle of a sentence rather
+ *    than a run of whole ones. r4's own blind review.
+ *  - `quote_omits_surrounding_text` — **r5.** The quote is whole sentences and
+ *    the author wrote more around them, so a neighbouring sentence this check
+ *    cannot read may change the force of the quoted one ("We will deploy
+ *    production Friday. Not."). r4 documented this as a residue it could not
+ *    see and auto-accepted it anyway; see `quoteCoversOwnText`.
+ *  - `superseded_by_later_message` — **r5.** A message later in the same window
+ *    restates the sentence with something added ("Correction: we will **not** …")
+ *    and the proposal cites only the earlier one. Append-only storage prevents
+ *    an edit; it does not make a correction part of acceptance.
+ *  - `statement_is_not_an_assertion` — **r5.** The sentence carries a question
+ *    mark and is being minted as something other than an open question. A
+ *    question quoted verbatim is an OpenQuestion or a referral, never a Claim.
+ *  - `statement_uncheckable` — the bearing check could not run: no quote, no
+ *    statement, or an input too large to align. Fails closed, because an
+ *    unchecked receipt is not a passed one.
+ *  - `ambiguous_quote` — two or more cited messages, by different people,
+ *    contain the quote. Taking the first in window order picks an author by
+ *    accident, and the author is the whole answer to "who said this".
+ *  - `attributed_person_not_author` — a Claim's claimant or a Commitment's owner
+ *    did not write the message bearing the quote.
+ */
+export const PROVENANCE_PROBLEM_KINDS = [
+  'no_provenance',
+  'unknown_message',
+  'missing_quote',
+  'quote_not_found',
+  'quote_only_in_reply_blockquote',
+  'elided_quote',
+  'quote_too_short',
+  'quote_does_not_bear_statement',
+  'quote_carries_more_than_statement',
+  'quote_is_a_fragment',
+  'quote_omits_surrounding_text',
+  'superseded_by_later_message',
+  'statement_is_not_an_assertion',
+  'statement_uncheckable',
+  'ambiguous_quote',
+  'attributed_person_not_author',
+] as const;
+
+export type ProvenanceProblemKind = (typeof PROVENANCE_PROBLEM_KINDS)[number];
 
 /**
  * What a problem *means*, which is not the same as what it is.
@@ -1122,7 +804,7 @@ export function validateProposalProvenance(
   }
 
   const quote = hasContent(subject.quote) ? (subject.quote as string).trim() : '';
-  const normalizedQuote = normalizeForMatch(quote);
+  const normalizedQuote = normalizeForReceipt(quote);
 
   // ── A model reading must quote the message it was read out of ────────────
   //
@@ -1157,7 +839,7 @@ export function validateProposalProvenance(
 
   if (normalizedQuote.length > 0 && cited.length > 0) {
     const inFullText = cited.filter((message) =>
-      normalizeForMatch(message.body).includes(normalizedQuote),
+      normalizeForReceipt(message.body).includes(normalizedQuote),
     );
     const inOwnText = bearingMessages(quote, cited);
 
@@ -1239,16 +921,90 @@ export function validateProposalProvenance(
     // `quoteSpansWholeSentences`. `refer` rather than `reject`: a fragment may be
     // a perfectly fair quotation, and nothing here can read the rest of the
     // sentence to find out, which is the definition of the third severity.
-    if (
-      fromModel &&
-      bearing &&
-      !quoteSpansWholeSentences(quote, stripReplyBlockquotes(bearing.body), policy)
-    ) {
+    if (fromModel && bearing) {
+      const ownText = stripReplyBlockquotes(bearing.body);
+      if (!quoteSpansWholeSentences(quote, ownText, policy)) {
+        problems.push({
+          kind: 'quote_is_a_fragment',
+          severity: 'refer',
+          detail: `the quote is a span cut out of the middle of a sentence in message "${bearing.id}" rather than one or more whole sentences of it — the words on either side of the cut may qualify or reverse it ("it is not true that …"), and nothing here can read them, so this reading is not accepted on a machine's word`,
+          messageId: bearing.id,
+        });
+      } else if (!quoteCoversOwnText(quote, ownText, policy)) {
+        // ── …and the sentences either side of it are not somebody's scissors ──
+        //
+        // r5, and it is r4's own documented residue turned into a disposition.
+        // r4 wrote: *"polarity that lives in a different sentence ('I will deploy
+        // Friday. Not.') is not visible to this and is not visible to any span
+        // rule"*. True, correct about the mechanism, and the code auto-accepted
+        // the sentence anyway — while the same round built the third severity
+        // that exactly fits it. A stated limit is not a disposition.
+        //
+        // The rule is "the quote is everything this author wrote here", not a
+        // list of the constructions a neighbour might use, because that list is
+        // unbounded in the way `RETRO.md` has now recorded three times. See
+        // `quoteCoversOwnText` for the candidates that were tried and what broke
+        // each of them.
+        problems.push({
+          kind: 'quote_omits_surrounding_text',
+          severity: 'refer',
+          detail: `the quote is whole sentences of message "${bearing.id}" but not all of it — its author wrote more around them, and a neighbouring sentence can reverse, condition or withdraw the one being quoted ("… Not.", "Unless CI is red.", "Correction: …") in a way no rule about the quoted span can see, so this reading is not accepted on a machine's word`,
+          messageId: bearing.id,
+        });
+      }
+    }
+
+    // ── …and nobody in the window has taken it back since ──────────────────
+    //
+    // r5. `ProvenanceMessage` carries `id`, `authorId` and `body`, and until now
+    // this function constructed and inspected only the *cited* messages — so a
+    // window holding "We will deploy production Friday." followed by
+    // "Correction: we will not deploy production Friday.", citing only the
+    // first, was a clean receipt. The message table being append-only stops the
+    // first message being edited; it does not make the second part of
+    // acceptance.
+    //
+    // Deliberately not a marker list ("correction", "actually", `s/x/y/`) —
+    // those route which model reads a window and have no business deciding
+    // whether a reading becomes a fact. The test is structural and reuses the
+    // alignment: a later message **restates the statement and adds to it**. That
+    // catches the inserted `not`, the added `unless`, and the retraction verb,
+    // without an opinion about which words are dangerous. An exact restatement
+    // is not a correction and a message about something else does not align at
+    // all.
+    if (fromModel && cited.length > 0) {
+      const revisited = laterRevision(
+        subject.statement ?? '',
+        subject.provenance,
+        messages,
+        policy,
+      );
+      if (revisited) {
+        problems.push({
+          kind: 'superseded_by_later_message',
+          severity: 'refer',
+          detail: `message "${revisited.message.id}" comes after every message this cites and says the same sentence with ${revisited.added.map((token) => `"${token}"`).join(', ')} added — a later message in the same window revisits the one being quoted, and whether that reverses it, narrows it or merely repeats it is not something a machine may decide from the words`,
+          messageId: revisited.message.id,
+        });
+      }
+    }
+
+    // ── …and it is being offered as an assertion at all ────────────────────
+    //
+    // r5. `objects.ts` requires a nonempty string and the receipt proves string
+    // equality, so `"Would we deploy production Friday?"` minted as a `claim`
+    // with an identical quote had a perfect receipt and turned somebody's
+    // question into their position. `RECEIPT_POLICY.droppableTokens` already
+    // makes this argument in the other direction — `?` is kept out of the set
+    // the bearing check will forgive because "Bob will deploy Friday?" is a
+    // question and minting it as an assertion is the same defect in different
+    // clothes. Here the mark is read rather than compared.
+    if (fromModel && subject.type !== 'open_question' && !isAssertion(subject.statement ?? '')) {
       problems.push({
-        kind: 'quote_is_a_fragment',
+        kind: 'statement_is_not_an_assertion',
         severity: 'refer',
-        detail: `the quote is a span cut out of the middle of a sentence in message "${bearing.id}" rather than one or more whole sentences of it — the words on either side of the cut may qualify or reverse it ("it is not true that …"), and nothing here can read them, so this reading is not accepted on a machine's word`,
-        messageId: bearing.id,
+        detail: `the ${subject.type} being minted carries a question mark — a question quoted verbatim is an open question or a referral, never an assertion about what somebody holds, and nothing here can tell a rhetorical question from a real one`,
+        messageId: bearing?.id ?? null,
       });
     }
 
@@ -1359,6 +1115,62 @@ export function validateProposalProvenance(
 }
 
 /**
+ * **Does a message later in this window say the quoted sentence again, with
+ * something added?**
+ *
+ * "Later" is positional: after every message the proposal cites. `EscalationWindow`
+ * documents its messages as being in room order, and the acceptance path is
+ * handed the same window, so position is the ordering the room itself has.
+ * Messages the proposal cites are not later than themselves, and a message
+ * *before* the citations is not a revision of them.
+ *
+ * The comparison runs over **routing** tokens rather than receipt tokens, and
+ * that is the one place on the receipt path where the lossy fold is correct: this
+ * is a detector, not a certification. A false positive costs a referral — a
+ * person reads two sentences — and a false negative costs an auto-accepted
+ * statement the room has already walked back. Case, fullwidth spellings and
+ * markdown are all noise to that question.
+ *
+ * Returns the tokens the later message added, because a refusal that does not
+ * say what changed is a dead end.
+ */
+export function laterRevision(
+  statement: string,
+  citedIds: readonly string[],
+  messages: readonly ProvenanceMessage[],
+  policy: ReceiptPolicy = RECEIPT_POLICY,
+): { message: ProvenanceMessage; added: string[] } | null {
+  if (isBlank(statement)) return null;
+  const wanted = routingTokens(statement);
+  if (wanted.length === 0 || wanted.length > policy.maxAlignedTokens) return null;
+
+  const cited = new Set(citedIds);
+  let lastCited = -1;
+  for (const [index, message] of messages.entries()) {
+    if (cited.has(message.id)) lastCited = index;
+  }
+  if (lastCited === -1) return null;
+
+  const later = messages.slice(lastCited + 1, lastCited + 1 + policy.maxLaterMessagesScanned);
+  for (const message of later) {
+    const own = stripReplyBlockquotes(message.body);
+    const sentences = sentencesOf(own);
+    if (sentences.length > policy.maxScannedSentences) continue;
+    for (const sentence of sentences) {
+      const aligned = alignTokens(routingTokens(sentence), wanted, policy);
+      if (aligned.undecidable !== null) continue;
+      // Every word of the statement is here, in order, and this sentence says
+      // more. An exact restatement (`unmatchedInQuote` empty) is agreement, and
+      // a sentence missing any of the statement's words is about something else.
+      if (aligned.unmatchedInStatement.length === 0 && aligned.unmatchedInQuote.length > 0) {
+        return { message, added: aligned.unmatchedInQuote };
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Every cited message whose *own* text carries a quoted span — reply-blockquotes
  * stripped, so a message that merely quoted the sentence back does not count.
  *
@@ -1370,10 +1182,10 @@ export function bearingMessages(
   quote: string,
   messages: readonly ProvenanceMessage[],
 ): ProvenanceMessage[] {
-  const normalized = normalizeForMatch(quote);
+  const normalized = normalizeForReceipt(quote);
   if (normalized.length === 0) return [];
   return messages.filter((message) =>
-    normalizeForMatch(stripReplyBlockquotes(message.body)).includes(normalized),
+    normalizeForReceipt(stripReplyBlockquotes(message.body)).includes(normalized),
   );
 }
 

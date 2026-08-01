@@ -47,9 +47,19 @@ const CLAIM_TEXT = 'the build is green on main';
  * parses.
  */
 const DECISION_TEXT = 'adopt the watermark contract';
+/**
+ * **One sentence per message.** r5: a certifiable quote is the whole of what its
+ * author wrote in the bearing message, because a neighbouring sentence can
+ * reverse the one being quoted and nothing about the quoted span can see that.
+ * These two sentences used to share a body, which made every acceptance here a
+ * referral and hid the gate each test is about.
+ */
 const MSG_9: ProvenanceMessage[] = [
-  { id: 'msg_9', authorId: ALICE, body: `${CLAIM_TEXT}. So let us ${DECISION_TEXT}.` },
+  { id: 'msg_9', authorId: ALICE, body: CLAIM_TEXT },
+  { id: 'msg_10', authorId: ALICE, body: DECISION_TEXT },
 ];
+/** Which of them carries the sentence a proposal of this type is read out of. */
+const citedFor = (type: 'decision' | 'claim'): string[] => [type === 'claim' ? 'msg_9' : 'msg_10'];
 
 function proposalEvent(
   overrides: {
@@ -82,7 +92,7 @@ function proposalEvent(
           : { statement: DECISION_TEXT },
       confidence: overrides.confidence ?? 0.9,
       proposer: overrides.proposer ?? { kind: 'model', model: 'test-model' },
-      provenance: ['msg_9'],
+      provenance: citedFor(type),
       quote: type === 'claim' ? CLAIM_TEXT : DECISION_TEXT,
       createdAt: minute,
       ...(overrides.status ? { status: overrides.status } : {}),
@@ -124,7 +134,7 @@ function acceptEvent(
           ? { statement: overrides.statement ?? CLAIM_TEXT, claimant: ALICE }
           : { statement: overrides.statement ?? 'Adopt the watermark contract', decidedBy: ALICE },
       provenance: {
-        messageIds: overrides.citing ?? ['msg_9'],
+        messageIds: overrides.citing ?? citedFor(type),
         proposalId: overrides.proposalId === undefined ? 'prop_x' : overrides.proposalId,
       },
       createdAt: minute,
@@ -835,6 +845,40 @@ describe('the actor floor — gate 7: a machine may not accept below the confide
     expect(state.objects.obj_x).toBeDefined();
   });
 
+  it('reports the receipt fault rather than the confidence, when both hold', () => {
+    // r5's ordering. Both refuse the fold, so nothing is at stake except which
+    // reason the room is shown — and "the quote says something the statement
+    // dropped" is evidence about the record, while "confidence 0.4 is below 0.7"
+    // is a fact about the model's mood. r4 reported the mood and buried the
+    // evidence.
+    const window: ProvenanceMessage[] = [
+      { id: 'msg_9', authorId: ALICE, body: `${CLAIM_TEXT} for now` },
+    ];
+    const state = reduce([
+      event({
+        id: 'ev_prop',
+        at: at(1),
+        actor: model(),
+        type: 'proposal_recorded',
+        proposal: {
+          id: 'prop_x',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: CLAIM_TEXT, claimant: ALICE },
+          confidence: 0.4,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['msg_9'],
+          quote: `${CLAIM_TEXT} for now`,
+          createdAt: at(1),
+        },
+      }),
+      acceptEvent({ type: 'claim', actor: model(), messages: window }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues[0]?.reason).toContain('declines to rule on');
+    expect(state.issues[0]?.reason).not.toContain('below the floor');
+  });
+
   it('does not gate a human on confidence — the floor is about machines', () => {
     const state = reduce([
       proposalEvent({ type: 'claim', confidence: 0 }),
@@ -992,11 +1036,13 @@ describe('the actor floor — gate 9: no receipt, no acceptance', () => {
       }),
     ]);
     expect(state.objects).toEqual({});
-    expect(state.issues.at(-1)?.reason).toContain('did not write it');
-    expect(state.issues.at(-1)?.reason).toContain('waits for the named owner to confirm');
+    // r5: it does not even reach the third-party check. A machine may not mint
+    // a commitment at all, so the refusal names that rule instead.
+    expect(state.issues.at(-1)?.reason).toContain('is a commitment accepted by a model actor');
+    expect(state.issues.at(-1)?.reason).toContain('writes an obligation onto a named person');
   });
 
-  it('lets the same commitment through when the owner wrote the sentence', () => {
+  it('refuses it even when the owner wrote the sentence himself', () => {
     const window: ProvenanceMessage[] = [
       { id: 'msg_c', authorId: BOB, body: "I'll wire the flag in tomorrow." },
     ];
@@ -1035,8 +1081,103 @@ describe('the actor floor — gate 9: no receipt, no acceptance', () => {
         },
       }),
     ]);
+    // **#44's fact-check, as a test.** A model actor proposed and accepted a
+    // commitment naming a human and it landed with zero issues: the quote was
+    // real, the author was real, and the attribution rules read it as
+    // self-stated because the bearing message's author id equalled the owner.
+    // Every gate held and none of them was the gate that was missing — whether a
+    // machine may write an obligation onto a person at all.
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain('is a commitment accepted by a model actor');
+  });
+
+  it('lets a human accept the same commitment — the route that stays open', () => {
+    const window: ProvenanceMessage[] = [
+      { id: 'msg_c', authorId: BOB, body: "I'll wire the flag in tomorrow." },
+    ];
+    const state = reduce([
+      event({
+        id: 'ev_pc',
+        at: at(1),
+        actor: model(),
+        type: 'proposal_recorded',
+        proposal: {
+          id: 'prop_c',
+          roomId: ROOM,
+          type: 'commitment',
+          payload: { statement: "I'll wire the flag in tomorrow", owner: BOB },
+          confidence: 0.95,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['msg_c'],
+          quote: "I'll wire the flag in tomorrow.",
+          createdAt: at(1),
+        },
+      }),
+      event({
+        id: 'ev_ac',
+        at: at(2),
+        actor: human(BOB),
+        messages: window,
+        type: 'object_accepted',
+        object: {
+          id: 'obj_c',
+          roomId: ROOM,
+          type: 'commitment',
+          payload: { statement: "I'll wire the flag in tomorrow", owner: BOB },
+          provenance: { messageIds: ['msg_c'], proposalId: 'prop_c' },
+          createdAt: at(2),
+          updatedAt: at(2),
+        },
+      }),
+    ]);
     expect(state.issues).toEqual([]);
     expect(state.objects.obj_c).toBeDefined();
+  });
+
+  it('refuses a model accepting an objective — the heading everything is filed under', () => {
+    // r5, and the argument is the one `decideSupersession` already makes on the
+    // way out: retiring an objective needs a person, so minting one does too, or
+    // the gate is a front door with the back door open.
+    const window: ProvenanceMessage[] = [
+      { id: 'msg_o', authorId: BOB, body: 'Ship the narrowing fix this quarter.' },
+    ];
+    const state = reduce([
+      event({
+        id: 'ev_po',
+        at: at(1),
+        actor: model(),
+        type: 'proposal_recorded',
+        proposal: {
+          id: 'prop_o',
+          roomId: ROOM,
+          type: 'objective',
+          payload: { title: 'Ship the narrowing fix this quarter' },
+          confidence: 0.99,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['msg_o'],
+          quote: 'Ship the narrowing fix this quarter.',
+          createdAt: at(1),
+        },
+      }),
+      event({
+        id: 'ev_ao',
+        at: at(2),
+        actor: model(),
+        messages: window,
+        type: 'object_accepted',
+        object: {
+          id: 'obj_o',
+          roomId: ROOM,
+          type: 'objective',
+          payload: { title: 'Ship the narrowing fix this quarter' },
+          provenance: { messageIds: ['msg_o'], proposalId: 'prop_o' },
+          createdAt: at(2),
+          updatedAt: at(2),
+        },
+      }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain('is an objective accepted by a model actor');
   });
 
   it('does not ask a human acceptance for any of it', () => {

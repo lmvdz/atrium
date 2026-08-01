@@ -14,6 +14,7 @@ export * from './corrections.js';
 export * from './epistemic.js';
 export * from './escalation.js';
 export * from './events.js';
+export * from './matching.js';
 export * from './objects.js';
 export * from './policy.js';
 export * from './ports.js';

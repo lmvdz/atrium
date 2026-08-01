@@ -10,7 +10,9 @@ import {
   FUTURE_PATTERNS,
   hasReplyBlockquote,
   lexicalOverlap,
-  normalizeForMatch,
+  normalizeForReceipt,
+  normalizeForRouting,
+  PROVENANCE_PROBLEM_KINDS,
   type ProvenanceProblemKind,
   provenanceIsClean,
   replyBlockquotes,
@@ -79,25 +81,26 @@ describe('stripReplyBlockquotes — the highest-value function in the file', () 
   });
 });
 
-describe('normalizeForMatch — the formatting both tiers drop while quoting', () => {
-  it('collapses emphasis, code ticks and whitespace', () => {
-    expect(normalizeForMatch('TypeScript **should   not** be so `confident`')).toBe(
+describe('normalizeForRouting — the lossy fold, for deciding which model reads a window', () => {
+  it('collapses emphasis, code ticks and whitespace, and folds case', () => {
+    expect(normalizeForRouting('TypeScript **should   not** be so `confident`')).toBe(
       'typescript should not be so confident',
     );
   });
 
   it('collapses a markdown link to its text', () => {
-    expect(normalizeForMatch('see [the playground](https://example.com/x?y=1) for it')).toBe(
+    expect(normalizeForRouting('see [the playground](https://example.com/x?y=1) for it')).toBe(
       'see the playground for it',
     );
   });
 
-  it('makes a correctly-quoted span match despite dropped markdown', () => {
-    // Three of the eight apparent provenance failures in the spike were exactly
-    // this: the model quoted correctly and dropped the `**`.
-    const source = 'so TypeScript *should not* be so confident that `this.state` is still online';
-    const quoted = 'so TypeScript should not be so confident that this.state is still online';
-    expect(normalizeForMatch(source)).toContain(normalizeForMatch(quoted));
+  it('is the only fold allowed to be this lossy, and it never sees a receipt', () => {
+    // Routing decides which model reads a window and whether a reading duplicates
+    // one already accepted. Getting either wrong costs a model call or a dropped
+    // re-proposal. Getting the receipt wrong mints something false about a named
+    // person, which is why the two folds are two functions since r5.
+    expect(normalizeForRouting('ｅｖｉｌ.example')).toBe(normalizeForReceipt('evil.example'));
+    expect(normalizeForReceipt('ｅｖｉｌ.example')).not.toBe(normalizeForReceipt('evil.example'));
   });
 });
 
@@ -348,7 +351,7 @@ describe('defaultEscalationConfig — pinned by value, and by what it does', () 
   it('puts the quote-length line exactly where the number says', () => {
     // Literal lengths on both sides: nothing here moves when the config does.
     const quote = (length: number) => 'ab '.repeat(Math.ceil(length / 3)).slice(0, length);
-    expect(normalizeForMatch(quote(23)).length).toBeLessThan(24);
+    expect(normalizeForRouting(quote(23)).length).toBeLessThan(24);
     expect(
       triggersForMessage({ id: 'm', authorId: 'a', body: `> ${quote(23)}\nmine` }).map(
         (trigger) => trigger.kind,
@@ -486,8 +489,27 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5, " +
     'line 6 (`this.bar()`) changes that, so TypeScript *should not* be so confident that ' +
     "`this.state` is still `'online'` after line 6.";
-  /** The same sentence with the markdown a model drops while quoting. */
-  const DISPUTE_SENTENCE_PLAIN = normalizeForMatch(DISPUTE_SENTENCE);
+  /**
+   * The same sentence with the emphasis a model drops while quoting, **written
+   * out** rather than computed.
+   *
+   * r4's blind review, third occurrence of the derived-probe class in this
+   * ticket (after r3's θ probes and r4's `maxAlignedTokens + 1`): this constant
+   * used to read `normalizeForReceipt(DISPUTE_SENTENCE)` and was then used as the
+   * *expected* value below. Delete the emphasis rule from the normalizer and the
+   * fixture and the assertion move together — the test goes on passing while the
+   * behaviour it names is gone. A probe computed by the code under test cannot
+   * fail on that code.
+   *
+   * The backticks survive on purpose: since r5 a code span is content, not
+   * formatting, so a model that drops *those* has changed the sentence. What it
+   * may drop is the paired `*…*`, and that is the only difference between this
+   * string and the one above.
+   */
+  const DISPUTE_SENTENCE_PLAIN =
+    "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5, " +
+    'line 6 (`this.bar()`) changes that, so TypeScript should not be so confident that ' +
+    "`this.state` is still `'online'` after line 6.";
 
   const problemKinds = (...args: Parameters<typeof validateProposalProvenance>) =>
     validateProposalProvenance(...args)
@@ -520,31 +542,61 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     expect(provenanceIsClean(problems)).toBe(false);
   });
 
-  it('passes the same claim when it cites the message its author actually wrote', () => {
+  it('refers the same claim when its author wrote more around the sentence', () => {
+    // r5. Citing the right message and quoting a whole sentence of it verbatim
+    // is no longer a certification: `messageOpener` runs to three paragraphs and
+    // a code fence, and a sentence pulled out of that is a sentence whose
+    // neighbours nothing here has read. The attribution is right, the quote is
+    // right, and the disposition is `refer` rather than `[]`.
+    const problems = validateProposalProvenance(
+      {
+        type: 'claim',
+        provenance: [messageOpener.id],
+        quote:
+          'I just ran into a problem with this for the first time despite using TypeScript for years.',
+        statement:
+          'I just ran into a problem with this for the first time despite using TypeScript for years.',
+        proposer: { kind: 'model' },
+        attributedTo: JORDAN,
+      },
+      messages,
+    );
+    expect(problems.map((problem) => problem.kind)).toEqual(['quote_omits_surrounding_text']);
+    expect(problems[0]?.severity).toBe('refer');
+  });
+
+  it('passes the claim when the quote is the whole of what that author wrote', () => {
+    // …and the certifying form, so the rule above is not simply "refuse
+    // everything". The guarantee this shape earns is stronger than the one r4
+    // could state: somebody wrote this message, and it says exactly this.
+    const sentence =
+      'I just ran into a problem with this for the first time despite using TypeScript for years.';
     expect(
       problemKinds(
         {
           type: 'claim',
-          provenance: [messageOpener.id],
-          quote:
-            'I just ran into a problem with this for the first time despite using TypeScript for years.',
-          statement:
-            'I just ran into a problem with this for the first time despite using TypeScript for years.',
+          provenance: ['m_short'],
+          quote: sentence,
+          statement: sentence,
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
-        messages,
+        [{ id: 'm_short', authorId: JORDAN, body: sentence }],
       ),
     ).toEqual([]);
   });
 
-  it('accepts a quote whose markdown the model dropped', () => {
+  it('still finds a quote whose emphasis the model dropped', () => {
+    // Three of the eight apparent provenance failures in the spike were exactly
+    // this: the model quoted correctly and dropped the `*…*`. The emphasis is
+    // still forgiven — the *only* finding here is that the author wrote more
+    // around the sentence, not that the quote could not be found or did not bear
+    // its statement.
     expect(
       problemKinds(
         {
           type: 'claim',
           provenance: [messageDispute.id],
-          // The source says *should not* and `this.state`; the model dropped both.
           quote: DISPUTE_SENTENCE_PLAIN,
           statement: DISPUTE_SENTENCE_PLAIN,
           proposer: { kind: 'model' },
@@ -552,7 +604,29 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ),
-    ).toEqual([]);
+    ).toEqual(['quote_omits_surrounding_text']);
+  });
+
+  it('does not forgive the backticks, because a code span is mention and not use', () => {
+    // r4's blind review: `normalizeForReceipt` deleted backticks, so
+    // "`Deploy production Friday.`" — a sample its author was displaying —
+    // became an assertion its author made. Since r5 the delimiters are content,
+    // so a quote that drops them is not the sentence that was written.
+    const body = '`Deploy production Friday and roll back Monday.`';
+    const dropped = 'Deploy production Friday and roll back Monday.';
+    expect(
+      problemKinds(
+        {
+          type: 'claim',
+          provenance: ['m_code'],
+          quote: dropped,
+          statement: dropped,
+          proposer: { kind: 'model' },
+          attributedTo: JORDAN,
+        },
+        [{ id: 'm_code', authorId: JORDAN, body }],
+      ),
+    ).not.toEqual([]);
   });
 
   it('rejects a quote elided with an ellipsis that is not verbatim anywhere', () => {
@@ -629,7 +703,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       },
       messages,
     );
-    expect(problems).toEqual(['attributed_person_not_author']);
+    expect(problems).toEqual(['attributed_person_not_author', 'quote_omits_surrounding_text']);
   });
 
   it('does not let a padded citation list flip attribution', () => {
@@ -691,10 +765,10 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     const asClaim = validateProposalProvenance({ ...subject, type: 'claim' }, messages);
     const asCommitment = validateProposalProvenance({ ...subject, type: 'commitment' }, messages);
 
-    expect(asClaim.map((problem) => problem.kind)).toEqual(['attributed_person_not_author']);
-    expect(asClaim[0]?.severity).toBe('reject');
-    expect(asCommitment.map((problem) => problem.kind)).toEqual(['attributed_person_not_author']);
-    expect(asCommitment[0]?.severity).toBe('reclassify');
+    const attribution = (problems: ReturnType<typeof validateProposalProvenance>) =>
+      problems.find((problem) => problem.kind === 'attributed_person_not_author');
+    expect(attribution(asClaim)?.severity).toBe('reject');
+    expect(attribution(asCommitment)?.severity).toBe('reclassify');
   });
 
   it('marks every wrong-receipt problem as rejecting', () => {
@@ -729,7 +803,9 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ),
-    ).toEqual([]);
+      // The one finding is about the scissors, not about attribution: an open
+      // question names nobody, so `attributed_person_not_author` cannot fire.
+    ).toEqual(['quote_omits_surrounding_text']);
     expect(
       problemKinds(
         { type: 'open_question', provenance: [messageDispute.id], proposer: { kind: 'model' } },
@@ -751,23 +827,14 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
 
   it('covers every problem kind it declares', () => {
     // A taxonomy with an unreachable member is a taxonomy that has drifted.
-    // Written out by hand rather than read off the type, so a kind that stops
-    // being reachable fails here instead of quietly shrinking both sides.
-    const declared: ProvenanceProblemKind[] = [
-      'no_provenance',
-      'unknown_message',
-      'missing_quote',
-      'quote_not_found',
-      'quote_only_in_reply_blockquote',
-      'elided_quote',
-      'quote_too_short',
-      'quote_does_not_bear_statement',
-      'quote_carries_more_than_statement',
-      'quote_is_a_fragment',
-      'statement_uncheckable',
-      'ambiguous_quote',
-      'attributed_person_not_author',
-    ];
+    //
+    // **Driven from `PROVENANCE_PROBLEM_KINDS`, which is what the type is made
+    // of.** r4 wrote this list out by hand on the argument that a restated list
+    // notices a kind that stops existing — true, and it is blind to a kind that
+    // starts existing, which is the failure r4's blind review found one file
+    // over (`acceptance.test.ts`'s "reaches every rule name the type declares",
+    // silently missing one). Since the type is derived from this array, adding a
+    // kind without a case fails here and deleting one fails at its call site.
     const seen = new Set<ProvenanceProblemKind>();
     const cases: Parameters<typeof validateProposalProvenance>[] = [
       // no_provenance
@@ -890,6 +957,56 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           },
         ],
       ],
+      // quote_omits_surrounding_text — whole sentences, and the author wrote more
+      [
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          quote: DISPUTE_SENTENCE,
+          statement: DISPUTE_SENTENCE,
+          proposer: { kind: 'model' },
+        },
+        messages,
+      ],
+      // superseded_by_later_message — a later message restates it with a `not`
+      [
+        {
+          type: 'claim',
+          provenance: ['m_first'],
+          quote: 'We will deploy production on Friday afternoon.',
+          statement: 'We will deploy production on Friday afternoon.',
+          proposer: { kind: 'model' },
+        },
+        [
+          {
+            id: 'm_first',
+            authorId: JORDAN,
+            body: 'We will deploy production on Friday afternoon.',
+          },
+          {
+            id: 'm_second',
+            authorId: JORDAN,
+            body: 'Correction: we will not deploy production on Friday afternoon.',
+          },
+        ],
+      ],
+      // statement_is_not_an_assertion — a question minted as something else
+      [
+        {
+          type: 'claim',
+          provenance: ['m_ask'],
+          quote: 'Would we deploy production on Friday afternoon?',
+          statement: 'Would we deploy production on Friday afternoon?',
+          proposer: { kind: 'model' },
+        },
+        [
+          {
+            id: 'm_ask',
+            authorId: JORDAN,
+            body: 'Would we deploy production on Friday afternoon?',
+          },
+        ],
+      ],
       // attributed_person_not_author
       [
         {
@@ -908,6 +1025,6 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     for (const args of cases) {
       for (const problem of validateProposalProvenance(...args)) seen.add(problem.kind);
     }
-    expect([...seen].sort()).toEqual([...declared].sort());
+    expect([...seen].sort()).toEqual([...PROVENANCE_PROBLEM_KINDS].sort());
   });
 });

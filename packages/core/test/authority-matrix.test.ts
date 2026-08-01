@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AcceptedObject as AcceptedObjectSchema,
   type AcceptedObjectType,
   type Actor,
   type AuthoredEvent,
+  acceptanceReceiptRefusal,
   authored,
   type CoreEvent,
   CoreEvent as CoreEventSchema,
   type CoreState,
   type CorrectionAction,
+  Proposal as ProposalSchema,
   type ProvenanceMessage,
   type RelationKind,
   reduce,
@@ -86,6 +89,8 @@ function actorOf(kind: ActorKind): Actor {
  */
 const GATES = {
   decision_acceptance: 'never auto-accepts',
+  commitment_acceptance: 'writes an obligation onto a named person',
+  objective_acceptance: 'what everything else in the room is filed under',
   claim_verification: 'would become a verified claim',
   direct_acceptance: 'only a human may accept an object directly',
   supersession: 'retires an accepted',
@@ -99,6 +104,7 @@ const GATES = {
   provenance_binding: 'the receipt may not change on the way through',
   missing_receipt_context: 'no message window supplied',
   receipt_failed: 'on a receipt that does not hold',
+  receipt_not_certifiable: 'on a receipt this check declines to rule on',
   third_party_confirm: 'waits for the named owner to confirm',
 } as const;
 type Gate = keyof typeof GATES;
@@ -110,10 +116,12 @@ type Gate = keyof typeof GATES;
  */
 const FLOOR: Record<AcceptedObjectType, number> = {
   decision: Number.POSITIVE_INFINITY,
-  commitment: 0.75,
+  // r5: a commitment writes an obligation onto a named person and an objective
+  // is what everything else is filed under. Neither is a machine's to mint.
+  commitment: Number.POSITIVE_INFINITY,
   open_question: 0.6,
   claim: 0.7,
-  objective: 0.75,
+  objective: Number.POSITIVE_INFINITY,
 };
 
 /** Supersession authority, restated from #4's split by what is retired. */
@@ -156,6 +164,8 @@ interface AcceptanceCase {
 function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   const human = isHumanKind(testCase.actor);
   if (testCase.type === 'decision' && !human) return 'decision_acceptance';
+  if (testCase.type === 'commitment' && !human) return 'commitment_acceptance';
+  if (testCase.type === 'objective' && !human) return 'objective_acceptance';
   if (testCase.type === 'claim' && testCase.verified && !human) return 'claim_verification';
   if (testCase.cited === 'none' && !human) return 'direct_acceptance';
   if (testCase.cited !== 'none' && !ownsProposal(testCase.actor, testCase.cited)) {
@@ -168,13 +178,24 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
 }
 
 /** The shapes a receipt can take on the way through acceptance. */
-type ReceiptShape = 'faithful' | 'payload' | 'citations' | 'no_window' | 'wrong_author';
+type ReceiptShape =
+  | 'faithful'
+  | 'payload'
+  | 'citations'
+  | 'no_window'
+  | 'wrong_author'
+  | 'uncertifiable';
 const RECEIPT_SHAPES: ReceiptShape[] = [
   'faithful',
   'payload',
   'citations',
   'no_window',
   'wrong_author',
+  // r5: the quote contains every word of the statement, in order, and says
+  // more. `receipt_not_certifiable` was declared as a gate in r4 and no case in
+  // this matrix reached it, so the reducer could have stopped enforcing it
+  // without a test noticing.
+  'uncertifiable',
 ];
 
 /**
@@ -195,6 +216,8 @@ function expectedForReceipt(actor: ActorKind, shape: ReceiptShape): Gate | 'allo
       return 'missing_receipt_context';
     case 'wrong_author':
       return 'receipt_failed';
+    case 'uncertifiable':
+      return 'receipt_not_certifiable';
     case 'faithful':
       return 'allowed';
   }
@@ -264,18 +287,43 @@ const TEXT: Record<AcceptedObjectType, string> = {
   objective: 'ship the narrowing fix this quarter',
 };
 
-const BODY = Object.values(TEXT)
-  // r4: the quote must be one or more *whole sentences* of the message, not a
-  // span cut out of the middle of one — a model that chooses the scissors can
-  // otherwise leave "it is not true that" outside the quote. Joining these with
-  // an em dash made every one of them a fragment of a single enormous sentence.
-  .map((sentence) => (/[.!?]$/.test(sentence) ? sentence : `${sentence}.`))
-  .join(' ');
+/**
+ * One sentence per message.
+ *
+ * r4 required the quote to be one or more *whole sentences* of the message. r5
+ * requires it to be **all** of them — a neighbouring sentence can reverse the
+ * one being quoted ("We will deploy Friday. Not.") and no rule about the quoted
+ * span can see that. So each of these sentences gets its own message, which is
+ * also what a room actually looks like; five of them in one body was a fixture
+ * convenience that now routes every cell of this matrix to the referral path
+ * instead of the authority rule it names.
+ */
+const MSG_FOR: Record<AcceptedObjectType, string> = {
+  decision: 'msg_decision',
+  commitment: 'msg_commitment',
+  open_question: 'msg_question',
+  claim: 'msg_claim',
+  objective: 'msg_objective',
+};
+
+const windowWrittenBy = (authorId: string): ProvenanceMessage[] =>
+  (Object.keys(TEXT) as AcceptedObjectType[]).map((type) => ({
+    id: MSG_FOR[type],
+    authorId,
+    body: /[.!?]$/.test(TEXT[type]) ? TEXT[type] : `${TEXT[type]}.`,
+  }));
+
+/**
+ * The claim's sentence with one word dropped: every word of it is in the quote,
+ * in order, and the quote says more. Nothing here can tell an aside from a
+ * "not", which is what `receipt_not_certifiable` is for.
+ */
+const REDUCED_CLAIM = 'the build is green on main';
 
 /** BOB wrote all of it, and BOB is the claimant and the owner. */
-const WINDOW: ProvenanceMessage[] = [{ id: 'msg_1', authorId: BOB, body: BODY }];
+const WINDOW: ProvenanceMessage[] = windowWrittenBy(BOB);
 /** The same words from somebody else, which breaks every attribution. */
-const WRONG_AUTHOR_WINDOW: ProvenanceMessage[] = [{ id: 'msg_1', authorId: ALICE, body: BODY }];
+const WRONG_AUTHOR_WINDOW: ProvenanceMessage[] = windowWrittenBy(ALICE);
 
 function payloadFor(type: AcceptedObjectType, verified = false): Record<string, unknown> {
   switch (type) {
@@ -302,10 +350,14 @@ function proposalEvent(input: {
   proposer: 'model_a' | 'human';
   confidence: number;
   verified?: boolean;
+  /** A statement that is a strict reduction of the quote — the referral shape. */
+  statement?: string;
   /** Who recorded it — drawn independently of who it names as proposer. */
   recordedBy: ActorKind;
 }): AuthoredEvent {
   const at = nextAt();
+  const payload = payloadFor(input.type, input.verified);
+  if (input.statement !== undefined) payload.statement = input.statement;
   return row(
     {
       id: `ev_${input.id}`,
@@ -315,13 +367,13 @@ function proposalEvent(input: {
         id: input.id,
         roomId: ROOM,
         type: input.type,
-        payload: payloadFor(input.type, input.verified),
+        payload,
         confidence: input.confidence,
         proposer:
           input.proposer === 'model_a'
             ? { kind: 'model', model: MODEL_A }
             : { kind: 'human', userId: ALICE },
-        provenance: ['msg_1'],
+        provenance: [MSG_FOR[input.type]],
         quote: TEXT[input.type],
         createdAt: at,
       },
@@ -362,7 +414,10 @@ function acceptEvent(input: {
         roomId: ROOM,
         type: input.type,
         payload,
-        provenance: { messageIds: input.citing ?? ['msg_1'], proposalId: input.proposalId },
+        provenance: {
+          messageIds: input.citing ?? [MSG_FOR[input.type]],
+          proposalId: input.proposalId,
+        },
         createdAt: at,
         updatedAt: at,
       },
@@ -501,6 +556,7 @@ describe('authority matrix — the receipt, every actor × shape', () => {
             proposer: 'model_a',
             confidence: 0.95,
             recordedBy: 'model_proposer',
+            ...(shape === 'uncertifiable' ? { statement: REDUCED_CLAIM } : {}),
           }),
           acceptEvent({
             id: `acc_r_${suffix}`,
@@ -508,8 +564,9 @@ describe('authority matrix — the receipt, every actor × shape', () => {
             type: 'claim',
             actor,
             proposalId,
+            ...(shape === 'uncertifiable' ? { statement: REDUCED_CLAIM } : {}),
             ...(shape === 'payload' ? { statement: 'something else entirely' } : {}),
-            ...(shape === 'citations' ? { citing: ['msg_1', 'msg_2'] } : {}),
+            ...(shape === 'citations' ? { citing: [MSG_FOR.claim, MSG_FOR.objective] } : {}),
             ...(shape === 'no_window' ? { messages: undefined } : {}),
             ...(shape === 'wrong_author' ? { messages: WRONG_AUTHOR_WINDOW } : {}),
           }),
@@ -531,10 +588,14 @@ describe('authority matrix — the receipt, every actor × shape', () => {
     }
   }
 
-  it('refuses a model accepting a commitment it cannot show the owner agreed to', () => {
-    // The sixth receipt gate, which only a commitment can reach: the owner did
-    // not write the message bearing the sentence, so it is #4's third-party case
-    // and it waits for them rather than landing.
+  it('refuses a model accepting a commitment before the receipt is even read', () => {
+    // Until r5 this reached the sixth receipt gate — the owner did not write the
+    // message bearing the sentence, so #4's third-party case waited for them. It
+    // no longer gets that far: a machine may not mint a commitment at any
+    // confidence, whoever wrote the sentence. `third_party_confirm` is exercised
+    // directly below, because a check that is deleted for being unreachable
+    // under today's type row is a check that will not be there when the row
+    // moves.
     const proposalId = 'prop_third_party';
     const state = reduce([
       proposalEvent({
@@ -553,8 +614,40 @@ describe('authority matrix — the receipt, every actor × shape', () => {
         messages: WRONG_AUTHOR_WINDOW,
       }),
     ]);
-    expect(verdictOf(state, 'ev_acc_third_party')).toBe('third_party_confirm');
+    expect(verdictOf(state, 'ev_acc_third_party')).toBe('commitment_acceptance');
     expect(state.objects).toEqual({});
+  });
+
+  it('keeps the third-party receipt gate live under the row that now hides it', () => {
+    const stamp = nextAt();
+    const payload = { statement: TEXT.commitment, owner: BOB };
+    const refusal = acceptanceReceiptRefusal({
+      actor: actorOf('model_proposer'),
+      proposalId: 'prop_tp',
+      proposal: ProposalSchema.parse({
+        id: 'prop_tp',
+        roomId: ROOM,
+        type: 'commitment',
+        payload,
+        confidence: 0.95,
+        proposer: { kind: 'model', model: MODEL_A },
+        provenance: [MSG_FOR.commitment],
+        quote: TEXT.commitment,
+        createdAt: stamp,
+      }),
+      object: AcceptedObjectSchema.parse({
+        id: 'obj_tp',
+        roomId: ROOM,
+        type: 'commitment',
+        payload,
+        provenance: { messageIds: [MSG_FOR.commitment], proposalId: 'prop_tp' },
+        createdAt: stamp,
+        updatedAt: stamp,
+      }),
+      // The same sentence, written by somebody who is not its owner.
+      messages: WRONG_AUTHOR_WINDOW,
+    });
+    expect(refusal?.gate).toBe('third_party_confirm');
   });
 });
 
@@ -907,6 +1000,17 @@ describe('the matrix as a whole', () => {
     // the oracle would refuse: a gate the reducer had stopped firing would still
     // have been "reached". `observed` is filled by `verdictOf` from
     // `state.issues`, so this fails when the reducer goes quiet.
-    expect([...observed].sort()).toEqual([...Object.keys(GATES), 'allowed'].sort());
+    // `third_party_confirm` is the one gate no `object_accepted` can reach
+    // while commitment is human-only (r5) — the type gate fires three checks
+    // earlier. It is not deleted, and it is not quietly excused either: the test
+    // above calls `acceptanceReceiptRefusal` directly and pins that it still
+    // fires, so "unreachable through this door" never becomes "gone".
+    const behindATypeRow: Gate[] = ['third_party_confirm'];
+    expect([...observed].sort()).toEqual(
+      [
+        ...Object.keys(GATES).filter((gate) => !behindATypeRow.includes(gate as Gate)),
+        'allowed',
+      ].sort(),
+    );
   });
 });

@@ -4,7 +4,7 @@ import {
   decideAcceptance,
   hasContent,
   isBlank,
-  normalizeForMatch,
+  normalizeForReceipt,
   orderedTokens,
   type Proposal,
   Proposal as ProposalSchema,
@@ -364,8 +364,11 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
 
   it('reads an edge apostrophe as a quotation mark, not a letter', () => {
     // The other direction of the same rule: `'online'` is the word `online`, so
-    // a model quoting a backticked term does not fail for punctuation.
-    expect(orderedTokens("`'online'` state")).toEqual(['online', 'state']);
+    // a model quoting a term does not fail for punctuation. The backticks *are*
+    // tokens since r5 — a code span is mention rather than use — so this asks
+    // the apostrophe question without them.
+    expect(orderedTokens("'online' state")).toEqual(['online', 'state']);
+    expect(orderedTokens("`'online'` state")).toEqual(['`', 'online', '`', 'state']);
   });
 
   it('refuses an article substitution, which laundered an indefinite reference', () => {
@@ -432,28 +435,69 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     // it was refused as `statement_uncheckable` — the check did not merely miss
     // the attack, it stopped working outside English.
     const russian = 'Боб развернёт продакшен в пятницу';
-    expect(orderedTokens(russian)).toEqual(['боб', 'развернёт', 'продакшен', 'в', 'пятницу']);
+    // Case is not folded since r5 — `US` and `us` are different words and a
+    // quote is supposed to be verbatim — so the tokens carry the capital.
+    expect(orderedTokens(russian)).toEqual(['Боб', 'развернёт', 'продакшен', 'в', 'пятницу']);
     expect(statementBearing(russian, russian).borne).toBe(true);
     expect(statementBearing(`Боб не развернёт продакшен в пятницу`, russian).borne).toBe(false);
   });
 
   it('treats a typographic apostrophe as an apostrophe', () => {
-    // Catches: dropping the `’` fold from `normalizeForMatch`. Without it
+    // Catches: dropping the `’` fold from `normalizeForReceipt`. Without it
     // `won’t` tokenizes as `won` + `t` and refuses a faithful quote for a reason
     // that has nothing to do with what was said.
     expect(orderedTokens('bob won’t deploy')).toEqual(['bob', "won't", 'deploy']);
     expect(statementBearing('bob won’t deploy', "bob won't deploy").borne).toBe(true);
   });
 
-  it('accepts a quote whose formatting the model dropped', () => {
-    // Catches: removing the markdown fold from `normalizeForMatch`. Three of the
-    // spike's eight apparent provenance failures were this and nothing else.
+  it('accepts a quote whose emphasis the model dropped', () => {
+    // Catches: removing the paired-emphasis entry from `normalizeForReceipt`.
+    // Three of the spike's eight apparent provenance failures were a dropped
+    // `**` and nothing else, and that difference is still admitted.
     expect(
       statementBearing(
-        "so **TypeScript** should not be so confident that `this.state` is still `'online'`",
-        'so TypeScript should not be so confident that this.state is still online',
+        'so **TypeScript** should not be so confident about narrowing',
+        'so TypeScript should not be so confident about narrowing',
       ).borne,
     ).toBe(true);
+  });
+
+  it('does not accept a quote whose code delimiters the model dropped', () => {
+    // r5, and the other half of the same policy. A backticked span is a string
+    // its author displayed, not a sentence its author asserted, so the two
+    // characters that carry that distinction are content. r4 deleted them, which
+    // turned `` `Deploy production Friday.` `` into its author's assertion.
+    expect(
+      statementBearing(
+        "so TypeScript should not be so confident that `this.state` is still `'online'`",
+        'so TypeScript should not be so confident that this.state is still online',
+      ).borne,
+    ).toBe(false);
+  });
+
+  it('does not fold a fullwidth or ligature spelling onto its ASCII form', () => {
+    // r4's blind review named NFKC as a defect on the receipt path: it maps the
+    // compatibility forms onto the base characters, so two distinct hostnames
+    // and two distinct identifiers compare equal. The tokenizer no longer needs
+    // it — `\p{L}` covers every script — so it is gone from the receipt fold.
+    expect(normalizeForReceipt('https://ｅｖｉｌ.example')).not.toBe(
+      normalizeForReceipt('https://evil.example'),
+    );
+    expect(normalizeForReceipt('ﬁle_handle')).not.toBe(normalizeForReceipt('file_handle'));
+  });
+
+  it('keeps a markdown link"s destination as content', () => {
+    // The security half: r4 collapsed `[text](destination)` to its text, so a
+    // statement naming the *safe* URL was certifiable against a record whose
+    // actionable link points somewhere else.
+    expect(normalizeForReceipt('Use [https://safe.example/a](https://evil.example/a) today.')).toBe(
+      'Use https://safe.example/a https://evil.example/a today.',
+    );
+    // …and an autolink whose text already states its destination does not
+    // stutter, so the common honest form stays bearable.
+    expect(normalizeForReceipt('[https://safe.example/a](https://safe.example/a)')).toBe(
+      'https://safe.example/a',
+    );
   });
 });
 
@@ -671,8 +715,8 @@ describe('emptiness is a property of the content, not of the container', () => {
     // Catches: `normalize_keeps_invisibles`. The other half of the same rule: an
     // invisible character must not make a correct quote *fail*, or the refusal
     // is again happening for the wrong reason.
-    expect(normalizeForMatch('ship​ it')).toBe('ship it');
-    expect(normalizeForMatch('ship it')).toBe('ship it');
+    expect(normalizeForReceipt('ship​ it')).toBe('ship it');
+    expect(normalizeForReceipt('ship it')).toBe('ship it');
     expect(statementBearing('ship​ the flag', 'ship the flag').borne).toBe(true);
   });
 

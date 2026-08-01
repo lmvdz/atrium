@@ -5,6 +5,7 @@ import {
   confidenceFloorRefusal,
   humanOnlyRefusal,
   isHuman,
+  modelMintingGate,
   proposalBindingRefusal,
 } from './authority.js';
 import type { Actor } from './common.js';
@@ -666,12 +667,17 @@ function applyObjectAccepted(
   // provenance first.
   const subject = `object "${object.id}"`;
 
-  // A decision is the type #4 bans inference at, by name: "that sounds good" is
-  // where the ambiguity lives. A model may propose one; only a human accepts
-  // it. Note this gate does not care whether a proposal was cited — an
+  // The types a machine may not mint at all, whatever its confidence.
+  //
+  // A decision is the one #4 bans inference at by name: "that sounds good" is
+  // where the ambiguity lives. r5 adds commitment and objective — see
+  // `modelMintingGate`, which reads the same θ table `MODEL_ACCEPTANCE_FLOOR`
+  // does, so this gate and that floor cannot disagree about which types are in
+  // the row. Note this gate does not care whether a proposal was cited — an
   // interpreter accepting *its own* decision proposal is exactly the move.
-  if (object.type === 'decision' && !isHuman(actor)) {
-    fail(state, event.id, humanOnlyRefusal('decision_acceptance', actor, subject));
+  const mintingGate = modelMintingGate(object.type);
+  if (mintingGate !== null && !isHuman(actor)) {
+    fail(state, event.id, humanOnlyRefusal(mintingGate, actor, subject));
     return false;
   }
 
@@ -767,20 +773,18 @@ function applyObjectAccepted(
     // because a model could land a claim at 0.55 that the engine at 0.7 would
     // never have emitted. One number, read from `policy.ts` by both.
     if (!isHuman(actor)) {
-      const floor = MODEL_ACCEPTANCE_FLOOR[object.type];
-      if (proposal.proposal.confidence < floor) {
-        fail(
-          state,
-          event.id,
-          confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),
-        );
-        return false;
-      }
-
-      // ── …and the receipt, likewise ──
+      // ── The receipt, and it is ruled on before the confidence ──
       //
       // Payload binding, provenance binding, a message window at all, the quote,
       // and third-party attribution. All five were call-site manners in round 1.
+      //
+      // **Above the confidence floor since r5**, for the reason `acceptance.ts`
+      // gives at length where the same ordering mattered more: the two answer
+      // different questions. The floor asks how sure the model was; the receipt
+      // asks whether the citation and the sentence agree. Both refuse the fold,
+      // so nothing is at stake here except which reason the room is shown — and
+      // "the quote says the opposite of the statement" is the one worth showing.
+      // A refusal that reports the cheaper finding buries the more serious one.
       const refusal = acceptanceReceiptRefusal({
         actor,
         proposalId,
@@ -790,6 +794,17 @@ function applyObjectAccepted(
       });
       if (refusal) {
         fail(state, event.id, refusal.detail);
+        return false;
+      }
+
+      // ── …and θ, as a trust boundary rather than a manner ──
+      const floor = MODEL_ACCEPTANCE_FLOOR[object.type];
+      if (proposal.proposal.confidence < floor) {
+        fail(
+          state,
+          event.id,
+          confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),
+        );
         return false;
       }
     }

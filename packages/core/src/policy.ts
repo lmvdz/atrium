@@ -39,10 +39,13 @@ import { AcceptedObjectType } from './objects.js';
  * model reads a window, never whether a reading becomes a fact. Getting one
  * wrong costs a model call; getting one of these wrong mints something false.
  *
- * The two that r2's gauntlet named as strays *were* acceptance policy and have
- * moved here: the dedup similarity threshold (a duplicate is discarded, so the
- * number decides what is never shown) and the minimum quote length (which is now
- * enforced on the acceptance path, not only on blockquote detection).
+ * One of the two r2's gauntlet named as strays *was* acceptance policy and moved
+ * here: the minimum quote length, which is enforced on the acceptance path and
+ * not only on blockquote detection. The other, the dedup similarity threshold,
+ * is **gone entirely as of r5** — `findDuplicate` no longer scores similarity at
+ * all, because a threshold over stopword-filtered tokens discarded a reading
+ * that said the *opposite* of the accepted object it was compared against. There
+ * is no number to place because there is no score.
  *
  * Pure: no clock, no I/O, no state.
  */
@@ -80,27 +83,52 @@ export type AcceptanceRule = z.infer<typeof AcceptanceRule>;
  * right.
  *
  *  - **Claim** — "X said Y" with its truth carried separately in `verification`.
- *    Cheap to correct, so recall wins. θ_auto is low.
+ *    Cheap to correct, so recall wins. θ_auto is low, and it auto-accepts.
  *  - **OpenQuestion** — a spurious one is one click to dismiss and a missed one
  *    is a question nobody ever revisits. The cost asymmetry is the strongest
- *    here, so this is the lowest bar in the table.
- *  - **Commitment** — an obligation with a name on it. Higher bar, and the
- *    self/third-party split matters more than the number.
+ *    here, so this is the lowest bar in the table, and it auto-accepts.
+ *  - **Commitment** — an obligation with a name on it. **Never, at any
+ *    confidence, since r5.**
  *  - **Objective** — a grouping noun; a wrong one mis-files things quietly,
- *    which is worse than a wrong claim because nobody notices.
+ *    which is worse than a wrong claim because nobody notices. **Never, since
+ *    r5.**
  *  - **Decision** — never, at any confidence.
+ *
+ * ## What r5 moved out of the auto-accept column, and why
+ *
+ * #44's fact-check drove a model actor through the whole stack with
+ * `{statement: 'Bob will deploy production Friday', owner: 'user_bob'}` and it
+ * landed with zero issues. Every gate held: the quote was real, the author was
+ * real, the attribution rules agreed it was self-stated because the bearing
+ * message's author id equalled the owner. What nothing asked was whether a
+ * *machine* may put an obligation on a named person at all.
+ *
+ * #4's row reads "Commitments: self-stated auto-accepts, third-party waits", and
+ * that row was written about who the sentence is *about*. It is silent on who is
+ * doing the accepting, and the silence read as permission. A commitment is the
+ * one accepted type that creates an expectation of somebody — the whole of #4's
+ * "nobody gets committed by someone else's sentence" — and a machine's reading
+ * of a sentence is exactly somebody else's sentence. An objective joins it for
+ * the reason its own bullet already gave and `decideSupersession` already
+ * enforces on the way out: retiring one needs a person, so minting one does too,
+ * or the gate is a front door with the back door open.
+ *
+ * `open_question` staying model-acceptable is deliberate and unchanged: a
+ * question puts nothing on anybody, and the cost of missing one is the highest
+ * asymmetry in the table.
  *
  * θ_min is the discard line. Below it the reading is not shown at all, because
  * a `~` a person has to evaluate is not free: the product's scarcest resource
- * is the attention of the people in the room.
+ * is the attention of the people in the room. **A receipt fault is not
+ * weakness**, and `acceptance.ts` says why it is ruled on above this line.
  */
 export const DEFAULT_ACCEPTANCE_RULES: Readonly<Record<AcceptedObjectType, AcceptanceRule>> =
   Object.freeze({
     decision: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: false }),
-    commitment: Object.freeze({ thetaAuto: 0.75, thetaMin: 0.5, autoAccept: true }),
+    commitment: Object.freeze({ thetaAuto: 0.75, thetaMin: 0.5, autoAccept: false }),
     open_question: Object.freeze({ thetaAuto: 0.6, thetaMin: 0.4, autoAccept: true }),
     claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),
-    objective: Object.freeze({ thetaAuto: 0.75, thetaMin: 0.5, autoAccept: true }),
+    objective: Object.freeze({ thetaAuto: 0.75, thetaMin: 0.5, autoAccept: false }),
   });
 
 /**
@@ -279,13 +307,22 @@ export interface ReceiptPolicy {
    */
   maxScannedSentences: number;
   /**
-   * Fraction of content words two texts must share to be the same reading.
+   * Messages *after* the cited ones that the later-correction scan will read.
    *
-   * Acceptance policy, not a formatting knob: a duplicate is *discarded*, so
-   * this number decides what the room never sees. It was a default argument on
-   * `findDuplicate` — r2's gauntlet counted it as a stray θ, correctly.
+   * r5: `ProvenanceMessage` carried `id`, `authorId` and `body`, and validation
+   * constructed and inspected only the **cited** messages — so a window holding
+   * `"We will deploy production Friday."` followed by `"Correction: we will not
+   * deploy production Friday."`, with the proposal citing only the first,
+   * auto-accepted. The message schema being append-only prevents a literal edit;
+   * it does not make a later correction part of acceptance.
+   *
+   * Bounded for the same reason every other scan here is: the window is somebody
+   * else's input and the scan is linear in it times the sentences in each. Above
+   * this the scan stops, and stopping is safe in the direction that matters —
+   * it can only miss a correction, and a missed correction leaves the receipt
+   * exactly as strong as it was in r4.
    */
-  duplicateThreshold: number;
+  maxLaterMessagesScanned: number;
 }
 
 export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
@@ -293,7 +330,7 @@ export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
   droppableTokens: Object.freeze(new Set(['.'])) as ReadonlySet<string>,
   maxAlignedTokens: 400,
   maxScannedSentences: 200,
-  duplicateThreshold: 0.8,
+  maxLaterMessagesScanned: 200,
 });
 
 /* ─────────────────────────────────────────────────────────────────────────

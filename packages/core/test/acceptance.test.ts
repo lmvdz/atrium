@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ACCEPTANCE_RULE_NAMES,
   type AcceptanceRuleName,
   type AcceptanceVerdict,
   type AcceptanceVisibility,
@@ -41,20 +42,17 @@ import { ALICE, at, BOB, event, human, model, ROOM, sampleLog } from './fixtures
  * be quietly dropped: the count is asserted at the end.
  */
 
-/** Every sentence the fixtures quote, in one message. */
-const BODY = [
-  "I'll land the migration tomorrow.",
-  'The migration is reversible.',
-  'Reset narrowing on mutating method calls.',
-  'Ship the narrowing fix this quarter.',
-  'Do we keep the flag after launch?',
-].join(' ');
-
-/** ALICE wrote all of it, so a claim or commitment of ALICE's is self-stated. */
-const aliceMessages: ProvenanceMessage[] = [{ id: 'msg_1', authorId: ALICE, body: BODY }];
-/** …and the same words from BOB, which makes ALICE's the third party. */
-const bobMessages: ProvenanceMessage[] = [{ id: 'msg_1', authorId: BOB, body: BODY }];
-
+/**
+ * Every sentence the fixtures quote — **one per message**.
+ *
+ * r5 moved these out of a single five-sentence body. A certifiable quote is now
+ * the whole of what its author wrote in the bearing message (see
+ * `quoteCoversOwnText`), because a neighbouring sentence can reverse the one
+ * being quoted and no rule about the quoted span can see that. Five sentences
+ * jammed into one body was a test convenience that no longer describes any
+ * message anybody sends, and keeping it would have meant every cell of #4's
+ * matrix exercising the referral path instead of the cell it names.
+ */
 const QUOTE: Record<AcceptedObjectType, string> = {
   decision: 'Reset narrowing on mutating method calls.',
   commitment: "I'll land the migration tomorrow.",
@@ -62,6 +60,31 @@ const QUOTE: Record<AcceptedObjectType, string> = {
   claim: 'The migration is reversible.',
   objective: 'Ship the narrowing fix this quarter.',
 };
+
+const OBJECT_TYPES: AcceptedObjectType[] = [
+  'decision',
+  'commitment',
+  'open_question',
+  'claim',
+  'objective',
+];
+
+/** The message each type's quote is the whole of. */
+const MESSAGE_ID: Record<AcceptedObjectType, string> = {
+  decision: 'msg_decision',
+  commitment: 'msg_commitment',
+  open_question: 'msg_question',
+  claim: 'msg_claim',
+  objective: 'msg_objective',
+};
+
+const windowWrittenBy = (authorId: string): ProvenanceMessage[] =>
+  OBJECT_TYPES.map((type) => ({ id: MESSAGE_ID[type], authorId, body: QUOTE[type] }));
+
+/** ALICE wrote all of it, so a claim or commitment of ALICE's is self-stated. */
+const aliceMessages: ProvenanceMessage[] = windowWrittenBy(ALICE);
+/** ...and the same words from BOB, which makes ALICE's the third party. */
+const bobMessages: ProvenanceMessage[] = windowWrittenBy(BOB);
 
 function proposal(overrides: {
   type: AcceptedObjectType;
@@ -92,7 +115,7 @@ function proposal(overrides: {
     payload,
     confidence: overrides.confidence,
     proposer: overrides.proposer ?? { kind: 'model', model: 'test-model' },
-    provenance: ['msg_1'],
+    provenance: [MESSAGE_ID[overrides.type]],
     quote: overrides.quote === undefined ? QUOTE[overrides.type] : overrides.quote,
     createdAt: at(1),
   });
@@ -138,7 +161,7 @@ function confidenceFor(type: AcceptedObjectType, band: Cell['band']): number {
 }
 
 const CELLS: Cell[] = [];
-for (const type of ['claim', 'open_question', 'objective'] as const) {
+for (const type of ['claim', 'open_question'] as const) {
   CELLS.push(
     {
       label: `${type} below θ_min`,
@@ -165,6 +188,21 @@ for (const type of ['claim', 'open_question', 'objective'] as const) {
       rule: 'auto_accept',
     },
   );
+}
+for (const band of ['below', 'between', 'above'] as const) {
+  CELLS.push({
+    label: `objective ${{ below: 'below θ_min', between: 'in the θ band', above: 'at θ_auto' }[band]}`,
+    type: 'objective',
+    band,
+    verdict: band === 'below' ? 'discard' : 'pending',
+    visibility: band === 'below' ? 'none' : band === 'between' ? 'quiet' : 'needs_you',
+    rule:
+      band === 'below'
+        ? 'below_theta_min'
+        : band === 'between'
+          ? 'theta_band'
+          : 'never_auto_accepts',
+  });
 }
 for (const attribution of ['self', 'third_party'] as const) {
   CELLS.push(
@@ -194,9 +232,13 @@ CELLS.push(
     type: 'commitment',
     band: 'above',
     attribution: 'self',
-    verdict: 'auto_accept',
-    visibility: 'accepted',
-    rule: 'auto_accept',
+    // r5: a commitment never auto-accepts at any confidence, self-stated or
+    // not. #4's row split on who the sentence is *about*; it was silent on who
+    // does the accepting, and #44's fact-check drove a model straight through
+    // that silence to mint an obligation naming a person.
+    verdict: 'pending',
+    visibility: 'needs_you',
+    rule: 'never_auto_accepts',
   },
   {
     label: 'commitment (third-party) at θ_auto',
@@ -274,8 +316,9 @@ describe('#4 acceptance matrix — one test per cell', () => {
     const covered = new Set(
       CELLS.map((cell) => `${cell.type}:${cell.attribution ?? '-'}:${cell.band}`),
     );
-    // 3 simple types × 3 bands + commitment 2 attributions × 3 bands + decision × 3
-    expect(covered.size).toBe(3 * 3 + 2 * 3 + 3);
+    // 2 auto-accepting types × 3 bands + objective × 3 + commitment 2
+    // attributions × 3 bands + decision × 3
+    expect(covered.size).toBe(2 * 3 + 3 + 2 * 3 + 3);
     // One extra row: decision at 1.0, pinning that "never" is not a threshold.
     expect(CELLS).toHaveLength(19);
   });
@@ -295,18 +338,34 @@ describe('#4 acceptance matrix — one test per cell', () => {
   });
 
   it('reaches every rule name the type declares', () => {
-    const reachable: AcceptanceRuleName[] = [
-      'missing_message_context',
-      'provenance_failed',
-      'duplicate_of_accepted',
-      'below_theta_min',
-      'theta_band',
-      'auto_accept',
-      'never_auto_accepts',
-      'third_party_commitment',
-      'human_proposer',
-    ];
+    /**
+     * **Driven from `ACCEPTANCE_RULE_NAMES`, which is what `AcceptanceRuleName`
+     * is made of.** r4's blind review found this test restating the list by hand
+     * and *omitting* `receipt_not_certifiable` — so a test titled "reaches every
+     * rule name the type declares" passed while one rule was unreachable from
+     * it, and would have gone on passing if that engine behaviour were deleted.
+     * A hand-written list is blind to a name that appears; deriving it from the
+     * data the type is built out of is blind to neither, because the list and
+     * the type are the same object.
+     */
     const seen = new Set<AcceptanceRuleName>(CELLS.map((cell) => cell.rule));
+    // receipt_not_certifiable — a quote that says more than the statement, and
+    // nothing here can tell an aside from a "not".
+    seen.add(
+      decideAcceptance(
+        proposal({
+          type: 'claim',
+          confidence: 0.9,
+          payload: { statement: 'The migration is reversible', claimant: BOB },
+          quote: 'The migration is not reversible.',
+        }),
+        {
+          messages: [
+            { id: MESSAGE_ID.claim, authorId: BOB, body: 'The migration is not reversible.' },
+          ],
+        },
+      ).rule,
+    );
     // A wrong receipt: the quote is in no cited message at all.
     seen.add(
       decideAcceptance(proposal({ type: 'claim', confidence: 0.9, quote: 'never written here' }), {
@@ -321,7 +380,7 @@ describe('#4 acceptance matrix — one test per cell', () => {
             objectId: 'obj_1',
             type: 'claim',
             text: 'The migration is reversible',
-            messageIds: ['msg_1'],
+            messageIds: [MESSAGE_ID.claim],
           },
         ],
       }).rule,
@@ -337,7 +396,7 @@ describe('#4 acceptance matrix — one test per cell', () => {
         messages: undefined as unknown as ProvenanceMessage[],
       }).rule,
     );
-    expect([...seen].sort()).toEqual([...reachable].sort());
+    expect([...seen].sort()).toEqual([...ACCEPTANCE_RULE_NAMES].sort());
   });
 });
 
@@ -418,10 +477,10 @@ describe('the θ table itself — pinned by value, not derived', () => {
   it('is exactly this table', () => {
     expect(DEFAULT_ACCEPTANCE_RULES).toEqual({
       decision: { thetaAuto: 0.7, thetaMin: 0.5, autoAccept: false },
-      commitment: { thetaAuto: 0.75, thetaMin: 0.5, autoAccept: true },
+      commitment: { thetaAuto: 0.75, thetaMin: 0.5, autoAccept: false },
       open_question: { thetaAuto: 0.6, thetaMin: 0.4, autoAccept: true },
       claim: { thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true },
-      objective: { thetaAuto: 0.75, thetaMin: 0.5, autoAccept: true },
+      objective: { thetaAuto: 0.75, thetaMin: 0.5, autoAccept: false },
     });
   });
 
@@ -448,11 +507,13 @@ describe('the θ table itself — pinned by value, not derived', () => {
     expect(verdictAt('open_question', 0.5)).toBe('quiet');
     expect(verdictAt('open_question', 0.65)).toBe('accepted');
 
+    // r5: neither of these accepts at any confidence — θ_auto now buys a place
+    // in Needs-you rather than acceptance, exactly as it does for a decision.
     expect(verdictAt('commitment', 0.7)).toBe('quiet'); // still under 0.75
-    expect(verdictAt('commitment', 0.8)).toBe('accepted');
+    expect(verdictAt('commitment', 0.8)).toBe('needs_you');
 
     expect(verdictAt('objective', 0.7)).toBe('quiet');
-    expect(verdictAt('objective', 0.8)).toBe('accepted');
+    expect(verdictAt('objective', 0.8)).toBe('needs_you');
 
     // A decision at a confidence that would accept any other type.
     expect(verdictAt('decision', 0.99)).toBe('needs_you');
@@ -465,10 +526,10 @@ describe('the θ table itself — pinned by value, not derived', () => {
     // auto-accepts is unreachable rather than "very high".
     expect(MODEL_ACCEPTANCE_FLOOR).toEqual({
       decision: Number.POSITIVE_INFINITY,
-      commitment: 0.75,
+      commitment: Number.POSITIVE_INFINITY,
       open_question: 0.6,
       claim: 0.7,
-      objective: 0.75,
+      objective: Number.POSITIVE_INFINITY,
     });
     for (const [type, rule] of Object.entries(DEFAULT_ACCEPTANCE_RULES)) {
       expect(MODEL_ACCEPTANCE_FLOOR[type as AcceptedObjectType]).toBe(
@@ -519,7 +580,7 @@ describe('provenance failure demotes below θ_min, whatever the confidence', () 
     const decision = decideAcceptance(proposal({ type: 'claim', confidence: 0.98 }), {
       messages: [
         {
-          id: 'msg_1',
+          id: MESSAGE_ID.claim,
           authorId: BOB,
           body: '> The migration is reversible.\n\nno she did not say that',
         },
@@ -535,11 +596,15 @@ describe('commitmentAttribution — nobody gets committed by someone else’s se
   const quote = QUOTE.commitment;
 
   it('is self when the owner wrote the message bearing the sentence', () => {
-    expect(commitmentAttribution(ALICE, ['msg_1'], aliceMessages, quote)).toBe('self');
+    expect(commitmentAttribution(ALICE, [MESSAGE_ID.commitment], aliceMessages, quote)).toBe(
+      'self',
+    );
   });
 
   it('is third-party when somebody else did', () => {
-    expect(commitmentAttribution(ALICE, ['msg_1'], bobMessages, quote)).toBe('third_party');
+    expect(commitmentAttribution(ALICE, [MESSAGE_ID.commitment], bobMessages, quote)).toBe(
+      'third_party',
+    );
   });
 
   it('is third-party when the messages are not supplied at all', () => {
@@ -583,7 +648,7 @@ describe('deduplication against accepted state — the spike’s amendment 3', (
       objectId: 'obj_existing',
       type: 'claim' as const,
       text: 'The migration is reversible',
-      messageIds: ['msg_1'],
+      messageIds: [MESSAGE_ID.claim],
     },
   ];
 
@@ -604,7 +669,7 @@ describe('deduplication against accepted state — the spike’s amendment 3', (
     // Same message, different words: also not a duplicate. One message carries
     // several readings, which is the ordinary case.
     expect(
-      findDuplicate('claim', 'The rollback script is untested', ['msg_1'], accepted),
+      findDuplicate('claim', 'The rollback script is untested', [MESSAGE_ID.claim], accepted),
     ).toBeNull();
   });
 

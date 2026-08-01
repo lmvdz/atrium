@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { Id, Timestamp } from './common.js';
-import { isBlank } from './escalation.js';
+import { isBlank } from './matching.js';
+
 import {
   ClaimPayload,
   CommitmentPayload,

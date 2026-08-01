@@ -1,12 +1,11 @@
 import type { Actor } from './common.js';
 import {
-  hasContent,
-  isBlank,
   type ProvenanceMessage,
   referringProblems,
   rejectingProblems,
   validateProposalProvenance,
 } from './escalation.js';
+import { hasContent, isBlank } from './matching.js';
 import { type AcceptedObject, type AcceptedObjectType, objectStatement } from './objects.js';
 import { decideSupersession, MODEL_ACCEPTANCE_FLOOR } from './policy.js';
 import type { Proposer, StoredProposal } from './proposal.js';
@@ -28,7 +27,8 @@ import { canonicalJson } from './state.js';
  * | ------------------------------------------------------- | ------- | --------- |
  * | Claims auto-accept at confidence ≥ θ                     | model   | **here**  |
  * | OpenQuestions auto-accept at confidence ≥ θ              | model   | **here**  |
- * | Commitments: self-stated auto-accepts, third-party waits | model/human | **here** |
+ * | **Commitments never auto-accept** (r5)                   | human   | **here**  |
+ * | **Objectives never auto-accept** (r5)                    | human   | **here**  |
  * | **Decisions never auto-accept**                          | human   | **here**  |
  * | A claim becomes `verified`                               | human   | **here**  |
  * | Supersession, split by the type being retired            | per policy | **here** |
@@ -67,12 +67,45 @@ import { canonicalJson } from './state.js';
  * (what the room already accepted, the whole window) and decides what a worker
  * should emit at all. It reads the same θ table this file does, so the two
  * cannot invert.
+ *
+ * ## What this floor enforces *independently*, and what it shares
+ *
+ * r4's receipt claimed two boundaries without qualification, and r4's blind
+ * review was right to refuse it: `acceptanceReceiptRefusal` below calls the same
+ * `validateProposalProvenance` the engine does, so a defect in quote semantics
+ * is a defect in both. The claim is scoped rather than repeated:
+ *
+ *  - **Independent of the engine, and unreachable from it**: the actor gates
+ *    above; that a cited proposal exists, is open, and matches the object's type
+ *    and room; that a non-human acted on its own reading; `MODEL_ACCEPTANCE_FLOOR`;
+ *    payload equality; provenance equality; that a window exists; that a quote
+ *    exists. Delete `acceptance.ts` entirely and every one of those still holds.
+ *  - **Shared, by design**: what the quote *means* — one implementation, two
+ *    call sites, because two implementations of "does this quote bear this
+ *    sentence" would be two answers to one question and `policy.ts` exists to
+ *    say why that is the defect rather than the redundancy.
  */
 export type HumanOnlyGate =
   /** `object_accepted` with `provenance.proposalId === null`. */
   | 'direct_acceptance'
   /** `object_accepted` for a `decision`, proposal or no proposal. */
   | 'decision_acceptance'
+  /**
+   * `object_accepted` for a `commitment`. **r5.** #44's fact-check drove a model
+   * actor through the whole stack with `{statement: 'Bob will deploy production
+   * Friday', owner: 'user_bob'}` and it landed with zero issues: the quote was
+   * real, the author was real, and the attribution rules read it as self-stated
+   * because the bearing message's author id equalled the owner. Nothing asked
+   * whether a machine may put an obligation on a named person at all.
+   */
+  | 'commitment_acceptance'
+  /**
+   * `object_accepted` for an `objective`. **r5.** An objective is what
+   * everything else is filed under, and `decideSupersession` already reserves
+   * *retiring* one to a person — a gate on the way out and none on the way in is
+   * a front door with the back door open.
+   */
+  | 'objective_acceptance'
   /** Any transition of a claim to `verification: 'verified'`. */
   | 'claim_verification'
   /** `supersedes` pointed at a type the supersession policy reserves to people. */
@@ -81,6 +114,40 @@ export type HumanOnlyGate =
   | 'answer_relation'
   /** `object_corrected`, every verb. */
   | 'correction';
+
+/**
+ * The gate a non-human actor hits when it tries to mint this type, or `null`
+ * when the type is one a machine may mint.
+ *
+ * **Derived from the same θ table `MODEL_ACCEPTANCE_FLOOR` is derived from**, so
+ * the named refusal and the unreachable number cannot drift: a type that stops
+ * auto-accepting acquires a gate here in the same commit, and `policy.test.ts`
+ * asserts the two agree for every type rather than trusting this switch.
+ *
+ * A gate *and* a floor for the same rule is deliberate. The floor alone would
+ * refuse these acceptances — `+Infinity` is unreachable — but it would refuse
+ * them as "confidence 0.95 is below the floor of Infinity", which tells a room
+ * nothing about why. `RETRO.md`: a rule applied at one site is not a rule, and a
+ * refusal that does not name itself is a dead end.
+ */
+export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null {
+  switch (type) {
+    case 'decision':
+      return 'decision_acceptance';
+    case 'commitment':
+      return 'commitment_acceptance';
+    case 'objective':
+      return 'objective_acceptance';
+    case 'claim':
+    case 'open_question':
+      return null;
+    default: {
+      const exhaustive: never = type;
+      // A type nobody has classified is not a type a machine may mint.
+      return JSON.stringify(exhaustive) === '' ? null : 'direct_acceptance';
+    }
+  }
+}
 
 /** The one predicate every gate is built from. */
 export function isHuman(actor: Actor): boolean {
@@ -105,6 +172,10 @@ export function humanOnlyRefusal(
       return `${subject} was accepted with no proposal by a ${kind} actor — only a human may accept an object directly; a ${kind} actor must record a proposal and have it accepted`;
     case 'decision_acceptance':
       return `${subject} is a decision accepted by a ${kind} actor — a decision never auto-accepts (issue #4): a ${kind} actor may propose one, but only a human may accept it`;
+    case 'commitment_acceptance':
+      return `${subject} is a commitment accepted by a ${kind} actor — accepting it writes an obligation onto a named person who never agreed to it, and #4's rule is that nobody gets committed by someone else's sentence; a ${kind} actor may propose the commitment and let the person named, or a person in the room, accept it`;
+    case 'objective_acceptance':
+      return `${subject} is an objective accepted by a ${kind} actor — an objective is what everything else in the room is filed under, and retiring one already needs a person (#4's supersession split), so minting one does too; a ${kind} actor may propose it and let a person accept`;
     case 'claim_verification':
       return `${subject} would become a verified claim on a ${kind} actor's word — only a human may move a claim to "verified"; a ${kind} actor may accept it as unverified or disputed`;
     case 'supersession':
@@ -381,7 +452,7 @@ export function acceptanceReceiptRefusal(input: {
       // check is about: the quote has to bear the thing being minted.
       statement: objectStatement(object),
     },
-    input.messages,
+    window,
   );
 
   const rejecting = rejectingProblems(problems);

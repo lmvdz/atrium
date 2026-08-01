@@ -1,9 +1,6 @@
 import type { Actor, Id, Timestamp } from './common.js';
 import {
   bearingMessage,
-  contentTokens,
-  hasContent,
-  isBlank,
   type ProvenanceMessage,
   type ProvenanceProblem,
   referringProblems,
@@ -11,13 +8,14 @@ import {
   validateProposalProvenance,
 } from './escalation.js';
 import { type AuthoredEvent, authored, type CoreEvent, trustedContext } from './events.js';
+import { alignTokens, hasContent, routingTokens } from './matching.js';
 import {
   type AcceptedObjectType,
   type ClaimPayload,
   type DecisionPayload,
   payloadText,
 } from './objects.js';
-import { type AcceptanceConfig, defaultAcceptanceConfig, RECEIPT_POLICY } from './policy.js';
+import { type AcceptanceConfig, defaultAcceptanceConfig } from './policy.js';
 import type { Proposal, StoredProposal } from './proposal.js';
 import { appendEvent, compareCursor } from './reduce.js';
 import type { CoreState } from './state.js';
@@ -34,6 +32,32 @@ import type { CoreState } from './state.js';
  * The two read one θ table (`policy.ts`), so they cannot disagree about whether
  * a reading is strong enough, and `AcceptanceConfig` refuses to be configured
  * below the floor, so the engine can only ever be the stricter of the two.
+ *
+ * ## What "two boundaries" does and does not mean
+ *
+ * r4's receipt said the engine and the reducer are two boundaries, unqualified,
+ * and r4's blind review was right that the claim outruns the code. Both call the
+ * *same* `validateProposalProvenance`, so **every defect in quote semantics
+ * survives both**: switching off the engine does not help, because the reducer
+ * accepts what the validator passes; switching off the reducer does not help,
+ * because the engine emits `auto_accept` on the same input.
+ *
+ * That is deliberate and it stays. Two implementations of "does this quote bear
+ * this sentence" is two answers to one question, which is the defect
+ * `policy.ts` exists to prevent for θ — and `RETRO.md` records what it costs
+ * when a rule has two homes. So the claim is scoped instead of withdrawn or
+ * padded:
+ *
+ *  - **Independently enforced at the floor** (`authority.ts`, and nothing here
+ *    can weaken them): who the actor is, that a proposal is cited and is real,
+ *    open, type-matching and room-matching, that a non-human acted on its own
+ *    reading, the confidence floor, payload equality, provenance equality, that
+ *    a message window exists at all, and that a quote exists at all.
+ *  - **One implementation, called from both**: everything about what the quote
+ *    *means* — where it sits in its message, what the statement drops or adds,
+ *    who wrote it, and whether the window revisits it. A defect here is a defect
+ *    in both layers, and `boundary.test.ts` pins that as a property rather than
+ *    letting a receipt imply otherwise.
  *
  * **The receipt is not optional, and an empty one is not a receipt.** In round 1
  * `messages` was an optional field whose absence produced an empty problem set,
@@ -78,29 +102,51 @@ export type AcceptanceVisibility =
   /** Nowhere. */
   | 'none';
 
-/** Which cell of the matrix fired. One name per cell, so tests can pin them. */
-export type AcceptanceRuleName =
-  | 'missing_message_context'
-  | 'provenance_failed'
-  /**
-   * The receipt could not be ruled on either way — the quote contains the whole
-   * statement, in order, and says more. Never auto-accepted, never discarded:
-   * it stays staged with its quote attached, for a person to read.
-   */
-  | 'receipt_not_certifiable'
-  | 'duplicate_of_accepted'
-  | 'below_theta_min'
-  | 'theta_band'
-  | 'auto_accept'
-  /**
-   * At or above θ_auto, for a type that never auto-accepts at any confidence.
-   * Named for the *rule* rather than for the decision: it was
-   * `decision_never_auto`, which misnamed every non-decision that reached it —
-   * the table is data, and a fifth type could join the row tomorrow.
-   */
-  | 'never_auto_accepts'
-  | 'third_party_commitment'
-  | 'human_proposer';
+/**
+ * Which cell of the matrix fired. One name per cell, so tests can pin them.
+ *
+ * **Data, so a coverage test can iterate it instead of restating it.** r4's
+ * blind review found the shape this closes: `acceptance.test.ts` carried a test
+ * titled *"reaches every rule name the type declares"* whose supposedly complete
+ * list omitted `receipt_not_certifiable`, so the test passed and would have gone
+ * on passing if that engine behaviour were deleted. A hand-written list catches
+ * a rule that disappears from the source and is blind to one that appears; the
+ * derived list is blind the other way. Deriving the *type* from the data makes
+ * them the same object, so a test iterating it is exhaustive by construction.
+ *
+ *  - `missing_message_context` — no window, an empty one, or one with no words
+ *    in any body. A model reading judged without the messages it cites.
+ *  - `provenance_failed` — a `reject`-severity receipt problem.
+ *  - `receipt_not_certifiable` — a `refer`-severity one: the check declines to
+ *    rule either way, so it is never auto-accepted and never discarded.
+ *  - `duplicate_of_accepted` — the room already accepted this, from these
+ *    messages.
+ *  - `below_theta_min` — too weak to be worth anybody's attention, with nothing
+ *    wrong in the receipt.
+ *  - `theta_band` — between θ_min and θ_auto: shown quietly, never Needs-you.
+ *  - `auto_accept` — at or above θ_auto, for a type that may auto-accept.
+ *  - `never_auto_accepts` — at or above θ_auto, for a type that never does at
+ *    any confidence. Named for the *rule* rather than the type: it was
+ *    `decision_never_auto`, which misnamed every non-decision that reached it,
+ *    and since r5 three types are in that row.
+ *  - `third_party_commitment` — an obligation somebody else's sentence put a
+ *    name on. It goes to the named owner.
+ *  - `human_proposer` — a person staged it, so θ does not apply.
+ */
+export const ACCEPTANCE_RULE_NAMES = [
+  'missing_message_context',
+  'provenance_failed',
+  'receipt_not_certifiable',
+  'duplicate_of_accepted',
+  'below_theta_min',
+  'theta_band',
+  'auto_accept',
+  'never_auto_accepts',
+  'third_party_commitment',
+  'human_proposer',
+] as const;
+
+export type AcceptanceRuleName = (typeof ACCEPTANCE_RULE_NAMES)[number];
 
 export interface AcceptanceDecision {
   verdict: AcceptanceVerdict;
@@ -163,8 +209,6 @@ export interface AcceptanceContext {
    * without a model.
    */
   acceptedObjects?: readonly AcceptedObjectRef[];
-  /** Fraction of content words two texts must share to be the same thing. */
-  duplicateThreshold?: number;
 }
 
 /** The person a payload puts on the hook, if any. */
@@ -202,7 +246,7 @@ export function commitmentAttribution(
 ): CommitmentAttribution {
   // Absent, empty, and empty-of-content are one state: nobody supplied the words.
   if (!messages?.some((message) => hasContent(message.body))) return 'third_party';
-  if (isBlank(quote)) return 'third_party';
+  if (!hasContent(quote)) return 'third_party';
   const cited = new Set(citedMessageIds);
   const citedMessages = messages.filter((message) => cited.has(message.id));
   const bearing = bearingMessage(quote, citedMessages);
@@ -212,32 +256,62 @@ export function commitmentAttribution(
 /**
  * Is this reading something the room already accepted?
  *
- * Statement similarity **and** provenance overlap, both required. Either alone
- * is a bad matcher: two different decisions drawn from one message share
- * provenance completely, and two unrelated claims about the same subsystem
- * share most of their content words. Requiring both is what makes the matcher
- * safe enough to *discard* on.
+ * Same sentence **and** provenance overlap, both required. Either alone is a bad
+ * matcher: two different decisions drawn from one message share provenance
+ * completely, and two readings of one subsystem share most of their words.
+ *
+ * ## Why this is not a similarity score any more
+ *
+ * **r5, from the audit of what every documented limit does with an input inside
+ * it — and this one was not on anybody's list.** `escalation.ts` says of its
+ * stopword table, in bold: *"This list decides which model reads a window. It
+ * has not decided whether a reading becomes a fact since r4, and it must never
+ * do so again."* It still did, through here. This function measured similarity
+ * with `contentTokens`, which drops stopwords, deduplicates and imposes a
+ * three-character floor — and `not`, `all` and `some` are all on that list. A
+ * duplicate is **discarded**, so:
+ *
+ * | already accepted, from msg_1     | newly read, from msg_1              | r4 verdict |
+ * | -------------------------------- | ----------------------------------- | ---------- |
+ * | The migration is reversible      | The migration is **not** reversible | discarded  |
+ * | **All** services restart cleanly | **Some** services restart cleanly   | discarded  |
+ *
+ * That is r3's gauntlet finding — a similarity measure accepting the negation of
+ * the thing it validates — surviving in the one path nobody re-read, and it is
+ * *worse* here than there: the reading is not referred or refused, it is
+ * destroyed, and what it was contradicting stays on the record. A correction the
+ * room can never see is the failure this whole ticket exists to prevent.
+ *
+ * So the test is the alignment the receipt already uses, over routing tokens: a
+ * duplicate is a **re-proposal of the same sentence**, with nothing added and
+ * nothing dropped on either side. `duplicateThreshold` is gone rather than
+ * tuned — `RETRO.md`: when a value invites a bypass, deleting it invites
+ * neither. A near-duplicate now costs a person one click, which is the cheap
+ * side of this trade; the expensive side deleted a contradiction in silence.
+ *
+ * Routing tokens rather than receipt tokens, deliberately: case, fullwidth
+ * spellings and markdown are noise to "is this the same sentence again", and
+ * being lossy *here* means firing more often, which for the receipt path is the
+ * dangerous direction and for a re-proposal is the harmless one — a text that
+ * differs only in case is the same reading twice.
  */
 export function findDuplicate(
   type: AcceptedObjectType,
   text: string,
   messageIds: readonly Id[],
   accepted: readonly AcceptedObjectRef[],
-  threshold = RECEIPT_POLICY.duplicateThreshold,
 ): AcceptedObjectRef | null {
-  const wanted = contentTokens(text);
-  if (wanted.size === 0) return null;
+  const wanted = routingTokens(text);
+  if (wanted.length === 0) return null;
   const cited = new Set(messageIds);
   for (const candidate of accepted) {
     if (candidate.type !== type) continue;
     if (!candidate.messageIds.some((id) => cited.has(id))) continue;
-    const have = contentTokens(candidate.text);
-    if (have.size === 0) continue;
-    let shared = 0;
-    for (const token of wanted) if (have.has(token)) shared += 1;
-    // Symmetric: neither "the new one restates the old" nor the reverse alone.
-    const similarity = shared / Math.max(wanted.size, have.size);
-    if (similarity >= threshold) return candidate;
+    const have = routingTokens(candidate.text);
+    if (have.length === 0) continue;
+    // Symmetric by construction: `borne` requires both sides accounted for, so
+    // neither "the new one restates the old" nor the reverse is enough alone.
+    if (alignTokens(have, wanted).borne) return candidate;
   }
   return null;
 }
@@ -376,13 +450,7 @@ export function decideAcceptance(
 
   // ── Already in the room ──────────────────────────────────────────────────
   const duplicate = context.acceptedObjects
-    ? findDuplicate(
-        proposal.type,
-        text,
-        proposal.provenance,
-        context.acceptedObjects,
-        context.duplicateThreshold,
-      )
+    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)
     : null;
   if (duplicate) {
     return {
@@ -424,17 +492,6 @@ export function decideAcceptance(
     };
   }
 
-  // ── Below the discard line ───────────────────────────────────────────────
-  if (proposal.confidence < rule.thetaMin) {
-    return {
-      ...base,
-      verdict: 'discard',
-      visibility: 'none',
-      rule: 'below_theta_min',
-      reason: `confidence ${proposal.confidence} is below θ_min ${rule.thetaMin} for ${proposal.type} — discarded rather than shown; an unconvincing "~" still costs someone's attention`,
-    };
-  }
-
   const attribution =
     proposal.type === 'commitment'
       ? commitmentAttribution(attributedTo ?? '', proposal.provenance, messages, proposal.quote)
@@ -442,14 +499,27 @@ export function decideAcceptance(
 
   // ── The receipt this check declines to rule on ───────────────────────────
   //
-  // Placed here on purpose: **below** the θ_min discard, so a weak reading is
-  // still dropped rather than promoted into the panel by a receipt problem, and
-  // **above** everything that can accept, so there is no path from here to
-  // `auto_accept`. It is the whole of r3's gauntlet finding, at the engine:
-  // "Bob will not deploy production Friday" quoted, "Bob will deploy production
-  // Friday" minted. The reading is not discarded — a person looking at the quote
-  // beside the statement sees the inversion immediately, and deleting it would
-  // hide the very discrepancy the receipt exists to show.
+  // **Above the θ_min discard since r5, and the two cases are different
+  // questions rather than two heights on one scale.**
+  //
+  // r4 put this below the discard and defended it: a weak reading should be
+  // dropped rather than promoted into the panel by a receipt problem. That
+  // argument is right about *one* input and r4 applied it to two. θ_min answers
+  // "is this reading worth somebody's attention" — a property of the model's own
+  // self-report, and a weak self-report with a clean receipt is noise, so it is
+  // still discarded below. A `refer` answers something else entirely: **the
+  // receipt and the statement disagree, and the disagreement was detected.**
+  // That is evidence about the record, not weakness in the reading.
+  //
+  // The input that made the difference visible: quote "Bob will not deploy
+  // production Friday", statement "Bob will deploy production Friday",
+  // confidence 0.4999. r4 discarded it as too weak to show — destroying the
+  // exact discrepancy the receipt exists to make visible, one thousandth of a
+  // point below a line that has nothing to do with what was found. The
+  // inversion is not less real for having been proposed timidly.
+  //
+  // Still **above everything that can accept**, so there is no path from here to
+  // `auto_accept`.
   const referring = referringProblems(problems);
   if (referring.length > 0) {
     return {
@@ -459,6 +529,22 @@ export function decideAcceptance(
       visibility: 'quiet',
       rule: 'receipt_not_certifiable',
       reason: `not accepted on a machine's word, and not thrown away: ${referring.map((problem) => problem.detail).join('; ')}`,
+    };
+  }
+
+  // ── Below the discard line ───────────────────────────────────────────────
+  //
+  // Reached only with a receipt nothing found fault with, which is what makes
+  // discarding safe: there is no detected discrepancy here to destroy, only a
+  // model that is not convinced by its own reading.
+  if (proposal.confidence < rule.thetaMin) {
+    return {
+      ...base,
+      attribution,
+      verdict: 'discard',
+      visibility: 'none',
+      rule: 'below_theta_min',
+      reason: `confidence ${proposal.confidence} is below θ_min ${rule.thetaMin} for ${proposal.type} — discarded rather than shown; an unconvincing "~" still costs someone's attention, and its receipt held, so nothing is being thrown away except a weak reading`,
     };
   }
 
@@ -478,19 +564,13 @@ export function decideAcceptance(
     };
   }
 
-  // ── At or above θ_auto, but this type never auto-accepts ─────────────────
-  if (!rule.autoAccept) {
-    return {
-      ...base,
-      attribution,
-      verdict: 'pending',
-      visibility: 'needs_you',
-      rule: 'never_auto_accepts',
-      reason: `a ${proposal.type} never auto-accepts at any confidence (#4) — at ${proposal.confidence} the pass is confident, so it goes to Needs-you for a person to accept or decline; the room's current state is unsettled until somebody rules on it`,
-    };
-  }
-
-  // ── At or above θ_auto ───────────────────────────────────────────────────
+  // ── At or above θ_auto, and somebody else's name is on it ────────────────
+  //
+  // **Before the never-auto-accepts row since r5**, because r5 moved commitment
+  // into that row and the general refusal would otherwise have swallowed the
+  // specific one. Both end in `pending, needs_you`; only this one knows *whose*
+  // Needs-you, and `awaitingConfirmFrom` is what the attention panel reads to
+  // put it in front of the person being committed rather than the room.
   if (proposal.type === 'commitment' && attribution === 'third_party') {
     return {
       ...base,
@@ -500,6 +580,23 @@ export function decideAcceptance(
       awaitingConfirmFrom: attributedTo,
       rule: 'third_party_commitment',
       reason: `"${attributedTo}" is named as owner but did not write the message this was read out of — surfaced to them to confirm, and accepted only on that confirm; nobody gets committed by someone else's sentence (#4)`,
+    };
+  }
+
+  // ── At or above θ_auto, but this type never auto-accepts ─────────────────
+  //
+  // Three types are in this row since r5: decision (#4's absolute), commitment
+  // and objective (see `DEFAULT_ACCEPTANCE_RULES`). The rule is read off the
+  // table rather than named here, so a type joining or leaving the row changes
+  // one line of data.
+  if (!rule.autoAccept) {
+    return {
+      ...base,
+      attribution,
+      verdict: 'pending',
+      visibility: 'needs_you',
+      rule: 'never_auto_accepts',
+      reason: `a ${proposal.type} never auto-accepts at any confidence (#4) — at ${proposal.confidence} the pass is confident, so it goes to Needs-you for a person to accept or decline; the room's current state is unsettled until somebody rules on it`,
     };
   }
 

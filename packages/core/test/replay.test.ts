@@ -477,8 +477,19 @@ function gateProbes(seed: number): AuthoredEvent[] {
   // used to read `it is true that ${text}`, which makes every probe's quote a
   // span cut out of the middle of one — the exact shape r4's own blind review
   // turned into an auto-accept of an inverted claim.
+  /**
+   * The sentence, and nothing else in the message.
+   *
+   * r4 wrapped it in "Yes." and "Agreed." to prove a whole-sentence quote taken
+   * from the middle of a message still certified. Since r5 that is exactly what
+   * does *not* certify — a neighbouring sentence can reverse the quoted one —
+   * so wrapping it here routed every claim acceptance in the corpus to
+   * `receipt_not_certifiable` and left `confidence_floor` unreached, which the
+   * gate-coverage assertion caught. The referral shape has its own case at
+   * `${tag}_41`.
+   */
   const claimWindow = (text: string): ProvenanceMessage[] => [
-    { id: `msg_${tag}`, authorId: BOB, body: `Yes. ${text}. Agreed.` },
+    { id: `msg_${tag}`, authorId: BOB, body: `${text}.` },
   ];
 
   const object = (
@@ -1075,8 +1086,15 @@ const GATE_MARKERS = {
   provenance_binding: 'the receipt may not change on the way through',
   missing_receipt_context: 'no message window supplied',
   receipt_failed: 'on a receipt that does not hold',
-  third_party_confirm: 'waits for the named owner to confirm',
-  // `missing_quote` is deliberately absent: the schema refuses a model proposal
+  // `third_party_confirm` is deliberately absent since r5: a commitment is
+  // human-only now, so the type gate refuses a model's acceptance three checks
+  // before the receipt is read and no delivery stream can reach it. It is
+  // asserted straight at `acceptanceReceiptRefusal` in `authority-matrix.test.ts`
+  // instead — a gate that only another gate makes unreachable is not a gate that
+  // may be deleted.
+  //
+  // `missing_quote` is deliberately absent for the same class of reason: the
+  // schema refuses a model proposal
   // with a blank quote at parse time, so the reducer's own gate for it is
   // defence in depth and unreachable through a delivery stream. It is asserted
   // straight at the predicate in `boundary.test.ts` instead, which is the point

@@ -690,7 +690,7 @@ describe('the receipt minima are policy, and are pinned by value', () => {
       droppableTokens: new Set(['.']),
       maxAlignedTokens: 400,
       maxScannedSentences: 200,
-      duplicateThreshold: 0.8,
+      maxLaterMessagesScanned: 200,
     });
   });
 
@@ -732,7 +732,7 @@ describe('the receipt minima are policy, and are pinned by value', () => {
     expect(defaultEscalationConfig.minQuoteLength).toBe(RECEIPT_POLICY.minQuoteLength);
   });
 
-  it('is the number `findDuplicate` discards on', () => {
+  it('discards only a re-proposal of the same sentence', () => {
     const accepted = [
       {
         objectId: 'obj_1',
@@ -741,14 +741,53 @@ describe('the receipt minima are policy, and are pinned by value', () => {
         messageIds: ['msg_1'],
       },
     ];
-    // 3 of 4 content words shared → 0.75, under 0.8: not a duplicate.
+    // The same sentence again, from the same message: a re-proposal.
+    expect(
+      findDuplicate('claim', 'The migration is reversible and safe.', ['msg_1'], accepted)
+        ?.objectId,
+    ).toBe('obj_1');
+    // One word added — an aside, or a qualifier, and nothing here can tell.
     expect(
       findDuplicate('claim', 'the migration is reversible and safe enough', ['msg_1'], accepted),
     ).toBeNull();
-    // All four → 1.0.
+    // Reordered. r5: this scored 1.0 under the old set-similarity and was
+    // discarded, which is the same blindness that makes "A blocks B" and "B
+    // blocks A" one reading.
     expect(
-      findDuplicate('claim', 'the migration is safe and reversible', ['msg_1'], accepted)?.objectId,
-    ).toBe('obj_1');
+      findDuplicate('claim', 'the migration is safe and reversible', ['msg_1'], accepted),
+    ).toBeNull();
+  });
+
+  it('does not discard a reading that says the opposite of the accepted one', () => {
+    /**
+     * **The audit's own find, and it was on nobody's defect list.**
+     * `escalation.ts` says of its stopword table, in bold, that it "has not
+     * decided whether a reading becomes a fact since r4, and it must never do so
+     * again". It still did, here: `findDuplicate` scored similarity over
+     * `contentTokens`, which drops `not`, `all` and `some` as stopwords — so a
+     * reading that contradicted an accepted object drawn from the same message
+     * scored 1.0 and was **discarded**, with the thing it contradicted left
+     * standing. r3's gauntlet finding, surviving in the one path nobody re-read,
+     * and worse here than there: not referred, not refused, destroyed.
+     */
+    const accepted = [
+      {
+        objectId: 'obj_1',
+        type: 'claim' as const,
+        text: 'The migration is reversible',
+        messageIds: ['msg_1'],
+      },
+      {
+        objectId: 'obj_2',
+        type: 'claim' as const,
+        text: 'All services restart cleanly',
+        messageIds: ['msg_1'],
+      },
+    ];
+    expect(
+      findDuplicate('claim', 'The migration is not reversible', ['msg_1'], accepted),
+    ).toBeNull();
+    expect(findDuplicate('claim', 'Some services restart cleanly', ['msg_1'], accepted)).toBeNull();
   });
 });
 

@@ -153,12 +153,12 @@
       ]
     },
     {
-      "id": "dedup_threshold_moved",
-      "why": "The dedup threshold r2's gauntlet called a stray θ. It is policy now, so moving it must be visible.",
-      "file": "src/policy.ts",
-      "find": "  duplicateThreshold: 0.8,",
-      "replace": "  duplicateThreshold: 0.5,",
-      "catches": ["is exactly this table", "is the number `findDuplicate` discards on"]
+      "id": "dedup_ignores_polarity",
+      "why": "Puts the stopword-filtered similarity score back in `findDuplicate`. A duplicate is discarded, so the score decides what the room never sees — and `not`, `all` and `some` are stopwords, which made a contradiction of an accepted object score 1.0 against it.",
+      "file": "src/acceptance.ts",
+      "find": "    if (alignTokens(have, wanted).borne) return candidate;",
+      "replace": "    const shared = new Set(have).size === 0 ? 0 : wanted.filter((t) => have.includes(t)).length;\n    if (shared / Math.max(wanted.length, have.length) >= 0.8) return candidate;",
+      "catches": ["does not discard a reading that says the opposite of the accepted one"]
     },
     {
       "id": "claim_theta_auto_lowered",
@@ -253,8 +253,8 @@
       "id": "decision_never_auto_disabled",
       "why": "#4's one absolute: a decision never auto-accepts, at any confidence.",
       "file": "src/reduce.ts",
-      "find": "  if (object.type === 'decision' && !isHuman(actor)) {",
-      "replace": "  if (false && object.type === 'decision' && !isHuman(actor)) {",
+      "find": "  const mintingGate = modelMintingGate(object.type);\n  if (mintingGate !== null && !isHuman(actor)) {",
+      "replace": "  const mintingGate = modelMintingGate(object.type);\n  if (false && mintingGate !== null && !isHuman(actor)) {",
       "catches": [
         "refuses a model actor accepting a decision through its own proposal",
         "reached every gate in the table — walking what the reducer said, not what the oracle predicts"
@@ -478,7 +478,7 @@
     {
       "id": "bearing_forgives_interposed_words",
       "why": "r3 gauntlet, major 1, exactly: a word the quote carries and the statement drops stops being reported, so `Bob will not deploy production Friday` supports `Bob will deploy production Friday`.",
-      "file": "src/escalation.ts",
+      "file": "src/matching.ts",
       "find": "      if (qt !== undefined) unmatchedInQuote.push(qt);\n      i += 1;",
       "replace": "      i += 1;",
       "catches": [
@@ -491,7 +491,7 @@
     {
       "id": "bearing_forgives_missing_statement_words",
       "why": "The other direction: the statement may assert words the quote does not contain, which is the quantifier flip (all -> some) and the invented sentence.",
-      "file": "src/escalation.ts",
+      "file": "src/matching.ts",
       "find": "      if (st !== undefined) unmatchedInStatement.push(st);\n      j += 1;",
       "replace": "      j += 1;",
       "catches": [
@@ -502,7 +502,7 @@
     {
       "id": "bearing_forgives_the_tail",
       "why": "Only the covering span of the statement is checked, so a trailing `unless the migration is still red` is invisible.",
-      "file": "src/escalation.ts",
+      "file": "src/matching.ts",
       "find": "  for (; i < q.length; i += 1) {\n    const token = q[i];\n    if (!droppable(token) && token !== undefined) unmatchedInQuote.push(token);\n  }",
       "replace": "  i = q.length;",
       "catches": [
@@ -514,7 +514,7 @@
     {
       "id": "bearing_forgives_the_statement_tail",
       "why": "The statement may run past the end of the quote and assert whatever it likes there.",
-      "file": "src/escalation.ts",
+      "file": "src/matching.ts",
       "find": "  for (; j < s.length; j += 1) {\n    const token = s[j];\n    if (!droppable(token) && token !== undefined) unmatchedInStatement.push(token);\n  }",
       "replace": "  j = s.length;",
       "catches": ["refuses a statement that runs past the end of its quote"]
@@ -522,9 +522,9 @@
     {
       "id": "ordered_tokens_dedup",
       "why": "The bearing tokens become a set again, which is how r3 could not have told double negation from single even with `not` off the stopword list.",
-      "file": "src/escalation.ts",
-      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForMatch(text).match(TOKEN) ?? [];\n}",
-      "replace": "export function orderedTokens(text: string): string[] {\n  const all = normalizeForMatch(text).match(TOKEN) ?? [];\n  return all.filter((token, index) => all.indexOf(token) === index);\n}",
+      "file": "src/matching.ts",
+      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForReceipt(text).match(TOKEN) ?? [];\n}",
+      "replace": "export function orderedTokens(text: string): string[] {\n  const all = normalizeForReceipt(text).match(TOKEN) ?? [];\n  return all.filter((token, index) => all.indexOf(token) === index);\n}",
       "catches": [
         "counts a repeated word twice, so double negation is not one negation",
         "refuses double negation"
@@ -533,9 +533,9 @@
     {
       "id": "bearing_drops_short_tokens",
       "why": "The three-character floor `contentTokens` uses for routing comes back to the receipt, and `no` stops existing.",
-      "file": "src/escalation.ts",
-      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForMatch(text).match(TOKEN) ?? [];\n}",
-      "replace": "export function orderedTokens(text: string): string[] {\n  return (normalizeForMatch(text).match(TOKEN) ?? []).filter((token) => token.length > 2);\n}",
+      "file": "src/matching.ts",
+      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForReceipt(text).match(TOKEN) ?? [];\n}",
+      "replace": "export function orderedTokens(text: string): string[] {\n  return (normalizeForReceipt(text).match(TOKEN) ?? []).filter((token) => token.length > 2);\n}",
       "catches": ["keeps two-letter words, because \"no\" inverts a sentence"]
     },
     {
@@ -616,8 +616,8 @@
     {
       "id": "blank_is_trim",
       "why": "r3 gauntlet polish: emptiness goes back to being whitespace-only, so a zero-width space counts as content and every required-input refusal becomes incidental.",
-      "file": "src/escalation.ts",
-      "find": "const CONTENTFUL = /[\\p{L}\\p{N}]/u;",
+      "file": "src/matching.ts",
+      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}]/u;",
       "replace": "const CONTENTFUL = /\\S/u;",
       "catches": [
         "reads a zero-width character as no content at all",
@@ -627,15 +627,15 @@
     {
       "id": "normalize_keeps_invisibles",
       "why": "The other half: an invisible character spliced into a quote makes it a different string from the message it came out of, so a correct receipt fails for the wrong reason.",
-      "file": "src/escalation.ts",
-      "find": "    .replace(INVISIBLE, '')\n",
-      "replace": "",
+      "file": "src/matching.ts",
+      "find": "  let folded = text.replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  let folded = text.replace(/[’ʼ]/g, \"'\");",
       "catches": ["matches a quote whose words a zero-width character was spliced into"]
     },
     {
       "id": "ordered_tokens_ascii_only",
       "why": "r4's own blind review: the tokenizer split on /[^a-z0-9']+/, which is a denylist of the characters that may carry meaning. Cyrillic and fullwidth negations were deleted as separators and bore their own affirmative; a Russian sentence tokenized to nothing and was refused as empty.",
-      "file": "src/escalation.ts",
+      "file": "src/matching.ts",
       "find": "const TOKEN = /[\\p{L}\\p{N}\\p{M}]+(?:'[\\p{L}\\p{N}\\p{M}]+)*|[^\\s']/gu;",
       "replace": "const TOKEN = /[a-z0-9]+(?:'[a-z0-9]+)*/gu;",
       "catches": [
@@ -646,7 +646,7 @@
     {
       "id": "ordered_tokens_drops_punctuation",
       "why": "The other half of the same denylist: a visible mark stops being a token, so `Bob will deploy Friday?` bears the assertion and a leading ❌ or 🚫 vanishes.",
-      "file": "src/escalation.ts",
+      "file": "src/matching.ts",
       "find": "|[^\\s']/gu;",
       "replace": "/gu;",
       "catches": [
@@ -657,18 +657,18 @@
     },
     {
       "id": "normalize_folds_strikethrough",
-      "why": "`~` returns to the emphasis-folding set beside `*` and backtick, so a struck-through — retracted — sentence normalizes to the sentence and bears its own assertion.",
-      "file": "src/escalation.ts",
-      "find": "      .replace(/[*_`]+/g, ' ')",
-      "replace": "      .replace(/[*_`~]+/g, ' ')",
+      "why": "Folds `~~struck through~~` away like emphasis. A strikethrough is a retraction, not a typeface, and folding it lets a withdrawn sentence bear its own assertion. r4's blind review.",
+      "file": "src/matching.ts",
+      "find": "const PAIRED_EMPHASIS = /(\\*{1,3})(?=\\S)([\\s\\S]*?\\S)\\1/g;",
+      "replace": "const PAIRED_EMPHASIS = /([*~]{1,3})(?=\\S)([\\s\\S]*?\\S)\\1/g;",
       "catches": ["refuses a struck-through sentence bearing its own assertion"]
     },
     {
       "id": "quote_anchoring_disabled",
       "why": "r4's own blind review, and the strongest finding of the round: the quote goes back to being any substring of the cited message, so a model that sets quote === statement to an affirmative span leaves `it is not true that` outside the scissors and auto-accepts the inversion.",
       "file": "src/escalation.ts",
-      "find": "      fromModel &&\n      bearing &&\n      !quoteSpansWholeSentences(quote, stripReplyBlockquotes(bearing.body), policy)",
-      "replace": "      false &&\n      bearing &&\n      !quoteSpansWholeSentences(quote, stripReplyBlockquotes(bearing.body), policy)",
+      "find": "      if (!quoteSpansWholeSentences(quote, ownText, policy)) {",
+      "replace": "      if (false && !quoteSpansWholeSentences(quote, ownText, policy)) {",
       "catches": [
         "refuses a quote mined out of an explicit denial",
         "refuses a quote mined out of a report of what nobody thinks",
@@ -679,15 +679,15 @@
     {
       "id": "quote_anchoring_allows_a_prefix",
       "why": "The anchor accepts a quote that merely *starts* a sentence rather than covering whole ones, which readmits every trailing qualifier — `we ship Friday` mined out of `we ship Friday unless CI is red`.",
-      "file": "src/escalation.ts",
-      "find": "      if (run.length > wanted.length) break;\n      if (run.length === wanted.length && run.every((token, index) => token === wanted[index])) {",
-      "replace": "      if (run.length > wanted.length + 40) break;\n      if (run.length >= wanted.length && wanted.every((token, index) => token === run[index])) {",
+      "file": "src/matching.ts",
+      "find": "      if (run.length > wanted.length) break;\n      if (run.length === wanted.length && sameRun(run, wanted)) return true;",
+      "replace": "      if (run.length > wanted.length + 40) break;\n      if (run.length >= wanted.length && wanted.every((token, index) => token === run[index])) return true;",
       "catches": ["refuses a quote that stops before the qualifier in its own sentence"]
     },
     {
       "id": "sentence_split_ignores_terminators",
       "why": "Sentences stop being split on `.`/`?`/`!`, so a multi-sentence message is one sentence and every honest single-sentence quote out of it becomes a fragment — the anchor inverted into an over-refusal nobody would notice until the product refused everything.",
-      "file": "src/escalation.ts",
+      "file": "src/matching.ts",
       "find": "    .split(/(?<=[.!?…。？！])\\s+|\\n+/u)",
       "replace": "    .split(/\\n+/u)",
       "catches": ["accepts a run of several whole sentences, and refuses half of one"]
@@ -695,10 +695,101 @@
     {
       "id": "typographic_apostrophe_unfolded",
       "why": "`won’t` stops being `won't`, so a faithful quotation is refused for its typography — an over-refusal, and the kind that gets 'fixed' later by weakening the check that matters.",
-      "file": "src/escalation.ts",
-      "find": "      .replace(/[’ʼ]/g, \"'\")\n",
-      "replace": "",
+      "file": "src/matching.ts",
+      "find": "  let folded = text.replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  let folded = text.replace(INVISIBLE, '');",
       "catches": ["treats a typographic apostrophe as an apostrophe"]
+    },
+    {
+      "id": "quote_context_unchecked",
+      "why": "Drops the rule that a certifiable quote is the whole of what its author wrote. This is r4's documented residue: \"We will deploy production Friday. Not.\" quoted as its first sentence is verbatim, whole-sentence, correctly attributed, and bears its own statement.",
+      "file": "src/escalation.ts",
+      "find": "      } else if (!quoteCoversOwnText(quote, ownText, policy)) {",
+      "replace": "      } else if (false && !quoteCoversOwnText(quote, ownText, policy)) {",
+      "catches": [
+        "does not certify a quote whose message carries a trailing inverter",
+        "refers every other way a neighbouring sentence changes the force"
+      ]
+    },
+    {
+      "id": "later_correction_unseen",
+      "why": "Stops acceptance looking past the cited messages, so a window holding \"We will deploy production Friday.\" followed by \"Correction: we will not deploy production Friday.\" certifies the first on a proposal that cites only it.",
+      "file": "src/escalation.ts",
+      "find": "    if (fromModel && cited.length > 0) {\n      const revisited = laterRevision(",
+      "replace": "    if (false && cited.length > 0) {\n      const revisited = laterRevision(",
+      "catches": ["refuses to certify a sentence a later message in the window corrects"]
+    },
+    {
+      "id": "speech_act_unchecked",
+      "why": "Lets a question be minted as a claim. The payload schemas require only a nonempty string and the receipt proves string equality, so \"Would we deploy production Friday?\" as a Claim has a perfect receipt and turns somebody's question into their position.",
+      "file": "src/escalation.ts",
+      "find": "    if (fromModel && subject.type !== 'open_question' && !isAssertion(subject.statement ?? '')) {",
+      "replace": "    if (false && subject.type !== 'open_question' && !isAssertion(subject.statement ?? '')) {",
+      "catches": ["does not mint a question as a claim"]
+    },
+    {
+      "id": "refer_below_theta_again",
+      "why": "Puts the referral check back under the theta_min discard, where r4 had it. An inverted receipt at confidence 0.4999 is then discarded as weak, destroying the exact discrepancy the receipt exists to show.",
+      "file": "src/acceptance.ts",
+      "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "replace": "  const referring = referringProblems(problems);\n  if (referring.length > 0 && proposal.confidence >= rule.thetaMin) {",
+      "catches": ["refers an inverted receipt that sits below theta_min"]
+    },
+    {
+      "id": "commitment_model_mintable",
+      "why": "Lets a machine mint a commitment again. #44's fact-check drove a model actor through the whole stack with {statement: 'Bob will deploy production Friday', owner: 'user_bob'} and it landed with zero issues.",
+      "file": "src/authority.ts",
+      "find": "    case 'commitment':\n      return 'commitment_acceptance';",
+      "replace": "    case 'commitment':\n      return null;",
+      "catches": ["refuses a model accepting a commitment before the receipt is even read"]
+    },
+    {
+      "id": "objective_model_mintable",
+      "why": "Lets a machine mint an objective — the heading everything else in the room is filed under, and one that already needs a person to retire.",
+      "file": "src/authority.ts",
+      "find": "    case 'objective':\n      return 'objective_acceptance';",
+      "replace": "    case 'objective':\n      return null;",
+      "catches": ["refuses a model accepting an objective — the heading everything is filed under"]
+    },
+    {
+      "id": "normalize_deletes_backticks",
+      "why": "Deletes the backticks a code span is made of, as r4 did. A backticked span is mention rather than use, and folding the delimiters away turns a string its author displayed into a sentence its author asserted.",
+      "file": "src/matching.ts",
+      "find": "const CODE_SPAN = /(```[\\s\\S]*?```|``[\\s\\S]*?``|`[^`\\n]*`)/;",
+      "replace": "const CODE_SPAN = /()`+/;",
+      "catches": ["does not accept a quote whose code delimiters the model dropped"]
+    },
+    {
+      "id": "normalize_drops_link_destination",
+      "why": "Collapses a markdown link to its text, as r4 did. `Use [https://safe.example/app](https://evil.example/app) today.` then certifies a statement naming the safe URL against a record whose actionable link points somewhere else.",
+      "file": "src/matching.ts",
+      "find": "    return text === target ? text : `${text} ${target}`;",
+      "replace": "    return text;",
+      "catches": ["keeps a markdown link\"s destination as content"]
+    },
+    {
+      "id": "normalize_refolds_nfkc",
+      "why": "Re-applies NFKC compatibility folding on the receipt path, so two distinct hostnames and two distinct identifiers compare equal.",
+      "file": "src/matching.ts",
+      "find": "  let folded = text.replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  let folded = text.normalize('NFKC').replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
+      "catches": ["does not fold a fullwidth or ligature spelling onto its ASCII form"]
+    },
+    {
+      "id": "content_excludes_pictographs",
+      "why": "Takes emoji back out of what counts as content, so a message that is a row of 🚫 reduces to \"nothing\" and its quote is refused as blank — a failure wearing another failure's clothes, and a package disagreeing with its own tokenizer.",
+      "file": "src/matching.ts",
+      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}]/u;",
+      "replace": "const CONTENTFUL = /[\\p{L}\\p{N}]/u;",
+      "catches": ["counts an emoji-only message as having something in it"]
+    },
+    {
+      "id": "receipt_after_confidence_floor",
+      "why": "Puts the reducer's receipt check back under the confidence floor, so an acceptance whose quote says the opposite of its statement is refused as 'confidence too low' and the serious finding never reaches the room's log.",
+      "file": "src/reduce.ts",
+      "find": "      const refusal = acceptanceReceiptRefusal({",
+      "replace": "      const floorFirst = MODEL_ACCEPTANCE_FLOOR[object.type];\n      if (proposal.proposal.confidence < floorFirst) {\n        fail(\n          state,\n          event.id,\n          confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),\n        );\n        return false;\n      }\n      const refusal = acceptanceReceiptRefusal({",
+      "catches": ["reports the receipt fault rather than the confidence, when both hold"]
     }
   ]
 }
