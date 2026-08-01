@@ -1,6 +1,7 @@
 import { createDatabase } from '@atrium/db';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
+import { createEventBus } from './event-bus.js';
 import { createLedger } from './ledger.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
@@ -21,10 +22,16 @@ async function main(): Promise<void> {
 
   const database = createDatabase({ url: env.DATABASE_URL, debug: env.LOG_LEVEL === 'debug' });
 
+  // Cross-instance fan-out on Postgres LISTEN/NOTIFY (#22 r2). init.md forbids
+  // Redis, and there is no need for it: a commit is announced on a channel and
+  // every instance reads the rows out of the ledger itself. A single-instance
+  // deployment carries the bus too and simply never hears from anyone.
+  const bus = createEventBus({ sql: database.sql, logger });
+
   // The live core state is a fold of the ledger, so it is rebuilt from the
   // ledger — before the socket opens, because a client that connected to a
   // half-hydrated server would be told a `head` the state does not yet reflect.
-  const ledger = createLedger({ db: database.db, logger });
+  const ledger = createLedger({ db: database.db, logger, bus });
   await ledger.hydrate();
 
   const commands = createCommandService({
@@ -42,6 +49,7 @@ async function main(): Promise<void> {
     isReady: () => ready,
     commands,
     ledger,
+    bus,
     // #26 replaces this and nothing else. See `session.ts`.
     session: createStubSessionAuthenticator(),
   });

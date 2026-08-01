@@ -17,7 +17,7 @@ import type { Database } from '@atrium/db';
 import { memberships } from '@atrium/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { CommandError, type Ledger } from './ledger.js';
+import { CommandError, type Ledger, type Tx } from './ledger.js';
 import { projectRoomEvent } from './projections.js';
 import { MessageAttachment, type RoomEvent } from './room-events.js';
 import type { Authorizer, Session } from './session.js';
@@ -32,7 +32,11 @@ import type { Authorizer, Session } from './session.js';
  *   2. **Append.** The event is built at the position the ledger assigns it and
  *      folded through @atrium/core's `appendEvent` in the same transaction as
  *      the INSERT. A rejection aborts the transaction — no row, no `room_seq`,
- *      an error to the caller (#22's invariant; see `ledger.ts`).
+ *      an error to the caller (#22's invariant; see `ledger.ts`). Membership is
+ *      re-read **inside that transaction**, with the row locked: step 1 is a
+ *      cheap early refusal, and this is the one that is actually load-bearing
+ *      (r1, major 4 — a membership revoked between the two would otherwise
+ *      still have written durable history).
  *   3. **Project.** The derived tables are written in that same transaction.
  *   4. **Broadcast.** Only after commit, tagged `(room, room_seq)`.
  *
@@ -164,8 +168,8 @@ export function createCommandService({
   ledger,
   authorizer,
 }: CommandServiceOptions): CommandService {
-  async function requireMembership(session: Session, roomId: string) {
-    const membership = await authorizer.authorize(session, roomId);
+  async function requireMembership(session: Session, roomId: string, runner?: Tx) {
+    const membership = await authorizer.authorize(session, roomId, runner);
     if (!membership) {
       // Same message whether the room is missing or merely not yours. A
       // membership check that distinguishes the two is a room-existence oracle.
@@ -180,11 +184,17 @@ export function createCommandService({
 
   /** The append path every non-ephemeral command funnels through. */
   async function appendAndProject(
+    session: Session,
     roomId: string,
     build: (assigned: { id: string; at: string }) => RoomEvent,
   ): Promise<CommandResult> {
     const appended = await ledger.append({
       roomId,
+      // The authorization that counts: same question, asked again under the
+      // append lock, on the transaction that is about to write.
+      authorize: async (tx) => {
+        await requireMembership(session, roomId, tx);
+      },
       build,
       project: (context) => projectRoomEvent(context),
     });
@@ -203,12 +213,15 @@ export function createCommandService({
   }
 
   async function execute(session: Session, command: Command): Promise<CommandResult> {
-    const membership = await requireMembership(session, command.roomId);
+    // The cheap early refusal. The one that decides whether an append is
+    // allowed to become durable is inside the append transaction — see
+    // `appendAndProject`.
+    await requireMembership(session, command.roomId);
     const actor = actorOf(session);
 
     switch (command.name) {
       case 'send_message':
-        return appendAndProject(command.roomId, ({ id, at }) => ({
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
           actor,
@@ -222,7 +235,7 @@ export function createCommandService({
         }));
 
       case 'record_proposal':
-        return appendAndProject(command.roomId, ({ id, at }) => ({
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
           actor,
@@ -231,7 +244,7 @@ export function createCommandService({
         }));
 
       case 'reject_proposal':
-        return appendAndProject(command.roomId, ({ id, at }) => ({
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
           actor,
@@ -241,7 +254,7 @@ export function createCommandService({
         }));
 
       case 'accept_proposal': {
-        return appendAndProject(command.roomId, ({ id, at }) => {
+        return appendAndProject(session, command.roomId, ({ id, at }) => {
           // Read inside `build`, which the ledger calls after catching up under
           // the append lock: the proposal this cites must be the one the state
           // holds *now*, not the one it held when the socket frame arrived.
@@ -261,7 +274,7 @@ export function createCommandService({
       }
 
       case 'correct':
-        return appendAndProject(command.roomId, ({ id, at }) => ({
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
           actor,
@@ -273,7 +286,7 @@ export function createCommandService({
         }));
 
       case 'answer_bind':
-        return appendAndProject(command.roomId, ({ id, at }) => {
+        return appendAndProject(session, command.roomId, ({ id, at }) => {
           const relation: Relation = {
             id: randomUUID(),
             roomId: command.roomId,
@@ -287,7 +300,7 @@ export function createCommandService({
         });
 
       case 'resolve_attention':
-        return appendAndProject(command.roomId, ({ id, at }) => ({
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
           actor,
@@ -327,18 +340,46 @@ export function createCommandService({
         }
         // GREATEST, so a cursor never goes backwards — two tabs racing must not
         // let the slower one un-read what the faster one read.
-        const [row] = await db
+        //
+        // The head check above is a courtesy that produces a good error message;
+        // the database enforces the same bound with a trigger, which is what
+        // holds if the room's head moves between the two statements or if the
+        // writer is not this code path at all.
+        const updated = await db
           .update(memberships)
           .set({ seenSeq: sql`greatest(${memberships.seenSeq}, ${command.roomSeq})` })
           .where(
             and(eq(memberships.roomId, command.roomId), eq(memberships.userId, session.userId)),
           )
-          .returning({ seenSeq: memberships.seenSeq });
+          .returning({ seenSeq: memberships.seenSeq })
+          .catch((error: unknown) => {
+            if (describeCause(error).includes('memberships_seen_seq_within_room_head')) {
+              throw new CommandError(
+                'invalid',
+                `cannot mark seen up to ${command.roomSeq}: room "${command.roomId}" does not have that many events`,
+              );
+            }
+            throw error;
+          });
+        const row = updated[0];
+        if (!row) {
+          // Nothing matched, so nothing moved (r1, major 5). Round 1 fell back
+          // to the membership row read at the top of this function and reported
+          // success, which tells the client its cursor advanced when the
+          // database says otherwise — and the client then renders a "since you
+          // left" divider that will jump backwards on its next reconnect. The
+          // only way to match nothing here is for the membership to have been
+          // revoked since the check above, so that is what this says.
+          throw new CommandError(
+            'not_a_member',
+            `the read cursor for room "${command.roomId}" was not advanced: no membership row to advance (it was revoked while this command was in flight)`,
+          );
+        }
         return {
           kind: 'seen',
           roomId: command.roomId,
           userId: session.userId,
-          seenSeq: Number(row?.seenSeq ?? membership.seenSeq),
+          seenSeq: Number(row.seenSeq),
         };
       }
 
@@ -350,6 +391,26 @@ export function createCommandService({
   }
 
   return { execute, requireMembership };
+}
+
+/**
+ * Every message and constraint name down a driver error's cause chain.
+ *
+ * Drizzle wraps the postgres-js error, so the constraint name that says *which*
+ * rule refused the statement is two levels down. Matching on the wrapper's text
+ * would match any failure at all.
+ */
+function describeCause(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    const pg = current as Error & { constraint_name?: string; constraint?: string };
+    parts.push(current.message, pg.constraint_name ?? '', pg.constraint ?? '');
+    current = current.cause;
+  }
+  return parts.join(' | ');
 }
 
 /**

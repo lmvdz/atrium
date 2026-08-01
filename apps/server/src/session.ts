@@ -45,9 +45,24 @@ export interface RoomMembership {
   seenSeq: number;
 }
 
+/** The read surface an authorization check needs: `db`, or a transaction. */
+export type AuthorizerRunner = Pick<Database, 'select'>;
+
 export interface Authorizer {
-  /** The caller's membership in this room, or `null` if they have none. */
-  authorize(session: Session, roomId: string): Promise<RoomMembership | null>;
+  /**
+   * The caller's membership in this room, or `null` if they have none.
+   *
+   * `runner` exists so the check can be made **inside the transaction that
+   * writes**. Round 1 checked before opening one, which left a
+   * time-of-check/time-of-use gap: a membership revoked in between was still
+   * good enough to append with, and what came out was durable history written
+   * by someone who had been removed from the room (#22 gauntlet r1, major 4).
+   */
+  authorize(
+    session: Session,
+    roomId: string,
+    runner?: AuthorizerRunner,
+  ): Promise<RoomMembership | null>;
 }
 
 /**
@@ -80,11 +95,11 @@ export function createStubSessionAuthenticator(): SessionAuthenticator {
 /** Membership, read from the database. Not a stub — see the note above. */
 export function createMembershipAuthorizer(db: Database): Authorizer {
   return {
-    authorize: async (session, roomId) => {
+    authorize: async (session, roomId, runner = db) => {
       // A malformed room id is a miss, not a 500: `roomId` arrives off the
       // wire, and Postgres raises on a uuid cast it cannot parse.
       if (!isUuid(roomId) || !isUuid(session.userId)) return null;
-      const [row] = await db
+      const query = runner
         .select({
           roomId: memberships.roomId,
           userId: memberships.userId,
@@ -94,6 +109,13 @@ export function createMembershipAuthorizer(db: Database): Authorizer {
         .from(memberships)
         .where(and(eq(memberships.roomId, roomId), eq(memberships.userId, session.userId)))
         .limit(1);
+      // `FOR SHARE` when this is running inside the append transaction, and
+      // only then. Re-reading in the transaction closes most of the TOCTOU gap;
+      // the row lock closes the rest, by making a concurrent DELETE of the
+      // membership wait for the append to commit or abort instead of slipping
+      // between our read and our write. Cheap: one row, one shared lock, held
+      // for the length of an append.
+      const [row] = await (runner === db ? query : query.for('share'));
       return row ?? null;
     },
   };
