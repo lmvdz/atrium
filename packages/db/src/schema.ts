@@ -424,6 +424,23 @@ export const coreEvents = pgTable(
     uniqueIndex('core_events_id_key').on(t.id),
     index('core_events_room_order_idx').on(t.roomId, t.roomSeq),
     index('core_events_order_idx').on(t.occurredAt, t.id),
+    /**
+     * The two lookups `atrium_append_core_event` runs for a room-less kind
+     * (#22 gauntlet r5 delta, major 2).
+     *
+     * `proposal_rejected`, `proposal_superseded` and `object_corrected` name a
+     * subject rather than a room, so the boundary resolves the subject back to
+     * the room its own ledger row landed in. Without these that resolution is a
+     * sequential scan of the whole ledger on every such append; with them it is
+     * an index probe. Partial, because the answer only ever comes from the one
+     * kind that minted the subject.
+     */
+    index('core_events_proposal_subject_idx')
+      .on(sql`(${t.payload}->'proposal'->>'id')`)
+      .where(sql`${t.type} = 'proposal_recorded'`),
+    index('core_events_object_subject_idx')
+      .on(sql`(${t.payload}->'object'->>'id')`)
+      .where(sql`${t.type} = 'object_accepted'`),
     check('core_events_room_seq_positive', sql`${t.roomSeq} >= 1`),
     /**
      * The lifted columns are a denormalisation of `payload`, so they are
@@ -537,8 +554,8 @@ export const coreEvents = pgTable(
       sql`(${t.id} COLLATE "C") ~ '^[!-~]+$' AND length(${t.id}) <= 256`,
     ),
     /**
-     * The room the row lands in is the room the payload declares (#22 gauntlet r4
-     * delta → r5, the append-surface audit).
+     * The room the row lands in is the room **this kind's own shape** declares
+     * (#22 gauntlet r5 delta, blocking).
      *
      * `room_id` was a lifted column nothing compared to the payload. A direct
      * caller of the append function could write an `object_accepted` whose
@@ -548,17 +565,80 @@ export const coreEvents = pgTable(
      * into another room. Same class as `payload_id_matches` and
      * `payload_type_matches`, and the last of the lifted columns to get one.
      *
-     * Four of the eight ledger kinds declare a room (`proposal.roomId`,
-     * `object.roomId`, `relation.roomId`, and the bare `roomId` on
-     * `message_posted` / `attention_resolved`). The other three name a proposal or
-     * an object and take their room from state — a question only the reducer can
-     * answer, and `resolveRoomId` in `ledger.ts` is where it is asked. So the
-     * check is total by construction: when no path yields a room, `coalesce` falls
-     * through to the column and the comparison holds.
+     * ## Round 5 wrote that fix kind-blind, and the finding is the shape of it
+     *
+     * > `coalesce(payload->'proposal'->>'roomId', payload->'object'->>'roomId',
+     * > …)` takes whichever key appears **first in its list**, JSONB accepts extra
+     * > keys, and Zod strips them only after the row exists.
+     *
+     * The exploit is one smuggled key. An `object_accepted` filed into room B,
+     * whose `object.roomId` really is room A, carrying an extra `proposal:
+     * {roomId: B}` that no reducer will ever read: the coalesce reaches
+     * `proposal.roomId` first, sees B, and the row installs. Fan-out uses the
+     * column (B), the fold uses `object.roomId` (A), and `since(B, n)` serves a
+     * row that folded into another room — the exact defect the previous round
+     * claimed to have closed, reopened by discriminating on **key order** instead
+     * of on **kind**.
+     *
+     * The general form, and it is now a RETRO entry: *validate a union by its
+     * tag, not by key presence.* `coalesce` over every member's shape is a check
+     * that some member is satisfied; it is not a check that **this** member is.
+     *
+     * ## What it says now
+     *
+     * Two clauses, and the first is the one that closes the class:
+     *
+     *  1. **The set of room-bearing keys present is exactly the set this kind's
+     *     shape declares** — one for the five kinds that carry a room, and *empty*
+     *     for the three that name a subject instead. A key belonging to another
+     *     kind's shape is not ignored, it is a refusal, so there is nothing to
+     *     smuggle. This also closes the room-less kinds, which under the coalesce
+     *     were satisfied by *anything* because the fall-through reached the column.
+     *  2. **That key's value is the row's room.** `IS NOT DISTINCT FROM`, not `=`:
+     *     a CHECK passes when its expression is NULL, so `=` against a missing key
+     *     would admit exactly the rows this exists to refuse.
+     *
+     * Wrapped in `coalesce(…, false)` so an event type this `CASE` does not
+     * enumerate fails closed. The type column is an enum and `payload_type_matches`
+     * pins the payload to it, so that is unreachable today; a ninth kind added
+     * without a room policy should be refused rather than waved through.
+     *
+     * A smuggled key whose value is JSON `null` (`proposal: {roomId: null}`) is
+     * accepted, and that is not a gap: `->>'roomId'` is SQL NULL either way, the
+     * key carries no room, and no fan-out or fold can read one out of it.
+     *
+     * The three room-less kinds (`proposal_rejected`, `proposal_superseded`,
+     * `object_corrected`) still take their room from state, which is a question
+     * only a fold can answer and a CHECK never can. That half is enforced one
+     * layer up, inside `atrium_append_core_event`, which resolves the named
+     * proposal or object back to the room its own ledger row landed in — the same
+     * answer `resolveRoomId` gives on the command path, asked of the log instead
+     * of the in-memory state. See `0007_kind_discriminated_room.sql`.
      */
     check(
       'core_events_payload_room_matches',
-      sql`${t.roomId}::text = coalesce(${t.payload}->'proposal'->>'roomId', ${t.payload}->'object'->>'roomId', ${t.payload}->'relation'->>'roomId', ${t.payload}->>'roomId', ${t.roomId}::text)`,
+      sql`coalesce(array_remove(ARRAY[
+        CASE WHEN ${t.payload}->'proposal'->>'roomId' IS NOT NULL THEN 'proposal.roomId' END,
+        CASE WHEN ${t.payload}->'object'->>'roomId' IS NOT NULL THEN 'object.roomId' END,
+        CASE WHEN ${t.payload}->'relation'->>'roomId' IS NOT NULL THEN 'relation.roomId' END,
+        CASE WHEN ${t.payload}->>'roomId' IS NOT NULL THEN 'roomId' END
+      ], NULL) = CASE ${t.payload}->>'type'
+        WHEN 'proposal_recorded' THEN ARRAY['proposal.roomId']
+        WHEN 'object_accepted' THEN ARRAY['object.roomId']
+        WHEN 'relation_added' THEN ARRAY['relation.roomId']
+        WHEN 'message_posted' THEN ARRAY['roomId']
+        WHEN 'attention_resolved' THEN ARRAY['roomId']
+        WHEN 'proposal_rejected' THEN ARRAY[]::text[]
+        WHEN 'proposal_superseded' THEN ARRAY[]::text[]
+        WHEN 'object_corrected' THEN ARRAY[]::text[]
+      END AND ${t.roomId}::text IS NOT DISTINCT FROM CASE ${t.payload}->>'type'
+        WHEN 'proposal_recorded' THEN ${t.payload}->'proposal'->>'roomId'
+        WHEN 'object_accepted' THEN ${t.payload}->'object'->>'roomId'
+        WHEN 'relation_added' THEN ${t.payload}->'relation'->>'roomId'
+        WHEN 'message_posted' THEN ${t.payload}->>'roomId'
+        WHEN 'attention_resolved' THEN ${t.payload}->>'roomId'
+        ELSE ${t.roomId}::text
+      END, false)`,
     ),
     /**
      * The snapshot is a list of `{id, authorId, body}`, all strings.

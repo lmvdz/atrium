@@ -661,6 +661,16 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    * declares one, and a declaration that disagrees with the authorized room is
    * refused: without this, a member of room A could accept an object into room B
    * by putting B's id inside the payload, having passed a membership check for A.
+   *
+   * **This is the command path only, and it is no longer the only place the
+   * question is asked** (#22 gauntlet r5 delta, major 2). Until 0007 a direct
+   * caller of the granted append function could file a `proposal_rejected` into
+   * any room at all — the CHECK's `coalesce` fell through to the column, so
+   * `room_id = room_id` held for anything. `atrium_append_core_event` now resolves
+   * the named proposal or object back to the room its own ledger row landed in
+   * and refuses a disagreement, which is this function's answer read out of the
+   * durable log instead of the in-memory fold. Same three refusals, in the same
+   * order: unknown subject, subject in another room.
    */
   function resolveRoomId(event: RoomEvent, authorizedRoomId: string): string {
     const declared = declaredRoomId(event);
@@ -818,14 +828,47 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           /**
            * The row folded under exactly the window the row now holds.
            *
-           * Both values come from `atrium_receipt_window`, called twice in one
-           * transaction while this process holds the ledger lock — so this can
-           * only fail if the two calls were given different arguments, or if
-           * something wrote `messages` from outside an append. Either would mean
-           * the live fold and every future replay disagree about a receipt, which
-           * is the divergence the whole column exists to prevent, so it aborts
-           * rather than logs: the transaction rolls back and the event leaves
-           * nothing behind.
+           * ## What this proves, exactly — and what it does not (r5 delta, major 1)
+           *
+           * Round 5's receipt called this "what makes one derivation a checked
+           * fact", which reads as though it validated the window. It does not, and
+           * the finding is right about why:
+           *
+           * > it is identity between two calls to the same SQL under one
+           * > transaction, so both can agree while both are wrong, and a direct
+           * > SQL caller never runs it at all.
+           *
+           * Granted in full. `atrium_receipt_window` is the only derivation there
+           * is; if the derivation is wrong, both calls are wrong together and this
+           * comparison is silent. It is not a check on the *content* of the
+           * window. What the content is checked by is a different instrument
+           * entirely — the integration tests that assert room-scoping, `messages.seq`
+           * ordering, and NULL-vs-`[]` against a real database.
+           *
+           * Two things it does prove, both worth the round trip:
+           *
+           *  1. **Live ≡ replay for this row.** The right-hand side is now a
+           *     `RETURNING` of the stored column (0007), not the value the function
+           *     meant to store. A replay reads that same column. So this compares
+           *     the window the live fold ran against with the bytes every future
+           *     replay will run against — which is the property this whole column
+           *     exists for, and the only one of the three the reducer's own
+           *     determinism does not already give.
+           *  2. **The `SECURITY INVOKER` / `SECURITY DEFINER` split costs nothing
+           *     here.** The two calls run as two roles by design (see
+           *     `trustToRecord`). If that divergence ever produced two answers —
+           *     row-level security, a search-path difference, a revoked `SELECT` on
+           *     `messages` — this is what notices, rather than a room whose
+           *     acceptances quietly stop folding.
+           *
+           * It aborts rather than logs, because either failure means the durable
+           * row would replay into a different state than it applied: the
+           * transaction rolls back and the event leaves nothing behind.
+           *
+           * It runs on the server's path only. A direct SQL caller holding
+           * `EXECUTE` never executes this line — which is exactly why every
+           * guarantee that has to hold against such a caller lives in the SQL
+           * boundary and not here.
            */
           if (folded && !sameWindow(foldedWindow, minted?.trusted_messages ?? null)) {
             throw new CommandError(
