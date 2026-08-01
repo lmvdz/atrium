@@ -39,6 +39,8 @@ apps/web        Next.js 16 App Router, React 19. The three-region shell.
 apps/server     Node 22. ws WebSocket server + pg-boss workers. One process.
 packages/core   The Semantic Core. Pure TypeScript, zero I/O.
 packages/db     Drizzle schema, migrations, postgres-js client.
+packages/ingest Replay ingest. Conversations in, canonical JSONL out.
+corpora/        Committed replay corpora (see below).
 design/         Design tokens (light default, dark via `html.atr-dark`).
 ```
 
@@ -61,6 +63,40 @@ are canonically ordered by `(at, id)`, a malformed event is recorded in
 `state.issues` rather than thrown, and the same log always serializes
 byte-identically.
 
+### Replay ingest
+
+`packages/ingest` turns a real conversation into the canonical replay format
+(issue #2) — JSONL, one message per line:
+
+```json
+{"id":"github:vercel/next.js#37136/c2807428","author":"leerob","ts":"2022-05-23T21:22:00.000Z","text":"Yes! …","reply_to":"github:vercel/next.js#37136/c2807422"}
+```
+
+`{id, author, ts, text, reply_to?, attachments?[]}` — small on purpose, so a
+Slack or Discord export adapter is a field rename and pasted markdown converts
+with a tiny parser. Files in, files out: no database, no interpretation, no UI.
+
+```bash
+pnpm ingest list                      # registered sources
+pnpm ingest ts9998                    # → corpora/ts9998.jsonl
+pnpm ingest all                       # every registered source
+pnpm ingest ts9998 --check            # fail if a refetch would change the file
+pnpm ingest markdown notes.md         # pasted transcript → JSONL on stdout
+pnpm ingest validate                  # re-validate the committed corpora
+```
+
+Two corpora are committed:
+
+| File | Source | Why |
+| --- | --- | --- |
+| `corpora/ts9998.jsonl` | TypeScript #9998, *Trade-offs in Control Flow Analysis* | A decade-long design argument: decisions, supersessions, open questions, commitments. The demo corpus. |
+| `corpora/holdout-nextjs-rfc.jsonl` | Next.js discussion #37136, *RFC: Layouts* | Threaded RFC feedback. **Eval holdout** — reserved for the interpretation-quality golden set, so prompts are never tuned on the corpus they are scored against. |
+
+A rerun is byte-identical. Ids are derived from the source, messages are sorted
+by `(ts, id)`, keys are written in a fixed order, and nothing records when the
+fetch happened — so `pnpm ingest all` twice leaves `git diff` empty and any real
+change to the upstream thread shows up as a readable diff.
+
 ## Scripts
 
 | Command | What it does |
@@ -68,6 +104,7 @@ byte-identically.
 | `pnpm dev` | Build packages, then web + server in watch mode |
 | `pnpm build` | Build packages, then both apps |
 | `pnpm test` | Vitest across `packages/*` |
+| `pnpm ingest <source>` | Fetch a conversation into `corpora/` (see Replay ingest) |
 | `pnpm test:e2e` | Playwright smoke test in `apps/web` |
 | `pnpm lint` | Biome lint + format check |
 | `pnpm lint:fix` | Biome with safe fixes applied |

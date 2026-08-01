@@ -1,0 +1,84 @@
+{
+  "page1": {
+    "data": {
+      "repository": {
+        "discussion": {
+          "number": 37136,
+          "title": "RFC: Layouts",
+          "body": "This RFC outlines the biggest update to Next.js since it was introduced in 2016.",
+          "createdAt": "2022-05-23T20:24:21Z",
+          "author": { "login": "timneutkens" },
+          "comments": {
+            "pageInfo": { "hasNextPage": true, "endCursor": "CURSOR_1" },
+            "nodes": [
+              {
+                "id": "DC_kwDOA1_asc4AKu1m",
+                "databaseId": 2807422,
+                "body": "Can layouts be `.tsx`?",
+                "createdAt": "2022-05-23T21:20:00Z",
+                "author": { "login": "jkjustjoshing" },
+                "replies": {
+                  "pageInfo": { "hasNextPage": true, "endCursor": "REPLY_CURSOR_1" },
+                  "nodes": [
+                    {
+                      "databaseId": 2807428,
+                      "body": "Yes! `.js`, `.jsx`, `.ts`, `.tsx` are all welcome",
+                      "createdAt": "2022-05-23T21:22:00Z",
+                      "author": { "login": "leerob" }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "page2": {
+    "data": {
+      "repository": {
+        "discussion": {
+          "number": 37136,
+          "title": "RFC: Layouts",
+          "body": "This RFC outlines the biggest update to Next.js since it was introduced in 2016.",
+          "createdAt": "2022-05-23T20:24:21Z",
+          "author": { "login": "timneutkens" },
+          "comments": {
+            "pageInfo": { "hasNextPage": false, "endCursor": "CURSOR_2" },
+            "nodes": [
+              {
+                "id": "DC_kwDOA1_asc4AKu1n",
+                "databaseId": 2807500,
+                "body": "What about a deleted account's comment?",
+                "createdAt": "2022-05-24T09:00:00Z",
+                "author": null,
+                "replies": {
+                  "pageInfo": { "hasNextPage": false, "endCursor": null },
+                  "nodes": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "replies2": {
+    "data": {
+      "node": {
+        "replies": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "databaseId": 2807440,
+              "body": "Second page of replies.",
+              "createdAt": "2022-05-23T21:30:00Z",
+              "author": { "login": "timneutkens" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
