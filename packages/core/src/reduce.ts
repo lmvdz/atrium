@@ -1,14 +1,15 @@
 import type { z } from 'zod';
 import {
+  acceptanceReceiptRefusal,
   actorMatchesProposer,
   confidenceFloorRefusal,
   humanOnlyRefusal,
   isHuman,
-  MODEL_ACCEPTANCE_FLOOR,
   proposalBindingRefusal,
 } from './authority.js';
+import type { Actor } from './common.js';
 import { ATTRIBUTION_FIELD, retypeCarryOver } from './corrections.js';
-import type { CoreEvent } from './events.js';
+import type { AuthoredEvent, CoreEvent, TrustedContext } from './events.js';
 import {
   AcceptedObject,
   type AcceptedObjectType,
@@ -18,6 +19,7 @@ import {
   ObjectivePayload,
   OpenQuestionPayload,
 } from './objects.js';
+import { decideSupersession, MODEL_ACCEPTANCE_FLOOR } from './policy.js';
 import { storeProposal } from './proposal.js';
 import { relationShapeError } from './relations.js';
 import {
@@ -58,11 +60,21 @@ export type RejectionReason =
  * the reducer declined to accept, and it leaves *nothing* behind: no `issues`
  * entry, no cursor movement, no `consumedEventIds` entry. The state handed back
  * is the state handed in, byte for byte and reference for reference.
+ *
+ * Every outcome carries the **trusted actor** the event was folded under, not
+ * one read out of the payload — the payload has no such field. A caller logging
+ * "who did this" is logging the authenticated identity or nothing.
  */
 export type EventOutcome =
-  | { outcome: 'applied'; event: CoreEvent }
-  | { outcome: 'applied_with_issue'; event: CoreEvent; issues: ReducerIssue[] }
-  | { outcome: 'rejected'; event: CoreEvent; reason: RejectionReason; detail: string };
+  | { outcome: 'applied'; event: CoreEvent; actor: Actor }
+  | { outcome: 'applied_with_issue'; event: CoreEvent; actor: Actor; issues: ReducerIssue[] }
+  | {
+      outcome: 'rejected';
+      event: CoreEvent;
+      actor: Actor;
+      reason: RejectionReason;
+      detail: string;
+    };
 
 /** The three-way taxonomy, for callers that switch on it. */
 export type AppendOutcome = EventOutcome['outcome'];
@@ -81,6 +93,16 @@ export interface FoldResult {
  * call a server makes for each event as it arrives, and the only one that
  * reports back what happened.
  *
+ * ## The signature, and why it has three arguments
+ *
+ * `trusted` is everything the reducer is allowed to believe that did not come
+ * out of the payload: the actor, derived from the authenticated session, and the
+ * messages a receipt can be checked against. Round 1's gauntlet rated the old
+ * two-argument form blocking — the actor was a payload field, so every
+ * human-only gate below was a gate a writer could declare itself through. See
+ * `TrustedContext` for the contract #22 implements, including where the actor
+ * lives when the event is persisted (a column, not the payload jsonb).
+ *
  * ## The contract, stated exactly
  *
  * 1. `appendEvent` never mutates the state it is given. On `applied` /
@@ -93,12 +115,13 @@ export interface FoldResult {
  * 3. Any other event is **consumed**: `state.cursor` advances to it, its room's
  *    watermark advances to it, its id is spent in `consumedEventIds`, and it
  *    either applies or records one or more `ReducerIssue`s. Business validity
- *    is judged here — the proposal boundary, the actor floor, the correction
- *    and relation guards — and none of those judgements depend on when the
- *    event arrived, only on the log before it.
+ *    is judged here — the proposal boundary, the actor floor, the receipt
+ *    checks, the correction and relation guards — and none of those judgements
+ *    depend on when the event arrived, only on the log before it and the trusted
+ *    context handed in with it.
  * 4. Therefore the consumed sequence is in canonical order **by construction**.
- *    Write `L` for the events a state consumed, in the order it consumed them.
- *    Then, whatever order those events *arrived* in:
+ *    Write `L` for the ledger rows a state consumed, in the order it consumed
+ *    them. Then, whatever order those events *arrived* in:
  *
  *        serializeState(state) === serializeState(reduce(L))
  *
@@ -108,6 +131,10 @@ export interface FoldResult {
  *    order. This is the whole live≡replay guarantee, and the only one claimed:
  *    it says nothing about rejected events, which is the point — they are in
  *    neither `L` nor, per #22, the ledger.
+ *
+ *    A row is the payload *and its trusted columns*: replaying an event under a
+ *    different actor is replaying a different event, so #22 persists the actor
+ *    with it and hands it back on replay.
  *
  * ## Why this is safe to rely on
  *
@@ -129,20 +156,28 @@ export interface FoldResult {
  * command whose event lost the ordering race is re-minted at the current
  * position and appended again.
  */
-export function appendEvent(state: CoreState, event: CoreEvent): AppendResult {
+export function appendEvent(
+  state: CoreState,
+  event: CoreEvent,
+  trusted: TrustedContext,
+): AppendResult {
+  const entry: AuthoredEvent = { ...trusted, event };
   const rejection = rejectionFor(state, event);
-  if (rejection) return { outcome: 'rejected', event, ...rejection, state };
+  if (rejection) {
+    return { outcome: 'rejected', event, actor: trusted.actor, ...rejection, state };
+  }
   const next = cloneState(state);
-  return { ...consume(next, event), state: next };
+  return { ...consume(next, entry), state: next };
 }
 
 /**
  * The deterministic reducer: fold a whole log into a state.
  *
  * Contract:
- *  - Pure. No clock, no randomness, no I/O. Given the same events it returns a
- *    state that serializes byte-identically, on any machine, in any order of
- *    arrival — events are canonically ordered by `(at, id)` before folding.
+ *  - Pure. No clock, no randomness, no I/O. Given the same ledger rows it
+ *    returns a state that serializes byte-identically, on any machine, in any
+ *    order of arrival — rows are canonically ordered by `(at, id)` before
+ *    folding.
  *  - Total. A malformed or unapplicable event never throws; it lands in
  *    `state.issues` so replay of a real log can never wedge.
  *  - Append-only. Corrections and supersessions change *status*, never history:
@@ -150,31 +185,34 @@ export function appendEvent(state: CoreState, event: CoreEvent): AppendResult {
  *  - Trust-preserving. The proposal → acceptance boundary is enforced here, not
  *    upstream: a recorded proposal is always `proposed`; an acceptance that
  *    cites a proposal must cite one that exists, is still open, has not already
- *    been spent, and matches the object's type; and the actor floor of #4's
- *    acceptance matrix holds regardless of what any layer above did — see
- *    `authority.ts`.
+ *    been spent, matches the object's type, carries the payload that was staged,
+ *    and — for a non-human actor — survives its receipt. See `authority.ts`.
  *
- * `reduce(events)` sorts, so nothing in a fresh replay is genuinely out of
- * order: the only events rejected are repeats. A verbatim repeat sorts onto the
+ * `reduce(log)` sorts, so nothing in a fresh replay is genuinely out of order:
+ * the only events rejected are repeats. A verbatim repeat sorts onto the
  * position its twin just took and is refused there (`out_of_order`); a repeated
  * id carrying a different timestamp sorts elsewhere and is refused by the id
- * (`duplicate`). `reduce(events, state)` is the same fold continued: events at
- * or before `state.cursor` are rejected and skipped, exactly as `appendEvent`
- * would reject them. Use `foldEvents` when you need to see *which* ones, and
+ * (`duplicate`). `reduce(log, state)` is the same fold continued: events at or
+ * before `state.cursor` are rejected and skipped, exactly as `appendEvent` would
+ * reject them. Use `foldEvents` when you need to see *which* ones, and
  * `appendEvent` when you are consuming one at a time — that is where the
  * outcome matters.
  */
-export function reduce(events: readonly CoreEvent[], initial?: CoreState): CoreState {
-  return foldEvents(events, initial).state;
+export function reduce(log: readonly AuthoredEvent[], initial?: CoreState): CoreState {
+  return foldEvents(log, initial).state;
 }
 
 /** `reduce`, plus the per-event outcome. Same fold, nothing hidden. */
-export function foldEvents(events: readonly CoreEvent[], initial?: CoreState): FoldResult {
+export function foldEvents(log: readonly AuthoredEvent[], initial?: CoreState): FoldResult {
   const state = initial ? cloneState(initial) : emptyState();
   const outcomes: EventOutcome[] = [];
-  for (const event of orderEvents(events)) {
-    const rejection = rejectionFor(state, event);
-    outcomes.push(rejection ? { outcome: 'rejected', event, ...rejection } : consume(state, event));
+  for (const entry of orderEvents(log)) {
+    const rejection = rejectionFor(state, entry.event);
+    outcomes.push(
+      rejection
+        ? { outcome: 'rejected', event: entry.event, actor: entry.actor, ...rejection }
+        : consume(state, entry),
+    );
   }
   return { state, outcomes };
 }
@@ -188,8 +226,8 @@ export function wasConsumed(outcome: EventOutcome): boolean {
  * Canonical event order: ascending timestamp, ties broken by event id. Two
  * nodes handed the same set in different orders reduce to the same state.
  */
-export function orderEvents(events: readonly CoreEvent[]): CoreEvent[] {
-  return [...events].sort((a, b) => compareCursor(cursorOf(a), cursorOf(b)));
+export function orderEvents(log: readonly AuthoredEvent[]): AuthoredEvent[] {
+  return [...log].sort((a, b) => compareCursor(cursorOf(a.event), cursorOf(b.event)));
 }
 
 /** The canonical sort key of an event. */
@@ -314,10 +352,11 @@ function rejectionFor(
  * the gate, so this always advances the cursor: the event is history now,
  * whether or not it changed anything.
  */
-function consume(state: CoreState, event: CoreEvent): EventOutcome {
+function consume(state: CoreState, entry: AuthoredEvent): EventOutcome {
+  const { event, actor } = entry;
   const issuesBefore = state.issues.length;
   const roomId = resolveRoomId(state, event);
-  const applied = dispatch(state, event);
+  const applied = dispatch(state, entry);
 
   state.cursor = cursorOf(event);
   // Advances whether or not the event applied: it is the log position this
@@ -338,25 +377,26 @@ function consume(state: CoreState, event: CoreEvent): EventOutcome {
 
   const issues = state.issues.slice(issuesBefore);
   return issues.length > 0
-    ? { outcome: 'applied_with_issue', event, issues }
-    : { outcome: 'applied', event };
+    ? { outcome: 'applied_with_issue', event, actor, issues }
+    : { outcome: 'applied', event, actor };
 }
 
 /** Applies one event. Returns whether it was applied; issues are recorded in state. */
-function dispatch(state: CoreState, event: CoreEvent): boolean {
+function dispatch(state: CoreState, entry: AuthoredEvent): boolean {
+  const { event, actor } = entry;
   switch (event.type) {
     case 'proposal_recorded':
       return applyProposalRecorded(state, event);
     case 'proposal_rejected':
-      return applyProposalRejected(state, event);
+      return applyProposalRejected(state, event, actor);
     case 'proposal_superseded':
-      return applyProposalSuperseded(state, event);
+      return applyProposalSuperseded(state, event, actor);
     case 'object_accepted':
-      return applyObjectAccepted(state, event);
+      return applyObjectAccepted(state, event, actor, entry.messages);
     case 'object_corrected':
-      return applyObjectCorrected(state, event);
+      return applyObjectCorrected(state, event, actor);
     case 'relation_added':
-      return applyRelationAdded(state, event);
+      return applyRelationAdded(state, event, actor);
     default: {
       const exhaustive: never = event;
       fail(state, (exhaustive as CoreEvent).id, 'unknown event type');
@@ -401,7 +441,11 @@ function applyProposalRecorded(state: CoreState, event: EventOf<'proposal_record
   return true;
 }
 
-function applyProposalRejected(state: CoreState, event: EventOf<'proposal_rejected'>): boolean {
+function applyProposalRejected(
+  state: CoreState,
+  event: EventOf<'proposal_rejected'>,
+  actor: Actor,
+): boolean {
   const record = state.proposals[event.proposalId];
   if (!record) {
     fail(state, event.id, `unknown proposal "${event.proposalId}"`);
@@ -419,13 +463,13 @@ function applyProposalRejected(state: CoreState, event: EventOf<'proposal_reject
   // another's — or a human's — before anyone has seen it, which is a silent
   // delete with no correction chain, performed by the one kind of actor that may
   // not correct anything.
-  if (!actorMatchesProposer(event.actor, record.proposal.proposer)) {
+  if (!actorMatchesProposer(actor, record.proposal.proposer)) {
     fail(
       state,
       event.id,
       proposalBindingRefusal(
         'rejection_binding',
-        event.actor,
+        actor,
         record.proposal.proposer,
         event.proposalId,
       ),
@@ -455,19 +499,23 @@ function applyProposalRejected(state: CoreState, event: EventOf<'proposal_reject
  * not a rejection: nobody judged it, so telling the room a person declined it
  * would be a lie about who did what.
  */
-function applyProposalSuperseded(state: CoreState, event: EventOf<'proposal_superseded'>): boolean {
+function applyProposalSuperseded(
+  state: CoreState,
+  event: EventOf<'proposal_superseded'>,
+  actor: Actor,
+): boolean {
   const record = state.proposals[event.proposalId];
   if (!record) {
     fail(state, event.id, `unknown proposal "${event.proposalId}"`);
     return false;
   }
-  if (!actorMatchesProposer(event.actor, record.proposal.proposer)) {
+  if (!actorMatchesProposer(actor, record.proposal.proposer)) {
     fail(
       state,
       event.id,
       proposalBindingRefusal(
         'supersession_binding',
-        event.actor,
+        actor,
         record.proposal.proposer,
         event.proposalId,
       ),
@@ -510,7 +558,12 @@ function applyProposalSuperseded(state: CoreState, event: EventOf<'proposal_supe
   return true;
 }
 
-function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>): boolean {
+function applyObjectAccepted(
+  state: CoreState,
+  event: EventOf<'object_accepted'>,
+  actor: Actor,
+  messages: TrustedContext['messages'],
+): boolean {
   const { object } = event;
   if (state.objects[object.id]) {
     fail(state, event.id, `object "${object.id}" already accepted`);
@@ -523,7 +576,6 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
   // the event and citation is a property of what it points at: a model that may
   // not accept this object at all should be told that, not sent to fix its
   // provenance first.
-  const { actor } = event;
   const subject = `object "${object.id}"`;
 
   // A decision is the type #4 bans inference at, by name: "that sounds good" is
@@ -619,18 +671,13 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
       return false;
     }
 
-    // ── The confidence floor (routed out of #19's gauntlet) ──
+    // ── θ, as a trust boundary rather than a manner ──
     //
     // The gates above close the *types* a model may not mint. This closes the
-    // rest of the write surface: without it, a model may accept its own claim,
-    // question, commitment or objective proposal at any confidence at all,
-    // including 0. θ was policy in the layer that mints events, and a policy in
-    // the minting layer holds exactly as long as that layer is the only writer.
-    //
-    // Note what this is not: it is not the product's θ_auto. `acceptance.ts`
-    // holds those and they are higher. This is the line below which an
-    // acceptance is malformed rather than debatable, and `AcceptanceConfig`
-    // refuses to be configured beneath it, so the two can never invert.
+    // rest of the write surface, and it is the engine's own θ_auto: round 1's
+    // gauntlet routed the split (a separate, lower "malformed" floor) as a hole,
+    // because a model could land a claim at 0.55 that the engine at 0.7 would
+    // never have emitted. One number, read from `policy.ts` by both.
     if (!isHuman(actor)) {
       const floor = MODEL_ACCEPTANCE_FLOOR[object.type];
       if (proposal.proposal.confidence < floor) {
@@ -639,6 +686,22 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
           event.id,
           confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),
         );
+        return false;
+      }
+
+      // ── …and the receipt, likewise ──
+      //
+      // Payload binding, provenance binding, a message window at all, the quote,
+      // and third-party attribution. All five were call-site manners in round 1.
+      const refusal = acceptanceReceiptRefusal({
+        actor,
+        proposalId,
+        proposal: proposal.proposal,
+        object,
+        messages,
+      });
+      if (refusal) {
+        fail(state, event.id, refusal.detail);
         return false;
       }
     }
@@ -704,7 +767,11 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
   return true;
 }
 
-function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected'>): boolean {
+function applyObjectCorrected(
+  state: CoreState,
+  event: EventOf<'object_corrected'>,
+  actor: Actor,
+): boolean {
   const record = state.objects[event.objectId];
   if (!record) {
     fail(state, event.id, `unknown object "${event.objectId}"`);
@@ -712,17 +779,17 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
   }
 
   // Every correction verb is human-only in v1 (#4, and the correction verbs
-  // #21 will grow are the same shape). A correction rewrites, withdraws or
-  // restores something the room already accepted — it is the one operation that
-  // reaches backwards, and an interpreter must never reach backwards on its own
+  // #21 grew are the same shape). A correction rewrites, withdraws or restores
+  // something the room already accepted — it is the one operation that reaches
+  // backwards, and an interpreter must never reach backwards on its own
   // authority. A model that thinks an object is wrong proposes a supersession.
   //
   // The claim-verification gate is repeated here rather than left to the
   // blanket rule above it. Today it is unreachable — a model cannot amend
-  // anything — but the two rules have different lifetimes: #21 may hand a model
-  // some correction verb, and "a claim only becomes ✓ by a human" must not
-  // depend on that never happening.
-  if (!isHuman(event.actor)) {
+  // anything — but the two rules have different lifetimes: a later round may
+  // hand a model some correction verb, and "a claim only becomes ✓ by a human"
+  // must not depend on that never happening.
+  if (!isHuman(actor)) {
     const verifying =
       event.patch.verification === 'verified' &&
       (record.object.type === 'claim' || event.toType === 'claim');
@@ -731,7 +798,7 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
       event.id,
       humanOnlyRefusal(
         verifying ? 'claim_verification' : 'correction',
-        event.actor,
+        actor,
         `object "${event.objectId}"`,
       ),
     );
@@ -743,7 +810,7 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
       fail(state, event.id, `object "${event.objectId}" is already retracted`);
       return false;
     }
-    commitCorrection(state, event, record, { retracted: false }, { retracted: true });
+    commitCorrection(state, event, record, actor, { retracted: false }, { retracted: true });
     record.retractedAt = event.at;
     return true;
   }
@@ -753,7 +820,7 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
       fail(state, event.id, `object "${event.objectId}" is not retracted`);
       return false;
     }
-    commitCorrection(state, event, record, { retracted: true }, { retracted: false });
+    commitCorrection(state, event, record, actor, { retracted: true }, { retracted: false });
     record.retractedAt = null;
     return true;
   }
@@ -769,8 +836,8 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
     return false;
   }
 
-  if (event.action === 'retype') return applyRetype(state, event, record);
-  if (event.action === 'reopen') return applyReopen(state, event, record);
+  if (event.action === 'retype') return applyRetype(state, event, record, actor);
+  if (event.action === 'reopen') return applyReopen(state, event, record, actor);
 
   const attributionField = ATTRIBUTION_FIELD[record.object.type];
   const touchesAttribution =
@@ -830,11 +897,21 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
   // An amendment that changes nothing is a no-op, not a correction. Bumping the
   // revision would invent history — and `revision` is the optimistic-concurrency
   // token, so a phantom bump would spuriously invalidate every open editor.
+  //
+  // It is recorded as an issue rather than passed over in silence: the object
+  // did not change, somebody thought it would, and `applied` with nothing
+  // applied is exactly the outcome a caller reads as success. Nothing about the
+  // *state* changes — this is a diagnosis, not a refusal.
   if (canonicalJson(patched.after) === canonicalJson(patched.before)) {
+    fail(
+      state,
+      event.id,
+      `"${event.action}" on object "${event.objectId}" changed nothing — no correction was recorded and the revision did not move; an edit that matches what is already there is a no-op, not history`,
+    );
     return true;
   }
 
-  commitCorrection(state, event, record, patched.before, patched.after);
+  commitCorrection(state, event, record, actor, patched.before, patched.after);
   record.object = { ...patched.object, updatedAt: event.at };
   return true;
 }
@@ -856,6 +933,7 @@ function applyRetype(
   state: CoreState,
   event: EventOf<'object_corrected'>,
   record: ObjectRecord,
+  actor: Actor,
 ): boolean {
   const toType = event.toType;
   if (toType === null) {
@@ -902,6 +980,7 @@ function applyRetype(
     state,
     event,
     record,
+    actor,
     { type: from.type, payload: from.payload },
     { type: toType, payload: parsed.data.payload },
   );
@@ -925,6 +1004,7 @@ function applyReopen(
   state: CoreState,
   event: EventOf<'object_corrected'>,
   record: ObjectRecord,
+  actor: Actor,
 ): boolean {
   const { object } = record;
 
@@ -940,6 +1020,7 @@ function applyReopen(
       state,
       event,
       record,
+      actor,
       { status: 'answered', answeredBy: answers },
       { status: 'open', priorAnswers: answers },
     );
@@ -959,7 +1040,14 @@ function applyReopen(
       fail(state, event.id, `commitment "${event.objectId}" is already open`);
       return false;
     }
-    commitCorrection(state, event, record, { status: object.payload.status }, { status: 'open' });
+    commitCorrection(
+      state,
+      event,
+      record,
+      actor,
+      { status: object.payload.status },
+      { status: 'open' },
+    );
     record.object = {
       ...object,
       payload: { ...object.payload, status: 'open' },
@@ -991,6 +1079,7 @@ function commitCorrection(
   state: CoreState,
   event: EventOf<'object_corrected'>,
   record: ObjectRecord,
+  actor: Actor,
   before: unknown,
   after: unknown,
 ): void {
@@ -1003,7 +1092,9 @@ function commitCorrection(
     action: event.action,
     before,
     after,
-    actor: event.actor,
+    // The trusted actor, not a payload field: "who took this off me" is a
+    // question about an authenticated identity or it is not a question.
+    actor,
     provenance: event.provenance,
     note: event.note,
     at: event.at,
@@ -1012,12 +1103,16 @@ function commitCorrection(
   record.revision += 1;
   // Corrections are human-only, so reaching here means a person has now taken
   // responsibility for this object: `~` becomes `✓`.
-  if (record.humanTouchedAt === null && isHuman(event.actor)) {
+  if (record.humanTouchedAt === null && isHuman(actor)) {
     record.humanTouchedAt = event.at;
   }
 }
 
-function applyRelationAdded(state: CoreState, event: EventOf<'relation_added'>): boolean {
+function applyRelationAdded(
+  state: CoreState,
+  event: EventOf<'relation_added'>,
+  actor: Actor,
+): boolean {
   const { relation } = event;
   if (state.relations.some((existing) => existing.id === relation.id)) {
     fail(state, event.id, `relation "${relation.id}" already exists`);
@@ -1062,6 +1157,20 @@ function applyRelationAdded(state: CoreState, event: EventOf<'relation_added'>):
   // the reducer would happily record "a commitment answers an objective" and
   // then silently skip the status flip — an edge that renders but means nothing.
   if (relation.kind === 'answers') {
+    // …and it is human-only. Round 1's gauntlet: any actor could close a
+    // person's open question by pointing an arbitrary claim at it, and the
+    // question would flip to `answered` and leave everybody's Needs-you. #4
+    // gives a decision exactly two doors — answer-binding and an explicit
+    // human accept — and an `answers` edge is the first one, so it is gated
+    // like the second. A model that thinks it knows the answer proposes it.
+    if (!isHuman(actor)) {
+      fail(
+        state,
+        event.id,
+        humanOnlyRefusal('answer_relation', actor, `relation "${relation.id}"`),
+      );
+      return false;
+    }
     if (from.object.type !== 'open_question') {
       fail(
         state,
@@ -1081,17 +1190,19 @@ function applyRelationAdded(state: CoreState, event: EventOf<'relation_added'>):
   }
 
   if (relation.kind === 'supersedes' && target) {
-    // #4 splits supersession by what is being retired: retiring a claim or an
-    // open question auto-accepts (a newer reading replacing an older one is
-    // cheap to correct), but retiring an accepted *decision* needs the same
-    // human hand that accepting one needed. Otherwise the decision gate is a
-    // front door with the back door open: a model that may not accept a
-    // decision could still supersede every decision in the room.
-    if (target.object.type === 'decision' && !isHuman(event.actor)) {
+    // #4 splits supersession by what is being retired, and the reducer enforces
+    // **the whole split**, not the decision row of it. Round 1's gauntlet found
+    // the gap: `decideSupersession` required a human for commitments and
+    // objectives while this gate asked only about decisions, so a model could
+    // retire a human-accepted commitment — and silence the attention item that
+    // went with it — through a door the policy believed was shut. One table,
+    // read from `policy.ts`.
+    const retired = target.object.type;
+    if (decideSupersession(retired).authority === 'requires_human' && !isHuman(actor)) {
       fail(
         state,
         event.id,
-        humanOnlyRefusal('decision_supersession', event.actor, `relation "${relation.id}"`),
+        humanOnlyRefusal('supersession', actor, `relation "${relation.id}"`, retired),
       );
       return false;
     }

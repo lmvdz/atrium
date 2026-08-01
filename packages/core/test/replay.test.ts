@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type Actor,
+  type AuthoredEvent,
   appendEvent,
   type CoreEvent,
   CoreEvent as CoreEventSchema,
   type CoreState,
+  type ProvenanceMessage,
   reduce,
   serializeState,
   wasConsumed,
@@ -14,10 +17,15 @@ import { ALICE, BOB, shuffle } from './fixtures.js';
  * The live≡replay invariant, checked property-style rather than by example.
  *
  * The claim under test is exactly the one `appendEvent` documents: for the
- * sequence of events a state actually *consumed*, folding them one at a time in
- * arrival order and replaying them all at once produce byte-identical states —
- * `issues` and `consumedEventIds` included, since those are the two places an
- * ordering bug hides.
+ * sequence of ledger rows a state actually *consumed*, folding them one at a
+ * time in arrival order and replaying them all at once produce byte-identical
+ * states — `issues` and `consumedEventIds` included, since those are the two
+ * places an ordering bug hides.
+ *
+ * A **row**, not an event: the payload plus its trusted columns (the actor, and
+ * the messages a receipt is checked against). Replaying a payload under a
+ * different actor is replaying a different event, which is why #22 persists the
+ * actor beside it and hands it back here.
  *
  * **The replay side does not ask the reducer what it consumed.** r3's version
  * did: it replayed the reducer's own `consumed` list, so any defect shared by
@@ -32,7 +40,8 @@ import { ALICE, BOB, shuffle } from './fixtures.js';
  * six-value pool so ties are constant, deliberate cross-room ties on one `at`,
  * ids that sort against insertion order, verbatim redeliveries, redeliveries
  * that re-minted their timestamp (including of events that failed the first
- * time), and model actors reaching for every human-only gate.
+ * time), and model actors reaching for every gate — the human-only ones, the
+ * binding ones, and the receipt ones #21 r2 moved into the reducer.
  */
 
 const ROOMS = ['room_1', 'room_2'] as const;
@@ -71,6 +80,11 @@ function parse(input: unknown): CoreEvent {
   return CoreEventSchema.parse(input);
 }
 
+/** One ledger row: the payload, plus the columns the command layer filled in. */
+function row(input: unknown, actor: Actor, messages?: readonly ProvenanceMessage[]): AuthoredEvent {
+  return { event: parse(input), actor, ...(messages === undefined ? {} : { messages }) };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The oracle: an independent reading of the consumption rule.
 //
@@ -101,17 +115,17 @@ function oracleCompare(a: Position, b: Position): number {
  *
  * Everything else is refused and leaves no trace, so it is simply absent here.
  */
-function oracleConsumed(arrival: readonly CoreEvent[]): CoreEvent[] {
-  const consumed: CoreEvent[] = [];
+function oracleConsumed(arrival: readonly AuthoredEvent[]): AuthoredEvent[] {
+  const consumed: AuthoredEvent[] = [];
   const spent = new Set<string>();
   let cursor: Position | null = null;
 
-  for (const event of arrival) {
-    const position: Position = { at: event.at, id: event.id };
+  for (const entry of arrival) {
+    const position: Position = { at: entry.event.at, id: entry.event.id };
     if (cursor !== null && oracleCompare(position, cursor) <= 0) continue;
-    if (spent.has(event.id)) continue;
-    consumed.push(event);
-    spent.add(event.id);
+    if (spent.has(entry.event.id)) continue;
+    consumed.push(entry);
+    spent.add(entry.event.id);
     cursor = position;
   }
   return consumed;
@@ -125,6 +139,12 @@ interface Staged {
   id: string;
   roomId: string;
   type: 'decision' | 'claim';
+  /** The statement that was staged — what an acceptance must carry verbatim. */
+  text: string;
+  /** The span it rests on, and the message that bears it. */
+  quote: string;
+  messageId: string;
+  window: ProvenanceMessage[];
 }
 
 const payloadFor = (type: 'decision' | 'claim', text: string, verified = false) =>
@@ -132,14 +152,14 @@ const payloadFor = (type: 'decision' | 'claim', text: string, verified = false) 
     ? { statement: text, claimant: BOB, ...(verified ? { verification: 'verified' as const } : {}) }
     : { statement: text, decidedBy: ALICE };
 
-const HUMAN = { kind: 'human', userId: ALICE } as const;
-const MODEL = { kind: 'model', model: 'test-model' } as const;
+const HUMAN: Actor = { kind: 'human', userId: ALICE };
+const MODEL: Actor = { kind: 'model', model: 'test-model' };
 /**
  * A second interpreter. #7 runs two tiers against one room by construction, so
  * "another model reaching for this model's proposals" is the ordinary case, not
  * an adversarial one, and the corpus has to contain it.
  */
-const OTHER_MODEL = { kind: 'model', model: 'other-model' } as const;
+const OTHER_MODEL: Actor = { kind: 'model', model: 'other-model' };
 
 /**
  * A delivery stream: what a server's socket actually hands the reducer, warts
@@ -149,12 +169,14 @@ const OTHER_MODEL = { kind: 'model', model: 'other-model' } as const;
  * Every event a model has no authority to emit is generated on purpose, at a
  * rate that makes each gate fire across the corpus: decisions a model tries to
  * accept (with and without a proposal), claims a model tries to land
- * pre-verified, corrections in all three verbs, and supersessions aimed at
- * decisions. The coverage test below fails if any of them stops occurring.
+ * pre-verified, corrections in all three verbs, supersessions aimed at
+ * decisions, acceptances that mint a payload nobody staged, and acceptances
+ * whose receipt the reducer cannot see. The coverage test below fails if any of
+ * them stops occurring.
  */
-function generateLog(seed: number, size: number): CoreEvent[] {
+function generateLog(seed: number, size: number): AuthoredEvent[] {
   const rng = makeRng(seed);
-  const events: CoreEvent[] = [];
+  const events: AuthoredEvent[] = [];
   const proposals: Staged[] = [];
   const objects: Staged[] = [];
 
@@ -176,26 +198,40 @@ function generateLog(seed: number, size: number): CoreEvent[] {
       // acceptance in the corpus is sometimes one the floor must refuse.
       const proposalId = `prop_${index}`;
       const preBlessed = rng() < 0.25;
+      const text = `proposed ${index}`;
+      const messageId = `msg_${index}`;
+      const staged: Staged = {
+        id: proposalId,
+        roomId,
+        type,
+        text,
+        quote: text,
+        messageId,
+        window: [{ id: messageId, authorId: BOB, body: `and then, ${text}, we agreed` }],
+      };
       events.push(
-        parse({
-          id,
-          at,
-          actor: MODEL,
-          type: 'proposal_recorded',
-          proposal: {
-            id: proposalId,
-            roomId,
-            type,
-            payload: payloadFor(type, `proposed ${index}`),
-            confidence: rng() < 0.3 ? 0.2 : 0.8,
-            proposer: MODEL,
-            provenance: [`msg_${index}`],
-            createdAt: at,
-            ...(preBlessed ? { status: 'accepted' as const } : {}),
+        row(
+          {
+            id,
+            at,
+            type: 'proposal_recorded',
+            proposal: {
+              id: proposalId,
+              roomId,
+              type,
+              payload: payloadFor(type, text),
+              confidence: rng() < 0.3 ? 0.2 : 0.85,
+              proposer: MODEL,
+              provenance: [messageId],
+              quote: text,
+              createdAt: at,
+              ...(preBlessed ? { status: 'accepted' as const } : {}),
+            },
           },
-        }),
+          MODEL,
+        ),
       );
-      proposals.push({ id: proposalId, roomId, type });
+      proposals.push(staged);
       continue;
     }
 
@@ -207,24 +243,26 @@ function generateLog(seed: number, size: number): CoreEvent[] {
       const actor = pick(rng, [MODEL, OTHER_MODEL, HUMAN, { kind: 'system' } as const]);
       const superseding = rng() < 0.5;
       events.push(
-        parse({
-          id,
-          at,
+        row(
+          {
+            id,
+            at,
+            ...(superseding
+              ? {
+                  type: 'proposal_superseded',
+                  proposalId: target.id,
+                  supersededByProposalId:
+                    proposals.length > 1 && rng() < 0.6 ? pick(rng, proposals).id : null,
+                  reason: `re-read ${index}`,
+                }
+              : {
+                  type: 'proposal_rejected',
+                  proposalId: target.id,
+                  reason: `withdrawn ${index}`,
+                }),
+          },
           actor,
-          ...(superseding
-            ? {
-                type: 'proposal_superseded',
-                proposalId: target.id,
-                supersededByProposalId:
-                  proposals.length > 1 && rng() < 0.6 ? pick(rng, proposals).id : null,
-                reason: `re-read ${index}`,
-              }
-            : {
-                type: 'proposal_rejected',
-                proposalId: target.id,
-                reason: `withdrawn ${index}`,
-              }),
-        }),
+        ),
       );
       continue;
     }
@@ -234,7 +272,9 @@ function generateLog(seed: number, size: number): CoreEvent[] {
       // actor is drawn independently of all of that, so the corpus contains
       // model acceptances of decisions (gate: a decision never auto-accepts),
       // model acceptances with no proposal at all (gate: direct acceptance),
-      // and model acceptances of claims that arrive pre-verified (gate: ✓).
+      // model acceptances of claims that arrive pre-verified (gate: ✓), and —
+      // since r2 — acceptances that mint a payload nobody staged, cite messages
+      // nobody staged, or arrive with no window to check at all.
       const staged = proposals.length > 0 && rng() < 0.7 ? pick(rng, proposals) : undefined;
       const direct = staged === undefined && rng() < 0.5;
       const objectId = `obj_${index}`;
@@ -243,27 +283,44 @@ function generateLog(seed: number, size: number): CoreEvent[] {
       const actorRoll = rng();
       const actor = actorRoll < 0.3 ? MODEL : actorRoll < 0.45 ? OTHER_MODEL : HUMAN;
       const verified = objectType === 'claim' && rng() < 0.3;
+      // Most acceptances carry the reading that was staged; some do not, which
+      // is the payload-binding gate. Same for the citation set and the window.
+      const faithful = staged !== undefined && rng() < 0.7;
+      const text = faithful ? staged.text : `accepted ${index}`;
+      const messageIds = faithful ? [staged.messageId] : [`msg_${index}`];
+      const window = staged && rng() < 0.85 ? staged.window : undefined;
       events.push(
-        parse({
-          id,
-          at,
-          actor,
-          type: 'object_accepted',
-          object: {
-            id: objectId,
-            roomId: objectRoom,
-            type: objectType,
-            payload: payloadFor(objectType, `accepted ${index}`, verified),
-            provenance: {
-              messageIds: [`msg_${index}`],
-              proposalId: staged ? staged.id : direct ? null : `prop_ghost_${index}`,
+        row(
+          {
+            id,
+            at,
+            type: 'object_accepted',
+            object: {
+              id: objectId,
+              roomId: objectRoom,
+              type: objectType,
+              payload: payloadFor(objectType, text, verified),
+              provenance: {
+                messageIds,
+                proposalId: staged ? staged.id : direct ? null : `prop_ghost_${index}`,
+              },
+              createdAt: at,
+              updatedAt: at,
             },
-            createdAt: at,
-            updatedAt: at,
           },
-        }),
+          actor,
+          window,
+        ),
       );
-      objects.push({ id: objectId, roomId: objectRoom, type: objectType });
+      objects.push({
+        id: objectId,
+        roomId: objectRoom,
+        type: objectType,
+        text,
+        quote: text,
+        messageId: messageIds[0] as string,
+        window: staged?.window ?? [],
+      });
       continue;
     }
 
@@ -293,27 +350,29 @@ function generateLog(seed: number, size: number): CoreEvent[] {
         return {};
       };
       events.push(
-        parse({
-          id,
-          at,
+        row(
+          {
+            id,
+            at,
+            type: 'object_corrected',
+            objectId: target ? target.id : `obj_ghost_${index}`,
+            action,
+            ...(action === 'retype'
+              ? { toType: pick(rng, ['decision', 'claim', 'open_question'] as const) }
+              : {}),
+            patch: patch(),
+            provenance: { messageIds: [`msg_${index}`], proposalId: null },
+            note: `note ${index}`,
+          },
           actor,
-          type: 'object_corrected',
-          objectId: target ? target.id : `obj_ghost_${index}`,
-          action,
-          ...(action === 'retype'
-            ? { toType: pick(rng, ['decision', 'claim', 'open_question'] as const) }
-            : {}),
-          patch: patch(),
-          provenance: { messageIds: [`msg_${index}`], proposalId: null },
-          note: `note ${index}`,
-        }),
+        ),
       );
       continue;
     }
 
     if (roll < 0.94 && objects.length >= 2) {
       // A relation: often cross-room, often the wrong endpoint types, and
-      // sometimes a model trying to retire a decision.
+      // sometimes a model trying to retire a decision or settle a question.
       let from = pick(rng, objects);
       let to = pick(rng, objects);
       const kind = pick(rng, ['supersedes', 'supersedes', 'answers', 'depends_on', 'blocks']);
@@ -335,20 +394,22 @@ function generateLog(seed: number, size: number): CoreEvent[] {
       }
 
       events.push(
-        parse({
-          id,
-          at,
-          actor,
-          type: 'relation_added',
-          relation: {
-            id: `rel_${index}`,
-            roomId: rng() < 0.8 ? from.roomId : roomId,
-            kind,
-            fromObjectId: from.id,
-            to: { kind: 'object', objectId: to.id },
-            createdAt: at,
+        row(
+          {
+            id,
+            at,
+            type: 'relation_added',
+            relation: {
+              id: `rel_${index}`,
+              roomId: rng() < 0.8 ? from.roomId : roomId,
+              kind,
+              fromObjectId: from.id,
+              to: { kind: 'object', objectId: to.id },
+              createdAt: at,
+            },
           },
-        }),
+          actor,
+        ),
       );
       continue;
     }
@@ -363,21 +424,23 @@ function generateLog(seed: number, size: number): CoreEvent[] {
       ['b', other],
     ] as const) {
       events.push(
-        parse({
-          id: `${id}_tie_${suffix}`,
-          at,
-          actor: HUMAN,
-          type: 'object_accepted',
-          object: {
-            id: `obj_tie_${index}_${suffix}`,
-            roomId: room,
-            type: 'objective',
-            payload: { title: `tie ${index}${suffix}` },
-            provenance: { messageIds: [`msg_${index}`], proposalId: null },
-            createdAt: at,
-            updatedAt: at,
+        row(
+          {
+            id: `${id}_tie_${suffix}`,
+            at,
+            type: 'object_accepted',
+            object: {
+              id: `obj_tie_${index}_${suffix}`,
+              roomId: room,
+              type: 'objective',
+              payload: { title: `tie ${index}${suffix}` },
+              provenance: { messageIds: [`msg_${index}`], proposalId: null },
+              createdAt: at,
+              updatedAt: at,
+            },
           },
-        }),
+          HUMAN,
+        ),
       );
     }
   }
@@ -386,8 +449,8 @@ function generateLog(seed: number, size: number): CoreEvent[] {
 }
 
 /**
- * One aimed attempt at each human-only gate, staged on objects it accepts for
- * itself so nothing else can refuse them first.
+ * One aimed attempt at each gate, staged on objects it accepts for itself so
+ * nothing else can refuse them first.
  *
  * The random log reaches these gates too, but only by luck: a model
  * supersession usually dies on a ghost endpoint or a cross-room edge long
@@ -398,31 +461,65 @@ function generateLog(seed: number, size: number): CoreEvent[] {
  * Timestamps sit past the generator's six-minute pool and before the re-minted
  * redeliveries, so in near-in-order delivery they land at the end of the log.
  */
-function gateProbes(seed: number): CoreEvent[] {
+function gateProbes(seed: number): AuthoredEvent[] {
   const room = ROOMS[0];
   const tag = `probe_${seed}`;
+  const claimWindow = (text: string): ProvenanceMessage[] => [
+    { id: `msg_${tag}`, authorId: BOB, body: `it is true that ${text}` },
+  ];
+
   const object = (
     index: number,
     type: 'decision' | 'claim',
     payload: Record<string, unknown>,
-    actor: typeof HUMAN | typeof MODEL | typeof OTHER_MODEL,
+    actor: Actor,
     proposalId: string | null,
+    messages?: readonly ProvenanceMessage[],
   ) =>
-    parse({
-      id: `${tag}_${index}`,
-      at: stamp(index),
-      actor,
-      type: 'object_accepted',
-      object: {
-        id: `pobj_${seed}_${index}`,
-        roomId: room,
-        type,
-        payload,
-        provenance: { messageIds: [`msg_${tag}`], proposalId },
-        createdAt: stamp(index),
-        updatedAt: stamp(index),
+    row(
+      {
+        id: `${tag}_${index}`,
+        at: stamp(index),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_${index}`,
+          roomId: room,
+          type,
+          payload,
+          provenance: { messageIds: [`msg_${tag}`], proposalId },
+          createdAt: stamp(index),
+          updatedAt: stamp(index),
+        },
       },
-    });
+      actor,
+      messages,
+    );
+
+  const modelClaimProposal = (
+    index: number,
+    proposalId: string,
+    text: string,
+    confidence: number,
+  ) =>
+    row(
+      {
+        id: `${tag}_${index}`,
+        at: stamp(index),
+        type: 'proposal_recorded',
+        proposal: {
+          id: proposalId,
+          roomId: room,
+          type: 'claim',
+          payload: { statement: text, claimant: BOB },
+          confidence,
+          proposer: MODEL,
+          provenance: [`msg_${tag}`],
+          quote: text,
+          createdAt: stamp(index),
+        },
+      },
+      MODEL,
+    );
 
   return [
     // Two decisions a human accepted, for the supersession and correction
@@ -431,22 +528,24 @@ function gateProbes(seed: number): CoreEvent[] {
     object(11, 'decision', { statement: `${tag} second`, decidedBy: ALICE }, HUMAN, null),
     // Gate: a decision never auto-accepts — even through a proposal the model
     // itself staged, which is the whole point of the rule.
-    parse({
-      id: `${tag}_12`,
-      at: stamp(12),
-      actor: MODEL,
-      type: 'proposal_recorded',
-      proposal: {
-        id: `pprop_${seed}`,
-        roomId: room,
-        type: 'decision',
-        payload: { statement: `${tag} proposed`, decidedBy: ALICE },
-        confidence: 0.99,
-        proposer: MODEL,
-        provenance: [`msg_${tag}`],
-        createdAt: stamp(12),
+    row(
+      {
+        id: `${tag}_12`,
+        at: stamp(12),
+        type: 'proposal_recorded',
+        proposal: {
+          id: `pprop_${seed}`,
+          roomId: room,
+          type: 'decision',
+          payload: { statement: `${tag} proposed`, decidedBy: ALICE },
+          confidence: 0.99,
+          proposer: MODEL,
+          provenance: [`msg_${tag}`],
+          createdAt: stamp(12),
+        },
       },
-    }),
+      MODEL,
+    ),
     object(
       13,
       'decision',
@@ -465,70 +564,51 @@ function gateProbes(seed: number): CoreEvent[] {
     // Gate: no proposal, no human, no object.
     object(15, 'claim', { statement: `${tag} direct`, claimant: BOB }, MODEL, null),
     // Gate: retiring an accepted decision is human-only.
-    parse({
-      id: `${tag}_16`,
-      at: stamp(16),
-      actor: MODEL,
-      type: 'relation_added',
-      relation: {
-        id: `prel_${seed}`,
-        roomId: room,
-        kind: 'supersedes',
-        fromObjectId: `pobj_${seed}_11`,
-        to: { kind: 'object', objectId: `pobj_${seed}_10` },
-        createdAt: stamp(16),
+    row(
+      {
+        id: `${tag}_16`,
+        at: stamp(16),
+        type: 'relation_added',
+        relation: {
+          id: `prel_${seed}`,
+          roomId: room,
+          kind: 'supersedes',
+          fromObjectId: `pobj_${seed}_11`,
+          to: { kind: 'object', objectId: `pobj_${seed}_10` },
+          createdAt: stamp(16),
+        },
       },
-    }),
+      MODEL,
+    ),
     // Gate: every correction verb is human-only.
-    parse({
-      id: `${tag}_17`,
-      at: stamp(17),
-      actor: MODEL,
-      type: 'object_corrected',
-      objectId: `pobj_${seed}_10`,
-      action: 'amend',
-      patch: { statement: `${tag} quietly reworded` },
-    }),
+    row(
+      {
+        id: `${tag}_17`,
+        at: stamp(17),
+        type: 'object_corrected',
+        objectId: `pobj_${seed}_10`,
+        action: 'amend',
+        patch: { statement: `${tag} quietly reworded` },
+      },
+      MODEL,
+    ),
 
-    // ── #21's additions to the floor ──────────────────────────────────────
+    // ── #21 r1's additions to the floor ───────────────────────────────────
     //
-    // A low-confidence claim proposal, staged by MODEL, that both new
-    // acceptance gates are aimed at in turn.
-    parse({
-      id: `${tag}_18`,
-      at: stamp(18),
-      actor: MODEL,
-      type: 'proposal_recorded',
-      proposal: {
-        id: `pprop_low_${seed}`,
-        roomId: room,
-        type: 'claim',
-        payload: { statement: `${tag} unsure`, claimant: BOB },
-        confidence: 0.05,
-        proposer: MODEL,
-        provenance: [`msg_${tag}`],
-        createdAt: stamp(18),
-      },
-    }),
+    // A low-confidence claim proposal, staged by MODEL, that both acceptance
+    // gates are aimed at in turn.
+    modelClaimProposal(18, `pprop_low_${seed}`, `${tag} unsure`, 0.05),
     // Gate: a model may not accept a reading it does not stand behind.
-    object(19, 'claim', { statement: `${tag} unsure`, claimant: BOB }, MODEL, `pprop_low_${seed}`),
+    object(
+      19,
+      'claim',
+      { statement: `${tag} unsure`, claimant: BOB },
+      MODEL,
+      `pprop_low_${seed}`,
+      claimWindow(`${tag} unsure`),
+    ),
     // A well-founded proposal, staged by MODEL…
-    parse({
-      id: `${tag}_20`,
-      at: stamp(20),
-      actor: MODEL,
-      type: 'proposal_recorded',
-      proposal: {
-        id: `pprop_own_${seed}`,
-        roomId: room,
-        type: 'claim',
-        payload: { statement: `${tag} confident`, claimant: BOB },
-        confidence: 0.95,
-        proposer: MODEL,
-        provenance: [`msg_${tag}`],
-        createdAt: stamp(20),
-      },
-    }),
+    modelClaimProposal(20, `pprop_own_${seed}`, `${tag} confident`, 0.95),
     // Gate: …that a *different* model tries to accept.
     object(
       21,
@@ -536,43 +616,228 @@ function gateProbes(seed: number): CoreEvent[] {
       { statement: `${tag} confident`, claimant: BOB },
       OTHER_MODEL,
       `pprop_own_${seed}`,
+      claimWindow(`${tag} confident`),
     ),
     // Gate: …and tries to reject.
-    parse({
-      id: `${tag}_22`,
-      at: stamp(22),
-      actor: OTHER_MODEL,
-      type: 'proposal_rejected',
-      proposalId: `pprop_own_${seed}`,
-      reason: `${tag} not mine to withdraw`,
-    }),
-    // Gate: …and tries to supersede.
-    parse({
-      id: `${tag}_23`,
-      at: stamp(23),
-      actor: OTHER_MODEL,
-      type: 'proposal_superseded',
-      proposalId: `pprop_own_${seed}`,
-      supersededByProposalId: null,
-      reason: `${tag} not mine to retire`,
-    }),
-    // Gate: an object filed under an objective that does not exist.
-    parse({
-      id: `${tag}_24`,
-      at: stamp(24),
-      actor: HUMAN,
-      type: 'object_accepted',
-      object: {
-        id: `pobj_${seed}_24`,
-        roomId: room,
-        objectiveId: `obj_no_such_objective_${seed}`,
-        type: 'claim',
-        payload: { statement: `${tag} orphan`, claimant: BOB },
-        provenance: { messageIds: [`msg_${tag}`], proposalId: null },
-        createdAt: stamp(24),
-        updatedAt: stamp(24),
+    row(
+      {
+        id: `${tag}_22`,
+        at: stamp(22),
+        type: 'proposal_rejected',
+        proposalId: `pprop_own_${seed}`,
+        reason: `${tag} not mine to withdraw`,
       },
-    }),
+      OTHER_MODEL,
+    ),
+    // Gate: …and tries to supersede.
+    row(
+      {
+        id: `${tag}_23`,
+        at: stamp(23),
+        type: 'proposal_superseded',
+        proposalId: `pprop_own_${seed}`,
+        supersededByProposalId: null,
+        reason: `${tag} not mine to retire`,
+      },
+      OTHER_MODEL,
+    ),
+    // Gate: an object filed under an objective that does not exist.
+    row(
+      {
+        id: `${tag}_24`,
+        at: stamp(24),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_24`,
+          roomId: room,
+          objectiveId: `obj_no_such_objective_${seed}`,
+          type: 'claim',
+          payload: { statement: `${tag} orphan`, claimant: BOB },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: null },
+          createdAt: stamp(24),
+          updatedAt: stamp(24),
+        },
+      },
+      HUMAN,
+    ),
+
+    // ── #21 r2's additions: the receipt, as a condition of folding ─────────
+    //
+    // Gate: the payload that lands is not the payload that was staged.
+    modelClaimProposal(25, `pprop_bind_${seed}`, `${tag} as staged`, 0.95),
+    object(
+      26,
+      'claim',
+      { statement: `${tag} something else entirely`, claimant: BOB },
+      MODEL,
+      `pprop_bind_${seed}`,
+      claimWindow(`${tag} as staged`),
+    ),
+    // Gate: the citation set changed on the way through acceptance.
+    modelClaimProposal(27, `pprop_cite_${seed}`, `${tag} cited`, 0.95),
+    row(
+      {
+        id: `${tag}_28`,
+        at: stamp(28),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_28`,
+          roomId: room,
+          type: 'claim',
+          payload: { statement: `${tag} cited`, claimant: BOB },
+          provenance: {
+            messageIds: [`msg_${tag}`, `msg_${tag}_extra`],
+            proposalId: `pprop_cite_${seed}`,
+          },
+          createdAt: stamp(28),
+          updatedAt: stamp(28),
+        },
+      },
+      MODEL,
+      claimWindow(`${tag} cited`),
+    ),
+    // Gate: no window at all, so the receipt cannot be checked.
+    modelClaimProposal(29, `pprop_blind_${seed}`, `${tag} unchecked`, 0.95),
+    object(
+      31,
+      'claim',
+      { statement: `${tag} unchecked`, claimant: BOB },
+      MODEL,
+      `pprop_blind_${seed}`,
+    ),
+    // Gate: the claimant wrote none of it — the spike's worst error.
+    modelClaimProposal(32, `pprop_wrong_${seed}`, `${tag} misattributed`, 0.95),
+    object(
+      33,
+      'claim',
+      { statement: `${tag} misattributed`, claimant: BOB },
+      MODEL,
+      `pprop_wrong_${seed}`,
+      [{ id: `msg_${tag}`, authorId: ALICE, body: `it is true that ${tag} misattributed` }],
+    ),
+    // Gate: a commitment somebody else's sentence named.
+    row(
+      {
+        id: `${tag}_34`,
+        at: stamp(34),
+        type: 'proposal_recorded',
+        proposal: {
+          id: `pprop_third_${seed}`,
+          roomId: room,
+          type: 'commitment',
+          payload: { statement: `${tag} land it`, owner: BOB },
+          confidence: 0.95,
+          proposer: MODEL,
+          provenance: [`msg_${tag}`],
+          quote: `${tag} will land it`,
+          createdAt: stamp(34),
+        },
+      },
+      MODEL,
+    ),
+    row(
+      {
+        id: `${tag}_35`,
+        at: stamp(35),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_35`,
+          roomId: room,
+          type: 'commitment',
+          payload: { statement: `${tag} land it`, owner: BOB },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: `pprop_third_${seed}` },
+          createdAt: stamp(35),
+          updatedAt: stamp(35),
+        },
+      },
+      MODEL,
+      [{ id: `msg_${tag}`, authorId: ALICE, body: `${tag} will land it, I think` }],
+    ),
+    // Gate: only a human declares a question answered.
+    row(
+      {
+        id: `${tag}_36`,
+        at: stamp(36),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_36`,
+          roomId: room,
+          type: 'open_question',
+          payload: { question: `${tag} do we?` },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: null },
+          createdAt: stamp(36),
+          updatedAt: stamp(36),
+        },
+      },
+      HUMAN,
+    ),
+    row(
+      {
+        id: `${tag}_37`,
+        at: stamp(37),
+        type: 'relation_added',
+        relation: {
+          id: `prel_ans_${seed}`,
+          roomId: room,
+          kind: 'answers',
+          fromObjectId: `pobj_${seed}_36`,
+          to: { kind: 'object', objectId: `pobj_${seed}_10` },
+          createdAt: stamp(37),
+        },
+      },
+      MODEL,
+    ),
+    // Gate: supersession follows the policy for every type, not just decisions.
+    row(
+      {
+        id: `${tag}_38`,
+        at: stamp(38),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_38`,
+          roomId: room,
+          type: 'commitment',
+          payload: { statement: `${tag} owed`, owner: BOB },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: null },
+          createdAt: stamp(38),
+          updatedAt: stamp(38),
+        },
+      },
+      HUMAN,
+    ),
+    row(
+      {
+        id: `${tag}_39`,
+        at: stamp(39),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_39`,
+          roomId: room,
+          type: 'commitment',
+          payload: { statement: `${tag} owed, restated`, owner: BOB },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: null },
+          createdAt: stamp(39),
+          updatedAt: stamp(39),
+        },
+      },
+      HUMAN,
+    ),
+    row(
+      {
+        id: `${tag}_40`,
+        at: stamp(40),
+        type: 'relation_added',
+        relation: {
+          id: `prel_sup_c_${seed}`,
+          roomId: room,
+          kind: 'supersedes',
+          fromObjectId: `pobj_${seed}_39`,
+          to: { kind: 'object', objectId: `pobj_${seed}_38` },
+          createdAt: stamp(40),
+        },
+      },
+      MODEL,
+    ),
   ];
 }
 
@@ -581,12 +846,12 @@ function gateProbes(seed: number): CoreEvent[] {
  * re-sends the frame it just sent. Applied *after* shuffling, because a
  * redelivery is a property of the wire, not of the log's order.
  */
-function withRedeliveries(events: readonly CoreEvent[], seed: number): CoreEvent[] {
+function withRedeliveries(log: readonly AuthoredEvent[], seed: number): AuthoredEvent[] {
   const rng = makeRng(seed);
-  const out: CoreEvent[] = [];
-  for (const event of events) {
-    out.push(event);
-    if (rng() < 0.15) out.push(event);
+  const out: AuthoredEvent[] = [];
+  for (const entry of log) {
+    out.push(entry);
+    if (rng() < 0.15) out.push(entry);
   }
   return out;
 }
@@ -605,39 +870,42 @@ function withRedeliveries(events: readonly CoreEvent[], seed: number): CoreEvent
  * Appended at the end of the arrival stream, so everything they shadow has
  * already been delivered.
  */
-function withRemintedRedeliveries(events: readonly CoreEvent[], seed: number): CoreEvent[] {
+function withRemintedRedeliveries(log: readonly AuthoredEvent[], seed: number): AuthoredEvent[] {
   const rng = makeRng(seed);
   const seen = new Set<string>();
-  const candidates: CoreEvent[] = [];
-  for (const event of events) {
-    if (seen.has(event.id)) continue;
-    seen.add(event.id);
-    if (rng() < 0.15) candidates.push(event);
+  const candidates: AuthoredEvent[] = [];
+  for (const entry of log) {
+    if (seen.has(entry.event.id)) continue;
+    seen.add(entry.event.id);
+    if (rng() < 0.15) candidates.push(entry);
   }
   return [
-    ...events,
-    ...candidates.map((event, index) => ({ ...event, at: stamp(REMINT_BASE + index) })),
+    ...log,
+    ...candidates.map((entry, index) => ({
+      ...entry,
+      event: { ...entry.event, at: stamp(REMINT_BASE + index) },
+    })),
   ];
 }
 
 interface Rejection {
-  event: CoreEvent;
+  entry: AuthoredEvent;
   reason: string;
 }
 
 interface Run {
   state: CoreState;
-  consumed: CoreEvent[];
+  consumed: AuthoredEvent[];
   rejections: Rejection[];
   /** Ids consumed *with a business issue* — the ones r3 forgot to spend. */
   failedIds: Set<string>;
   counts: Record<string, number>;
 }
 
-/** The live path: one event at a time, in arrival order, through `appendEvent`. */
-function foldLive(events: readonly CoreEvent[]): Run {
+/** The live path: one row at a time, in arrival order, through `appendEvent`. */
+function foldLive(log: readonly AuthoredEvent[]): Run {
   let state = reduce([]);
-  const consumed: CoreEvent[] = [];
+  const consumed: AuthoredEvent[] = [];
   const rejections: Rejection[] = [];
   const failedIds = new Set<string>();
   const counts: Record<string, number> = {
@@ -647,21 +915,24 @@ function foldLive(events: readonly CoreEvent[]): Run {
     duplicate: 0,
   };
 
-  for (const event of events) {
+  for (const entry of log) {
     const before = state;
-    const result = appendEvent(state, event);
+    const result = appendEvent(state, entry.event, entry);
     if (result.outcome === 'rejected') {
       // The rejection contract, asserted on every rejected event of every
       // generated log rather than once by example.
       expect(result.state).toBe(before);
       counts[result.reason] = (counts[result.reason] ?? 0) + 1;
-      rejections.push({ event, reason: result.reason });
+      rejections.push({ entry, reason: result.reason });
       continue;
     }
     expect(wasConsumed(result)).toBe(true);
+    // The actor the outcome reports is the trusted one, not a payload field —
+    // the payload has no such field to report.
+    expect(result.actor).toEqual(entry.actor);
     counts[result.outcome] = (counts[result.outcome] ?? 0) + 1;
-    if (result.outcome === 'applied_with_issue') failedIds.add(event.id);
-    consumed.push(event);
+    if (result.outcome === 'applied_with_issue') failedIds.add(entry.event.id);
+    consumed.push(entry);
     state = result.state;
   }
 
@@ -684,15 +955,15 @@ function roomOfInput(event: CoreEvent): string | null {
  * ordering gate admits only an increasing subsequence, so most events never
  * reach a business rule at all and the rarer gates stop firing.
  */
-function jitter(events: readonly CoreEvent[], seed: number): CoreEvent[] {
+function jitter(log: readonly AuthoredEvent[], seed: number): AuthoredEvent[] {
   const rng = makeRng(seed);
-  const out = [...events].sort((a, b) =>
-    oracleCompare({ at: a.at, id: a.id }, { at: b.at, id: b.id }),
+  const out = [...log].sort((a, b) =>
+    oracleCompare({ at: a.event.at, id: a.event.id }, { at: b.event.at, id: b.event.id }),
   );
   for (let index = 0; index < out.length - 1; index += 1) {
     if (rng() >= 0.25) continue;
-    const here = out[index] as CoreEvent;
-    const next = out[index + 1] as CoreEvent;
+    const here = out[index] as AuthoredEvent;
+    const next = out[index + 1] as AuthoredEvent;
     out[index] = next;
     out[index + 1] = here;
     index += 1;
@@ -703,7 +974,7 @@ function jitter(events: readonly CoreEvent[], seed: number): CoreEvent[] {
 type Delivery = 'shuffled' | 'jittered';
 
 /** The full arrival stream for a seed: generated, disordered, then redelivered. */
-function arrivalStream(seed: number, delivery: Delivery = 'shuffled'): CoreEvent[] {
+function arrivalStream(seed: number, delivery: Delivery = 'shuffled'): AuthoredEvent[] {
   const generated = [...generateLog(seed, 60), ...gateProbes(seed)];
   const disordered =
     delivery === 'shuffled' ? shuffle(generated, seed * 7 + 1) : jitter(generated, seed * 11 + 3);
@@ -712,7 +983,8 @@ function arrivalStream(seed: number, delivery: Delivery = 'shuffled'): CoreEvent
 
 /**
  * Refusal texts the corpus must keep producing, one per gate — the five the
- * scaffold's actor floor holds, and the five #21 added on top of it.
+ * scaffold's actor floor holds, the five #21 r1 added on top of it, and the six
+ * r2 moved into the reducer out of the acceptance engine.
  *
  * The assertion below fails if any of them stops firing, which is the point: a
  * corpus that drifts until a gate is never reached is a corpus that stopped
@@ -722,13 +994,19 @@ const GATE_MARKERS = {
   direct_acceptance: 'only a human may accept an object directly',
   decision_acceptance: 'never auto-accepts',
   claim_verification: 'would become a verified claim',
-  decision_supersession: 'retires an accepted decision',
+  supersession: 'retires an accepted',
   correction: 'corrections (amend, retract, restore)',
   acceptance_binding: 'may only accept its own reading',
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
   confidence_floor: 'below the floor',
   dangling_objective: 'which does not exist',
+  payload_binding: 'does not carry its payload',
+  provenance_binding: 'the receipt may not change on the way through',
+  missing_receipt_context: 'no message window supplied',
+  receipt_failed: 'on a receipt that does not hold',
+  third_party_confirm: 'waits for the named owner to confirm',
+  answer_relation: 'declares an open question answered',
 } as const;
 
 describe('live≡replay — generated logs, an independent oracle, adversarial redeliveries', () => {
@@ -755,7 +1033,9 @@ describe('live≡replay — generated logs, an independent oracle, adversarial r
         const replayed = reduce(expected);
 
         // The reducer and the oracle agree on the sequence …
-        expect(live.consumed.map((event) => event.id)).toEqual(expected.map((event) => event.id));
+        expect(live.consumed.map((entry) => entry.event.id)).toEqual(
+          expected.map((entry) => entry.event.id),
+        );
         // … and folding that sequence in one shot lands on the same bytes.
         expect(serializeState(live.state)).toBe(serializeState(replayed));
 
@@ -763,7 +1043,7 @@ describe('live≡replay — generated logs, an independent oracle, adversarial r
         // nothing is stripped before comparing.
         expect(live.state.issues).toEqual(replayed.issues);
         expect(live.state.consumedEventIds).toEqual(replayed.consumedEventIds);
-        expect(live.state.consumedEventIds).toEqual(expected.map((event) => event.id));
+        expect(live.state.consumedEventIds).toEqual(expected.map((entry) => entry.event.id));
         expect(live.state.cursor).toEqual(replayed.cursor);
         expect(live.state.watermarks).toEqual(replayed.watermarks);
 
@@ -783,17 +1063,17 @@ describe('live≡replay — generated logs, an independent oracle, adversarial r
         sawRemintedDuplicateOfFailure ||= live.rejections.some(
           (rejection) =>
             rejection.reason === 'duplicate' &&
-            rejection.event.at >= stamp(REMINT_BASE) &&
-            live.failedIds.has(rejection.event.id),
+            rejection.entry.event.at >= stamp(REMINT_BASE) &&
+            live.failedIds.has(rejection.entry.event.id),
         );
 
         const roomsByAt = new Map<string, Set<string>>();
-        for (const event of live.consumed) {
-          const room = roomOfInput(event);
+        for (const entry of live.consumed) {
+          const room = roomOfInput(entry.event);
           if (room === null) continue;
-          const set = roomsByAt.get(event.at) ?? new Set<string>();
+          const set = roomsByAt.get(entry.event.at) ?? new Set<string>();
           set.add(room);
-          roomsByAt.set(event.at, set);
+          roomsByAt.set(entry.event.at, set);
         }
         sawCrossRoomTie ||= [...roomsByAt.values()].some((set) => set.size > 1);
       });
@@ -819,21 +1099,23 @@ describe('live≡replay — generated logs, an independent oracle, adversarial r
     expect(sawRemintedDuplicateOfFailure).toBe(true);
     // Two rooms, one timestamp, both consumed — ordered by the global cursor.
     expect(sawCrossRoomTie).toBe(true);
-    // Every human-only gate was reached for by a model somewhere in the corpus.
+    // Every gate was reached for by a model somewhere in the corpus.
     expect([...gatesSeen].sort()).toEqual(Object.keys(GATE_MARKERS).sort());
   });
 
   it('generates the same corpus twice — the stream itself is deterministic', () => {
-    expect(generateLog(42, 40).map((e) => e.id)).toEqual(generateLog(42, 40).map((e) => e.id));
-    expect(arrivalStream(42).map((e) => `${e.id}@${e.at}`)).toEqual(
-      arrivalStream(42).map((e) => `${e.id}@${e.at}`),
+    expect(generateLog(42, 40).map((e) => e.event.id)).toEqual(
+      generateLog(42, 40).map((e) => e.event.id),
+    );
+    expect(arrivalStream(42).map((e) => `${e.event.id}@${e.event.at}`)).toEqual(
+      arrivalStream(42).map((e) => `${e.event.id}@${e.event.at}`),
     );
   });
 
   it('produces same-`at` ties, which is what the id tie-break is for', () => {
-    const events = generateLog(7, 60);
+    const log = generateLog(7, 60);
     const byAt = new Map<string, number>();
-    for (const event of events) byAt.set(event.at, (byAt.get(event.at) ?? 0) + 1);
+    for (const entry of log) byAt.set(entry.event.at, (byAt.get(entry.event.at) ?? 0) + 1);
     expect([...byAt.values()].filter((count) => count > 1).length).toBeGreaterThan(0);
   });
 
@@ -855,14 +1137,47 @@ describe('live≡replay — generated logs, an independent oracle, adversarial r
     const base = generateLog(11, 20);
     const first = base[0];
     if (!first) throw new Error('generator changed');
-    const spentTail = [...base, { ...first, at: stamp(REMINT_BASE) }];
-    const freshTail = [...base, { ...first, id: `${first.id}_fresh`, at: stamp(REMINT_BASE) }];
+    const spentTail = [...base, { ...first, event: { ...first.event, at: stamp(REMINT_BASE) } }];
+    const freshTail = [
+      ...base,
+      {
+        ...first,
+        event: { ...first.event, id: `${first.event.id}_fresh`, at: stamp(REMINT_BASE) },
+      },
+    ];
 
     const spentConsumed = oracleConsumed(spentTail);
     const freshConsumed = oracleConsumed(freshTail);
 
-    expect(spentConsumed.filter((event) => event.id === first.id)).toHaveLength(1);
+    expect(spentConsumed.filter((entry) => entry.event.id === first.event.id)).toHaveLength(1);
     expect(spentConsumed).toHaveLength(freshConsumed.length - 1);
     expect(serializeState(reduce(spentConsumed))).not.toBe(serializeState(reduce(freshConsumed)));
+  });
+
+  it('folds the same rows to a different state under a different actor', () => {
+    // The half the trusted seam adds: the actor is not in the payload, so a
+    // replay that reconstructs it wrongly is not "the same log with a cosmetic
+    // difference" — it is a different history, and it must not fold the same.
+    const payload = {
+      id: 'ev_actor_probe',
+      at: stamp(1),
+      type: 'object_accepted' as const,
+      object: {
+        id: 'obj_actor_probe',
+        roomId: ROOMS[0],
+        type: 'claim' as const,
+        payload: { statement: 'the build is green', claimant: BOB },
+        provenance: { messageIds: ['msg_1'], proposalId: null },
+        createdAt: stamp(1),
+        updatedAt: stamp(1),
+      },
+    };
+    const asHuman = reduce([row(payload, HUMAN)]);
+    const asModel = reduce([row(payload, MODEL)]);
+    expect(asHuman.issues).toEqual([]);
+    // A model cannot accept anything directly, so the same bytes with a
+    // different trusted actor are refused.
+    expect(asModel.issues[0]?.reason).toContain('only a human may accept an object directly');
+    expect(serializeState(asHuman)).not.toBe(serializeState(asModel));
   });
 });

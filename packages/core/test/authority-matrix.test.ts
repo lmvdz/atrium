@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   type AcceptedObjectType,
+  type Actor,
+  type AuthoredEvent,
   type CoreEvent,
   CoreEvent as CoreEventSchema,
   type CoreState,
   type CorrectionAction,
+  type ProvenanceMessage,
   type RelationKind,
   reduce,
   serializeState,
@@ -20,14 +23,25 @@ import { ALICE, BOB } from './fixtures.js';
  * the ones that were not. Here the case space is enumerated — every event type
  * against every kind of actor, and for the types that have sub-shapes (five
  * object types, six correction verbs, five relation kinds, cited-or-direct
- * proposals, above-or-below the confidence floor) every one of those too — and
- * a table written from #4 and `authority.ts`'s doc comment says what each cell
- * should do.
+ * proposals, above-or-below the confidence floor, and since r2 five shapes of
+ * receipt) every one of those too — and a table written from #4 and
+ * `authority.ts`'s doc comment says what each cell should do.
  *
  * **The oracle imports nothing from `../src` except types.** It does not call
- * `isHuman`, `actorMatchesProposer`, or `MODEL_ACCEPTANCE_FLOOR`; it restates
- * them. A shared predicate would make the two sides agree by construction, which
- * is exactly the defect the replay suite's own oracle exists to avoid.
+ * `isHuman`, `actorMatchesProposer`, `MODEL_ACCEPTANCE_FLOOR` or
+ * `acceptanceReceiptRefusal`; it restates them. A shared predicate would make
+ * the two sides agree by construction, which is exactly the defect the replay
+ * suite's own oracle exists to avoid.
+ *
+ * Two things round 2 fixed in the harness itself, both found by the r1 gauntlet:
+ *
+ *  - **The recording actor is drawn independently of the proposer.** It was
+ *    derived from it, so the proposal-lifecycle loop's eight cells were two
+ *    logs run four times each.
+ *  - **"Reaches every gate" walks the reducer's output**, not the oracle's. The
+ *    old version asked the oracle what the oracle would say, which is a
+ *    tautology dressed as a coverage assertion: a gate the reducer had stopped
+ *    firing would still have been "reached".
  */
 
 const ROOM = 'room_1';
@@ -38,16 +52,16 @@ const MODEL_B = 'model-b';
 type ActorKind = 'human' | 'model_proposer' | 'model_other' | 'system';
 const ACTOR_KINDS: ActorKind[] = ['human', 'model_proposer', 'model_other', 'system'];
 
-function actorOf(kind: ActorKind) {
+function actorOf(kind: ActorKind): Actor {
   switch (kind) {
     case 'human':
-      return { kind: 'human', userId: ALICE } as const;
+      return { kind: 'human', userId: ALICE };
     case 'model_proposer':
-      return { kind: 'model', model: MODEL_A } as const;
+      return { kind: 'model', model: MODEL_A };
     case 'model_other':
-      return { kind: 'model', model: MODEL_B } as const;
+      return { kind: 'model', model: MODEL_B };
     case 'system':
-      return { kind: 'system' } as const;
+      return { kind: 'system' };
   }
 }
 
@@ -66,22 +80,41 @@ const GATES = {
   decision_acceptance: 'never auto-accepts',
   claim_verification: 'would become a verified claim',
   direct_acceptance: 'only a human may accept an object directly',
-  decision_supersession: 'retires an accepted decision',
+  supersession: 'retires an accepted',
+  answer_relation: 'declares an open question answered',
   correction: 'corrections (amend, retract, restore)',
   acceptance_binding: 'may only accept its own reading',
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
   confidence_floor: 'below the floor',
+  payload_binding: 'does not carry its payload',
+  provenance_binding: 'the receipt may not change on the way through',
+  missing_receipt_context: 'no message window supplied',
+  receipt_failed: 'on a receipt that does not hold',
+  third_party_confirm: 'waits for the named owner to confirm',
 } as const;
 type Gate = keyof typeof GATES;
 
-/** #4's floor, restated. Decisions are human-only, so the row is unreachable. */
+/**
+ * θ, restated. Round 2 collapsed the reducer's floor into the engine's θ_auto,
+ * so these are #4's confident lines — and a type that never auto-accepts is
+ * unreachable rather than merely high.
+ */
 const FLOOR: Record<AcceptedObjectType, number> = {
   decision: Number.POSITIVE_INFINITY,
-  commitment: 0.5,
-  open_question: 0.4,
-  claim: 0.5,
-  objective: 0.5,
+  commitment: 0.75,
+  open_question: 0.6,
+  claim: 0.7,
+  objective: 0.75,
+};
+
+/** Supersession authority, restated from #4's split by what is retired. */
+const SUPERSESSION_NEEDS_HUMAN: Record<AcceptedObjectType, boolean> = {
+  decision: true,
+  commitment: true,
+  objective: true,
+  claim: false,
+  open_question: false,
 };
 
 const isHumanKind = (kind: ActorKind) => kind === 'human';
@@ -126,6 +159,39 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   return 'allowed';
 }
 
+/** The shapes a receipt can take on the way through acceptance. */
+type ReceiptShape = 'faithful' | 'payload' | 'citations' | 'no_window' | 'wrong_author';
+const RECEIPT_SHAPES: ReceiptShape[] = [
+  'faithful',
+  'payload',
+  'citations',
+  'no_window',
+  'wrong_author',
+];
+
+/**
+ * The receipt row, added in round 2 — every one of these was a call-site manner
+ * before, and a caller that skipped it got an auto-acceptance.
+ *
+ * A human runs none of it: a person accepting a reading has read it.
+ */
+function expectedForReceipt(actor: ActorKind, shape: ReceiptShape): Gate | 'allowed' {
+  if (!ownsProposal(actor, 'model_a')) return 'acceptance_binding';
+  if (isHumanKind(actor)) return 'allowed';
+  switch (shape) {
+    case 'payload':
+      return 'payload_binding';
+    case 'citations':
+      return 'provenance_binding';
+    case 'no_window':
+      return 'missing_receipt_context';
+    case 'wrong_author':
+      return 'receipt_failed';
+    case 'faithful':
+      return 'allowed';
+  }
+}
+
 function expectedForCorrection(actor: ActorKind): Gate | 'allowed' {
   return isHumanKind(actor) ? 'allowed' : 'correction';
 }
@@ -134,11 +200,17 @@ function expectedForRelation(
   actor: ActorKind,
   kind: RelationKind,
   retires: AcceptedObjectType | null,
-) {
-  if (kind === 'supersedes' && retires === 'decision' && !isHumanKind(actor)) {
-    return 'decision_supersession' as const;
+): Gate | 'allowed' {
+  if (kind === 'answers' && !isHumanKind(actor)) return 'answer_relation';
+  if (
+    kind === 'supersedes' &&
+    retires !== null &&
+    SUPERSESSION_NEEDS_HUMAN[retires] &&
+    !isHumanKind(actor)
+  ) {
+    return 'supersession';
   }
-  return 'allowed' as const;
+  return 'allowed';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,22 +226,53 @@ function nextAt(): string {
 
 const parse = (input: unknown): CoreEvent => CoreEventSchema.parse(input);
 
+/** One ledger row: payload, plus the trusted columns. */
+function row(
+  input: unknown,
+  actor: ActorKind,
+  messages?: readonly ProvenanceMessage[],
+): AuthoredEvent {
+  return {
+    event: parse(input),
+    actor: actorOf(actor),
+    ...(messages === undefined ? {} : { messages }),
+  };
+}
+
+/** The sentence each type is read out of, and who wrote it. */
+const TEXT: Record<AcceptedObjectType, string> = {
+  decision: 'a decision',
+  commitment: 'a commitment',
+  open_question: 'a question?',
+  claim: 'a claim',
+  objective: 'an objective',
+};
+
+/** BOB wrote all of it, and BOB is the claimant and the owner. */
+const WINDOW: ProvenanceMessage[] = [
+  { id: 'msg_1', authorId: BOB, body: Object.values(TEXT).join(' — ') },
+];
+/** The same words from somebody else, which breaks every attribution. */
+const WRONG_AUTHOR_WINDOW: ProvenanceMessage[] = [
+  { id: 'msg_1', authorId: ALICE, body: Object.values(TEXT).join(' — ') },
+];
+
 function payloadFor(type: AcceptedObjectType, verified = false): Record<string, unknown> {
   switch (type) {
     case 'decision':
-      return { statement: 'a decision', decidedBy: ALICE };
+      return { statement: TEXT.decision, decidedBy: ALICE };
     case 'commitment':
-      return { statement: 'a commitment', owner: BOB };
+      return { statement: TEXT.commitment, owner: BOB };
     case 'open_question':
-      return { question: 'a question?' };
+      return { question: TEXT.open_question };
     case 'claim':
       return {
-        statement: 'a claim',
+        statement: TEXT.claim,
         claimant: BOB,
         ...(verified ? { verification: 'verified' } : {}),
       };
     case 'objective':
-      return { title: 'an objective' };
+      return { title: TEXT.objective };
   }
 }
 
@@ -179,27 +282,32 @@ function proposalEvent(input: {
   proposer: 'model_a' | 'human';
   confidence: number;
   verified?: boolean;
-}): CoreEvent {
+  /** Who recorded it — drawn independently of who it names as proposer. */
+  recordedBy: ActorKind;
+}): AuthoredEvent {
   const at = nextAt();
-  return parse({
-    id: `ev_${input.id}`,
-    at,
-    actor: input.proposer === 'model_a' ? actorOf('model_proposer') : actorOf('human'),
-    type: 'proposal_recorded',
-    proposal: {
-      id: input.id,
-      roomId: ROOM,
-      type: input.type,
-      payload: payloadFor(input.type, input.verified),
-      confidence: input.confidence,
-      proposer:
-        input.proposer === 'model_a'
-          ? { kind: 'model', model: MODEL_A }
-          : { kind: 'human', userId: ALICE },
-      provenance: ['msg_1'],
-      createdAt: at,
+  return row(
+    {
+      id: `ev_${input.id}`,
+      at,
+      type: 'proposal_recorded',
+      proposal: {
+        id: input.id,
+        roomId: ROOM,
+        type: input.type,
+        payload: payloadFor(input.type, input.verified),
+        confidence: input.confidence,
+        proposer:
+          input.proposer === 'model_a'
+            ? { kind: 'model', model: MODEL_A }
+            : { kind: 'human', userId: ALICE },
+        provenance: ['msg_1'],
+        quote: TEXT[input.type],
+        createdAt: at,
+      },
     },
-  });
+    input.recordedBy,
+  );
 }
 
 function acceptEvent(input: {
@@ -209,31 +317,62 @@ function acceptEvent(input: {
   actor: ActorKind;
   proposalId: string | null;
   verified?: boolean;
-}): CoreEvent {
+  statement?: string;
+  citing?: string[];
+  messages?: readonly ProvenanceMessage[];
+}): AuthoredEvent {
   const at = nextAt();
-  return parse({
-    id: `ev_${input.id}`,
-    at,
-    actor: actorOf(input.actor),
-    type: 'object_accepted',
-    object: {
-      id: input.objectId,
-      roomId: ROOM,
-      type: input.type,
-      payload: payloadFor(input.type, input.verified),
-      provenance: { messageIds: ['msg_1'], proposalId: input.proposalId },
-      createdAt: at,
-      updatedAt: at,
+  const payload = payloadFor(input.type, input.verified);
+  if (input.statement !== undefined) {
+    payload[
+      input.type === 'open_question'
+        ? 'question'
+        : input.type === 'objective'
+          ? 'title'
+          : 'statement'
+    ] = input.statement;
+  }
+  return row(
+    {
+      id: `ev_${input.id}`,
+      at,
+      type: 'object_accepted',
+      object: {
+        id: input.objectId,
+        roomId: ROOM,
+        type: input.type,
+        payload,
+        provenance: { messageIds: input.citing ?? ['msg_1'], proposalId: input.proposalId },
+        createdAt: at,
+        updatedAt: at,
+      },
     },
-  });
+    input.actor,
+    input.messages === undefined ? WINDOW : input.messages,
+  );
 }
 
-/** Did the reducer refuse, and with which gate? */
+/**
+ * Did the reducer refuse, and with which gate?
+ *
+ * Every verdict is recorded in `observed`, which the coverage test at the foot
+ * of the file reads. That set is built from what the *reducer* said — the round-1
+ * version built it from what the oracle predicted, so a gate the reducer had
+ * stopped firing was still "reached".
+ */
+const observed = new Set<Gate | 'allowed'>();
+
 function verdictOf(state: CoreState, eventId: string): Gate | 'allowed' {
   const issue = state.issues.find((entry) => entry.eventId === eventId);
-  if (!issue) return 'allowed';
+  if (!issue) {
+    observed.add('allowed');
+    return 'allowed';
+  }
   for (const [gate, marker] of Object.entries(GATES)) {
-    if (issue.reason.includes(marker)) return gate as Gate;
+    if (issue.reason.includes(marker)) {
+      observed.add(gate as Gate);
+      return gate as Gate;
+    }
   }
   throw new Error(`refusal did not match any known gate: ${issue.reason}`);
 }
@@ -280,7 +419,7 @@ describe('authority matrix — object_accepted, every actor × type × citation 
     const label = `${testCase.actor} accepts ${testCase.type}${testCase.verified ? ' (verified)' : ''} via ${testCase.cited}${testCase.cited === 'none' ? '' : ` @${testCase.confidence} floor`}`;
     it(label, () => {
       const suffix = `${acceptanceCases.indexOf(testCase)}`;
-      const events: CoreEvent[] = [];
+      const events: AuthoredEvent[] = [];
       let proposalId: string | null = null;
 
       if (testCase.cited !== 'none') {
@@ -302,6 +441,8 @@ describe('authority matrix — object_accepted, every actor × type × citation 
             proposer: testCase.cited,
             confidence,
             verified: testCase.verified,
+            // Independent of the proposer, and of the accepting actor.
+            recordedBy: 'model_proposer',
           }),
         );
       }
@@ -327,60 +468,146 @@ describe('authority matrix — object_accepted, every actor × type × citation 
   }
 });
 
-describe('authority matrix — proposal lifecycle, every actor × proposer', () => {
+describe('authority matrix — the receipt, every actor × shape', () => {
   for (const actor of ACTOR_KINDS) {
+    for (const shape of RECEIPT_SHAPES) {
+      it(`${actor} accepts a claim with a ${shape} receipt`, () => {
+        const suffix = `${actor}_${shape}`;
+        const proposalId = `prop_r_${suffix}`;
+        const events: AuthoredEvent[] = [
+          proposalEvent({
+            id: proposalId,
+            type: 'claim',
+            proposer: 'model_a',
+            confidence: 0.95,
+            recordedBy: 'model_proposer',
+          }),
+          acceptEvent({
+            id: `acc_r_${suffix}`,
+            objectId: `obj_r_${suffix}`,
+            type: 'claim',
+            actor,
+            proposalId,
+            ...(shape === 'payload' ? { statement: 'something else entirely' } : {}),
+            ...(shape === 'citations' ? { citing: ['msg_1', 'msg_2'] } : {}),
+            ...(shape === 'no_window' ? { messages: undefined } : {}),
+            ...(shape === 'wrong_author' ? { messages: WRONG_AUTHOR_WINDOW } : {}),
+          }),
+        ];
+        // `undefined` means "supply the default window", so the no-window shape
+        // has to strip the key rather than pass undefined through.
+        if (shape === 'no_window') {
+          const accept = events[1] as AuthoredEvent;
+          events[1] = { event: accept.event, actor: accept.actor };
+        }
+
+        const state = reduce(events);
+        const expected = expectedForReceipt(actor, shape);
+        expect(verdictOf(state, `ev_acc_r_${suffix}`)).toBe(expected);
+        expect(Object.keys(state.objects)).toEqual(
+          expected === 'allowed' ? [`obj_r_${suffix}`] : [],
+        );
+      });
+    }
+  }
+
+  it('refuses a model accepting a commitment it cannot show the owner agreed to', () => {
+    // The sixth receipt gate, which only a commitment can reach: the owner did
+    // not write the message bearing the sentence, so it is #4's third-party case
+    // and it waits for them rather than landing.
+    const proposalId = 'prop_third_party';
+    const state = reduce([
+      proposalEvent({
+        id: proposalId,
+        type: 'commitment',
+        proposer: 'model_a',
+        confidence: 0.95,
+        recordedBy: 'model_proposer',
+      }),
+      acceptEvent({
+        id: 'acc_third_party',
+        objectId: 'obj_third_party',
+        type: 'commitment',
+        actor: 'model_proposer',
+        proposalId,
+        messages: WRONG_AUTHOR_WINDOW,
+      }),
+    ]);
+    expect(verdictOf(state, 'ev_acc_third_party')).toBe('third_party_confirm');
+    expect(state.objects).toEqual({});
+  });
+});
+
+describe('authority matrix — proposal lifecycle, every recorder × actor × proposer', () => {
+  /**
+   * Three independent dimensions, and round 1 collapsed two of them: the actor
+   * that *recorded* the proposal was derived from the proposer, so eight cells
+   * were two logs run four times. Recording is open to everybody by design and
+   * the loop has to be able to see that, rather than assuming it.
+   */
+  for (const recordedBy of ACTOR_KINDS) {
     for (const proposer of ['model_a', 'human'] as const) {
-      it(`${actor} records a ${proposer} proposal`, () => {
+      it(`${recordedBy} records a ${proposer} proposal`, () => {
         // Recording a reading is not accepting it, so no actor is gated here —
         // that is the whole shape of the trust model and it must stay open.
         const state = reduce([
           proposalEvent({
-            id: `p_rec_${actor}_${proposer}`,
+            id: `p_rec_${recordedBy}_${proposer}`,
             type: 'claim',
             proposer,
             confidence: 0.9,
+            recordedBy,
           }),
         ]);
         expect(state.issues).toEqual([]);
+        expect(state.proposals[`p_rec_${recordedBy}_${proposer}`]?.status).toBe('proposed');
       });
 
-      it(`${actor} rejects a ${proposer} proposal`, () => {
-        const id = `p_rej_${actor}_${proposer}`;
-        const state = reduce([
-          proposalEvent({ id, type: 'claim', proposer, confidence: 0.9 }),
-          parse({
-            id: `ev_rej_${id}`,
-            at: nextAt(),
-            actor: actorOf(actor),
-            type: 'proposal_rejected',
-            proposalId: id,
-            reason: 'on reflection, no',
-          }),
-        ]);
-        const expected = ownsProposal(actor, proposer) ? 'allowed' : 'rejection_binding';
-        expect(verdictOf(state, `ev_rej_${id}`)).toBe(expected);
-        expect(state.proposals[id]?.status).toBe(expected === 'allowed' ? 'rejected' : 'proposed');
-      });
+      for (const actor of ACTOR_KINDS) {
+        it(`${actor} rejects a ${proposer} proposal recorded by ${recordedBy}`, () => {
+          const id = `p_rej_${recordedBy}_${actor}_${proposer}`;
+          const state = reduce([
+            proposalEvent({ id, type: 'claim', proposer, confidence: 0.9, recordedBy }),
+            row(
+              {
+                id: `ev_rej_${id}`,
+                at: nextAt(),
+                type: 'proposal_rejected',
+                proposalId: id,
+                reason: 'on reflection, no',
+              },
+              actor,
+            ),
+          ]);
+          const expected = ownsProposal(actor, proposer) ? 'allowed' : 'rejection_binding';
+          expect(verdictOf(state, `ev_rej_${id}`)).toBe(expected);
+          expect(state.proposals[id]?.status).toBe(
+            expected === 'allowed' ? 'rejected' : 'proposed',
+          );
+        });
 
-      it(`${actor} supersedes a ${proposer} proposal`, () => {
-        const id = `p_sup_${actor}_${proposer}`;
-        const state = reduce([
-          proposalEvent({ id, type: 'claim', proposer, confidence: 0.9 }),
-          parse({
-            id: `ev_sup_${id}`,
-            at: nextAt(),
-            actor: actorOf(actor),
-            type: 'proposal_superseded',
-            proposalId: id,
-            reason: 're-read at a bumped interpretation version',
-          }),
-        ]);
-        const expected = ownsProposal(actor, proposer) ? 'allowed' : 'supersession_binding';
-        expect(verdictOf(state, `ev_sup_${id}`)).toBe(expected);
-        expect(state.proposals[id]?.status).toBe(
-          expected === 'allowed' ? 'superseded' : 'proposed',
-        );
-      });
+        it(`${actor} supersedes a ${proposer} proposal recorded by ${recordedBy}`, () => {
+          const id = `p_sup_${recordedBy}_${actor}_${proposer}`;
+          const state = reduce([
+            proposalEvent({ id, type: 'claim', proposer, confidence: 0.9, recordedBy }),
+            row(
+              {
+                id: `ev_sup_${id}`,
+                at: nextAt(),
+                type: 'proposal_superseded',
+                proposalId: id,
+                reason: 're-read at a bumped interpretation version',
+              },
+              actor,
+            ),
+          ]);
+          const expected = ownsProposal(actor, proposer) ? 'allowed' : 'supersession_binding';
+          expect(verdictOf(state, `ev_sup_${id}`)).toBe(expected);
+          expect(state.proposals[id]?.status).toBe(
+            expected === 'allowed' ? 'superseded' : 'proposed',
+          );
+        });
+      }
     }
   }
 });
@@ -399,9 +626,9 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
   function setupFor(
     verb: CorrectionAction,
     suffix: string,
-  ): { events: CoreEvent[]; objectId: string } {
+  ): { events: AuthoredEvent[]; objectId: string } {
     const objectId = `obj_c_${suffix}`;
-    const events: CoreEvent[] = [];
+    const events: AuthoredEvent[] = [];
 
     if (verb === 'reopen') {
       // An answered question: accept a question and a decision, then answer it.
@@ -421,20 +648,22 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
           actor: 'human',
           proposalId: null,
         }),
-        parse({
-          id: `ev_ans_${suffix}`,
-          at: nextAt(),
-          actor: actorOf('human'),
-          type: 'relation_added',
-          relation: {
-            id: `rel_ans_${suffix}`,
-            roomId: ROOM,
-            kind: 'answers',
-            fromObjectId: objectId,
-            to: { kind: 'object', objectId: answerId },
-            createdAt: nextAt(),
+        row(
+          {
+            id: `ev_ans_${suffix}`,
+            at: nextAt(),
+            type: 'relation_added',
+            relation: {
+              id: `rel_ans_${suffix}`,
+              roomId: ROOM,
+              kind: 'answers',
+              fromObjectId: objectId,
+              to: { kind: 'object', objectId: answerId },
+              createdAt: nextAt(),
+            },
           },
-        }),
+          'human',
+        ),
       );
       return { events, objectId };
     }
@@ -452,14 +681,16 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
     );
     if (verb === 'restore') {
       events.push(
-        parse({
-          id: `ev_pre_${suffix}`,
-          at: nextAt(),
-          actor: actorOf('human'),
-          type: 'object_corrected',
-          objectId,
-          action: 'retract',
-        }),
+        row(
+          {
+            id: `ev_pre_${suffix}`,
+            at: nextAt(),
+            type: 'object_corrected',
+            objectId,
+            action: 'retract',
+          },
+          'human',
+        ),
       );
     }
     return { events, objectId };
@@ -479,16 +710,18 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
         const { events, objectId } = setupFor(verb, suffix);
         const correctionId = `ev_corr_${suffix}`;
         events.push(
-          parse({
-            id: correctionId,
-            at: nextAt(),
-            actor: actorOf(actor),
-            type: 'object_corrected',
-            objectId,
-            action: verb,
-            ...(verb === 'retype' ? { toType: 'claim' } : {}),
-            patch: patchFor(verb),
-          }),
+          row(
+            {
+              id: correctionId,
+              at: nextAt(),
+              type: 'object_corrected',
+              objectId,
+              action: verb,
+              ...(verb === 'retype' ? { toType: 'claim' } : {}),
+              patch: patchFor(verb),
+            },
+            actor,
+          ),
         );
 
         const state = reduce(events);
@@ -509,15 +742,17 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
     const objectId = 'obj_verify_probe';
     const state = reduce([
       acceptEvent({ id: 'vp_setup', objectId, type: 'claim', actor: 'human', proposalId: null }),
-      parse({
-        id: 'ev_vp',
-        at: nextAt(),
-        actor: actorOf('model_other'),
-        type: 'object_corrected',
-        objectId,
-        action: 'amend',
-        patch: { verification: 'verified' },
-      }),
+      row(
+        {
+          id: 'ev_vp',
+          at: nextAt(),
+          type: 'object_corrected',
+          objectId,
+          action: 'amend',
+          patch: { verification: 'verified' },
+        },
+        'model_other',
+      ),
     ]);
     expect(verdictOf(state, 'ev_vp')).toBe('claim_verification');
   });
@@ -529,9 +764,13 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
   for (const actor of ACTOR_KINDS) {
     for (const kind of KINDS) {
       // `supersedes` is the only kind whose authority depends on what it points
-      // at, so it is the only one enumerated over the target's type.
+      // at, so it is the only one enumerated over the target's type — and since
+      // round 2 that enumeration has to cover the whole policy table, not just
+      // the decision row of it.
       const targets: AcceptedObjectType[] =
-        kind === 'supersedes' ? ['decision', 'claim', 'open_question'] : ['decision'];
+        kind === 'supersedes'
+          ? ['decision', 'commitment', 'objective', 'claim', 'open_question']
+          : ['decision'];
 
       for (const target of targets) {
         it(`${actor} adds "${kind}"${kind === 'supersedes' ? ` retiring a ${target}` : ''}`, () => {
@@ -541,7 +780,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
           const fromId = `obj_from_${suffix}`;
           const toId = `obj_to_${suffix}`;
 
-          const events: CoreEvent[] = [
+          const events: AuthoredEvent[] = [
             acceptEvent({
               id: `f_${suffix}`,
               objectId: fromId,
@@ -556,23 +795,25 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
               actor: 'human',
               proposalId: null,
             }),
-            parse({
-              id: `ev_rel_${suffix}`,
-              at: nextAt(),
-              actor: actorOf(actor),
-              type: 'relation_added',
-              relation: {
-                id: `rel_${suffix}`,
-                roomId: ROOM,
-                kind,
-                fromObjectId: fromId,
-                to:
-                  kind === 'evidence'
-                    ? { kind: 'message', messageId: 'msg_1' }
-                    : { kind: 'object', objectId: toId },
-                createdAt: nextAt(),
+            row(
+              {
+                id: `ev_rel_${suffix}`,
+                at: nextAt(),
+                type: 'relation_added',
+                relation: {
+                  id: `rel_${suffix}`,
+                  roomId: ROOM,
+                  kind,
+                  fromObjectId: fromId,
+                  to:
+                    kind === 'evidence'
+                      ? { kind: 'message', messageId: 'msg_1' }
+                      : { kind: 'object', objectId: toId },
+                  createdAt: nextAt(),
+                },
               },
-            }),
+              actor,
+            ),
           ];
 
           const state = reduce(events);
@@ -602,20 +843,6 @@ describe('the matrix as a whole', () => {
     expect(distinct.size).toBe(acceptanceCases.length);
   });
 
-  it('reaches every gate in the table, so no marker is dead', () => {
-    const reached = new Set<Gate | 'allowed'>();
-    for (const testCase of acceptanceCases) reached.add(expectedForAcceptance(testCase));
-    for (const actor of ACTOR_KINDS) {
-      reached.add(expectedForCorrection(actor));
-      reached.add(expectedForRelation(actor, 'supersedes', 'decision'));
-      for (const proposer of ['model_a', 'human'] as const) {
-        reached.add(ownsProposal(actor, proposer) ? 'allowed' : 'rejection_binding');
-        reached.add(ownsProposal(actor, proposer) ? 'allowed' : 'supersession_binding');
-      }
-    }
-    expect([...reached].sort()).toEqual([...Object.keys(GATES), 'allowed'].sort());
-  });
-
   it('is not vacuous — the oracle refuses a substantial share of the space', () => {
     const refused = acceptanceCases.filter(
       (entry) => expectedForAcceptance(entry) !== 'allowed',
@@ -628,13 +855,22 @@ describe('the matrix as a whole', () => {
     for (const testCase of acceptanceCases.filter((entry) => entry.actor === 'human')) {
       expect(expectedForAcceptance(testCase)).toBe('allowed');
     }
+    for (const shape of RECEIPT_SHAPES) {
+      expect(expectedForReceipt('human', shape)).toBe('allowed');
+    }
   });
 
   it('folds identically however the cases are ordered', () => {
     // The matrix is about authority, and authority must not depend on arrival
     // order any more than anything else in the reducer does.
     const events = [
-      proposalEvent({ id: 'ord_p', type: 'claim', proposer: 'model_a', confidence: 0.9 }),
+      proposalEvent({
+        id: 'ord_p',
+        type: 'claim',
+        proposer: 'model_a',
+        confidence: 0.9,
+        recordedBy: 'model_proposer',
+      }),
       acceptEvent({
         id: 'ord_a',
         objectId: 'obj_ord',
@@ -644,5 +880,13 @@ describe('the matrix as a whole', () => {
       }),
     ];
     expect(serializeState(reduce(events))).toBe(serializeState(reduce([...events].reverse())));
+  });
+
+  it('reached every gate in the table — walking what the reducer said, not what the oracle predicts', () => {
+    // Round 1 built this set from `expectedFor…`, which asks the oracle whether
+    // the oracle would refuse: a gate the reducer had stopped firing would still
+    // have been "reached". `observed` is filled by `verdictOf` from
+    // `state.issues`, so this fails when the reducer goes quiet.
+    expect([...observed].sort()).toEqual([...Object.keys(GATES), 'allowed'].sort());
   });
 });

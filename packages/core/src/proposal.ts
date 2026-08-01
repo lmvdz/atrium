@@ -60,9 +60,9 @@ const ProposalShape = z.discriminatedUnion('type', [
 ]);
 
 /**
- * The proposal, with the one rule that could not be expressed field-by-field.
+ * The proposal, with the two rules that could not be expressed field-by-field.
  *
- * **A model proposal must cite at least one message.** This was a comment on
+ * **1. A model proposal must cite at least one message.** This was a comment on
  * `provenance` and nothing else — routed out of #19's gauntlet, because a
  * comment is not a constraint. Provenance is the receipt: it is what the UI
  * shows under a `~`, what `validateProposalProvenance` checks a quote against,
@@ -70,14 +70,36 @@ const ProposalShape = z.discriminatedUnion('type', [
  * proposal with no receipt is an assertion, which is the one thing the
  * acceptance boundary exists to refuse. A *human* proposer may cite nothing —
  * a person staging their own reading is the receipt.
+ *
+ * **2. A model proposal that puts a name on somebody must quote them.** Claims
+ * and commitments are the two types that name a person — "X said Y", "X will
+ * do Y" — and r1's gauntlet found the attribution check was satisfied by the
+ * owner having authored *any* cited message, so padding `provenance` with one
+ * message the owner happened to write flipped a third-party commitment into a
+ * self-statement. The fix binds attribution to the message that carries the
+ * sentence, and the only thing that identifies that message is the quote. So
+ * the quote is mandatory here rather than "checked when present": without it
+ * there is no answer to "which message committed them", and the honest reading
+ * of no answer is that nobody did.
  */
 export const Proposal = ProposalShape.superRefine((proposal, ctx) => {
-  if (proposal.proposer.kind === 'model' && proposal.provenance.length === 0) {
+  if (proposal.proposer.kind !== 'model') return;
+  if (proposal.provenance.length === 0) {
     ctx.addIssue({
       code: 'custom',
       path: ['provenance'],
       message:
         'a model proposal must cite at least one source message — a reading with no receipt cannot be checked, and an unbacked `~` is an assertion',
+    });
+  }
+  if (
+    (proposal.type === 'claim' || proposal.type === 'commitment') &&
+    (proposal.quote ?? '').trim().length === 0
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['quote'],
+      message: `a model ${proposal.type} proposal must quote the message that carries it — attribution is decided from the message bearing the sentence, and without the quote there is nothing to identify it`,
     });
   }
 });

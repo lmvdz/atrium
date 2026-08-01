@@ -1,7 +1,9 @@
 import { z } from 'zod';
-import { commitmentAttribution } from './acceptance.js';
+import { decideAcceptance } from './acceptance.js';
 import { Id, Timestamp } from './common.js';
+import type { ProvenanceMessage } from './escalation.js';
 import type { AcceptedObject } from './objects.js';
+import type { AcceptanceConfig } from './policy.js';
 import type { CoreState, ObjectRecord } from './state.js';
 
 /**
@@ -9,9 +11,10 @@ import type { CoreState, ObjectRecord } from './state.js';
  * stored so the UI can page them, but they are always recomputable from the
  * accepted-object graph.
  *
- * `rationale` is required by design: an attention item that cannot say why it
+ * A rationale is required by design: an attention item that cannot say why it
  * needs this person specifically is not allowed to exist (research brief,
- * concept 8).
+ * concept 8). What is *stored* is the structured reason; the sentence is
+ * rendered from it. See `RationaleReason`.
  */
 export const AttentionClass = z.enum([
   'needs_decision',
@@ -33,6 +36,12 @@ export type AttentionStatus = z.infer<typeof AttentionStatus>;
  * the item at a not-yet-existent object id, or inventing a placeholder object,
  * would both be worse than saying which kind of thing this is.
  *
+ * **No default.** It carried `.default('object')` in round 1, which is a footgun
+ * with #22's polymorphic subject column behind it: an item read back from a
+ * store that forgot the column would parse cleanly as an object-subject item and
+ * point its foreign key at a proposal id. A field whose wrong value is
+ * unfalsifiable does not get a default.
+ *
  * (Noted for #22: `attention_items.object_id` is a foreign key onto
  * `accepted_objects`, so persisting a proposal-subject item needs that column to
  * become polymorphic. Core is the layer that discovered it; the migration is not
@@ -41,50 +50,88 @@ export type AttentionStatus = z.infer<typeof AttentionStatus>;
 export const AttentionSubjectKind = z.enum(['object', 'proposal']);
 export type AttentionSubjectKind = z.infer<typeof AttentionSubjectKind>;
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * Rationale — structured, and rendered from trusted templates
+ * ───────────────────────────────────────────────────────────────────────── */
+
+declare const rationaleBrand: unique symbol;
+
+/**
+ * A rendered rationale.
+ *
+ * Branded, so a bare string cannot be passed off as one. Round 1's gauntlet
+ * found the brand did not bind at runtime — the persisted field was
+ * `z.string().min(1)`, so anything non-empty that came back from a store, or in
+ * from an API, was a rationale as far as the schema was concerned, and the
+ * "only one producer" argument held only for code that went through the
+ * producer.
+ *
+ * So the string is no longer the thing that is stored. `AttentionItem.reason` is
+ * a discriminated union with no free text in it except the object's own words,
+ * and the sentence is rendered from it by `rationaleFor` — the only producer,
+ * whose first argument is the person's id. "Why you specifically" is a
+ * constructor argument, and now it is one at runtime too: an attention item
+ * cannot carry a reason that is not one of the eight the product has.
+ */
+export type Rationale = string & { readonly [rationaleBrand]: true };
+
+/**
+ * Why an item was raised, as data.
+ *
+ * Every variant carries only what the template interpolates, and the free-text
+ * fields are quotations of the room's own objects — a statement, a question, the
+ * request a mention carried. Nothing here is a sentence somebody wrote for the
+ * UI to display, which is the property that makes rendering safe: the template
+ * is in this file, under review, and a caller cannot substitute its own.
+ */
+export const RationaleReason = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('decision_pending'),
+    statement: z.string().min(1),
+    assigned: z.boolean(),
+  }),
+  z.object({
+    kind: z.literal('commitment_overdue'),
+    statement: z.string().min(1),
+    due: Timestamp,
+    now: Timestamp,
+  }),
+  z.object({
+    kind: z.literal('commitment_open'),
+    statement: z.string().min(1),
+    due: Timestamp.nullable().default(null),
+  }),
+  z.object({ kind: z.literal('commitment_confirm'), statement: z.string().min(1) }),
+  z.object({
+    kind: z.literal('question_blocks_commitment'),
+    question: z.string().min(1),
+    commitment: z.string().min(1),
+  }),
+  z.object({
+    kind: z.literal('question_blocks_objective'),
+    question: z.string().min(1),
+    objective: z.string().min(1),
+  }),
+  z.object({ kind: z.literal('question_names_you'), question: z.string().min(1) }),
+  z.object({ kind: z.literal('mention'), request: z.string().min(1) }),
+]);
+export type RationaleReason = z.infer<typeof RationaleReason>;
+
 export const AttentionItem = z.object({
   id: Id,
   roomId: Id,
   userId: Id,
   /** The accepted object, or the staged proposal — see `subjectKind`. */
   objectId: Id,
-  subjectKind: AttentionSubjectKind.default('object'),
+  subjectKind: AttentionSubjectKind,
   class: AttentionClass,
-  /** Why this person specifically. Never empty. */
-  rationale: z.string().min(1),
+  /** Why this person specifically, as data. Rendered by `rationaleFor`. */
+  reason: RationaleReason,
   status: AttentionStatus.default('pending'),
   createdAt: Timestamp,
 });
 export type AttentionItem = z.infer<typeof AttentionItem>;
 export type AttentionItemInput = z.input<typeof AttentionItem>;
-
-/* ─────────────────────────────────────────────────────────────────────────
- * Rationale — enforced by the type system, not by a convention
- * ───────────────────────────────────────────────────────────────────────── */
-
-declare const rationaleBrand: unique symbol;
-
-/**
- * A rationale that names the person and the reason.
- *
- * Branded, so `buildAttentionItem` cannot be handed a bare string. The zod
- * schema's `min(1)` catches an empty rationale at the boundary; this catches the
- * thing that actually happens, which is not an empty rationale but a lazy one —
- * somebody in a hurry passing `"needs attention"` and moving on. There is
- * exactly one way to make a `Rationale`, it takes the person's id, and it
- * cannot produce an empty string. That is the enforcement the research brief's
- * concept 8 asks for: *"why you specifically"* is a constructor argument.
- */
-export type Rationale = string & { readonly [rationaleBrand]: true };
-
-export type RationaleReason =
-  | { kind: 'decision_pending'; statement: string; assigned: boolean }
-  | { kind: 'commitment_overdue'; statement: string; due: Timestamp; now: Timestamp }
-  | { kind: 'commitment_open'; statement: string; due: Timestamp | null }
-  | { kind: 'commitment_confirm'; statement: string }
-  | { kind: 'question_blocks_commitment'; question: string; commitment: string }
-  | { kind: 'question_blocks_objective'; question: string; objective: string }
-  | { kind: 'question_names_you'; question: string }
-  | { kind: 'mention'; request: string };
 
 /**
  * The only producer of a `Rationale`.
@@ -121,6 +168,11 @@ export function rationaleFor(userId: Id, reason: RationaleReason): Rationale {
       return `${you} — ${JSON.stringify(exhaustive)}` as Rationale;
     }
   }
+}
+
+/** The sentence for a stored item. The one way to get text out of one. */
+export function renderRationale(item: Pick<AttentionItem, 'userId' | 'reason'>): Rationale {
+  return rationaleFor(item.userId, item.reason);
 }
 
 function clip(text: string, limit = 140): string {
@@ -236,10 +288,38 @@ export interface AttentionContext {
    * here so the silence is a known consequence rather than a mystery.
    */
   members?: Readonly<Record<Id, readonly Id[]>>;
-  /** `messageId → authorId`, for commitment attribution. */
-  messageAuthors?: Readonly<Record<Id, Id>>;
+  /**
+   * The window's messages — the same input `decideAcceptance` takes, because
+   * every proposal-derived item here *is* an acceptance decision.
+   *
+   * Round 1's gauntlet: the confirm path fail-opened without message authorship,
+   * so every staged commitment read as third-party and everybody named in one
+   * got a confirm they never needed to be asked for. It refuses now: a proposal
+   * whose messages are not supplied raises nothing and is reported in
+   * `AttentionProjection.refusals`.
+   */
+  messages?: readonly ProvenanceMessage[];
+  /** The θ table to judge proposals by. Defaults to the product's. */
+  config?: AcceptanceConfig;
   mentions?: readonly MentionSignal[];
   questionMentions?: readonly QuestionMentionSignal[];
+}
+
+/** A proposal the projection declined to judge, and why. */
+export interface AttentionRefusal {
+  proposalId: Id;
+  reason: string;
+}
+
+export interface AttentionProjection {
+  items: ComputedAttentionItem[];
+  /**
+   * Proposals that could have raised an item and were not judged, because a
+   * required input was missing. Empty in normal operation; non-empty means a
+   * caller is asking for a projection it has not supplied the evidence for, and
+   * the honest answer to that is silence *plus a receipt for the silence*.
+   */
+  refusals: AttentionRefusal[];
 }
 
 /**
@@ -249,22 +329,35 @@ export interface AttentionContext {
  * tiebreak, so two nodes computing it from the same state produce identical
  * bytes — the same property the reducer has, for the same reason.
  *
- * Backwards-compatible with the scaffold's `computeAttention(state, now)`: a
- * bare timestamp is read as a context with nothing else set.
+ * **Proposal-derived items ask `decideAcceptance`.** They used to apply their
+ * own reading of θ, and round 1's gauntlet found the two disagreeing in both
+ * directions: below θ_min the engine discarded a commitment while the panel
+ * still asked its owner to confirm one, and inside the θ band the engine stayed
+ * quiet while the panel raised a Needs-you. One source of truth now — if the
+ * engine would not surface it, the panel does not raise it.
  */
-export function computeAttention(
+export function projectAttention(
   state: CoreState,
   context: AttentionContext | Timestamp,
-): ComputedAttentionItem[] {
+): AttentionProjection {
   const ctx: AttentionContext = typeof context === 'string' ? { now: context } : context;
   const items: ComputedAttentionItem[] = [];
+  const refusals: AttentionRefusal[] = [];
 
-  for (const item of decisionItems(state, ctx)) items.push(item);
+  for (const item of proposalItems(state, ctx, refusals)) items.push(item);
   for (const item of commitmentItems(state, ctx)) items.push(item);
   for (const item of blockingQuestionItems(state, ctx)) items.push(item);
   for (const item of mentionItems(ctx)) items.push(item);
 
-  return sortAttention(items);
+  return { items: sortAttention(items), refusals };
+}
+
+/** `projectAttention`, when the caller only wants the panel. */
+export function computeAttention(
+  state: CoreState,
+  context: AttentionContext | Timestamp,
+): ComputedAttentionItem[] {
+  return projectAttention(state, context).items;
 }
 
 /** Live means: accepted, not retracted, not superseded. */
@@ -273,60 +366,98 @@ function isLive(record: ObjectRecord | undefined): record is ObjectRecord {
 }
 
 function item(
-  input: Omit<ComputedAttentionItem, 'status' | 'rationale' | 'subjectKind'> & {
-    rationale: Rationale;
-    subjectKind?: AttentionSubjectKind;
-  },
+  input: Omit<ComputedAttentionItem, 'status' | 'reason'> & { reason: RationaleReason },
 ): ComputedAttentionItem {
-  return {
-    ...input,
-    subjectKind: input.subjectKind ?? 'object',
-    status: 'pending',
-  };
+  return { ...input, status: 'pending' };
 }
 
-/** `needs_decision` — a staged decision waiting on a person. */
-function decisionItems(state: CoreState, ctx: AttentionContext): ComputedAttentionItem[] {
+/**
+ * Everything a staged proposal raises: `needs_decision`, and the owner-confirm
+ * shape of `owned_commitment`.
+ *
+ * Both go through `decideAcceptance`, so the panel and the engine cannot
+ * disagree about what a proposal in the θ band means — and so a proposal the
+ * engine cannot judge (no messages) raises nothing rather than raising
+ * everything.
+ */
+function proposalItems(
+  state: CoreState,
+  ctx: AttentionContext,
+  refusals: AttentionRefusal[],
+): ComputedAttentionItem[] {
   const out: ComputedAttentionItem[] = [];
+
   for (const proposalId of Object.keys(state.proposals).sort()) {
     const record = state.proposals[proposalId];
     if (record?.status !== 'proposed') continue;
     const { proposal } = record;
-    if (proposal.type !== 'decision') continue;
+    if (proposal.type !== 'decision' && proposal.type !== 'commitment') continue;
 
-    const statement = proposal.payload.statement;
-    const named = proposal.payload.decidedBy;
-    const audience = named !== null ? [named] : [...(ctx.members?.[proposal.roomId] ?? [])].sort();
-
-    for (const userId of audience) {
-      out.push(
-        item({
-          id: `attn:${userId}:${proposal.id}:needs_decision`,
-          roomId: proposal.roomId,
-          userId,
-          objectId: proposal.id,
-          subjectKind: 'proposal',
-          class: 'needs_decision',
-          priority: ATTENTION_PRIORITY.needs_decision,
-          createdAt: ctx.now,
-          rationale: rationaleFor(userId, {
-            kind: 'decision_pending',
-            statement,
-            assigned: named !== null,
-          }),
-        }),
-      );
+    const verdict = decideAcceptance(proposal, {
+      messages: ctx.messages as readonly ProvenanceMessage[],
+      ...(ctx.config ? { config: ctx.config } : {}),
+    });
+    if (verdict.rule === 'missing_message_context') {
+      refusals.push({
+        proposalId: proposal.id,
+        reason:
+          'no message window was supplied, so this proposal could not be judged — raising it anyway would ask somebody to confirm a commitment nobody can show they were named in',
+      });
+      continue;
     }
+    if (verdict.visibility !== 'needs_you') continue;
+
+    if (proposal.type === 'decision') {
+      const statement = proposal.payload.statement;
+      const named = proposal.payload.decidedBy;
+      const audience =
+        named !== null ? [named] : [...(ctx.members?.[proposal.roomId] ?? [])].sort();
+      for (const userId of audience) {
+        out.push(
+          item({
+            id: `attn:${userId}:${proposal.id}:needs_decision`,
+            roomId: proposal.roomId,
+            userId,
+            objectId: proposal.id,
+            subjectKind: 'proposal',
+            class: 'needs_decision',
+            priority: ATTENTION_PRIORITY.needs_decision,
+            createdAt: ctx.now,
+            reason: { kind: 'decision_pending', statement, assigned: named !== null },
+          }),
+        );
+      }
+      continue;
+    }
+
+    // A commitment only asks anybody anything when somebody else's sentence put
+    // their name on it — which is exactly `awaitingConfirmFrom`.
+    const owner = verdict.awaitingConfirmFrom;
+    if (owner === null) continue;
+    out.push(
+      item({
+        id: `attn:${owner}:${proposal.id}:owned_commitment`,
+        roomId: proposal.roomId,
+        userId: owner,
+        objectId: proposal.id,
+        subjectKind: 'proposal',
+        class: 'owned_commitment',
+        priority: ATTENTION_PRIORITY.commitment_confirm,
+        createdAt: ctx.now,
+        reason: { kind: 'commitment_confirm', statement: proposal.payload.statement },
+      }),
+    );
   }
+
   return out;
 }
 
 /**
- * `owned_commitment` — three shapes: overdue, open, and awaiting your confirm.
+ * `owned_commitment` for objects: overdue, and open.
  *
- * The confirm shape is the interesting one and it comes from a *proposal*, not
- * an object: a commitment somebody else's sentence put your name on is staged,
- * never accepted, until you say so (#4). It sorts above an ordinary open
+ * The third shape — awaiting your confirm — comes from a *proposal* and lives in
+ * `proposalItems`: a commitment somebody else's sentence put your name on is
+ * staged, never accepted, until you say so (#4). It sorts above an ordinary open
  * commitment because it is a question, and below an overdue one because an
  * overdue commitment is already late.
  */
@@ -347,50 +478,15 @@ function commitmentItems(state: CoreState, ctx: AttentionContext): ComputedAtten
         roomId: object.roomId,
         userId: owner,
         objectId: object.id,
+        subjectKind: 'object',
         class: 'owned_commitment',
         priority: overdue
           ? ATTENTION_PRIORITY.commitment_overdue
           : ATTENTION_PRIORITY.commitment_open,
         createdAt: ctx.now,
-        rationale: overdue
-          ? rationaleFor(owner, {
-              kind: 'commitment_overdue',
-              statement,
-              due: due as Timestamp,
-              now: ctx.now,
-            })
-          : rationaleFor(owner, { kind: 'commitment_open', statement, due }),
-      }),
-    );
-  }
-
-  for (const proposalId of Object.keys(state.proposals).sort()) {
-    const record = state.proposals[proposalId];
-    if (record?.status !== 'proposed') continue;
-    const { proposal } = record;
-    if (proposal.type !== 'commitment') continue;
-
-    // Only a third-party attribution asks anybody anything. A self-stated
-    // commitment that has not cleared θ is just a quiet proposal.
-    const messages = ctx.messageAuthors
-      ? Object.entries(ctx.messageAuthors).map(([id, authorId]) => ({ id, authorId, body: '' }))
-      : undefined;
-    if (commitmentAttribution(proposal.payload.owner, proposal.provenance, messages) === 'self') {
-      continue;
-    }
-
-    const { owner, statement } = proposal.payload;
-    out.push(
-      item({
-        id: `attn:${owner}:${proposal.id}:owned_commitment`,
-        roomId: proposal.roomId,
-        userId: owner,
-        objectId: proposal.id,
-        subjectKind: 'proposal',
-        class: 'owned_commitment',
-        priority: ATTENTION_PRIORITY.commitment_confirm,
-        createdAt: ctx.now,
-        rationale: rationaleFor(owner, { kind: 'commitment_confirm', statement }),
+        reason: overdue
+          ? { kind: 'commitment_overdue', statement, due: due as Timestamp, now: ctx.now }
+          : { kind: 'commitment_open', statement, due },
       }),
     );
   }
@@ -409,7 +505,7 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Compute
   const out: ComputedAttentionItem[] = [];
   const seen = new Set<string>();
 
-  const push = (userId: Id, question: ObjectRecord, rationale: Rationale): void => {
+  const push = (userId: Id, question: ObjectRecord, reason: RationaleReason): void => {
     const id = `attn:${userId}:${question.object.id}:blocking_question`;
     if (seen.has(id)) return;
     seen.add(id);
@@ -419,10 +515,11 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Compute
         roomId: question.object.roomId,
         userId,
         objectId: question.object.id,
+        subjectKind: 'object',
         class: 'blocking_question',
         priority: ATTENTION_PRIORITY.blocking_question,
         createdAt: ctx.now,
-        rationale,
+        reason,
       }),
     );
   };
@@ -439,14 +536,10 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Compute
   for (const signal of [...(ctx.questionMentions ?? [])].sort(compareQuestionMention)) {
     const question = openQuestion(signal.questionObjectId);
     if (question?.object.type !== 'open_question') continue;
-    push(
-      signal.userId,
-      question,
-      rationaleFor(signal.userId, {
-        kind: 'question_names_you',
-        question: question.object.payload.question,
-      }),
-    );
+    push(signal.userId, question, {
+      kind: 'question_names_you',
+      question: question.object.payload.question,
+    });
   }
 
   const relations = [...state.relations].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -460,29 +553,21 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Compute
     const questionText = question.object.payload.question;
     if (blocked.object.type === 'commitment') {
       const owner = blocked.object.payload.owner;
-      push(
-        owner,
-        question,
-        rationaleFor(owner, {
-          kind: 'question_blocks_commitment',
-          question: questionText,
-          commitment: blocked.object.payload.statement,
-        }),
-      );
+      push(owner, question, {
+        kind: 'question_blocks_commitment',
+        question: questionText,
+        commitment: blocked.object.payload.statement,
+      });
       continue;
     }
     if (blocked.object.type === 'objective') {
       const title = blocked.object.payload.title;
       for (const userId of [...(ctx.members?.[question.object.roomId] ?? [])].sort()) {
-        push(
-          userId,
-          question,
-          rationaleFor(userId, {
-            kind: 'question_blocks_objective',
-            question: questionText,
-            objective: title,
-          }),
-        );
+        push(userId, question, {
+          kind: 'question_blocks_objective',
+          question: questionText,
+          objective: title,
+        });
       }
     }
   }
@@ -509,10 +594,11 @@ function mentionItems(ctx: AttentionContext): ComputedAttentionItem[] {
       roomId: signal.roomId,
       userId: signal.userId,
       objectId: signal.objectId,
+      subjectKind: 'object',
       class: 'mention',
       priority: ATTENTION_PRIORITY.mention,
       createdAt: ctx.now,
-      rationale: rationaleFor(signal.userId, { kind: 'mention', request: signal.request }),
+      reason: { kind: 'mention', request: signal.request },
     }),
   );
 }
@@ -684,7 +770,15 @@ export function sinceCursorCounts(state: CoreState, input: SinceCursorInput): Si
   return { attention, byClass, changes, quiet: attention === 0 && changes === 0 };
 }
 
-/** All the objects that would be counted as changed — for a UI that lists them. */
+/**
+ * All the objects that would be counted as changed — for a UI that lists them.
+ *
+ * "Changed" is `updatedAt`, not `acceptedAt`: this answers "what should I look
+ * at", and an object accepted last week and corrected this morning is a thing
+ * that moved this morning. It is deliberately *not* the same population
+ * `sinceCursorCounts` counts — that one counts events, this one lists objects,
+ * and one object can be three events.
+ */
 export function changedSince(
   state: CoreState,
   roomId: Id,

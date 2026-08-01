@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bearingMessage,
+  CONCESSION_MARKERS,
   contentTokens,
+  defaultEscalationConfig,
   type EscalationMessage,
   type EscalationTriggerKind,
   evaluateEscalation,
+  FUTURE_PATTERNS,
   hasReplyBlockquote,
   lexicalOverlap,
   normalizeForMatch,
   type ProvenanceProblemKind,
   provenanceIsClean,
   replyBlockquotes,
+  SED_CORRECTION,
   stripReplyBlockquotes,
   triggersForMessage,
   validateProposalProvenance,
@@ -159,7 +164,111 @@ describe('trigger 2 — concession markers', () => {
   });
 });
 
+describe('trigger 2 — every marker in the table, one case each', () => {
+  /**
+   * The round-1 gauntlet's test-vacuity finding, closed: three of twenty-one
+   * markers were exercised and the rest were decoration — deleting them left the
+   * suite green. This drives the cases *from the array*, so every entry is
+   * exercised, and pins the array by value, so deleting one fails here even
+   * though the table would happily shrink with it. Both halves are needed: the
+   * table alone cannot notice a row that stopped existing.
+   */
+  it('is exactly this list', () => {
+    expect(CONCESSION_MARKERS).toEqual([
+      'you are right',
+      "you're right",
+      'you were right',
+      'i was wrong',
+      "i'm wrong",
+      'i am wrong',
+      'i stand corrected',
+      'my mistake',
+      'my bad',
+      'correction',
+      'corrected',
+      'actually',
+      'never mind',
+      'nevermind',
+      'scratch that',
+      'disregard that',
+      'on second thought',
+      'fair enough',
+      'good point',
+      'i take that back',
+      'withdrawn',
+    ]);
+  });
+
+  for (const marker of CONCESSION_MARKERS) {
+    it(`fires on "${marker}", and names it as the evidence`, () => {
+      const message: EscalationMessage = { id: 'm', authorId: 'a', body: `Ok. ${marker}.` };
+      const triggers = triggersForMessage(message).filter(
+        (trigger) => trigger.kind === 'concession_marker',
+      );
+      expect(triggers).toHaveLength(1);
+      // Exactly this marker, not merely "some marker fired": an entry whose
+      // evidence is always another entry's is an entry that does nothing.
+      expect(triggers[0]?.evidence).toBe(marker);
+    });
+  }
+
+  it('fires on the sed form, which is in no word list', () => {
+    const triggers = triggersForMessage({ id: 'm', authorId: 'a', body: 's/line 8/line 7/' });
+    expect(triggers.map((trigger) => trigger.kind)).toEqual(['concession_marker']);
+    expect(SED_CORRECTION.test('s/line 8/line 7/')).toBe(true);
+    // …and not on a path or a URL, which is what the `\b` and the closing slash
+    // are for.
+    expect(SED_CORRECTION.test('docs/api/v1/')).toBe(false);
+    expect(SED_CORRECTION.test('https://example.com/x/')).toBe(false);
+  });
+});
+
 describe('trigger 3 — named-person future tense', () => {
+  /**
+   * Five patterns, and round 1 exercised two. Each case below matches exactly
+   * one pattern — asserted, not assumed — so deleting any pattern drops its case
+   * and the suite goes red rather than quietly covering less.
+   */
+  const CASES: Array<{ pattern: number; body: string; evidence: string }> = [
+    { pattern: 0, body: '@dhlolo will take the narrowing fix.', evidence: '@dhlolo will' },
+    { pattern: 1, body: 'you should rerun the suite first', evidence: 'you should' },
+    { pattern: 2, body: 'Can you rerun the RWC suite?', evidence: 'Can you' },
+    { pattern: 3, body: '@dhlolo take the branch cut this week', evidence: '@dhlolo take' },
+    { pattern: 4, body: 'please review the patch before Friday', evidence: 'please review' },
+  ];
+
+  it('is exactly these five patterns', () => {
+    expect(FUTURE_PATTERNS.map(String)).toEqual([
+      '/@[\\w-]+\\s+(?:will|should|can|could|needs? to|is going to|has to|must|please)\\b/i',
+      '/\\byou\\s+(?:will|should|need to|needs to|ought to|have to|must|can|could)\\b/i',
+      '/\\b(?:can|could|would|will)\\s+you\\b/i',
+      '/@[\\w-]+[,:]?\\s+(?:please|take|handle|own|pick up)\\b/i',
+      '/\\bplease\\s+(?:can|could|take|handle|own|pick up|review|land|ship)\\b/i',
+    ]);
+  });
+
+  it('has a case for every pattern', () => {
+    expect(CASES.map((entry) => entry.pattern)).toEqual(
+      FUTURE_PATTERNS.map((_pattern, index) => index),
+    );
+  });
+
+  for (const testCase of CASES) {
+    it(`pattern ${testCase.pattern} fires on "${testCase.body}"`, () => {
+      // Exactly one pattern matches, so this case is testing the one it claims.
+      const matching = FUTURE_PATTERNS.map((pattern, index) =>
+        pattern.test(testCase.body) ? index : -1,
+      ).filter((index) => index >= 0);
+      expect(matching).toEqual([testCase.pattern]);
+
+      const triggers = triggersForMessage({ id: 'm', authorId: 'a', body: testCase.body });
+      const future = triggers.find((trigger) => trigger.kind === 'named_person_future');
+      expect(future?.evidence).toBe(testCase.evidence);
+    });
+  }
+});
+
+describe('trigger 3 — the corpus shapes', () => {
   it('fires on somebody committing somebody else', () => {
     const triggers = triggersForMessage(messageThirdPartyCommitment);
     const future = triggers.find((trigger) => trigger.kind === 'named_person_future');
@@ -216,6 +325,97 @@ describe('trigger 4 — overlap with an accepted decision', () => {
 
   it('drops stopwords and short tokens before comparing', () => {
     expect([...contentTokens('the and for it is a to be')].sort()).toEqual([]);
+  });
+});
+
+describe('defaultEscalationConfig — pinned by value, and by what it does', () => {
+  /**
+   * Round 1: the config had no by-value test at all, so every threshold in it
+   * could be changed without a single assertion noticing — including the ones
+   * the trigger tests draw their fixtures from.
+   */
+  it('is exactly this table', () => {
+    expect(defaultEscalationConfig).toEqual({
+      minQuoteLength: 24,
+      decisionOverlapThreshold: 0.5,
+      decisionOverlapMinTokens: 3,
+      maxScanChars: 20000,
+      maxHistoryScanned: 200,
+      maxComparedDecisions: 200,
+    });
+  });
+
+  it('puts the quote-length line exactly where the number says', () => {
+    // Literal lengths on both sides: nothing here moves when the config does.
+    const quote = (length: number) => 'ab '.repeat(Math.ceil(length / 3)).slice(0, length);
+    expect(normalizeForMatch(quote(23)).length).toBeLessThan(24);
+    expect(
+      triggersForMessage({ id: 'm', authorId: 'a', body: `> ${quote(23)}\nmine` }).map(
+        (trigger) => trigger.kind,
+      ),
+    ).toEqual([]);
+    expect(
+      triggersForMessage({ id: 'm', authorId: 'a', body: `> ${quote(30)}\nmine` }).map(
+        (trigger) => trigger.kind,
+      ),
+    ).toEqual(['reply_blockquote']);
+  });
+
+  it('bounds the work per call, so content cannot choose the cost', () => {
+    // The cap, observed rather than asserted about: a marker past `maxScanChars`
+    // is not read, which is the visible consequence of not scanning it. Without
+    // a bound, normalization is linear in whatever somebody pastes.
+    const filler = 'x'.repeat(defaultEscalationConfig.maxScanChars);
+    const message: EscalationMessage = { id: 'm', authorId: 'a', body: `${filler} you are right` };
+    expect(kinds(message)).toEqual([]);
+    expect(kinds({ ...message, body: `you are right ${filler}` })).toEqual(['concession_marker']);
+  });
+
+  it('bounds the decisions compared against one message', () => {
+    const decision = { objectId: 'obj_real', statement: 'narrowing resets on mutating calls' };
+    const padding = Array.from(
+      { length: defaultEscalationConfig.maxComparedDecisions },
+      (_, i) => ({
+        objectId: `obj_pad_${i}`,
+        statement: `unrelated padding statement number ${i} about compilers`,
+      }),
+    );
+    const body = 'narrowing resets on mutating calls, we decided';
+    // Inside the cap it fires…
+    expect(
+      triggersForMessage({ id: 'm', authorId: 'a', body }, [], [decision, ...padding]).some(
+        (trigger) => trigger.kind === 'accepted_decision_overlap',
+      ),
+    ).toBe(true);
+    // …and a decision pushed past it is simply not compared.
+    expect(
+      triggersForMessage({ id: 'm', authorId: 'a', body }, [], [...padding, decision]).some(
+        (trigger) => trigger.kind === 'accepted_decision_overlap',
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('bearingMessage — which message actually carries the sentence', () => {
+  it('finds the message whose own text contains the quote', () => {
+    const found = bearingMessage('The error occurs on line 8 not line 5', [
+      messageOpener,
+      messageQuotingOpener,
+    ]);
+    expect(found?.id).toBe(messageQuotingOpener.id);
+  });
+
+  it('does not count a message that was only quoting it', () => {
+    // messageQuotingOpener reproduces every word of messageOpener inside a
+    // blockquote. That is the trap, and this is the function that refuses it.
+    const quoted = 'I just ran into a problem with this for the first time';
+    expect(bearingMessage(quoted, [messageQuotingOpener])).toBeNull();
+    expect(bearingMessage(quoted, [messageOpener])?.id).toBe(messageOpener.id);
+  });
+
+  it('is null for a quote nobody wrote, and for an empty one', () => {
+    expect(bearingMessage('nobody ever said this', [messageOpener])).toBeNull();
+    expect(bearingMessage('   ', [messageOpener])).toBeNull();
   });
 });
 
@@ -396,6 +596,49 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       messages,
     );
     expect(problems).toEqual(['attributed_person_not_author']);
+  });
+
+  it('does not let a padded citation list flip attribution', () => {
+    /**
+     * Round 1's gauntlet, major 5. The owner authored *a* cited message — an
+     * unrelated one — and the check read that as a self-statement. Cite the
+     * message where somebody else committed them, plus any message they ever
+     * wrote, and an obligation nobody agreed to auto-accepts.
+     *
+     * The finding is bound to the message bearing the sentence now, so the
+     * padding is inert.
+     */
+    const window = [
+      { id: 'm_pad', authorId: DHLOLO, body: 'Morning all, the CI is green again.' },
+      { id: 'm_commit', authorId: JORDAN, body: '@dhlolo will land the narrowing fix on Friday.' },
+    ];
+    const subject = {
+      type: 'commitment' as const,
+      provenance: ['m_pad', 'm_commit'],
+      quote: '@dhlolo will land the narrowing fix on Friday.',
+      proposer: { kind: 'model' as const },
+      attributedTo: DHLOLO,
+    };
+    const problems = validateProposalProvenance(subject, window);
+    expect(problems.map((problem) => problem.kind)).toEqual(['attributed_person_not_author']);
+    expect(problems[0]?.messageId).toBe('m_commit');
+    expect(problems[0]?.detail).toContain('the message bearing it');
+
+    // …and when the owner really did write the bearing sentence, it is clean —
+    // the check has not simply become "always third-party".
+    expect(
+      validateProposalProvenance(
+        {
+          ...subject,
+          quote: "I'll land the narrowing fix on Friday.",
+          provenance: ['m_pad', 'm_self'],
+        },
+        [
+          ...window,
+          { id: 'm_self', authorId: DHLOLO, body: "I'll land the narrowing fix on Friday." },
+        ],
+      ),
+    ).toEqual([]);
   });
 
   it('reports the same finding at different severities for claim and commitment', () => {

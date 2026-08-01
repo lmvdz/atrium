@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { Actor, emptyProvenance, Id, Provenance, Timestamp } from './common.js';
+import { type Actor, emptyProvenance, Id, Provenance, Timestamp } from './common.js';
+import type { ProvenanceMessage } from './escalation.js';
 import { AcceptedObject, AcceptedObjectType } from './objects.js';
 import { Proposal } from './proposal.js';
 import { Relation } from './relations.js';
@@ -7,6 +8,25 @@ import { Relation } from './relations.js';
 /**
  * The event log the reducer folds. Nothing is ever mutated in place and nothing
  * is ever erased — a correction is another event (init.md §5).
+ *
+ * ## The actor is not in here, and that is the whole point
+ *
+ * Round 1's gauntlet rated this blocking, from the boundary rather than from an
+ * exploit: every human-only gate in `authority.ts` reads `event.actor`, and
+ * `event.actor` was part of the payload. A payload is whatever the writer says
+ * it is. An interpretation worker emitting `{"actor":{"kind":"human","userId":
+ * "alice"}}` was Alice, as far as four rounds of trust gates were concerned —
+ * and "the caller is trusted" stops being true the moment there is a second
+ * writer, a replayed log, or a bug.
+ *
+ * So the actor left. It is not an optional field, not a stripped field, not a
+ * field the reducer overwrites: **the event schema has no place to put one**,
+ * and `CoreEvent` refuses at parse time to accept an input that carries one, so
+ * a forged actor cannot even be silently dropped on the floor — it is an error
+ * with a message that says where the actor belongs instead.
+ *
+ * Where it belongs is `TrustedContext`, handed to `appendEvent` beside the
+ * event. See that type for the exact seam #22 implements against.
  */
 
 /**
@@ -54,7 +74,6 @@ export type CorrectionAction = z.infer<typeof CorrectionAction>;
 const eventBase = {
   id: Id,
   at: Timestamp,
-  actor: Actor,
 };
 
 export const ProposalRecorded = z.object({
@@ -117,11 +136,11 @@ export const ObjectCorrected = z.object({
   /**
    * Where the correction came from — the messages that motivated it (#19 r1:
    * "correction events must carry provenance/attribution, not just payload
-   * before/after"). Attribution is `actor`, which every event carries; this is
-   * the other half. A correction with a receipt can be shown next to the thing
-   * it corrected; one without is an unexplained edit, and the counterexample
-   * extractor that feeds corrections back into the interpretation prompt (#5)
-   * has nothing to point at.
+   * before/after"). Attribution is the trusted actor, which every append
+   * carries out of band; this is the other half. A correction with a receipt can
+   * be shown next to the thing it corrected; one without is an unexplained edit,
+   * and the counterexample extractor that feeds corrections back into the
+   * interpretation prompt (#5) has nothing to point at.
    */
   provenance: Provenance.default(emptyProvenance),
   note: z.string().nullable().default(null),
@@ -133,7 +152,8 @@ export const RelationAdded = z.object({
   relation: Relation,
 });
 
-export const CoreEvent = z.discriminatedUnion('type', [
+/** The payload union, before the no-actor guard. Exposed for `.options`. */
+export const CoreEventVariants = z.discriminatedUnion('type', [
   ProposalRecorded,
   ProposalRejected,
   ProposalSuperseded,
@@ -141,6 +161,84 @@ export const CoreEvent = z.discriminatedUnion('type', [
   ObjectCorrected,
   RelationAdded,
 ]);
-export type CoreEvent = z.infer<typeof CoreEvent>;
-export type CoreEventInput = z.input<typeof CoreEvent>;
+
+/**
+ * An event payload, refusing any actor an author tries to smuggle in with it.
+ *
+ * Zod strips unknown keys by default, which would have been the *quiet* fix:
+ * the forged actor would vanish and the event would fold happily under whatever
+ * actor the command layer supplied. That is safe and it is not honest — a
+ * worker sending an actor field believes it is doing something, and it should
+ * be told it is not, at the boundary, once. So the guard runs before the union
+ * and turns it into a parse error naming the seam.
+ */
+export const CoreEvent = z
+  .unknown()
+  .superRefine((value, ctx) => {
+    if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['actor'],
+        message:
+          'an event payload may not carry an actor — the actor is a trusted argument to appendEvent, derived from the authenticated session, never from the payload',
+      });
+    }
+  })
+  .pipe(CoreEventVariants);
+
+export type CoreEvent = z.infer<typeof CoreEventVariants>;
+export type CoreEventInput = z.input<typeof CoreEventVariants>;
 export type CoreEventType = CoreEvent['type'];
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * The trusted seam
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Everything the reducer is allowed to believe that did **not** come out of the
+ * event payload. This is the interface #22 implements.
+ *
+ * ## `actor`
+ *
+ * Derived from the authenticated session at the command layer — a signed-in
+ * user id for a human, the worker's own model identity for an interpretation
+ * pass, the process identity for the system actor. It is never read off the
+ * request body, and it is what every human-only gate in `authority.ts` consults.
+ *
+ * When the event is persisted, the actor is stored **as a column** on the ledger
+ * row (`core_events.actor_kind` / `actor_id`), written by the same transaction
+ * that assigns `room_seq`. It is not part of the payload jsonb. A replay reads
+ * the column back and hands it here — so a replayed log carries exactly the
+ * authority the live append had, and nothing a payload says can change it.
+ *
+ * ## `messages`
+ *
+ * The messages a receipt check can be run against: at minimum every message the
+ * accepted proposal cites. Also a trusted read (the room's own message table),
+ * also never payload.
+ *
+ * **Required for any non-human acceptance.** Round 1's second blocking finding
+ * was that provenance validation was opt-in: omit the window and the problem
+ * set came back empty and the reading auto-accepted. Now the reducer refuses a
+ * non-human `object_accepted` whose cited messages it cannot see. A human
+ * acceptance needs nothing here — a person reading the room *is* the receipt.
+ */
+export interface TrustedContext {
+  actor: Actor;
+  messages?: readonly ProvenanceMessage[];
+}
+
+/**
+ * One ledger row, as `reduce` folds it: the payload plus its trusted columns.
+ *
+ * `reduce(log)` takes these, not bare events, because a replay must reconstruct
+ * the authority of the original append and the payload cannot supply it.
+ */
+export interface AuthoredEvent extends TrustedContext {
+  event: CoreEvent;
+}
+
+/** Pair an event with its trusted context. */
+export function authored(event: CoreEvent, trusted: TrustedContext): AuthoredEvent {
+  return { ...trusted, event };
+}

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type AuthoredEvent,
   type CoreEvent,
   type CoreState,
+  confirmedAt,
   correctionChain,
   correctionChains,
   correctionCounterexamples,
@@ -32,7 +34,7 @@ const corrected = (
     objectId: string;
     action: 'amend' | 'retract' | 'restore' | 'retype' | 'reattribute' | 'reopen';
   },
-): CoreEvent =>
+): AuthoredEvent =>
   event({
     actor: human(),
     type: 'object_corrected',
@@ -40,7 +42,8 @@ const corrected = (
   } as Parameters<typeof event>[0]);
 
 /** A claim accepted by a model, through its own proposal — so it starts at `~`. */
-function modelAcceptedClaim(): CoreEvent[] {
+function modelAcceptedClaim(): AuthoredEvent[] {
+  const messages = [{ id: 'msg_1', authorId: BOB, body: 'the build is green' }];
   return [
     event({
       id: 'ev_mp',
@@ -55,6 +58,7 @@ function modelAcceptedClaim(): CoreEvent[] {
         confidence: 0.9,
         proposer: { kind: 'model', model: 'test-model' },
         provenance: ['msg_1'],
+        quote: 'the build is green',
         createdAt: at(1),
       },
     }),
@@ -62,6 +66,7 @@ function modelAcceptedClaim(): CoreEvent[] {
       id: 'ev_ma',
       at: at(2),
       actor: model(),
+      messages,
       type: 'object_accepted',
       object: {
         id: 'obj_model_claim',
@@ -360,7 +365,11 @@ describe('reopen — the prior answer stays on the record', () => {
   });
 
   it('refuses to reopen a question that is already open', () => {
-    const state = reduce([...sampleLog(), reopen, { ...reopen, id: 'ev_again', at: at(10) }]);
+    const state = reduce([
+      ...sampleLog(),
+      reopen,
+      { ...reopen, event: { ...reopen.event, id: 'ev_again', at: at(10) } },
+    ]);
     expect(state.issues).toHaveLength(1);
     expect(state.issues[0]?.reason).toContain('already open');
   });
@@ -394,7 +403,7 @@ describe('reopen — the prior answer stays on the record', () => {
 
 describe('replay after an arbitrary correction chain', () => {
   /** Every verb, in an order that exercises each one against a live object. */
-  function chainedLog(): CoreEvent[] {
+  function chainedLog(): AuthoredEvent[] {
     return [
       ...sampleLog(),
       corrected({
@@ -507,6 +516,39 @@ describe('epistemic state — `~` until a person touches it', () => {
     expect(record.acceptedBy).toEqual({ kind: 'human', userId: ALICE });
   });
 
+  it('says when it became a fact, or that it is not one yet', () => {
+    // `confirmedAt` was untested in round 1 and named in the gauntlet's polish
+    // list. Three cases, and the middle one is the interesting one: an object a
+    // machine read and a person later corrected becomes a fact at the
+    // *correction*, not at the acceptance.
+    const staged = reduce(modelAcceptedClaim());
+    const stagedRecord = staged.objects.obj_model_claim;
+    if (!stagedRecord) throw new Error('fixture changed');
+    expect(confirmedAt(stagedRecord)).toBeNull();
+
+    const touched = reduce([
+      ...modelAcceptedClaim(),
+      corrected({
+        id: 'ev_touch2',
+        at: at(4),
+        objectId: 'obj_model_claim',
+        action: 'amend',
+        patch: { statement: 'the build is green on main' },
+      }),
+    ]);
+    const touchedRecord = touched.objects.obj_model_claim;
+    if (!touchedRecord) throw new Error('fixture changed');
+    expect(confirmedAt(touchedRecord)).toBe(at(4));
+    expect(touchedRecord.acceptedAt).toBe(at(2));
+
+    // A human acceptance is a fact from the moment it was accepted, and stays
+    // dated there even after later corrections move `updatedAt`.
+    const direct = reduce(sampleLog()).objects.obj_decision_1;
+    if (!direct) throw new Error('fixture changed');
+    expect(confirmedAt(direct)).toBe(at(2));
+    expect(direct.updatedAt).toBe(at(7));
+  });
+
   it('keeps `verification` on a separate axis from `~`/`✓`', () => {
     // "✓ unverified" is a real and important state: we are sure somebody said
     // it, not that it is true.
@@ -598,10 +640,14 @@ describe('counterexamples for the interpretation prompt', () => {
     expect(retract?.text).toContain('was not one, and it was withdrawn');
   });
 
-  it('formats a block ready to inject, including the room’s own words', () => {
+  it('formats a block ready to inject, quoting the note as a note', () => {
     const block = formatCounterexamples(correctedState(), { limit: 2 });
     expect(block).toContain('do not repeat their shape');
-    expect(block).toContain('the room said: "not a commitment at all"');
+    // "the room said" narrated a speech act nobody performed — a note typed into
+    // a correction form is not a sentence the room uttered, and CONVENTIONS is
+    // explicit that the system never synthesizes speech.
+    expect(block).toContain('correction note: "not a commitment at all"');
+    expect(block).not.toContain('the room said');
     expect(block.split('\n').filter((line) => line.startsWith('- '))).toHaveLength(2);
   });
 

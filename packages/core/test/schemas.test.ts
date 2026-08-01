@@ -3,12 +3,16 @@ import {
   AcceptedObject,
   AcceptedObjectType,
   AttentionItem,
+  CoreEvent,
+  type CoreEventInput,
   Proposal,
   Relation,
   RelationKind,
+  rationaleFor,
   relationShapeError,
+  renderRationale,
 } from '../src/index.js';
-import { ALICE, at, ROOM } from './fixtures.js';
+import { ALICE, at, BOB, ROOM } from './fixtures.js';
 
 describe('accepted object schemas', () => {
   it('covers exactly the five first-class types from issue #3', () => {
@@ -124,6 +128,46 @@ describe('proposal schema', () => {
     expect(parsed.quote).toBe('we should ship it behind a flag');
   });
 
+  it('requires that quote when a model puts a name on somebody', () => {
+    // Attribution is decided from the message *bearing* the sentence, and the
+    // quote is the only thing that identifies it. Without the quote there is no
+    // answer to "which message committed them", so there is no proposal either.
+    const claim = { ...valid, type: 'claim', payload: { statement: 'x said y', claimant: BOB } };
+    const unquoted = Proposal.safeParse(claim);
+    expect(unquoted.success).toBe(false);
+    expect(unquoted.error?.issues[0]?.path).toEqual(['quote']);
+    expect(unquoted.error?.issues[0]?.message).toContain('bearing the sentence');
+    expect(Proposal.safeParse({ ...claim, quote: '   ' }).success).toBe(false);
+    expect(Proposal.safeParse({ ...claim, quote: 'x said y' }).success).toBe(true);
+
+    const commitment = {
+      ...valid,
+      type: 'commitment',
+      payload: { statement: 'land it', owner: BOB },
+    };
+    expect(Proposal.safeParse(commitment).success).toBe(false);
+    expect(Proposal.safeParse({ ...commitment, quote: "I'll land it" }).success).toBe(true);
+  });
+
+  it('does not require a quote from a human proposer, or on a type that names nobody', () => {
+    expect(
+      Proposal.safeParse({
+        ...valid,
+        type: 'claim',
+        payload: { statement: 'x said y', claimant: BOB },
+        proposer: { kind: 'human', userId: ALICE },
+      }).success,
+    ).toBe(true);
+    expect(Proposal.safeParse({ ...valid, type: 'open_question' as const }).success).toBe(false);
+    expect(
+      Proposal.safeParse({
+        ...valid,
+        type: 'open_question',
+        payload: { question: 'do we?' },
+      }).success,
+    ).toBe(true);
+  });
+
   it('constrains confidence to 0..1', () => {
     expect(Proposal.safeParse({ ...valid, confidence: 1.5 }).success).toBe(false);
     expect(Proposal.safeParse({ ...valid, confidence: -0.1 }).success).toBe(false);
@@ -134,6 +178,55 @@ describe('proposal schema', () => {
     expect(
       Proposal.safeParse({ ...valid, type: 'commitment', payload: { statement: 'x' } }).success,
     ).toBe(false);
+  });
+});
+
+describe('the event envelope — an actor cannot be forged because there is nowhere to put one', () => {
+  const accepted = {
+    id: 'ev_1',
+    at: at(1),
+    type: 'object_accepted' as const,
+    object: {
+      id: 'obj_1',
+      roomId: ROOM,
+      type: 'decision' as const,
+      payload: { statement: 'do it' },
+      createdAt: at(1),
+      updatedAt: at(1),
+    },
+  };
+
+  it('parses an event that carries no actor', () => {
+    const parsed = CoreEvent.parse(accepted);
+    expect(parsed).not.toHaveProperty('actor');
+    expect(Object.keys(parsed)).not.toContain('actor');
+  });
+
+  it('refuses a payload that carries one, rather than stripping it silently', () => {
+    // The round-1 blocking finding, closed at the boundary: a worker that sends
+    // `actor: {kind:"human"}` is not quietly ignored, it is told no. Zod would
+    // have dropped the key by default, which is safe and dishonest.
+    const forged = CoreEvent.safeParse({ ...accepted, actor: { kind: 'human', userId: ALICE } });
+    expect(forged.success).toBe(false);
+    expect(forged.error?.issues[0]?.path).toEqual(['actor']);
+    expect(forged.error?.issues[0]?.message).toContain('trusted argument to appendEvent');
+  });
+
+  it('refuses a forged actor on every event type', () => {
+    const payloads = [
+      accepted,
+      { id: 'ev_2', at: at(2), type: 'proposal_rejected', proposalId: 'p' },
+      { id: 'ev_3', at: at(3), type: 'object_corrected', objectId: 'o', action: 'retract' },
+    ];
+    for (const one of payloads) {
+      expect(CoreEvent.safeParse({ ...one, actor: { kind: 'system' } }).success).toBe(false);
+    }
+  });
+
+  it('will not type-check either, which is the half that catches it before runtime', () => {
+    // @ts-expect-error — `actor` is not a member of any event variant.
+    const attempt: CoreEventInput = { ...accepted, actor: { kind: 'system' } };
+    expect(CoreEvent.safeParse(attempt).success).toBe(false);
   });
 });
 
@@ -194,17 +287,51 @@ describe('relation schema', () => {
 });
 
 describe('attention item schema', () => {
-  it('requires a non-empty rationale — no unexplained attention', () => {
-    const base = {
-      id: 'attn_1',
-      roomId: ROOM,
-      userId: ALICE,
-      objectId: 'obj_1',
-      class: 'owned_commitment',
-      createdAt: at(1),
-    };
-    expect(AttentionItem.safeParse({ ...base, rationale: '' }).success).toBe(false);
+  const base = {
+    id: 'attn_1',
+    roomId: ROOM,
+    userId: ALICE,
+    objectId: 'obj_1',
+    subjectKind: 'object',
+    class: 'owned_commitment',
+    createdAt: at(1),
+  };
+  const reason = { kind: 'commitment_open', statement: 'wire the flag in', due: null };
+
+  it('requires a structured reason — no unexplained attention, and no free text', () => {
     expect(AttentionItem.safeParse(base).success).toBe(false);
-    expect(AttentionItem.parse({ ...base, rationale: 'you own it' }).status).toBe('pending');
+    // The round-1 shape: a bare string that satisfied `min(1)` and meant
+    // nothing. The brand did not bind at runtime, so this is what a store or an
+    // API could hand back and have accepted.
+    expect(AttentionItem.safeParse({ ...base, reason: 'because' }).success).toBe(false);
+    expect(AttentionItem.safeParse({ ...base, rationale: 'you own it' }).success).toBe(false);
+    expect(AttentionItem.parse({ ...base, reason }).status).toBe('pending');
+  });
+
+  it('refuses a reason kind the product does not have', () => {
+    expect(
+      AttentionItem.safeParse({ ...base, reason: { kind: 'because_i_said_so', statement: 'x' } })
+        .success,
+    ).toBe(false);
+  });
+
+  it('refuses an empty quotation inside a well-formed reason', () => {
+    expect(
+      AttentionItem.safeParse({ ...base, reason: { kind: 'commitment_confirm', statement: '' } })
+        .success,
+    ).toBe(false);
+  });
+
+  it('has no default for subjectKind — the wrong value there is unfalsifiable', () => {
+    // #22's subject column is polymorphic: an item that silently defaults to
+    // `object` points a foreign key at a proposal id and nothing complains.
+    const { subjectKind: _dropped, ...withoutKind } = base;
+    expect(AttentionItem.safeParse({ ...withoutKind, reason }).success).toBe(false);
+  });
+
+  it('renders its sentence from the reason, naming the person first', () => {
+    const item = AttentionItem.parse({ ...base, reason });
+    expect(renderRationale(item)).toBe(rationaleFor(ALICE, item.reason));
+    expect(renderRationale(item).startsWith(`@${ALICE} — `)).toBe(true);
   });
 });

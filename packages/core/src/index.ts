@@ -15,6 +15,7 @@ export * from './epistemic.js';
 export * from './escalation.js';
 export * from './events.js';
 export * from './objects.js';
+export * from './policy.js';
 export * from './ports.js';
 export * from './proposal.js';
 export * from './reduce.js';

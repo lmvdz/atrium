@@ -74,8 +74,12 @@ const files = sourceFiles();
 describe('the zero-I/O boundary', () => {
   it('finds the source it is supposed to be checking', () => {
     // A glob that silently matches nothing is a test that always passes.
-    expect(files.length).toBeGreaterThanOrEqual(12);
-    expect(files.map((file) => file.split('/').at(-1))).toContain('reduce.ts');
+    expect(files.length).toBeGreaterThanOrEqual(14);
+    const names = files.map((file) => file.split('/').at(-1));
+    expect(names).toContain('reduce.ts');
+    // The θ table moved into its own module in r2; a scan that missed it would
+    // miss the numbers every trust boundary is built on.
+    expect(names).toContain('policy.ts');
   });
 
   it('imports nothing but zod and its own relative modules', () => {

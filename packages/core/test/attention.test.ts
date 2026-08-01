@@ -4,13 +4,17 @@ import {
   AttentionClass,
   type AttentionContext,
   AttentionItem,
+  type AuthoredEvent,
   type ComputedAttentionItem,
-  type CoreEvent,
+  changedSince,
   computeAttention,
   dismissAttention,
+  type ProvenanceMessage,
+  projectAttention,
   rationaleFor,
   reconcileAttention,
   reduce,
+  renderRationale,
   resolveAttention,
   sinceCursorCounts,
   sortAttention,
@@ -26,12 +30,29 @@ import { ALICE, at, BOB, event, human, model, ROOM, sampleLog } from './fixtures
 const CAROL = 'user_carol';
 const MEMBERS = { [ROOM]: [ALICE, BOB, CAROL] };
 
+/**
+ * The window every proposal here is read out of. `msg_bob` is BOB committing
+ * somebody else, which is the sentence #4 spends most of its length on.
+ */
+const MESSAGES: ProvenanceMessage[] = [
+  { id: 'msg_1', authorId: ALICE, body: 'Reset narrowing on mutating method calls.' },
+  { id: 'msg_bob', authorId: BOB, body: 'Land the narrowing fix, please.' },
+];
+
+/** The context every test starts from: a window, so proposals can be judged. */
+const context = (extra: Partial<AttentionContext> = {}): AttentionContext => ({
+  now: at(20),
+  messages: MESSAGES,
+  ...extra,
+});
+
 /** A staged decision proposal, which is what `needs_decision` waits on. */
 function decisionProposal(overrides: {
   id: string;
   at: string;
   decidedBy?: string | null;
-}): CoreEvent {
+  confidence?: number;
+}): AuthoredEvent {
   return event({
     id: `ev_${overrides.id}`,
     at: overrides.at,
@@ -45,16 +66,22 @@ function decisionProposal(overrides: {
         statement: 'Reset narrowing on mutating method calls',
         ...(overrides.decidedBy ? { decidedBy: overrides.decidedBy } : {}),
       },
-      confidence: 0.9,
+      confidence: overrides.confidence ?? 0.9,
       proposer: { kind: 'model', model: 'test-model' },
       provenance: ['msg_1'],
+      quote: 'Reset narrowing on mutating method calls.',
       createdAt: overrides.at,
     },
   });
 }
 
-/** A staged commitment proposal naming somebody who wrote none of the messages. */
-function thirdPartyCommitment(overrides: { id: string; at: string; owner: string }): CoreEvent {
+/** A staged commitment proposal naming somebody who did not write the sentence. */
+function thirdPartyCommitment(overrides: {
+  id: string;
+  at: string;
+  owner: string;
+  confidence?: number;
+}): AuthoredEvent {
   return event({
     id: `ev_${overrides.id}`,
     at: overrides.at,
@@ -65,9 +92,10 @@ function thirdPartyCommitment(overrides: { id: string; at: string; owner: string
       roomId: ROOM,
       type: 'commitment',
       payload: { statement: 'Land the narrowing fix', owner: overrides.owner },
-      confidence: 0.9,
+      confidence: overrides.confidence ?? 0.9,
       proposer: { kind: 'model', model: 'test-model' },
       provenance: ['msg_bob'],
+      quote: 'Land the narrowing fix, please.',
       createdAt: overrides.at,
     },
   });
@@ -76,23 +104,28 @@ function thirdPartyCommitment(overrides: { id: string; at: string; owner: string
 const classesOf = (items: readonly ComputedAttentionItem[]) => items.map((entry) => entry.class);
 
 describe('every generated item has a rationale that names the person', () => {
-  it('is required by the schema — an empty one cannot exist', () => {
+  it('is structured, and rendered — the string is not the stored thing', () => {
     const base = {
       id: 'attn_1',
       roomId: ROOM,
       userId: ALICE,
       objectId: 'obj_1',
+      subjectKind: 'object',
       class: 'owned_commitment',
       createdAt: at(1),
     };
-    expect(AttentionItem.safeParse({ ...base, rationale: '' }).success).toBe(false);
     expect(AttentionItem.safeParse(base).success).toBe(false);
+    expect(AttentionItem.safeParse({ ...base, reason: 'because' }).success).toBe(false);
+    expect(
+      AttentionItem.safeParse({ ...base, reason: { kind: 'commitment_confirm', statement: 'x' } })
+        .success,
+    ).toBe(true);
   });
 
   it('is produced by exactly one function, which takes the person as an argument', () => {
-    // The type-level half: `rationaleFor` is the only producer of the branded
-    // `Rationale` that the item builder accepts, and its first parameter is the
-    // user id. "Why you specifically" is a constructor argument, not a habit.
+    // "Why you specifically" is a constructor argument, not a habit — and now a
+    // runtime constraint too: the reason is a closed union, so a caller cannot
+    // substitute its own sentence.
     const rationale = rationaleFor(BOB, { kind: 'mention', request: 'can you take a look?' });
     expect(rationale).toContain(`@${BOB}`);
     expect(rationale).toContain('can you take a look?');
@@ -104,19 +137,23 @@ describe('every generated item has a rationale that names the person', () => {
       decisionProposal({ id: 'prop_d', at: at(9) }),
       thirdPartyCommitment({ id: 'prop_c', at: at(10), owner: CAROL }),
     ]);
-    const items = computeAttention(state, {
-      now: at(20),
-      members: MEMBERS,
-      mentions: [{ roomId: ROOM, objectId: 'obj_decision_2', userId: ALICE, request: 'thoughts?' }],
-    });
+    const items = computeAttention(
+      state,
+      context({
+        members: MEMBERS,
+        mentions: [
+          { roomId: ROOM, objectId: 'obj_decision_2', userId: ALICE, request: 'thoughts?' },
+        ],
+      }),
+    );
 
     expect(items.length).toBeGreaterThan(0);
     for (const entry of items) {
-      expect(entry.rationale.length).toBeGreaterThan(0);
+      const rationale = renderRationale(entry);
       // Names the person…
-      expect(entry.rationale).toContain(`@${entry.userId}`);
+      expect(rationale).toContain(`@${entry.userId}`);
       // …and gives a reason, not just a label.
-      expect(entry.rationale.length).toBeGreaterThan(`@${entry.userId} — `.length + 10);
+      expect(rationale.length).toBeGreaterThan(`@${entry.userId} — `.length + 10);
       // …and every item parses as the schema requires.
       expect(AttentionItem.safeParse(entry).success).toBe(true);
     }
@@ -129,27 +166,59 @@ describe('class 1 — needs_decision', () => {
       ...sampleLog(),
       decisionProposal({ id: 'prop_d', at: at(9), decidedBy: BOB }),
     ]);
-    const items = computeAttention(state, { now: at(20), members: MEMBERS }).filter(
+    const items = computeAttention(state, context({ members: MEMBERS })).filter(
       (entry) => entry.class === 'needs_decision',
     );
     expect(items.map((entry) => entry.userId)).toEqual([BOB]);
-    expect(items[0]?.rationale).toContain('you are named as the one to decide this');
-    expect(items[0]?.subjectKind).toBe('proposal');
-    expect(items[0]?.objectId).toBe('prop_d');
+    const first = items[0];
+    if (!first) throw new Error('unreachable');
+    expect(renderRationale(first)).toContain('you are named as the one to decide this');
+    expect(first.subjectKind).toBe('proposal');
+    expect(first.objectId).toBe('prop_d');
   });
 
   it('fans an unassigned decision out to every member — "or any-member when unassigned"', () => {
     const state = reduce([...sampleLog(), decisionProposal({ id: 'prop_d', at: at(9) })]);
-    const items = computeAttention(state, { now: at(20), members: MEMBERS }).filter(
+    const items = computeAttention(state, context({ members: MEMBERS })).filter(
       (entry) => entry.class === 'needs_decision',
     );
     expect(items.map((entry) => entry.userId)).toEqual([ALICE, BOB, CAROL]);
-    expect(items[0]?.rationale).toContain('nobody is named on this decision');
+    const first = items[0];
+    if (!first) throw new Error('unreachable');
+    expect(renderRationale(first)).toContain('nobody is named on this decision');
   });
 
   it('produces nothing when membership is unknown, rather than guessing', () => {
     const state = reduce([...sampleLog(), decisionProposal({ id: 'prop_d', at: at(9) })]);
-    expect(computeAttention(state, at(20)).filter((e) => e.class === 'needs_decision')).toEqual([]);
+    expect(computeAttention(state, context()).filter((e) => e.class === 'needs_decision')).toEqual(
+      [],
+    );
+  });
+
+  it('stays quiet about a decision the engine would not surface', () => {
+    // Round 1's gauntlet, major 9: the panel raised `needs_decision` for every
+    // staged decision proposal, including ones the engine had put in the θ band
+    // and shown quietly — two answers to "does this need a person" from two
+    // files. One answer now, and it is the engine's.
+    const inTheBand = reduce([
+      ...sampleLog(),
+      decisionProposal({ id: 'prop_d', at: at(9), decidedBy: BOB, confidence: 0.6 }),
+    ]);
+    expect(
+      computeAttention(inTheBand, context({ members: MEMBERS })).filter(
+        (e) => e.class === 'needs_decision',
+      ),
+    ).toEqual([]);
+
+    const belowTheFloor = reduce([
+      ...sampleLog(),
+      decisionProposal({ id: 'prop_d', at: at(9), decidedBy: BOB, confidence: 0.2 }),
+    ]);
+    expect(
+      computeAttention(belowTheFloor, context({ members: MEMBERS })).filter(
+        (e) => e.class === 'needs_decision',
+      ),
+    ).toEqual([]);
   });
 
   it('stops once the decision is accepted', () => {
@@ -174,7 +243,7 @@ describe('class 1 — needs_decision', () => {
     ]);
     expect(state.issues).toEqual([]);
     expect(
-      computeAttention(state, { now: at(20), members: MEMBERS }).filter(
+      computeAttention(state, context({ members: MEMBERS })).filter(
         (e) => e.class === 'needs_decision',
       ),
     ).toEqual([]);
@@ -183,7 +252,7 @@ describe('class 1 — needs_decision', () => {
 
 describe('class 2 — owned_commitment', () => {
   it('routes an open commitment to its owner', () => {
-    const items = computeAttention(reduce(sampleLog()), at(20));
+    const items = computeAttention(reduce(sampleLog()), context());
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       userId: BOB,
@@ -192,16 +261,19 @@ describe('class 2 — owned_commitment', () => {
       status: 'pending',
       subjectKind: 'object',
     });
-    expect(items[0]?.rationale).toContain('you own this commitment');
+    const first = items[0];
+    if (!first) throw new Error('unreachable');
+    expect(renderRationale(first)).toContain('you own this commitment');
   });
 
   it('ranks an overdue commitment above an on-time one, and says it is late', () => {
     // sampleLog's commitment is due at minute 9.
-    const late = computeAttention(reduce(sampleLog()), at(20))[0];
-    const early = computeAttention(reduce(sampleLog()), at(5))[0];
+    const late = computeAttention(reduce(sampleLog()), context())[0];
+    const early = computeAttention(reduce(sampleLog()), context({ now: at(5) }))[0];
     expect(late?.priority).toBe(ATTENTION_PRIORITY.commitment_overdue);
     expect(early?.priority).toBe(ATTENTION_PRIORITY.commitment_open);
-    expect(late?.rationale).toContain('which has passed');
+    if (!late) throw new Error('unreachable');
+    expect(renderRationale(late)).toContain('which has passed');
   });
 
   it('asks the named owner to confirm a third-party commitment', () => {
@@ -209,30 +281,57 @@ describe('class 2 — owned_commitment', () => {
       ...sampleLog(),
       thirdPartyCommitment({ id: 'prop_c', at: at(9), owner: CAROL }),
     ]);
-    const confirm = computeAttention(state, {
-      now: at(20),
-      members: MEMBERS,
-      messageAuthors: { msg_bob: BOB },
-    }).find((entry) => entry.objectId === 'prop_c');
+    const confirm = computeAttention(state, context({ members: MEMBERS })).find(
+      (entry) => entry.objectId === 'prop_c',
+    );
 
     expect(confirm?.userId).toBe(CAROL);
     expect(confirm?.class).toBe('owned_commitment');
     expect(confirm?.priority).toBe(ATTENTION_PRIORITY.commitment_confirm);
-    expect(confirm?.rationale).toContain('nobody gets committed by someone else');
+    if (!confirm) throw new Error('unreachable');
+    expect(renderRationale(confirm)).toContain('nobody gets committed by someone else');
   });
 
   it('does not ask anybody to confirm their own words', () => {
     const state = reduce([
       ...sampleLog(),
+      // BOB wrote the message the sentence is in, so this is a self-statement.
       thirdPartyCommitment({ id: 'prop_c', at: at(9), owner: BOB }),
     ]);
-    const items = computeAttention(state, {
-      now: at(20),
-      members: MEMBERS,
-      // BOB wrote the message, so this is a self-statement, not an imposition.
-      messageAuthors: { msg_bob: BOB },
-    });
+    const items = computeAttention(state, context({ members: MEMBERS }));
     expect(items.find((entry) => entry.objectId === 'prop_c')).toBeUndefined();
+  });
+
+  it('refuses to raise a confirm it cannot justify, rather than asking everybody', () => {
+    // Round 1's gauntlet, major 10: with no authorship the attribution check
+    // fell through to "third-party", so *every* staged commitment turned into a
+    // confirm aimed at whoever it named. It fails closed now — and says so, so
+    // the silence is a receipt rather than a mystery.
+    const state = reduce([
+      ...sampleLog(),
+      thirdPartyCommitment({ id: 'prop_c', at: at(9), owner: CAROL }),
+    ]);
+    const projection = projectAttention(state, { now: at(20), members: MEMBERS });
+    expect(projection.items.find((entry) => entry.objectId === 'prop_c')).toBeUndefined();
+    expect(projection.refusals).toEqual([
+      {
+        proposalId: 'prop_c',
+        reason:
+          'no message window was supplied, so this proposal could not be judged — raising it anyway would ask somebody to confirm a commitment nobody can show they were named in',
+      },
+    ]);
+  });
+
+  it('stays quiet about a commitment the engine discarded', () => {
+    // The other half of major 9: below θ_min the engine discards the reading and
+    // the panel used to ask its owner to confirm one anyway.
+    const state = reduce([
+      ...sampleLog(),
+      thirdPartyCommitment({ id: 'prop_c', at: at(9), owner: CAROL, confidence: 0.2 }),
+    ]);
+    const projection = projectAttention(state, context({ members: MEMBERS }));
+    expect(projection.items.find((entry) => entry.objectId === 'prop_c')).toBeUndefined();
+    expect(projection.refusals).toEqual([]);
   });
 
   it('drops attention for a retracted commitment', () => {
@@ -247,12 +346,12 @@ describe('class 2 — owned_commitment', () => {
         action: 'retract',
       }),
     ]);
-    expect(computeAttention(state, at(20))).toEqual([]);
+    expect(computeAttention(state, context())).toEqual([]);
   });
 });
 
 describe('class 3 — blocking_question', () => {
-  function blockingLog(blocked: string): CoreEvent[] {
+  function blockingLog(blocked: string): AuthoredEvent[] {
     return [
       ...sampleLog(),
       event({
@@ -303,31 +402,38 @@ describe('class 3 — blocking_question', () => {
   it('routes a question blocking a commitment to that commitment’s owner', () => {
     const state = reduce(blockingLog('obj_commitment_1'));
     expect(state.issues).toEqual([]);
-    const item = computeAttention(state, { now: at(20), members: MEMBERS }).find(
+    const item = computeAttention(state, context({ members: MEMBERS })).find(
       (entry) => entry.class === 'blocking_question',
     );
     expect(item?.userId).toBe(BOB);
-    expect(item?.rationale).toContain('you own the commitment this open question blocks');
+    if (!item) throw new Error('unreachable');
+    expect(renderRationale(item)).toContain('you own the commitment this open question blocks');
   });
 
   it('fans a question blocking an objective out to the room — objectives have no owner', () => {
     const state = reduce(blockingLog('obj_objective_1'));
-    const items = computeAttention(state, { now: at(20), members: MEMBERS }).filter(
+    const items = computeAttention(state, context({ members: MEMBERS })).filter(
       (entry) => entry.class === 'blocking_question',
     );
     expect(items.map((entry) => entry.userId)).toEqual([ALICE, BOB, CAROL]);
-    expect(items[0]?.rationale).toContain('blocks the objective');
+    const first = items[0];
+    if (!first) throw new Error('unreachable');
+    expect(renderRationale(first)).toContain('blocks the objective');
   });
 
   it('routes a question that names you, whatever it blocks', () => {
     const state = reduce(blockingLog('obj_commitment_1'));
-    const items = computeAttention(state, {
-      now: at(20),
-      members: MEMBERS,
-      questionMentions: [{ questionObjectId: 'obj_blocker_q', userId: CAROL }],
-    }).filter((entry) => entry.class === 'blocking_question');
+    const items = computeAttention(
+      state,
+      context({
+        members: MEMBERS,
+        questionMentions: [{ questionObjectId: 'obj_blocker_q', userId: CAROL }],
+      }),
+    ).filter((entry) => entry.class === 'blocking_question');
     expect(items.map((entry) => entry.userId).sort()).toEqual([BOB, CAROL]);
-    expect(items.find((entry) => entry.userId === CAROL)?.rationale).toContain('names you');
+    const carol = items.find((entry) => entry.userId === CAROL);
+    if (!carol) throw new Error('unreachable');
+    expect(renderRationale(carol)).toContain('names you');
   });
 
   it('stops once the question is answered, and returns when it is reopened', () => {
@@ -348,9 +454,10 @@ describe('class 3 — blocking_question', () => {
         },
       }),
     ];
-    const context: AttentionContext = { now: at(20), members: MEMBERS };
     expect(
-      computeAttention(reduce(answered), context).filter((e) => e.class === 'blocking_question'),
+      computeAttention(reduce(answered), context({ members: MEMBERS })).filter(
+        (e) => e.class === 'blocking_question',
+      ),
     ).toEqual([]);
 
     const reopened = reduce([
@@ -365,7 +472,9 @@ describe('class 3 — blocking_question', () => {
       }),
     ]);
     expect(
-      computeAttention(reopened, context).filter((e) => e.class === 'blocking_question'),
+      computeAttention(reopened, context({ members: MEMBERS })).filter(
+        (e) => e.class === 'blocking_question',
+      ),
     ).toHaveLength(1);
   });
 
@@ -381,33 +490,36 @@ describe('class 3 — blocking_question', () => {
         action: 'retract',
       }),
     ]);
-    expect(computeAttention(state, { now: at(20), members: MEMBERS })).toEqual([]);
+    expect(computeAttention(state, context({ members: MEMBERS }))).toEqual([]);
   });
 });
 
 describe('class 4 — mention', () => {
   it('routes an upstream mention signal, quoting what was asked', () => {
-    const items = computeAttention(reduce(sampleLog()), {
-      now: at(20),
-      mentions: [
-        {
-          roomId: ROOM,
-          objectId: 'obj_decision_2',
-          userId: CAROL,
-          request: 'can you sanity-check this?',
-        },
-      ],
-    });
+    const items = computeAttention(
+      reduce(sampleLog()),
+      context({
+        mentions: [
+          {
+            roomId: ROOM,
+            objectId: 'obj_decision_2',
+            userId: CAROL,
+            request: 'can you sanity-check this?',
+          },
+        ],
+      }),
+    );
     const mention = items.find((entry) => entry.class === 'mention');
     expect(mention?.userId).toBe(CAROL);
-    expect(mention?.rationale).toContain('can you sanity-check this?');
-    expect(mention?.priority).toBe(ATTENTION_PRIORITY.mention);
+    if (!mention) throw new Error('unreachable');
+    expect(renderRationale(mention)).toContain('can you sanity-check this?');
+    expect(mention.priority).toBe(ATTENTION_PRIORITY.mention);
   });
 
   it('produces none without a signal — core never sees message bodies', () => {
-    expect(computeAttention(reduce(sampleLog()), at(20)).some((e) => e.class === 'mention')).toBe(
-      false,
-    );
+    expect(
+      computeAttention(reduce(sampleLog()), context()).some((e) => e.class === 'mention'),
+    ).toBe(false);
   });
 });
 
@@ -418,12 +530,15 @@ describe('the sort — owed attention above everything', () => {
       decisionProposal({ id: 'prop_d', at: at(9), decidedBy: ALICE }),
       thirdPartyCommitment({ id: 'prop_c', at: at(10), owner: ALICE }),
     ]);
-    const items = computeAttention(state, {
-      now: at(20),
-      members: MEMBERS,
-      messageAuthors: { msg_bob: BOB },
-      mentions: [{ roomId: ROOM, objectId: 'obj_decision_2', userId: ALICE, request: 'thoughts?' }],
-    });
+    const items = computeAttention(
+      state,
+      context({
+        members: MEMBERS,
+        mentions: [
+          { roomId: ROOM, objectId: 'obj_decision_2', userId: ALICE, request: 'thoughts?' },
+        ],
+      }),
+    );
 
     expect(classesOf(items)).toEqual([
       'needs_decision', // 0
@@ -431,21 +546,18 @@ describe('the sort — owed attention above everything', () => {
       'owned_commitment', // 3 — awaiting confirm
       'mention', // 5
     ]);
-    expect(items.map((entry) => entry.priority)).toEqual([
-      ATTENTION_PRIORITY.needs_decision,
-      ATTENTION_PRIORITY.commitment_overdue,
-      ATTENTION_PRIORITY.commitment_confirm,
-      ATTENTION_PRIORITY.mention,
-    ]);
+    // Literal ranks, not the constants under test: a table that describes itself
+    // cannot notice when it changes.
+    expect(items.map((entry) => entry.priority)).toEqual([0, 1, 3, 5]);
   });
 
   it('breaks ties deterministically, so two nodes agree', () => {
     const state = reduce([...sampleLog(), decisionProposal({ id: 'prop_d', at: at(9) })]);
-    const context: AttentionContext = { now: at(20), members: MEMBERS };
-    expect(JSON.stringify(computeAttention(state, context))).toBe(
-      JSON.stringify(computeAttention(state, context)),
+    const ctx = context({ members: MEMBERS });
+    expect(JSON.stringify(computeAttention(state, ctx))).toBe(
+      JSON.stringify(computeAttention(state, ctx)),
     );
-    const users = computeAttention(state, context)
+    const users = computeAttention(state, ctx)
       .filter((entry) => entry.class === 'needs_decision')
       .map((entry) => entry.userId);
     expect(users).toEqual([...users].sort());
@@ -461,7 +573,7 @@ describe('the sort — owed attention above everything', () => {
       roomId: ROOM,
       objectId: 'obj',
       subjectKind: 'object' as const,
-      rationale: 'because',
+      reason: { kind: 'mention' as const, request: 'because' },
       status: 'pending' as const,
     }));
     expect(sortAttention(stored).map((entry) => entry.class)).toEqual([
@@ -485,18 +597,50 @@ describe('the sort — owed attention above everything', () => {
     expect(Object.values(tiersByClass).flat().sort()).toEqual(
       Object.keys(ATTENTION_PRIORITY).sort(),
     );
-    expect(new Set(Object.values(ATTENTION_PRIORITY)).size).toBe(6);
 
-    // …and the ranks are in #6's stated order.
-    expect(Object.values(ATTENTION_PRIORITY)).toEqual([0, 1, 2, 3, 4, 5]);
-    expect(ATTENTION_PRIORITY.needs_decision).toBeLessThan(ATTENTION_PRIORITY.commitment_overdue);
-    expect(ATTENTION_PRIORITY.commitment_overdue).toBeLessThan(
-      ATTENTION_PRIORITY.blocking_question,
-    );
-    expect(ATTENTION_PRIORITY.blocking_question).toBeLessThan(
-      ATTENTION_PRIORITY.commitment_confirm,
-    );
-    expect(ATTENTION_PRIORITY.commitment_confirm).toBeLessThan(ATTENTION_PRIORITY.mention);
+    // …and the ranks are #6's order, by value. Every assertion here is a literal
+    // on both sides: the round-1 version compared the constants to themselves.
+    expect(ATTENTION_PRIORITY).toEqual({
+      needs_decision: 0,
+      commitment_overdue: 1,
+      blocking_question: 2,
+      commitment_confirm: 3,
+      commitment_open: 4,
+      mention: 5,
+    });
+  });
+
+  it('sorts by those ranks, in #6’s stated order', () => {
+    // The ordering the numbers are *for*, checked through the sort rather than
+    // by comparing the constants to each other.
+    const item = (id: string, cls: AttentionClass, priority: number) => ({
+      id,
+      roomId: ROOM,
+      userId: ALICE,
+      objectId: 'obj',
+      subjectKind: 'object' as const,
+      class: cls,
+      reason: { kind: 'mention' as const, request: 'x' },
+      status: 'pending' as const,
+      createdAt: at(1),
+      priority,
+    });
+    const shuffled = [
+      item('mention', 'mention', ATTENTION_PRIORITY.mention),
+      item('open', 'owned_commitment', ATTENTION_PRIORITY.commitment_open),
+      item('confirm', 'owned_commitment', ATTENTION_PRIORITY.commitment_confirm),
+      item('blocking', 'blocking_question', ATTENTION_PRIORITY.blocking_question),
+      item('overdue', 'owned_commitment', ATTENTION_PRIORITY.commitment_overdue),
+      item('decision', 'needs_decision', ATTENTION_PRIORITY.needs_decision),
+    ];
+    expect(sortAttention(shuffled).map((entry) => entry.id)).toEqual([
+      'decision',
+      'overdue',
+      'blocking',
+      'confirm',
+      'open',
+      'mention',
+    ]);
   });
 });
 
@@ -506,8 +650,9 @@ describe('transitions', () => {
     roomId: ROOM,
     userId: ALICE,
     objectId: 'obj_1',
+    subjectKind: 'object',
     class: 'owned_commitment',
-    rationale: 'because you own it',
+    reason: { kind: 'commitment_open', statement: 'you own it', due: null },
     createdAt: at(1),
   });
 
@@ -545,7 +690,7 @@ describe('transitions', () => {
 
 describe('reconciliation — resolution happens by acting on the object', () => {
   const state = reduce(sampleLog());
-  const computed = computeAttention(state, at(20));
+  const computed = computeAttention(state, context());
 
   it('resolves a pending item whose object no longer generates it', () => {
     const closed = reduce([
@@ -561,7 +706,7 @@ describe('reconciliation — resolution happens by acting on the object', () => 
       }),
     ]);
     // Nobody clicked anything; the commitment closed and the item is done.
-    const reconciled = reconcileAttention(computed, computeAttention(closed, at(20)));
+    const reconciled = reconcileAttention(computed, computeAttention(closed, context()));
     expect(reconciled).toHaveLength(1);
     expect(reconciled[0]?.status).toBe('resolved');
   });
@@ -581,7 +726,7 @@ describe('reconciliation — resolution happens by acting on the object', () => 
 
 describe('since-you-left counts', () => {
   const state = reduce(sampleLog());
-  const items = computeAttention(state, at(20));
+  const items = computeAttention(state, context());
 
   it('counts everything for somebody who has never been here', () => {
     const counts = sinceCursorCounts(state, {
@@ -633,5 +778,40 @@ describe('since-you-left counts', () => {
       items: [dismissed.item],
     });
     expect(counts.attention).toBe(0);
+  });
+});
+
+describe('changedSince — what moved, as objects rather than events', () => {
+  /** Untested in round 1, and named in the gauntlet's polish list. */
+  const state = reduce(sampleLog());
+
+  it('lists every object in the room for somebody who has never been here', () => {
+    expect(changedSince(state, ROOM, null).map((object) => object.id)).toEqual([
+      'obj_commitment_1',
+      'obj_decision_1',
+      'obj_decision_2',
+      'obj_question_1',
+    ]);
+  });
+
+  it('is keyed on when the object last moved, not when it was accepted', () => {
+    // obj_decision_1 was accepted at minute 2 and superseded at minute 7, so a
+    // reader who left at minute 5 should be shown it. `acceptedAt` would hide
+    // exactly the change they need to see.
+    const since = changedSince(state, ROOM, at(5)).map((object) => object.id);
+    expect(since).toContain('obj_decision_1');
+    expect(state.objects.obj_decision_1?.acceptedAt).toBe(at(2));
+    expect(state.objects.obj_decision_1?.updatedAt).toBe(at(7));
+  });
+
+  it('is empty once the cursor is past everything, and is scoped to the room', () => {
+    expect(changedSince(state, ROOM, at(30))).toEqual([]);
+    expect(changedSince(state, 'room_2', null)).toEqual([]);
+  });
+
+  it('returns objects in a stable order', () => {
+    expect(changedSince(state, ROOM, null).map((object) => object.id)).toEqual(
+      changedSince(state, ROOM, null).map((object) => object.id),
+    );
   });
 });

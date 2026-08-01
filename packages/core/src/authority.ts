@@ -1,77 +1,69 @@
 import type { Actor } from './common.js';
-import type { AcceptedObjectType } from './objects.js';
-import type { Proposer } from './proposal.js';
+import {
+  type ProvenanceMessage,
+  rejectingProblems,
+  validateProposalProvenance,
+} from './escalation.js';
+import type { AcceptedObject, AcceptedObjectType } from './objects.js';
+import { decideSupersession, MODEL_ACCEPTANCE_FLOOR } from './policy.js';
+import type { Proposer, StoredProposal } from './proposal.js';
+import { canonicalJson } from './state.js';
 
 /**
- * Who is allowed to do what — the *floor* under the acceptance rules, not the
- * rules themselves.
+ * Who is allowed to do what, and on what evidence — the *floor* under the
+ * acceptance rules, enforced where nothing can route around it.
  *
- * Issue #4 resolved acceptance per type. Most of that matrix is policy that
- * belongs to the θ engine (#21): confidence thresholds, which types a model may
- * propose at all, how a third-party commitment routes to its named owner. But
- * some of it is not policy — it is the trust boundary itself, and a boundary
+ * Issue #4 resolved acceptance per type. Some of that matrix is policy that
+ * belongs to the θ engine; the rest is the trust boundary itself, and a boundary
  * enforced only in the layer above the reducer is a boundary that a second
- * writer, a replay, or a bug can walk around. Those rows live here, and the
- * reducer refuses to fold an event that breaks them.
+ * writer, a replay, or a bug walks around. Those rows live here, and the reducer
+ * refuses to fold an event that breaks them.
  *
  * #4's matrix, and where each row is enforced:
  *
- * | rule (#4)                                              | who may | where          |
- * | ------------------------------------------------------ | ------- | -------------- |
- * | Claims auto-accept at confidence ≥ θ                    | model   | #21 (θ)        |
- * | OpenQuestions auto-accept at confidence ≥ θ             | model   | #21 (θ)        |
- * | Commitments: self-stated auto-accepts, third-party waits | model/human | #21 (attribution) |
- * | **Decisions never auto-accept**                          | human   | **here**       |
- * | A claim becomes `verified`                               | human   | **here**       |
- * | Supersession retiring a claim or a question              | model   | (allowed)      |
- * | **Supersession retiring an accepted Decision**            | human   | **here**       |
- * | **Corrections (amend / retract / restore)**               | human   | **here**       |
- * | **Acceptance citing no proposal at all**                  | human   | **here**       |
+ * | rule (#4)                                               | who may | where     |
+ * | ------------------------------------------------------- | ------- | --------- |
+ * | Claims auto-accept at confidence ≥ θ                     | model   | **here**  |
+ * | OpenQuestions auto-accept at confidence ≥ θ              | model   | **here**  |
+ * | Commitments: self-stated auto-accepts, third-party waits | model/human | **here** |
+ * | **Decisions never auto-accept**                          | human   | **here**  |
+ * | A claim becomes `verified`                               | human   | **here**  |
+ * | Supersession, split by the type being retired            | per policy | **here** |
+ * | **Corrections (amend / retract / restore / …)**          | human   | **here**  |
+ * | **Acceptance citing no proposal at all**                 | human   | **here**  |
+ * | **Declaring a question answered**                        | human   | **here**  |
  *
- * The three rows marked "(allowed)"/"#21" are deliberately *not* gated: a model
- * accepting a claim or an open question through its own proposal is the design
- * (#4), and gating it here would break the auto-accept path the product wants.
- * The `verification` field is what carries truth status for a claim — `~` until
- * a human confirms — so the claim row that matters is the transition to `✓`.
+ * ## What round 2 moved down here, and why
  *
- * Two things deliberately left open, so the omission is a decision and not an
- * oversight:
- *  - `proposal_rejected` is not a correction verb. Withdrawing a staged reading
- *    destroys nothing (the proposal stays in state, rejected and visible), and
- *    an interpreter retiring its own low-confidence proposal is a path #4 wants.
- *    **#21 narrows this rather than reopening it**: see `ProposalBindingGate` —
- *    a model may retire *its own* reading, not somebody else's.
- *  - Commitment attribution (self-stated vs third-party) needs the message the
- *    commitment was drawn from, which the reducer does not have. #21's, and it
- *    lives in `acceptance.ts` where the message authors are an input.
+ * Every row above that used to say "#21 (θ)" or "the engine" now says **here**.
+ * Round 1's gauntlet found the same shape twice:
  *
- * ## What #21 added to this floor, and why each row is here and not upstairs
+ *  1. **The actor was forgeable.** Every gate below reads an actor, and the
+ *     actor used to be part of the event payload — so a worker could declare
+ *     itself human and walk through all of them. The actor now arrives out of
+ *     band (`TrustedContext`), derived from the authenticated session, and the
+ *     event schema has nowhere to put one.
+ *  2. **The receipt checks were opt-in.** θ, quote-matching, and "did the person
+ *     named actually say this" lived in `acceptance.ts`, which the layer that
+ *     mints events calls *if it remembers to* and which returned "no problems"
+ *     when handed no messages. A check that fails open when its input is missing
+ *     is a manner, not a boundary. They are conditions of folding now:
+ *     `acceptanceReceiptRefusal` runs on every non-human acceptance, and an
+ *     acceptance whose messages the reducer cannot see is refused rather than
+ *     waved through.
  *
- * The rows above answer "who may". Three more answer "on what", and they are
- * here for the same reason: a rule enforced only where the events are minted is
- * a rule a second writer walks around.
+ * Two things are still deliberately left open, so the omission is a decision:
+ *  - `proposal_recorded` is open to every actor. Recording a reading is not
+ *    asserting it; the whole trust model is that staging is free and acceptance
+ *    is not.
+ *  - `proposal_rejected` is not a correction verb — withdrawing a staged reading
+ *    destroys nothing — but it is narrowed by `ProposalBindingGate`: a model may
+ *    retire *its own* reading, not somebody else's.
  *
- *  - **`ProposalBindingGate`** — a non-human actor may only act on a proposal it
- *    authored. Without it, "a model may reject its own low-confidence reading"
- *    reads as "a model may reject any reading", and one interpreter can silently
- *    retire another's — or a human's — staged proposals. Acceptance has the same
- *    hole: a model accepting a *human's* proposal is the human's judgement being
- *    minted by a machine.
- *  - **`MODEL_ACCEPTANCE_FLOOR`** — a non-human actor may not accept a proposal
- *    below the per-type confidence floor. The r4 floor closed every *type* a
- *    model may not mint; it left the write surface open at *any confidence* for
- *    the types it may. `θ` is otherwise a policy the layer above applies to its
- *    own events, which is a policy that only holds while that layer is the only
- *    writer. (The spike measured self-reported confidence as uncorrelated with
- *    correctness — 0.937 mean on wrong objects vs 0.928 on right ones — so this
- *    floor is a write-surface bound, not a quality signal. It is set where a
- *    value is implausible rather than merely low.)
- *
- * Neither replaces the acceptance engine. `acceptance.ts` runs stricter rules
- * over richer inputs and decides what *should* be emitted; this decides what may
- * be folded at all, and it is deliberately the weaker of the two — a floor that
- * duplicated the engine's judgement would have to be given the engine's inputs,
- * and the reducer would stop being a function of the log.
+ * `acceptance.ts` still exists and is still stricter: it runs over richer inputs
+ * (what the room already accepted, the whole window) and decides what a worker
+ * should emit at all. It reads the same θ table this file does, so the two
+ * cannot invert.
  */
 export type HumanOnlyGate =
   /** `object_accepted` with `provenance.proposalId === null`. */
@@ -80,8 +72,10 @@ export type HumanOnlyGate =
   | 'decision_acceptance'
   /** Any transition of a claim to `verification: 'verified'`. */
   | 'claim_verification'
-  /** `supersedes` pointed at an accepted `decision`. */
-  | 'decision_supersession'
+  /** `supersedes` pointed at a type the supersession policy reserves to people. */
+  | 'supersession'
+  /** An `answers` edge — declaring a question settled. */
+  | 'answer_relation'
   /** `object_corrected`, every verb. */
   | 'correction';
 
@@ -96,7 +90,12 @@ export function isHuman(actor: Actor): boolean {
  * names both what was refused and the route that stays open — a refusal that
  * does not say what to do instead is a dead end.
  */
-export function humanOnlyRefusal(gate: HumanOnlyGate, actor: Actor, subject: string): string {
+export function humanOnlyRefusal(
+  gate: HumanOnlyGate,
+  actor: Actor,
+  subject: string,
+  retiredType?: AcceptedObjectType,
+): string {
   const kind = actor.kind;
   switch (gate) {
     case 'direct_acceptance':
@@ -105,8 +104,10 @@ export function humanOnlyRefusal(gate: HumanOnlyGate, actor: Actor, subject: str
       return `${subject} is a decision accepted by a ${kind} actor — a decision never auto-accepts (issue #4): a ${kind} actor may propose one, but only a human may accept it`;
     case 'claim_verification':
       return `${subject} would become a verified claim on a ${kind} actor's word — only a human may move a claim to "verified"; a ${kind} actor may accept it as unverified or disputed`;
-    case 'decision_supersession':
-      return `${subject} retires an accepted decision on a ${kind} actor's word — superseding a decision requires a human, exactly as accepting one does; superseding a claim or a question does not`;
+    case 'supersession':
+      return `${subject} retires an accepted ${retiredType ?? 'object'} on a ${kind} actor's word — ${retiredType ? decideSupersession(retiredType).reason : 'this type needs a human'}; a ${kind} actor may propose the replacement and let a person retire it`;
+    case 'answer_relation':
+      return `${subject} declares an open question answered on a ${kind} actor's word — only a human may bind an answer (#4: a decision reaches the room through answer-binding or an explicit accept, never through inference); a ${kind} actor may propose the answer and let a person bind it`;
     case 'correction':
       return `${subject} was corrected by a ${kind} actor — corrections (amend, retract, restore) are human-only in v1: a correction rewrites what the room already accepted`;
     default: {
@@ -196,32 +197,6 @@ export function proposalBindingRefusal(
   }
 }
 
-/**
- * The confidence a non-human actor must clear to accept a proposal of each
- * type. **This is a floor on the write surface, not a tuned θ.**
- *
- * `acceptance.ts` holds the θ_auto/θ_min the product actually runs on, and they
- * are higher; this is the value below which an acceptance is not a judgement
- * call but a malformed event, and it is enforced where nothing can route around
- * it. Read the two together: the engine decides what to emit, this decides what
- * can be folded, and `AcceptanceConfig` refuses to be configured beneath it, so
- * the two can never invert.
- *
- * `decision` is present and set to a value nothing can reach, so the table is
- * total over the five types and cannot silently acquire a hole if the decision
- * gate above it is ever moved. A decision is human-only regardless of
- * confidence — the gate above returns first, and this row is unreachable by
- * construction.
- */
-export const MODEL_ACCEPTANCE_FLOOR: Readonly<Record<AcceptedObjectType, number>> = Object.freeze({
-  /** Unreachable: `decision_acceptance` refuses every non-human actor first. */
-  decision: Number.POSITIVE_INFINITY,
-  commitment: 0.5,
-  open_question: 0.4,
-  claim: 0.5,
-  objective: 0.5,
-});
-
 /** The refusal text for the confidence floor. */
 export function confidenceFloorRefusal(
   actor: Actor,
@@ -231,4 +206,129 @@ export function confidenceFloorRefusal(
 ): string {
   const floor = MODEL_ACCEPTANCE_FLOOR[type];
   return `${actorName(actor)} accepted ${type} proposal "${proposalId}" at confidence ${confidence}, below the floor of ${floor} for that type — a non-human actor may not mint an object from a reading it does not stand behind; propose it and let a human accept`;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * The receipt, as a condition of folding
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Why a non-human acceptance was refused on its receipt rather than on its
+ * actor. One name per check, so a caller can switch and a test can pin.
+ */
+export type AcceptanceReceiptGate =
+  /** The object's payload is not the payload that was staged. */
+  | 'payload_binding'
+  /** The object's cited messages are not the proposal's. */
+  | 'provenance_binding'
+  /** No message window was supplied, so the receipt cannot be checked at all. */
+  | 'missing_receipt_context'
+  /** The receipt is wrong: the quote, or who is named in it. */
+  | 'receipt_failed'
+  /** A commitment somebody else's sentence put a name on. It needs their word. */
+  | 'third_party_confirm';
+
+export interface AcceptanceReceiptRefusal {
+  gate: AcceptanceReceiptGate;
+  detail: string;
+}
+
+/**
+ * Everything a **non-human** acceptance must survive beyond "may this actor
+ * touch this proposal at all".
+ *
+ * Each of these was a call-site manner in round 1 and is a trust boundary now.
+ * They run in this order because the answers get more expensive and less
+ * certain as you go down: what was staged is a fact about two payloads, the
+ * receipt is a fact about the room's messages, and third-party attribution is a
+ * judgement about a person.
+ *
+ *  1. **Payload binding.** The proposal is the thing a person could have read
+ *     before it landed. An acceptance that cites it while minting a *different*
+ *     statement — or a different owner — has used the citation as a permission
+ *     slip: r1's gauntlet, "staging a self-owned commitment then minting a
+ *     third-party one". Canonical equality, so key order is never a difference.
+ *  2. **Provenance binding.** Same argument, applied to the receipt: an
+ *     acceptance may not add or drop cited messages on the way through, because
+ *     the citation set is what the attribution rules below are computed over.
+ *  3. **A window at all.** No messages, no auto-acceptance, ever.
+ *  4. **The receipt itself** — the quote is in a cited message, and is that
+ *     author's own text rather than something they were quoting.
+ *  5. **Third-party attribution.** A commitment whose owner did not write the
+ *     message bearing it is not a self-statement, and #4 is unambiguous that
+ *     nobody gets committed by someone else's sentence. It is a real reading and
+ *     it goes to the named person to confirm — through a human acceptance, not
+ *     through this path.
+ *
+ * A human acceptance runs none of this: a person accepting a reading has read
+ * it, and their judgement is the receipt. That asymmetry is the product.
+ */
+export function acceptanceReceiptRefusal(input: {
+  actor: Actor;
+  proposalId: string;
+  proposal: StoredProposal;
+  object: AcceptedObject;
+  messages: readonly ProvenanceMessage[] | undefined;
+}): AcceptanceReceiptRefusal | null {
+  const { object, proposal, proposalId } = input;
+  const who = actorName(input.actor);
+
+  if (canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {
+    return {
+      gate: 'payload_binding',
+      detail: `object "${object.id}" cites proposal "${proposalId}" but does not carry its payload — ${who} may only accept the reading that was staged, not mint a different one behind a citation that says a person could have checked it`,
+    };
+  }
+
+  const objectCites = [...object.provenance.messageIds].sort();
+  const proposalCites = [...proposal.provenance].sort();
+  if (canonicalJson(objectCites) !== canonicalJson(proposalCites)) {
+    return {
+      gate: 'provenance_binding',
+      detail: `object "${object.id}" cites messages [${objectCites.join(', ')}] but proposal "${proposalId}" was staged against [${proposalCites.join(', ')}] — the receipt may not change on the way through acceptance; it is what the attribution rules are computed over`,
+    };
+  }
+
+  if (input.messages === undefined) {
+    return {
+      gate: 'missing_receipt_context',
+      detail: `${who} accepted proposal "${proposalId}" with no message window supplied, so its receipt could not be checked — a reading whose citation cannot be verified is refused, never accepted on trust`,
+    };
+  }
+
+  const attributedTo =
+    object.type === 'claim'
+      ? object.payload.claimant
+      : object.type === 'commitment'
+        ? object.payload.owner
+        : null;
+
+  const problems = validateProposalProvenance(
+    {
+      type: proposal.type,
+      provenance: proposal.provenance,
+      quote: proposal.quote,
+      proposer: proposal.proposer,
+      attributedTo,
+    },
+    input.messages,
+  );
+
+  const rejecting = rejectingProblems(problems);
+  if (rejecting.length > 0) {
+    return {
+      gate: 'receipt_failed',
+      detail: `${who} accepted proposal "${proposalId}" on a receipt that does not hold: ${rejecting.map((problem) => problem.detail).join('; ')}`,
+    };
+  }
+
+  const thirdParty = problems.find((problem) => problem.kind === 'attributed_person_not_author');
+  if (thirdParty) {
+    return {
+      gate: 'third_party_confirm',
+      detail: `${who} accepted proposal "${proposalId}" as a commitment for somebody who did not write it: ${thirdParty.detail}. Nobody gets committed by someone else's sentence (#4) — it waits for the named owner to confirm, and only a human acceptance can carry that confirmation`,
+    };
+  }
+
+  return null;
 }

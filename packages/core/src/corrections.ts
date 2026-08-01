@@ -247,8 +247,12 @@ function counterexampleText(state: CoreState, correction: CorrectionRecord): str
 export function formatCounterexamples(state: CoreState, query: CounterexampleQuery = {}): string {
   const examples = correctionCounterexamples(state, query);
   if (examples.length === 0) return '';
+  // The note is quoted as what it is — the note somebody attached to the
+  // correction — and not as "the room said", which narrates a speech act nobody
+  // performed. CONVENTIONS: the system never synthesizes speech, and a note
+  // written into a form is not a sentence the room uttered.
   const lines = examples.map((example) => {
-    const why = example.note ? ` (the room said: "${clip(example.note, 120)}")` : '';
+    const why = example.note ? ` (correction note: "${clip(example.note, 120)}")` : '';
     return `- ${example.text}${why}`;
   });
   return [

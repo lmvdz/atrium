@@ -147,12 +147,37 @@ export interface EscalationConfig {
   decisionOverlapThreshold: number;
   /** …and at least this many of them, so a two-word decision cannot fire on one. */
   decisionOverlapMinTokens: number;
+  /**
+   * Characters of a message body the triggers will look at.
+   *
+   * A cost cap, routed out of r1's gauntlet. Every trigger normalizes text, and
+   * normalization is linear in the body — so without a bound the work per window
+   * is chosen by whoever writes the messages, and a 2 MB paste is a free way to
+   * make the pre-model pass cost more than the model call it was meant to avoid.
+   * The cap is far above any real message; the point is that it exists.
+   */
+  maxScanChars: number;
+  /**
+   * Earlier messages the blockquote matcher will scan, newest first. The match
+   * is evidence, not a condition (see `triggersForMessage`), so giving up after
+   * a bounded look-back costs a `matched` id and never a trigger.
+   */
+  maxHistoryScanned: number;
+  /**
+   * Accepted decisions compared against one message. Overlap is O(decisions),
+   * and a room with a thousand accepted decisions must not turn every message
+   * into a thousand comparisons.
+   */
+  maxComparedDecisions: number;
 }
 
 export const defaultEscalationConfig: EscalationConfig = Object.freeze({
   minQuoteLength: 24,
   decisionOverlapThreshold: 0.5,
   decisionOverlapMinTokens: 3,
+  maxScanChars: 20000,
+  maxHistoryScanned: 200,
+  maxComparedDecisions: 200,
 });
 
 /**
@@ -195,7 +220,7 @@ export const CONCESSION_MARKERS: readonly string[] = Object.freeze([
  * v1/`) and a URL (`https://…`) cannot fire it: in both, the `s` is preceded by
  * a word character and `\b` fails.
  */
-const SED_CORRECTION = /\bs\/[^/\n]+\/[^/\n]*\//;
+export const SED_CORRECTION = /\bs\/[^/\n]+\/[^/\n]*\//;
 
 /**
  * Future-tense constructions aimed at a named person or at "you".
@@ -207,7 +232,7 @@ const SED_CORRECTION = /\bs\/[^/\n]+\/[^/\n]*\//;
  * built from the shape of the sentence rather than from corpus evidence, and
  * that is stated here rather than hidden: it is the one trigger not measured.
  */
-const FUTURE_PATTERNS: readonly RegExp[] = Object.freeze([
+export const FUTURE_PATTERNS: readonly RegExp[] = Object.freeze([
   /@[\w-]+\s+(?:will|should|can|could|needs? to|is going to|has to|must|please)\b/i,
   /\byou\s+(?:will|should|need to|needs to|ought to|have to|must|can|could)\b/i,
   /\b(?:can|could|would|will)\s+you\b/i,
@@ -306,21 +331,33 @@ export function contentTokens(text: string): Set<string> {
  * Jaccard scores it near zero because the message is long.
  */
 export function lexicalOverlap(text: string, statement: string): number {
-  const wanted = contentTokens(statement);
-  if (wanted.size === 0) return 0;
-  const have = contentTokens(text);
-  let shared = 0;
-  for (const token of wanted) if (have.has(token)) shared += 1;
-  return shared / wanted.size;
+  return overlapOf(contentTokens(text), statement).overlap;
 }
 
 /** Content words shared between a message and a statement. */
 export function sharedTokenCount(text: string, statement: string): number {
+  return overlapOf(contentTokens(text), statement).shared;
+}
+
+/**
+ * Both measures from one already-tokenized message.
+ *
+ * The message is tokenized once per call rather than once per decision: with
+ * `n` accepted decisions the old shape re-normalized the whole body `2n` times,
+ * which is the unbounded per-call cost r1's gauntlet flagged. Same numbers, one
+ * pass over the text.
+ */
+function overlapOf(
+  have: ReadonlySet<string>,
+  statement: string,
+): {
+  overlap: number;
+  shared: number;
+} {
   const wanted = contentTokens(statement);
-  const have = contentTokens(text);
   let shared = 0;
   for (const token of wanted) if (have.has(token)) shared += 1;
-  return shared;
+  return { overlap: wanted.size === 0 ? 0 : shared / wanted.size, shared };
 }
 
 /** An accepted decision, as the trigger needs it: an id and its statement. */
@@ -399,6 +436,9 @@ export function triggersForMessage(
   config: EscalationConfig = defaultEscalationConfig,
 ): EscalationTrigger[] {
   const found: EscalationTrigger[] = [];
+  // Every trigger below reads this, and nothing reads past it — see
+  // `EscalationConfig.maxScanChars`.
+  const body = message.body.slice(0, config.maxScanChars);
 
   // ── 1. reply-blockquote ──────────────────────────────────────────────────
   //
@@ -407,14 +447,14 @@ export function triggersForMessage(
   // messages and a quote-reply routinely points at message 3 of a 400-message
   // thread, so demanding a match would drop the chains this exists to catch.
   // The match is evidence for a human reading the log, not a condition.
-  for (const quoted of replyBlockquotes(message.body)) {
+  for (const quoted of replyBlockquotes(body)) {
     const normalized = normalizeForMatch(quoted);
     if (normalized.length < config.minQuoteLength) continue;
     found.push({
       kind: 'reply_blockquote',
       messageId: message.id,
       evidence: clip(quoted),
-      matched: matchEarlier(normalized, earlier),
+      matched: matchEarlier(normalized, earlier, config),
     });
     break; // One is enough to escalate; the rest are the same signal.
   }
@@ -422,7 +462,7 @@ export function triggersForMessage(
   // Everything below reads only what this author wrote. A concession inside a
   // blockquote is somebody else's concession being quoted back at them, and the
   // trigger above has already fired on that message anyway.
-  const own = stripReplyBlockquotes(message.body);
+  const own = stripReplyBlockquotes(body);
   const normalizedOwn = normalizeForMatch(own);
 
   // ── 2. concession markers ────────────────────────────────────────────────
@@ -462,9 +502,12 @@ export function triggersForMessage(
   }
 
   // ── 4. overlap with an accepted decision ─────────────────────────────────
-  for (const decision of acceptedDecisions) {
-    if (lexicalOverlap(own, decision.statement) < config.decisionOverlapThreshold) continue;
-    if (sharedTokenCount(own, decision.statement) < config.decisionOverlapMinTokens) continue;
+  const ownTokens = contentTokens(own);
+  const compared = acceptedDecisions.slice(0, config.maxComparedDecisions);
+  for (const decision of compared) {
+    const { overlap, shared } = overlapOf(ownTokens, decision.statement);
+    if (overlap < config.decisionOverlapThreshold) continue;
+    if (shared < config.decisionOverlapMinTokens) continue;
     found.push({
       kind: 'accepted_decision_overlap',
       messageId: message.id,
@@ -477,15 +520,19 @@ export function triggersForMessage(
   return found;
 }
 
-/** The earlier message a quote came from, or `null`. */
+/** The earlier message a quote came from, or `null`. Bounded look-back. */
 function matchEarlier(
   normalizedQuote: string,
   earlier: readonly EscalationMessage[],
+  config: EscalationConfig,
 ): string | null {
-  for (let index = earlier.length - 1; index >= 0; index -= 1) {
+  const stop = Math.max(0, earlier.length - config.maxHistoryScanned);
+  for (let index = earlier.length - 1; index >= stop; index -= 1) {
     const candidate = earlier[index];
     if (!candidate) continue;
-    if (normalizeForMatch(candidate.body).includes(normalizedQuote)) return candidate.id;
+    if (normalizeForMatch(candidate.body.slice(0, config.maxScanChars)).includes(normalizedQuote)) {
+      return candidate.id;
+    }
   }
   return null;
 }
@@ -668,32 +715,71 @@ export function validateProposalProvenance(
   }
 
   // #4's rule, mechanized: nobody gets committed — or quoted — by someone
-  // else's sentence. If the named person authored none of the cited messages,
-  // this is third-party attribution whatever the proposal called it.
+  // else's sentence.
+  //
+  // **Bound to the message bearing the sentence, not to the citation list.**
+  // r1's gauntlet: "self-stated if the owner authored *any* cited message —
+  // padding provenance flips attribution". It does. Cite one message the owner
+  // wrote about anything at all, next to the message where somebody else
+  // committed them, and the old check read the pair as a self-statement and
+  // auto-accepted an obligation nobody agreed to. The quote identifies which
+  // message carries the sentence; that message's author is the only one whose
+  // authorship means anything here.
+  //
+  // With no bearing message — no quote, or a quote that is nowhere (the quote
+  // problems above have already fired) — it falls back to the citation list.
+  // That fallback can only be *more* likely to report a problem, never less.
   const attributed = subject.attributedTo;
   if (
     attributed &&
     cited.length > 0 &&
-    (subject.type === 'claim' || subject.type === 'commitment') &&
-    !cited.some((message) => message.authorId === attributed)
+    (subject.type === 'claim' || subject.type === 'commitment')
   ) {
-    const claim = subject.type === 'claim';
-    const authors = cited.map((message) => `"${message.authorId}"`).join(', ');
-    problems.push({
-      kind: 'attributed_person_not_author',
-      // The split the spike's "or force `attribution: third_party`" implies.
-      // A claim whose claimant said nothing is a wrong receipt; a commitment
-      // whose owner said nothing is the third-party case #4 is entirely about,
-      // and discarding it would delete the confirm flow rather than trigger it.
-      severity: claim ? 'reject' : 'reclassify',
-      detail: claim
-        ? `claimant "${attributed}" authored none of the cited messages (${authors}) — the receipt does not support "X said Y"`
-        : `owner "${attributed}" authored none of the cited messages (${authors}) — this is third-party attribution, not a self-statement, so it needs their confirm`,
-      messageId: null,
-    });
+    const bearing = quote ? bearingMessage(quote, cited) : null;
+    const supported = bearing
+      ? bearing.authorId === attributed
+      : cited.some((message) => message.authorId === attributed);
+    if (!supported) {
+      const claim = subject.type === 'claim';
+      const where = bearing
+        ? `the message bearing it ("${bearing.id}") was written by "${bearing.authorId}"`
+        : `authored none of the cited messages (${cited.map((message) => `"${message.authorId}"`).join(', ')})`;
+      problems.push({
+        kind: 'attributed_person_not_author',
+        // The split the spike's "or force `attribution: third_party`" implies.
+        // A claim whose claimant said nothing is a wrong receipt; a commitment
+        // whose owner said nothing is the third-party case #4 is entirely about,
+        // and discarding it would delete the confirm flow rather than trigger it.
+        severity: claim ? 'reject' : 'reclassify',
+        detail: claim
+          ? `claimant "${attributed}" ${where} — the receipt does not support "X said Y"`
+          : `owner "${attributed}" ${where} — this is third-party attribution, not a self-statement, so it needs their confirm`,
+        messageId: bearing?.id ?? null,
+      });
+    }
   }
 
   return problems;
+}
+
+/**
+ * The cited message that actually carries a quoted span — the one whose *own*
+ * text contains it once reply-blockquotes are stripped.
+ *
+ * This is the function that makes attribution answerable. "Did the owner say
+ * this?" is a question about one message, and every version of it that ranges
+ * over the citation list instead is answerable by padding the list.
+ */
+export function bearingMessage(
+  quote: string,
+  messages: readonly ProvenanceMessage[],
+): ProvenanceMessage | null {
+  const normalized = normalizeForMatch(quote);
+  if (normalized.length === 0) return null;
+  for (const message of messages) {
+    if (normalizeForMatch(stripReplyBlockquotes(message.body)).includes(normalized)) return message;
+  }
+  return null;
 }
 
 /** True when nothing is wrong with the receipt. */

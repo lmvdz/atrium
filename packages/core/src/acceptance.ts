@@ -1,32 +1,37 @@
-import { z } from 'zod';
-import { MODEL_ACCEPTANCE_FLOOR } from './authority.js';
 import type { Actor, Id, Timestamp } from './common.js';
 import {
+  bearingMessage,
   contentTokens,
   type ProvenanceMessage,
   type ProvenanceProblem,
   rejectingProblems,
   validateProposalProvenance,
 } from './escalation.js';
-import type { CoreEvent } from './events.js';
-import { AcceptedObjectType, type ClaimPayload, type DecisionPayload } from './objects.js';
+import type { AuthoredEvent, CoreEvent } from './events.js';
+import type { AcceptedObjectType, ClaimPayload, DecisionPayload } from './objects.js';
+import { type AcceptanceConfig, defaultAcceptanceConfig } from './policy.js';
 import type { Proposal, StoredProposal } from './proposal.js';
+import { appendEvent, compareCursor } from './reduce.js';
 import type { CoreState } from './state.js';
 
 /**
  * The acceptance engine — #4's matrix, entire.
  *
- * The reducer already holds the *floor* of this matrix (`authority.ts`): the
- * rows that are trust boundaries rather than policy, enforced where nothing can
- * route around them. This file holds the policy, and it is strictly stricter:
- * it decides what a worker should emit at all, given inputs the reducer does
- * not have — the messages a reading was drawn from, who wrote them, what the
- * room has already accepted.
+ * The reducer holds the *floor* of this matrix (`authority.ts`): the rows that
+ * are trust boundaries, enforced where nothing can route around them. This file
+ * decides what a worker should emit at all, given inputs the reducer applies
+ * more narrowly — the messages a reading was drawn from, who wrote them, what
+ * the room has already accepted.
  *
- * The two must never invert, so `AcceptanceConfig` refuses to be configured
- * below the reducer's floor. A config that could go under it would produce
- * events the reducer refuses, which is a room where acceptance silently stops
- * working and the only symptom is a growing `issues` list.
+ * The two read one θ table (`policy.ts`), so they cannot disagree about whether
+ * a reading is strong enough, and `AcceptanceConfig` refuses to be configured
+ * below the floor, so the engine can only ever be the stricter of the two.
+ *
+ * **The receipt is not optional.** In round 1 `messages` was an optional field
+ * whose absence produced an empty problem set, so the caller that forgot it got
+ * auto-acceptance instead of a refusal — the exact fail-open shape a trust
+ * boundary must not have. It is a required input now, and a model proposal
+ * judged without one is discarded with `missing_message_context`.
  *
  * Everything here is pure. No clock: `answerBinding` takes its timestamp. No id
  * generation: it takes its ids. That is what makes an acceptance decision
@@ -35,141 +40,12 @@ import type { CoreState } from './state.js';
  */
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Configuration
- * ───────────────────────────────────────────────────────────────────────── */
-
-/**
- * One type's rule.
- *
- * θ_auto is the **confident** line, and `autoAccept` says what crossing it
- * buys. For four types it buys acceptance. For a decision it buys a place in
- * Needs-you and nothing else, because a decision cannot be auto-accepted at any
- * confidence (#4: "inference is banned at exactly this point").
- *
- * Encoding that as `thetaAuto: 1.01` instead would have been shorter and wrong
- * twice over: it would make the rule look tunable, and it would collapse "the
- * pass is sure about this decision" into "the pass is unsure about this
- * decision", which are the two cells #4 and #6 disagree about. Keeping the
- * threshold real and the permission separate is what lets a confident decision
- * proposal reach a person while an uncertain one stays quiet.
- */
-export const AcceptanceRule = z.object({
-  /** At or above this, the pass is "confident". */
-  thetaAuto: z.number().min(0).max(1),
-  /** Below this, the reading is discarded, not shown. */
-  thetaMin: z.number().min(0).max(1),
-  /** Whether crossing θ_auto may accept, rather than only surface. */
-  autoAccept: z.boolean(),
-});
-export type AcceptanceRule = z.infer<typeof AcceptanceRule>;
-
-/**
- * #4's thresholds, per type.
- *
- * The shape of the table is #4's argument, restated: acceptance thresholds
- * follow the **cost of being wrong**, not the model's confidence in being
- * right.
- *
- *  - **Claim** — "X said Y" with its truth carried separately in `verification`.
- *    Cheap to correct, so recall wins. θ_auto is low.
- *  - **OpenQuestion** — a spurious one is one click to dismiss and a missed one
- *    is a question nobody ever revisits. The cost asymmetry is the strongest
- *    here, so this is the lowest bar in the table.
- *  - **Commitment** — an obligation with a name on it. Higher bar, and the
- *    self/third-party split below matters more than the number.
- *  - **Objective** — a grouping noun; a wrong one mis-files things quietly,
- *    which is worse than a wrong claim because nobody notices.
- *  - **Decision** — never, at any confidence.
- *
- * θ_min is the discard line. Below it the reading is not shown at all, because
- * a `~` a person has to evaluate is not free: the product's scarcest resource
- * is the attention of the people in the room.
- */
-export const DEFAULT_ACCEPTANCE_RULES: Readonly<Record<AcceptedObjectType, AcceptanceRule>> =
-  Object.freeze({
-    decision: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: false }),
-    commitment: Object.freeze({ thetaAuto: 0.75, thetaMin: 0.5, autoAccept: true }),
-    open_question: Object.freeze({ thetaAuto: 0.6, thetaMin: 0.4, autoAccept: true }),
-    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),
-    objective: Object.freeze({ thetaAuto: 0.75, thetaMin: 0.5, autoAccept: true }),
-  });
-
-/**
- * The whole config, with the three invariants that keep it coherent checked at
- * parse time rather than discovered in a room:
- *
- *  1. `thetaMin ≤ thetaAuto` — otherwise the pending band is inverted and a
- *     reading can be simultaneously too weak to show and strong enough to
- *     accept.
- *  2. `thetaAuto ≥ MODEL_ACCEPTANCE_FLOOR[type]` for any type that auto-accepts
- *     — the engine may be stricter than the reducer's floor and may never be
- *     looser, or it emits events the reducer refuses.
- *  3. `decision.autoAccept === false` — #4's one absolute, and the one a
- *     well-meaning config change would otherwise flip.
- */
-export const AcceptanceConfig = z
-  .record(AcceptedObjectType, AcceptanceRule)
-  .superRefine((rules, ctx) => {
-    for (const type of AcceptedObjectType.options) {
-      const rule = rules[type];
-      if (!rule) {
-        ctx.addIssue({
-          code: 'custom',
-          path: [type],
-          message: `acceptance config is missing a rule for "${type}" — the table must be total over the five object types`,
-        });
-        continue;
-      }
-      if (rule.thetaMin > rule.thetaAuto) {
-        ctx.addIssue({
-          code: 'custom',
-          path: [type, 'thetaMin'],
-          message: `θ_min (${rule.thetaMin}) is above θ_auto (${rule.thetaAuto}) for "${type}" — the pending band would be inverted`,
-        });
-      }
-      if (type === 'decision' && rule.autoAccept) {
-        ctx.addIssue({
-          code: 'custom',
-          path: [type, 'autoAccept'],
-          message:
-            'a decision may never auto-accept at any confidence (#4) — accepted only by a human, or by answer-binding',
-        });
-      }
-      const floor = MODEL_ACCEPTANCE_FLOOR[type];
-      if (rule.autoAccept && Number.isFinite(floor) && rule.thetaAuto < floor) {
-        ctx.addIssue({
-          code: 'custom',
-          path: [type, 'thetaAuto'],
-          message: `θ_auto (${rule.thetaAuto}) for "${type}" is below the reducer's acceptance floor (${floor}) — the engine may be stricter than the floor, never looser, or it emits acceptances the reducer refuses`,
-        });
-      }
-    }
-  });
-export type AcceptanceConfig = Record<AcceptedObjectType, AcceptanceRule>;
-
-/** The default table, parsed — so the defaults are held to their own invariants. */
-export const defaultAcceptanceConfig: AcceptanceConfig = AcceptanceConfig.parse(
-  DEFAULT_ACCEPTANCE_RULES,
-) as AcceptanceConfig;
-
-/** Merge per-type overrides onto the defaults and re-check the invariants. */
-export function resolveAcceptanceConfig(
-  overrides: Partial<Record<AcceptedObjectType, Partial<AcceptanceRule>>> = {},
-): AcceptanceConfig {
-  const merged: Record<string, AcceptanceRule> = {};
-  for (const type of AcceptedObjectType.options) {
-    merged[type] = { ...DEFAULT_ACCEPTANCE_RULES[type], ...(overrides[type] ?? {}) };
-  }
-  return AcceptanceConfig.parse(merged) as AcceptanceConfig;
-}
-
-/* ─────────────────────────────────────────────────────────────────────────
  * The decision
  * ───────────────────────────────────────────────────────────────────────── */
 
 /** Who a commitment's sentence came from. */
 export type CommitmentAttribution =
-  /** The owner wrote one of the cited messages — "I'll finish it tomorrow". */
+  /** The owner wrote the message bearing it — "I'll finish it tomorrow". */
   | 'self'
   /** Somebody else did — "Justin will handle it". Nobody gets committed by it. */
   | 'third_party';
@@ -194,12 +70,19 @@ export type AcceptanceVisibility =
 
 /** Which cell of the matrix fired. One name per cell, so tests can pin them. */
 export type AcceptanceRuleName =
+  | 'missing_message_context'
   | 'provenance_failed'
   | 'duplicate_of_accepted'
   | 'below_theta_min'
   | 'theta_band'
   | 'auto_accept'
-  | 'decision_never_auto'
+  /**
+   * At or above θ_auto, for a type that never auto-accepts at any confidence.
+   * Named for the *rule* rather than for the decision: it was
+   * `decision_never_auto`, which misnamed every non-decision that reached it —
+   * the table is data, and a fifth type could join the row tomorrow.
+   */
+  | 'never_auto_accepts'
   | 'third_party_commitment'
   | 'human_proposer';
 
@@ -236,13 +119,17 @@ export interface AcceptedObjectRef {
 export interface AcceptanceContext {
   config?: AcceptanceConfig;
   /**
-   * The window's messages. Supplying them turns on two checks that cannot be
-   * done without them: commitment attribution (did the owner write any of
-   * this?) and provenance validation.
+   * The window's messages — **required**, and the reason is the whole of round
+   * 1's second blocking finding. Commitment attribution and provenance
+   * validation cannot be done without them, and in round 1 that meant they
+   * silently were not done: no messages, no problems, auto-accept. A model
+   * proposal judged with no window is discarded now.
+   *
+   * A human-staged proposal does not go through θ at all, so it survives an
+   * empty window; there is nothing to check when the person staging the reading
+   * is the receipt.
    */
-  messages?: readonly ProvenanceMessage[];
-  /** Pre-computed provenance problems; derived from `messages` when absent. */
-  provenanceProblems?: readonly ProvenanceProblem[];
+  messages: readonly ProvenanceMessage[];
   /**
    * What the room has already accepted, for deduplication.
    *
@@ -278,24 +165,33 @@ export function payloadAttributedTo(
 }
 
 /**
- * Did the owner of this commitment write any of the messages it was read out of?
+ * Did the owner of this commitment write the message it was read out of?
  *
- * When the messages are not supplied the answer is `third_party`, deliberately.
- * #4's rule is "nobody gets committed by someone else's sentence", and the only
- * way to honour it without evidence is to ask the named person. An unproven
+ * **The message bearing the sentence, not any cited message.** Round 1's
+ * gauntlet: an owner who authored *any* cited message counted as a
+ * self-statement, so padding `provenance` with one unrelated message the owner
+ * happened to write turned "Justin will handle it" into "Justin said he would
+ * handle it" and auto-accepted an obligation nobody agreed to. The quote names
+ * the bearing message; its author is the only authorship that answers the
+ * question.
+ *
+ * With no quote, or no window, the answer is `third_party`, deliberately. #4's
+ * rule is "nobody gets committed by someone else's sentence", and the only way
+ * to honour it without evidence is to ask the named person. An unproven
  * self-statement is a third-party statement.
  */
 export function commitmentAttribution(
   owner: Id,
   citedMessageIds: readonly Id[],
   messages: readonly ProvenanceMessage[] | undefined,
+  quote: string | null | undefined,
 ): CommitmentAttribution {
   if (!messages || messages.length === 0) return 'third_party';
+  if (!quote || quote.trim().length === 0) return 'third_party';
   const cited = new Set(citedMessageIds);
-  for (const message of messages) {
-    if (cited.has(message.id) && message.authorId === owner) return 'self';
-  }
-  return 'third_party';
+  const citedMessages = messages.filter((message) => cited.has(message.id));
+  const bearing = bearingMessage(quote, citedMessages);
+  return bearing !== null && bearing.authorId === owner ? 'self' : 'third_party';
 }
 
 /**
@@ -346,6 +242,11 @@ export function findDuplicate(
  * | commitment, third-party  | discard   | pending, quiet     | pending, owner confirm|
  * | decision                 | discard   | pending, quiet     | pending, Needs-you    |
  *
+ * …with one cell in front of all of them: **no window, no verdict**. A model
+ * proposal judged without the messages it cites is discarded, because the
+ * alternative — an empty problem set read as a clean receipt — is how a wrong
+ * citation becomes an accepted fact.
+ *
  * Two cells are worth defending.
  *
  * **Decision at c ≥ θ_auto is Needs-you, not quiet.** #4 says a pending
@@ -364,13 +265,14 @@ export function findDuplicate(
  */
 export function decideAcceptance(
   proposal: Proposal | StoredProposal,
-  context: AcceptanceContext = {},
+  context: AcceptanceContext,
 ): AcceptanceDecision {
   const config = context.config ?? defaultAcceptanceConfig;
   const rule = config[proposal.type];
   const payload = proposal.payload as unknown as Record<string, unknown>;
   const text = payloadText(proposal.type, payload);
   const attributedTo = payloadAttributedTo(proposal.type, payload);
+  const messages = context.messages as readonly ProvenanceMessage[] | undefined;
 
   const base = {
     thetaAuto: rule.thetaAuto,
@@ -381,6 +283,21 @@ export function decideAcceptance(
     awaitingConfirmFrom: null,
   } as const;
 
+  // ── No window, no verdict ────────────────────────────────────────────────
+  //
+  // Fail-closed, and loudly: this is a caller bug, not a reading defect. The
+  // failure it replaces was silent in the other direction.
+  if (proposal.proposer.kind === 'model' && messages === undefined) {
+    return {
+      ...base,
+      verdict: 'discard',
+      visibility: 'none',
+      rule: 'missing_message_context',
+      reason:
+        'no message window was supplied, so the receipt could not be checked — a model reading is never accepted on trust; supply the messages it cites',
+    };
+  }
+
   // ── The receipt, before anything else ────────────────────────────────────
   //
   // A reading whose citation is wrong is worse than no reading: the citation is
@@ -389,22 +306,21 @@ export function decideAcceptance(
   // who never said it — fails here and nowhere else.
   //
   // Only `reject`-severity problems discard. A `reclassify` one — an owner who
-  // wrote none of the cited messages — is not a defect in the reading, it *is*
-  // the third-party commitment case, and it routes below rather than dying here.
-  const problems =
-    context.provenanceProblems ??
-    (context.messages
-      ? validateProposalProvenance(
-          {
-            type: proposal.type,
-            provenance: proposal.provenance,
-            quote: proposal.quote,
-            proposer: proposal.proposer,
-            attributedTo,
-          },
-          context.messages,
-        )
-      : []);
+  // did not write the message bearing the sentence — is not a defect in the
+  // reading, it *is* the third-party commitment case, and it routes below
+  // rather than dying here.
+  const problems: readonly ProvenanceProblem[] = messages
+    ? validateProposalProvenance(
+        {
+          type: proposal.type,
+          provenance: proposal.provenance,
+          quote: proposal.quote,
+          proposer: proposal.proposer,
+          attributedTo,
+        },
+        messages,
+      )
+    : [];
   const rejecting = rejectingProblems(problems);
   if (rejecting.length > 0) {
     return {
@@ -445,12 +361,24 @@ export function decideAcceptance(
   // means. (A person writing a fact outright uses `answerBinding` or direct
   // acceptance; they do not need a proposal.)
   if (proposal.proposer.kind === 'human') {
+    // …with one exception that is not about θ at all: a person naming *somebody
+    // else* on a commitment is still somebody else's sentence, and #4's rule
+    // does not care whether a machine or a colleague wrote it. The named owner
+    // is the one asked, and that is what the attention panel reads to decide
+    // whose confirm this is.
+    const staged = proposal.proposer.userId;
+    const namesAnother =
+      proposal.type === 'commitment' && attributedTo !== null && attributedTo !== staged;
     return {
       ...base,
       verdict: 'pending',
       visibility: 'needs_you',
+      attribution: proposal.type === 'commitment' ? (namesAnother ? 'third_party' : 'self') : null,
+      awaitingConfirmFrom: namesAnother ? attributedTo : null,
       rule: 'human_proposer',
-      reason: `staged by user "${proposal.proposer.userId}" — a person's reading goes to the room to be accepted, not through θ`,
+      reason: namesAnother
+        ? `staged by user "${staged}", who named "${attributedTo}" as owner — it waits for "${attributedTo}" to confirm; nobody gets committed by someone else's sentence (#4), whoever wrote it`
+        : `staged by user "${staged}" — a person's reading goes to the room to be accepted, not through θ`,
     };
   }
 
@@ -467,7 +395,7 @@ export function decideAcceptance(
 
   const attribution =
     proposal.type === 'commitment'
-      ? commitmentAttribution(attributedTo ?? '', proposal.provenance, context.messages)
+      ? commitmentAttribution(attributedTo ?? '', proposal.provenance, messages, proposal.quote)
       : null;
 
   // ── The band: θ_min ≤ c < θ_auto ─────────────────────────────────────────
@@ -493,7 +421,7 @@ export function decideAcceptance(
       attribution,
       verdict: 'pending',
       visibility: 'needs_you',
-      rule: 'decision_never_auto',
+      rule: 'never_auto_accepts',
       reason: `a ${proposal.type} never auto-accepts at any confidence (#4) — at ${proposal.confidence} the pass is confident, so it goes to Needs-you for a person to accept or decline; the room's current state is unsettled until somebody rules on it`,
     };
   }
@@ -507,7 +435,7 @@ export function decideAcceptance(
       visibility: 'needs_you',
       awaitingConfirmFrom: attributedTo,
       rule: 'third_party_commitment',
-      reason: `"${attributedTo}" is named as owner but wrote none of the cited messages — surfaced to them to confirm, and accepted only on that confirm; nobody gets committed by someone else's sentence (#4)`,
+      reason: `"${attributedTo}" is named as owner but did not write the message this was read out of — surfaced to them to confirm, and accepted only on that confirm; nobody gets committed by someone else's sentence (#4)`,
     };
   }
 
@@ -522,73 +450,6 @@ export function decideAcceptance(
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Supersession
- * ───────────────────────────────────────────────────────────────────────── */
-
-export type SupersessionAuthority =
-  /** A model may land it. */
-  | 'auto_accept'
-  /** A person must. */
-  | 'requires_human';
-
-export interface SupersessionDecision {
-  authority: SupersessionAuthority;
-  reason: string;
-}
-
-/**
- * #4's supersession split, by what is being retired.
- *
- * "Auto-accept when it retires a claim or a question; requires human accept when
- * it retires an accepted Decision." The other two types are not in #4's sentence
- * and default to `requires_human`, which is the conservative reading and the
- * only one that is safe to be wrong about: a commitment is an obligation with a
- * name on it and an objective is what everything else is filed under. Retiring
- * either quietly is a change nobody sees.
- *
- * The reducer enforces only the decision row (`authority.ts`) — it is the trust
- * boundary. This is the policy over it, and it is stricter by two rows.
- */
-export function decideSupersession(retiredType: AcceptedObjectType): SupersessionDecision {
-  switch (retiredType) {
-    case 'claim':
-      return {
-        authority: 'auto_accept',
-        reason:
-          'retiring a claim is a newer reading replacing an older one, and cheap to correct (#4)',
-      };
-    case 'open_question':
-      return {
-        authority: 'auto_accept',
-        reason:
-          'retiring an open question is cheap to correct, and a stale question costs recall (#4)',
-      };
-    case 'decision':
-      return {
-        authority: 'requires_human',
-        reason:
-          'retiring an accepted decision needs the same human hand that accepting one needed (#4) — otherwise the decision gate is a front door with the back door open',
-      };
-    case 'commitment':
-      return {
-        authority: 'requires_human',
-        reason:
-          "a commitment is an obligation with a name on it — #4 does not put it in the auto-accept row, and dropping someone's obligation quietly is not a cheap correction",
-      };
-    case 'objective':
-      return {
-        authority: 'requires_human',
-        reason:
-          'an objective is what everything else is filed under — #4 does not put it in the auto-accept row, and retiring one silently re-files the room',
-      };
-    default: {
-      const exhaustive: never = retiredType;
-      return { authority: 'requires_human', reason: `unknown type ${JSON.stringify(exhaustive)}` };
-    }
-  }
-}
-
-/* ─────────────────────────────────────────────────────────────────────────
  * Answer-binding
  * ───────────────────────────────────────────────────────────────────────── */
 
@@ -600,17 +461,19 @@ export function decideSupersession(retiredType: AcceptedObjectType): Supersessio
  * proposal is staged, no confidence is computed, nothing is extracted. #4 names
  * this as one of exactly two ways a decision is ever accepted.
  *
- * It is a **command**, not an interpretation: this function turns the command
- * into the two events the reducer will fold, and both the object id and the
- * event ids come from the caller. No clock, no uuid, no randomness — hand it the
- * same command twice and you get byte-identical events, which is what makes the
- * whole path replayable.
+ * It is a **command**, not an interpretation: this turns the command into the
+ * two events the reducer will fold, and both the object id and the event ids
+ * come from the caller. No clock, no uuid, no randomness — hand it the same
+ * command twice and you get byte-identical events, which is what makes the whole
+ * path replayable.
+ *
+ * **The actor is not in here.** It is the same trusted argument the reducer
+ * takes, for the same reason: a command that carried its own actor would be a
+ * self-declared human, and this is the one path that mints an accepted decision.
  */
 export interface AnswerBindingCommand {
   /** Event timestamp; also the objects' created/updated time. */
   at: Timestamp;
-  /** Must be a human — the reducer refuses a proposal-less acceptance otherwise. */
-  actor: Actor;
   roomId: Id;
   /** The open question being answered. */
   questionObjectId: Id;
@@ -631,12 +494,21 @@ export interface AnswerBindingCommand {
  *
  * Checked here so a caller can refuse before minting events, and checked again
  * by the reducer because a check that only runs upstream is not a check.
+ *
+ * The ordering rule is the one worth explaining. The two events share a
+ * timestamp, so the canonical `(at, id)` order breaks the tie on the *ids the
+ * caller chose* — and if the relation sorts first it arrives before the object
+ * it points at, fails on an unknown target, and the question stays open with the
+ * answer accepted next to it. Round 1's gauntlet found it; the fix is to refuse
+ * the command rather than to hope, because ids are the caller's to pick and the
+ * caller can pick again.
  */
 export function answerBindingRefusal(
   state: CoreState,
   command: AnswerBindingCommand,
+  actor: Actor,
 ): string | null {
-  if (command.actor.kind !== 'human') {
+  if (actor.kind !== 'human') {
     return 'answer-binding is a person answering a question — only a human may bind an answer, and a model must go through a proposal';
   }
   const record = state.objects[command.questionObjectId];
@@ -647,11 +519,21 @@ export function answerBindingRefusal(
   if (record.retractedAt !== null) {
     return `open question "${command.questionObjectId}" is retracted — restore it before answering`;
   }
+  if (record.object.payload.status !== 'open') {
+    return `open question "${command.questionObjectId}" is already answered — reopen it before binding a different answer, so the room can see that it was settled twice`;
+  }
   if (record.object.roomId !== command.roomId) {
     return `open question "${command.questionObjectId}" is in room "${record.object.roomId}", not "${command.roomId}"`;
   }
   if (state.objects[command.answer.objectId]) {
     return `object "${command.answer.objectId}" already exists`;
+  }
+  const { acceptEventId, relationEventId } = command.ids;
+  if (
+    compareCursor({ at: command.at, id: acceptEventId }, { at: command.at, id: relationEventId }) >=
+    0
+  ) {
+    return `answer-binding event ids are out of order: the acceptance "${acceptEventId}" must sort strictly before the relation "${relationEventId}" at ${command.at}, or the edge arrives before the object it points at and the question is left open beside its own answer — pick ids whose order matches`;
   }
   return null;
 }
@@ -659,9 +541,12 @@ export function answerBindingRefusal(
 /**
  * The events an answer-binding produces: accept the answer, then point the
  * question at it. The `answers` edge is what flips the question to `answered`,
- * so the ordering is load-bearing and the timestamps reflect it.
+ * so the ordering is load-bearing and `answerBindingRefusal` enforces it.
+ *
+ * Each event comes back paired with the trusted actor, because that is the shape
+ * the reducer folds — the caller passes the pairs straight through.
  */
-export function answerBindingEvents(command: AnswerBindingCommand): CoreEvent[] {
+export function answerBindingEvents(command: AnswerBindingCommand, actor: Actor): AuthoredEvent[] {
   const { answer } = command;
   const object = {
     id: answer.objectId,
@@ -680,18 +565,16 @@ export function answerBindingEvents(command: AnswerBindingCommand): CoreEvent[] 
     updatedAt: command.at,
   };
 
-  return [
+  const events = [
     {
       id: command.ids.acceptEventId,
       at: command.at,
-      actor: command.actor,
       type: 'object_accepted',
       object,
     },
     {
       id: command.ids.relationEventId,
       at: command.at,
-      actor: command.actor,
       type: 'relation_added',
       relation: {
         id: command.ids.relationId,
@@ -704,14 +587,60 @@ export function answerBindingEvents(command: AnswerBindingCommand): CoreEvent[] 
       },
     },
   ] as CoreEvent[];
+
+  return events.map((event) => ({ event, actor }));
 }
 
 /** Refusal or events, in one call. */
 export function bindAnswer(
   state: CoreState,
   command: AnswerBindingCommand,
-): { ok: true; events: CoreEvent[] } | { ok: false; refusal: string } {
-  const refusal = answerBindingRefusal(state, command);
+  actor: Actor,
+): { ok: true; events: AuthoredEvent[] } | { ok: false; refusal: string } {
+  const refusal = answerBindingRefusal(state, command, actor);
   if (refusal !== null) return { ok: false, refusal };
-  return { ok: true, events: answerBindingEvents(command) };
+  return { ok: true, events: answerBindingEvents(command, actor) };
+}
+
+/**
+ * Bind an answer **as one command**: either both events land, or the state comes
+ * back untouched.
+ *
+ * `bindAnswer` mints the pair and leaves applying them to the caller, which is
+ * right for a command layer that has to persist them. But a caller that folds
+ * them one at a time can land the acceptance, have the relation refused, and
+ * leave the room with an answer nobody asked and a question nobody answered —
+ * two events, one meaning, no transaction. So the atomic form exists, and it is
+ * the one to reach for by default.
+ *
+ * Nothing is mutated: on refusal the *same state object* comes back, exactly as
+ * `appendEvent` does for a rejection.
+ */
+export function applyAnswerBinding(
+  state: CoreState,
+  command: AnswerBindingCommand,
+  actor: Actor,
+):
+  | { ok: true; state: CoreState; events: AuthoredEvent[] }
+  | { ok: false; state: CoreState; refusal: string } {
+  const bound = bindAnswer(state, command, actor);
+  if (!bound.ok) return { ok: false, state, refusal: bound.refusal };
+
+  let next = state;
+  for (const entry of bound.events) {
+    const result = appendEvent(next, entry.event, { actor: entry.actor });
+    if (result.outcome !== 'applied') {
+      const why =
+        result.outcome === 'rejected'
+          ? result.detail
+          : result.issues.map((issue) => issue.reason).join('; ');
+      return {
+        ok: false,
+        state,
+        refusal: `answer-binding "${command.ids.acceptEventId}" was rolled back: event "${entry.event.id}" ${result.outcome} — ${why}`,
+      };
+    }
+    next = result.state;
+  }
+  return { ok: true, state: next, events: bound.events };
 }
