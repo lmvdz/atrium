@@ -19,6 +19,7 @@ playwright-report/
 test-results/
 # machine-readable run summaries the CI gates count tests from
 vitest-report.json
+vitest-ci-report.json
 playwright-report.json
 blob-report/
 .playwright/
