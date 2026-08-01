@@ -262,12 +262,37 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .iconbtn svg { width: 13px; height: 13px; display: block; }
 
 /* --- center -------------------------------------------------------------- */
+/* FIVE CHILDREN, FIVE TRACKS, EACH ONE PLACED BY NAME.
+   roomhead · pin · trace · feed · composer.
+
+   Round 4 declared four tracks for five children. The fifth fell into an
+   implicit `auto` track and the whole column shifted by one: the FEED got
+   `auto` (unbounded — it sizes to its content) and the TRACE got
+   `minmax(0,1fr)` (whatever is left, which is nothing). The trace resolved to
+   0px, the feed painted straight through it, and both trace controls failed
+   hit-testing — measured with trace.top === feed.top === 306.14 at 1440.
+
+   Declaring the fifth track is NOT sufficient, and this is the part worth
+   keeping: the trace is `hidden` most of the time, `[hidden]` is
+   `display: none`, and a display:none child is not a grid item at all. With
+   auto-placement, hiding it slid the last three children up one track — the
+   feed onto `auto`, the composer onto `1fr`, which resolved to 0 — and the
+   composer left the viewport entirely at top: 900. One template cannot be
+   correct for both states under auto-placement, so nothing is auto-placed:
+   every child names its own row and hiding one leaves an empty track behind
+   rather than renumbering its siblings. checkLayoutInvariant() proves all of
+   it against the painted geometry on every render and every resize. */
 .center {
   background: var(--bg1);
   display: grid;
-  grid-template-rows: auto auto minmax(0,1fr) auto;
+  grid-template-rows: auto auto auto minmax(0,1fr) auto;
   min-width: 0; min-height: 0;
 }
+.center > .roomhead { grid-row: 1; }
+.center > .pin      { grid-row: 2; }
+.center > .trace    { grid-row: 3; }
+.center > .feed     { grid-row: 4; }
+.center > .composer { grid-row: 5; }
 
 .roomhead { border-bottom: 1px solid var(--line); padding: 8px 16px 0; background: var(--bg1); }
 .roomhead .top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
@@ -747,6 +772,24 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 }
 .prov:hover .full, .prov:focus-visible .full { max-height: 44px; opacity: 1; margin-top: 4px; }
 
+/* A SOURCE THE PAGE AUTHORED IS NOT A QUOTATION.
+   When the human clicked an option rather than typing a sentence, the receipt's
+   source entry is a system-voice record of that click — mono, muted, no
+   quotation marks, no <q>, no data-quoted, and therefore outside the quotation
+   checker's remit by construction rather than by exemption. Its disclosure is
+   `.always`: on screen at rest, because "you chose this, you did not write it"
+   is the one thing a receipt may never make you hover to discover. */
+.prov .sysex {
+  display: block; margin-top: 2px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10.5px;
+  color: var(--tx1); line-height: 1.4;
+}
+.prov .always {
+  display: block; margin-top: 3px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10px;
+  color: var(--tx2); line-height: 1.4;
+}
+
 .corr { border-left: 2px solid var(--line2); padding: 2px 0 2px 9px; margin-bottom: 7px; }
 .corr .hd { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 .corr .bd { font-size: 11px; color: var(--tx1); margin-top: 2px; }
@@ -1135,7 +1178,13 @@ S.rooms["users-migration"] = {
       facts: ["accepted by lars", "29 Jul 11:20", "3 sources"],
       history: [
         { k: "claim",    who: "priya",  tm: "29 Jul 09:41", text: "proposed keeping dual-write until parity was proven — self-reported, no check attached" },
-        { k: "verified", who: "checks", tm: "29 Jul 10:02", text: "parity had passed 3 consecutive days at the time of the proposal" },
+        /* a history line may only assert what its cited source carries. Round 4
+           said "parity had passed 3 consecutive days"; the run it cites (m0p,
+           #391) carries a row count and a checksum count and no day count at
+           all. The line now says what run #391 actually said — which is also
+           the honest reading, since one run is exactly not the clean week the
+           proposal was asking for. */
+        { k: "verified", who: "checks", tm: "29 Jul 10:02", text: "parity run #391 passed with 0 checksum diffs at the time of the proposal — one run, not the clean week the proposal asked for" },
         { k: "claim",    who: "mateo",  tm: "29 Jul 10:55", text: "estimated the extra write cost at ~$900/mo — never checked against a bill" },
         { k: "accepted", who: "lars",   tm: "29 Jul 11:20", text: "accepted by answer-binding — nothing about this line was inferred" }
       ],
@@ -1169,9 +1218,16 @@ S.rooms["users-migration"] = {
       waiting: 3, blocks: "1 objective",
       why: "needs you specifically — you set the freeze date, and nobody else can trade $900/mo against the 4.7% of sessions still on legacy tokens.",
       facts: ["proposed · not accepted", "conf .71", "from priya 08:36"],
+      /* OPTION IDENTITY, NOT OPTION TEXT (round 4 D7). Whether an answer departs
+         from the proposal is a fact about WHICH option was chosen, not about
+         whether its wording happens to match `text`. `agrees: true` marks the
+         option that IS the proposal on the card — here, cutting over Friday,
+         which the proposal statement says in different words. Round 4
+         string-compared and so recorded "not what was proposed" against an
+         answer that agreed with it exactly. */
       options: [
         { label: "Keep dual-write through 14 Aug", statement: "Dual-write runs through the 14 Aug freeze; legacy tokens stay accepted until then" },
-        { label: "Cut over Friday", statement: "Cut over Friday 1 Aug; legacy tokens are dropped and the 4.7% tail is force-re-authed" }
+        { label: "Cut over Friday", agrees: true, statement: "Cut over Friday 1 Aug; legacy tokens are dropped and the 4.7% tail is force-re-authed" }
       ],
       history: [
         { k: "claim",    who: "priya",  tm: "08:36", text: "asked for one of two options — the model read this as a decision proposal, not a decision" },
@@ -1368,7 +1424,7 @@ S.rooms["identity-service"] = {
       why: "needs you specifically — strict rotation breaks any client that replays a refresh token, and you own the mobile compatibility call.",
       facts: ["proposed · not accepted", "conf .66", "from justin 08:14"],
       options: [
-        { label: "Rotate on every use", statement: "Refresh tokens rotate on every use; replayed tokens are refused outright" },
+        { label: "Rotate on every use", agrees: true, statement: "Refresh tokens rotate on every use; replayed tokens are refused outright" },
         { label: "Sliding window", statement: "Refresh tokens rotate on a 24h sliding window so replays inside the window still succeed" }
       ],
       history: [
@@ -1395,7 +1451,7 @@ S.rooms["identity-service"] = {
       why: "needs you specifically — it is the same trade you owe #users-migration, and it was put to you over there, so this room has the decision without the line that raised it.",
       facts: ["proposed · not accepted", "conf .58", "source in #users-migration"],
       options: [
-        { label: "Stop with the cutover", statement: "Opaque-token issuance stops the day the users cutover lands" },
+        { label: "Stop with the cutover", agrees: true, statement: "Opaque-token issuance stops the day the users cutover lands" },
         { label: "Hold until the freeze", statement: "Opaque-token issuance stays open until the 14 Aug freeze, whatever the users cutover does" }
       ],
       history: [
@@ -1463,6 +1519,29 @@ Object.values(S.rooms).forEach(r => { r.absenceEnd = r.messages[r.messages.lengt
    destroying it — the group keeps its boundaries, its counts and its chips
    after the cursor has passed it, and can be un-marked. */
 Object.values(S.rooms).forEach(r => { r.absenceFrom = r.seenAfter; r.markedAt = null; });
+
+/* ---------------------------------------------------------------------------
+ * MESSAGE ORIGIN — who authored the words in this row.
+ *
+ * Round 4's cardinal defect (D3) was that this distinction did not exist. A
+ * one-click answer appended a message whose actor was `lars` and whose body was
+ * the CARD's sentence; the receipt then quoted that message and the quotation
+ * checker resolved the quote against it and passed. The invariant was circular:
+ * the page fabricated the evidence it then checked itself against.
+ *
+ *   'seeded'  — in the loaded record at boot. Real words, real author.
+ *   'typed'   — this human typed these characters into this page.
+ *   'chosen'  — THE PAGE authored this row on a human's behalf (they clicked an
+ *               option). Never that human's words, never quotable, never
+ *               rendered in their voice.
+ *   'system'  — a transition record the page wrote about itself.
+ *
+ * Only 'seeded' and 'typed' may satisfy a quotation context. That is enforced
+ * in checkQuotationInvariant(), not by convention, so a future change that
+ * re-routes a chosen answer through the human path fails on the first paint.
+ * design/CONVENTIONS.md § "No synthesized speech" is the written rule.
+ * ------------------------------------------------------------------------ */
+Object.values(S.rooms).forEach(r => r.messages.forEach(m => { if (!m.origin) m.origin = "seeded"; }));
 
 /* Seeded human input joins the human-speech register, so a quotation seeded in
    the corpus is proved exactly the way a quotation typed live is proved. There
@@ -1532,6 +1611,15 @@ function sourceRoomOf(o) { return o.sourceRoom && o.sourceRoom !== S.roomId ? o.
 function msgGlyph(r, m) {
   const o = linkedObject(r, m);
   if (!o) return "·";
+  /* A TRANSITION ROW WEARS THE TRANSITION'S GLYPH, NOT THE OBJECT'S (round 4 D6).
+     A system row that records "accepted → proposed · reopened" is a record of a
+     downgrade. Deriving its glyph from the object's PRESENT state made that row
+     turn green again the moment the object was re-accepted, so the permanent
+     record of a downgrade rendered ✓. The glyph is frozen at the instant the
+     transition is written (appendSystem) and never moves again — which is the
+     whole point of a record. Content rows still re-derive live: reopen an object
+     and the row that carried the claim still downgrades with it (round-1 B2). */
+  if (m.tglyph) return m.tglyph;
   /* ANSWER-ROW IDENTITY (round 2 blocker 2): only the message whose id is the
      object's CURRENT answerMsg may wear the settled treatment. Every earlier
      answer to the same object is a superseded answer and renders as one, no
@@ -1547,8 +1635,26 @@ function msgGlyph(r, m) {
 function msgIsClaim(r, m) {
   const o = linkedObject(r, m);
   if (!o) return false;
+  if (m.tglyph) return !!m.tclaim;          // frozen with the glyph, same reason
   if (m.boundTo && o.answerMsg !== m.id) return true;
   return isClaim(o);
+}
+
+/* ---------------------------------------------------------------------------
+ * NO OPTIONAL FIELD REACHES A RENDERED RECORD UNGUARDED (round 4 D2).
+ *
+ * `was due ${o.due}` on a commitment with no `due` printed "was due undefined"
+ * into a permanent system row. Every optional field on a record-writing path
+ * now goes through this: a missing value is STATED, in words, never printed as
+ * the name of a JavaScript value. checkRecordTextInvariant() asserts on every
+ * paint that no page-authored string on screen contains undefined/null/NaN, so
+ * a future template literal that forgets is caught by what it painted.
+ * ------------------------------------------------------------------------ */
+function fieldOr(v, fallback) {
+  if (v === undefined || v === null) return fallback;
+  if (typeof v === "number" && !isFinite(v)) return fallback;
+  const s = String(v).trim();
+  return s === "" ? fallback : v;
 }
 
 /* the four classes partition the group: they add up to the total, by construction */
@@ -1717,21 +1823,50 @@ function checkRowScopeInvariant(r) {
 
 /* --- THE QUOTATION INVARIANT ---------------------------------------------
  * Round 3's cardinal defect, encoded so it cannot come back: anything rendered
- * as a person's words must prove where the words came from.
+ * as a person's words must prove where the words came from. Round 4 found the
+ * encoding CIRCULAR and this is the closure of that loophole.
  *
  *   1. Every element in a quotation context (<q>, .ex, .quoted) carries
  *      data-quoted, and it resolves — either "msg:<id>[@room]", in which case
- *      the rendered text must actually appear in that message, or "typed", in
- *      which case the text must be in the human-speech register (S.typed).
- *   2. No quotation marks are rendered anywhere else. A quote outside a
- *      quotation context is a quote nothing is checking.
+ *      the rendered text must actually appear in that message AND that message
+ *      must have been authored by a human (origin 'typed' or 'seeded'), or
+ *      "typed", in which case the text must be in the human-speech register.
+ *      A message the PAGE authored on a human's behalf (origin 'chosen') can
+ *      never satisfy a quotation context, however real its text is: the defect
+ *      is the attribution, not the invention. Round 4 checked only that the
+ *      cited message existed and contained the text — which a page-fabricated
+ *      message trivially does, because the page wrote it to contain the text.
+ *   2. No quotation marks are rendered anywhere else — SCOPED TO PAGE-AUTHORED
+ *      TEXT. Round 4 walked every text node on the page, so a human typing
+ *      “like this” tripped a page-integrity rule on their own words, on every
+ *      render. A person's typographic quotes are their business; the rule is
+ *      about what the PAGE puts in quotation marks.
+ *   3. A row the page authored (origin 'chosen') is never dressed as human
+ *      speech: not classed `.me`, no quotation marks in it, no quotation
+ *      context inside it.
  * ---------------------------------------------------------------------- */
 const QUOTED_SEL = "q, .ex, .quoted";
+/* text a HUMAN produced, marked at render. Two rules read it: the quote-mark
+   walk skips it (their quotes are theirs) and the record-text check skips it
+   (someone may legitimately type the word "undefined"). Everything not marked
+   is page-authored and is held to both. */
+const HUMAN_SEL = '[data-voice="human"]';
+
+/* strip only a MATCHED PAIR of wrapper quotes the page itself added, plus a
+   truncation ellipsis. Round 4 stripped every curly quote in the string, so a
+   quotation of a message that legitimately contained “…” no longer matched the
+   message it cited and the checker reported invented speech about real words. */
+function quotedText(el) {
+  let s = el.textContent.trim().replace(/…$/, "").trim();
+  if (s.length > 1 && /^[“"]/.test(s) && /[”"]$/.test(s)) s = s.slice(1, -1).trim();
+  return s;
+}
+
 function checkQuotationInvariant() {
   if (!DEV) return;
   document.querySelectorAll(QUOTED_SEL).forEach(el => {
     const ref = el.getAttribute("data-quoted");
-    const text = el.textContent.replace(/[“”"]/g, "").replace(/…$/, "").trim();
+    const text = quotedText(el);
     if (!ref) return console.error("[atrium invariant] quoted text with no provenance — nothing proves anyone said this:", text, el);
     if (ref === "typed") {
       if (!S.typed.some(s => s.indexOf(text) === 0 || s === text))
@@ -1742,24 +1877,221 @@ function checkQuotationInvariant() {
     const home = roomId ? S.rooms[roomId] : room();
     const m = home && msg(home, id);
     if (!m) return console.error("[atrium invariant] quotation cites a message that does not exist:", ref, el);
+    /* THE LOOPHOLE, CLOSED. A quotation may only cite a message a human wrote. */
+    if (m.origin !== "typed" && m.origin !== "seeded")
+      return console.error("[atrium invariant] quotation cites a message the page authored (origin " +
+        m.origin + ") — a page-written sentence can never be a person's words:", ref, text, el);
     if (plain(m.body).indexOf(text) < 0)
       console.error("[atrium invariant] quoted text is not in the message it cites — this is invented speech:", ref, text, el);
   });
 
-  /* no stray quotation marks: every “ ” on screen must sit inside a checked
-     quotation context. This is what makes rule 1 exhaustive rather than a
-     convention someone can forget to follow. */
+  /* no stray quotation marks in PAGE-AUTHORED text: every “ ” the page renders
+     must sit inside a checked quotation context. This is what makes rule 1
+     exhaustive rather than a convention someone can forget to follow — and
+     skipping human-authored bodies is what stops it crying wolf on input. */
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
     acceptNode(n) {
       if (!/[“”]/.test(n.nodeValue)) return NodeFilter.FILTER_REJECT;
       const p = n.parentElement;
       if (!p || p.closest("script, style, template")) return NodeFilter.FILTER_REJECT;
+      if (p.closest(HUMAN_SEL)) return NodeFilter.FILTER_REJECT;
       return p.closest(QUOTED_SEL) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
     }
   });
   let n;
   while ((n = walker.nextNode()))
     console.error("[atrium invariant] quotation marks outside a checked quotation context:", n.nodeValue.trim(), n.parentElement);
+
+  /* rule 3: a page-authored answer row is a system record, and must look like
+     one. If a future change routes a chosen answer back through the human path
+     — actor S.me, body in quotation marks, or a quotation context inside it —
+     this fires before anyone reads the row and believes it. */
+  document.querySelectorAll('#feed .mrow[data-origin="chosen"]').forEach(el => {
+    if (el.classList.contains("me"))
+      console.error("[atrium invariant] a row the page authored is classed as the human's own:", el.dataset.msg, el);
+    if (el.querySelector(QUOTED_SEL))
+      console.error("[atrium invariant] a row the page authored contains a quotation context:", el.dataset.msg, el);
+    if (/[“”]/.test(el.textContent))
+      console.error("[atrium invariant] a row the page authored is rendered in quotation marks:", el.dataset.msg, el);
+  });
+}
+
+/* --- THE RECORD-TEXT INVARIANT (round 4 D2) -------------------------------
+ * No page-authored string on screen may contain `undefined`, `null` or `NaN`.
+ * Those are the names of JavaScript values, not facts about anything, and a
+ * permanent record that contains one is a record that is wrong. Human-authored
+ * text is exempt: a person may type the word "undefined" and that is their
+ * sentence, not the page's failure — the round-4 D4 lesson, applied here too.
+ * Attributes count: a tooltip is rendered text a user reads.
+ * ---------------------------------------------------------------------- */
+const BAD_VALUE = /\b(undefined|null|NaN)\b/;
+function checkRecordTextInvariant() {
+  if (!DEV) return;
+  [document.querySelector(".app"), $("toast")].forEach(root => {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        if (!BAD_VALUE.test(n.nodeValue)) return NodeFilter.FILTER_REJECT;
+        const p = n.parentElement;
+        if (!p || p.closest("script, style, template")) return NodeFilter.FILTER_REJECT;
+        if (p.closest(HUMAN_SEL)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    let n;
+    while ((n = walker.nextNode()))
+      console.error("[atrium invariant] a rendered record contains an unguarded optional field:", n.nodeValue.trim(), n.parentElement);
+
+    root.querySelectorAll("[title], [aria-label]").forEach(el => {
+      if (el.closest(HUMAN_SEL)) return;
+      ["title", "aria-label"].forEach(a => {
+        const v = el.getAttribute(a);
+        if (v && BAD_VALUE.test(v))
+          console.error("[atrium invariant] a rendered " + a + " contains an unguarded optional field:", v, el);
+      });
+    });
+  });
+}
+
+/* --- THE LAYOUT INVARIANT (round 4 D1) ------------------------------------
+ * Round 4's blocking defect was invisible to every other check on this page:
+ * the state was right, the strings were right, the DOM was right, and the
+ * cross-room trace was 0px tall with the feed painting over it and both of its
+ * controls unclickable. Nothing in a state-shaped invariant can see that. So
+ * this one asserts against geometry, on the thing that was actually painted:
+ *
+ *   1. Every visible child of `.center` occupies a track with real height.
+ *   2. No two of those children overlap — a collapsed track shows up as a
+ *      sibling painting through, which is exactly what round 4 measured.
+ *   3. Every interactive control's centre point hit-tests to itself. A control
+ *      you cannot click is not an affordance, whatever it looks like.
+ *
+ * Controls scrolled out of their container are skipped — legitimately not on
+ * screen — by intersecting each element with every clipping ancestor first.
+ * ---------------------------------------------------------------------- */
+const CONTROL_SEL = "button, input, textarea, select, a[href], [role='button'], [tabindex]:not([tabindex='-1'])";
+
+/* an element is on screen only if NO ancestor hides it. getComputedStyle reports
+   an element's OWN display, so a button inside a `hidden` panel still reads
+   `display: flex` while having no box at all — the walk up is what tells the
+   difference between "unclickable" and "not currently on the page". */
+function shown(el) {
+  for (let p = el; p && p.nodeType === 1; p = p.parentElement) {
+    if (p.hidden) return false;
+    const cs = getComputedStyle(p);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+  }
+  return true;
+}
+/* the element's box intersected with every scroll/clip ancestor and the
+   viewport — i.e. the part of it a pointer could actually reach */
+function visibleBox(el) {
+  let box = el.getBoundingClientRect();
+  box = { left: box.left, top: box.top, right: box.right, bottom: box.bottom };
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const cs = getComputedStyle(p);
+    if (cs.overflow === "visible" && cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+    const r = p.getBoundingClientRect();
+    box.left = Math.max(box.left, r.left); box.top = Math.max(box.top, r.top);
+    box.right = Math.min(box.right, r.right); box.bottom = Math.min(box.bottom, r.bottom);
+  }
+  box.left = Math.max(box.left, 0); box.top = Math.max(box.top, 0);
+  box.right = Math.min(box.right, window.innerWidth);
+  box.bottom = Math.min(box.bottom, window.innerHeight);
+  return box;
+}
+
+function checkLayoutInvariant() {
+  if (!DEV) return;
+  const center = document.querySelector(".center");
+  if (!center) return console.error("[atrium invariant] the conversation column is missing");
+
+  const cbox = center.getBoundingClientRect();
+  const kids = Array.from(center.children).filter(shown);
+  const boxes = kids.map(el => el.getBoundingClientRect());
+  kids.forEach((el, i) => {
+    if (boxes[i].height < 1)
+      console.error("[atrium invariant] a .center child owns a zero-height track — it is on the page and cannot be seen or clicked:",
+        el.id || el.className, el);
+    /* THE COLUMN IS AUTHORITATIVE AND DOES NOT SCROLL, so a child outside it is
+       not "scrolled out of view", it is gone. Found while verifying the fix
+       above: hiding the trace slid the composer to top: 900 on a 900px
+       viewport, entirely below the fold — non-zero height, no overlap with the
+       feed, and invisible to both of the other two rules. Its controls were
+       skipped by the hit-test as legitimately off-screen. This is the rule that
+       sees it. */
+    if (boxes[i].bottom > cbox.bottom + 0.5 || boxes[i].top < cbox.top - 0.5)
+      console.error("[atrium invariant] a .center child is outside the column that owns it — the track layout pushed it off:",
+        el.id || el.className, boxes[i].top, boxes[i].bottom, "column:", cbox.top, cbox.bottom);
+  });
+  /* a track can collapse without the child reporting zero height (a min-height,
+     an absolute child), and the symptom is always the same: siblings sharing
+     pixels. Round 4 measured trace.top === feed.top at 306.14 on both. */
+  for (let i = 0; i < kids.length - 1; i++) {
+    if (boxes[i].bottom > boxes[i + 1].top + 0.5)
+      console.error("[atrium invariant] two .center children overlap — a track collapsed and a sibling is painting through it:",
+        (kids[i].id || kids[i].className), "over", (kids[i + 1].id || kids[i + 1].className),
+        boxes[i].bottom, boxes[i + 1].top);
+  }
+
+  /* every control hit-tests to itself */
+  document.querySelectorAll(CONTROL_SEL).forEach(el => {
+    if (!shown(el)) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1)
+      return console.error("[atrium invariant] an interactive control has no clickable area:", controlName(el), el);
+    const v = visibleBox(el);
+    if (v.right - v.left < 1 || v.bottom - v.top < 1) return;   // scrolled out of view — legitimately unreachable
+    let cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    if (cx < v.left || cx > v.right || cy < v.top || cy > v.bottom) {
+      cx = (v.left + v.right) / 2; cy = (v.top + v.bottom) / 2;  // partially scrolled: test the reachable part
+    }
+    let hit = document.elementFromPoint(cx, cy);
+    if (hit === el || (hit && el.contains(hit))) return;
+    /* THE CENTRE IS NOT THE WHOLE CONTROL. A sticky header or footer legitimately
+       covers a band of a scrolling pane — the control under it is one scroll away,
+       which is what sticky is for, and failing it would be exactly the cry-wolf
+       mistake D4 is about. What is NOT legitimate is a control with no reachable
+       point at all: round 4's trace controls were covered edge to edge by a feed
+       that had swallowed their track, and no scroll position recovered them. So
+       the rule is "at least one point of this control hit-tests to it". */
+    const probes = [[.15, .5], [.85, .5], [.5, .15], [.5, .85], [.15, .15], [.85, .85], [.15, .85], [.85, .15]];
+    const reachable = probes.some(([fx, fy]) => {
+      const px = v.left + (v.right - v.left) * fx, py = v.top + (v.bottom - v.top) * fy;
+      const h = document.elementFromPoint(px, py);
+      return h === el || (h && el.contains(h));
+    });
+    if (reachable) return;
+    /* ...and a sticky or fixed overlay is one scroll away, not a dead end. The
+       receipt's sticky footer deliberately covers a band of a scrolling pane so
+       that Reopen never falls below the fold; a source entry under it is reached
+       by scrolling, which is the contract sticky signs. Round 4's trace controls
+       were covered by a sibling in NORMAL FLOW inside a column that does not
+       scroll at all, and that stays a failure. */
+    if (scrollEscapable(el, hit)) return;
+    console.error("[atrium invariant] an interactive control has no point that hit-tests to itself — something is painting over all of it:",
+      controlName(el), "→", hit && (hit.className || hit.tagName), el);
+  });
+}
+/* is the thing covering `el` an overlay a scroll would move it out from under?
+   True only when the blocker is sticky/fixed AND is not an ancestor of the
+   control AND the control sits in a pane with somewhere left to scroll. */
+function scrollEscapable(el, hit) {
+  if (!hit) return false;
+  let sticky = null;
+  for (let p = hit; p && p !== document.body; p = p.parentElement) {
+    const pos = getComputedStyle(p).position;
+    if ((pos === "sticky" || pos === "fixed") && !p.contains(el)) { sticky = p; break; }
+  }
+  if (!sticky) return false;
+  for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+    if (p.scrollHeight > p.clientHeight + 1 || p.scrollWidth > p.clientWidth + 1) return true;
+  }
+  return false;
+}
+function controlName(el) {
+  return (el.id ? "#" + el.id + " " : "") + (el.className || el.tagName) +
+         " · " + (el.textContent || el.getAttribute("aria-label") || "").trim().slice(0, 40);
 }
 
 /* WHY YOU is never empty. When the seed carries a rationale, that is the
@@ -1768,9 +2100,18 @@ function checkQuotationInvariant() {
 function whyOf(r, o) {
   if (o.why) return o.why;
   const bits = [];
-  if (o.reopenedAt) bits.push(`you reopened this at ${o.reopenedAt}, so it is pending again and only you can settle it`);
+  /* a synthesized rationale still may not assert something the record
+     contradicts. Round 4's version said "only you can settle it" about every
+     reopened object, including a commitment that had gone back to its owner —
+     the facts line one row below said "pending again · justin's". */
+  const owner = o.kind === "commitment" ? (o.owner || o.claimant) : null;
+  const mine = !owner || owner === S.me;
+  if (o.reopenedAt)
+    bits.push(mine
+      ? `you reopened this at ${o.reopenedAt}, so it is pending again and only you can settle it`
+      : `you reopened this at ${o.reopenedAt}, so it is pending again — it is ${owner}'s to sign off, and it is on your list because you are waiting on it`);
   else if (o.kind === "decision") bits.push("it is a decision routed to you — decisions never auto-accept");
-  else if (o.kind === "commitment") bits.push(`it is ${o.owner === S.me ? "yours" : o.owner + "'s"} and it is waiting on you`);
+  else if (o.kind === "commitment") bits.push(`it is ${mine ? "yours" : owner + "'s"} and it is waiting on you`);
   else bits.push("it was routed to you and nobody else has picked it up");
   /* one supporting clause, drawn from the object's own record — the prior call
      if there is one, otherwise the objective it sits under. Two clauses keep it
@@ -1987,11 +2328,18 @@ function pinActions(o, primaryOnly) {
       `<button class="btn ${i === 0 ? "amber" : ""}" data-opt="${i}" title="${esc(opt.statement)}">${esc(opt.label)}</button>`);
     acts.push(`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`);
   } else if (o.kind === "commitment") {
-    acts = [`<button class="btn sm" data-fx="signed">Mark signed off</button>`,
-            `<button class="btn ghost sm" data-fx="resched">Reschedule</button>`];
+    /* only the person who owes it can sign it off (round 4 D5). When a
+       commitment that is not yours ends up owed to you, the honest actions are
+       the ones you can actually take: say why in your own words, or leave it. */
+    acts = commitmentOwner(o) === S.me
+      ? [`<button class="btn sm" data-fx="signed">Mark signed off</button>`,
+         `<button class="btn ghost sm" data-fx="resched">Reschedule</button>`]
+      : [`<button class="btn sm" data-bind="1">Answer in your own words →</button>`];
   } else if (o.kind === "question") {
-    acts = [`<button class="btn sm" data-fx="answered">${o.answerHint ? "Answer — " + esc(o.answerHint) : "Answer it"}</button>`,
-            `<button class="btn ghost sm" data-fx="reassign">Ask ${esc(o.reassignTo || "someone else")} instead</button>`];
+    acts = [`<button class="btn sm" data-fx="answered">${o.answerHint ? "Answer — " + esc(o.answerHint) : "Answer it"}</button>`];
+    /* the page does not invent a name to hand a question to */
+    if (o.reassignTo) acts.push(`<button class="btn ghost sm" data-fx="reassign">Ask ${esc(o.reassignTo)} instead</button>`);
+    else acts.push(`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`);
   } else {
     /* anything else that ends up owed still gets a way out */
     acts = [`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`];
@@ -2002,10 +2350,10 @@ function pinActions(o, primaryOnly) {
 function wireActions(el, o) {
   el.querySelectorAll("[data-opt]").forEach(b => b.addEventListener("click", () => {
     const opt = o.options[Number(b.dataset.opt)];
-    answerDecision(o.id, opt.statement, opt.synthesized
-      ? "one-click re-affirmation · the statement already on the record, recorded again verbatim · chosen, not typed · no model in the path"
-      : "one-click answer · reversible gate · the button's statement recorded verbatim · chosen, not typed · no model in the path",
-      "option");
+    answerDecision(o.id, { origin: "chosen", statement: opt.statement, label: opt.label, agrees: !!opt.agrees },
+      opt.synthesized
+        ? `one-click re-affirmation · the statement already on the record, recorded again verbatim · ${S.me} chose it, the page worded it · no model in the path`
+        : `one-click answer · reversible gate · the card's statement recorded verbatim · ${S.me} chose it, the page worded it · no model in the path`);
   }));
   const bind = el.querySelector("[data-bind]");
   if (bind) bind.addEventListener("click", () => bindComposer(o.id));
@@ -2065,6 +2413,7 @@ function messageRow(r, m) {
                    S.ui.jumpTo === m.id ? "tgt" : "", m.fresh ? "rise" : ""].filter(Boolean).join(" ");
   row.dataset.msg = m.id;
   row.dataset.cls = cls;
+  row.dataset.origin = m.origin || "seeded";
 
   let inner = "";
   if (m.replyTo) {
@@ -2072,9 +2421,14 @@ function messageRow(r, m) {
     if (t) inner += `<span class="mreply">↩ ${esc(t.actor)} ${esc(t.t)} · <span class="quoted" data-quoted="msg:${esc(t.id)}">${esc(plain(t.body).slice(0, 60))}</span></span>`;
   }
   /* the dotted treatment is derived from the object's epistemic state, not from
-     the glyph — so a proposal that is ALSO a gate renders ◆ and dotted. */
+     the glyph — so a proposal that is ALSO a gate renders ◆ and dotted.
+     `data-voice` says who authored the characters inside: a human's own words
+     are exempt from the page-integrity rules that police what the PAGE writes
+     (stray quotation marks, `undefined` in a record). A row the page authored
+     on a human's behalf is 'system', not 'human' — that is the whole of D3. */
+  const voice = (!m.system && (m.origin === "typed" || m.origin === "seeded")) ? "human" : "system";
   const claimWrap = msgIsClaim(r, m);
-  inner += claimWrap ? `<span class="claim">${bodyHtml(m.body)}</span>` : bodyHtml(m.body);
+  inner += `<span class="${claimWrap ? "claim" : ""}" data-voice="${voice}">${bodyHtml(m.body)}</span>`;
   if (m.note) inner += `<span class="mnote">${esc(m.note)}</span>`;
   if (o && !m.sysFor) inner += objectTag(r, m, o);
 
@@ -2114,20 +2468,30 @@ function objectTag(r, m, o) {
      still dressed as the resolution. */
   if (m.boundTo) {
     const current = o.answerMsg === m.id;
+    /* the tag says which kind of answer settled it, because "answer-bound" on a
+       row the page wrote reads as a sentence the human composed (round 4 D3) */
     if (current && o.verification === "accepted")
-      return `<button class="tag green" ${rc}>resolves ◆ · answer-bound · nothing inferred${where}</button>`;
+      return `<button class="tag green" ${rc}>resolves ◆ · ${m.origin === "chosen" ? "chosen from the card" : "answer-bound"} · nothing inferred${where}</button>`;
     /* it was NOT superseded — nothing replaced it. The object it settled was
        reopened, so this is still the answer of record and the decision is
        pending again. Round 3 called this "superseded", which is the word for
        the other case entirely (a later answer), and the two now read apart. */
     if (current)
-      return `<button class="tag amber" ${rc}>answer reopened ${esc(o.reopenedAt || "")} · still the answer on the record · ${esc(o.kind)} pending again${where}</button>`;
-    return `<button class="tag amber" ${rc}>superseded answer · replaced ${esc(m.supersededAt || "")} · kept on the record${where}</button>`;
+      return `<button class="tag amber" ${rc}>answer reopened ${esc(fieldOr(o.reopenedAt, "· time not recorded"))} · still the answer on the record · ${esc(o.kind)} pending again${where}</button>`;
+    return `<button class="tag amber" ${rc}>superseded answer · replaced ${esc(fieldOr(m.supersededAt, "· time not recorded"))} · kept on the record${where}</button>`;
   }
-  if (needsYou(o)) return `<button class="tag amber" data-pin="${esc(o.id)}"${home ? ` data-pinroom="${esc(home)}"` : ""}>${g === "?" ? "? open question · needs " + esc(S.me) : "◆ needs " + esc(S.me)}${where}</button>`;
-  if (o.verification === "verified") return `<button class="tag green" ${rc}>verified · ${esc(o.verifiedBy)}${where}</button>`;
-  if (o.verification === "accepted") return `<button class="tag green" ${rc}>accepted · ${esc(o.acceptedBy)}${where}</button>`;
-  if (o.kind === "commitment") return `<button class="tag" ${rc}>commitment · ${esc(o.owner)} · ${esc(o.due)} ~${where}</button>`;
+  /* A ◆ BADGE MEANS "THIS ROOM OWES YOU THIS" (round 4 minor). When the object
+     lives in ANOTHER room, this room's Needs-you filter correctly does not count
+     this row — so under that filter the row dimmed to .3 while still wearing an
+     amber ◆ badge saying it needed you. The toast was honest and the badge was
+     not. A cross-room gate now renders as a neutral pointer that says where the
+     need actually is and goes there; amber is reserved for what this room owes. */
+  if (needsYou(o) && home)
+    return `<button class="tag" data-pin="${esc(o.id)}" data-pinroom="${esc(home)}">${g === "?" ? "? open question" : "◆ gate"} · needs ${esc(S.me)} in #${esc(home)} →</button>`;
+  if (needsYou(o)) return `<button class="tag amber" data-pin="${esc(o.id)}">${g === "?" ? "? open question · needs " + esc(S.me) : "◆ needs " + esc(S.me)}</button>`;
+  if (o.verification === "verified") return `<button class="tag green" ${rc}>verified · ${esc(fieldOr(o.verifiedBy, "no verifier on record"))}${where}</button>`;
+  if (o.verification === "accepted") return `<button class="tag green" ${rc}>accepted · ${esc(fieldOr(o.acceptedBy, "no acceptor on record"))}${where}</button>`;
+  if (o.kind === "commitment") return `<button class="tag" ${rc}>commitment · ${esc(fieldOr(o.owner || o.claimant, "no owner on record"))} · ${esc(fieldOr(o.due, "no due date"))} ~${where}</button>`;
   if (o.kind === "claim") return `<button class="tag" ${rc}>claim · unverified${where}</button>`;
   return `<button class="tag" ${rc}>${esc(o.kind)} · ${esc(o.verification)}${where}</button>`;
 }
@@ -2400,15 +2764,16 @@ function lensItem(o) {
 }
 
 function receiptState(o) {
-  if (o.verification === "accepted") return ["ACCEPTED", o.kind, `by ${o.acceptedBy} · ${o.acceptedAt}`];
-  if (o.verification === "verified") return ["VERIFIED", o.kind, `checked by ${o.verifiedBy} · ${o.verifiedAt}`];
-  if (o.verification === "proposed") return ["PROPOSED", "not accepted", `confidence ${o.confidence || "—"}`, "renders as a claim until a human answers"];
-  if (o.verification === "open") return ["OPEN", "question", `open ${o.openFor || "—"}`, o.assignee ? `assigned to ${o.assignee}` : "nobody assigned"];
-  if (o.verification === "self_reported") return ["SELF-REPORTED", o.kind, `${o.owner || o.claimant}`, "nothing other than the claimant has checked it"];
+  if (o.verification === "accepted") return ["ACCEPTED", o.kind, `by ${fieldOr(o.acceptedBy, "nobody on record")} · ${fieldOr(o.acceptedAt, "time not recorded")}`];
+  if (o.verification === "verified") return ["VERIFIED", o.kind, `checked by ${fieldOr(o.verifiedBy, "nobody on record")} · ${fieldOr(o.verifiedAt, "time not recorded")}`];
+  if (o.verification === "proposed") return ["PROPOSED", "not accepted", `confidence ${fieldOr(o.confidence, "—")}`, "renders as a claim until a human answers"];
+  if (o.verification === "open") return ["OPEN", "question", `open ${fieldOr(o.openFor, "—")}`, o.assignee ? `assigned to ${o.assignee}` : "nobody assigned"];
+  if (o.verification === "self_reported") return ["SELF-REPORTED", o.kind, `${fieldOr(o.owner || o.claimant, "no owner on record")}`,
+    o.due ? `due ${o.due}` : "no due date on record", "nothing other than the claimant has checked it"];
   /* round 2 carried a REASSIGNED branch here and never wrote that value: an
      assignment changes who owes the answer, not whether it is verified. The
      assignee is reported by the OPEN branch above, where it actually lives. */
-  return ["CLAIM", "unverified", `claimant: ${o.claimant}`];
+  return ["CLAIM", "unverified", `claimant: ${fieldOr(o.claimant, "nobody on record")}`];
 }
 
 /* ---------------------------------------------------------------------------
@@ -2456,7 +2821,21 @@ function renderReceipt(o) {
   /* every excerpt is a quotation, so every excerpt must be provably a real line:
      either a message in the loaded record, or text this human typed into the
      page. There is no third case, and no way to render one. */
+  /* A PROVENANCE ENTRY IS EITHER A QUOTATION OR A SYSTEM RECORD, NEVER BOTH.
+     `voice: "system"` marks the entries the page authored on a human's behalf —
+     a one-click answer. Those render with no quotation marks, no <q>/.ex, no
+     data-quoted, and with their disclosure ALWAYS ON SCREEN. Round 4 rendered a
+     chosen answer exactly like a typed one, quoted, with the single word
+     "chosen" buried in `.full` behind a hover: the receipt's resting state said
+     the human wrote a sentence they had never written. */
   const prov = o.provenance.map(p => {
+    if (p.voice === "system") {
+      return `<button class="prov"${p.msg ? ` data-jump="${esc(p.msg)}"${p.room ? ` data-jumproom="${esc(p.room)}"` : ""}` : ""}>
+       <span class="hd"><span class="who">${esc(p.who)}</span><span>${esc(p.tm)}</span><span class="jump">jump to the row →</span></span>
+       <span class="sysex">${esc(p.ex)}</span>
+       <span class="always">${esc(p.note)}</span>
+     </button>`;
+    }
     const ref = p.msg ? "msg:" + p.msg + (p.room ? "@" + p.room : "") : "typed";
     return `<button class="prov"${p.msg ? ` data-jump="${esc(p.msg)}"${p.room ? ` data-jumproom="${esc(p.room)}"` : ""}` : ""}>
        <span class="hd"><span class="who">${esc(p.who)}</span><span>${esc(p.tm)}</span>${p.msg ? `<span class="jump">jump to source${p.room ? " in #" + esc(p.room) : ""} →</span>` : `<span class="jump">typed here · no message carries it</span>`}</span>
@@ -2480,7 +2859,7 @@ function renderReceipt(o) {
           <span aria-hidden="true">·</span><span>in ${o.objectives.length} objective${o.objectives.length > 1 ? "s" : ""}</span></div>
      </div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">WHAT HAPPENED</span><span class="rule"></span></div>${happened}</div>
-     <div class="rc-sec"><div class="glbl"><span class="lbl">PROVENANCE</span><span class="lbl">${o.provenance.length} SOURCES · HOVER TO EXPAND</span><span class="rule"></span></div>${prov}</div>
+     <div class="rc-sec"><div class="glbl"><span class="lbl">PROVENANCE</span><span class="lbl">${o.provenance.length} SOURCE${o.provenance.length === 1 ? "" : "S"} · HOVER OR FOCUS TO EXPAND</span><span class="rule"></span></div>${prov}</div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">CORRECTION CHAIN</span><span class="rule"></span></div>${corr}</div>
      <div class="rc-sec" id="rcReopenBox"></div>
      <div class="rc-foot">
@@ -2530,40 +2909,64 @@ function nextId(p) { return p + (++S.seq); }
 
 function appendMessage(r, m) { r.messages.push(m); return m; }
 /* a transition row is your activity — you caused it, watching. `byMe` keeps it
-   out of every unseen count, and `sysFor` lets it derive its glyph from the
-   object it reports on instead of flattening to the routine dot. */
-function appendSystem(r, text, objectId) {
+   out of every unseen count, and `sysFor` links it to the object it reports on
+   instead of flattening to the routine dot.
+   THE GLYPH IS FROZEN HERE (round 4 D6). `o` is passed AFTER the mutation, so
+   glyphOf(o) is the state this transition landed in — and that is what the row
+   records forever. It is not re-derived on later renders, because the object
+   moves on and the record must not: a row that says "accepted → proposed ·
+   reopened" turned green again the moment the object was re-accepted, which is
+   a permanent record of a downgrade rendering as a verified fact. */
+function appendSystem(r, text, o) {
+  const g = glyphOf(o);
   return appendMessage(r, { id: nextId("s"), t: S.now, actor: "atrium", system: true, fresh: true, byMe: true,
-                            body: [text], objectId: null, sysFor: objectId });
+                            origin: "system", body: [text], objectId: null, sysFor: o.id,
+                            tglyph: g, tclaim: isClaim(o) });
 }
 function clearFresh() {
   Object.values(S.rooms).forEach(r => { r.messages.forEach(m => delete m.fresh); r.objects.forEach(o => delete o.fresh); });
 }
 
 /* --- B1: the answer IS the decision -------------------------------------
- * `statement` is whatever the human produced — the label of the button they
- * clicked, or the exact text they typed. It is recorded verbatim as the
- * decision, quoted verbatim in the receipt, and escaped at every render.
- * If it contradicts the proposal on the card, the contradiction is what gets
- * recorded: the human's answer is the decision.
+ * `answer` is what the human produced:
+ *   { origin: "typed",  statement }               — they wrote this sentence
+ *   { origin: "chosen", statement, label, agrees } — they clicked this option
+ * The statement is recorded verbatim as the decision either way. What differs
+ * is WHO AUTHORED THE WORDS, and round 4's D3 is that the page did not track
+ * that at all: a chosen answer was appended as a message actored to the human,
+ * containing the card's sentence, and the receipt then quoted it under their
+ * name. The human clicked a button; the page wrote the sentence and signed it
+ * for them. design/CONVENTIONS.md now names this as the same defect class as
+ * inventing the sentence outright, because it is.
+ *
+ * A chosen answer is therefore recorded as a SYSTEM ROW in system voice —
+ * "lars chose: Cut over Friday" — with the statement it recorded stated beside
+ * it, unquoted, and the receipt's source entry rendered the same way with its
+ * disclosure on screen at rest. No quotation marks anywhere near it.
  * ----------------------------------------------------------------------- */
-function answerDecision(objectId, statement, provenanceNote, src) {
+function answerDecision(objectId, answer, provenanceNote) {
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
   const t = tick();
-  const typed = src !== "option";
+  const typed = answer.origin === "typed";
+  const statement = answer.statement;
 
-  /* A one-click answer is the human ADOPTING a statement the page offered, not
-     the human writing one. Both are legitimate answers and both are recorded
-     verbatim — but the row says which it was, because a line in the record that
-     reads like something you wrote, and was not, is exactly the class of defect
-     this round exists to close. Only typed text enters the human-speech
-     register. */
-  if (typed) S.typed.push(statement);
-  const m = appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [statement], boundTo: o.id,
-    src: typed ? "typed" : "option",
-    note: typed ? null : "chosen from the options on the card · recorded verbatim, not typed" });
+  /* Only typed text enters the human-speech register. A statement the page
+     offered is not a thing the human said, so it is not quotable. */
+  let m;
+  if (typed) {
+    S.typed.push(statement);
+    m = appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, origin: "typed",
+      body: [statement], boundTo: o.id });
+  } else {
+    /* system voice, third person, no quotation marks, no first person, and the
+       actor column says `atrium` because atrium is who wrote these characters. */
+    m = appendMessage(r, { id: nextId("m"), t, actor: "atrium", system: true, byMe: true, fresh: true,
+      origin: "chosen", chosenBy: S.me, chosenLabel: answer.label,
+      body: [`${S.me} chose: ${answer.label}`], boundTo: o.id,
+      note: `statement recorded: ${statement} · chosen from the card's options, not typed — these are not ${S.me}'s words` });
+  }
 
   /* the answer that WAS the answer stops being it, on the message itself. That
      is what makes the resolves/answer-bound tag identity-checked rather than
@@ -2572,8 +2975,16 @@ function answerDecision(objectId, statement, provenanceNote, src) {
   const priorText = prior ? plain(prior.body) : null;
   if (prior) { prior.supersededAt = t; prior.supersededBy = m.id; }
 
+  /* DEPARTURE IS OPTION IDENTITY, NOT STRING EQUALITY (round 4 D7). Choosing
+     the option that IS the proposal is agreement even when its wording differs
+     — P1's proposal reads "Cut over Friday 1 Aug and drop legacy tokens" and
+     its agreeing option reads "Cut over Friday 1 Aug; legacy tokens are
+     dropped…". Round 4 compared the two strings, found them different, and
+     recorded "not what was proposed" against an answer that agreed exactly.
+     A typed answer has no option identity to compare, so there the text
+     comparison is the only question there is — and it is the right one. */
   const proposal = o.proposedText || o.text;
-  const contradicts = statement !== proposal;
+  const contradicts = typed ? statement !== proposal : !answer.agrees;
 
   o.proposedText = proposal;
   o.text = statement;                       // the decision statement is the answer, verbatim
@@ -2582,11 +2993,24 @@ function answerDecision(objectId, statement, provenanceNote, src) {
   o.acceptedAt = t + " today";
   o.owedTo = null;
   o.answerMsg = m.id;
-  o.facts = ["accepted by " + S.me, t + " today", "answer-bound"];
+  /* "answer-bound" means the human's own wording became the record. A chosen
+     answer is bound to an option, not to a sentence they wrote, and the fact
+     chip in the lens has to say which — it is the one line about this object a
+     reader sees without opening anything. */
+  o.facts = ["accepted by " + S.me, t + " today", typed ? "answer-bound" : "chosen from the card"];
   o.fresh = true;
   o.history.push({ k: "accepted", who: S.me, tm: t,
-    text: "answered it directly — the resolution was recorded from the answer, not interpreted from it" });
-  o.provenance.unshift({ who: S.me, tm: t, msg: m.id, ex: statement, note: provenanceNote });
+    text: typed
+      ? "answered it directly — the resolution was recorded from the typed answer, not interpreted from it"
+      : `chose the option ${answer.label} from the card — the statement it carries was recorded verbatim, and none of it is worded by ${S.me}` });
+  /* the source entry for a chosen answer is a system record of a click, not a
+     quotation of a sentence. `voice: "system"` is what renderReceipt() reads to
+     drop the quotation marks and put the disclosure on screen at rest. */
+  o.provenance.unshift(typed
+    ? { who: S.me, tm: t, msg: m.id, ex: statement, note: provenanceNote }
+    : { who: "atrium", tm: t, msg: m.id, voice: "system",
+        ex: `${S.me} chose: ${answer.label} — statement recorded: ${statement}`,
+        note: provenanceNote });
 
   /* an answer that is not the proposal is a correction to the record, and the
      correction chain is where corrections live. Round 2 recorded the
@@ -2599,25 +3023,29 @@ function answerDecision(objectId, statement, provenanceNote, src) {
          when it IS the human's sentence — a prior answer they typed. */
       was: prior ? "Answer of " + prior.t : "Proposal: " + proposal,
       after: statement + (contradicts && !prior ? " — not what was proposed; your answer is the decision" : ""),
-      fact: prior
-        ? `re-answered by ${S.me} at ${t}` + (typed ? " · typed" : " · chosen from the options on the card")
-        : `answered by ${S.me} at ${t}` + (typed ? " · typed" : " · chosen from the options on the card"),
+      fact: (prior ? `re-answered by ${S.me} at ${t}` : `answered by ${S.me} at ${t}`) +
+            (typed ? " · typed" : ` · chosen: ${answer.label} — the page wrote the sentence, ${S.me} chose it`),
       msg: prior ? prior.id : (o.sourceMsg || null),
       room: prior ? null : sourceRoomOf(o),
       link: prior ? "the superseded answer is still in the room →" : "the proposal it replaced is still in the room →"
     };
-    if (prior && prior.src === "typed") c.quote = { text: priorText, by: S.me, src: "typed" };
+    /* only a prior answer the human TYPED may be quoted back at them. A prior
+       CHOSEN answer is a page-authored row; quoting it would re-open exactly
+       the loophole D3 closes, one step removed. */
+    if (prior && prior.origin === "typed") c.quote = { text: priorText, by: S.me, src: "typed" };
+    else if (prior) c.fact += ` · the superseded answer was chosen from the card, so there is nothing of ${S.me}'s to quote`;
     o.corrections.push(c);
   }
 
   o.note = (typed
       ? "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. "
-      : "You chose one of the statements the card offered; it is recorded verbatim, and the row says it was chosen rather than typed. ") +
+      : "You chose one of the statements the card offered. It is recorded verbatim as the decision, and the row that records it is in the system's voice — the page wrote that sentence, so it is not attributed to you as something you said. ") +
            (contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
            (prior ? "It replaces your earlier answer, which is still on the record and still in the room." : "");
 
-  appendSystem(r, `decision ${o.id} · ${prior ? "re-answered" : "proposed → accepted"} · recorded verbatim from ${S.me}'s ` +
-                  (typed ? "typed answer" : "one-click answer") + ` · nothing inferred`, o.id);
+  appendSystem(r, `${o.kind} ${o.id} · ${prior ? "re-answered" : "proposed → accepted"} · ` +
+                  (typed ? `recorded verbatim from ${S.me}'s typed answer` : `${S.me} chose: ${answer.label} · statement recorded verbatim, not worded by ${S.me}`) +
+                  ` · nothing inferred`, o);
   S.ui.bound = null; S.ui.replyTo = null; S.ui.pinOpen = null;
   $("cinput").value = "";
   render();
@@ -2627,7 +3055,7 @@ function answerDecision(objectId, statement, provenanceNote, src) {
   toast(prior
     ? "re-answered · the earlier answer is now marked superseded, not deleted"
     : typed ? "recorded as a decision · answer-bound, your wording verbatim"
-            : "recorded as a decision · the option you chose, recorded verbatim — not written as your words");
+            : "recorded as a decision · the option you chose, recorded verbatim — the row is in the system's voice, not yours");
 }
 
 /* --- B2: reopen re-renders EVERYTHING, including the historical row ------
@@ -2657,6 +3085,23 @@ function canReopen(o) {
 /* the reopen states, per kind — all of them land somewhere with an action path */
 const REOPEN_TO = { decision: "proposed", question: "open", commitment: "self_reported", claim: "unverified" };
 
+/* --- WHO OWES IT AGAIN (round 4 D5) --------------------------------------
+ * Reopening undoes a state. It does not transfer ownership, and round 4 made it
+ * do exactly that: `o.owedTo = S.me` unconditionally, so reopening justin's
+ * commitment K0 moved it onto YOUR list, offered you "Mark signed off", and —
+ * if you took it — rewrote its facts to your name and asserted "You signed your
+ * own sign-off" in a receipt that still named justin as the claimant.
+ *
+ * A commitment goes back to whoever owed it. A decision or question goes back
+ * to whoever settled it. When that is not you it does not join your list at
+ * all, and the toast says whose it is instead of pretending it is yours.
+ * ---------------------------------------------------------------------- */
+function reopenOwner(o) {
+  if (o.kind === "claim") return null;                 // a reopened claim owes nobody an answer
+  if (o.kind === "commitment") return o.owner || o.claimant || null;
+  return o.resolvedBy || o.acceptedBy || o.assignee || o.owedTo || o.claimant || null;
+}
+
 function reopen(objectId, reason) {
   const r = room();
   const o = obj(r, objectId);
@@ -2669,10 +3114,13 @@ function reopen(objectId, reason) {
   o.resolvedAt = null;
   o.fresh = true;
 
-  /* a reopened decision, question or commitment owes you an answer again; a
-     reopened claim owes nobody one — it is simply unverified. */
-  const owed = o.kind !== "claim";
-  if (owed) { o.owedTo = S.me; o.priority = o.priority || (o.kind === "decision" ? 20 : 12); }
+  /* a reopened decision, question or commitment owes SOMEONE an answer again —
+     whoever owned it, which is not automatically you. A reopened claim owes
+     nobody one; it is simply unverified. */
+  const back = reopenOwner(o);
+  const owed = !!back;
+  o.owedTo = back;
+  if (owed) o.priority = o.priority || (o.kind === "decision" ? 20 : 12);
   if (o.kind === "decision" && (!o.options || !o.options.length)) {
     /* NO DEAD ATTENTION ITEMS. Options that existed survive the reopen. A
        decision that never carried options gets the one option that is not
@@ -2682,19 +3130,27 @@ function reopen(objectId, reason) {
   }
   if (o.kind === "commitment" && o.priorOverdue) o.overdue = o.priorOverdue;
 
-  const wasLabel = { accepted: "Accepted decision", verified: "Verified claim",
-                     unverified: "Answered question", self_reported: "Signed off, self-reported" }[from]
-                   || from;
-  const nowLabel = { decision: "Proposal — pending again, prior answer preserved on the record",
-                     question: "Open question — the prior answer preserved on the record",
-                     commitment: "Awaiting sign-off again — the prior sign-off preserved on the record",
-                     claim: "Claim — prior verification preserved on the record" }[o.kind];
+  /* the label names the object's OWN kind. Round 4's table hard-coded
+     "Verified claim" for every verified object, so reopening a verified
+     COMMITMENT (K0) recorded that a claim had been reopened. */
+  const wasLabel = { accepted: "Accepted " + o.kind,
+                     verified: "Verified " + o.kind,
+                     unverified: o.kind === "question" ? "Answered question" : "Unverified " + o.kind,
+                     self_reported: o.kind === "commitment" ? "Signed off, self-reported" : "Self-reported " + o.kind,
+                     proposed: "Proposed " + o.kind,
+                     open: "Open " + o.kind }[from]
+                   || String(from);
+  const nowLabel = ({ decision: "Proposal — pending again, prior answer preserved on the record",
+                      question: "Open question — the prior answer preserved on the record",
+                      commitment: "Awaiting sign-off — the prior state preserved on the record",
+                      claim: "Claim — prior verification preserved on the record" }[o.kind]) +
+                   (owed && back !== S.me ? ` · back to ${back}, not to ${S.me}` : "");
 
   const kept = { decision: "prior answer kept", question: "prior answer kept",
                  commitment: "prior sign-off kept", claim: "prior verification kept" };
   o.facts = ["reopened by " + S.me + " " + t,
              wasResolved || o.answerMsg ? kept[o.kind] : "prior state kept",
-             owed ? "pending again" : "unverified again"]
+             !owed ? "unverified again" : back === S.me ? "pending again" : "pending again · " + back + "'s"]
     .concat(sourceRoomOf(o) ? ["source in #" + o.sourceRoom] : []);
   /* system voice: what happened, not what anyone said about it */
   o.history.push({ k: "gate", who: S.me, tm: t,
@@ -2715,19 +3171,26 @@ function reopen(objectId, reason) {
   if (reason) { S.typed.push(reason); c.quote = { text: reason, by: S.me, src: "typed" }; }
   o.corrections.push(c);
 
-  o.note = "Reopening is append-only. The state at " + (o.acceptedAt || o.verifiedAt || o.reopenedAt) +
+  o.note = "Reopening is append-only. The state at " + fieldOr(o.acceptedAt || o.verifiedAt || o.reopenedAt, "the time it was settled") +
            " is still in the conversation, still in this history, and the row that carried it re-renders to say so. " +
+           (owed && back !== S.me
+             ? `It went back to ${back}, who owed it — reopening undoes a state, it does not move ownership onto you. `
+             : "") +
            (reason ? "The reason above is your own sentence, recorded verbatim."
                    : "No reason was given, and the page does not write one for you.");
 
   appendSystem(r, `${o.kind} ${o.id} · ${from} → ${o.verification} · reopened by ${S.me}` +
-                  (reason ? " · reason recorded" : " · no reason given") + " · prior state kept", o.id);
+                  (owed && back !== S.me ? ` · back to ${back}, whose it is` : "") +
+                  (reason ? " · reason recorded" : " · no reason given") + " · prior state kept", o);
   S.ui.reopening = null;
   render();
-  /* the toast reports what actually happened to THIS object, not a fixed line */
+  /* the toast reports what actually happened to THIS object, not a fixed line —
+     including, since round 4's D5, whose list it landed on when it is not yours */
   toast(needsYou(o)
     ? `reopened · back in Needs you as a pending ${o.kind}, the prior state on record`
-    : "reopened · it is a ~ claim again and owes nobody an answer — nothing was added to your list", "warn");
+    : owed
+      ? `reopened · back to ${back} as a pending ${o.kind} — it is not yours, so it did not join your list`
+      : `reopened · it is a ~ ${o.kind} again and owes nobody an answer — nothing was added to your list`, "warn");
 }
 
 /* the optional reason prompt. Empty is fine and says so: a reason you did not
@@ -2772,17 +3235,33 @@ function doVerify(objectId, evidence) {
     note: `verification note · attached by ${S.me} · the claimant did not check their own claim` });
   o.note = "Verified by someone other than the claimant, which is the only thing that makes a line green. " +
            "Reopening it puts the ~ back and keeps this note on the record.";
-  appendSystem(r, `claim ${o.id} · unverified → verified by ${S.me} · evidence: ${evidence}`, o.id);
+  appendSystem(r, `claim ${o.id} · unverified → verified by ${S.me} · evidence: ${evidence}`, o);
   S.ui.verifying = null;
   render();
   toast("verified · " + o.claimant + " said it, you checked it");
 }
 
 /* --- pin effects -------------------------------------------------------- */
+/* whose commitment it is. `owner` when the seed names one, otherwise the person
+   who made the commitment. Only that person can sign it off. */
+function commitmentOwner(o) { return o.owner || o.claimant || null; }
+
 function applyEffect(objectId, fx) {
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
+
+  /* SIGN-OFF IS GUARDED ON OWNERSHIP (round 4 D5). Round 4 let you sign off a
+     commitment that was not yours — it rewrote the facts to your name and the
+     receipt asserted "You signed your own sign-off" while still naming justin
+     as the claimant, which is two false statements about one object. You may
+     record that you settled your own commitment; you may not record that you
+     settled somebody else's. */
+  if ((fx === "signed" || fx === "resched") && commitmentOwner(o) !== S.me) {
+    toast(`${fieldOr(commitmentOwner(o), "someone else")} owns this commitment, not you — signing it off would record their word as yours`, "bad");
+    return;
+  }
+
   const t = tick();
   let line = "", msgText = "", kind = "ok";
 
@@ -2793,28 +3272,32 @@ function applyEffect(objectId, fx) {
   const blocks = `${blocked} objective${blocked === 1 ? "" : "s"}`;
 
   if (fx === "signed") {
-    const wasDue = o.due;
+    /* GUARDED (round 4 D2). K0 is a commitment with no `due` field at all, and
+       round 4 wrote `was due ${o.due}` straight into the permanent system row:
+       "was due undefined". A missing due date is a fact worth stating; the name
+       of a JavaScript value is not. */
+    const dueClause = o.due ? `was due ${o.due}` : "no due date was ever set";
     /* BRIEF §5: an item you settled keeps its reopen affordance, so signing off
        records that you settled it and what state to put back. */
-    o.resolvedAt = t; o.priorOverdue = o.overdue;
+    o.resolvedAt = t; o.resolvedBy = S.me; o.priorOverdue = o.overdue;
     o.verification = "self_reported"; o.owedTo = null; o.overdue = null;
     o.facts = [S.me, "marked done " + t, "self-reported"];
     o.history.push({ k: "claim", who: S.me, tm: t, text: "marked it signed off — your own word, nothing has checked it" });
     o.note = "You signed your own sign-off. Nobody verifies their own commitment, so this stays ~.";
-    line = `commitment ${o.id} · marked signed off by ${S.me} · was due ${wasDue} · self-reported, not verified`;
+    line = `commitment ${o.id} · marked signed off by ${S.me} · ${dueClause} · self-reported, not verified`;
     msgText = "signed off · recorded as self-reported, not verified — nobody verifies their own commitment";
     kind = "info";
   } else if (fx === "resched") {
-    const wasDue = o.due;
+    const fromClause = o.due ? `from ${o.due}` : "from no due date at all";
     o.verification = "self_reported"; o.owedTo = null; o.overdue = null; o.due = "today 17:00";
     o.facts = [S.me, "due today 17:00", "rescheduled " + t];
-    o.history.push({ k: "claim", who: S.me, tm: t, text: `moved the due date from ${wasDue} to today 17:00 — the original date stays above` });
+    o.history.push({ k: "claim", who: S.me, tm: t, text: `moved the due date ${fromClause} to today 17:00 — the original date stays above` });
     o.note = "Rescheduling never erases the original date; both are in the history.";
-    line = `commitment ${o.id} · due ${wasDue} → today 17:00 · rescheduled by ${S.me}`;
+    line = `commitment ${o.id} · due ${fromClause} → today 17:00 · rescheduled by ${S.me}`;
     msgText = "rescheduled · the original due date stays on the record";
     kind = "info";
   } else if (fx === "answered") {
-    o.resolvedAt = t;
+    o.resolvedAt = t; o.resolvedBy = S.me;
     o.verification = "unverified"; o.owedTo = null;
     o.facts = ["answered by " + S.me + " " + t, "no sign-off attached", "still blocks " + blocks];
     o.history.push({ k: "claim", who: S.me, tm: t, text: "answered it with no written sign-off attached, so it stays a claim" });
@@ -2823,9 +3306,13 @@ function applyEffect(objectId, fx) {
     msgText = `answered · stays ~ with no sign-off attached, and still blocks ${blocks}`;
     kind = "warn";
   } else if (fx === "reassign") {
-    const to = o.reassignTo || "justin";
+    /* the page never invents a name. pinActions() only offers this when the
+       object names who to hand it to; round 4 fell back to a hard-coded
+       "justin" if it did not, which is a person's name written by a page. */
+    const to = o.reassignTo;
+    if (!to) { toast("nobody is named on this question to hand it to, and the page will not pick one", "bad"); return; }
     o.owedTo = null; o.assignee = to;
-    o.facts = ["asked by " + o.askedBy, "now " + to + "'s", "still open"];
+    o.facts = ["asked by " + fieldOr(o.askedBy, "nobody on the record"), "now " + to + "'s", "still open"];
     o.history.push({ k: "question", who: S.me, tm: t, text: `reassigned it to ${to} — out of your list, unchanged in the record` });
     o.note = "Reassigning moves it off your surface. It is still open and still blocking the objectives it blocked.";
     line = `question ${o.id} · reassigned to ${to} by ${S.me} · still open · still blocking ${blocks}`;
@@ -2833,7 +3320,7 @@ function applyEffect(objectId, fx) {
     kind = "warn";
   }
   o.fresh = true;
-  appendSystem(r, line, o.id);
+  appendSystem(r, line, o);
   S.ui.pinOpen = null;
   render();
   toast(msgText, kind);
@@ -2903,13 +3390,14 @@ function send() {
   const v = input.value.trim();
   if (S.ui.bound) {
     if (!v) { toast("type your answer — the composer records what you write, not what the card suggested", "bad"); input.focus(); return; }
-    answerDecision(S.ui.bound, v, `answer-bound reply · typed by ${S.me} and recorded verbatim · no model in the path`, "typed");
+    answerDecision(S.ui.bound, { origin: "typed", statement: v },
+      `answer-bound reply · typed by ${S.me} and recorded verbatim · no model in the path`);
     return;
   }
   if (!v) return;
   S.typed.push(v);
   const t = tick();
-  appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [v], replyTo: S.ui.replyTo || null });
+  appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, origin: "typed", body: [v], replyTo: S.ui.replyTo || null });
   input.value = "";
   S.ui.replyTo = null;
   render();
@@ -3039,11 +3527,26 @@ function render() {
   renderTrace();
   renderComposer();
   renderLens();
-  /* the two DOM-level invariants run against what was actually painted */
+  /* the DOM-level invariants run against what was actually painted, not against
+     the functions that drew it. Geometry last, because it needs layout: the
+     browser has already flushed style by the time these read boxes, and every
+     one of them is synchronous with the paint that produced them. */
   checkRowScopeInvariant(room());
   checkQuotationInvariant();
+  checkRecordTextInvariant();
+  checkLayoutInvariant();
   setTimeout(clearFresh, 400);
 }
+
+/* geometry is a function of the viewport as well as of the state, and resizing
+   does not re-render. Round 4's D1 was width-independent, but the class of
+   defect it belongs to is not — a track that survives 1440 and collapses at
+   1124 is the same failure with a narrower repro. */
+let layoutTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(checkLayoutInvariant, 120);
+});
 
 /* --- static wiring ------------------------------------------------------- */
 $("themeBtn").addEventListener("click", () => {
