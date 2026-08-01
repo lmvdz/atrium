@@ -186,3 +186,26 @@ Nothing the product renders as a person's words may be words that person did not
 Found in the #10 round-3 gauntlet: the prototype invented a first-person sentence on every reopen and rendered it quoted under the actor's name and timestamp, inside the receipt — the artifact whose entire job is being the trustworthy record. It was also false in context. Fabricated attribution is the product's cardinal defect; a page that will invent one sentence cannot be trusted about any of them.
 
 Enforcement: any quotation-context element must carry provenance proving its text came from user input or a seeded human message; the dev invariant checker asserts it.
+
+**The rule covers authorship, not just invention.** A message the interface authors on a person's behalf — the text of an option they clicked, a template filled with their name — may never be attributed to them as their words, and may never satisfy the quotation check. Found in the #10 round-4 gauntlet: one-click answers appended a message authored as the user containing the card's sentence, and the checker then validated the quotation against that page-fabricated message, passing on exactly the class it exists to prevent. Messages carry their origin (`typed` vs `chosen`); only typed text and seeded human messages can be quoted; chosen answers render in system voice ("chose: <option>"), never in quotation marks.
+
+## Measured contrast exceptions
+
+Verified against the tokens as extracted (not guesses — measured at the sizes actually used):
+
+- **`--red2` fails AA in dark at glyph sizes** (4.21–4.26:1 on `--bg1`/`--bg3` at 10.5px). Use **`--red3`** for `■` and `✗` glyphs and any small red text: 7.03:1 light, 5.85:1 dark — one token that clears both themes. Found during #39; the token values are byte-identical to the source corpus, so this is a latent contrast bug inherited from it, corrected in *usage*. Never edit `design/tokens.css` values to fix contrast — change which token the usage picks.
+- Measured floor across the shipped component set: 4.53:1 light / 5.37:1 dark (`--amb2` on `--ambbg`).
+
+## Animation fill mode
+
+Entrance animations use `animation: gl-rise … backwards`, never `both`. An animated fill outranks a normal declaration, so `both` pins the element at the keyframe's final `opacity: 1` and a later state change (a filter dimming the row) can never take effect. Found during #39; guarded by an e2e assertion on computed opacity.
+
+## De-emphasis must stay readable
+
+A filtered-out or de-emphasised row keeps its text, so it must keep its legibility: **dimming may not drop any text below AA at the size it renders.** `opacity: .3` on a feed row measures 1.47–1.69:1 in both themes — a third of the stated floor, and below the contrast this file already rejects `--tx4` for. If the affordance's own copy claims a dimmed row is still checkable, the measurement has to back it; otherwise hide the row and say so.
+
+Found independently in two artifacts by two critics (#10 r6 and #39 r1) — the same `opacity: .3` decision, wrong in both.
+
+**No exemption for inactive controls.** An earlier version of this rule exempted "a genuinely inactive control (a disabled button at ~2.5:1)". That exemption was wrong and was implemented faithfully by the audit harness, which is exactly how a disabled indicator at 2.49:1 and a count chip at 2.43:1 survived two review rounds (#39 r2/r3). **General corollary: an audit may not exempt the case its rule covers.** Express inactive state with a token step and a shape change (dashed chip, altered border), never with alpha.
+
+**Measured consequence (#39 r2, theme-corrected in r3): no fade clears AA.** The weakest thing a row can legitimately carry (`--amb2` on `--ambbg`) is **4.53:1 in light** at *full* opacity — the shell's own floor — so any opacity reduction drops it below. (The dark value is 9.65:1; earlier receipts quoting ~5.37:1 for dark came from a contrast harness whose block parser matched selector names inside `tokens.css`'s provenance comment and re-measured the light theme, fixed in #39 r3. The practical conclusion is unchanged and was independently confirmed by compositing measurements of real rendered rows in both themes: `opacity:.3` yields 1.47–1.75:1 light and 1.12–2.14:1 dark.) Therefore **de-emphasis is expressed by lifting the matches, not by dimming the rest**, and the affordance's copy says so. Do not reintroduce a fade with a gentler alpha; the arithmetic does not work at any value.
