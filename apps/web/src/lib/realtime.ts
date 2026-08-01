@@ -18,6 +18,14 @@ import { resolveWsUrl } from './ws-url.js';
  *    both are answered the same way: ask for the gap and apply it in order.
  *    Nothing is ever applied out of order, and nothing is applied twice.
  *
+ *    That sentence is absolute and it is load-bearing, so note what has to hold
+ *    for it: `applyEntry` decides both from `lastSeq` alone, and `lastSeq` comes
+ *    out of the durable journal on the first read of a room. A stored record
+ *    whose positions did not climb would hand it a cursor that disagrees with
+ *    the events already in the timeline, and the sentence would be false without
+ *    `applyEntry` doing anything wrong — which is exactly what r7's gauntlet
+ *    found. `StoredRoom` is where that is now enforced; see its note.
+ *
  *    Catch-up is a **loop**, not a call. The condition to keep going is
  *    `lastSeq < head` — never "was that page full?", and never the server's
  *    word for it alone. #22's r1 gauntlet found the server computing `more`
@@ -388,11 +396,67 @@ function warnDegraded(roomId: string, reason: string): void {
  * The write side is `{events, lastSeq}` and the read side used to trust that on
  * the strength of two `typeof` checks and a cast. See the note at the read for
  * why this is the strict one of the two parses in this file.
+ *
+ * ## The record has to be a *history*, not merely well-typed (r7, defect 2)
+ *
+ * r7 put the envelope schema here and left the record's own structure to one
+ * comparison at the read: `lastSeq === events.at(-1).roomSeq`. That is a check
+ * on the last element and says nothing about the ones before it, so
+ * `{events: [{roomSeq: 9, …}, {roomSeq: 2, …}], lastSeq: 2}` was accepted — the
+ * last event is 2, the cursor is 2, the record agrees with itself. The 9 is then
+ * already in the timeline while the cursor sits at 2, `applyEntry` dedups on
+ * `roomSeq <= lastSeq`, and the *real* event at 9 arrives in catch-up and is
+ * applied a second time. The room renders `[9,2,3,4,5,6,7,8,9]` in a client
+ * whose first paragraph says nothing is ever applied out of order and nothing is
+ * applied twice.
+ *
+ * Those two sentences are absolute, this schema is where they are cashed, so
+ * both halves of "is this a history" are checked here rather than at the caller:
+ *
+ *  * `room_seq` **strictly increases**. It is minted per room by the table, so
+ *    it climbs and never repeats; equal adjacent positions is the same forgery
+ *    with the duplicate already in the record. Strictly increasing rather than
+ *    contiguous, because eviction drops from the front and the client is allowed
+ *    to hold a window — `[2,3]` is an ordinary trimmed record, `[3,2]` is not a
+ *    record at all.
+ *  * the cursor names the **last event held**. Unchanged in meaning from r7 and
+ *    moved in here, because it is the same question: an empty record carries
+ *    cursor 0, and a non-empty one carries its final position.
+ *
+ * What this does *not* claim is what the head check already says it does not:
+ * the store carries no provenance, so a forgery that satisfies both of these is
+ * still writable by anything on the origin, and a plausible one at or below the
+ * room's head still displaces real events. The bound this closes is narrower and
+ * exact — a record that reaches the timeline cannot make it render a position
+ * twice, or out of order, which is what the two sentences promise.
  */
-const StoredRoom = z.object({
-  events: z.array(Envelope),
-  lastSeq: z.number().int().min(0),
-});
+const StoredRoom = z
+  .object({
+    events: z.array(Envelope),
+    lastSeq: z.number().int().min(0),
+  })
+  .superRefine((record, ctx) => {
+    for (let i = 1; i < record.events.length; i += 1) {
+      const previous = record.events[i - 1];
+      const current = record.events[i];
+      if (previous !== undefined && current !== undefined && current.roomSeq <= previous.roomSeq) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['events', i, 'roomSeq'],
+          message: `room_seq must increase: ${previous.roomSeq} is followed by ${current.roomSeq}`,
+        });
+        return;
+      }
+    }
+    const held = record.events.at(-1)?.roomSeq ?? 0;
+    if (record.lastSeq !== held) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['lastSeq'],
+        message: `the cursor must name the last event held: ${record.lastSeq} against ${held}`,
+      });
+    }
+  });
 
 /**
  * A `localStorage`-backed journal.
@@ -593,14 +657,24 @@ export function localStorageJournal(
       // history, cursor 0, refetch. That is already the safe answer here — the
       // room is re-read from the ledger — and it is why this can be strict
       // without risking the outage #46 is about.
+      // `StoredRoom` now carries both structural invariants — `room_seq`
+      // strictly increasing, and the cursor naming the last event held. r7 had
+      // the second of those as a comparison here and did not have the first at
+      // all, which is r7 defect 2: a record can agree with its own cursor and
+      // still not be a history. See the schema for the exploit it admitted.
       const stored = StoredRoom.safeParse(JSON.parse(raw));
       if (!stored.success) return { events: [], lastSeq: 0 };
       const { events, lastSeq } = stored.data;
-      // The invariant the whole interface exists for, checked on the way back
-      // in: the cursor may not name a position past the last event held. Still
-      // exact under eviction — trimming drops from the front, never the end.
-      const held = events.at(-1)?.roomSeq ?? 0;
-      if (lastSeq !== held) return { events: [], lastSeq: 0 };
+      // The one invariant the schema cannot state, because it needs the key:
+      // these have to be *this room's* events. The key says which room; the
+      // envelopes carry their own `roomId` and `view()` renders `held.events` as
+      // this room's timeline without ever re-reading it. Asking the same
+      // question of the same store — what is this made of, and who wrote it —
+      // the answer is "same-origin JSON anyone can author", and an entry filed
+      // under room A carrying room B's `roomId` is cross-room content injection
+      // for the cost of one `setItem`. Same answer as every other way this
+      // record can fail to be a history: no history, cursor 0, refetch.
+      if (events.some((entry) => entry.roomId !== roomId)) return { events: [], lastSeq: 0 };
       return { events, lastSeq };
     } catch {
       return { events: [], lastSeq: 0 };
@@ -663,16 +737,45 @@ export function localStorageJournal(
         }
       }
     },
+    /**
+     * Forget this room, on disk and not only in this object (r7, defect 3).
+     *
+     * The caller reaches here having decided the stored record is not this
+     * room's history — today that is the head check in `subscribed` — so the
+     * only thing `reset` owes it is that the record stops being resumed. r7
+     * caught a throwing `removeItem` and degraded, which made the promise true
+     * for the live instance and false for the store: the poisoned key survived,
+     * and the next page load built a fresh journal with an empty `degraded` set,
+     * read the forgery again, fired the same check again, and degraded again.
+     * "Resumes from nothing" is a claim about resuming, which is what happens
+     * after a reload, so a degradation cannot be the whole of it.
+     *
+     * Two doors, tried in order. `removeItem` is the right one and is what
+     * ordinarily runs. If it throws, `setItem` of the empty record is the same
+     * outcome by another route: `{events: [], lastSeq: 0}` is precisely what a
+     * missing key reads back as, so overwriting is erasing as far as every
+     * reader is concerned, and it leaves nothing behind to resume.
+     *
+     * If both throw the store is not writable at all, and the honest statement
+     * is narrower than the one r7 made: this instance resumes from nothing, the
+     * record stays on disk, and every later load re-reads it and re-runs the
+     * check that sent us here. That costs one discard and one catch-up per load
+     * — noisy, bounded, and not a corruption — and it is reported once per room
+     * like every other way out of durability.
+     */
     reset: (roomId) => {
       fallback.reset(roomId);
       const access = storage();
       if (!access.store) return;
-      // A store that refuses `removeItem` is a store this room cannot resume
-      // from safely, and the caller has already decided not to trust the record.
-      // Degrading here rather than throwing keeps `reset` a promise the caller
-      // can rely on: after it returns, this room resumes from nothing.
       try {
         access.store.removeItem(key(roomId));
+        return;
+      } catch {
+        // Fall through: a store that refuses to delete may still accept a write,
+        // and an empty record is indistinguishable from a deleted one on read.
+      }
+      try {
+        access.store.setItem(key(roomId), JSON.stringify({ events: [], lastSeq: 0 }));
       } catch (error) {
         degrade(roomId, { events: [], lastSeq: 0 }, describeStorageError(error));
       }
@@ -705,7 +808,17 @@ export interface RoomView {
   head: number;
   /** This user's read cursor — the "since you left" divider. */
   seenSeq: number;
-  /** Applied events, in `room_seq` order. Never out of order, never repeated. */
+  /**
+   * Applied events, in `room_seq` order. Never out of order, never repeated.
+   *
+   * True of everything `applyEntry` puts here, and — since r8 — of the resumed
+   * prefix too, which is where r7's gauntlet found it false: a stored record was
+   * checked against its own cursor and not against itself, so a forged one could
+   * seed this array out of order and get a real position rendered twice.
+   * `StoredRoom` refuses that record now. What is still *not* claimed is that
+   * every entry here is authentic: a forgery under the room's head is
+   * well-ordered and indistinguishable from history on this side of the socket.
+   */
   events: RoomEventEnvelope[];
   /** Own messages not yet confirmed. The only optimistic thing here. */
   pending: PendingMessage[];
@@ -967,18 +1080,28 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
          * exploit's durable consequence reached from the other end. Schema
          * validation was r7's answer and is not an answer to this.
          *
-         * Arithmetic is, because there is one number the client did not write:
-         * `frame.head`, from the server, in the reply to this socket's own
-         * `subscribe`. Nothing has been applied to this room on this socket yet,
-         * so a `lastSeq` above it cannot be an honest race — it is a claim about
-         * events the room has never had. The room is dropped back to nothing and
-         * re-read, which costs one catch-up.
+         * Arithmetic is, because `frame.head` is a number the forger did not
+         * *write*: it comes from the server, in the reply to this socket's own
+         * `subscribe`. Note the exact strength of that, because r7's phrasing
+         * read stronger than it is — it is **not** a number an attacker cannot
+         * influence or predict. Same-origin JS can open its own socket, read the
+         * room's true head, and plant a forgery exactly at it; the bounded case
+         * below is trivially satisfiable, not merely possible. What "did not
+         * write" buys is only this: the client is comparing its stored cursor
+         * against a fact it fetched instead of against itself, and nothing has
+         * been applied to this room on this socket yet, so a `lastSeq` above the
+         * head cannot be an honest race — it is a claim about events the room
+         * has never had. The room is dropped back to nothing and re-read, which
+         * costs one catch-up.
          *
          * This does not make the journal trustworthy and is not offered as
          * making it so: a forgery *at or below* the true head still displaces
          * real events, and nothing on this side of the socket can tell. What it
          * closes is the unbounded case — the one where a single forged record
          * takes a room out permanently rather than corrupting a prefix of it.
+         * Since r8 the prefix it can corrupt is at least well-ordered
+         * (`StoredRoom`), so a forgery cannot make the timeline render the same
+         * position twice; it can still put a plausible lie in front of you.
          */
         if (room.lastSeq > frame.head) {
           fail(

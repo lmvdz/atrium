@@ -1141,8 +1141,12 @@ describe('a frame the client cannot read is refused, not written', () => {
  * answer to it.
  *
  * Arithmetic is, for the unbounded case. `frame.head` in the `subscribed` reply is
- * the one number the client did not write, nothing has been applied to the room on
- * this socket yet, and a cursor above the head is a claim about events the room
+ * a number the client did not *write* — and r8 sharpens exactly that, because r7's
+ * phrasing read stronger than it is. It is not a number an attacker cannot
+ * influence or predict: same-origin JS can open its own socket, read the room's
+ * true head, and plant at it. The last test here does that. What "did not write"
+ * buys is only that the stored cursor is compared against a fetched fact instead
+ * of against itself, so a cursor above the head is a claim about events the room
  * has never had. The room is dropped and re-read.
  *
  * What this does **not** do is stated in the source and asserted below: a forgery
@@ -1221,6 +1225,276 @@ describe('a resumed cursor the server contradicts is not believed', () => {
     expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
     expect(errors).toEqual([]);
     expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 2 });
+  });
+
+  it('does not detect a forgery planted at the room’s true head', async () => {
+    /**
+     * The limit, asserted rather than only conceded (#22 gauntlet r7, sharpening).
+     *
+     * `frame.head` is not unpredictable — it is public to anything on the origin,
+     * which can open its own socket and read it. So the bounded case is not a
+     * corner an attacker might stumble into; it is one line of reconnaissance
+     * away. Planted at exactly the head, the record is well-formed, well-ordered,
+     * in the right room, consistent with its cursor, and *not* above the head, so
+     * every check in this file passes it and the catch-up asks for nothing.
+     *
+     * This test exists to fail if that stops being true — which would mean the
+     * client had acquired provenance it does not have — and to keep the comment
+     * describing this mitigation honest about which case it closes.
+     */
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('planted');
+    journal.commit(ROOM, messageEvent(1, 'the room’s real first event'), 1);
+    journal.commit(ROOM, messageEvent(2, 'a lie, planted exactly at the head'), 2);
+
+    const planted = await clientWith({ journal });
+    planted.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 2, seenSeq: 0 });
+
+    expect(errors).toEqual([]);
+    expect(planted.lastSeq(ROOM)).toBe(2);
+    expect(planted.room(ROOM).events.at(-1)?.event).toMatchObject({
+      body: 'a lie, planted exactly at the head',
+    });
+    // And the catch-up it asks for cannot correct it: the cursor is at the head,
+    // so the server has nothing above it to send.
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 2 });
+  });
+});
+
+/**
+ * The eleventh claim: **order** (#22 gauntlet r7, defect 2).
+ *
+ * `realtime.ts` opens by saying "Nothing is ever applied out of order, and
+ * nothing is applied twice", and `RoomView.events` is documented as "in
+ * `room_seq` order. Never out of order, never repeated." Both are absolute, and
+ * until r8 the schema that was supposed to make them true checked only that the
+ * cursor equalled the *last* event's `roomSeq` — not that the events climbed.
+ *
+ * So `{events: [{roomSeq: 9}, {roomSeq: 2}], lastSeq: 2}` loaded clean: the last
+ * event is 2, the cursor is 2, the record agrees with itself. The 9 is already in
+ * the timeline, the cursor is 2, `applyEntry` dedups on `roomSeq <= lastSeq` —
+ * and the real event at 9 arrives in catch-up and is applied a **second** time.
+ * The rendered room is `[9,2,3,4,5,6,7,8,9]`, in the client whose first sentence
+ * says that cannot happen.
+ *
+ * This is inside the bounded case the head check declares — a forgery at or below
+ * the true head still displaces real events, and nothing here can tell. What it
+ * is *not* inside is the sentence: displacing a prefix is what the bound admits,
+ * rendering the same event twice is what two absolute claims deny. The schema is
+ * where those claims are cashed, so the check goes there.
+ */
+describe('a stored journal that is not in order is not history', () => {
+  function fakeStorage(): Storage & { raw: Map<string, string> } {
+    const raw = new Map<string, string>();
+    const store = {
+      raw,
+      getItem: (key: string) => raw.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        raw.set(key, value);
+      },
+      removeItem: (key: string) => {
+        raw.delete(key);
+      },
+      clear: () => raw.clear(),
+      key: (index: number) => [...raw.keys()][index] ?? null,
+      get length() {
+        return raw.size;
+      },
+    };
+    return store as unknown as Storage & { raw: Map<string, string> };
+  }
+
+  const KEY = 'atrium:journal:order:room-1';
+
+  it('reads an out-of-order record as no history at all', () => {
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('order');
+    // Self-consistent by r7's rule — last event is 2, cursor is 2 — and not a
+    // history: `room_seq` is minted by the table and climbs by one.
+    storage.setItem(
+      KEY,
+      JSON.stringify({ events: [messageEvent(9, 'planted'), messageEvent(2, 'b')], lastSeq: 2 }),
+    );
+    expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+  });
+
+  it('reads a record with a repeated position as no history at all', () => {
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('order');
+    // Strictly increasing, not merely non-decreasing: `room_seq` is unique per
+    // room, so two entries at the same position is the same forgery with the
+    // duplicate already in the record rather than arriving later.
+    storage.setItem(
+      KEY,
+      JSON.stringify({ events: [messageEvent(2, 'a'), messageEvent(2, 'b')], lastSeq: 2 }),
+    );
+    expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+  });
+
+  it('reads a record holding another room’s events as no history at all', () => {
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('order');
+    // The same question asked of the other field the record carries and the read
+    // never checked: `roomId`. The key says room-1; the entry says room-2, and
+    // `view()` renders `held.events` as this room's timeline without re-reading
+    // the envelope's own room. Content injection across rooms, from a store the
+    // origin shares with everything else on it.
+    const foreign = { ...messageEvent(1, 'from another room'), roomId: 'room-2' };
+    storage.setItem(KEY, JSON.stringify({ events: [foreign], lastSeq: 1 }));
+    expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+  });
+
+  it('keeps an ordinary in-order record', () => {
+    // Non-vacuity: the check must not reject the shape the commit path writes.
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('order');
+    journal.commit(ROOM, messageEvent(1, 'a'), 1);
+    journal.commit(ROOM, messageEvent(2, 'b'), 2);
+    expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+    expect(journal.load(ROOM).lastSeq).toBe(2);
+  });
+
+  it('keeps a trimmed record, whose first position is not 1', () => {
+    // Eviction drops from the front, so a real record routinely starts above 1
+    // and above the previous read's floor. Increasing, not contiguous-from-one.
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('order', { maxEvents: 2 });
+    journal.commit(ROOM, messageEvent(1, 'a'), 1);
+    journal.commit(ROOM, messageEvent(2, 'b'), 2);
+    journal.commit(ROOM, messageEvent(3, 'c'), 3);
+    expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([2, 3]);
+  });
+
+  it('never renders the same event twice, given the exact forged record', async () => {
+    /**
+     * The critic's exploit end to end, and the assertion that names the harm:
+     * the timeline, not the journal. On r7 this renders `[9,2,3,4,5,6,7,8,9]`.
+     */
+    const storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('order');
+    storage.setItem(
+      KEY,
+      JSON.stringify({ events: [messageEvent(9, 'planted'), messageEvent(2, 'b')], lastSeq: 2 }),
+    );
+
+    const forged = await clientWith({ journal });
+    forged.join(ROOM);
+    // head 9, so the r7 head check does not fire: `lastSeq` is 2, under the head.
+    // This forgery is inside the bounded case, which is the point.
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 9, seenSeq: 0 });
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 9,
+      head: 9,
+      more: false,
+      entries: [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => messageEvent(n, `real-${n}`)),
+    });
+
+    const rendered = forged.room(ROOM).events.map((e) => e.roomSeq);
+    expect(rendered).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(new Set(rendered).size).toBe(rendered.length);
+  });
+});
+
+/**
+ * `reset` is a promise about the store, not only about this instance
+ * (#22 gauntlet r7, defect 3).
+ *
+ * The comment at the call said "after it returns, this room resumes from
+ * nothing". r7 made that true for the live object — a `removeItem` that throws
+ * degrades the room to memory — and false for the disk: the poisoned key stayed,
+ * so the *next* page load read the forgery again, fired the head check again, and
+ * degraded again, for ever. "Resumes from nothing" is a claim about resuming,
+ * which is the thing that happens after a reload.
+ */
+describe('reset clears the room from the store, not just from this instance', () => {
+  const KEY = 'atrium:journal:reset:room-1';
+
+  function storageWith(overrides: Partial<Storage>): Storage & { raw: Map<string, string> } {
+    const raw = new Map<string, string>();
+    const store = {
+      raw,
+      getItem: (key: string) => raw.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        raw.set(key, value);
+      },
+      removeItem: (key: string) => {
+        raw.delete(key);
+      },
+      clear: () => raw.clear(),
+      key: (index: number) => [...raw.keys()][index] ?? null,
+      get length() {
+        return raw.size;
+      },
+      ...overrides,
+    };
+    return store as unknown as Storage & { raw: Map<string, string> };
+  }
+
+  it('overwrites the record when removeItem throws, so a reload resumes from nothing', () => {
+    const storage = storageWith({
+      removeItem: () => {
+        throw new Error('removeItem is not available');
+      },
+    });
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const poison = JSON.stringify({ events: [messageEvent(50, 'forged')], lastSeq: 50 });
+    storage.raw.set(KEY, poison);
+
+    localStorageJournal('reset').reset(ROOM);
+
+    // The live instance degrading is not enough and never was: a reload builds a
+    // new journal with an empty `degraded` set and reads whatever is on disk.
+    // What has to be true is that the *store* no longer resumes the forgery.
+    expect(localStorageJournal('reset').load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+    expect(storage.raw.get(KEY)).not.toBe(poison);
+  });
+
+  it('reports and stays quiet about the store when neither removeItem nor setItem works', () => {
+    // Both doors shut is the case `reset` genuinely cannot honour, so it says so
+    // once and the source says what is left true: the live room resumes from
+    // nothing, and a reload re-reads the record and re-runs the same check —
+    // which costs a catch-up per load rather than corrupting anything.
+    const degraded: string[] = [];
+    const storage = storageWith({
+      removeItem: () => {
+        throw new Error('removeItem is not available');
+      },
+      setItem: () => {
+        throw new Error('setItem is not available');
+      },
+    });
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    storage.raw.set(KEY, JSON.stringify({ events: [messageEvent(50, 'forged')], lastSeq: 50 }));
+
+    const journal = localStorageJournal('reset', {
+      onDegraded: (_r, reason) => degraded.push(reason),
+    });
+    journal.reset(ROOM);
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]).toContain('localStorage is unusable');
+    expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+  });
+
+  it('still removes the record outright when removeItem works', () => {
+    // Non-vacuity: the ordinary path must not have become a write.
+    const storage = storageWith({});
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+    const journal = localStorageJournal('reset');
+    journal.commit(ROOM, messageEvent(1, 'a'), 1);
+    expect(storage.raw.size).toBe(1);
+    journal.reset(ROOM);
+    expect(storage.raw.size).toBe(0);
   });
 });
 
