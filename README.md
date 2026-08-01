@@ -377,9 +377,11 @@ default, so compose refuses to start when one of them is unset, and an unset
 host on the internet. That default holds only because `NODE_ENV` is read from
 the process environment and nowhere else: the `.env` you copied above says
 `development`, and a file may supply a value nobody set but may never set
-`NODE_ENV`, or the strict default would be decoration. `docker run
-atrium-server` with no environment at all fails at boot with a named error
-rather than reaching for a public secret.
+`NODE_ENV`, or the strict default would be decoration.
+`apps/server/test/entrypoint-env.test.ts` boots the real entrypoint against a
+planted `.env` to prove it, and `docker run atrium-server` with no environment
+at all fails at boot with a named error rather than reaching for a public
+secret.
 
 Before exposing anything: set real values in `.env` (or the deployment's own
 secret store), and do not publish 5432 / 9000 / 9001 at all unless you mean to.
@@ -492,6 +494,7 @@ is what `core_events.room_seq` will map onto — but the gate is the global
 `cursor`, because `issues`, `corrections` and `consumedEventIds` are global
 ordered lists and a per-room gate would let two rooms interleave them one way
 live and another way on replay.
+
 ### Replay ingest
 
 `packages/ingest` turns a real conversation into the canonical replay format
