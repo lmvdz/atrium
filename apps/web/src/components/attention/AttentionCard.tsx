@@ -6,30 +6,38 @@
  * THE RULE THIS COMPONENT ENFORCES: `item.rationale` is a `Rationale`, which is
  * a branded non-empty string with a throwing constructor (model/rationale.ts).
  * The prop is required, so it cannot be omitted; the brand means `''` and
- * `undefined` are not assignable to it, so it cannot be empty. There is no
- * `why?` and no fallback branch — an attention item without a stated reason is
- * an unexplained demand on a person, and this component cannot render one.
+ * `undefined` are not assignable to it, so a TypeScript caller cannot make it
+ * empty. There is no `why?` and no fallback branch — an attention item without
+ * a stated reason is an unexplained demand on a person, and this component
+ * cannot render one. (`isRationale` is the runtime half, for data that did not
+ * come through the compiler.)
  *
  * The rationale is system voice. It is a synthesized sentence about the
  * authority gap, so it is never quoted and never attributed to anybody.
  *
- * Friction is asymmetric (CONVENTIONS): a reversible ◆ gate answers in one
- * click; an irreversible ■ decision renders its action as press-and-hold. The
- * component derives which from the same EpistemicState the glyph comes from,
- * so the two can never disagree.
+ * FRICTION IS ASYMMETRIC (CONVENTIONS): a reversible ◆ gate answers in one
+ * click; an irreversible ■ decision renders as <HoldToAct>, which is a real
+ * two-second press-and-hold with a filling bar and a cancel-on-release, not a
+ * `data-hold` attribute nothing reads. The component derives which from the
+ * same EpistemicState the glyph comes from, so the two can never disagree, and
+ * the destructive control wears the red ramp rather than the gate's amber.
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
 import { glyphFor } from '../model/glyph';
 import type { AttentionAction, AttentionItem } from '../model/records';
+import { slot } from '../model/slot';
 import { list } from '../model/text';
 import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
+import { HoldToAct } from '../primitives/HoldToAct';
 import styles from './attention.module.css';
 
 export type AttentionCardProps = {
   readonly item: AttentionItem;
   readonly onAct?: (itemId: string, actionId: string) => void;
+  /** the arming of an irreversible action, recorded before the act */
+  readonly onArm?: (itemId: string, actionId: string, armedAt: string) => void;
   readonly onJumpToSource?: (itemId: string) => void;
 } & NoGlyph;
 
@@ -39,10 +47,12 @@ const EMPHASIS_CLASS: Readonly<Record<AttentionAction['emphasis'], string>> = {
   ghost: 'atr-btn atr-btn-ghost atr-btn-sm',
 };
 
-export function AttentionCard({ item, onAct, onJumpToSource }: AttentionCardProps) {
+export function AttentionCard({ item, onAct, onArm, onJumpToSource }: AttentionCardProps) {
   const glyph = glyphFor(item.state);
   const facts = list(item.facts);
-  const crossRoom = item.source !== null && item.source.room !== null ? item.source.room : null;
+  /* `text()` is the runtime boundary for Maybe: `undefined` reaching this from a
+     cast or a JS caller used to render "source in #undefined". */
+  const crossRoom = item.source === null ? null : (list([item.source.room]) ?? null);
 
   return (
     <article
@@ -60,7 +70,7 @@ export function AttentionCard({ item, onAct, onJumpToSource }: AttentionCardProp
       <Glyph className={styles.acardGlyph} decorative={false} state={item.state} />
       <div>
         <div className={styles.acardTitle}>
-          <ClaimText state={item.state}>{item.title}</ClaimText>
+          <ClaimText content={slot(item.title)} state={item.state} />
         </div>
 
         <div className={styles.why}>
@@ -99,26 +109,32 @@ export function AttentionCard({ item, onAct, onJumpToSource }: AttentionCardProp
           </div>
 
           <div className={styles.acardActions}>
-            {item.actions.map((action) => (
-              <button
-                className={EMPHASIS_CLASS[action.emphasis]}
-                data-hold={
-                  item.state.irreversible && action.emphasis === 'primary' ? '2000' : undefined
-                }
-                key={action.id}
-                onClick={onAct === undefined ? undefined : () => onAct(item.id, action.id)}
-                title={
-                  item.state.irreversible && action.emphasis === 'primary'
-                    ? 'destructive — press and hold for 2 seconds; the hold is the confirmation'
-                    : (action.statement ?? undefined)
-                }
-                type="button"
-              >
-                {item.state.irreversible && action.emphasis === 'primary'
-                  ? `${action.label} — hold`
-                  : action.label}
-              </button>
-            ))}
+            {item.actions.map((action) =>
+              item.state.irreversible && action.emphasis === 'primary' ? (
+                <HoldToAct
+                  actionId={action.id}
+                  describe={action.label}
+                  key={action.id}
+                  onAct={onAct === undefined ? undefined : () => onAct(item.id, action.id)}
+                  onArm={
+                    onArm === undefined
+                      ? undefined
+                      : (arming) => onArm(item.id, action.id, arming.armedAt)
+                  }
+                  label={action.label}
+                />
+              ) : (
+                <button
+                  className={EMPHASIS_CLASS[action.emphasis]}
+                  key={action.id}
+                  onClick={onAct === undefined ? undefined : () => onAct(item.id, action.id)}
+                  title={action.statement ?? undefined}
+                  type="button"
+                >
+                  {action.label}
+                </button>
+              ),
+            )}
           </div>
         </div>
       </div>

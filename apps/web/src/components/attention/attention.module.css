@@ -50,10 +50,27 @@
   border-color: var(--line);
 }
 
+/* THE SECOND LINE OF DEFENCE. `foldPin` bounds the pin by COUNT, which is the
+   bound that matters because it is derived from the items and testable without
+   a browser. This max-height bounds it by PIXELS as well, so a budget that is
+   one row too generous — or a card that grew a line — still cannot push the
+   composer off the bottom of the frame. Round 1: at 19 owed items the composer
+   sat at 909px in a 900px viewport with scrollHeight stuck at 900, unreachable
+   by any means. Nothing about that failure was recoverable by the user.
+
+   340px, not tighter: the belt must clear the budgeted content — one open card,
+   four compressed rows, and the "N more owed" line — or it clips the very
+   affordance that says what is behind the fold, which is the worse failure of
+   the two. Measured at 19 items: the list comes to 314px, and the e2e asserts
+   the overflow button is inside the pin's visible box rather than merely in the
+   DOM. The count bound is what does the work; this is what catches the count
+   bound being wrong. */
 .pinList {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-height: 340px;
+  overflow: hidden;
 }
 
 /* --- the open card ------------------------------------------------------- */
@@ -183,7 +200,7 @@
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--bg1);
-  padding: 2px 5px 3px 9px;
+  padding: 3px 5px 4px 9px;
   width: 100%;
   text-align: left;
   transition:
@@ -196,6 +213,20 @@
   border-color: var(--line3);
 }
 
+/* amber and red are not interchangeable severities — a compressed destructive
+   item is still destructive, and it says so before you reach for its button */
+.acompDestructive {
+  background: var(--redbg);
+  border-color: var(--redbd);
+  box-shadow: inset 2px 0 0 var(--red3);
+}
+
+.acompText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .acompTitle {
   font-size: 11.5px;
   color: var(--tx1);
@@ -204,6 +235,43 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* BRIEF concept 8 on screen, not on hover. One line's worth: the row stays
+   compressed, and the `title` carries the remainder for the rare long one. */
+.acompWhy {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  line-height: 1.3;
+  min-width: 0;
+}
+
+/* the ellipsis lives on a real element: an anonymous flex item made from a bare
+   text node does not take `text-overflow`, so the reason would be cut mid-word
+   with nothing to say it had been */
+.acompWhyText {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.acompWhyLabel {
+  flex: none;
+  color: var(--amb2);
+}
+
+.acompDestructive .acompWhyLabel {
+  color: var(--red3);
+}
+
+.acompHold {
+  font-size: 11px;
+  padding: 2px 7px 3px;
 }
 
 .acompMeta {
@@ -257,6 +325,66 @@
 
 .trailerGlyph {
   flex: none;
+}
+
+/* --- the overflow affordance --------------------------------------------- */
+/* "N more owed" — explicit, counted, and named by derived glyph. The pin folds
+   rather than scrolling, so what is behind the fold has to say how hard it is
+   before you decide whether to open it. */
+
+.more {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  text-align: left;
+  border: 1px dashed var(--ambbd);
+  border-radius: 5px;
+  background: var(--ambbg5);
+  padding: 3px 9px 4px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.more:hover {
+  background: var(--ambbg);
+  border-color: var(--amb2);
+}
+
+.moreCount {
+  color: var(--amb2);
+  font-weight: 600;
+  flex: none;
+}
+
+.moreTally {
+  flex: none;
+  color: var(--tx1);
+}
+
+.tallyGlyph {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  padding-right: 2px;
+}
+
+.moreHint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* everything clean compresses to a count and never takes a row */
+.clean {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  padding: 2px 2px 0;
 }
 
 /* --- empty --------------------------------------------------------------- */

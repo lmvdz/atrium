@@ -83,6 +83,64 @@
   font-weight: 500;
 }
 
+/* --- hold to arm --------------------------------------------------------- */
+/* The destructive control. It wears the red ramp, never the amber one:
+   CONVENTIONS — "amber and red are not interchangeable severities. Amber is a
+   reversible gate that wants an answer; red is destructive or already failed."
+   Round 1: the destructive primary rendered --amb2, byte-identical to the
+   reversible gate's primary, so the one action class the corpus singles out was
+   invisible.
+
+   --bg3 on --red3 measures 7.47:1 light and 5.81:1 dark. --red2 would be
+   4.21:1 dark, under AA, which is the same latent bug CONVENTIONS records for
+   the ■ and ✗ glyphs. */
+.hold {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 9px 4px;
+  border: 1px solid var(--red3);
+  border-radius: 4px;
+  background: var(--red3);
+  color: var(--bg3);
+  touch-action: none;
+  user-select: none;
+}
+
+.hold:hover {
+  border-color: var(--tx1);
+}
+
+/* The progress bar. Driven by --hold-progress, which HoldToAct writes from the
+   same `performance.now()` clock that gates the action, so what fills is what
+   is being measured. It is a width, not an animation, so
+   `prefers-reduced-motion` — which kills every animation in this app — cannot
+   switch the safety indicator off.
+
+   It is a BAR along the bottom edge rather than a wash behind the label, on
+   purpose: a wash would put the label over two different backgrounds at once
+   and only one of them could be measured. --bg3 on --red3 is 7.47:1 light and
+   5.81:1 dark, well past the 3:1 that non-text contrast needs. */
+.holdFill {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: var(--hold-progress, 0%);
+  background: var(--bg3);
+}
+
+.holdLabel {
+  position: relative;
+}
+
+.hold[data-armed='true'] {
+  background: var(--red);
+  border-color: var(--red);
+}
+
 /* --- tag ----------------------------------------------------------------- */
 
 .tag {
