@@ -65,8 +65,8 @@ autonomous agents.
 drawn from [`design/CONVENTIONS.md`](design/CONVENTIONS.md) rather than captured
 from a running app.
 
-Current state is a flat list, one glyph per line, most recently changed first.
-Needs you is the subset addressed to the person reading it.
+Current state is a flat list, one glyph per line. Needs you is the subset
+addressed to the person reading it.
 
 ```
 CURRENT STATE                                                       #deploy
@@ -75,7 +75,7 @@ CURRENT STATE                                                       #deploy
 ~  decision     Use Postgres for the event log                     alex  14:02  →
 ✓  commitment   sam — wire the flag into the server (due today)    sam   10:04  →
 ~  claim        the migration is reversible                        sam   11:30  →
-·  routine      3 more, unchanged since you left
+·  routine      3 more · sam, alex · 11:40–13:55 · peek
 
 NEEDS YOU                                                                 1
 
@@ -88,7 +88,7 @@ than in a pending queue — a reading is *in* the state, visible, and simply not
 dressed as settled. And the `◆` item states why it is *this* person's: attention
 items are a recomputed projection over the state, and every one of them must
 carry the sentence that justifies it. "Needs you" without a reason is a
-notification badge, which is the thing this product exists to replace.
+notification badge, and the design does not have one.
 
 ## A claim is not a fact
 
@@ -119,8 +119,10 @@ the durable thing.
 Seven glyphs carry the whole vocabulary — `✓` verified, `~` claim, `?`
 explicitly unverified, `·` routine, `◆` needs you, `■` destructive decision
 pending, `✗` failed. [`design/CONVENTIONS.md`](design/CONVENTIONS.md) defines
-each one, gives the measured contrast floor it has to clear in both themes, and
-states the invariant they exist to serve: **a claim never dresses as a fact.**
+each one, records the measured contrast rulings that constrain them — `■` and
+`✗` had to be moved off `--red2`, which fails AA in dark at glyph sizes — and
+states the invariant they all exist to serve: **a claim never dresses as a
+fact.**
 
 ## What is actually built
 
@@ -128,9 +130,9 @@ states the invariant they exist to serve: **a claim never dresses as a fact.**
 `apps/web` and `apps/server` both declare `@atrium/core` in their
 `package.json`; neither imports a symbol from it. `apps/server/src/index.ts`
 opens a database handle, starts a WebSocket server and registers a worker, and
-issues no query. The reducer this document spends most of its length on is
-exercised by its test suite and by nothing else. The enforcement is real code
-with real tests, and it is real code that no user action can currently reach.
+issues no query. The reducer the rest of this file describes is exercised by
+its test suite and by nothing else — 315 tests across 14 files, all passing,
+measuring something real about code that no user action can currently reach.
 
 **On `main`.** `packages/core` is the semantic core: pure TypeScript with no I/O
 and no clock, holding five accepted object types (decision, commitment, open
@@ -141,16 +143,13 @@ equivalence across all of them, rather than over hand-written cases.
 `packages/db` has the Drizzle schema and its first migration. `packages/ingest`
 turns a real conversation into canonical JSONL, byte-identically on a rerun;
 three corpora are committed, of 454, 111 and 480 messages. `design/` holds the
-token system — 51 variables per theme, lifted byte-for-byte from `Atrium
-v6.dc.html`, the last of the prior prototype lineage — and the rules for using
-it. `apps/web` is a Next.js shell that lays out the three regions over hardcoded
-fixtures; it depends on `@atrium/core` directly rather than through `db`, and
-imports nothing from it. `apps/server` is one Node process whose WebSocket
+token system — 51 variables per theme, values byte-identical to the `:root`
+and `html.atr-dark` blocks of `Atrium v6.dc.html`, the last of the prior
+prototype lineage — and the rules for using it. `apps/web` is a Next.js shell that lays out the three regions over hardcoded
+fixtures, and depends on `@atrium/core` directly rather than through `db`.
+`apps/server` is one Node process whose WebSocket
 server is a heartbeat-and-echo placeholder and whose job queue is real but
 registers `interpret-message` as a no-op.
-
-`pnpm test` is 315 tests across 14 files, all passing. That measures something
-real. It is not evidence that any of it runs inside an application.
 
 **On branches, under review, not merged.** The realtime ledger
 ([#22](https://github.com/lmvdz/atrium/issues/22)), auth and workspaces
@@ -164,8 +163,9 @@ next round of the core engine
 ([#21](https://github.com/lmvdz/atrium/issues/21)). Each is a branch with an open
 ticket and an unfinished review round. None of it is shipped, and there is no
 continuous integration on `main` yet — the workflow that would provide it is
-itself on a branch. There is also no host: the compose stack under "Boot it" has
-been run on laptops and never on a public VPS, which is what #40 is open to fix.
+itself on a branch. There is also no host. #40 is open precisely because the
+deployment does not yet serve a page, so the compose stack under "Boot it" is a
+local stack today, whatever the file says about production.
 
 **Not built at all.** No product code here calls a language model — not on
 `main`, not on any branch under review. There is no interpretation job that does
@@ -207,7 +207,7 @@ convergence question — and
 found the same answer in a different field. Of the collaborative terminals
 surveyed — sshx, tmate, Zellij, VS Code Live Share — not one resolves concurrent
 input by merging. Every one of them does it with read-only tokens and
-per-session permissions.
+per-terminal read/write permissions.
 
 **Borrow the pattern, not the dependency.** The design system, the glyph grammar
 and the attention rules come from the prior Atrium design lineage recorded in
@@ -215,7 +215,7 @@ and the attention rules come from the prior Atrium design lineage recorded in
 Several architectural rules come from reading `block/buzz` — the closest live
 analog — at a pinned commit, source and issue tracker together, in
 [`plans/research-buzz/`](plans/research-buzz/). The finding that mattered there
-was that its specifications are better than this project's and its enforcement
+was that its documentation is better than this project's and its enforcement
 is worse, and that every serious bug in its tracker lives in that gap. Both were
 taken as patterns. Neither was taken as a dependency.
 
@@ -250,8 +250,8 @@ A critic's finding is a hypothesis, not a verdict, and each one is checked
 against the code before it is acted on; the log records one that was wrong, whose
 suggested fix would itself have broken a working healthcheck. Every closed ticket
 appends what its rounds caught to [`RETRO.md`](RETRO.md) — no entry, no close.
-That file is this project's record of its own errors, including both of the above
-and the two blocking defects a review round found in this README.
+That file is this project's record of its own errors, including both of the
+above.
 
 ## Where the decisions are written down
 
@@ -389,11 +389,11 @@ implies.** Drive the shipped reducer with a model actor proposing an object and
 then accepting its own proposal, one type at a time, and this is what comes
 back:
 
-| type | may a model mint it accepted? | |
+| type | may a model mint it accepted? | why |
 | --- | --- | --- |
 | `decision` | **no** — refused | the floor, above |
 | a claim moving to `verification: 'verified'` | **no** — refused | the floor, above |
-| a claim accepted `unverified` or `disputed` | yes | deliberate: it still renders `~`, never `✓` |
+| a claim accepted `unverified` or `disputed` | yes | deliberate: truth status lives in the `verification` field, so it never reads as `✓` |
 | `open_question` | yes | deliberate: #4's auto-accept path |
 | `commitment` | **yes — and it should not** | attribution is deferred to #21 |
 | `objective` | **yes — and it should not** | no gate exists |
@@ -407,7 +407,7 @@ is routed to [#21](https://github.com/lmvdz/atrium/issues/21). It is scheduled
 rather than unknown. But until #21 lands, "`✓` means a human checked it" is true
 of decisions and of verified claims, and false of commitments and objectives.
 
-The three openings that *are* deliberate are the other rows. A model may accept
+The openings that *are* deliberate are the remaining rows. A model may accept
 its own claim and open-question readings — a claim carries its truth status in a
 separate `verification` field, so an accepted claim still renders `~` — may
 supersede a claim or a question, and may reject a proposal, because withdrawing
