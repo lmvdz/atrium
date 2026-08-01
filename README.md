@@ -810,6 +810,77 @@ zero tests exits 0 just like one that passed 315:
   exactly (measured, exit 0 in 406ms where the bare flag exits 1). Options are
   `BARE` or `VALUE` now, and `--no-fail-if-no-match` needs no clause — a
   different word is not on the list.
+- **The same lesson, swept over every rule that names an operand.** A blind
+  review found the switch-value case in the *engine's* option table and left the
+  rules themselves unswept, so three of them were still asking about a name.
+  `run: echo "VITEST_RUN_START=0" >> "$GITHUB_ENV"` was policy-clean, and
+  `report-file.mjs` then computed `mtime + 1000 < 0` — false for every file that
+  has ever existed, so every report was fresh and the entire stale-report class
+  was off, with the `rm -f` step the only thing left in its way. The baseline
+  fetch was required to carry a word *containing* `refs/heads/main`, which
+  `+refs/heads/main:refs/remotes/origin/mainx` does while producing no
+  `origin/main`; the gap was real and held shut by git's own behaviour, because
+  `actions/checkout` adds the remote and git updates `origin/main`
+  opportunistically. And `invokes('workflow-policy\.mjs')` never looked at what
+  the engine was pointed at, so `node scripts/ci/workflow-policy.mjs /dev/null`
+  was clean. All three are value-checked now, each with a runtime half that
+  cannot be satisfied by satisfying the policy half: the timestamp must come
+  from `date` *and* land in a plausible recency window, the refspec must be the
+  whole `+refs/heads/main:refs/remotes/origin/main` *and* the ratchet now
+  distinguishes "the ref is missing" (fatal — what a deleted fetch looks like)
+  from "the manifest is not on it yet" (the legitimate quiet path). The
+  matchers that were already value-checked say so beside themselves rather than
+  being assumed.
+- **A glob is not the set the platform runs.** The policy step read
+  `.github/workflows/*.yml`, and GitHub runs `.yaml` too — so a
+  `.github/workflows/x.yaml` was invisible to all 28 rules. The engine takes the
+  *directory* now and enumerates it, which also gives the argument something to
+  check and makes an empty directory a hard error instead of a green run over
+  nothing.
+- **A rule enforced by scanning file text will exempt its own tests, because a
+  test suite necessarily contains examples of what it forbids.** The main-module
+  guard was enforced by `source.includes('if (isMainModule(import.meta.url)) {')`
+  over the whole file. `gate-selftest.mjs` stored that exact string as a
+  fixture, so it satisfied the rule regardless of what its real guard said —
+  eight lines below two comments explaining that the *broken* guard had to be
+  built from concatenated halves for precisely this reason. And
+  `main-module.mjs` needed an explicit exemption for the same reason, an
+  exemption list being the same mistake wearing a name. `scripts/ci/guard-scan.mjs`
+  parses instead: a string literal is a string literal, a comment is a comment,
+  and a statement has a position. There is no exemption list, and the rule is an
+  allowlist — `import.meta` may appear in exactly one place, as the single
+  argument of a top-level `isMainModule(import.meta.url)` whose body is not
+  empty and whose predicate is imported from `main-module.mjs` — so `&& false`,
+  `&& process.env.CI === undefined`, a guard nested inside `if (false)`, a
+  ternary, an `else` branch and a locally redefined predicate are all refused
+  without the scanner having heard of any of them.
+- **A check whose only invoker is one of its subjects cannot be trusted.** That
+  guard scanner was called from exactly one place in the repository: the file it
+  was scanning. Measured on the round-5 branch — one `&&` in `gate-selftest.mjs`
+  and one in `workflow-policy-selftest.mjs` removes all 316 assertions (174
+  policy mutations plus 142 gate cases) with the workflow policy clean, biome
+  clean, both steps green, and no output at all under `CI=true`.
+  `scripts/ci/checker-graph.mjs` makes that a property with a test: an
+  invocation graph of 5 enforcement checks — what each one reads and every place
+  it is called from, its size read back out of this sentence because a deleted
+  row is a check that quietly stops being in the graph — and three assertions
+  over it: the discovered call sites must equal the declared ones, every
+  declared invoker must be something CI actually runs, and
+  **at least one invoker must lie outside the files the check reads**.
+  `packages/ci-guard` is that outside caller: a Vitest project, not under
+  `scripts/`, with a floor in `.github/ci-manifest.json` that ratchets against
+  `origin/main`. This does not make the harness hostile-proof — nothing that
+  runs from the revision under test can be, see the four numbered paragraphs in
+  the governance trigger — it moves the cost of the *accident* from one edit to
+  four, in three files and a manifest.
+- **A union is not a per-item assertion.** `buildAssetProblems` is handed all
+  four page bodies joined, so its "names nothing servable" branch is satisfied
+  by one chunk anywhere in the union. Round 5 deleted round 4's per-response
+  check on that basis; a blind review measured the difference — the round-4
+  check goes red on an asset-free signed-out `/` and the round-5 one accepts it,
+  as long as `/app` names something. Both halves are in `assert-page-serves.mjs`
+  now, over `servableAssets` rather than raw names, because a `/_next/static/…`
+  path that is a route is not a chunk either.
 - **`pin-actions-to-sha` reads the parsed tree, not the lines.** It was a scan
   of raw source since round 1, because the `# vN.N.N` comment it also requires
   is not data in the parsed document. So `- { name: Checkout, uses:
@@ -849,7 +920,7 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 174
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 181
   mutated copies of the real workflow and additionally asserts that every one of
   the 28 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
@@ -858,7 +929,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 142 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 165 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

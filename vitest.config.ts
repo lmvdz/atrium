@@ -13,6 +13,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     projects: [
+      'packages/ci-guard',
       'packages/core',
       'packages/db',
       'packages/auth',

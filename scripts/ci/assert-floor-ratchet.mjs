@@ -44,12 +44,46 @@ const MIN_REASON = 30;
 /**
  * Reads `<ref>:<path>` out of git history.
  *
- * @returns {{ present: boolean, json?: unknown, reason?: string }}
+ * ── "NO BASELINE" IS TWO DIFFERENT ANSWERS (#40 round 6) ────────────────────
+ * Round 5 collapsed them. `git show origin/main:.github/ci-manifest.json` fails
+ * both when the *file* is not there — which is the legitimate case, true until
+ * the branch introducing the manifest merges — and when the *ref* is not there,
+ * which means the fetch did not happen or was pointed somewhere else. Measured
+ * on r5: `CI_MANIFEST_BASELINE_REF=origin/mainbaseline` prints "no baseline,
+ * sanity only" and exits 0. So did deleting the fetch step, which is the
+ * founding defect of this ticket, still fail-open at runtime three rounds after
+ * the policy engine started requiring the step.
+ *
+ * The ref is now resolved separately, and an unresolvable one is fatal. A
+ * missing *file* at a ref that exists stays the quiet, legitimate path.
+ *
+ * @returns {{ present: boolean, json?: unknown, reason?: string, fatal?: boolean }}
  */
 export function readBaseline(ref, path, run = spawnSync) {
+  const resolved = run('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
+    encoding: 'utf8',
+  });
+  if (resolved.error) {
+    return {
+      present: false,
+      fatal: true,
+      reason: `git is not runnable here (${resolved.error.message})`,
+    };
+  }
+  if (resolved.status !== 0) {
+    return {
+      present: false,
+      fatal: true,
+      reason: `there is no ref \`${ref}\` in this checkout. The ratchet compares every floor against that ref, so without it there is nothing to ratchet against — and "nothing to ratchet against" is the exit-0 path a deleted \`git fetch\` step takes, which is the defect this whole pair exists for. Fetch it (\`git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main\`), or point CI_MANIFEST_BASELINE_REF at a ref that exists`,
+    };
+  }
   const result = run('git', ['show', `${ref}:${path}`], { encoding: 'utf8' });
   if (result.error) {
-    return { present: false, reason: `git is not runnable here (${result.error.message})` };
+    return {
+      present: false,
+      fatal: true,
+      reason: `git is not runnable here (${result.error.message})`,
+    };
   }
   if (result.status !== 0) {
     const stderr = String(result.stderr ?? '').trim();
@@ -173,6 +207,12 @@ function describeRequirement(key) {
 function main() {
   const current = JSON.parse(readFileSync(MANIFEST, 'utf8'));
   const baseline = readBaseline(BASELINE_REF, BASELINE_PATH);
+
+  if (baseline.fatal === true) {
+    console.error(`::error file=${MANIFEST}::${LABEL}: ${baseline.reason}.`);
+    console.error(`::error::${LABEL} failed: the baseline ref is not readable.`);
+    return 1;
+  }
 
   if (!baseline.present) {
     console.info(

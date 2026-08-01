@@ -31,20 +31,23 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { checkHostNetworkPolicy } from './assert-deploy-preflight.mjs';
-import { checkRatchet } from './assert-floor-ratchet.mjs';
+import { checkRatchet, readBaseline } from './assert-floor-ratchet.mjs';
 import { checkImageIdentity } from './assert-image-identity.mjs';
 import { checkMigrationImage } from './assert-migration-image.mjs';
 import { checkPlaywrightReport } from './assert-playwright-report.mjs';
 import { checkSchema, readSchema } from './assert-stack-schema.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
+import { checkerGraphProblems, ENFORCEMENT } from './checker-graph.mjs';
 import { notAVerdict } from './child-verdict.mjs';
 import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
-import { isMainModule, mainGuardProblems } from './main-module.mjs';
+import { mainGuardProblems } from './guard-scan.mjs';
+import { isMainModule } from './main-module.mjs';
 import { readFreshReport } from './report-file.mjs';
 import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
-import { buildAssetProblems, buildAssets, forgeLike } from './stack-client.mjs';
+import { buildAssetProblems, buildAssets, forgeLike, servableAssets } from './stack-client.mjs';
+import { workflowFiles } from './workflow-policy.mjs';
 
 const WORKFLOW = process.env.CI_WORKFLOW ?? '.github/workflows/ci.yml';
 
@@ -612,6 +615,133 @@ const CASES = [
       return readFreshReport(path, Number.NaN, 'the test runner').problems;
     },
     expect: /run-start timestamp/i,
+  },
+  // ---- and the timestamp as a *value* (#40 round 6) ------------------------
+  // `run: echo "VITEST_RUN_START=0" >> "$GITHUB_ENV"` was policy-clean on r5,
+  // and `Number.isFinite(0)` is true, so the freshness comparison became
+  // `mtime + 1000 < 0` — false for every file that has ever existed. Every
+  // report fresh, the whole stale-report class off, with the `rm -f` step the
+  // only thing still in the way. The policy engine now requires the value to
+  // come from `date`; this is the other half, and neither is satisfied by
+  // satisfying the other.
+  {
+    name: 'a run-start timestamp of 0, which makes a month-old report fresh',
+    run: () => {
+      const dir = mkdtempSync(join(tmpdir(), 'atrium-gate-'));
+      const path = join(dir, 'report.json');
+      writeFileSync(path, JSON.stringify({ success: true }));
+      const monthAgo = Date.now() / 1000 - 30 * 86400;
+      utimesSync(path, monthAgo, monthAgo);
+      return readFreshReport(path, 0, 'the test runner').problems;
+    },
+    expect: /not a plausible epoch-milliseconds time/,
+  },
+  {
+    name: '`date +%s` instead of `date +%s%3N`, which is seconds and lands in 1970',
+    run: () => {
+      const dir = mkdtempSync(join(tmpdir(), 'atrium-gate-'));
+      const path = join(dir, 'report.json');
+      writeFileSync(path, JSON.stringify({ success: true }));
+      return readFreshReport(path, Math.floor(Date.now() / 1000), 'the test runner').problems;
+    },
+    expect: /not a plausible epoch-milliseconds time/,
+  },
+  {
+    name: 'a clock a week ahead of this one, which would accept anything',
+    run: () => {
+      const dir = mkdtempSync(join(tmpdir(), 'atrium-gate-'));
+      const path = join(dir, 'report.json');
+      writeFileSync(path, JSON.stringify({ success: true }));
+      return readFreshReport(path, Date.now() + 7 * 86400_000, 'the test runner').problems;
+    },
+    expect: /not a plausible epoch-milliseconds time/,
+  },
+  {
+    name: 'the real thing: a fresh report and a timestamp from this second',
+    run: () => {
+      const dir = mkdtempSync(join(tmpdir(), 'atrium-gate-'));
+      const path = join(dir, 'report.json');
+      const started = Date.now();
+      writeFileSync(path, JSON.stringify({ success: true }));
+      return readFreshReport(path, started, 'the test runner').problems;
+    },
+    expect: 'clean',
+  },
+
+  // ---- the ratchet's baseline ref, which had two meanings (#40 round 6) ----
+  // `git show origin/main:.github/ci-manifest.json` fails both when the file is
+  // absent — legitimate, until the branch introducing the manifest merges — and
+  // when the *ref* is absent, which is what a deleted `git fetch` step looks
+  // like. Round 5 answered "no baseline, sanity only" and exited 0 to both.
+  {
+    name: 'a baseline ref that does not exist, which is what a missing fetch looks like',
+    run: () => {
+      const result = readBaseline('origin/mainbaseline', '.github/ci-manifest.json', (_, args) =>
+        args[0] === 'rev-parse'
+          ? { status: 1, stdout: '', stderr: '' }
+          : { status: 128, stdout: '', stderr: "fatal: invalid object name 'origin/mainbaseline'" },
+      );
+      return result.fatal === true ? [result.reason] : ['treated as a plain absent baseline'];
+    },
+    expect: /there is no ref `origin\/mainbaseline`/,
+  },
+  {
+    name: 'a ref that exists with no manifest on it, which stays the quiet legitimate path',
+    run: () => {
+      const result = readBaseline('origin/main', '.github/ci-manifest.json', (_, args) =>
+        args[0] === 'rev-parse'
+          ? { status: 0, stdout: 'deadbeef\n', stderr: '' }
+          : { status: 128, stdout: '', stderr: "fatal: path '…' does not exist in 'origin/main'" },
+      );
+      return result.fatal === true ? ['a missing manifest was treated as a missing ref'] : [];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'a ref that exists carrying a manifest, which is the ratchet doing its job',
+    run: () => {
+      const result = readBaseline('origin/main', '.github/ci-manifest.json', (_, args) =>
+        args[0] === 'rev-parse'
+          ? { status: 0, stdout: 'deadbeef\n', stderr: '' }
+          : { status: 0, stdout: JSON.stringify(ratchetManifest()), stderr: '' },
+      );
+      return result.present === true ? [] : [`baseline not read: ${result.reason}`];
+    },
+    expect: 'clean',
+  },
+
+  // ---- every workflow file, not every file one glob named (#40 round 6) ----
+  {
+    name: 'the workflow directory enumerates `.yaml` as well as `.yml`',
+    run: () => {
+      const entries = [
+        { name: 'ci.yml', isFile: () => true },
+        { name: 'release.yaml', isFile: () => true },
+        { name: 'notes.md', isFile: () => true },
+        { name: 'archive', isFile: () => false },
+      ];
+      const found = workflowFiles(
+        '.github/workflows',
+        () => ({ isDirectory: () => true }),
+        () => entries,
+      );
+      return found.join(',') === '.github/workflows/ci.yml,.github/workflows/release.yaml'
+        ? []
+        : [`enumerated ${found.join(', ') || 'nothing'}`];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'the round-5 glob, which would have left release.yaml unchecked',
+    run: () => {
+      const globbed = ['ci.yml', 'release.yaml', 'notes.md'].filter((name) =>
+        name.endsWith('.yml'),
+      );
+      return globbed.includes('release.yaml')
+        ? []
+        : ['`.github/workflows/*.yml` does not name release.yaml, which GitHub runs'];
+    },
+    expect: /does not name release\.yaml/,
   },
 
   // ---- the dual reports must describe the same run, not merely the same size
@@ -1410,12 +1540,11 @@ const CASES = [
   {
     name: 'the round-4 guard, re-introduced in one file',
     run: () =>
-      mainGuardProblems('scripts', (path) =>
-        path.endsWith('assert-tables.mjs')
-          ? `if (${BROKEN_GUARD_HALVES.join(' ')}) { process.exit(main()); }\n`
-          : readFileSync(path, 'utf8'),
+      guardScanWith(
+        'assert-tables.mjs',
+        () => `if (${BROKEN_GUARD_HALVES.join(' ')}) { process.exit(main()); }\n`,
       ),
-    expect: /percent-encodes and resolves symlinks/,
+    expect: /percent-encodes/,
   },
   {
     name: 'the sound predicate wired so it can never be true',
@@ -1423,25 +1552,122 @@ const CASES = [
     // false` uses the right predicate, passes that test, and exits 0 having
     // asserted nothing. Found by a blind review of the first version.
     run: () =>
-      mainGuardProblems('scripts', (path) =>
-        path.endsWith('assert-tables.mjs')
-          ? readFileSync(path, 'utf8').replace(
-              CANONICAL_GUARD_LINE,
-              `${CANONICAL_GUARD_LINE.slice(0, -2)} && false) {`,
-            )
-          : readFileSync(path, 'utf8'),
+      guardScanWith('assert-tables.mjs', (source) =>
+        source.replace(CANONICAL_GUARD_LINE, conjoin('false')),
       ),
-    expect: /does not contain the one spelling of the guard/,
+    expect: /condition is not exactly/,
   },
   {
     name: 'the same written with a loose equality and single quotes',
     run: () =>
-      mainGuardProblems('scripts', (path) =>
-        path.endsWith('assert-tables.mjs')
-          ? `if (${LOOSE_GUARD_HALVES.join(' ')}) { main(); }\n`
-          : readFileSync(path, 'utf8'),
+      guardScanWith(
+        'assert-tables.mjs',
+        () => `if (${LOOSE_GUARD_HALVES.join(' ')}) { main(); }\n`,
       ),
-    expect: /percent-encodes and resolves symlinks/,
+    expect: /percent-encodes/,
+  },
+  // ---- and the round-6 defect: the file holding the fixture (#40 round 6) ---
+  // The round-5 rule was `source.includes('if (isMainModule(import.meta.url)) {')`
+  // over the whole file. THIS file stores that exact string as a fixture, forty
+  // lines below, so it satisfied the rule whatever its own guard said — and it
+  // was the only place in the repository `mainGuardProblems` was called from.
+  // Measured on r5 as committed: `&& process.env.CI === undefined` on line 1951,
+  // scanner 0 problems, biome clean, policy clean, `CI=true node
+  // gate-selftest.mjs` exit 0 with no output. The scanner parses now, so the
+  // fixture is a string and the guard is a statement, and the two cases below
+  // are the standing proof of both halves.
+  {
+    name: 'the guard of the file that holds the canonical spelling as a fixture',
+    run: () =>
+      guardScanWith('gate-selftest.mjs', (source) =>
+        source.replace(
+          `${CANONICAL_GUARD_LINE}\n  process.exit(await main());`,
+          `${conjoin(CI_CONJUNCT)}\n  process.exit(await main());`,
+        ),
+      ),
+    expect: /condition is not exactly/,
+  },
+  {
+    name: 'the same edit to the other self-test, which is the file that would notice',
+    run: () =>
+      guardScanWith('workflow-policy-selftest.mjs', (source) =>
+        source.replace(
+          `${CANONICAL_GUARD_LINE}\n  process.exit(main());`,
+          `${conjoin(CI_CONJUNCT)}\n  process.exit(main());`,
+        ),
+      ),
+    expect: /condition is not exactly/,
+  },
+  {
+    name: 'a guard that establishes it was run and then does nothing',
+    run: () =>
+      guardScanWith('assert-tables.mjs', () => `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n}\n`),
+    expect: /body is empty/,
+  },
+  {
+    name: 'the guard nested inside a branch that is never taken',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}if (false) {\n  ${CANONICAL_GUARD_LINE}\n    process.exit(main());\n  }\n}\n`,
+      ),
+    expect: /outside the one place a script here may/,
+  },
+  {
+    name: 'the same comparison with `import.meta.url` renamed out of it',
+    run: () =>
+      guardScanWith('assert-tables.mjs', () => "if (process.argv[1] === '/x/y.mjs') { main(); }\n"),
+    expect: /compares `process\.argv\[1\]` for equality/,
+  },
+  {
+    name: 'a file the scanner cannot parse is a failure, not a skip',
+    run: () => guardScanWith('assert-tables.mjs', () => 'if (isMainModule(import.meta.url) {\n'),
+    expect: /does not parse as JavaScript/,
+  },
+
+  // ---- who runs the checks (#40 round 6) -----------------------------------
+  // `mainGuardProblems` was invoked in exactly one place: line 1407 of this
+  // file, which is one of the files it scans. Sole enforcer, sole exception.
+  // The registry in checker-graph.mjs now pins the invocation graph of every
+  // check here, and requires each one to have a caller outside its own
+  // subjects — `packages/ci-guard`, which is a Vitest project rather than
+  // anything under scripts/.
+  {
+    name: 'every check has an invoker that is not one of its own subjects',
+    run: () => checkerGraphProblems(),
+    expect: 'clean',
+  },
+  {
+    name: "the round-5 graph, restored: this file as mainGuardProblems' only caller",
+    run: () =>
+      checkerGraphProblems({
+        registry: [{ ...ENFORCEMENT[0], invokers: ['scripts/ci/gate-selftest.mjs'] }],
+      }),
+    expect: /Sole enforcer, sole exception/,
+  },
+  {
+    name: 'an invoker CI never runs is not a witness',
+    run: () =>
+      checkerGraphProblems({
+        registry: [{ ...ENFORCEMENT[0], invokers: ['packages/ci-guard/vitest.config.ts'] }],
+      }),
+    expect: /nothing in \.github\/workflows runs/,
+  },
+  {
+    name: 'a call site the registry has forgotten',
+    run: () =>
+      checkerGraphProblems({
+        registry: [
+          {
+            ...ENFORCEMENT[0],
+            invokers: ENFORCEMENT[0].invokers.filter(
+              (file) => !file.endsWith('workflow-policy-selftest.mjs'),
+            ),
+          },
+        ],
+      }),
+    expect: /calls mainGuardProblems, which the registry/,
   },
 
   // ---- the build's assets, actually fetched (#40 round 5) ------------------
@@ -1487,6 +1713,47 @@ const CASES = [
     run: () =>
       servedAssets('<html><body><p>the page</p></body></html>', () => ({ status: 200, body: 'x' })),
     expect: /none of them is a file this deployment could serve/,
+  },
+  // ---- and per body, which the union does not cover (#40 round 6) ----------
+  // `assert-page-serves.mjs` hands `buildAssetProblems` all four responses
+  // joined, so the "names nothing servable" branch above is satisfied by one
+  // chunk *anywhere in the union*. Round 4 asserted it per response; round 5
+  // deleted that and said the fetch loop stood in for it. These two cases are
+  // the measurement a blind review made: same input, opposite verdicts.
+  {
+    name: 'an asset-free signed-out page, joined with three pages that have assets',
+    run: () =>
+      servedAssets(
+        [ASSET_FREE_PAGE, PAGE_WITH_ASSETS, PAGE_WITH_ASSETS, PAGE_WITH_ASSETS].join('\n'),
+        () => ({
+          status: 200,
+          body: 'chunk',
+        }),
+      ),
+    // Deliberately clean: this is what the union check says, and why it is not
+    // the whole answer.
+    expect: 'clean',
+  },
+  {
+    name: 'the same signed-out page, asked about on its own',
+    run: () =>
+      servableAssets(ASSET_FREE_PAGE).length === 0
+        ? ['GET / signed out names no `/_next/static/…` file this deployment could serve']
+        : [],
+    expect: /names no `\/_next\/static\/…` file/,
+  },
+  {
+    name: 'a page whose only `/_next/static/…` path is a route, not a file',
+    run: () =>
+      servableAssets('<a href="/_next/static/chunks/app/app">go</a>').length === 0
+        ? ['names no file this deployment could serve']
+        : [],
+    expect: /names no file/,
+  },
+  {
+    name: 'a real page names files, so the per-body check is not vacuous',
+    run: () => (servableAssets(PAGE_WITH_ASSETS).length > 0 ? [] : ['found no servable asset']),
+    expect: 'clean',
   },
   {
     name: 'the escaped copies Next embeds in its RSC payload are not fetched as-is',
@@ -1595,17 +1862,62 @@ const CASES = [
 /**
  * The broken guard, in halves.
  *
- * Written as two strings joined at runtime because `mainGuardProblems` scans
- * this directory and this file is in it: spelled out in one literal, the
- * fixture would make the scanner report *this* file, and a self-test that
- * cannot contain the thing it tests is a self-test with a hole where its
- * fixture should be.
+ * Round 5 wrote it this way out of necessity: `mainGuardProblems` was a
+ * substring scan over each file's source, so a fixture spelled out in one
+ * literal would have made the scanner report *this* file. That discipline is no
+ * longer load-bearing — the scanner parses, and a string literal is a string
+ * literal — but the halves stay, because the round-5 defect was the *other*
+ * half of the same fact and it is worth keeping both in view.
  */
 // biome-ignore lint/suspicious/noTemplateCurlyInString: the broken guard, quoted verbatim as a fixture
 const BROKEN_GUARD_HALVES = ['import.meta.url', '===', '`file://${process.argv[1]}`'];
-/** The canonical guard, which every entry point in scripts/ must contain. */
+/**
+ * The canonical guard — deliberately a plain literal, which under round 5 was
+ * the hole.
+ *
+ * `source.includes(CANONICAL_GUARD)` found *this line* and stopped looking, so
+ * this file passed the guard check no matter what its real guard said, and this
+ * file was the only caller of the guard check in the repository. Left spelled
+ * out on purpose: it is the standing witness that the parser does not care,
+ * and two cases above mutate the real guard of this file and of
+ * workflow-policy-selftest.mjs to prove it.
+ */
 const CANONICAL_GUARD_LINE = 'if (isMainModule(import.meta.url)) {';
 const LOOSE_GUARD_HALVES = ['import.meta.url', '==', "'file://' + process.argv[1]"];
+/** What a guarded file has to import for the guard to be the shared predicate. */
+const GUARD_IMPORT = "import { isMainModule } from './main-module.mjs';\n";
+/**
+ * The canonical guard with something conjoined to the sound predicate.
+ *
+ * Every one of these keeps `isMainModule(import.meta.url)` intact, so every text
+ * test ever written for this accepts them, and every one of them can be false on
+ * a machine where nobody is looking.
+ */
+const conjoin = (extra) => `${CANONICAL_GUARD_LINE.slice(0, -3)} && ${extra}) {`;
+/** The one a blind review actually landed on r5: silent exactly under CI. */
+const CI_CONJUNCT = 'process.env.CI === undefined';
+
+/**
+ * `mainGuardProblems` over the real `scripts/` tree with one file rewritten.
+ *
+ * The rest of the tree is read from disk, so every case also re-asserts that
+ * nothing *else* trips the scanner — a fixture that fires for the right reason
+ * in a tree that fires for six other reasons is not a test.
+ */
+function guardScanWith(target, rewrite) {
+  return mainGuardProblems('scripts', (path) => {
+    const source = readFileSync(path, 'utf8');
+    return path.endsWith(target) ? rewrite(source) : source;
+  });
+}
+
+/**
+ * A 200 that is a page and names no build asset at all.
+ *
+ * What four lines of `respond` in a Caddyfile produce, and what an image whose
+ * `.next/static` never made it in produces for a route Next could not render.
+ */
+const ASSET_FREE_PAGE = '<html><body><p data-region="conversation">the page</p></body></html>';
 
 /** A rendered page naming the chunks a Next build produces, escaping and all. */
 const PAGE_WITH_ASSETS = [
@@ -1928,6 +2240,18 @@ function checkReadmeClaims() {
       what: 'stated blind spots',
       pattern: phrase('(\\d+) stated blind spots'),
       actual: Object.keys(BLIND_SPOTS).length,
+    },
+    {
+      // Found by attacking round 6's own fix. `checkerGraphProblems` asserts a
+      // property of every row in `ENFORCEMENT` — and says nothing at all about a
+      // row that is *deleted*, which is one line and restores exactly the state
+      // the file exists to prevent. The size of the registry is therefore prose
+      // that is read back, the same technique that keeps the rule and mutation
+      // counts honest. Removing a check from the graph now costs a README edit
+      // that says out loud that the graph got smaller.
+      what: 'enforcement checks in the invocation graph',
+      pattern: phrase('invocation graph of (\\d+) enforcement checks'),
+      actual: ENFORCEMENT.length,
     },
   ];
   const failures = [];

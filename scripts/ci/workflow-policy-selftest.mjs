@@ -48,6 +48,8 @@
 
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
+import { checkerGraphProblems } from './checker-graph.mjs';
+import { mainGuardProblems } from './guard-scan.mjs';
 import { isMainModule } from './main-module.mjs';
 import { LAUNCHER_NAMES, PACKAGE_MANAGER_NAMES } from './shell-command.mjs';
 import {
@@ -220,8 +222,8 @@ const ACCEPTED_FORMS = {
   // The same requirement for the node-flag allowlist: a diagnostic flag must
   // still read as a real invocation, or the allowlist is a ban on flags.
   'the policy engine run with source maps and no warnings': [
-    '        run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml\n',
-    '        run: node --enable-source-maps --no-warnings scripts/ci/workflow-policy.mjs .github/workflows/*.yml\n',
+    '        run: node scripts/ci/workflow-policy.mjs .github/workflows\n',
+    '        run: node --enable-source-maps --no-warnings scripts/ci/workflow-policy.mjs .github/workflows\n',
   ],
   'the fetch with a per-invocation git config': rewritesFetch(
     `git -c protocol.version=2 fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main`,
@@ -717,11 +719,7 @@ const MUTATIONS = [
     name: 'the policy step deleted, so the policy stops objecting to anything',
     rule: 'policy-steps-present',
     mutate: (s) =>
-      replaceOnce(
-        s,
-        '        run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml\n',
-        '',
-      ),
+      replaceOnce(s, '        run: node scripts/ci/workflow-policy.mjs .github/workflows\n', ''),
     message: /never runs the workflow policy engine/,
   },
   {
@@ -2091,6 +2089,83 @@ const MUTATIONS = [
       ]),
     pair: PAIRS.ratchetNeedsFetch,
   },
+  // ---- and the same lesson applied to the operands (#40 round 6) ------------
+  // Round 5 carried `--dry-run` for this step and nothing about what the fetch
+  // was pointed *at*: the rule asked for a word containing `refs/heads/main`,
+  // which `+refs/heads/main:refs/remotes/origin/mainx` satisfies while producing
+  // no `origin/main` for the ratchet to read. A blind review checked whether it
+  // reproduces and found it does not — `actions/checkout` adds the remote, so
+  // git's own remote-tracking update writes `origin/main` regardless. Held shut
+  // by git's behaviour rather than by the rule, which is not a state to leave a
+  // rule in.
+  {
+    name: 'the baseline fetch aimed at a remote-tracking ref nobody reads',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      rewriteFetch(s, [
+        'git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/mainx',
+      ]),
+    pair: PAIRS.ratchetNeedsFetch,
+  },
+  {
+    name: 'the baseline fetch of the right branch into no destination at all',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => rewriteFetch(s, ['git fetch --no-tags --depth=1 origin refs/heads/main']),
+    pair: PAIRS.ratchetNeedsFetch,
+  },
+  // The run-start timestamp as a *value*. `VITEST_RUN_START=0` was policy-clean
+  // on r5, and `report-file.mjs` then computes `mtime + 1000 < 0` — false for
+  // every file that has ever existed, so every report is fresh and the whole
+  // stale-report class is off. Same shape as `--fail-if-no-match=false`: a rule
+  // about a name where the meaning is in the value.
+  {
+    name: 'the run-start timestamp written down as a constant instead of read from the clock',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      replaceOnce(s, ENV_LINE, '        run: echo "VITEST_RUN_START=0" >> "$GITHUB_ENV"\n'),
+    pair: PAIRS.suiteNeedsReset,
+  },
+  {
+    name: 'the same for the e2e run-start timestamp',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: echo "E2E_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n',
+        '        run: echo "E2E_RUN_START=1" >> "$GITHUB_ENV"\n',
+      ),
+    pair: PAIRS.e2eSuiteNeedsReset,
+  },
+  {
+    name: 'the timestamp computed by something that is not a clock',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      replaceOnce(s, ENV_LINE, '        run: echo "VITEST_RUN_START=$(echo 0)" >> "$GITHUB_ENV"\n'),
+    pair: PAIRS.suiteNeedsReset,
+  },
+  // The policy engine's own argument, which no rule had ever looked at.
+  {
+    name: 'the policy engine pointed at a file that is not a workflow',
+    rule: 'policy-steps-present',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: node scripts/ci/workflow-policy.mjs .github/workflows\n',
+        '        run: node scripts/ci/workflow-policy.mjs /dev/null\n',
+      ),
+    message: /never runs the workflow policy engine, over the whole workflow directory/,
+  },
+  {
+    name: 'the policy engine given the round-5 glob, which misses every `.yaml`',
+    rule: 'policy-steps-present',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: node scripts/ci/workflow-policy.mjs .github/workflows\n',
+        '        run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml\n',
+      ),
+    message: /never runs the workflow policy engine, over the whole workflow directory/,
+  },
   {
     name: 'the Playwright suite with `--list`, which prints the tests and runs none',
     rule: 'required-job-steps',
@@ -2297,6 +2372,21 @@ function main() {
     failures.push(
       `the unmutated ${WORKFLOW} must pass its own policy, but reported: ${clean.map((v) => `[${v.rule}] ${v.message}`).join(' | ')}`,
     );
+  }
+
+  // ── the guard, and the graph that decides who checks it (#40 round 6) ──────
+  // Round 5 enforced the main-module guard from `gate-selftest.mjs` alone — a
+  // file the scanner scans. Adding `&& process.env.CI === undefined` to that
+  // file's own guard silenced it, and then this file could take the same edit
+  // unopposed, because the thing that would have noticed had just been
+  // disarmed. 316 assertions, two `&&`, every gate green. So the two self-tests
+  // check each other now: disarming one leaves the other scanning it, and
+  // `packages/ci-guard` is a third caller outside `scripts/` entirely.
+  for (const problem of mainGuardProblems('scripts')) {
+    failures.push(`the main-module guard: ${problem}`);
+  }
+  for (const problem of checkerGraphProblems()) {
+    failures.push(`the invocation graph: ${problem}`);
   }
 
   // Coverage, derived rather than counted. A rule with no mutation is a rule

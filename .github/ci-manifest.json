@@ -13,8 +13,13 @@
     "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
     "target: the point is to catch a suite that shrank, not to go red every time a test is",
     "renamed away. Counted from a real run of this tree (fix/ci-r6 merged into fix/auth-r5,",
-    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16 — 642 tests across",
-    "30 files.",
+    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 27 — 669",
+    "tests across 31 files.",
+    "packages/ci-guard is #40 round 6. It exists to run checks from *outside* scripts/: the",
+    "main-module guard scanner was enforced only from gate-selftest.mjs, a file it scans, so",
+    "one `&&` in that file removed 316 assertions with every gate green. Its floor is what",
+    "makes deleting those tests loud — see scripts/ci/checker-graph.mjs, which requires every",
+    "enforcement check to have an invoker that is not one of its own subjects.",
     "apps/web left `exempt` and acquired a floor in #40's merge: fix/auth-r5 gave it a Vitest",
     "project for its server-side modules (the boot conditions in `lib/env.ts`, and #40's",
     "rules about build-time constants in `next.config.ts`), which a browser suite cannot",
@@ -29,6 +34,10 @@
       "apps/web": {
         "project": "web",
         "minTests": 12
+      },
+      "packages/ci-guard": {
+        "project": "ci-guard",
+        "minTests": 20
       },
       "packages/auth": {
         "project": "auth",
@@ -48,7 +57,7 @@
       }
     },
     "exempt": {},
-    "minTotalTests": 600
+    "minTotalTests": 620
   },
   "playwright": {
     "projects": {

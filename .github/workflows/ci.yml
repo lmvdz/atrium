@@ -220,7 +220,13 @@ jobs:
         # actionlint proves the file is a *valid* workflow. This proves it is an
         # *honest* one: no fail-open construct, no bypassable job, no unpinned
         # action, and a gate that covers every job in the file.
-        run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml
+        #
+        # The *directory*, not `*.yml`. GitHub runs `.yaml` too, and a glob that
+        # names one extension leaves a whole workflow invisible to every rule
+        # here; the shell expanding the set also meant the engine's argument was
+        # never checked, so pointing it at `/dev/null` was policy-clean. The
+        # engine enumerates the directory itself and refuses an empty one.
+        run: node scripts/ci/workflow-policy.mjs .github/workflows
 
       - name: Prove the workflow policy actually rejects things
         # A policy engine nobody tests is a policy engine that passes everything.

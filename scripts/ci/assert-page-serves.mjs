@@ -103,6 +103,7 @@ import {
   mailpit,
   once,
   report,
+  servableAssets,
   stackTarget,
 } from './stack-client.mjs';
 
@@ -326,10 +327,29 @@ check(
  * nothing goes red. `/app` is behind `requireSession` and names its own chunks,
  * so its body has to be in here.
  */
-for (const problem of await buildAssetProblems(
-  target,
-  [anonymous.body, signedIn.body, withForgedCookie.body, app.body].join('\n'),
-)) {
+const BODIES = [
+  ['GET / signed out', anonymous.body],
+  ['GET / signed in', signedIn.body],
+  ['GET / with a forged cookie', withForgedCookie.body],
+  ['GET /app', app.body],
+];
+
+// Per body first, and this half is not redundant with the fetch loop below.
+// `buildAssetProblems` is handed all four responses joined, so the "names no
+// servable asset at all" branch inside it asks about the *union*: one chunk
+// anywhere satisfies it. Round 4 asserted this per response, round 5 deleted it
+// on the grounds that the fetch covered it, and a blind review measured the
+// difference — the round-4 check goes red on an asset-free signed-out `/`, the
+// round-5 one accepts it. A page that names no chunk is not the Next build,
+// whatever the other three pages name.
+for (const [label, body] of BODIES) {
+  check(
+    servableAssets(body).length > 0,
+    `${label} names no \`/_next/static/…\` file this deployment could serve. A page rendered by a Next build names its script and stylesheet chunks by content hash; four lines of \`respond\` in a Caddyfile name none, and neither does an error shell with a 200 on it. Named: ${buildAssets(body).join(', ') || 'nothing at all'}.`,
+  );
+}
+
+for (const problem of await buildAssetProblems(target, BODIES.map(([, body]) => body).join('\n'))) {
   check(false, problem);
 }
 

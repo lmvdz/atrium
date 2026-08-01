@@ -1,0 +1,17 @@
+{
+  "name": "@atrium/ci-guard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The invariants that keep the CI checkers honest, run from outside scripts/ so that no check in scripts/ is enforced only by its own subjects.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0"
+  }
+}

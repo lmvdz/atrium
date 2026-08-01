@@ -57,11 +57,11 @@
  * chain can recurse — cost that buys nothing until the first one exists.
  *
  * Usage:
- *   node scripts/ci/workflow-policy.mjs .github/workflows/*.yml
+ *   node scripts/ci/workflow-policy.mjs .github/workflows
  *   import { checkWorkflow } from './workflow-policy.mjs'
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { isAlias, isCollection, parseDocument, visit } from 'yaml';
 import { isMainModule } from './main-module.mjs';
 import {
@@ -389,6 +389,46 @@ function invokes(script) {
 }
 
 /**
+ * The policy engine pointed at the whole workflow directory.
+ *
+ * ── TWO DEFECTS, ONE STEP (#40 round 6) ─────────────────────────────────────
+ * The step used to read `node scripts/ci/workflow-policy.mjs
+ * .github/workflows/*.yml`, and the rule that required it was
+ * `invokes('workflow-policy\\.mjs')` — the script by name, its argument
+ * unexamined.
+ *
+ *  1. `*.yml` is not the set GitHub runs. `.github/workflows/x.yaml` is a
+ *     workflow by every rule GitHub applies and by none of the rules in this
+ *     file, because the glob never named it. A whole workflow, invisible.
+ *  2. The argument being unchecked is the value-vs-presence class again: `node
+ *     scripts/ci/workflow-policy.mjs /dev/null` satisfies `invokes`, prints
+ *     "clean", and exits 0 having read nothing.
+ *
+ * Both close the same way. The engine takes the *directory* and enumerates it
+ * — `.yml`, `.yaml`, and anything added later, with an empty directory a hard
+ * error rather than a green run over nothing — and the rule requires that
+ * operand to be the directory. What is checked is no longer a glob some shell
+ * expanded before anyone could look at it.
+ */
+/** Where GitHub looks for workflows, and therefore where this engine must. */
+const WORKFLOW_DIRECTORY = '.github/workflows';
+
+const CHECKS_ALL_WORKFLOWS = command(
+  '`node scripts/ci/workflow-policy.mjs .github/workflows`',
+  ['node'],
+  ({ argv }) => {
+    if (argv[0] !== 'node' || !runsItsScript(argv)) return false;
+    const script = firstOperand(argv);
+    if (script === undefined || !/^(?:\.\.\/)*scripts\/ci\/workflow-policy\.mjs$/.test(script)) {
+      return false;
+    }
+    const operand = firstOperand(argv, argv.indexOf(script) + 1);
+    return operand === WORKFLOW_DIRECTORY || operand === `${WORKFLOW_DIRECTORY}/`;
+  },
+  [...NODE_FLAGS_ALLOWED.keys()],
+);
+
+/**
  * A package.json script run through the workspace's package manager.
  *
  * `via` rather than `raw[0]`, so `sudo pnpm build` and `timeout 60 pnpm lint`
@@ -431,13 +471,50 @@ function binary(name, flags, ...subcommand) {
 // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion, quoted verbatim
 const JOB_ENV_FILE = new Set(['$GITHUB_ENV', '${GITHUB_ENV}']);
 
+/**
+ * The value has to be *computed*, and this is the whole of round 6's sweep.
+ *
+ * ── THE DEFECT (#40 round 6) ────────────────────────────────────────────────
+ * Rounds 4 and 5 argued about where `VITEST_RUN_START=` had to appear and what
+ * it had to be redirected into. Nothing ever looked at the value. Measured on
+ * r5 as committed:
+ *
+ *     run: echo "VITEST_RUN_START=0" >> "$GITHUB_ENV"
+ *
+ * is policy-clean, and `report-file.mjs` then computes `stat.mtimeMs + 1000 <
+ * 0`, which is false for every file that has ever existed. Every report is
+ * "fresh". That is the entire cached-or-leftover-report class the reset/gate
+ * pair exists for, wide open, with the only remaining line of defence being
+ * that the `rm -f` step happens to still run.
+ *
+ * It is the same shape as round 5's own `--fail-if-no-match=false` finding — a
+ * rule about a name where the meaning lives in a value — so the sweep was run
+ * over every matcher in this file rather than over this one. Three came back:
+ * this, `FETCHES_BASELINE`'s refspec (the word `refs/heads/main` appearing
+ * somewhere is not `origin/main` resulting), and the policy engine's own
+ * argument (`invokes('workflow-policy\\.mjs')` did not care *what* it was
+ * pointed at). The rest are value-checked already (`composeStack` pins the
+ * verb, `deletesReports` pins the filenames, `binary` pins the subcommand) or
+ * fail closed at runtime with the wrong value, and that is written down beside
+ * each one rather than assumed.
+ *
+ * A timestamp is either `$(date …)` or a lie. `%s%3N` is not required here —
+ * `date +%s` is wrong by a factor of a thousand rather than dishonest, and
+ * `report-file.mjs` refuses it as implausible at runtime. Two halves, neither
+ * of which can be satisfied by satisfying the other.
+ */
+const COMPUTED_BY_DATE = /(?:\$\(|`)\s*date\b/;
+
 function exportsToJobEnv(name) {
   return command(
-    `\`echo ${name}=… >> "$GITHUB_ENV"\``,
+    `\`echo ${name}=$(date +%s%3N) >> "$GITHUB_ENV"\``,
     ['echo', 'printf'],
     ({ argv, redirections }) => {
       if (argv[0] !== 'echo' && argv[0] !== 'printf') return false;
       if (!(firstOperand(argv) ?? '').startsWith(`${name}=`)) return false;
+      // Any operand, not only the first: `printf "NAME=%s\n" "$(date +%s%3N)"`
+      // is the same claim spelled with the value in the second word.
+      if (!argv.slice(1).some((word) => COMPUTED_BY_DATE.test(word))) return false;
       return redirections.some(
         ({ op, target }) =>
           (op === '>>' || op === '>') && target.expandable && JOB_ENV_FILE.has(target.value),
@@ -606,17 +683,39 @@ const DELETES_E2E_REPORT = {
   because: 'same reason as the vitest delete: a leftover report is the quietest possible green',
 };
 
+/**
+ * The refspec that actually produces `origin/main`, whole.
+ *
+ * `assert-floor-ratchet.mjs` reads `origin/main`, so the destination half is the
+ * part that matters and it is the part round 5 did not look at. The leading `+`
+ * is optional (a shallow fetch of a branch that only fast-forwards does not need
+ * it); everything else is fixed, because there is exactly one ref the ratchet
+ * compares against.
+ */
+const BASELINE_REFSPEC = /^\+?refs\/heads\/main:refs\/remotes\/origin\/main$/;
+
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
   test: command(
-    '`git fetch … refs/heads/main`',
+    '`git fetch … +refs/heads/main:refs/remotes/origin/main`',
     ['git'],
     ({ argv }) => {
       if (basename(argv[0]) !== 'git') return false;
       // The subcommand by membership rather than by position: `git -c x=y fetch`
       // is a fetch, and reading the first operand would call it a `x=y`.
       if (!argv.slice(1).includes('fetch')) return false;
-      return argv.slice(1).some((word) => word.includes('refs/heads/main'));
+      // The whole refspec, as one word, and not merely a word that *contains*
+      // `refs/heads/main`. Round 5 asked for the substring, which accepts
+      // `+refs/heads/main:refs/remotes/origin/mainx` — a fetch that updates a
+      // ref nobody reads. A blind review checked whether that reproduces and
+      // found it does not, for a reason that is not this rule: `actions/checkout`
+      // runs `git remote add origin …`, so git's opportunistic remote-tracking
+      // update writes `origin/main` anyway, and `git -c remote.origin.fetch=…`
+      // *appends* to that multi-valued key rather than replacing it. So the gap
+      // was real and held shut by git's behaviour. One `git config --unset` in an
+      // earlier step, or a checkout action that stops adding the remote, and it
+      // opens. Rules do not get to rely on that.
+      return argv.slice(1).some((word) => BASELINE_REFSPEC.test(word));
     },
     // The one that matters most in this file. `git fetch --dry-run …` keeps
     // every word this matcher reads and updates no ref, so `origin/main` never
@@ -661,8 +760,8 @@ const REQUIRED_STEPS = {
     { rule: 'policy-steps-present', what: 'actionlint', test: RUNS_ACTIONLINT },
     {
       rule: 'policy-steps-present',
-      what: 'the workflow policy engine',
-      test: invokes('workflow-policy\\.mjs'),
+      what: 'the workflow policy engine, over the whole workflow directory',
+      test: CHECKS_ALL_WORKFLOWS,
     },
     {
       rule: 'policy-steps-present',
@@ -2483,10 +2582,52 @@ export function checkWorkflowFile(source, path) {
   return violations;
 }
 
+/**
+ * Every workflow file under a path, whether that path is a file or a directory.
+ *
+ * `.yaml` as well as `.yml`, because GitHub runs both and round 5's invocation
+ * globbed only the first — a `.github/workflows/x.yaml` was invisible to every
+ * rule in this engine. Enumerating the directory here rather than in the shell
+ * also means the set is decided by something that can be tested, and that an
+ * empty directory is a failure instead of a green run over nothing.
+ *
+ * @param {string} path
+ * @returns {string[]} sorted, or `[path]` when it is a file
+ */
+export function workflowFiles(path, stat = statSync, list = readdirSync) {
+  let entry;
+  try {
+    entry = stat(path);
+  } catch (error) {
+    throw new Error(`${path} cannot be read (${error.message}).`);
+  }
+  if (!entry.isDirectory()) return [path];
+  const base = path.replace(/\/+$/, '');
+  return list(base, { withFileTypes: true })
+    .filter((child) => child.isFile() && /\.ya?ml$/.test(child.name))
+    .map((child) => `${base}/${child.name}`)
+    .sort();
+}
+
 function main(argv) {
-  const files = argv.slice(2);
+  const paths = argv.slice(2);
+  if (paths.length === 0) {
+    console.error(
+      'usage: node scripts/ci/workflow-policy.mjs <.github/workflows|workflow.yml> [...]',
+    );
+    return 2;
+  }
+  let files;
+  try {
+    files = [...new Set(paths.flatMap((path) => workflowFiles(path)))];
+  } catch (error) {
+    console.error(`::error::Workflow policy: ${error.message}`);
+    return 2;
+  }
   if (files.length === 0) {
-    console.error('usage: node scripts/ci/workflow-policy.mjs <workflow.yml> [...]');
+    console.error(
+      `::error::Workflow policy: ${paths.join(', ')} contains no .yml or .yaml file. A policy engine that checks nothing and exits 0 is the failure it exists to prevent.`,
+    );
     return 2;
   }
   let failed = 0;

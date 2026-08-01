@@ -32,14 +32,24 @@
  * `fileURLToPath` undoes the encoding, and `realpathSync` undoes the symlink on
  * both sides — the cheap comparison first, so the common case costs nothing and
  * a deleted entry point cannot throw. Fifteen copies of a subtle four-line
- * predicate is how fifteen copies of a defect happen, so there is one copy, and
- * `mainGuardProblems()` below is what keeps it the only one: `gate-selftest.mjs`
- * runs it over this directory, so re-introducing the broken spelling fails the
- * suite on the commit that writes it.
+ * predicate is how fifteen copies of a defect happen, so there is one copy.
+ *
+ * ── WHY THE SCANNER IS NOT IN HERE ANY MORE (#40 round 6) ───────────────────
+ * Round 5 kept the scanner that enforces this in this file, as a pair of
+ * substring tests over each file's source. Two things were wrong with that and
+ * both are recorded in `guard-scan.mjs`, which now owns it: a substring test
+ * cannot tell a guard from a string literal that quotes one, and this file had
+ * to be *exempted* from its own rule because it has to say the words it forbids.
+ * The scanner parses now, so it reads neither comments nor string literals and
+ * needs no exemption list — which is why the broken guard can be quoted verbatim
+ * eight lines above this sentence.
+ *
+ * This file therefore imports nothing but `node:` builtins and is the one module
+ * every entry point here loads. `guard-scan.mjs` pulls in the TypeScript
+ * compiler; the fifteen scripts that only need the predicate should not.
  */
 
-import { readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -60,73 +70,4 @@ export function isMainModule(url, argv = process.argv) {
     // Whatever node was given, it was not this file by a path we can confirm.
     return false;
   }
-}
-
-/**
- * The comparison this file exists to replace, in every spelling seen so far.
- *
- * Deliberately a *source* scan rather than a lint rule: the defect is a string
- * comparison that is correct-looking and wrong, and what has to be refused is
- * the shape, wherever somebody writes it next.
- */
-const BROKEN_GUARD =
-  /import\.meta\.url\s*={2,3}\s*[`'"]file:\/\/|[`'"]file:\/\/[^\n]{0,80}={2,3}\s*import\.meta\.url/;
-
-/**
- * The one spelling of the guard, and why "not the broken one" is not enough.
- *
- * A blind review of the first version of this scanner pointed out what it
- * accepts: `if (isMainModule(import.meta.url) && false) { … }` uses the sound
- * predicate, passes the broken-spelling test, and exits 0 having asserted
- * nothing. Refusing one spelling is the denylist this round exists to stop
- * writing, one file over — so the guard is an allowlist too. A file that
- * mentions `import.meta.url` at all must contain this exact line, and any other
- * arrangement of the same words is refused without this file having heard of
- * it. It is a shape check and says so: it cannot stop `main()` itself being
- * replaced with `() => 0`, which is the semantics boundary the SCOPE block in
- * workflow-policy.mjs owns.
- */
-const CANONICAL_GUARD = 'if (isMainModule(import.meta.url)) {';
-const MENTIONS_ENTRY = /\bimport\.meta\.url\b/;
-
-/** Files that may not be run at all, so a guard in them would be theatre. */
-const NOT_ENTRY_POINTS = new Set(['main-module.mjs']);
-
-/**
- * Every file in `directory` whose main-module guard is the broken comparison.
- *
- * @param {string} directory
- * @param {(path: string) => string} [read] injectable so the self-test can
- *   hand this a fixture without writing files
- * @returns {string[]} human-readable problems; empty means every guard is sound
- */
-export function mainGuardProblems(directory, read = (path) => readFileSync(path, 'utf8')) {
-  const problems = [];
-  // Recursive, because "the directory this happens to be flat today" is the
-  // same kind of assumption as "the checkout path happens to have no space in
-  // it" — which is what made this defect latent rather than absent.
-  for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  )) {
-    const full = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === 'node_modules') continue;
-      problems.push(...mainGuardProblems(full, read));
-      continue;
-    }
-    if (!entry.name.endsWith('.mjs') || NOT_ENTRY_POINTS.has(entry.name)) continue;
-    const source = read(full);
-    if (BROKEN_GUARD.test(source)) {
-      problems.push(
-        `${full} decides whether it was run by comparing \`import.meta.url\` against \`file://\` + \`process.argv[1]\`. \`import.meta.url\` percent-encodes and resolves symlinks; \`process.argv[1]\` does neither, so a checkout path containing a space — or an invocation through a symlink — makes the comparison false, and the script exits 0 having printed nothing and asserted nothing. Measured: \`node "/tmp/g/with space/g.mjs"\` exits 0 where \`node /tmp/g/g.mjs\` exits 3. Use \`isMainModule(import.meta.url)\` from scripts/ci/main-module.mjs.`,
-      );
-      continue;
-    }
-    if (MENTIONS_ENTRY.test(source) && !source.includes(CANONICAL_GUARD)) {
-      problems.push(
-        `${full} names \`import.meta.url\` but does not contain the one spelling of the guard, \`${CANONICAL_GUARD}\`. Refusing only the broken comparison is a denylist: \`if (isMainModule(import.meta.url) && false) {\` uses the sound predicate, passes that test, and exits 0 having asserted nothing. Write the canonical line, or do not decide this here.`,
-      );
-    }
-  }
-  return problems;
 }

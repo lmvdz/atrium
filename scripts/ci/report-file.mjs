@@ -13,6 +13,27 @@ import { readFileSync, statSync } from 'node:fs';
 /** Filesystems and clocks disagree at the millisecond; a second of slack costs nothing. */
 const CLOCK_SLACK_MS = 1000;
 
+/**
+ * A run-start timestamp has to be a *time*, not merely a number (#40 round 6).
+ *
+ * `Number.isFinite` gated the missing case and nothing else, so `0` passed:
+ * `stat.mtimeMs + 1000 < 0` is false for every file that has ever existed, and
+ * every report is therefore fresh. Measured on r5 — `run: echo
+ * "VITEST_RUN_START=0" >> "$GITHUB_ENV"` is policy-clean and turns the whole
+ * stale-report class off, with the `rm -f` step the only thing still standing
+ * between a restored cache and a green gate.
+ *
+ * So the bound is a plausible recency window rather than `> 0`. Anything before
+ * this repository existed is a value somebody wrote down; `date +%s` instead of
+ * `date +%s%3N` lands in 1970 and is caught by the same test, which is the
+ * point — the policy engine requires the value to come from `date`, and this
+ * requires it to be a *millisecond* one from roughly now. Neither half can be
+ * satisfied by satisfying the other.
+ */
+const EARLIEST_PLAUSIBLE_MS = Date.UTC(2025, 0, 1);
+/** A runner whose clock is a day ahead of ours is a broken runner, loudly. */
+const FUTURE_SLACK_MS = 24 * 60 * 60 * 1000;
+
 export function readFreshReport(path, runStartMs, label) {
   const problems = [];
   let stat;
@@ -30,6 +51,10 @@ export function readFreshReport(path, runStartMs, label) {
   if (!Number.isFinite(runStartMs)) {
     problems.push(
       `no run-start timestamp was recorded for ${label}, so ${path} cannot be proven fresh. The step that deletes the report must export it.`,
+    );
+  } else if (runStartMs < EARLIEST_PLAUSIBLE_MS || runStartMs > Date.now() + FUTURE_SLACK_MS) {
+    problems.push(
+      `the run-start timestamp recorded for ${label} is ${runStartMs}, which is not a plausible epoch-milliseconds time (expected between ${EARLIEST_PLAUSIBLE_MS} and now). A constant makes every report fresh — \`0\` makes the comparison \`mtime + ${CLOCK_SLACK_MS} < 0\`, false for every file that has ever existed — so ${path} proves nothing about this run. The step must export \`$(date +%s%3N)\`.`,
     );
   } else if (stat.mtimeMs + CLOCK_SLACK_MS < runStartMs) {
     const age = Math.round((runStartMs - stat.mtimeMs) / 1000);

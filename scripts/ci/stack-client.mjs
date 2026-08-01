@@ -178,6 +178,21 @@ const SERVABLE_ASSET = /\.(?:js|mjs|css|json|woff2?|ttf|otf|svg|png|webp|ico|map
 const assetPath = (url) => url.split(/[?#]/)[0];
 
 /**
+ * The subset of `buildAssets(html)` that is a file, not a route.
+ *
+ * Exported because "this page names a chunk" has to be assertable per response.
+ * `buildAssetProblems` is handed all four bodies joined, so its own
+ * `servable.length === 0` is satisfied by *one* asset anywhere in the union — an
+ * asset-free signed-out `/` passes it as long as `/app` names something. Round 4
+ * had a per-body check for this and round 5 deleted it on the grounds that the
+ * fetch loop covered it. It does not; see the four `check(...)` calls in
+ * assert-page-serves.mjs, which are the per-body half, restored.
+ */
+export function servableAssets(html) {
+  return buildAssets(html).filter((path) => SERVABLE_ASSET.test(assetPath(path)));
+}
+
+/**
  * Every build asset the page names is actually served.
  *
  * ── THE DEFECT (#40 round 5) ────────────────────────────────────────────────
@@ -194,9 +209,21 @@ const assetPath = (url) => url.split(/[?#]/)[0];
  *
  * Two strings from two responses of one build cannot answer "is the build
  * there". Fetching can, and it is one request per chunk against a stack that is
- * already up. It also gives `assets !== ''` something to stand on: a page that
- * names assets nobody can retrieve is no better evidence of a Next build than a
- * page that names none.
+ * already up.
+ *
+ * ── WHAT IT DOES NOT REPLACE (#40 round 6) ──────────────────────────────────
+ * Round 5 deleted round 4's per-response `buildAssets(anonymous.body) !== ''`
+ * and claimed the fetch loop covered it, because it "gives `assets !== ''`
+ * something to stand on". It does not, and the difference is one word: this
+ * function is called on all four bodies **joined**, so its `servable.length ===
+ * 0` asks whether the *union* names an asset. A blind review measured it — the
+ * round-4 check goes red on an asset-free signed-out `/`, and this one accepts
+ * it as long as `/app` names a chunk. A page that names no chunks is a page
+ * that is not the Next build, and no amount of fetching *other* pages' chunks
+ * says otherwise. The per-body half is back, in assert-page-serves.mjs, over
+ * `servableAssets` rather than over `buildAssets`: `/_next/static/` paths that
+ * are not files were the round-5 lesson about this same string, and a page
+ * whose only "asset" is a route has not named a chunk either.
  *
  * @param {object} target from `stackTarget()`
  * @param {string} html   the rendered page
@@ -208,7 +235,7 @@ const assetPath = (url) => url.split(/[?#]/)[0];
  */
 export async function buildAssetProblems(target, html, get = (path) => once(target, path)) {
   const named = buildAssets(html);
-  const servable = named.filter((path) => SERVABLE_ASSET.test(assetPath(path)));
+  const servable = servableAssets(html);
   if (servable.length === 0) {
     return [
       `the page references ${named.length} \`/_next/static/…\` path(s) and none of them is a file this deployment could serve (${named.join(', ') || 'none at all'}). A page produced by a Next build names its script and stylesheet chunks by content hash; four lines of \`respond\` in the Caddyfile name none, and a build whose \`static\` directory never made it into the image names them and cannot serve them.`,
