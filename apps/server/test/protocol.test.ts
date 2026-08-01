@@ -90,9 +90,9 @@ describe('the ledger event union', () => {
   });
 
   it('refuses presence — it is not a kind of event at all (#14)', () => {
-    expect(RoomEvent.safeParse({ id: 'e1', at, type: 'presence_changed', roomId: 'r1' }).success).toBe(
-      false,
-    );
+    expect(
+      RoomEvent.safeParse({ id: 'e1', at, type: 'presence_changed', roomId: 'r1' }).success,
+    ).toBe(false);
   });
 
   it('leaves the room of a correction, a rejection or a supersession to state', () => {

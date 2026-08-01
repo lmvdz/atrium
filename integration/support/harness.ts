@@ -178,12 +178,13 @@ export async function startTestServer(
  * that. Each instance gets a real handle, which the caller must close.
  */
 export async function startSecondInstance(
-  url = databaseUrl(),
+  options: { url?: string; instanceId?: string; reconcileIntervalMs?: number } = {},
 ): Promise<{ handle: DatabaseHandle; server: TestServer; close: () => Promise<void> }> {
-  const handle = createDatabase({ url, max: 10 });
+  const handle = createDatabase({ url: options.url ?? databaseUrl(), max: 10 });
   const server = await startTestServer(handle, {
     bus: true,
-    instanceId: `instance-${randomUUID()}`,
+    instanceId: options.instanceId ?? `instance-${randomUUID()}`,
+    reconcileIntervalMs: options.reconcileIntervalMs,
   });
   return {
     handle,

@@ -761,7 +761,11 @@ describe('attention_items — a polymorphic subject that is still room-scoped', 
         subjectKind: 'proposal',
         subjectId,
         class: 'needs_decision',
-        reason: { kind: 'decision_pending', statement: 'you asked for this call', assigned: true } as const,
+        reason: {
+          kind: 'decision_pending',
+          statement: 'you asked for this call',
+          assigned: true,
+        } as const,
       }),
     ).resolves.toBeDefined();
 

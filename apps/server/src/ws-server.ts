@@ -7,11 +7,7 @@ import { createHub, type Hub } from './hub.js';
 import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
 import type { Logger } from './logger.js';
 import { ClientFrame, type ServerFrame, type WireEvent } from './protocol.js';
-import {
-  createReconciler,
-  DEFAULT_RECONCILE_INTERVAL_MS,
-  type Reconciler,
-} from './reconciler.js';
+import { createReconciler, DEFAULT_RECONCILE_INTERVAL_MS, type Reconciler } from './reconciler.js';
 import type { Session, SessionAuthenticator } from './session.js';
 
 /**

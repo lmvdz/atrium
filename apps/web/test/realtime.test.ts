@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createRealtimeClient,
+  localStorageJournal,
   memoryJournal,
   type RealtimeClient,
   type RealtimeClientOptions,
-  type RoomJournal,
   type RoomEventEnvelope,
+  type RoomJournal,
   type ServerFrame,
   type SocketLike,
 } from '../src/lib/realtime.js';
@@ -111,9 +112,7 @@ function latest(): FakeSocket {
 }
 
 /** A second client over the same fake-socket registry, connected and open. */
-async function clientWith(
-  overrides: Partial<RealtimeClientOptions> = {},
-): Promise<RealtimeClient> {
+async function clientWith(overrides: Partial<RealtimeClientOptions> = {}): Promise<RealtimeClient> {
   const built = createRealtimeClient({
     userId: ME,
     url: 'ws://test/ws',
@@ -324,6 +323,21 @@ describe('the cursor never names an event the client does not hold', () => {
       }),
     ).toThrow('journal died mid-page');
 
+    // The ordering property, asserted on the client that died rather than on
+    // the one that resumes.
+    //
+    // This is the assertion that makes the test about `applyEntry`'s ordering
+    // instead of about the store. With one journal holding both halves, "commit
+    // then apply" and "apply then commit" leave the *same* durable state after a
+    // crash — so a resumed-client assertion alone cannot tell them apart, and an
+    // earlier draft of this test claimed a mutation it did not catch. What
+    // differs is the live client's own cursor at the moment of the throw: under
+    // r2's ordering it has already advanced to 4, a position nothing made
+    // durable and which the next `since` would therefore ask from *past*.
+    //
+    // Catches: moving `journal.commit` after the in-memory push in `applyEntry`.
+    expect(dying.lastSeq(ROOM)).toBe(3);
+
     // The crash: every in-memory thing above is gone and only what the journal
     // made durable survives. A fresh client over that journal is what a reload
     // is.
@@ -331,11 +345,11 @@ describe('the cursor never names an event the client does not hold', () => {
     resumed.join(ROOM);
     latest().deliver({ type: 'subscribed', roomId: ROOM, head: 5, seenSeq: 0 });
 
-    // Catches: moving `journal.commit` back after the in-memory push in
-    // `applyEntry`, and splitting the journal back into a cursor and an event
-    // list written separately. Under either, the resumed cursor names position 4
-    // — an event this client never held — and the `since` below asks from past
-    // the hole, so entry 4 is lost permanently and silently.
+    // Catches: splitting the journal back into a cursor and an event list
+    // written separately — r2's `WatermarkStore` by construction. Under that
+    // shape the resumed cursor names a position whose event the client does not
+    // hold, and the `since` below asks from past the hole, so the entry is lost
+    // permanently and silently.
     expect(resumed.lastSeq(ROOM)).toBe(3);
     expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3]);
     expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 3 });
@@ -364,6 +378,71 @@ describe('the cursor never names an event the client does not hold', () => {
     expect(() => latest().deliver({ type: 'event', entry: messageEvent(3, 'c') })).toThrow();
     expect(fragile.lastSeq(ROOM)).toBe(2);
     expect(fragile.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+  });
+});
+
+/**
+ * `localStorageJournal` — the durable implementation, and the one where the
+ * atomicity claim has to be earned rather than inherited.
+ *
+ * `localStorage` offers no transaction across two keys, so the whole reason this
+ * is a journal and not a watermark is that both halves live under one key and
+ * one `setItem`.
+ */
+describe('the durable journal writes both halves or neither', () => {
+  function fakeStorage(): Storage & { raw: Map<string, string> } {
+    const raw = new Map<string, string>();
+    const store = {
+      raw,
+      getItem: (key: string) => raw.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        raw.set(key, value);
+      },
+      removeItem: (key: string) => {
+        raw.delete(key);
+      },
+      clear: () => raw.clear(),
+      key: (index: number) => [...raw.keys()][index] ?? null,
+      get length() {
+        return raw.size;
+      },
+    };
+    return store as unknown as Storage & { raw: Map<string, string> };
+  }
+
+  let storage: ReturnType<typeof fakeStorage>;
+  beforeEach(() => {
+    storage = fakeStorage();
+    (globalThis as { localStorage?: Storage }).localStorage = storage;
+  });
+
+  it('persists the events and the cursor under one key, in one write', () => {
+    const journal = localStorageJournal('test');
+    journal.commit(ROOM, messageEvent(1, 'a'), 1);
+    journal.commit(ROOM, messageEvent(2, 'b'), 2);
+    // Catches: writing the cursor and the events to two keys. Two keys is two
+    // writes with no transaction between them, which is precisely the window
+    // `RoomJournal` exists to close — and `localStorage` gives no way to close
+    // it other than by not opening it.
+    expect(storage.raw.size).toBe(1);
+    expect(journal.load(ROOM)).toMatchObject({ lastSeq: 2 });
+    expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+  });
+
+  it('reads a torn record as no history at all', () => {
+    const journal = localStorageJournal('test');
+    journal.commit(ROOM, messageEvent(1, 'a'), 1);
+    const [key] = [...storage.raw.keys()];
+    // A cursor naming a position past the last event held — the exact state the
+    // commit path cannot produce, arriving from a partial write, a hand edit, or
+    // an older format. Catches: dropping the `lastSeq !== held` check in
+    // `readRoom`, which lets the client resume into a hole and ask `since` from
+    // past it. Replaying a room is cheap; resuming into a gap is not.
+    storage.setItem(key as string, JSON.stringify({ events: [], lastSeq: 9 }));
+    expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
+
+    storage.setItem(key as string, 'not json');
+    expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
   });
 });
 

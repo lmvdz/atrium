@@ -109,7 +109,10 @@ export function createReconciler(options: ReconcilerOptions): Reconciler {
       // A row this instance just folded is a row its subscribers have now been
       // sent, so its head is announced by construction.
       for (const entry of folded) {
-        announcedHeads.set(entry.roomId, Math.max(announcedHeads.get(entry.roomId) ?? 0, entry.roomSeq));
+        announcedHeads.set(
+          entry.roomId,
+          Math.max(announcedHeads.get(entry.roomId) ?? 0, entry.roomSeq),
+        );
       }
     }
 

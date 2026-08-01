@@ -90,9 +90,17 @@ describe('table shape', () => {
     expect(byName.get('payload')?.notNull).toBe(true);
   });
 
-  it('requires a rationale on every attention item', () => {
-    const rationale = getTableConfig(attentionItems).columns.find((c) => c.name === 'rationale');
-    expect(rationale?.notNull).toBe(true);
+  it('requires a structured reason on every attention item, not a rendered sentence', () => {
+    const columns = getTableConfig(attentionItems).columns;
+    const reason = columns.find((c) => c.name === 'reason');
+    expect(reason?.notNull).toBe(true);
+    expect(reason?.getSQLType()).toBe('jsonb');
+    // Catches: keeping `rationale` alongside `reason` as a rendered
+    // denormalisation. #21 made the sentence a render of the reason
+    // (`renderRationale`), so a stored copy is a second source for the same
+    // fact — it freezes today's wording into every historical row, and "which
+    // rule raised this" becomes a substring search over prose.
+    expect(columns.map((c) => c.name)).not.toContain('rationale');
   });
 
   it('carries the (message_id, interpretation_version) unique constraint from issue #16', () => {
@@ -159,16 +167,43 @@ describe('the durable ledger (issue #22)', () => {
     expect(eventType.enumValues).not.toContain('typing');
   });
 
-  it('splits the enum into the reducer’s five and the ledger-only two', () => {
+  it('splits the enum into the reducer’s six and the ledger-only two', () => {
+    // Pinned by value on both sides, because the direction that bites is the
+    // one a `satisfies` cannot express: a seventh core type added to
+    // @atrium/core and forgotten here compiles, is classified as ledger-only,
+    // is never folded, and vanishes from every replay while live ingestion
+    // still applies it (r1, major 3). `proposal_superseded` is the sixth,
+    // added by #21 for #8's re-interpretation.
     expect([...coreEventTypes]).toEqual([
       'proposal_recorded',
       'proposal_rejected',
+      'proposal_superseded',
       'object_accepted',
       'object_corrected',
       'relation_added',
     ]);
     const ledgerOnly = eventType.enumValues.filter((v) => !isCoreEventType(v));
     expect(ledgerOnly).toEqual(['message_posted', 'attention_resolved']);
+  });
+
+  it('carries the trusted actor as two columns, and no actor in the payload', () => {
+    const columns = config.columns.map((c) => c.name);
+    // #21's contract, at the storage layer. Catches: reinstating the `actor`
+    // jsonb column — which is not merely redundant, it is the shape whose
+    // ability to disagree with the payload was r1's major 2.
+    expect(columns).toContain('actor_kind');
+    expect(columns).toContain('actor_id');
+    expect(columns).not.toContain('actor');
+
+    const checks = config.checks.map((c) => c.name);
+    // The inverted equality. Catches: deleting
+    // `core_events_payload_actor_matches` without replacing it, which is how a
+    // finding gets lost during a contract change: the old constraint became
+    // unsatisfiable, so the tempting move is to drop it, and the rule it
+    // carried — one actor per row, in one place — goes with it.
+    expect(checks).toContain('core_events_payload_has_no_actor');
+    expect(checks).toContain('core_events_actor_id_matches_kind');
+    expect(checks).not.toContain('core_events_payload_actor_matches');
   });
 
   it('gives memberships a bigint seen_seq that matches room_seq’s width', () => {

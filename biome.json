@@ -80,7 +80,8 @@
         "**/*.config.*",
         "**/scripts/**",
         "apps/server/src/**",
-        "packages/core/mutants/**"
+        "packages/core/mutants/**",
+        "mutants/**"
       ],
       "linter": {
         "rules": {

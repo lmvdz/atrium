@@ -76,10 +76,7 @@ const send = (roomId: string, body: string, clientMessageId: string | null = nul
  * the reading rests on, and is required outright for a model claim or
  * commitment — the two types that put a name on somebody.
  */
-function modelDraft(
-  messageId: string,
-  quote: string,
-): Omit<ProposalDraft, 'type' | 'payload'> {
+function modelDraft(messageId: string, quote: string): Omit<ProposalDraft, 'type' | 'payload'> {
   return {
     confidence: 0.7,
     proposer: { kind: 'model', model: 'test-model' },

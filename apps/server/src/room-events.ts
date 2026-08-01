@@ -136,10 +136,7 @@ export interface AuthoredRoomEvent {
 }
 
 /** Pair a ledger payload with the trusted context it was appended under. */
-export function authoredRoomEvent(
-  event: RoomEvent,
-  trusted: TrustedContext,
-): AuthoredRoomEvent {
+export function authoredRoomEvent(event: RoomEvent, trusted: TrustedContext): AuthoredRoomEvent {
   return { event, trusted };
 }
 

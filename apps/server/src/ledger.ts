@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   type Actor,
-  appendEvent,
   type AuthoredEvent,
+  appendEvent,
   type CoreState,
   type EventOutcome,
   emptyState,

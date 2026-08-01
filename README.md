@@ -272,6 +272,26 @@ seen, into its own `CoreState`, and fans them out to its own subscribers. The
 notification is a doorbell and never a payload: the rows come from the ledger,
 which is where the receiver has to read them anyway.
 
+**And the doorbell is an optimization, never the delivery path.** `NOTIFY` is
+at-most-once — it is lost on a listener disconnect and on a rolled-back
+transaction — so an instance that only ever acted on notifications would strand
+its subscribers the first time one went missing, with no gap for a client to
+notice and therefore no reason for it to ask. So the doorbell decides *when*
+delivery happens and never *whether*:
+
+- **The bell rings from inside the database.** `pg_notify` is emitted by
+  `atrium_append_core_event`, not by the application, so no writer can insert a
+  row silently — including one that is not this application.
+- **Every instance reconciles on a timer** (`apps/server/src/reconciler.ts`),
+  folding and fanning out anything durable it has not seen, and telling each
+  subscribed room its head when that head moves past what its subscribers were
+  told. The second half covers a different loss: a row this instance *did* fold
+  and broadcast, whose frame one particular socket dropped.
+- **A resubscribe reconciles immediately.** postgres-js re-establishes `LISTEN`
+  after a dropped connection; everything that landed while this process was deaf
+  produced a notification nobody received, so the only correct response is to go
+  and look.
+
 What that does and does not buy, stated plainly:
 
 | | multi-instance safe? |
@@ -280,7 +300,8 @@ What that does and does not buy, stated plainly:
 | Live event delivery | **Yes.** A second instance's commits reach the first instance's subscribers, and each instance folds them into its own core state. |
 | Catch-up and recovery | **Yes.** `since(room, room_seq)` reads the ledger; any instance can answer it. |
 | Presence and typing | **Yes, as a relay.** Frames are forwarded on a second channel. There is no shared presence *registry*: each instance knows who is connected to it, and learns about everyone else only from the updates they send. An instance that starts mid-session sees nobody until they next say something. |
-| Notification delivery | **Best-effort.** An instance disconnected when a NOTIFY fires never sees it; it folds those rows on its next sync or append, and clients recover through the catch-up loop. Nothing durable depends on a notification arriving. |
+| Notification delivery | **Best-effort, and nothing depends on it.** An instance disconnected when a NOTIFY fires never sees it; the reconciler folds and fans out those rows on its next pass, and on the listener's resubscribe. A lost doorbell costs latency, never delivery — `integration/server/reconcile.test.ts` severs a listener mid-run and asserts convergence with no client command at all. |
+| Writing around the app | **Refused.** `atrium_append_core_event` is the only way a row reaches `core_events`; `EXECUTE` on it is granted to the application role and revoked from `PUBLIC`, it authorizes a human actor's membership inside the transaction, and it refuses anything that does not sort strictly after the ledger's canonical cursor. A privileged operator who disables triggers (`session_replication_role`, `pg_restore --disable-triggers`) is out of scope and the migration says so. |
 | Throughput | **Bounded by the global append lock**, deliberately. Appends serialize instance-wide *and* across instances, because core state is global. init.md prescribes one application server; if that stops being true, the fix is to shard core state per room, not to weaken the lock while the state stays global. |
 
 `docker-compose.yml` still runs exactly one `server`. That is a capacity
@@ -355,6 +376,7 @@ no attempt to reconcile a stored corpus against later upstream history, and
 | `pnpm build` | Build packages, then both apps |
 | `pnpm test` | Vitest unit suite across `packages/*` and `apps/*` (no database needed) |
 | `pnpm test:integration` | Real-Postgres suite: brings up the compose service, applies migrations, runs, tears down |
+| `node mutants/run.mjs` | Run the realtime layer's mutant ledger and rewrite `mutants/RESULTS.md` |
 | `pnpm ingest <source>` | Fetch a conversation into `corpora/` (see Replay ingest) |
 | `pnpm test:e2e` | Playwright smoke test in `apps/web` |
 | `pnpm lint` | Biome lint + format check |
@@ -374,11 +396,42 @@ deliberately no in-suite skip: without a database it exits non-zero, because a
 test that goes green when its dependency is missing turns a verification gate
 into decoration.
 
-`pnpm lint` has one gotcha worth knowing before it wastes an afternoon: Biome
-excludes `**/.claude`, so a checkout made *inside* `.claude/worktrees/` reports
-"no files were processed" and exits successfully having linted nothing. If the
-tree you are working in lives there, verify lint from a copy outside that path
-before believing a green result.
+`pnpm lint` used to have a gotcha worth knowing about, and it is fixed: Biome's
+ignore list said `!**/.claude`, which Biome matches against the *absolute* path,
+so a checkout made inside `.claude/worktrees/` reported "no files were
+processed" and exited successfully having linted nothing. It now says
+`!.claude`, which matches the repo-root directory only, and lint runs for real
+inside a worktree checkout.
+
+### Mutation evidence
+
+Both `packages/core/mutants/` and `mutants/` hold a committed, re-runnable
+mutant ledger, because of a standing rule this campaign adopted after #21's
+round-2 gauntlet: **a mutation claim ships with a runnable mutant list and its
+results, or it is not evidence.** A number in a write-up that nobody can execute
+is a number, not a receipt.
+
+```
+node mutants/run.mjs                # run all, rewrite RESULTS.md
+node mutants/run.mjs --check        # …and exit 1 if any mutant survives
+node mutants/run.mjs --suite unit   # skip the half that needs a database
+```
+
+The integration mutants need `ATRIUM_TEST_DATABASE_URL` pointing at a migrated
+Postgres — `./scripts/integration-test.sh --keep` leaves one running. There is no
+skip: a run that quietly covered half the ledger would be the same class of
+false receipt the ledger exists to prevent.
+
+Half of what #22 fixed lives in SQL, so half the mutants are SQL, applied to the
+live database and undone by re-executing statements **extracted from the
+migration file itself**. Migrations are journalled, so editing an applied one
+demonstrates nothing; and a restore built from a copied string could re-deploy
+something this repo does not ship.
+
+`mutants/ledger.test.ts` runs in the ordinary suite and fails if a mutant's
+`find` has drifted out of the code, or if a `catches` entry names a test that
+does not exist — the two ways a ledger like this goes on printing ticks for
+substitutions that describe nothing.
 
 Playwright needs its browser once: `pnpm --filter @atrium/web exec playwright
 install chromium`. Without it the smoke test skips with a reason instead of

@@ -9,6 +9,7 @@ import {
   type SeededRoom,
   seedRoom,
   startSecondInstance,
+  startTestServer,
   TestClient,
   until,
 } from '../support/harness.js';
@@ -191,6 +192,58 @@ describe('a lost doorbell costs latency, never delivery', () => {
     expect(a.server.ledger.serialize()).toBe(b.server.ledger.serialize());
   });
 
+  it('reconciles on the listener’s resubscribe, not only on the next tick', async () => {
+    /**
+     * `onListen` is a latency fix rather than a correctness one — the timer
+     * gets there eventually — so every other test in this file stays green
+     * without it, and it needs a pin that isolates it.
+     *
+     * Two variables are removed to get that isolation, and both are deliberate:
+     *
+     *  - **The timer is set to a minute.** Nothing it does can explain
+     *    convergence inside five seconds.
+     *  - **Both instances share an instance id.** The origin filter then makes A
+     *    deaf to B's doorbell *by construction* — the same state a permanently
+     *    lost notification leaves it in, reached deterministically instead of
+     *    by racing a driver reconnect. An earlier draft severed the listener and
+     *    then wrote, and postgres-js resubscribed fast enough to hear the later
+     *    commits' doorbells; the mutant escaped, because the test was measuring
+     *    the doorbell it thought it had removed.
+     *
+     * What is left is exactly one path: the resubscribe fires `onListen`, which
+     * reconciles. Catches: dropping `onListen` from the `bus.start` call in
+     * `ws-server.ts`, or from `BusHandlers` in `event-bus.ts`.
+     */
+    const shared = 'deaf-to-its-own-echo';
+    const a = await startSecondInstance({ instanceId: shared, reconcileIntervalMs: 60_000 });
+    const b = await startSecondInstance({ instanceId: shared });
+    teardown.push(a.close, b.close);
+
+    const reader = productionClient(a.server.url, room.people.bob as string);
+    await reader.connect();
+    reader.join(room.roomId);
+    await until(() => reader.room(room.roomId).subscribed, 15_000, 'the reader to subscribe');
+
+    const writer = await TestClient.connect(b.server.url, room.people.alice as string);
+    open.push(writer);
+    await writer.subscribe(room.roomId);
+    for (let i = 0; i < 4; i += 1) await post(writer, `resubscribe-${i}`);
+
+    // A is deaf by origin, and its timer will not fire for a minute. It stays
+    // where it was — which is the r2 world, and is asserted rather than assumed
+    // so that the convergence below has something to be a change from.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(reader.lastSeq(room.roomId)).toBe(0);
+
+    expect(await severLedgerListeners()).toBeGreaterThan(0);
+
+    await until(
+      () => reader.lastSeq(room.roomId) === 4,
+      5_000,
+      'convergence from the listener resubscribe, well inside the 60s timer',
+    );
+  });
+
   it('converges with no event bus at all — the reconciler is the durable path', async () => {
     // An instance with no listener whatsoever. There is no doorbell to lose
     // because there is no doorbell, and delivery still happens.
@@ -201,7 +254,6 @@ describe('a lost doorbell costs latency, never delivery', () => {
     // instance tests never had a peer.
     const handleA = openDatabase(5);
     teardown.push(() => handleA.close());
-    const { startTestServer } = await import('../support/harness.js');
     const a = await startTestServer(handleA, { bus: false, reconcileIntervalMs: 150 });
     teardown.push(a.close);
 
