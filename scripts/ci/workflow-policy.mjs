@@ -1071,17 +1071,45 @@ const SHADOWING_BUILTINS = new Set(['alias', 'export', 'declare', 'typeset', 're
  *     clause if the question is "does any word of this command name that file",
  *     and an unbounded list if it is "which writer is it".
  *
- * What must keep *not* matching is `$GITHUB_ENV.bak` — round 5's own lesson,
- * from the other direction: a word boundary after `ENV` would read a file
- * nobody reads as the job environment. So the whole word is compared, and the
- * only variation allowed is inside the braces.
+ * And it is a *substring* test, which the first draft of this predicate got
+ * wrong in the same way it got the redirection-only version wrong: `dd
+ * of="$GITHUB_ENV"` and `sh -c 'echo … >> $GITHUB_ENV'` both name the file
+ * inside a longer word, so an anchored comparison sees neither. The direction
+ * of the over-approximation is deliberate — `>> "$GITHUB_ENV.bak"` now reads as
+ * naming the job environment, which is a step nothing in this repository has
+ * and which is refused rather than admitted. Its own rule is untouched: the
+ * *prerequisite* matcher `exportsToJobEnv` still compares the target as a whole
+ * word, because there the mistake was the opposite one.
  */
-const jobFilePattern = (name) =>
-  new RegExp(String.raw`^\$(?:${name}|\{${name}(?:[:?+=-][^}]*)?\})$`);
+const jobFilePattern = (name) => new RegExp(String.raw`\$(?:${name}\b|\{${name}[^}]*\})`);
 const GITHUB_ENV_FILE = jobFilePattern('GITHUB_ENV');
 const GITHUB_PATH_FILE = jobFilePattern('GITHUB_PATH');
 
-/** True when this command writes that file, by redirection or by argument. */
+/**
+ * True when this command writes that file, by redirection or by argument.
+ *
+ * Both halves require a *live* expansion, and the reason is the shape of this
+ * whole ticket. `>> '$GITHUB_ENV'` single-quoted creates a file with a funny
+ * name and exports nothing, so reading it as the job environment is a false
+ * red. The tempting widening — any word containing the text, quoted or not —
+ * catches `sh -c 'echo NODE_OPTIONS=… >> $GITHUB_ENV'`, where the quote that
+ * makes it inert here is what makes it live for the next shell. It also catches
+ * `echo 'echo NODE_OPTIONS=… >> "$GITHUB_ENV"'`, which prints a line and writes
+ * nothing, and that is the `echo` decoy this repository has spent four rounds
+ * learning to tell apart from the thing it quotes. This parser cannot: the two
+ * are the same word, and only the *command* distinguishes them.
+ *
+ * So the boundary is stated instead of guessed at, and it is the one already on
+ * the record. `sh -c '<script>'` hides an entire script from an engine that
+ * reads `run:` — the deploy job refuses it by name (`compose-through-one-entrypoint`
+ * allows two entrypoints and `sh` is neither), a protected step refuses it (a
+ * launcher nobody put on the allowlist), and on an ordinary step of `verify` or
+ * `e2e` it is opaque, as any interpreter's argument is. Closing that means
+ * enumerating interpreters, which is the denylist this round exists to stop
+ * writing. What this predicate does close is every writer that names the file
+ * in an argv it does not quote away: `tee -a "$GITHUB_ENV"`, `dd
+ * of="$GITHUB_ENV"`, `sponge "$GITHUB_ENV"` and the next one, in one clause.
+ */
 function namesJobFile(pattern, { redirections, words }) {
   const names = ({ expandable, value }) => expandable === true && pattern.test(value);
   return (
@@ -1461,12 +1489,12 @@ function protectedStepIndices(jobs) {
       matchers.add(step.test);
       for (const prerequisite of step.requires ?? []) matchers.add(prerequisite.test);
     }
-    const indices = new Set();
+    const indices = new Map();
     const steps = Array.isArray(job.steps) ? job.steps : [];
     for (const [index, step] of steps.entries()) {
       if (!isPlainObject(step) || typeof step.run !== 'string') continue;
       const protects = [...matchers].filter((matcher) => matcher.test(step.run));
-      if (protects.length > 0 || jobId === DEPLOY_JOB) indices.add(index);
+      if (protects.length > 0 || jobId === DEPLOY_JOB) indices.set(index, protects);
     }
     owned.set(jobId, indices);
   }
@@ -1474,21 +1502,10 @@ function protectedStepIndices(jobs) {
 }
 
 function checkProtectedStepShape(jobs, path, add) {
-  for (const [jobId, required] of Object.entries(REQUIRED_STEPS)) {
-    const job = jobs[jobId];
-    if (!isPlainObject(job)) continue;
-    const matchers = new Set();
-    for (const step of required) {
-      matchers.add(step.test);
-      for (const prerequisite of step.requires ?? []) matchers.add(prerequisite.test);
-    }
-    const steps = Array.isArray(job.steps) ? job.steps : [];
-    for (const [index, step] of steps.entries()) {
-      if (!isPlainObject(step) || typeof step.run !== 'string') continue;
-      const protects = [...matchers].filter((matcher) => matcher.test(step.run));
-      const everyStep = jobId === DEPLOY_JOB;
-      if (protects.length === 0 && !everyStep) continue;
-      const problems = singleCommandProblems(step.run);
+  for (const [jobId, indices] of protectedStepIndices(jobs)) {
+    const steps = Array.isArray(jobs[jobId]?.steps) ? jobs[jobId].steps : [];
+    for (const [index, protects] of indices) {
+      const problems = singleCommandProblems(steps[index].run);
       if (problems.length === 0) continue;
       const because =
         protects.length > 0
