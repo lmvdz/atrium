@@ -101,4 +101,6 @@ Procedure, per branch, in merge-train order:
 2. Restore main's forward paths explicitly: `git checkout HEAD~1 -- biome.json RETRO.md design/CONVENTIONS.md plans/research-buzz` (adjust to whatever main has moved by then), then re-apply any doctrine the branch legitimately added to those files by hand.
 3. Run the full gate with real exit codes (never pipe through `tail`) before committing the merge.
 
-Do not `--allow-unrelated-histories` without step 2: `-X theirs` will otherwise silently revert main's doctrine files to their branch-point state.
+3. **Check for resurrected files.** `-X theirs`/`-X ours` does **not** suppress a delete or rename across unrelated histories: a file the branch renamed or deleted comes back from main's side, silently. Verified the hard way in #26 r7, where a renamed initial migration was resurrected — `0000_classy_shocker.sql` reappeared beside the branch's `0000_auth_and_workspaces.sql`, which would have meant two initial migrations and a broken database on any fresh boot. After every merge in this train, diff the merged tree against the branch tree and delete anything the branch had renamed or removed; check `packages/db/drizzle/` specifically.
+
+Do not `--allow-unrelated-histories` without steps 2 and 3: the strategy option silently reverts main's doctrine files to their branch-point state, and silently resurrects whatever the branch renamed away.
