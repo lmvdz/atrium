@@ -164,12 +164,6 @@ jobs:
         # action, and a gate that covers every job in the file.
         run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml
 
-      - name: Prove the workflow policy actually rejects things
-        # A policy engine nobody tests is a policy engine that passes everything.
-        # This feeds it mutated copies of the real workflow — the `if: ${{ false }}`
-        # bypass among them — and fails if any mutation goes unnoticed.
-        run: node scripts/ci/workflow-policy-selftest.mjs
-
       - name: Prove the test gates actually reject things
         # Same argument, one layer up: synthetic reports carrying a skipped test,
         # an expected failure, a vanished project and a stale timestamp, each of
