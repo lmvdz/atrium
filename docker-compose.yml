@@ -11,11 +11,17 @@
 # │ laptop boots with no setup. They are published in this repository, so
 # │ anyone can read them.
 # │
-# │ Never run this file on a public VPS with those values. Every secret below
-# │ is written `${VAR:?...}`, with no default: compose refuses to start rather
-# │ than quietly reusing a known password. Set real values in `.env` (or the
-# │ deployment's own secret store) before exposing any port to the internet,
-# │ and do not publish 5432/9000/9001 at all unless you mean to.
+# │ Never run this file on a public VPS with those values. The three secrets —
+# │ POSTGRES_PASSWORD, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY — are each
+# │ written `${VAR:?...}` with no default: compose refuses to start rather than
+# │ quietly reusing a known password. Everything else here is a non-secret
+# │ setting (POSTGRES_USER, POSTGRES_DB, S3_BUCKET, S3_REGION, log level, ports)
+# │ and does keep a default, because a guessed database name costs nothing and
+# │ a guessed password costs everything.
+# │
+# │ Set real values in `.env` (or the deployment's own secret store) before
+# │ exposing any port to the internet, and do not publish 5432/9000/9001 at all
+# │ unless you mean to.
 # └────────────────────────────────────────────────────────────────────────────
 
 name: atrium
@@ -86,6 +92,12 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      # Stated rather than inherited. apps/server/src/env.ts treats an unset
+      # NODE_ENV as production anyway, and the image sets it — this is here so
+      # the file says what this container is, without a reader having to chase
+      # two defaults to find out. `loadMigrationEnv` asks for nothing else:
+      # migrations touch no object store.
+      NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}@postgres:5432/${POSTGRES_DB:-atrium}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: 'no'

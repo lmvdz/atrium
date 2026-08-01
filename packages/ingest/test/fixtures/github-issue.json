@@ -1,0 +1,31 @@
+{
+  "issue": {
+    "number": 9998,
+    "title": "Trade-offs in Control Flow Analysis",
+    "body": "Some rough notes from a conversation.\r\n\r\nThe primary question is: when a function is invoked, what should we assume its side effects are?\r\n",
+    "user": { "login": "RyanCavanaugh" },
+    "created_at": "2016-07-28T00:03:48Z",
+    "author_association": "MEMBER",
+    "comments": 3
+  },
+  "comments": [
+    {
+      "id": 235870066,
+      "body": "Optimistic is the right default. Here is the diagram:\n\n![flow diagram](https://user-images.githubusercontent.com/1/2/flow.png)",
+      "user": { "login": "ahejlsberg" },
+      "created_at": "2016-07-28T01:00:00Z"
+    },
+    {
+      "id": 235870067,
+      "body": "",
+      "user": null,
+      "created_at": "2016-07-28T02:00:00Z"
+    },
+    {
+      "id": 235870068,
+      "body": "See [the attachment](https://github.com/user-attachments/files/1/notes.txt) and <img src=\"https://user-images.githubusercontent.com/9/9/inline.png\" alt=\"inline\">",
+      "user": { "login": "sandersn" },
+      "created_at": "2016-07-28T03:00:00Z"
+    }
+  ]
+}

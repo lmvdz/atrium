@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeAttention, reduce, serializeState } from '../src/index.js';
+import { appendEvent, computeAttention, foldEvents, reduce, serializeState } from '../src/index.js';
 import { ALICE, at, BOB, event, human, ROOM, sampleLog, shuffle } from './fixtures.js';
 
 describe('reduce — determinism', () => {
@@ -27,18 +27,50 @@ describe('reduce — determinism', () => {
   it('folds incrementally to the same state as a full replay', () => {
     const events = sampleLog();
     const full = reduce(events);
-    const incremental = events.reduce((state, next) => reduce([next], state), reduce([]));
+    const incremental = events.reduce((state, next) => appendEvent(state, next).state, reduce([]));
     expect(serializeState(incremental)).toBe(serializeState(full));
   });
 
-  it('is idempotent per event id — a replayed event is refused, not double-applied', () => {
+  it('is idempotent per event id — a redelivery is rejected, not double-applied', () => {
     const events = sampleLog();
     const once = reduce(events);
     const twice = reduce([...events, ...events]);
-    expect(twice.objects).toEqual(once.objects);
-    expect(twice.relations).toEqual(once.relations);
-    expect(twice.corrections).toEqual(once.corrections);
-    expect(twice.issues).toHaveLength(events.length);
+
+    // A duplicate is a rejection, not a business issue: it never happened, so
+    // it leaves nothing in `issues` for a replay to have to reproduce. The
+    // second copy of the log is simply not there.
+    expect(serializeState(twice)).toBe(serializeState(once));
+    expect(twice.issues).toEqual([]);
+  });
+
+  it('reports each redelivery as a rejection rather than swallowing it', () => {
+    const events = sampleLog();
+    const { outcomes } = foldEvents([...events, ...events]);
+    const rejected = outcomes.filter((o) => o.outcome === 'rejected');
+    expect(rejected).toHaveLength(events.length);
+    for (const outcome of rejected) {
+      if (outcome.outcome !== 'rejected') throw new Error('unreachable');
+      // `reduce` sorts, so each verbatim copy lands on exactly the cursor its
+      // twin just set: the position gate is what refuses it, and the detail
+      // says the id was spent too.
+      expect(outcome.reason).toBe('out_of_order');
+      expect(outcome.detail).toContain('do not re-mint it');
+    }
+  });
+
+  it('rejects a redelivery that re-minted its timestamp, and says so', () => {
+    const events = sampleLog();
+    const reminted = events.map((e) => ({ ...e, at: at(20 + Number(e.id.slice(3))) }));
+    const { state, outcomes } = foldEvents([...events, ...reminted]);
+    const rejected = outcomes.filter((o) => o.outcome === 'rejected');
+
+    expect(rejected).toHaveLength(events.length);
+    for (const outcome of rejected) {
+      if (outcome.outcome !== 'rejected') throw new Error('unreachable');
+      expect(outcome.reason).toBe('duplicate');
+    }
+    // Nothing the re-minted copies carried reached the state.
+    expect(serializeState(state)).toBe(serializeState(reduce(events)));
   });
 });
 
@@ -184,7 +216,8 @@ describe('reduce — correction replay', () => {
       }),
     ]);
     expect(state.issues).toEqual([{ eventId: 'ev_x', reason: 'unknown object "nope"' }]);
-    expect(state.appliedEventIds).toEqual([]);
+    // It did not apply, but it was consumed: one delivery, one outcome.
+    expect(state.consumedEventIds).toEqual(['ev_x']);
   });
 });
 

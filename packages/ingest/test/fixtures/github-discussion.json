@@ -1,0 +1,106 @@
+{
+  "page1": {
+    "data": {
+      "repository": {
+        "discussion": {
+          "number": 37136,
+          "title": "RFC: Layouts",
+          "body": "This RFC outlines the biggest update to Next.js since it was introduced in 2016.",
+          "createdAt": "2022-05-23T20:24:21Z",
+          "author": { "login": "timneutkens" },
+          "comments": {
+            "totalCount": 2,
+            "pageInfo": { "hasNextPage": true, "endCursor": "CURSOR_1" },
+            "nodes": [
+              {
+                "id": "DC_kwDOA1_asc4AKu1m",
+                "databaseId": 2807422,
+                "body": "Can layouts be `.tsx`?",
+                "createdAt": "2022-05-23T21:20:00Z",
+                "author": { "login": "jkjustjoshing" },
+                "replies": {
+                  "totalCount": 2,
+                  "pageInfo": { "hasNextPage": true, "endCursor": "REPLY_CURSOR_1" },
+                  "nodes": [
+                    {
+                      "id": "DC_kwDOA1_asc4AKu1x",
+                      "databaseId": 2807428,
+                      "body": "Yes! `.js`, `.jsx`, `.ts`, `.tsx` are all welcome  \r\nEvery one of them.  ",
+                      "createdAt": "2022-05-23T21:22:00Z",
+                      "author": { "login": "leerob" }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "page2": {
+    "data": {
+      "repository": {
+        "discussion": {
+          "number": 37136,
+          "title": "RFC: Layouts",
+          "body": "This RFC outlines the biggest update to Next.js since it was introduced in 2016.",
+          "createdAt": "2022-05-23T20:24:21Z",
+          "author": { "login": "timneutkens" },
+          "comments": {
+            "totalCount": 2,
+            "pageInfo": { "hasNextPage": false, "endCursor": "CURSOR_2" },
+            "nodes": [
+              {
+                "id": "DC_kwDOA1_asc4AKu1n",
+                "databaseId": 2807500,
+                "body": "What about a deleted account's comment?",
+                "createdAt": "2022-05-24T09:00:00Z",
+                "author": null,
+                "replies": {
+                  "totalCount": 2,
+                  "pageInfo": { "hasNextPage": false, "endCursor": null },
+                  "nodes": [
+                    {
+                      "id": "DC_kwDOA1_asc4AKu2a",
+                      "databaseId": null,
+                      "body": "A reply the API returned no databaseId for.",
+                      "createdAt": "2022-05-24T09:05:00Z",
+                      "author": { "login": "styfle" }
+                    },
+                    {
+                      "id": "DC_kwDOA1_asc4AKu2b",
+                      "databaseId": null,
+                      "body": "And a second one, under the same parent.",
+                      "createdAt": "2022-05-24T09:06:00Z",
+                      "author": { "login": "ijjk" }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "replies2": {
+    "data": {
+      "node": {
+        "replies": {
+          "totalCount": 2,
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "DC_kwDOA1_asc4AKu1y",
+              "databaseId": 2807440,
+              "body": "Second page of replies.",
+              "createdAt": "2022-05-23T21:30:00Z",
+              "author": { "login": "timneutkens" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

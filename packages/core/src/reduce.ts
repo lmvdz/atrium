@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { humanOnlyRefusal, isHuman } from './authority.js';
 import type { CoreEvent } from './events.js';
 import {
   type AcceptedObject,
@@ -8,6 +9,7 @@ import {
   ObjectivePayload,
   OpenQuestionPayload,
 } from './objects.js';
+import { storeProposal } from './proposal.js';
 import { relationShapeError } from './relations.js';
 import {
   type CoreState,
@@ -19,8 +21,114 @@ import {
   type ReducerIssue,
 } from './state.js';
 
+/** Why an event was refused entry. Both are properties of position, not content. */
+export type RejectionReason =
+  /**
+   * It does not sort strictly after `state.cursor`: consuming it would rewrite
+   * settled history, or would put two events at one position.
+   */
+  | 'out_of_order'
+  /**
+   * Its id has already been consumed, and it arrived *ahead* of the cursor —
+   * a redelivery whose timestamp was re-minted. At-least-once delivery, made a
+   * no-op.
+   */
+  | 'duplicate';
+
 /**
- * The deterministic reducer.
+ * The reducer's two answers to one event.
+ *
+ * A **consumed** event took a position in the log. It is part of the history
+ * this state is a fold of, whether it applied cleanly (`applied`) or recorded a
+ * business problem on the way (`applied_with_issue` — a proposal coerced back
+ * to `proposed`, an amendment to an object that does not exist, a relation that
+ * fails its type signature). Either way the outcome is a function of the log
+ * alone, so replaying the log reproduces it exactly.
+ *
+ * A **rejected** event was never consumed. It is not history; it is a command
+ * the reducer declined to accept, and it leaves *nothing* behind: no `issues`
+ * entry, no cursor movement, no `consumedEventIds` entry. The state handed back
+ * is the state handed in, byte for byte and reference for reference.
+ */
+export type EventOutcome =
+  | { outcome: 'applied'; event: CoreEvent }
+  | { outcome: 'applied_with_issue'; event: CoreEvent; issues: ReducerIssue[] }
+  | { outcome: 'rejected'; event: CoreEvent; reason: RejectionReason; detail: string };
+
+/** The three-way taxonomy, for callers that switch on it. */
+export type AppendOutcome = EventOutcome['outcome'];
+
+/** What `appendEvent` returns: an outcome plus the state that goes with it. */
+export type AppendResult = EventOutcome & { state: CoreState };
+
+export interface FoldResult {
+  state: CoreState;
+  /** One outcome per input event, in canonical order. */
+  outcomes: EventOutcome[];
+}
+
+/**
+ * Append one event to a state. **This is the command-layer entry point** — the
+ * call a server makes for each event as it arrives, and the only one that
+ * reports back what happened.
+ *
+ * ## The contract, stated exactly
+ *
+ * 1. `appendEvent` never mutates the state it is given. On `applied` /
+ *    `applied_with_issue` the result carries a new state; on `rejected` it
+ *    carries the *same object*, untouched.
+ * 2. An event is **rejected** if it does not sort strictly after `state.cursor`
+ *    in the canonical `(at, id)` order, or if its id has already been consumed.
+ *    Rejection is total: no issue, no cursor move, no watermark move, no
+ *    consumed id. A rejected event must not be persisted (see below).
+ * 3. Any other event is **consumed**: `state.cursor` advances to it, its room's
+ *    watermark advances to it, its id is spent in `consumedEventIds`, and it
+ *    either applies or records one or more `ReducerIssue`s. Business validity
+ *    is judged here — the proposal boundary, the actor floor, the correction
+ *    and relation guards — and none of those judgements depend on when the
+ *    event arrived, only on the log before it.
+ * 4. Therefore the consumed sequence is in canonical order **by construction**.
+ *    Write `L` for the events a state consumed, in the order it consumed them.
+ *    Then, whatever order those events *arrived* in:
+ *
+ *        serializeState(state) === serializeState(reduce(L))
+ *
+ *    because `reduce` sorts `L` and `L` is already sorted. `issues` and
+ *    `consumedEventIds` are included in that — they are built in consumption
+ *    order on one side and in sorted order on the other, and those are the same
+ *    order. This is the whole live≡replay guarantee, and the only one claimed:
+ *    it says nothing about rejected events, which is the point — they are in
+ *    neither `L` nor, per #22, the ledger.
+ *
+ * ## Why this is safe to rely on
+ *
+ * Half of the invariant lives in the durable ledger, and it is recorded on
+ * issue #22:
+ *
+ * > "the durable ledger must contain ONLY events accepted in canonical order —
+ * > room_seq is assigned transactionally at append, so an out-of-order event is
+ * > rejected at the command layer and never persisted. The reducer watermark is
+ * > a defense-in-depth guard, not a data path; if refused events could reach the
+ * > log, full replay (which re-sorts) would accept what live ingestion refused
+ * > and the two states would diverge."
+ *
+ * So: rejected events never enter state (this file) *and* never enter the log
+ * (#22). `fold(log) === live state` holds because the two sides are folding the
+ * identical sequence, not because anything reconciles them afterwards.
+ *
+ * A rejection is an error for the caller to handle, not a silent drop — a
+ * command whose event lost the ordering race is re-minted at the current
+ * position and appended again.
+ */
+export function appendEvent(state: CoreState, event: CoreEvent): AppendResult {
+  const rejection = rejectionFor(state, event);
+  if (rejection) return { outcome: 'rejected', event, ...rejection, state };
+  const next = cloneState(state);
+  return { ...consume(next, event), state: next };
+}
+
+/**
+ * The deterministic reducer: fold a whole log into a state.
  *
  * Contract:
  *  - Pure. No clock, no randomness, no I/O. Given the same events it returns a
@@ -31,39 +139,40 @@ import {
  *  - Append-only. Corrections and supersessions change *status*, never history:
  *    the prior value is written to `state.corrections` and the object stays.
  *  - Trust-preserving. The proposal → acceptance boundary is enforced here, not
- *    upstream: a recorded proposal is always `proposed`, and an acceptance that
+ *    upstream: a recorded proposal is always `proposed`; an acceptance that
  *    cites a proposal must cite one that exists, is still open, has not already
- *    been accepted, and is of the object's own type.
+ *    been spent, and matches the object's type; and the actor floor of #4's
+ *    acceptance matrix holds regardless of what any layer above did — see
+ *    `authority.ts`.
  *
- * ## Incremental application and the room watermark
- *
- * `reduce(events)` sorts the whole batch, so a full replay is canonically
- * ordered by construction. `reduce([next], state)` — the live fold a server
- * runs per arriving event — has no such luxury: it cannot re-sort events it has
- * already folded. Without a rule, feeding a late-arriving event into a live
- * fold would produce a state that a replay of the same accepted sequence would
- * never produce.
- *
- * The rule: `CoreState.watermarks[roomId]` holds the canonical `(at, id)`
- * position of the last event that room consumed. An event that sorts *before*
- * its room's watermark is never applied — it lands in `state.issues` and the
- * watermark holds. So for any sequence of events a state actually accepted,
- * folding them one at a time and replaying them all at once land on the same
- * state; a stale event is refused loudly instead of being silently applied out
- * of order.
- *
- * The watermark advances on every consumed event, applied or refused: it
- * records the log position the room's state reflects, not a success count. It
- * does not advance for an event whose room cannot be resolved (a correction to
- * an unknown object, a rejection of an unknown proposal) — those events change
- * nothing and are recorded as issues regardless.
+ * `reduce(events)` sorts, so nothing in a fresh replay is genuinely out of
+ * order: the only events rejected are repeats. A verbatim repeat sorts onto the
+ * position its twin just took and is refused there (`out_of_order`); a repeated
+ * id carrying a different timestamp sorts elsewhere and is refused by the id
+ * (`duplicate`). `reduce(events, state)` is the same fold continued: events at
+ * or before `state.cursor` are rejected and skipped, exactly as `appendEvent`
+ * would reject them. Use `foldEvents` when you need to see *which* ones, and
+ * `appendEvent` when you are consuming one at a time — that is where the
+ * outcome matters.
  */
 export function reduce(events: readonly CoreEvent[], initial?: CoreState): CoreState {
+  return foldEvents(events, initial).state;
+}
+
+/** `reduce`, plus the per-event outcome. Same fold, nothing hidden. */
+export function foldEvents(events: readonly CoreEvent[], initial?: CoreState): FoldResult {
   const state = initial ? cloneState(initial) : emptyState();
+  const outcomes: EventOutcome[] = [];
   for (const event of orderEvents(events)) {
-    applyEvent(state, event);
+    const rejection = rejectionFor(state, event);
+    outcomes.push(rejection ? { outcome: 'rejected', event, ...rejection } : consume(state, event));
   }
-  return state;
+  return { state, outcomes };
+}
+
+/** True when the event was consumed — i.e. it belongs in the durable log. */
+export function wasConsumed(outcome: EventOutcome): boolean {
+  return outcome.outcome !== 'rejected';
 }
 
 /**
@@ -137,33 +246,90 @@ function resolveRoomId(state: CoreState, event: CoreEvent): string | null {
   }
 }
 
-function applyEvent(state: CoreState, event: CoreEvent): void {
-  if (state.appliedEventIds.includes(event.id)) {
-    fail(state, event.id, 'duplicate event id — already applied');
-    return;
+/**
+ * The command-layer gate. Returns why the event may not be consumed, or `null`
+ * if it may.
+ *
+ * ## Two checks, and why they run in this order
+ *
+ * **Position first.** An event must sort *strictly after* `state.cursor`.
+ * Strictly, because `(at, id)` is a total order: two distinct events cannot
+ * occupy one position, so an event that lands exactly on the cursor is either a
+ * redelivery or a forged id, and admitting it would let two different payloads
+ * claim the same place in the log — which is the same divergence the ordering
+ * gate exists to prevent, just harder to see.
+ *
+ * **Identity second.** An id that has already been consumed can never be
+ * consumed again, whatever timestamp it now carries.
+ *
+ * The order cannot change what the state *becomes* — both branches reject, and
+ * a rejection leaves the state untouched either way. What it decides is the
+ * reason reported, and the reason is a diagnosis, so it should name the
+ * strongest fact. Position is the stronger one: it holds on the log's terms
+ * alone, whether or not the id was ever seen, which means the ordering gate's
+ * correctness does not depend on `consumedEventIds` being complete. Running
+ * identity first would invert that — every stale event whose id happened to be
+ * spent would be reported as a redelivery, and the ordering guarantee would
+ * quietly become a property of the id set. That is the r3 lesson, kept.
+ *
+ * The detail says when both are true, so a caller is never told "you lost the
+ * ordering race, re-mint and retry" about an event that is already in the log.
+ */
+function rejectionFor(
+  state: CoreState,
+  event: CoreEvent,
+): { reason: RejectionReason; detail: string } | null {
+  const cursor = cursorOf(event);
+  const spent = state.consumedEventIds.includes(event.id);
+  if (state.cursor && compareCursor(cursor, state.cursor) <= 0) {
+    const also = spent
+      ? '; its id was consumed already too, so this is a redelivery — do not re-mint it'
+      : '';
+    return {
+      reason: 'out_of_order',
+      detail: `event (${event.at}, ${event.id}) does not sort strictly after the consumed position (${state.cursor.at}, ${state.cursor.id}) — rejected, not applied and not recorded${also}`,
+    };
   }
+  if (spent) {
+    return {
+      reason: 'duplicate',
+      detail: `event "${event.id}" was consumed already — rejected as a redelivery, whatever timestamp it now carries and whatever the first delivery made of it`,
+    };
+  }
+  return null;
+}
 
+/**
+ * Consume one event into `state`, mutating it. The caller has already cleared
+ * the gate, so this always advances the cursor: the event is history now,
+ * whether or not it changed anything.
+ */
+function consume(state: CoreState, event: CoreEvent): EventOutcome {
+  const issuesBefore = state.issues.length;
   const roomId = resolveRoomId(state, event);
-  if (roomId !== null) {
-    const mark = state.watermarks[roomId];
-    if (mark && compareCursor(cursorOf(event), mark) < 0) {
-      fail(
-        state,
-        event.id,
-        `event (${event.at}, ${event.id}) precedes the watermark (${mark.at}, ${mark.id}) of room "${roomId}" — out-of-order application refused`,
-      );
-      return;
-    }
-  }
-
   const applied = dispatch(state, event);
 
+  state.cursor = cursorOf(event);
   // Advances whether or not the event applied: it is the log position this
-  // room's state reflects, which is what keeps a live fold and a replay
-  // indistinguishable. See the contract on `reduce`.
+  // room's state reflects, not a success count.
   if (roomId !== null) state.watermarks[roomId] = cursorOf(event);
+  // Spent by being consumed, not by succeeding. An event that failed its
+  // business checks got its one delivery; a redelivery must not get a second
+  // one against a state that has since moved on. See `consumedEventIds`.
+  state.consumedEventIds.push(event.id);
 
-  if (applied) state.appliedEventIds.push(event.id);
+  // A refusal that records no reason is a fact that vanished — the object did
+  // not change, nothing says why, and `applied_with_issue` degrades to
+  // `applied`. Every `dispatch` path that returns false calls `fail` first;
+  // this keeps that true for the next one somebody writes.
+  if (!applied && state.issues.length === issuesBefore) {
+    fail(state, event.id, `event "${event.id}" did not apply and recorded no reason`);
+  }
+
+  const issues = state.issues.slice(issuesBefore);
+  return issues.length > 0
+    ? { outcome: 'applied_with_issue', event, issues }
+    : { outcome: 'applied', event };
 }
 
 /** Applies one event. Returns whether it was applied; issues are recorded in state. */
@@ -209,8 +375,11 @@ function applyProposalRecorded(state: CoreState, event: EventOf<'proposal_record
     );
   }
 
+  // The wire status is dropped rather than copied: `record.status` is the only
+  // status a proposal has, so acceptance cannot leave a stale second copy
+  // behind. See `StoredProposal`.
   state.proposals[proposal.id] = {
-    proposal: { ...proposal, status: 'proposed' },
+    proposal: storeProposal(proposal),
     status: 'proposed',
     acceptedObjectId: null,
     rejectedReason: null,
@@ -244,11 +413,50 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
     return false;
   }
 
-  // An object may be born without a proposal — a human writing a decision
-  // directly, or answer-bound creation. But an object that *claims* a proposal
-  // must claim a real, still-open, type-matching one: that citation is the
-  // provenance the UI shows, so an unverifiable one is worse than none.
+  // ── The actor floor (see `authority.ts` for #4's matrix) ──
+  //
+  // Checked before the proposal citation, because authority is a property of
+  // the event and citation is a property of what it points at: a model that may
+  // not accept this object at all should be told that, not sent to fix its
+  // provenance first.
+  const { actor } = event;
+  const subject = `object "${object.id}"`;
+
+  // A decision is the type #4 bans inference at, by name: "that sounds good" is
+  // where the ambiguity lives. A model may propose one; only a human accepts
+  // it. Note this gate does not care whether a proposal was cited — an
+  // interpreter accepting *its own* decision proposal is exactly the move.
+  if (object.type === 'decision' && !isHuman(actor)) {
+    fail(state, event.id, humanOnlyRefusal('decision_acceptance', actor, subject));
+    return false;
+  }
+
+  // `~` vs `✓`, as data. A claim may be model-accepted — that is #4's
+  // auto-accept path and it stays open — but it arrives unverified. Verified is
+  // the room asserting the claim is true, and nothing model-accepted ever
+  // renders as fact.
+  if (object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {
+    fail(state, event.id, humanOnlyRefusal('claim_verification', actor, subject));
+    return false;
+  }
+
+  // An object may be born without a proposal — but only from a human. That is
+  // the answer-binding path: a person writes a decision, or binds an answer,
+  // and a person's word is not an interpretation that needs accepting.
+  //
+  // A model or a system actor has exactly one way to mint a fact: propose it,
+  // and have the proposal accepted. Without this gate the whole acceptance
+  // boundary is optional — an interpreter that cannot hand itself a
+  // pre-accepted proposal can simply skip the proposal and emit the object.
   const proposalId = object.provenance.proposalId;
+  if (proposalId === null && !isHuman(actor)) {
+    fail(state, event.id, humanOnlyRefusal('direct_acceptance', actor, subject));
+    return false;
+  }
+
+  // An object that *claims* a proposal must claim a real, still-open,
+  // type-matching one: that citation is the provenance the UI shows, so an
+  // unverifiable one is worse than none.
   let proposal: ProposalRecord | undefined;
   if (proposalId !== null) {
     proposal = state.proposals[proposalId];
@@ -307,6 +515,34 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
   const record = state.objects[event.objectId];
   if (!record) {
     fail(state, event.id, `unknown object "${event.objectId}"`);
+    return false;
+  }
+
+  // Every correction verb is human-only in v1 (#4, and the correction verbs
+  // #21 will grow are the same shape). A correction rewrites, withdraws or
+  // restores something the room already accepted — it is the one operation that
+  // reaches backwards, and an interpreter must never reach backwards on its own
+  // authority. A model that thinks an object is wrong proposes a supersession.
+  //
+  // The claim-verification gate is repeated here rather than left to the
+  // blanket rule above it. Today it is unreachable — a model cannot amend
+  // anything — but the two rules have different lifetimes: #21 may hand a model
+  // some correction verb, and "a claim only becomes ✓ by a human" must not
+  // depend on that never happening.
+  if (!isHuman(event.actor)) {
+    const verifying =
+      record.object.type === 'claim' &&
+      event.action === 'amend' &&
+      event.patch.verification === 'verified';
+    fail(
+      state,
+      event.id,
+      humanOnlyRefusal(
+        verifying ? 'claim_verification' : 'correction',
+        event.actor,
+        `object "${event.objectId}"`,
+      ),
+    );
     return false;
   }
 
@@ -452,6 +688,20 @@ function applyRelationAdded(state: CoreState, event: EventOf<'relation_added'>):
   }
 
   if (relation.kind === 'supersedes' && target) {
+    // #4 splits supersession by what is being retired: retiring a claim or an
+    // open question auto-accepts (a newer reading replacing an older one is
+    // cheap to correct), but retiring an accepted *decision* needs the same
+    // human hand that accepting one needed. Otherwise the decision gate is a
+    // front door with the back door open: a model that may not accept a
+    // decision could still supersede every decision in the room.
+    if (target.object.type === 'decision' && !isHuman(event.actor)) {
+      fail(
+        state,
+        event.id,
+        humanOnlyRefusal('decision_supersession', event.actor, `relation "${relation.id}"`),
+      );
+      return false;
+    }
     if (target.supersededById !== null) {
       fail(
         state,
