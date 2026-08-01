@@ -83,3 +83,16 @@ Anti-staleness alone breeds calcification — a project that only audits itself 
 - **Budget for divergence.** The design corpus's own history is the evidence: every settled pattern came from its single wild breadth phase; six later versions refined and never re-architected. So at phase boundaries, spend one cheap Variants-style pass on a deliberately different approach to something that already "works" — most will lose, and the one that wins pays for all of them.
 - **Reopening is health, not failure.** The reopen affordance exists in the product and the process for the same reason: a system that never revisits accepted state isn't stable, it's rigid. Track reopens in the retro as a vitality metric — zero reopens over a long stretch is a warning sign, not a win.
 - **New eyes on old code.** Rotate at least one gauntlet critic lens per phase (a fresh failure-class prompt, a different lineage pairing) so the critics don't converge on the same grooves as the builders.
+
+## Merge procedure for the pre-UI branch chains (2026-08-01)
+
+`git merge-base` returns nothing between `main` and the older fix chains (`fix/realtime-*`, `fix/auth-*`, `fix/ci-*`); `build/ui-components`, branched from post-merge main, is unaffected. No force-push appears in the reflog and `main` is intact (14 commits, all merged content present) — the histories are disconnected while the **trees remain compatible**: each chain contains main's content as of its branch point plus its own work.
+
+Verified divergence against `fix/realtime-r3`: it lacks only `plans/research-buzz/**` (added to main after it branched) and differs on `biome.json`, `RETRO.md`, `design/CONVENTIONS.md` — the three files main has moved forward.
+
+Procedure, per branch, in merge-train order:
+1. `git merge --allow-unrelated-histories -X theirs <branch>` — the branch wins, since it is main-at-branch-point plus its work.
+2. Restore main's forward paths explicitly: `git checkout HEAD~1 -- biome.json RETRO.md design/CONVENTIONS.md plans/research-buzz` (adjust to whatever main has moved by then), then re-apply any doctrine the branch legitimately added to those files by hand.
+3. Run the full gate with real exit codes (never pipe through `tail`) before committing the merge.
+
+Do not `--allow-unrelated-histories` without step 2: `-X theirs` will otherwise silently revert main's doctrine files to their branch-point state.
