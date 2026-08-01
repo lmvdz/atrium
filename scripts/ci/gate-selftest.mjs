@@ -714,11 +714,14 @@ const CASES = [
   {
     name: 'the workflow directory enumerates `.yaml` as well as `.yml`',
     run: () => {
+      const file = (name) => ({ name, isFile: () => true, isSymbolicLink: () => false });
       const entries = [
-        { name: 'ci.yml', isFile: () => true },
-        { name: 'release.yaml', isFile: () => true },
-        { name: 'notes.md', isFile: () => true },
-        { name: 'archive', isFile: () => false },
+        file('ci.yml'),
+        // A symlinked workflow counts: GitHub reads what the checkout
+        // materialises, and `isFile()` is false for the link itself.
+        { name: 'release.yaml', isFile: () => false, isSymbolicLink: () => true },
+        file('notes.md'),
+        { name: 'archive', isFile: () => false, isSymbolicLink: () => false },
       ];
       const found = workflowFiles(
         '.github/workflows',

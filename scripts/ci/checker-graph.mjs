@@ -198,7 +198,7 @@ export function workflowRunScripts(root = process.cwd(), read = readFileSync, li
     return scripts;
   }
   for (const entry of entries) {
-    if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue;
+    if (!(entry.isFile() || entry.isSymbolicLink()) || !/\.ya?ml$/.test(entry.name)) continue;
     let document;
     try {
       document = parseYaml(String(read(join(root, WORKFLOW_DIRECTORY, entry.name), 'utf8')));

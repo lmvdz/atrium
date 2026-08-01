@@ -2604,7 +2604,13 @@ export function workflowFiles(path, stat = statSync, list = readdirSync) {
   if (!entry.isDirectory()) return [path];
   const base = path.replace(/\/+$/, '');
   return list(base, { withFileTypes: true })
-    .filter((child) => child.isFile() && /\.ya?ml$/.test(child.name))
+    .filter(
+      (child) =>
+        // A symlink too. GitHub reads what the checkout materialises, and "the
+        // entry happens to be a regular file today" is the same shape of
+        // assumption as "the glob happens to name every extension".
+        (child.isFile() || child.isSymbolicLink()) && /\.ya?ml$/.test(child.name),
+    )
     .map((child) => `${base}/${child.name}`)
     .sort();
 }
