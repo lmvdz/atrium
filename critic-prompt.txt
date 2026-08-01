@@ -1,0 +1,31 @@
+You are reviewing a fix round on a TypeScript monorepo. The working tree is at the repo root you are in. Dependencies are installed (node_modules present) and the packages are built (packages/*/dist exists), so `pnpm --filter @atrium/core test`, `npx vitest run` inside packages/core, and `node -e "..."` against packages/core/dist/index.js all work offline. DO NOT run `pnpm install` — the sandbox has no network and it will fail.
+
+SCOPE: `packages/core` only. The diff under review is the single most recent commit on branch `fix/core-engine-r5` (`git show HEAD`), against its parent.
+
+WHAT THE CODE IS. Atrium turns chat messages into accepted objects (decision, commitment, open_question, claim, objective). A language model reads a window of messages and stages a `Proposal` carrying a `quote` (a span it says it read the object out of) and a payload with a statement. Deterministic checks then decide whether that reading may become a fact with no human involved. The cardinal defect class, found repeatedly in earlier rounds, is a receipt that looks perfect while the record it produces says something the named person did not say — e.g. quoting "Bob will not deploy production Friday" and minting "Bob will deploy production Friday".
+
+WHAT THIS ROUND CLAIMS. Attack each claim directly by constructing an input:
+
+1. A model reading can only be certified when the quote is the ENTIRE own text of the bearing message (reply-blockquotes stripped) — `quoteCoversOwnText` in packages/core/src/matching.ts. Anything less is `refer` (never auto-accepted, never discarded). The claim is that no neighbouring sentence can therefore change the force of the quoted one. FIND AN INPUT THAT IS STILL AUTO-ACCEPTED AND SAYS SOMETHING ITS AUTHOR DID NOT MEAN.
+
+2. `normalizeForReceipt` is an ALLOWLIST of exactly five differences a quote may have from its source: whitespace runs collapse, unrendered characters (\p{Cf}\p{Cc}) drop, typographic apostrophes fold to ASCII, PAIRED asterisk emphasis may be absent, and a markdown link contributes its destination as content. Nothing else. The claim is that no two texts a reader would read as different sentences normalize to the same string, and that code spans, link destinations and identifiers survive intact. FIND TWO TEXTS THAT NORMALIZE EQUAL AND MEAN DIFFERENT THINGS, or a text where the fold destroys content.
+
+3. `laterRevision` refuses to certify a statement that a message LATER in the same window restates with anything added. The claim is that a correction in the window cannot be invisible to acceptance. FIND A CORRECTION IT MISSES, or a benign message it falsely fires on.
+
+4. A statement carrying a question mark may not be minted as anything but an open question (`isAssertion`).
+
+5. Ordering: in `decideAcceptance` a `refer`-severity receipt problem is now ruled on ABOVE the θ_min discard, so a detected discrepancy is never destroyed for being low-confidence; a clean-receipt weak reading is still discarded. In `reduce.ts` the receipt check moved above the confidence floor. FIND AN INPUT WHERE THIS ORDERING LOSES INFORMATION OR CHANGES A VERDICT IT SHOULD NOT.
+
+6. `commitment` and `objective` join `decision` as types no non-human actor may ever mint (`modelMintingGate` in authority.ts, `DEFAULT_ACCEPTANCE_RULES` in policy.ts). Claim: `modelMintingGate(t) === null` exactly when `autoAcceptable(t)`, and there is no path by which a model actor lands one of those three types.
+
+7. `findDuplicate` no longer scores similarity; a duplicate is a token-for-token re-proposal under the routing fold. Claim: a reading that contradicts an accepted object is never discarded as a duplicate.
+
+8. `hasContent` counts letters, digits and Extended_Pictographic as content; punctuation, whitespace and format characters are absence.
+
+9. The two enforcement layers (`acceptance.ts` engine, `authority.ts`/`reduce.ts` reducer floor) share ONE quote-semantics validator by design. The doc comments claim to enumerate exactly what the floor enforces INDEPENDENTLY. Check that enumeration against the code and report any item that is not in fact independently enforced, and anything independently enforced that the list omits.
+
+ALSO CHECK, as its own question: is any of this defended only in a comment? Find any place where the source documents something it "cannot see" or "cannot judge" and then AUTO-ACCEPTS or SILENTLY DISCARDS an input that lands inside that limit. That exact failure is what this round exists to fix and it is the most likely place for it to recur.
+
+ALSO CHECK the tests: any test whose expected value is computed by the code under test (a "derived probe"); any test claiming exhaustiveness whose list is restated rather than derived; any assertion that would still pass if the behaviour it names were deleted.
+
+HOW TO REPORT. Ground every finding in an input you actually constructed. Prefer running node against packages/core/dist/index.js or adding a scratch vitest file to asserting from reading. For each finding give: severity (blocking / major / minor), the exact input, the observed behaviour, why it is wrong, and the file:line. Then give an explicit overall verdict on its own line: `VERDICT: PASS` or `VERDICT: FAIL`. State it even if you found nothing.

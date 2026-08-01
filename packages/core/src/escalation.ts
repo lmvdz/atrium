@@ -220,6 +220,39 @@ export const CONCESSION_MARKERS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * The subset of the markers above that **perform a retraction** rather than
+ * merely sounding like agreement.
+ *
+ * Two lists because they answer two questions with opposite risk profiles, and
+ * `CONCESSION_MARKERS` says why it is deliberately noisy: it decides which model
+ * reads a window, so `actually`, `fair enough` and `good point` earn their false
+ * positives at the price of one model call. This subset is read on the
+ * **acceptance** path, where a hit means "a person looks at this" — so it holds
+ * only the phrases whose utterance *is* the withdrawal. "Good point" concedes
+ * something; "scratch that" takes something back.
+ *
+ * This is the one marker list in the package that touches acceptance, and the
+ * direction it can be wrong in is the whole justification: it can only add a
+ * referral. It never accepts anything and never discards anything, so no entry
+ * here can turn a reading into a fact — which is the property `STOPWORDS` lost
+ * when `findDuplicate` discarded on it (see `acceptance.ts`).
+ */
+export const RETRACTION_MARKERS: readonly string[] = Object.freeze([
+  'i was wrong',
+  "i'm wrong",
+  'i am wrong',
+  'i stand corrected',
+  'correction',
+  'corrected',
+  'never mind',
+  'nevermind',
+  'scratch that',
+  'disregard that',
+  'i take that back',
+  'withdrawn',
+]);
+
+/**
  * `s/wrong/right/` — the terse form, which no word list catches.
  *
  * The closing slash is required and `s` must start a word, so a path (`docs/api/
@@ -979,11 +1012,18 @@ export function validateProposalProvenance(
         messages,
         policy,
       );
-      if (revisited) {
+      if (revisited === 'unscanned') {
         problems.push({
           kind: 'superseded_by_later_message',
           severity: 'refer',
-          detail: `message "${revisited.message.id}" comes after every message this cites and says the same sentence with ${revisited.added.map((token) => `"${token}"`).join(', ')} added — a later message in the same window revisits the one being quoted, and whether that reverses it, narrows it or merely repeats it is not something a machine may decide from the words`,
+          detail: `the window carries more after this citation than this check will read (${policy.maxLaterMessagesScanned} messages, ${policy.maxScannedSentences} sentences each, ${policy.maxAlignedTokens} tokens a sentence), so whether one of them corrects the quoted sentence was never established — an unread window is not a clean one, and a check that declined to run is not a check that passed`,
+          messageId: null,
+        });
+      } else if (revisited) {
+        problems.push({
+          kind: 'superseded_by_later_message',
+          severity: 'refer',
+          detail: `message "${revisited.message.id}" comes after every message this cites and carries ${revisited.added.map((token) => `"${token}"`).join(', ')} — a later message in the same window either restates the quoted sentence with something added or takes something back, and whether that reverses this reading, narrows it or leaves it alone is not something a machine may decide from the words`,
           messageId: revisited.message.id,
         });
       }
@@ -1139,10 +1179,13 @@ export function laterRevision(
   citedIds: readonly string[],
   messages: readonly ProvenanceMessage[],
   policy: ReceiptPolicy = RECEIPT_POLICY,
-): { message: ProvenanceMessage; added: string[] } | null {
+): { message: ProvenanceMessage; added: string[] } | 'unscanned' | null {
   if (isBlank(statement)) return null;
   const wanted = routingTokens(statement);
-  if (wanted.length === 0 || wanted.length > policy.maxAlignedTokens) return null;
+  if (wanted.length === 0) return null;
+  // Too long to align against anything is the same answer the bearing check
+  // gives: not checked, therefore not passed.
+  if (wanted.length > policy.maxAlignedTokens) return 'unscanned';
 
   const cited = new Set(citedIds);
   let lastCited = -1;
@@ -1151,13 +1194,51 @@ export function laterRevision(
   }
   if (lastCited === -1) return null;
 
-  const later = messages.slice(lastCited + 1, lastCited + 1 + policy.maxLaterMessagesScanned);
+  const later = messages.slice(lastCited + 1);
+  // ── The cap fails closed, and that is r5 auditing its own first draft ──────
+  //
+  // The first version of this scan stopped at the cap and returned "nothing
+  // found", with a comment arguing that stopping was safe "in the direction that
+  // matters — it can only miss a correction". That argument is the exact shape
+  // this round exists to delete: a limit written into a comment, and an input
+  // inside it **auto-accepted**. A window with 201 messages after the citation
+  // is a window this function did not read, and an unread window is not a clean
+  // one. `maxAlignedTokens` and `maxScannedSentences` already answer their own
+  // version of this question with a refusal; this one now does too.
+  if (later.length > policy.maxLaterMessagesScanned) return 'unscanned';
+
   for (const message of later) {
     const own = stripReplyBlockquotes(message.body);
+
+    // ── …or somebody took something back, in whatever words ────────────────
+    //
+    // The structural test below only sees a correction that **reuses the
+    // sentence**. This round's own adversarial pass produced the one it does
+    // not: *"We will deploy production Friday."* followed by *"Correction: the
+    // deployment is cancelled."* shares not one content token with the statement
+    // (`deploy` and `deployment` are different tokens), aligns with nothing, and
+    // auto-accepted.
+    //
+    // So the second clause is a marker, and it is the only marker list in this
+    // package that acceptance reads. It is admissible **because of the direction
+    // it can be wrong in**: a hit adds a referral and can never add an
+    // acceptance, so an over-firing entry costs a person one glance at a window
+    // where somebody explicitly withdrew something — which is a window a machine
+    // should not be minting facts out of anyway. `RETRACTION_MARKERS` is the
+    // subset that performs a withdrawal; the noisy conversational half of
+    // `CONCESSION_MARKERS` (`actually`, `good point`) stays out, because a
+    // referral is cheap and free is cheaper.
+    const normalized = normalizeForRouting(own);
+    for (const marker of RETRACTION_MARKERS) {
+      if (containsPhrase(normalized, marker)) return { message, added: [marker] };
+    }
+    if (SED_CORRECTION.test(own)) return { message, added: ['s/…/…/'] };
+
     const sentences = sentencesOf(own);
-    if (sentences.length > policy.maxScannedSentences) continue;
+    if (sentences.length > policy.maxScannedSentences) return 'unscanned';
     for (const sentence of sentences) {
       const aligned = alignTokens(routingTokens(sentence), wanted, policy);
+      if (aligned.undecidable === 'too_long') return 'unscanned';
       if (aligned.undecidable !== null) continue;
       // Every word of the statement is here, in order, and this sentence says
       // more. An exact restatement (`unmatchedInQuote` empty) is agreement, and

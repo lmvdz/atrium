@@ -187,10 +187,20 @@ export function normalizeForReceipt(text: string): string {
   const out: string[] = [];
   for (const [index, segment] of text.split(CODE_SPAN).entries()) {
     // `String.split` with one capture group alternates: prose, delimiter, prose…
+    //
+    // **A code segment is passed through byte for byte.** Not even the whitespace
+    // collapse and the invisible-character drop apply inside one, and that is
+    // this round's own blind cross-lineage review: the first draft collapsed
+    // whitespace across the whole string after rejoining, so
+    // `` `Set the deployment password to `a  b` immediately.` `` and the same
+    // sentence with `` `a b` `` compared equal. Two spaces in prose are a line
+    // wrap; two spaces in a password are a different password. Every argument in
+    // the allowlist above is an argument about *prose*, and none of them survives
+    // being carried into a literal.
     const isCode = index % 2 === 1;
-    out.push(isCode ? segment.replace(INVISIBLE, '') : foldProse(segment));
+    out.push(isCode ? segment : foldProse(segment));
   }
-  return out.join('').replace(/\s+/g, ' ').trim();
+  return out.join('').trim();
 }
 
 function foldProse(text: string): string {
@@ -201,14 +211,16 @@ function foldProse(text: string): string {
     previous = folded;
     folded = folded.replace(PAIRED_EMPHASIS, '$2');
   }
-  return folded.replace(MARKDOWN_LINK, (_match, label: string, destination: string) => {
-    const text = label.trim();
-    const target = destination.trim();
-    if (target.length === 0) return text;
-    // The destination disappears only when the text already states it, so an
-    // autolink does not turn into a stutter that nothing can bear.
-    return text === target ? text : `${text} ${target}`;
-  });
+  return folded
+    .replace(MARKDOWN_LINK, (_match, label: string, destination: string) => {
+      const text = label.trim();
+      const target = destination.trim();
+      if (target.length === 0) return text;
+      // The destination disappears only when the text already states it, so an
+      // autolink does not turn into a stutter that nothing can bear.
+      return text === target ? text : `${text} ${target}`;
+    })
+    .replace(/\s+/g, ' ');
 }
 
 /**
@@ -601,12 +613,47 @@ export function quoteCoversOwnText(
  * *"Bob will deploy Friday?" is a question and minting it as an assertion is the
  * same defect in different clothes.* Here the mark is read rather than compared.
  *
- * Deliberately only the mark. An interrogative without one ("I wonder whether we
- * ship Friday") reads as an assertion to any string check, and inventing a
- * grammar to catch it would be the guess this file refuses to make elsewhere.
+ * ## The limit, and what the code does with an input inside it
+ *
+ * Deliberately only the mark. An interrogative without one — *"I wonder whether
+ * we should deploy production Friday."* — reads as an assertion to any string
+ * check, and inventing a grammar to catch it would be the guess this file
+ * refuses to make everywhere else. That input **auto-accepts**, and this is
+ * stated as a disposition rather than as a residue, because r4 was failed for
+ * writing a limit down and leaving the disposition wrong:
+ *
+ * By the time anything reaches here, `quoteCoversOwnText` has established that
+ * the statement is **the whole of one message, verbatim, by an identified
+ * author**. So the object this limit admits is a real sentence somebody wrote,
+ * filed under the wrong type — a mis-typed `claim` where an `open_question`
+ * belonged. That is a different class from the ones this file exists to refuse:
+ * the record does not attribute to anybody a sentence they did not write, and
+ * the recovery is the ordinary one (a person re-types it, and #5/#17's
+ * correction-rate telemetry counts it), rather than a false statement nobody can
+ * see is false.
+ *
  * What is claimed is exactly what is checked: **a sentence carrying a question
  * mark is not an assertion.**
+ *
+ * ## Which characters are question marks
+ *
+ * This round's own blind review: the first draft compared tokens against the
+ * ASCII `?` alone, and `Would we deploy production Friday？` — U+FF1F, the
+ * fullwidth form — was minted as a claim. Removing NFKC from the receipt fold
+ * was right (it made distinct hostnames compare equal) and it left this check
+ * reading one spelling of a mark that has several.
+ *
+ * The fix is NFKC **here**, and the distinction is the point: the receipt asks
+ * *are these two texts the same*, where compatibility folding destroys evidence;
+ * this asks *what kind of character is this*, which is exactly what compatibility
+ * folding answers. NFKC maps U+FF1F, U+FE56 and the ligatures U+2047–U+2049 onto
+ * `?`. `QUESTION_MARKS` then carries the ones Unicode gives no decomposition —
+ * a **closed, published inventory**, not an open-ended list of things somebody
+ * might try, which is the distinction `RETRO.md` draws between an enumeration
+ * that is safe and one that is not.
  */
+const QUESTION_MARKS = /[?؟፧⸮꘏\u{11143}]/u;
+
 export function isAssertion(text: string): boolean {
-  return !orderedTokens(text).includes('?');
+  return !QUESTION_MARKS.test(text.normalize('NFKC'));
 }

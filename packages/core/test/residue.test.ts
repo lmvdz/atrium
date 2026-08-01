@@ -9,6 +9,7 @@ import {
   Proposal as ProposalSchema,
   type ProvenanceMessage,
   type ProvenanceProblemKind,
+  RECEIPT_POLICY,
   validateProposalProvenance,
 } from '../src/index.js';
 import { ALICE, at, BOB, ROOM } from './fixtures.js';
@@ -263,6 +264,83 @@ describe('r5 — a later correction is part of the receipt', () => {
     expect(decision.rule).toBe('receipt_not_certifiable');
   });
 
+  it('refuses to certify when a later message takes something back in other words', () => {
+    // **This round's own blind cross-lineage review, on this round's own fix.**
+    // The structural test only sees a correction that reuses the sentence, and
+    // codex produced the one it does not: "Correction: the deployment is
+    // cancelled." shares not one content token with "We will deploy production
+    // Friday." (`deploy` and `deployment` are different tokens), aligns with
+    // nothing, and auto-accepted.
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: STATEMENT,
+          statement: STATEMENT,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        [
+          { id: 'msg_1', authorId: ALICE, body: STATEMENT },
+          { id: 'msg_2', authorId: ALICE, body: 'Correction: the deployment is cancelled.' },
+        ],
+      ),
+    ).toEqual(['superseded_by_later_message']);
+  });
+
+  it('does not fire on the conversational half of the concession list', () => {
+    // The marker list acceptance reads is the subset that *performs* a
+    // withdrawal. "Good point" concedes something and retracts nothing, and it
+    // appears in ordinary technical prose — referring on it would cost a person
+    // a glance for nothing.
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: STATEMENT,
+          statement: STATEMENT,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        [
+          { id: 'msg_1', authorId: ALICE, body: STATEMENT },
+          { id: 'msg_2', authorId: BOB, body: 'Good point, that lines up with the release plan.' },
+        ],
+      ),
+    ).toEqual([]);
+  });
+
+  it('refuses when the window is longer than the scan will read', () => {
+    // The audit's second find, and it was in this round's own first draft: the
+    // scan stopped at `maxLaterMessagesScanned` and returned "nothing found",
+    // defended by a comment saying a miss was the safe direction. A limit in a
+    // comment with an auto-accept under it is the exact shape r4 was failed for.
+    const many: ProvenanceMessage[] = [
+      { id: 'msg_1', authorId: ALICE, body: STATEMENT },
+      ...Array.from({ length: RECEIPT_POLICY.maxLaterMessagesScanned + 1 }, (_, i) => ({
+        id: `pad_${i}`,
+        authorId: ALICE,
+        body: `Unrelated note ${i} about the build.`,
+      })),
+      { id: 'msg_z', authorId: ALICE, body: 'Correction: we will not deploy production Friday.' },
+    ];
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: STATEMENT,
+          statement: STATEMENT,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        many,
+      ),
+    ).toEqual(['superseded_by_later_message']);
+  });
+
   it('leaves an unrelated later message alone', () => {
     expect(
       kinds(
@@ -303,6 +381,29 @@ describe('r5 — speech-act fitness', () => {
     ).toEqual(['statement_is_not_an_assertion']);
   });
 
+  it('reads every spelling of a question mark, not only the ASCII one', () => {
+    // This round's own blind cross-lineage review. Dropping NFKC from the
+    // receipt fold was right — it made distinct hostnames compare equal — and it
+    // left this check reading one spelling of a mark that has several. `？`
+    // (U+FF1F) is a distinct token, and the claim auto-accepted.
+    for (const mark of ['?', '？', '⁇', '؟']) {
+      const body = `Would we deploy production Friday${mark}`;
+      expect(
+        kinds(
+          {
+            type: 'claim',
+            provenance: ['msg_1'],
+            quote: body,
+            statement: body,
+            proposer: { kind: 'model' },
+            attributedTo: ALICE,
+          },
+          [{ id: 'msg_1', authorId: ALICE, body }],
+        ),
+      ).toContain('statement_is_not_an_assertion');
+    }
+  });
+
   it('mints the same sentence as an open question', () => {
     const messages: ProvenanceMessage[] = [
       { id: 'msg_1', authorId: ALICE, body: 'Would we deploy production Friday?' },
@@ -322,7 +423,52 @@ describe('r5 — speech-act fitness', () => {
   });
 });
 
+describe('r5 — a code span is compared byte for byte', () => {
+  it('does not collapse whitespace inside a code literal', () => {
+    // This round's own blind review, on this round's own allowlist. Every entry
+    // in it is an argument about prose, and the whitespace one was being carried
+    // into a literal: two spaces in a sentence are a line wrap, two spaces in a
+    // password are a different password.
+    expect(normalizeForReceipt('Set the password to `a  b` today.')).not.toBe(
+      normalizeForReceipt('Set the password to `a b` today.'),
+    );
+    // …and prose either side of the literal still folds.
+    expect(normalizeForReceipt('Set   the password to `a  b`   today.')).toBe(
+      normalizeForReceipt('Set the password to `a  b` today.'),
+    );
+  });
+});
+
 describe('r5 — a detected fault is not weakness', () => {
+  it('does not let deduplication destroy a discrepancy nobody has seen', () => {
+    // This round's own blind review. The referral was moved above θ_min so a
+    // detected discrepancy is never destroyed for being low-confidence — and
+    // `findDuplicate` was still upstream of it, destroying the same discrepancy
+    // for a different reason.
+    const messages: ProvenanceMessage[] = [
+      { id: 'msg_1', authorId: BOB, body: 'Bob will not deploy production Friday.' },
+    ];
+    const staged = modelProposal({
+      type: 'claim',
+      payload: { statement: 'Bob will deploy production Friday.', claimant: BOB },
+      quote: 'Bob will not deploy production Friday.',
+    });
+    const withoutRoom = decideAcceptance(staged, { messages });
+    const withRoom = decideAcceptance(staged, {
+      messages,
+      acceptedObjects: [
+        {
+          objectId: 'obj_old',
+          type: 'claim',
+          text: 'Bob will deploy production Friday.',
+          messageIds: ['msg_1'],
+        },
+      ],
+    });
+    expect(withoutRoom.rule).toBe('receipt_not_certifiable');
+    expect(withRoom.rule).toBe('receipt_not_certifiable');
+  });
+
   it('refers an inverted receipt that sits below theta_min', () => {
     const messages: ProvenanceMessage[] = [
       { id: 'msg_1', authorId: BOB, body: 'Bob will not deploy production Friday.' },

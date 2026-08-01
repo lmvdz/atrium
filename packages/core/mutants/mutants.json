@@ -382,8 +382,8 @@
       "id": "one_concession_marker_deleted",
       "why": "A table driven from a constant cannot notice a row that stopped existing; the by-value pin must.",
       "file": "src/escalation.ts",
-      "find": "  'i stand corrected',\n",
-      "replace": "",
+      "find": "  'i stand corrected',\n  'my mistake',\n",
+      "replace": "  'my mistake',\n",
       "catches": ["is exactly this list"]
     },
     {
@@ -717,7 +717,10 @@
       "file": "src/escalation.ts",
       "find": "    if (fromModel && cited.length > 0) {\n      const revisited = laterRevision(",
       "replace": "    if (false && cited.length > 0) {\n      const revisited = laterRevision(",
-      "catches": ["refuses to certify a sentence a later message in the window corrects"]
+      "catches": [
+        "refuses to certify a sentence a later message in the window corrects",
+        "refuses to certify when a later message takes something back in other words"
+      ]
     },
     {
       "id": "speech_act_unchecked",
@@ -790,6 +793,38 @@
       "find": "      const refusal = acceptanceReceiptRefusal({",
       "replace": "      const floorFirst = MODEL_ACCEPTANCE_FLOOR[object.type];\n      if (proposal.proposal.confidence < floorFirst) {\n        fail(\n          state,\n          event.id,\n          confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),\n        );\n        return false;\n      }\n      const refusal = acceptanceReceiptRefusal({",
       "catches": ["reports the receipt fault rather than the confidence, when both hold"]
+    },
+    {
+      "id": "later_correction_cap_fails_open",
+      "why": "Makes the later-correction scan return 'nothing found' when the window is longer than it will read, instead of refusing. This round's own first draft did exactly that and defended it in a comment — a limit written down with an auto-accept under it, which is the shape the whole round exists to delete.",
+      "file": "src/escalation.ts",
+      "find": "  if (later.length > policy.maxLaterMessagesScanned) return 'unscanned';",
+      "replace": "  if (later.length > policy.maxLaterMessagesScanned) return null;",
+      "catches": ["refuses when the window is longer than the scan will read"]
+    },
+    {
+      "id": "question_mark_ascii_only",
+      "why": "Reads only the ASCII question mark, so `Would we deploy production Friday？` (U+FF1F) is minted as a claim. The receipt fold stopped applying NFKC in r5 for a good reason; this check is a classification question, not a comparison, and needs it.",
+      "file": "src/matching.ts",
+      "find": "  return !QUESTION_MARKS.test(text.normalize('NFKC'));",
+      "replace": "  return !QUESTION_MARKS.test(text);",
+      "catches": ["reads every spelling of a question mark, not only the ASCII one"]
+    },
+    {
+      "id": "code_span_whitespace_collapsed",
+      "why": "Carries the whitespace-collapse rule into a code literal, so `` `a  b` `` and `` `a b` `` compare equal. Two spaces in prose are a line wrap; two spaces in a password are a different password.",
+      "file": "src/matching.ts",
+      "find": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').trim();",
+      "replace": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').replace(/\\s+/g, ' ').trim();",
+      "catches": ["does not collapse whitespace inside a code literal"]
+    },
+    {
+      "id": "dedup_destroys_a_referral",
+      "why": "Puts the duplicate discard back above the referral, where it deletes a detected receipt discrepancy the room has never been shown — the same destruction the theta_min ordering was fixed for, through a different door.",
+      "file": "src/acceptance.ts",
+      "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "replace": "  const dupFirst = context.acceptedObjects\n    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)\n    : null;\n  if (dupFirst) {\n    return {\n      ...base,\n      verdict: 'discard',\n      visibility: 'none',\n      rule: 'duplicate_of_accepted',\n      duplicateOf: dupFirst.objectId,\n      reason: `the room already accepted \"${dupFirst.objectId}\"`,\n    };\n  }\n  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "catches": ["does not let deduplication destroy a discrepancy nobody has seen"]
     }
   ]
 }

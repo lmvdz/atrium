@@ -447,51 +447,6 @@ export function decideAcceptance(
       reason: `demoted below θ_min: ${rejecting.map((problem) => problem.detail).join('; ')}`,
     };
   }
-
-  // ── Already in the room ──────────────────────────────────────────────────
-  const duplicate = context.acceptedObjects
-    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)
-    : null;
-  if (duplicate) {
-    return {
-      ...base,
-      verdict: 'discard',
-      visibility: 'none',
-      rule: 'duplicate_of_accepted',
-      duplicateOf: duplicate.objectId,
-      reason: `the room already accepted "${duplicate.objectId}" from the same messages, saying the same thing`,
-    };
-  }
-
-  // ── A person staged this ─────────────────────────────────────────────────
-  //
-  // θ does not apply. #4's thresholds calibrate *extraction* confidence, and a
-  // person's self-report is not that number — it is not a number at all. A
-  // human-staged reading goes to the room to be judged, which is what staging
-  // means. (A person writing a fact outright uses `answerBinding` or direct
-  // acceptance; they do not need a proposal.)
-  if (proposal.proposer.kind === 'human') {
-    // …with one exception that is not about θ at all: a person naming *somebody
-    // else* on a commitment is still somebody else's sentence, and #4's rule
-    // does not care whether a machine or a colleague wrote it. The named owner
-    // is the one asked, and that is what the attention panel reads to decide
-    // whose confirm this is.
-    const staged = proposal.proposer.userId;
-    const namesAnother =
-      proposal.type === 'commitment' && attributedTo !== null && attributedTo !== staged;
-    return {
-      ...base,
-      verdict: 'pending',
-      visibility: 'needs_you',
-      attribution: proposal.type === 'commitment' ? (namesAnother ? 'third_party' : 'self') : null,
-      awaitingConfirmFrom: namesAnother ? attributedTo : null,
-      rule: 'human_proposer',
-      reason: namesAnother
-        ? `staged by user "${staged}", who named "${attributedTo}" as owner — it waits for "${attributedTo}" to confirm; nobody gets committed by someone else's sentence (#4), whoever wrote it`
-        : `staged by user "${staged}" — a person's reading goes to the room to be accepted, not through θ`,
-    };
-  }
-
   const attribution =
     proposal.type === 'commitment'
       ? commitmentAttribution(attributedTo ?? '', proposal.provenance, messages, proposal.quote)
@@ -529,6 +484,66 @@ export function decideAcceptance(
       visibility: 'quiet',
       rule: 'receipt_not_certifiable',
       reason: `not accepted on a machine's word, and not thrown away: ${referring.map((problem) => problem.detail).join('; ')}`,
+    };
+  }
+
+  // ── Already in the room ──────────────────────────────────────────────────
+  //
+  // **Below the referral since r5, and this round's own blind review found it.**
+  // The referral was moved above θ_min because a detected discrepancy must not be
+  // destroyed for being low-confidence — and `findDuplicate` was still upstream
+  // of it, destroying the same discrepancy for a different reason. The input:
+  // quote "Alice will not deploy production Friday", statement "Alice will deploy
+  // production Friday", against a room that has already accepted the affirmative
+  // from the same message. Without `acceptedObjects` the verdict was
+  // `receipt_not_certifiable`; with it, `duplicate_of_accepted` — the dropped
+  // `not` deleted rather than shown, by the check whose whole job is to suppress
+  // things nobody needs to see.
+  //
+  // A duplicate is a reading the room already has. A referral is a reading the
+  // room has *never* been shown, carrying a discrepancy it has never seen, and
+  // the two are not the same thing however similar the sentences look.
+  const duplicate = context.acceptedObjects
+    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)
+    : null;
+  if (duplicate) {
+    return {
+      ...base,
+      attribution,
+      verdict: 'discard',
+      visibility: 'none',
+      rule: 'duplicate_of_accepted',
+      duplicateOf: duplicate.objectId,
+      reason: `the room already accepted "${duplicate.objectId}" from the same messages, saying the same thing`,
+    };
+  }
+
+  // ── A person staged this ─────────────────────────────────────────────────
+  //
+  // θ does not apply. #4's thresholds calibrate *extraction* confidence, and a
+  // person's self-report is not that number — it is not a number at all. A
+  // human-staged reading goes to the room to be judged, which is what staging
+  // means. (A person writing a fact outright uses `answerBinding` or direct
+  // acceptance; they do not need a proposal.)
+  if (proposal.proposer.kind === 'human') {
+    // …with one exception that is not about θ at all: a person naming *somebody
+    // else* on a commitment is still somebody else's sentence, and #4's rule
+    // does not care whether a machine or a colleague wrote it. The named owner
+    // is the one asked, and that is what the attention panel reads to decide
+    // whose confirm this is.
+    const staged = proposal.proposer.userId;
+    const namesAnother =
+      proposal.type === 'commitment' && attributedTo !== null && attributedTo !== staged;
+    return {
+      ...base,
+      verdict: 'pending',
+      visibility: 'needs_you',
+      attribution: proposal.type === 'commitment' ? (namesAnother ? 'third_party' : 'self') : null,
+      awaitingConfirmFrom: namesAnother ? attributedTo : null,
+      rule: 'human_proposer',
+      reason: namesAnother
+        ? `staged by user "${staged}", who named "${attributedTo}" as owner — it waits for "${attributedTo}" to confirm; nobody gets committed by someone else's sentence (#4), whoever wrote it`
+        : `staged by user "${staged}" — a person's reading goes to the room to be accepted, not through θ`,
     };
   }
 
