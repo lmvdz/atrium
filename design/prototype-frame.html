@@ -148,7 +148,14 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
  * MOTION — three keyframes, per design/CONVENTIONS.md.
  * JS-driven scrolling consults the same media query (see reduceMotion() ).
  * ======================================================================== */
-@keyframes gl-blink { 0%,49% { opacity: 1 } 50%,100% { opacity: 0 } }
+/* gl-blink is NOT DEFINED HERE, deliberately. CONVENTIONS assigns it to live and
+   recording indicators only, and Atrium v1 has no live surface — the call strip
+   arrives in Phase 4 alongside the `--live` token family that tokens.css already
+   keeps under a marked, unconsumed section. Round 6 defined the keyframe, used
+   it nowhere, and drove the one dot on the page off gl-pulse in verified green,
+   so the file carried a rule it did not follow and a colour it had not earned.
+   The rule is followed by having nothing to break: an animation this file does
+   not use is an animation this file does not define. */
 @keyframes gl-pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
 @keyframes gl-rise  { from { opacity: 0; transform: translateY(2px) } to { opacity: 1; transform: none } }
 .rise  { animation: gl-rise .2s ease both; }
@@ -454,8 +461,45 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 
 /* --- feed ---------------------------------------------------------------- */
 .feed { position: relative; overflow-y: auto; padding: 8px 0 14px; min-height: 0; }
-.feed.filtered .mrow:not(.hit) { opacity: .3; }
-.feed.filtered .mrow:not(.hit) .acts { display: none; }
+
+/* --- THE FILTER HIGHLIGHTS; IT DOES NOT DIM (round 6 D2) ------------------
+ * design/CONVENTIONS.md § "De-emphasis must stay readable": dimming may not
+ * drop any text below AA at the size it renders. Round 6 put `opacity: .3` on
+ * every non-matching row and measured 1.48–1.75:1 light, 1.12–2.14:1 dark —
+ * a third of the floor this file states, and below the contrast it already
+ * rejects `--tx4` for. Fifty-seven text elements, every one of them failing.
+ *
+ * THERE IS NO OPACITY THAT FIXES IT. A row's smallest text is `--tx2` at 10px,
+ * which sits close to the AA floor at full strength, so any alpha below 1 puts
+ * it under; and `--tx0` body text would need α ≥ .84 to clear 4.5:1, which is
+ * not a dim, it is a rounding error. The affordance had to change shape, not
+ * value. The rule's other branch — hide the row and say so — throws away the
+ * thing this feed is for: seeing a match IN ITS CONTEXT, with the conversation
+ * around it still legible.
+ *
+ * So the filter highlights instead. A match gets a band, a left rule and
+ * full-strength body text; every other row keeps exactly the legibility it had
+ * with no filter on. Nothing on this page is less readable than it was, and the
+ * divider says out loud that the rest of the room is neither hidden nor dimmed.
+ * The band is NEUTRAL, not amber: amber means "this room owes you", and the
+ * routine filter's matches owe nobody anything.
+ *
+ * AND THE BAND BRIGHTENS, in both themes — `--bg3` on paper, `--bg5` on
+ * near-black. It is an alias over the existing ramp, not a new colour. This is
+ * not a cosmetic preference: highlighting by DARKENING the light theme took
+ * `--amb2` on `◆` from 4.84:1 to 3.99:1 — measured, mid-round — and a fix for a
+ * contrast defect that introduces a contrast defect is not a fix. Every text
+ * token on a highlighted row is now on more contrast than it had unfiltered,
+ * not less, which is the only version of "emphasis" that cannot fail this rule.
+ * ---------------------------------------------------------------------- */
+:root { --hitbg: var(--bg3); }
+html.atr-dark { --hitbg: var(--bg5); }
+.feed.filtered .mrow.hit { background: var(--hitbg); box-shadow: inset 3px 0 0 var(--line3); }
+/* hover feedback on a match moves the RULE, never the background — the band's
+   luminance is load-bearing for every ratio measured on the row */
+.feed.filtered .mrow.hit:hover { background: var(--hitbg); box-shadow: inset 3px 0 0 var(--tx2); }
+.feed.filtered .mrow.hit .m { color: var(--tx0); }
+.feed.filtered .mrow.hit .t, .feed.filtered .mrow.hit .a { color: var(--tx1); }
 
 .mrow {
   display: grid;
@@ -467,6 +511,9 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 }
 .mrow:hover { background: var(--bg3); }
 .mrow.tgt { background: var(--ambbg5); box-shadow: inset 2px 0 0 var(--amb2); }
+/* a jump target keeps its amber even when it is also a filter match — "you were
+   sent here" outranks "this matches", and the two must not cancel out */
+.feed.filtered .mrow.hit.tgt { background: var(--ambbg5); box-shadow: inset 2px 0 0 var(--amb2); }
 .mrow .t { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); text-align: right; padding-top: 2px; }
 .mrow .g { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx2); text-align: center; padding-top: 1px; }
 .mrow .a {
@@ -571,6 +618,9 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .cnt[disabled] { cursor: default; border-style: dashed; border-color: var(--line); background: transparent; }
 .cnt[disabled]:hover { border-color: var(--line); color: var(--tx2); }
 .syl .own { color: var(--blu2); }
+/* what the active filter is doing to the rows it did not match — same register
+   as the rest of the when-line, because it is another counted fact about it */
+.syl .fnote { color: var(--tx2); }
 /* BRIEF concept 1: marking a group seen FADES IT TO MUTED. It does not vanish,
    it keeps its window and its counts, and the unmark link sits on the same line
    that reports the mark. */
@@ -659,7 +709,13 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }
-.lens-head .sub .live { width: 5px; height: 5px; border-radius: 50%; background: var(--grn2); animation: gl-pulse 1.6s infinite; }
+/* THIS DOT IS NOT A LIVE INDICATOR AND IT IS NOT VERIFIED (round 6 minor).
+   It marks that the pane beside it is continuously re-derived from the record —
+   an in-progress state, which is what gl-pulse is for. Round 6 painted it
+   `--grn2`, and green in this system means one thing: checked by something other
+   than the claimant. A green dot in the CURRENT STATE header reads as a verdict
+   on the state. It is neutral now, and named for what it does. */
+.lens-head .sub .derived { width: 5px; height: 5px; border-radius: 50%; background: var(--tx2); animation: gl-pulse 1.6s infinite; }
 /* sub-counts that do not sum, reconciled in prose right under the counts */
 .lens-head .sums {
   margin-top: 3px; padding-left: 11px;
@@ -690,6 +746,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 }
 .st.active { border-color: var(--grnbd); background: var(--grnbg); color: var(--tx1); }
 .st.blocked { border-color: var(--ambbd); background: var(--ambbg); color: var(--amb2); }
+.st.failed { border-color: var(--redbd); background: var(--redbg); color: var(--red3); }
 
 .grp { padding: 0 14px 4px; }
 .grp .glbl { display: flex; align-items: center; gap: 7px; padding: 7px 0 4px; }
@@ -797,6 +854,10 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
    SYSTEM: mono, muted, no quotation marks — `.was` and `.fact`.
    HUMAN:  serif-italic inside <q>, attributed, and only ever real words. */
 .corr .was { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
+/* the "nothing changed" marker stands where the arrow would be — same weight,
+   same register, so the two shapes of entry read as siblings and not as one
+   being a degraded version of the other */
+.corr .same { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 .corr .fact {
   margin-top: 3px; font-family: "IBM Plex Mono", monospace; font-size: 10px;
   color: var(--tx2); line-height: 1.4;
@@ -870,7 +931,10 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 <div class="app">
 
   <!-- ===================== WORKSPACE STRIP ===================== -->
-  <aside class="ws">
+  <!-- a complementary landmark with no accessible name is an unlabelled region
+       in every screen-reader landmark list — the one strip on this page that
+       said nothing about itself (round 6 minor). -->
+  <aside class="ws" aria-label="Workspace and account">
     <!-- one workspace, because switching workspaces is not wired. Round 1 shipped
          two decoy tiles and a "+"; they are gone rather than left inert. -->
     <div class="ws-tile" title="Atrium — this workspace">AT</div>
@@ -926,7 +990,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
     </header>
 
     <!-- ---------- attention pin ---------- -->
-    <section class="pin" id="pin" aria-label="Needs you">
+    <section class="pin" id="pin" aria-label="Needs you" tabindex="-1">
       <div class="pin-head">
         <span class="g" aria-hidden="true">◆</span>
         <span class="lbl">NEEDS YOU</span>
@@ -951,7 +1015,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
          Still not role="log": the feed re-renders wholesale from state, so an
          implicit live region would re-announce the room on every action. The
          toast at the bottom of the document is the aria-live channel. -->
-    <section class="feed scroll" id="feed" aria-label="Conversation"></section>
+    <section class="feed scroll" id="feed" aria-label="Conversation" tabindex="-1"></section>
 
     <!-- ---------- composer ---------- -->
     <div class="composer" id="composer">
@@ -975,7 +1039,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
   </main>
 
   <!-- ===================== RIGHT — CURRENT STATE LENS ===================== -->
-  <aside class="lens" id="lens" aria-label="Current state">
+  <aside class="lens" id="lens" aria-label="Current state" tabindex="-1">
     <div class="lens-head">
       <div class="top">
         <span class="lbl">CURRENT STATE</span>
@@ -983,7 +1047,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
         <span class="lbl" id="lensRoom"></span>
       </div>
       <div class="sub">
-        <span class="live" aria-hidden="true"></span>
+        <span class="derived" aria-hidden="true"></span>
         <span id="lensSummary"></span>
       </div>
       <!-- the sub-counts reconciled in prose, where they are shown -->
@@ -1100,6 +1164,19 @@ function isClaim(o) { return !!o && UNSETTLED.includes(o.verification); }
 function needsYou(o) { return o.owedTo === S.me && o.verification !== "accepted" && o.verification !== "verified"; }
 function gclass(g) { return GLYPH_CLASS[g] || ""; }
 
+/* --- THE RECEIPT HEADER CHIP DERIVES FROM THE GLYPH (round 6 minor) --------
+ * Round 6 asked one question — "is it ✓?" — and gave every other state the
+ * amber chip through a class literally named `.blocked`, so an unverified claim
+ * that owes nobody anything wore "needs you". CONVENTIONS makes `~` NEUTRAL and
+ * `·` neutral; amber is `◆` and `?`, red is `■` and `✗`. Every other surface in
+ * this file already honours that table through gclass(); the receipt header was
+ * the one place that re-derived it by hand and got it wrong. Same table, one
+ * source: the chip is a restatement of the glyph beside it, never a second
+ * opinion about it.
+ * ---------------------------------------------------------------------- */
+const STATE_CHIP = { "✓": "active", "◆": "blocked", "?": "blocked", "■": "failed", "✗": "failed", "~": "", "·": "" };
+function stateChip(g) { return STATE_CHIP[g] || ""; }
+
 /* history entries carry a semantic kind; their glyph derives from it too */
 const HIST_GLYPH = { claim: "~", verified: "✓", accepted: "✓", gate: "◆", question: "?", routine: "·", failed: "✗" };
 function histGlyph(k) { return HIST_GLYPH[k] || "·"; }
@@ -1206,6 +1283,9 @@ S.rooms["users-migration"] = {
       corrections: [
         { hd: "RETYPED · CLAIM → DECISION", who: "lars", tm: "29 Jul 11:22",
           was: "Claim (priya's line, read as thinking out loud)", after: "Decision",
+          /* every entry that asserts an amendment carries the two values it says
+             differ, seeded ones included — checkCorrectionInvariant() proves it */
+          change: { of: "reading", from: "Claim", to: "Decision" },
           quote: { text: "This was an actual call, not priya thinking out loud.", by: "lars", src: "typed", seeded: true } }
       ],
       note: "Correction chain is append-only. The original interpretation is retained; nothing here was erased."
@@ -1664,6 +1744,21 @@ function fieldOr(v, fallback) {
   return s === "" ? fallback : v;
 }
 
+/* --- TWO SENTENCES ARE THE SAME SENTENCE (round 6 D1) ---------------------
+ * The record compares statements in several places — an answer against the
+ * proposal it replaces, a correction's before against its after — and every one
+ * of them wants the same question answered the same way. Whitespace is not
+ * content, so it is normalised; nothing else is. Case and punctuation are part
+ * of what somebody wrote and are never folded away.
+ * ---------------------------------------------------------------------- */
+function normText(v) { return String(voicedText(v) == null ? "" : voicedText(v)).replace(/\s+/g, " ").trim(); }
+function sameText(a, b) { return normText(a) === normText(b); }
+
+/* an enum value is snake_case in the data and prose on screen. Round 6 applied
+   the prettifier to one side of an arrow only and rendered
+   `SELF-REPORTED → SELF_REPORTED`; one function means both sides always agree. */
+function enumLabel(v) { return String(fieldOr(v, "state not recorded")).toUpperCase().replace(/_/g, "-"); }
+
 /* the four classes partition the group: they add up to the total, by construction */
 function msgClass(r, m) {
   if (m.routine) return "routine";
@@ -1979,6 +2074,80 @@ function checkRecordTextInvariant() {
   });
 }
 
+/* --- THE AMENDMENT INVARIANTS (round 6 D1) --------------------------------
+ *
+ * Round 6's blocking defect was a false sentence about the record: the receipt
+ * rendered two byte-identical statements either side of an arrow and said the
+ * second was "not what was proposed". Nothing on the page could see it. It was
+ * not a quotation, so the quotation rule was silent; every field was populated,
+ * so the record-text rule was silent; every box had a real height and every
+ * control hit-tested to itself, so the geometry rule was silent. It was
+ * ROUND 4'S D7 CLASS arriving through the fallback ROUND 4 ITSELF ADDED — a fix
+ * opening a path around an earlier fix's guard.
+ *
+ * That is the reason there are two checks here and not one line of code. The
+ * one-line fix (`agrees: true`) is a value; these are the relationships that
+ * value has to satisfy, asserted where a future edit cannot route around them:
+ *
+ *   1. AN OPTION THAT IS THE PROPOSAL AGREES WITH IT. If an option's statement
+ *      is the proposal's own sentence, `agrees` must be true. This is checked
+ *      against the strings, not against the flag, so minting an option whose
+ *      statement is `o.text` and forgetting the flag is caught at the source —
+ *      before anyone clicks it, on the render that puts it on screen.
+ *
+ *   2. A CORRECTION THAT CLAIMS A CHANGE HAS ONE. An entry in a correction
+ *      chain either carries `change: {of, from, to}` — in which case `from` and
+ *      `to` must actually differ — or it carries none, in which case it may not
+ *      be worded as an amendment. "Amended" and "re-affirmed" are different
+ *      facts about a record and the chain has to be able to tell them apart.
+ *
+ * Both walk STATE, not the DOM: a correction chain is wrong the moment it is
+ * written, whether or not its receipt happens to be open.
+ * ---------------------------------------------------------------------- */
+function checkAnswerIdentityInvariant() {
+  if (!DEV) return;
+  eachObject(o => {
+    const proposal = o.proposedText || o.text;
+    (o.options || []).forEach(opt => {
+      if (!sameText(opt.statement, proposal)) return;
+      if (opt.agrees === true) return;
+      console.error("[atrium invariant] an option whose statement IS the proposal is not marked as agreeing with it — " +
+        "answering with it would record a contradiction between two identical sentences:", o.id, opt.label, opt);
+    });
+  });
+}
+
+function checkCorrectionInvariant() {
+  if (!DEV) return;
+  eachObject(o => {
+    (o.corrections || []).forEach(c => {
+      if (c.change) {
+        if (sameText(c.change.from, c.change.to))
+          console.error("[atrium invariant] a correction entry asserts the " + c.change.of +
+            " changed, but its before and after are the same text — the record is claiming an amendment it never made:",
+            o.id, c.hd, normText(c.change.from));
+        return;
+      }
+      /* No `change` means the entry asserts nothing was amended, so it may not
+         be PUNCTUATED as though something was. The arrow is the claim — it is
+         what the header and the rendered body both use to say "this became
+         that" — so an entry with no before/after may not carry one. Syntax, not
+         a word list: a keyword sniffer cannot tell "amended" from "nothing was
+         amended", and correctionHtml() drops the arrow for these entries too,
+         so the check and the render are asserting the same thing. */
+      if (/→/.test(c.hd))
+        console.error("[atrium invariant] a correction entry's header claims a transition but the entry records no " +
+          "before and after that differ — the arrow is asserting a change nothing proves:", o.id, c.hd);
+    });
+  });
+}
+
+/* every object in every loaded room — the invariants above are about the record,
+   and the record is not only the room you are looking at */
+function eachObject(fn) {
+  Object.keys(S.rooms).forEach(k => (S.rooms[k].objects || []).forEach(o => fn(o, S.rooms[k])));
+}
+
 /* --- THE LAYOUT INVARIANT (round 4 D1) ------------------------------------
  * Round 4's blocking defect was invisible to every other check on this page:
  * the state was right, the strings were right, the DOM was right, and the
@@ -2153,8 +2322,16 @@ function revealInPane(el, pad) {
 /* every prompt currently on the page. There is at most one per pane, and each
    one is recreated by the render that keeps it open, so this is idempotent —
    once it is clear of the sticky band, `delta` is 0 and nothing moves. */
+/* Anything the page has just put in front of someone has to be on screen, and
+   there are exactly two ways it can do that: open a prompt, or move focus.
+   scrollEscapable() already refuses to whitelist either — so both have to be
+   revealed, or the guard fires on a thing the page did to itself. Round 6 had
+   only the first half, because focus after a write had no spec and so nothing
+   was ever deliberately focused. */
 function revealOpenPrompts() {
   document.querySelectorAll("[data-prompt]").forEach(el => { revealInPane(el); });
+  const a = document.activeElement;
+  if (a && a !== document.body && a.nodeType === 1 && !a.closest("[data-prompt]")) revealInPane(a);
 }
 /* is the thing covering `el` an overlay a scroll would move it out from under?
    True only when the blocker is sticky/fixed AND is not an ancestor of the
@@ -2375,7 +2552,10 @@ function renderPin() {
   $("pinCount").textContent = !items.length
     ? "nothing owed — this is the whole list"
     : (f && f.k === "need")
-      ? `${items.length} item${items.length > 1 ? "s" : ""} · ${rows} linked row${rows === 1 ? "" : "s"} highlighted below`
+      /* "highlighted" is now literally what happens — round 6 said this while
+         dropping every other row to 1.5:1, so the word was doing the work of
+         hiding a legibility failure. It says what the other rows get, too. */
+      ? `${items.length} item${items.length > 1 ? "s" : ""} · ${rows} linked row${rows === 1 ? "" : "s"} highlighted below · nothing else dimmed`
       : `${items.length} item${items.length > 1 ? "s" : ""} · hardest first`;
   $("pinFold").setAttribute("aria-pressed", String(S.ui.pinFolded));
   $("pinFold").textContent = S.ui.pinFolded ? "UNFOLD" : "FOLD";
@@ -2698,6 +2878,21 @@ function focusReopen() { const i = $("rinput"); if (i) i.focus({ preventScroll: 
  * A chip counts MESSAGES in its own group; the pin above counts the ITEMS those
  * messages are about. The when-line says so, and a chip that counts nothing is
  * disabled rather than a clickable no-op. */
+/* WHAT THE FILTER DOES TO THE ROWS IT DID NOT MATCH, said on screen and counted
+   rather than asserted (round 6 D2). CONVENTIONS: "If the affordance's own copy
+   claims a dimmed row is still checkable, the measurement has to back it." This
+   copy claims the opposite of dimming, and the CSS is what backs it. */
+function filterNote(scope) {
+  const f = S.ui.feedFilter;
+  if (!f || f.scope !== scope) return "";
+  const r = room();
+  const hits = groupMessages(r, scope).filter(m => msgClass(r, m) === f.k).length;
+  const rest = groupMessages(r, scope).length - hits;
+  return `<span aria-hidden="true">·</span><span class="fnote">${FILTER_LABEL[f.k].toLowerCase()} filter on · ` +
+         `${hits} row${hits === 1 ? "" : "s"} highlighted · the other ${rest} ` +
+         `${rest === 1 ? "row is" : "rows are"} neither hidden nor dimmed — they read exactly as they did unfiltered</span>`;
+}
+
 function sylDivider(r, mode) {
   const read = mode !== "seen" && groupRead(r, mode === "absence" ? "absence" : "return");
   const el = document.createElement("div");
@@ -2733,7 +2928,7 @@ function sylDivider(r, mode) {
   const when = mode === "absence"
     ? `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages · frozen at return</span>
        <span aria-hidden="true">·</span>
-       <span>chips count rows · NEEDS YOU counts the items behind them</span>
+       <span>chips count rows · NEEDS YOU counts the items behind them</span>` + filterNote(scope) + `
        <span aria-hidden="true">·</span>` +
       (read
         ? `<span class="marked">marked seen ${esc(r.markedAt || "")} · the group stays here, muted</span>
@@ -2742,6 +2937,7 @@ function sylDivider(r, mode) {
         : `<button class="mark" id="markSeen">mark this group seen</button>`)
     : `<span>${c.total} ${read ? "message" + (c.total === 1 ? "" : "s") + " here, all read" : "unseen since " + esc(cursorPastAbsence ? "you marked this seen" : r.away.to)}</span>` +
       (own ? `<span aria-hidden="true">·</span><span class="own">${own} row${own === 1 ? " here is yours" : "s here are yours"} — your own activity is never counted back to you as unseen</span>` : "") +
+      filterNote(scope) +
       (c.total
         ? read
           ? `<span aria-hidden="true">·</span><span class="marked">marked seen ${esc(r.markedAt || "")}</span>
@@ -2914,6 +3110,9 @@ function lensItem(o) {
   const g = glyphOf(o);
   const b = document.createElement("button");
   b.className = "oitem " + gclass(g) + (o.fresh ? " rise" : "");
+  /* the object's own item in the lens, addressable by the object it is about —
+     the last resort in the focus chain, and stable across a rebuild */
+  b.dataset.lensObj = o.id;
   const facts = (o.facts || []).map(f =>
     `<span class="${/overdue|not accepted|open |blocked|reopened/i.test(voicedText(f)) ? "warn" : ""}">${voiced(f)}</span>`)
     .join('<span aria-hidden="true">·</span>');
@@ -2982,8 +3181,16 @@ function correctionHtml(c) {
          <span class="src">— ${esc(c.quote.by)}, typed here${c.quote.seeded ? " on the record" : ""}</span></div>`
     : "";
   const fact = c.fact ? `<div class="fact"><span aria-hidden="true">·</span> ${voiced(c.fact)}</div>` : "";
+  /* THE ARROW IS A CLAIM (round 6 D1). Round 6 rendered `was → now: after` for
+     every entry unconditionally, so an entry recording that nothing changed
+     still asserted a swap — and did it with two byte-identical sentences either
+     side of the arrow. An entry that carries no `change` gets no arrow, and
+     checkCorrectionInvariant() holds every entry to the same distinction. */
+  const body = c.change
+    ? `<span class="was">${voiced(c.was)}</span> → now: ${voiced(c.after)}`
+    : `<span class="was">${voiced(c.was)}</span> <span class="same">— unchanged ·</span> ${voiced(c.after)}`;
   return `<div class="corr"><div class="hd">${esc(c.hd)} · ${esc(c.who)} · ${esc(c.tm)}</div>
-     <div class="bd"><span class="was">${voiced(c.was)}</span> → now: ${voiced(c.after)}${link}</div>
+     <div class="bd">${body}${link}</div>
      ${fact}${quote}</div>`;
 }
 /* a quotation's provenance token: "typed" for text in the human-speech register,
@@ -3043,7 +3250,7 @@ function renderReceipt(o) {
        <button class="rc-back" id="rcBack">← BACK TO CURRENT STATE</button>
        <div class="rc-ttl ${gclass(g)}"><span class="g" aria-hidden="true">${g}</span><span class="h ${isClaim(o) ? "claim" : ""}">${voiced(titleFrag(o))}</span></div>
        <div class="rc-state">${st.map((s, i) => i === 0
-          ? `<span class="st ${g === "✓" ? "active" : "blocked"}">${esc(s)}</span>` : `<span>${esc(s)}</span>`).join('<span aria-hidden="true">·</span>')}
+          ? `<span class="st ${stateChip(g)}">${esc(s)}</span>` : `<span>${esc(s)}</span>`).join('<span aria-hidden="true">·</span>')}
           <span aria-hidden="true">·</span><span>in ${o.objectives.length} objective${o.objectives.length > 1 ? "s" : ""}</span></div>
      </div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">WHAT HAPPENED</span><span class="rule"></span></div>${happened}</div>
@@ -3175,7 +3382,15 @@ function answerDecision(objectId, answer, provenanceNote) {
      A typed answer has no option identity to compare, so there the text
      comparison is the only question there is — and it is the right one. */
   const proposal = o.proposedText || o.text;
-  const contradicts = typed ? statement !== proposal : !answer.agrees;
+  const contradicts = typed ? !sameText(statement, proposal) : !answer.agrees;
+  /* AND SEPARATELY: DID THE SENTENCE ON THE RECORD ACTUALLY CHANGE? (round 6 D1)
+     "Departs from the proposal" is a fact about which option was chosen.
+     "The record now says something else" is a fact about two strings. Round 6
+     had only the first and rendered the second from it, so re-affirming a
+     decision printed `X → now: X — not what was proposed`. They are computed
+     apart now, and the correction chain reports the second one. */
+  const replaced = prior ? priorText : proposal;
+  const changed = !sameText(statement, replaced);
 
   o.proposedText = proposal;
   o.text = statement;                       // the decision statement is the answer, verbatim
@@ -3210,17 +3425,27 @@ function answerDecision(objectId, answer, provenanceNote) {
   /* an answer that is not the proposal is a correction to the record, and the
      correction chain is where corrections live. Round 2 recorded the
      contradiction in the note and left the chain empty. */
-  if (prior || contradicts) {
+  if (prior || contradicts || !changed) {
     const c = {
-      hd: prior ? "RE-ANSWERED · PRIOR ANSWER SUPERSEDED" : "ANSWERED · PROPOSAL → DECISION",
+      hd: changed
+        ? (prior ? "RE-ANSWERED · PRIOR ANSWER SUPERSEDED" : "ANSWERED · PROPOSAL → DECISION")
+        : (prior ? "RE-ANSWERED · THE SAME SENTENCE, RECORDED AGAIN" : "RE-AFFIRMED · THE PRIOR CALL, UNCHANGED"),
       who: S.me, tm: t,
       /* system voice for the before/after; the human's sentence is quoted only
          when it IS the human's sentence — a prior answer they typed. */
       was: prior ? "Answer of " + prior.t : "Proposal: " + proposal,
-      after: [typed ? human(statement) : statement,
-              contradicts && !prior ? " — not what was proposed; your answer is the decision" : ""],
-      fact: (prior ? `re-answered by ${S.me} at ${t}` : `answered by ${S.me} at ${t}`) +
-            (typed ? " · typed" : ` · chosen: ${answer.label} — the page wrote the sentence, ${S.me} chose it`),
+      after: changed
+        ? [typed ? human(statement) : statement,
+           contradicts && !prior ? " — not what was proposed; your answer is the decision" : ""]
+        : "recorded again, verbatim — nothing about the statement changed",
+      /* THE ENTRY CARRIES WHAT IT CLAIMS DIFFERS, and carries it only when it
+         claims something differs. checkCorrectionInvariant() holds every entry
+         to this: a chain that asserts an amendment must have one. */
+      change: changed ? { of: "statement", from: replaced, to: statement } : null,
+      fact: (prior ? (changed ? `re-answered by ${S.me} at ${t}` : `re-recorded by ${S.me} at ${t}`)
+                   : (changed ? `answered by ${S.me} at ${t}` : `re-affirmed by ${S.me} at ${t}`)) +
+            (typed ? " · typed" : ` · chosen: ${answer.label} — the page wrote the sentence, ${S.me} chose it`) +
+            (changed ? "" : " · the statement on the record is unchanged, so nothing was amended"),
       msg: prior ? prior.id : (o.sourceMsg || null),
       room: prior ? null : sourceRoomOf(o),
       link: prior ? "the superseded answer is still in the room →" : "the proposal it replaced is still in the room →"
@@ -3236,7 +3461,8 @@ function answerDecision(objectId, answer, provenanceNote) {
   o.note = (typed
       ? "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. "
       : "You chose one of the statements the card offered. It is recorded verbatim as the decision, and the row that records it is in the system's voice — the page wrote that sentence, so it is not attributed to you as something you said. ") +
-           (contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
+           (changed && contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
+           (changed ? "" : "It is word for word the sentence already on the record, so nothing was amended — the chain records that it was affirmed again, not that it changed. ") +
            (prior ? "It replaces your earlier answer, which is still on the record and still in the room." : "");
 
   appendSystem(r, `${o.kind} ${o.id} · ${prior ? "re-answered" : "proposed → accepted"} · ` +
@@ -3244,14 +3470,22 @@ function answerDecision(objectId, answer, provenanceNote) {
                   ` · nothing inferred`, o);
   S.ui.bound = null; S.ui.replyTo = null; S.ui.pinOpen = null;
   $("cinput").value = "";
+  /* the record of this write, most specific first: the correction entry it just
+     added to an open receipt, then the row it appended, then the object's item
+     in the lens. FOCUS FOLLOWS THE RECORD. */
+  focusAfter(S.ui.receiptId === o.id ? ".rc-sec .corr:last-of-type .lnk" : null,
+             `[data-msg="${m.id}"] .tag`, `[data-msg="${m.id}"] button`,
+             `[data-lens-obj="${o.id}"]`);
   render();
   scrollFeedToEnd();
   /* the toast says which kind of answer it was. Round 3 told you your wording
      was recorded verbatim even when the wording was the card's, not yours. */
-  toast(prior
-    ? "re-answered · the earlier answer is now marked superseded, not deleted"
-    : typed ? "recorded as a decision · answer-bound, your wording verbatim"
-            : "recorded as a decision · the option you chose, recorded verbatim — the row is in the system's voice, not yours");
+  toast(!changed
+    ? "re-affirmed · the same sentence is on the record, recorded again — nothing was amended"
+    : prior
+      ? "re-answered · the earlier answer is now marked superseded, not deleted"
+      : typed ? "recorded as a decision · answer-bound, your wording verbatim"
+              : "recorded as a decision · the option you chose, recorded verbatim — the row is in the system's voice, not yours");
 }
 
 /* --- B2: reopen re-renders EVERYTHING, including the historical row ------
@@ -3305,6 +3539,13 @@ function reopen(objectId, reason) {
   const t = tick();
   const from = o.verification;
   const wasResolved = !!o.resolvedAt;
+  /* WHEN THE STATE BEING PRESERVED WAS ACTUALLY REACHED (round 6 minor).
+     Captured BEFORE the mutation, because `o.reopenedAt` is about to be set and
+     `o.resolvedAt` is about to be cleared. Round 6's note fell through to
+     `o.reopenedAt` and so read "the state at 09:14 is still in the
+     conversation" under a correction header dated 09:14 for the reopen itself —
+     the record timestamping a preserved state with the moment it was undone. */
+  const settledAt = o.acceptedAt || o.verifiedAt || o.answeredAt || o.resolvedAt || null;
   o.verification = REOPEN_TO[o.kind] || "unverified";
   o.reopenedAt = t;
   o.resolvedAt = null;
@@ -3321,8 +3562,18 @@ function reopen(objectId, reason) {
     /* NO DEAD ATTENTION ITEMS. Options that existed survive the reopen. A
        decision that never carried options gets the one option that is not
        invented — re-affirming the statement already on the record — plus the
-       bound composer, which pinActions() offers on every pending decision. */
-    o.options = [{ label: "Re-affirm the prior call", statement: o.text, synthesized: true }];
+       bound composer, which pinActions() offers on every pending decision.
+
+       `agrees: true` IS NOT A DETAIL (round 6 D1). A re-affirmation is the
+       proposal, by construction: its statement is `o.text`, verbatim. Round 6
+       left the flag off, `answerDecision`'s `!answer.agrees` read `!undefined`
+       as a departure, and the correction chain then asserted that two
+       byte-identical sentences differed. That is round 4's D7 arriving back
+       through the fallback round 4 itself added — which is why the relationship
+       is now ASSERTED by checkAnswerIdentityInvariant() instead of trusted to
+       a literal, and why answerDecision derives "did it change" from the two
+       strings rather than from this flag alone. */
+    o.options = [{ label: "Re-affirm the prior call", statement: o.text, synthesized: true, agrees: true }];
   }
   if (o.kind === "commitment" && o.priorOverdue) o.overdue = o.priorOverdue;
 
@@ -3352,11 +3603,23 @@ function reopen(objectId, reason) {
   o.history.push({ k: "gate", who: S.me, tm: t,
     text: "reopened it · the prior state is kept on the record and stays reachable from here" });
 
+  /* A TRANSITION HEADER NAMES WHAT MOVED (round 6 minor). Reopening a
+     signed-off commitment puts back `self_reported` — the verification it
+     already had — so round 6's header read `SELF-REPORTED → SELF_REPORTED`:
+     a prettifier applied to one side, and an arrow claiming a verification
+     change that did not happen. What changed there is that it stopped being
+     settled, and that is what the header now says. */
+  const vChanged = from !== o.verification;
   const c = {
-    hd: "REOPENED · " + String(from).toUpperCase().replace("_", "-") + " → " + String(o.verification).toUpperCase(),
+    hd: "REOPENED · " + (vChanged
+      ? enumLabel(from) + " → " + enumLabel(o.verification)
+      : enumLabel(o.verification) + " THROUGHOUT · NO LONGER SETTLED"),
     who: S.me, tm: t,
     was: wasLabel,
     after: nowLabel,
+    /* the before/after this entry asserts differ — the settled state it had and
+       the pending state it is in — and checkCorrectionInvariant() proves it. */
+    change: { of: vChanged ? "state" : "settlement", from: wasLabel, to: nowLabel },
     fact: `reopened by ${S.me} at ${t}` + (reason ? "" : " · no reason given, and none was invented"),
     msg: o.answerMsg || o.sourceMsg || (o.provenance[0] && o.provenance[0].msg) || null,
     room: o.answerMsg ? null : sourceRoomOf(o),
@@ -3367,7 +3630,8 @@ function reopen(objectId, reason) {
   if (reason) { S.typed.push(reason); c.quote = { text: reason, by: S.me, src: "typed" }; }
   o.corrections.push(c);
 
-  o.note = "Reopening is append-only. The state at " + fieldOr(o.acceptedAt || o.verifiedAt || o.reopenedAt, "the time it was settled") +
+  o.note = "Reopening is append-only. The state " +
+           (settledAt ? "reached at " + settledAt : "it was settled in — no time was ever recorded for it —") +
            " is still in the conversation, still in this history, and the row that carried it re-renders to say so. " +
            (owed && back !== S.me
              ? `It went back to ${back}, who owed it — reopening undoes a state, it does not move ownership onto you. `
@@ -3375,10 +3639,17 @@ function reopen(objectId, reason) {
            (reason ? "The reason above is your own sentence, recorded verbatim."
                    : "No reason was given, and the page does not write one for you.");
 
-  appendSystem(r, `${o.kind} ${o.id} · ${from} → ${o.verification} · reopened by ${S.me}` +
+  const sys = appendSystem(r, `${o.kind} ${o.id} · ${from} → ${o.verification} · reopened by ${S.me}` +
                   (owed && back !== S.me ? ` · back to ${back}, whose it is` : "") +
                   (reason ? " · reason recorded" : " · no reason given") + " · prior state kept", o);
   S.ui.reopening = null;
+  /* the reopen is normally driven from the receipt, and the receipt stays open —
+     so the record of this write is the correction entry that was just appended
+     to the chain the reader is already looking at. */
+  focusAfter(S.ui.receiptId === o.id ? ".rc-sec .corr:last-of-type .lnk" : null,
+             S.ui.receiptId === o.id ? "#rcBack" : null,
+             `[data-msg="${sys.id}"] .tag`, `[data-msg="${sys.id}"] button`,
+             `[data-lens-obj="${o.id}"]`);
   render();
   /* the toast reports what actually happened to THIS object, not a fixed line —
      including, since round 4's D5, whose list it landed on when it is not yours */
@@ -3434,8 +3705,10 @@ function doVerify(objectId, evidence) {
     note: `verification note · attached by ${S.me} · the claimant did not check their own claim` });
   o.note = "Verified by someone other than the claimant, which is the only thing that makes a line green. " +
            "Reopening it puts the ~ back and keeps this note on the record.";
-  appendSystem(r, [`claim ${o.id} · unverified → verified by ${S.me} · evidence: `, human(evidence)], o);
+  const sys = appendSystem(r, [`claim ${o.id} · unverified → verified by ${S.me} · evidence: `, human(evidence)], o);
   S.ui.verifying = null;
+  focusAfter(`[data-msg="${sys.id}"] .tag`, `[data-msg="${sys.id}"] button`,
+             `[data-lens-obj="${o.id}"]`);
   render();
   toast("verified · " + o.claimant + " said it, you checked it");
 }
@@ -3541,8 +3814,10 @@ function applyEffect(objectId, fx) {
     kind = "warn";
   }
   o.fresh = true;
-  appendSystem(r, line, o);
+  const sys = appendSystem(r, line, o);
   S.ui.pinOpen = null;
+  focusAfter(`[data-msg="${sys.id}"] .tag`, `[data-msg="${sys.id}"] button`,
+             `[data-lens-obj="${o.id}"]`);
   render();
   toast(msgText, kind);
 }
@@ -3635,6 +3910,10 @@ function send() {
   appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, origin: "typed", body: [v], replyTo: S.ui.replyTo || null });
   input.value = "";
   S.ui.replyTo = null;
+  /* the composer is not rebuilt, so it keeps the cursor on its own — declared
+     anyway, because "where focus goes after a write" is a spec and not an
+     accident of which nodes happened to survive innerHTML. */
+  focusAfter("#cinput");
   render();
   scrollFeedToEnd();
   toast("sent · your own message, so it is never counted back to you as unseen", "info");
@@ -3750,10 +4029,105 @@ function scrollFeedToEnd() {
 }
 
 /* ===========================================================================
+ * WHERE FOCUS GOES AFTER A WRITE (round 6 minor)
+ *
+ * render() rebuilds every surface from state, so the element that had focus is
+ * detached and the browser drops focus to BODY. That is not cosmetic: a
+ * keyboard reader who signs off a commitment is returned to the top of the
+ * document and has to walk the whole page back to where they were, once per
+ * action. Round 6 had no spec for this at all, which is the actual finding —
+ * the page had simply never decided.
+ *
+ * THE SPEC, one sentence: FOCUS FOLLOWS THE RECORD. After a write, focus lands
+ * on the first control inside the page's own record of that write — the row it
+ * just appended, or the correction entry it just added to an open receipt — and
+ * it never lands on BODY.
+ *
+ * Two mechanisms, tried in order:
+ *
+ *   1. A DECLARED SUCCESSOR. A write calls focusAfter() with the selectors for
+ *      what it just created, most specific first. This is the normal path and
+ *      it is deliberate: the write knows what it wrote.
+ *   2. SAME-KEY RESTORE. If nothing was declared, focus returns to whatever had
+ *      it, matched by a key that survives the rebuild (an id, or the element's
+ *      own data attributes scoped to its row). This covers every render that is
+ *      not a write — a filter, a fold, a theme toggle — where the right answer
+ *      is "put it back where it was".
+ *
+ * And a floor under both: after a write, `checkFocusInvariant()` asserts focus
+ * is not on BODY. A successor that silently stops resolving is a regression
+ * this page can see rather than one a reader discovers.
+ * ======================================================================== */
+
+/* the element's own attributes, as a selector — stable across a rebuild
+   because they are derived from the record, not from DOM position */
+function attrSel(el) {
+  const ds = el.dataset || {};
+  const keys = Object.keys(ds).filter(k => k !== "fresh").sort();
+  if (!keys.length) return null;
+  return el.tagName.toLowerCase() + keys.map(k =>
+    `[data-${k.replace(/[A-Z]/g, ch => "-" + ch.toLowerCase())}="${CSS.escape(ds[k])}"]`).join("");
+}
+function focusKey(el) {
+  if (!el || el.nodeType !== 1 || el === document.body) return null;
+  if (el.id) return "#" + CSS.escape(el.id);
+  const own = attrSel(el);
+  if (!own) return null;
+  /* scope to the row that owns it, so restoring a Reply button does not land on
+     some other message's Reply button that happens to carry the same attribute */
+  const row = el.closest("[data-msg]");
+  return (row && row !== el ? `[data-msg="${CSS.escape(row.dataset.msg)}"] ` : "") + own;
+}
+function focusAfter() {
+  S.ui.focusNext = Array.prototype.slice.call(arguments).filter(Boolean);
+  S.ui.wrote = true;
+}
+function tryFocus(sel) {
+  if (!sel) return false;
+  let el = null;
+  try { el = document.querySelector(sel); } catch (e) { return false; }
+  if (!el || !shown(el)) return false;
+  el.focus({ preventScroll: true });
+  return document.activeElement === el;
+}
+function restoreFocus(prev) {
+  const a = document.activeElement;
+  const held = a && a !== document.body && a !== document.documentElement;
+  const wrote = !!S.ui.wrote;
+  const want = S.ui.focusNext;
+  S.ui.focusNext = null;
+  /* nothing was lost — a prompt that focused its own input, or a reader who
+     tabbed somewhere during an async render, keeps it */
+  if (held) return;
+  /* NOTHING HAD FOCUS AND NOTHING WAS WRITTEN, so there is nothing to restore
+     and nothing to announce. A page nobody has touched yet does not get focus
+     put into it: taking focus is a thing you do in response to an action, and
+     boot is not one. (Caught by this file's own focus check on the first draft,
+     which forced focus into the lens on the boot render.) */
+  if (!prev && !wrote) return;
+  if (want && want.some(tryFocus)) return;
+  if (tryFocus(prev)) return;
+  /* last resort, and only after a write: the surface that owns what changed,
+     never BODY. These carry tabindex="-1" so they can hold focus without ever
+     entering the tab order. */
+  if (wrote) ["#lens", "#pin", "#feed"].some(tryFocus);
+}
+function checkFocusInvariant() {
+  if (!DEV || !S.ui.wrote) return;
+  S.ui.wrote = false;
+  const a = document.activeElement;
+  if (!a || a === document.body || a === document.documentElement)
+    console.error("[atrium invariant] a write rebuilt the page and left focus on " +
+      (a ? a.tagName : "nothing") + " — a keyboard reader has to walk back from the top of the document after every action");
+}
+
+/* ===========================================================================
  * RENDER — one call, every surface
  * ======================================================================== */
 
 function render() {
+  /* captured before anything is torn down — see restoreFocus() */
+  const hadFocus = focusKey(document.activeElement);
   normalizeFilter();
   renderRail();
   renderHead();
@@ -3762,16 +4136,25 @@ function render() {
   renderTrace();
   renderComposer();
   renderLens();
-  /* a prompt this render put on the page has to be reachable in this frame, so
-     it is revealed BEFORE the geometry check reads any boxes (round 5 D1). */
+  /* a prompt this render put on the page — or a control it moved focus to —
+     has to be reachable in this frame, so both are revealed BEFORE the geometry
+     check reads any boxes (round 5 D1, extended in round 7). */
+  /* focus is re-established BEFORE the reveal, because the reveal's job includes
+     scrolling whatever now holds focus clear of a sticky band — and before the
+     checks, so checkFocusInvariant() reads the frame a reader actually gets
+     rather than the instant between teardown and repair */
+  restoreFocus(hadFocus);
   revealOpenPrompts();
   /* the DOM-level invariants run against what was actually painted, not against
      the functions that drew it. Geometry last, because it needs layout: the
      browser has already flushed style by the time these read boxes, and every
      one of them is synchronous with the paint that produced them. */
+  checkFocusInvariant();
   checkRowScopeInvariant(room());
   checkQuotationInvariant();
   checkRecordTextInvariant();
+  checkAnswerIdentityInvariant();
+  checkCorrectionInvariant();
   checkLayoutInvariant();
   setTimeout(clearFresh, 400);
 }
@@ -3828,7 +4211,8 @@ $("surfNeeds").addEventListener("click", () => {
   const rows = attentionRows(r).length;
   const off = offRoomItems(r);
   toast(`needs you · ${items} item${items === 1 ? "" : "s"} owe you here · ${rows} row${rows === 1 ? " in this room is" : "s in this room are"} linked to them` +
-        (off.length ? ` · ${off.length} ${off.length === 1 ? "has its source" : "have their sources"} in another room — jump from the pin` : ""), "warn");
+        (off.length ? ` · ${off.length} ${off.length === 1 ? "has its source" : "have their sources"} in another room — jump from the pin` : "") +
+        " · matches are highlighted, and nothing else is dimmed", "warn");
 });
 $("surfState").addEventListener("click", () => {
   S.ui.lensFocus = !S.ui.lensFocus;

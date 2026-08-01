@@ -143,10 +143,19 @@ cheaper to explain and impossible to muscle-memory through.
 
 Three keyframes, and no others without a reason:
 
-- `gl-blink` — 1s infinite, hard on/off. Live/recording indicators only.
-- `gl-pulse` — 1.2s or 1.6s infinite, opacity 1 → .35. In-progress states.
+- `gl-blink` — 1s infinite, hard on/off. Live/recording indicators only. **v1 has
+  no live surface, so v1 defines no `gl-blink`** — it arrives in Phase 4 with the
+  call strip, alongside the `--live` token family kept unconsumed in `tokens.css`.
+  A keyframe defined and never used is a rule nobody is holding, and #10 r6 proved
+  it: `gl-blink` sat unused while the one animated dot on the page ran `gl-pulse`
+  in verified green. Define it when something is live; until then, don't.
+- `gl-pulse` — 1.2s or 1.6s infinite, opacity 1 → .35. In-progress states. A pane
+  that is continuously re-derived is in-progress, not live.
 - `gl-rise` — .15s / .2s / .25s ease, a 2px translate plus fade. New rows entering
   the timeline (`.mrow`) and content appearing.
+
+Colour is decided by the glyph table, not by the animation: nothing wears `--grn`
+unless it is `✓` verified, however alive it is.
 
 Everything is short. Nothing in this system eases in over half a second; a feed
 that animates slowly is a feed you cannot read while it moves.
