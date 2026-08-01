@@ -172,18 +172,53 @@ near-in-order delivery. The replay side does not ask the reducer what it
 consumed — it reconstructs that from the input stream with an independent filter
 written in the test, so a defect shared by both paths cannot cancel out.
 
-The other half of the invariant is the ledger's, and it is recorded on
-[#22](https://github.com/lmvdz/atrium/issues/22): the durable log must contain
-only events accepted in canonical order, because an out-of-order event is
-rejected at the command layer and never persisted. Rejected events enter
+The other half of the invariant is the ledger's, and
+[#22](https://github.com/lmvdz/atrium/issues/22) ships it: the durable log
+contains only events accepted in canonical order, because an out-of-order event
+is rejected at the command layer and never persisted. Rejected events enter
 neither state nor log, so the two sides are folding the same sequence rather
-than being reconciled after the fact.
+than being reconciled after the fact. See **The durable ledger** below.
 
 `CoreState.watermarks` still records each room's last consumed position — that
-is what `core_events.room_seq` will map onto — but the gate is the global
-`cursor`, because `issues`, `corrections` and `consumedEventIds` are global
-ordered lists and a per-room gate would let two rooms interleave them one way
-live and another way on replay.
+is what `core_events.room_seq` maps onto — but the gate is the global `cursor`,
+because `issues`, `corrections` and `consumedEventIds` are global ordered lists
+and a per-room gate would let two rooms interleave them one way live and another
+way on replay.
+
+### The durable ledger
+
+`core_events` is the append-only spine, and everything in the semantic layer —
+messages, accepted objects, relations, attention, corrections — is a projection
+of it, written in the same transaction as the append.
+
+It carries **two** sequences, which is how #22 resolved the design point #19's
+gauntlet left open:
+
+- **`seq`** — `bigserial`, primary key, a total order **across rooms**. Core
+  state gates on a global cursor, so the ledger owes it a global order. The
+  alternative was sharding core state per room; that was rejected because it
+  would split `corrections` and `issues` into per-room lists to buy an
+  independence the product does not have.
+- **`room_seq`** — the per-room client protocol. `UNIQUE(room_id, room_seq)`
+  plus serialized assignment makes it gap-free and duplicate-free, which is what
+  lets `since(room, room_seq)` recover a byte-identical history after a dropped
+  socket.
+
+Appends serialize on a transaction-scoped Postgres advisory lock, so `seq` order
+and the canonical `(at, id)` order are the same order by construction rather
+than by luck. There is no status column and no quarantine table: a refused event
+aborts the transaction and leaves no row, no sequence number, and no gap.
+
+A command validates membership, folds through `appendEvent` **inside** the
+transaction that inserts, writes its projections there too, and only then
+broadcasts `(room, room_seq)`. Presence and typing skip all of it — they are
+transient frames, never rows, and an integration test floods them and asserts
+the ledger gained nothing.
+
+Rooms are the isolation boundary, so every reference that could cross one is a
+composite `(room_id, id)` foreign key rather than a bare-id one. A plain FK
+checks that a row exists; only the composite one checks that it exists *in this
+room*.
 ### Replay ingest
 
 `packages/ingest` turns a real conversation into the canonical replay format
@@ -251,7 +286,8 @@ no attempt to reconcile a stored corpus against later upstream history, and
 | --- | --- |
 | `pnpm dev` | Build packages, then web + server in watch mode |
 | `pnpm build` | Build packages, then both apps |
-| `pnpm test` | Vitest across `packages/*` |
+| `pnpm test` | Vitest unit suite across `packages/*` and `apps/*` (no database needed) |
+| `pnpm test:integration` | Real-Postgres suite: brings up the compose service, applies migrations, runs, tears down |
 | `pnpm ingest <source>` | Fetch a conversation into `corpora/` (see Replay ingest) |
 | `pnpm test:e2e` | Playwright smoke test in `apps/web` |
 | `pnpm lint` | Biome lint + format check |
@@ -260,6 +296,16 @@ no attempt to reconcile a stored corpus against later upstream history, and
 | `pnpm db:generate` | Generate a migration from the Drizzle schema |
 | `pnpm db:migrate` | Apply pending migrations |
 | `pnpm infra:up` / `infra:down` | Postgres + MinIO only |
+
+`pnpm test:integration` needs Docker and nothing else — it starts the
+`postgres-test` service from `docker-compose.test.yml` under its own compose
+project (so it can never touch the database `pnpm dev` is using), applies the
+real migrations from `packages/db/drizzle`, runs the suite, and tears the
+container down. `--keep` leaves it running; `ATRIUM_TEST_DATABASE_URL=...` points
+it at a database you already have and skips compose entirely. There is
+deliberately no in-suite skip: without a database it exits non-zero, because a
+test that goes green when its dependency is missing turns a verification gate
+into decoration.
 
 Playwright needs its browser once: `pnpm --filter @atrium/web exec playwright
 install chromium`. Without it the smoke test skips with a reason instead of
@@ -276,8 +322,15 @@ here".
   is already in place: dedup key `${messageId}:${interpretationVersion}` with an
   explicit singleton window, backed by the `(message_id, interpretation_version)`
   unique constraint on `interpretations` (issue #16).
-- The WebSocket protocol is a heartbeat + echo placeholder. The real command and
-  event contract slots into `handleFrame` without the transport changing.
+- The WebSocket protocol is real (#22): `subscribe` / `since` / `command`
+  in, `(room, room_seq)`-tagged events out. Identity at the upgrade is the #26
+  stub in `apps/server/src/session.ts` — the *seam* is real and membership is
+  checked against the database per command; only the "who is this socket"
+  half is placeholder.
+- The client's WebSocket URL is resolved at runtime, never baked. Same-origin
+  `/ws` by default; `ATRIUM_WS_URL` is read per request by the `force-dynamic`
+  route at `apps/web/app/api/runtime-config/route.ts`. A unit test asserts that
+  nothing under `apps/web/src` ever reads a `NEXT_PUBLIC_*` variable again.
 - Adapter seams (`ConversationSource`, `ExecutionProvider`) are type-only ports
   in `packages/core/src/ports.ts`. No integration ships in v1; the door stays
   open.

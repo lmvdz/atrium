@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node", "vitest/globals"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    // The same three aliases `vitest.integration.config.ts` resolves, so what
+    // the compiler checks is what the runner runs. Pointing at source rather
+    // than `dist` also means the suite never depends on build order.
+    "baseUrl": "..",
+    "paths": {
+      "@atrium/core": ["./packages/core/src/index.ts"],
+      "@atrium/db": ["./packages/db/src/index.ts"],
+      "@atrium/db/schema": ["./packages/db/src/schema.ts"]
+    }
+  },
+  "include": ["**/*.ts", "../vitest.integration.config.ts"]
+}

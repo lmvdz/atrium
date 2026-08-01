@@ -13,11 +13,12 @@
     "ingest": "pnpm --filter @atrium/ingest... build && node packages/ingest/dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "bash scripts/integration-test.sh",
     "test:e2e": "pnpm --filter @atrium/web test:e2e",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "typecheck": "pnpm --filter \"./packages/*\" build && pnpm -r typecheck",
+    "typecheck": "pnpm --filter \"./packages/*\" build && pnpm -r typecheck && tsc -p integration/tsconfig.json",
     "db:generate": "pnpm --filter @atrium/db generate",
     "db:migrate": "pnpm --filter @atrium/db migrate",
     "infra:up": "docker compose up -d postgres minio",
@@ -26,7 +27,11 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.6",
     "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
+    "drizzle-orm": "^0.45.2",
+    "postgres": "^3.4.9",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "ws": "^8.21.1"
   }
 }
