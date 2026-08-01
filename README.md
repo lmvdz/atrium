@@ -390,7 +390,7 @@ zero tests exits 0 just like one that passed 315:
   subshells — and yields simple commands; a rule is a predicate over the words
   of one command, and `echo exec node x` is an `echo` with two arguments however
   it is spaced. Both polarities are fixtures: the evasions are mutations that
-  must go red, and 9 legitimate rewrites of the same step must leave the whole
+  must go red, and 14 legitimate rewrites of the real steps must leave the whole
   file clean, because a guard that is wrong in that direction is one somebody
   deletes.
 - **Recognising a command word is not proving what runs.** `git` means "the word

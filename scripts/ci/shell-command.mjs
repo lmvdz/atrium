@@ -454,7 +454,7 @@ export function parseScript(script) {
   }
   flush();
 
-  for (const command of commands) command.argv = unwrap(command.raw);
+  for (const command of commands) Object.assign(command, unwrap(command.raw));
   return { commands, functions };
 }
 
@@ -544,6 +544,10 @@ function isOption(word) {
  */
 function unwrap(argv) {
   let words = argv;
+  // The prefix words that were stripped, in order. A rule that means "run
+  // through the workspace's package manager" asks about this rather than about
+  // `argv[0]`, so `sudo pnpm build` is still a `pnpm build`.
+  const via = [];
   for (let guard = 0; guard < 8 && words.length > 0; guard += 1) {
     const head = words[0];
     const launcher = Object.hasOwn(LAUNCHERS, head) ? LAUNCHERS[head] : undefined;
@@ -562,7 +566,8 @@ function unwrap(argv) {
       for (let skipped = 0; skipped < (launcher.positional ?? 0); skipped += 1) {
         if (index < words.length) index += 1;
       }
-      if (rejected || index >= words.length) return words;
+      if (rejected || index >= words.length) return { argv: words, via };
+      via.push(head);
       words = words.slice(index);
       continue;
     }
@@ -577,15 +582,16 @@ function unwrap(argv) {
       // bare word here is not an option, so the unwrap stops and the manager
       // itself stays the command word — which is the whole defence against
       // `pnpm … echo exec node …`.
-      if (index >= words.length) return words;
+      if (index >= words.length) return { argv: words, via };
       if (EXEC_WORDS.has(words[index])) index += 1;
-      if (index >= words.length) return words;
+      if (index >= words.length) return { argv: words, via };
+      via.push(head);
       words = words.slice(index);
       continue;
     }
-    return words;
+    return { argv: words, via };
   }
-  return words;
+  return { argv: words, via };
 }
 
 /** The first argument that is not an option — `node -e X` → `X`. */

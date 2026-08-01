@@ -217,10 +217,15 @@ function invokes(script) {
   });
 }
 
-/** A package.json script run through the workspace's package manager. */
+/**
+ * A package.json script run through the workspace's package manager.
+ *
+ * `via` rather than `raw[0]`, so `sudo pnpm build` and `timeout 60 pnpm lint`
+ * are the same claim as `pnpm build` — the launcher is not what makes it one.
+ */
 function packageScript(name) {
-  return command(`\`pnpm ${name}\``, [...PACKAGE_MANAGER_NAMES], ({ raw, argv }) => {
-    return PACKAGE_MANAGER_NAMES.includes(raw[0]) && argv[0] === name;
+  return command(`\`pnpm ${name}\``, [...PACKAGE_MANAGER_NAMES], ({ via, argv }) => {
+    return via.some((word) => PACKAGE_MANAGER_NAMES.includes(word)) && argv[0] === name;
   });
 }
 
@@ -256,7 +261,7 @@ function exportsToJobEnv(name) {
     ['echo', 'printf'],
     ({ argv, redirections }) => {
       if (argv[0] !== 'echo' && argv[0] !== 'printf') return false;
-      if (!(argv[1] ?? '').startsWith(`${name}=`)) return false;
+      if (!(firstOperand(argv) ?? '').startsWith(`${name}=`)) return false;
       return redirections.some(
         ({ op, target }) =>
           (op === '>>' || op === '>') && target.expandable && JOB_ENV_FILE.has(target.value),
@@ -335,7 +340,9 @@ const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
   test: command('`git fetch … refs/heads/main`', ['git'], ({ argv }) => {
     if (basename(argv[0]) !== 'git') return false;
-    if (firstOperand(argv) !== 'fetch') return false;
+    // The subcommand by membership rather than by position: `git -c x=y fetch`
+    // is a fetch, and reading the first operand would call it a `x=y`.
+    if (!argv.slice(1).includes('fetch')) return false;
     return argv.slice(1).some((word) => word.includes('refs/heads/main'));
   }),
   because:

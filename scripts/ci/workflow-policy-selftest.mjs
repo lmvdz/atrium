@@ -162,16 +162,23 @@ function rewriteFetch(source, lines) {
   return replaceOnce(source, FETCH_RUN, runBlock(lines));
 }
 
+/** The two other real lines these fixtures rewrite. */
+const LINT_RUN = '        run: pnpm lint\n';
+const ENV_LINE = '          echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n';
+
+/** An accepted form: one exact line of the real workflow, and what it becomes. */
+const rewritesFetch = (...lines) => [FETCH_RUN, runBlock(lines)];
+
 /**
- * Legitimate ways to write the baseline fetch that the policy must NOT reject.
+ * Legitimate ways to write a protected command that the policy must NOT reject.
  *
  * ── THE OTHER HALF OF THE ROUND-5 FINDING ───────────────────────────────────
- * Round 5's matcher recognised a command only at the start of a line, so every
- * form below read as "the fetch is missing" — verified directly against the
- * round-5 engine, which reports `required-step-prerequisites` on all eight. None
- * of them is exotic and none of them is an evasion: they are a subshell, a
- * conditional list, a one-shot environment variable, three ordinary launchers,
- * `xargs`, and a line long enough to wrap.
+ * Round 5's matcher recognised a command only at the start of a line, so the
+ * fetch forms below all read as "the fetch is missing" — verified directly
+ * against the round-5 engine, which reports `required-step-prerequisites` on
+ * every one of them. None is exotic and none is an evasion: they are a subshell,
+ * a conditional list, a one-shot environment variable, three ordinary launchers,
+ * `xargs`, a per-invocation `git -c`, and a line long enough to wrap.
  *
  * A guard that is wrong in both directions is worse than the regex it replaced,
  * because a false red is fixed by deleting the rule. So these are fixtures with
@@ -179,23 +186,47 @@ function rewriteFetch(source, lines) {
  * must come back *completely clean*, not merely free of one rule.
  */
 const ACCEPTED_FORMS = {
-  'the fetch inside a subshell': [`(${FETCH})`],
-  'the fetch after a `&&` list': [`true && ${FETCH}`],
-  'the fetch behind a one-shot environment variable': [`GIT_TERMINAL_PROMPT=0 ${FETCH}`],
-  'the fetch behind sudo': [`sudo ${FETCH}`],
-  'the fetch behind a timeout': [`timeout 30 ${FETCH}`],
-  'the fetch behind `command`, which bypasses functions and aliases': [`command ${FETCH}`],
-  'the fetch driven by xargs': [`echo main | xargs -I{} ${FETCH}`],
-  'the fetch wrapped over a backslash continuation': [
+  'the fetch inside a subshell': rewritesFetch(`(${FETCH})`),
+  'the fetch after a `&&` list': rewritesFetch(`true && ${FETCH}`),
+  'the fetch behind a one-shot environment variable': rewritesFetch(
+    `GIT_TERMINAL_PROMPT=0 ${FETCH}`,
+  ),
+  'the fetch behind sudo': rewritesFetch(`sudo ${FETCH}`),
+  'the fetch behind a timeout': rewritesFetch(`timeout 30 ${FETCH}`),
+  'the fetch behind `command`, which bypasses functions and aliases': rewritesFetch(
+    `command ${FETCH}`,
+  ),
+  'the fetch driven by xargs': rewritesFetch(`echo main | xargs -I{} ${FETCH}`),
+  'the fetch with a per-invocation git config': rewritesFetch(
+    `git -c protocol.version=2 fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main`,
+  ),
+  'the fetch wrapped over a backslash continuation': rewritesFetch(
     'git fetch --no-tags \\',
     '  --depth=1 origin +refs/heads/main:refs/remotes/origin/main',
-  ],
-  'the fetch as the body of a shell function that is then called': [
+  ),
+  'the fetch as the body of a shell function that is then called': rewritesFetch(
     'fetch_baseline() {',
     `  ${FETCH}`,
     '}',
     'fetch_baseline',
+  ),
+  // The tightened $GITHUB_ENV matcher, from the accepting side. Its rejecting
+  // side is two mutations below: `$GITHUB_ENV.bak` and `'$GITHUB_ENV'`.
+  'the run-start timestamp with braces round the variable': [
+    ENV_LINE,
+    '          echo "VITEST_RUN_START=$(date +%s%3N)" >> "${GITHUB_ENV}"\n',
   ],
+  'the run-start timestamp written with printf': [
+    ENV_LINE,
+    `          printf 'VITEST_RUN_START=%s\\n' "$(date +%s%3N)" >> "$GITHUB_ENV"\n`,
+  ],
+  'the run-start timestamp with the variable unquoted': [
+    ENV_LINE,
+    '          echo "VITEST_RUN_START=$(date +%s%3N)" >> $GITHUB_ENV\n',
+  ],
+  // A package.json script is still one behind a launcher: `sudo` is not what
+  // makes `pnpm lint` a lint, so the rule asks what was unwrapped, not argv[0].
+  'the linter behind a launcher': [LINT_RUN, '        run: timeout 300 pnpm lint\n'],
 };
 
 /**
@@ -918,10 +949,13 @@ function main() {
   //    missing. These must leave the workflow *entirely* clean — not "clean of
   //    the rule we were thinking about", because a false red anywhere in this
   //    file is a reason to delete a rule.
-  for (const [name, lines] of Object.entries(ACCEPTED_FORMS)) {
+  for (const [name, [target, replacement]] of Object.entries(ACCEPTED_FORMS)) {
     let violations;
     try {
-      violations = checkWorkflowFile(rewriteFetch(pristine, lines), `${WORKFLOW}#accepted`);
+      violations = checkWorkflowFile(
+        replaceOnce(pristine, target, replacement),
+        `${WORKFLOW}#accepted`,
+      );
     } catch (error) {
       failures.push(`accepted form "${name}" could not be applied: ${error.message}`);
       continue;
@@ -940,7 +974,7 @@ function main() {
     return 1;
   }
   console.info(
-    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected by the rule it targets and by nothing else undeclared; all ${RULES.length} declared rules exercised, and all ${PREREQUISITE_PAIRS.length} declared step→prerequisite pairs broken by name; ${Object.keys(ACCEPTED_FORMS).length} legitimate rewrites of the same step accepted; the real file clean.`,
+    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected by the rule it targets and by nothing else undeclared; all ${RULES.length} declared rules exercised, and all ${PREREQUISITE_PAIRS.length} declared step→prerequisite pairs broken by name; ${Object.keys(ACCEPTED_FORMS).length} legitimate rewrites of real steps accepted; the real file clean.`,
   );
   return 0;
 }
