@@ -1,0 +1,172 @@
+/* ---------------------------------------------------------------------------
+ * Atrium design tokens
+ *
+ * Provenance: extracted verbatim from the `:root` and `html.atr-dark` blocks of
+ * "Atrium v6.dc.html" (design-canvas prototype, "Design system for live call
+ * interface" corpus), 2026-07-31. Values are byte-identical to the source; the
+ * only changes are grouping comments and the ordering of the call-era tokens
+ * into their own section. See plans/research-live-call-design-system/BRIEF.md
+ * concept 9 for what this system is and why it is adopted wholesale.
+ *
+ * Light (`:root`) is the default theme - warm paper. Dark is opt-in by putting
+ * `atr-dark` on <html>. Both themes define the same token names, so nothing
+ * downstream ever branches on theme.
+ *
+ * Usage conventions (ramps, typography, glyphs, density): design/CONVENTIONS.md
+ * ------------------------------------------------------------------------- */
+
+/* light - warm paper (default) */
+:root {
+  /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
+  --bg0: #E6E2DA;
+  --bg1: #F4F1EA;
+  --bg2: #ECE8DF;
+  --bg3: #FAF8F3;
+  --bg4: #EAE5DA;
+  --bg5: #E2DCCF;
+  --bg6: #DDD6C8;
+  --bg7: #EFEAE0;
+
+  /* neutral rules - line (hairline) / line2 (divider) / line3 (emphatic) */
+  --line: #D4CDBD;
+  --line2: #C8C1B4;
+  --line3: #B0A896;
+
+  /* neutral text - tx0 (primary) ... tx4 (faintest) */
+  --tx0: #171A18;
+  --tx1: #3A362E;
+  --tx2: #57534A;
+  --tx3: #7D7666;
+  --tx4: #A39B89;
+
+  /* green - verified / settled / passing */
+  --grn: #4E9161;
+  --grn2: #3E7B52;
+  --grn3: #5B8A6B;
+  --grnbd: #9DC4A8;
+  --grnbg: #E3EDE2;
+  --grnav: #CBE0CE;
+
+  /* amber - needs you / gate awaiting a human */
+  --amb: #B07D2A;
+  --amb2: #8A6220;
+  --ambbd: #D9B36A;
+  --ambbd2: #E3C88F;
+  --ambbg: #F5E9CD;
+  --ambbg2: #F0E2C2;
+  --ambbg3: #EBDAB1;
+  --ambbg4: #EFDFB9;
+  --ambbg5: #F6EDDA;
+
+  /* red - destructive / failed */
+  --red: #B3402E;
+  --red2: #A63A28;
+  --red3: #8F3222;
+  --redbd: #DBA090;
+  --redbg: #F6DFD7;
+  --redbg2: #F1D3CA;
+  --redbg3: #E4B8AC;
+
+  /* blue - human / person-authored surfaces */
+  --blu: #3D6BB3;
+  --blu2: #2F5590;
+  --blu3: #8A97AC;
+  --replybg: #DFE7F2;
+  --filebg: #DFE9F4;
+  --filebd: #B7CCE4;
+
+  /* -------------------------------------------------------------- */
+  /* call-era - unused in v1, kept for Phase 4.                      */
+  /* Live-call chrome from the Atrium fleet-ops era: the pine call   */
+  /* strip (--strip) and its live indicator (--live), plus the       */
+  /* speaker-tile ramp - fill, active fill, border, text, active     */
+  /* text (--stile, --stileac, --stbd, --stx, --stxac). Atrium v1    */
+  /* is human-only with no voice surface, so nothing consumes these  */
+  /* yet; they are kept verbatim for when calls return in Phase 4.   */
+  /* -------------------------------------------------------------- */
+  --live: #9BB3A0;
+  --strip: #173A32;
+  --stile: rgba(244,241,234,.10);
+  --stileac: #F4F1EA;
+  --stbd: rgba(244,241,234,.25);
+  --stx: #C9D6CB;
+  --stxac: #173A32;
+}
+
+/* dark - near-black (opt-in via `atr-dark` on <html>) */
+html.atr-dark {
+  /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
+  --bg0: #0a0b0c;
+  --bg1: #0c0d0f;
+  --bg2: #0b0c0e;
+  --bg3: #0d0f10;
+  --bg4: #101214;
+  --bg5: #15181b;
+  --bg6: #1a1d21;
+  --bg7: #0e1012;
+
+  /* neutral rules - line (hairline) / line2 (divider) / line3 (emphatic) */
+  --line: #1f2226;
+  --line2: #2a2e33;
+  --line3: #3a3f45;
+
+  /* neutral text - tx0 (primary) ... tx4 (faintest) */
+  --tx0: #e8eaec;
+  --tx1: #c9ced3;
+  --tx2: #9aa1a8;
+  --tx3: #6d747c;
+  --tx4: #575e66;
+
+  /* green - verified / settled / passing */
+  --grn: #5CB27A;
+  --grn2: #4EA76B;
+  --grn3: #6FA383;
+  --grnbd: #2E5A40;
+  --grnbg: #14261B;
+  --grnav: #1E3A2A;
+
+  /* amber - needs you / gate awaiting a human */
+  --amb: #C99A3F;
+  --amb2: #E0C077;
+  --ambbd: #6E5320;
+  --ambbd2: #57431C;
+  --ambbg: #221C0E;
+  --ambbg2: #2A2210;
+  --ambbg3: #332A14;
+  --ambbg4: #332A14;
+  --ambbg5: #201A0E;
+
+  /* red - destructive / failed */
+  --red: #D4604A;
+  --red2: #C25340;
+  --red3: #E06A52;
+  --redbd: #6E3427;
+  --redbg: #261311;
+  --redbg2: #2E1714;
+  --redbg3: #57271E;
+
+  /* blue - human / person-authored surfaces */
+  --blu: #8AB4F8;
+  --blu2: #AECBFA;
+  --blu3: #6B89B3;
+  --replybg: #1C2836;
+  --filebg: #16222f;
+  --filebd: #24435f;
+
+  /* -------------------------------------------------------------- */
+  /* call-era - unused in v1, kept for Phase 4.                      */
+  /* Live-call chrome from the Atrium fleet-ops era: the pine call   */
+  /* strip (--strip) and its live indicator (--live), plus the       */
+  /* speaker-tile ramp - fill, active fill, border, text, active     */
+  /* text (--stile, --stileac, --stbd, --stx, --stxac). Atrium v1    */
+  /* is human-only with no voice surface, so nothing consumes these  */
+  /* yet; they are kept verbatim for when calls return in Phase 4.   */
+  /* -------------------------------------------------------------- */
+  --live: #3E5748;
+  --strip: #0E1A15;
+  --stile: #16241D;
+  --stileac: #1E3A2A;
+  --stbd: #2E5A40;
+  --stx: #7FA98A;
+  --stxac: #5CB27A;
+}
