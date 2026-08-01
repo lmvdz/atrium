@@ -71,6 +71,31 @@ if (!check(networkName !== undefined, 'the proxy container is on no network')) {
 }
 const proxyAddress = networkInfo.IPAddress;
 
+/**
+ * Two addresses on the stack's network, derived rather than written down.
+ *
+ * The subnet is `docker-compose.yml`'s, and this file used to hard-code two
+ * addresses inside it. That is a second copy of a value the compose file owns,
+ * and a copy of a value is a copy that goes stale — the same shape as the
+ * hard-coded table list `assert-tables.mjs` was written to replace. The
+ * addresses are taken from the network docker actually created, high in the
+ * range so they cannot collide with a container compose assigns from the bottom.
+ */
+function callerAddresses(subnet) {
+  const [base] = String(subnet ?? '').split('/');
+  const octets = base.split('.');
+  if (octets.length !== 4) return null;
+  return [`${octets[0]}.${octets[1]}.0.101`, `${octets[0]}.${octets[1]}.0.102`];
+}
+
+const subnet = inspect(proxy.ID).NetworkSettings?.Networks?.[networkName]?.IPPrefixLen
+  ? `${proxyAddress}/${inspect(proxy.ID).NetworkSettings.Networks[networkName].IPPrefixLen}`
+  : null;
+const [sprayAddress, bystanderAddress] = callerAddresses(subnet) ?? [
+  '172.28.0.101',
+  '172.28.0.102',
+];
+
 /** Runs one caller in its own container, at its own address. */
 function probe(label, address, attempts) {
   const args = [
@@ -106,7 +131,7 @@ function probe(label, address, attempts) {
 }
 
 // One over the cap: the last attempt must be the refused one.
-const spraying = probe('spray', '172.28.0.101', capacity + 1);
+const spraying = probe('spray', sprayAddress, capacity + 1);
 check(!spraying.error, `the spraying caller could not run: ${spraying.error}`);
 check(
   spraying.limited === true,
@@ -118,7 +143,7 @@ check(
 );
 
 // A different address, one attempt, immediately afterwards.
-const bystander = probe('bystander', '172.28.0.102', 1);
+const bystander = probe('bystander', bystanderAddress, 1);
 check(!bystander.error, `the bystanding caller could not run: ${bystander.error}`);
 check(
   bystander.limited === false,
@@ -126,6 +151,6 @@ check(
 );
 
 console.info(
-  `Caller 172.28.0.101 refused at attempt ${spraying.limitedAt} (cap ${capacity}); caller 172.28.0.102 allowed.`,
+  `Caller ${sprayAddress} refused at attempt ${spraying.limitedAt} (cap ${capacity}); caller ${bystanderAddress} allowed.`,
 );
 report('assert-rate-limit');

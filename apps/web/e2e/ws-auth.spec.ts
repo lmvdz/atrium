@@ -161,9 +161,31 @@ test.describe('websocket authorization', () => {
     await expect(owner.getByTestId('member-removed')).toBeVisible();
     await expect(owner.getByTestId('member-list')).not.toContainText(memberEmail);
 
-    // Same socket, next command. The membership row is gone, so the answer is.
+    /**
+     * Same socket, next command. The membership row is gone, so the authority
+     * is — by one of two routes, and this asserts the property rather than the
+     * route.
+     *
+     * The per-command check refuses with `not_a_member`. The idle sweep evicts
+     * and closes with 1008. Which one lands first is a race between
+     * `WS_SWEEP_INTERVAL_MS` (1s for this suite) and how long the removal above
+     * took, and on a CI runner the sweep wins often enough to make a
+     * reply-only assertion flake — it did, on the first run of this branch,
+     * with `after.reply` null because there was no socket left to answer on.
+     *
+     * Accepting both is not a weakening: a socket that is gone has lost more
+     * authority than one that gets a refusal. What neither branch accepts is
+     * `{ type: 'joined' }`, which is what deleting the membership re-check in
+     * `handleCommand` produces — and the deterministic version of that check
+     * lives in `apps/server/test/ws-server.test.ts`, where the sweep can be
+     * turned off and the refusal is the only path available.
+     */
     const after = await sendOnLiveSocket(member, { command: 'room.join', roomId });
-    expect(after.reply).toMatchObject({ type: 'command_error', reason: 'not_a_member' });
+    if (after.closed) {
+      expect(await liveSocketStatus(member)).toMatchObject({ open: false, closeCode: 1008 });
+    } else {
+      expect(after.reply).toMatchObject({ type: 'command_error', reason: 'not_a_member' });
+    }
 
     // And the workspace itself is gone from their account.
     await member.goto('/app');
