@@ -782,6 +782,34 @@ const MUTATIONS = [
     mutate: (s) => replaceOnce(s, '        run: node scripts/ci/gate-selftest.mjs\n', ''),
     message: /never runs the test gates' self-test/,
   },
+  // ---- the positive control over both self-tests (#40 round 8, D3) --------
+  // The two self-tests above report green, and nothing in either distinguishes
+  // "green because the tree is clean" from "green because the file was
+  // silenced". On r7, one statement one line above each one's guard left both at
+  // exit=0 with no output under CI, with every other gate clean.
+  {
+    name: 'the positive control over the self-tests deleted',
+    rule: 'policy-steps-present',
+    mutate: (s) => replaceOnce(s, '        run: node scripts/ci/positive-control.mjs verify\n', ''),
+    message: /never runs the positive control over both self-tests/,
+  },
+  {
+    name: 'the positive control kept but pointed at a group that does not exist',
+    rule: 'policy-steps-present',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: node scripts/ci/positive-control.mjs verify\n',
+        '        run: node scripts/ci/positive-control.mjs nothing\n',
+      ),
+    message: /never runs the positive control over both self-tests/,
+  },
+  {
+    name: 'the positive control over the stack assertions deleted',
+    rule: 'required-job-steps',
+    mutate: (s) => replaceOnce(s, '        run: node scripts/ci/positive-control.mjs deploy\n', ''),
+    message: /never runs the positive control over the stack assertions/,
+  },
   {
     name: 'the test suite removed from verify, leaving a job that lints and calls it a day',
     rule: 'required-job-steps',

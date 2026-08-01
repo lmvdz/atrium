@@ -90,15 +90,18 @@ import { join, posix, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { parse as parseYaml } from 'yaml';
+import { notAVerdict } from './child-verdict.mjs';
 import { composeArgs } from './compose.mjs';
 import { mainGuardProblems } from './guard-scan.mjs';
 import { requireFrom } from './import-from.mjs';
 import { isMainModule } from './main-module.mjs';
+import { CONTROLS, controlProblems } from './positive-control.mjs';
 import { manifestPath } from './record-built-images.mjs';
+import { repoRoot } from './repo-root.mjs';
 import { readFreshReport } from './report-file.mjs';
 import { scanForExpectedFailures } from './scan-expected-failures.mjs';
 import { completedCommands } from './shell-command.mjs';
-import { check, failures, resetFailures, verdict } from './stack-client.mjs';
+import { check, failures, resetFailures, stackTarget, verdict } from './stack-client.mjs';
 import { checkWorkflowFile, protectedCommandCoverage } from './workflow-policy.mjs';
 
 /** Directories that hold source this repository wrote. */
@@ -492,6 +495,12 @@ export const ENFORCEMENT = [
         ...expectProblem(passing === 0, 'the verdict over a clean run is not a passing exit'),
       ];
     },
+    // Four names, one decision: `check` records, `failures` holds, `verdict`
+    // reads, `resetFailures` clears, and the contract above exercises all four.
+    // Declared, because `sharedModuleProblems` counts *bindings* now and a row
+    // that covered its module wholesale is how a new shared decision arrives in
+    // an already-rowed file with nothing to test it.
+    covers: ['check', 'verdict', 'failures', 'resetFailures'],
     mutants: [
       {
         name: 'a `check` that records nothing',
@@ -504,6 +513,59 @@ export const ENFORCEMENT = [
       {
         name: 'a verdict that always fails',
         fn: { check, verdict: () => 1, failures, resetFailures },
+      },
+    ],
+  },
+  {
+    check: 'stackTarget',
+    definedIn: 'scripts/ci/stack-client.mjs',
+    fn: stackTarget,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      "every request the deploy job makes is aimed by this one function, so a version of it that answered `http://localhost` would have five assertions cheerfully reporting on a stack nobody deployed — and the whole point of the TLS in this job is that the certificate chain is verified against the deployment's own CA rather than waved through",
+    contract: (where, { workspace }) => {
+      const ca = join(workspace, 'ca.pem');
+      writeFileSync(ca, 'a certificate\n');
+      const configured = where({
+        ATRIUM_STACK_DOMAIN: 'atrium.localhost',
+        ATRIUM_STACK_CA: ca,
+        ATRIUM_STACK_HTTPS_PORT: '8443',
+      });
+      const bare = where({});
+      return [
+        ...expectProblem(
+          configured.origin === 'https://atrium.localhost',
+          `it aims at ${configured.origin} rather than at the configured domain over TLS`,
+        ),
+        ...expectProblem(
+          configured.httpsPort === 8443,
+          'it ignores ATRIUM_STACK_HTTPS_PORT, so a stack published on another port is unreachable and the failure reads as a broken deployment',
+        ),
+        ...expectProblem(
+          String(configured.ca ?? '').includes('a certificate'),
+          "it does not read the deployment's own certificate authority, and an assertion with no CA either trusts the system store — where this certificate is not — or is one flag away from verifying nothing",
+        ),
+        ...expectProblem(
+          bare.ca === undefined && bare.httpsPort === 443 && bare.address === '127.0.0.1',
+          'an unset environment does not fall back to the published loopback port with no CA',
+        ),
+      ];
+    },
+    mutants: [
+      {
+        name: 'cleartext against localhost, whatever the environment says',
+        fn: () => ({
+          domain: 'localhost',
+          address: '127.0.0.1',
+          httpsPort: 80,
+          httpPort: 80,
+          origin: 'http://localhost',
+        }),
+      },
+      {
+        name: 'the right origin with no certificate authority',
+        fn: (env = {}) => ({ ...stackTarget({ ...env, ATRIUM_STACK_CA: '' }) }),
       },
     ],
   },
@@ -642,6 +704,184 @@ export const ENFORCEMENT = [
           throw new Error('no');
         },
       },
+    ],
+  },
+  {
+    // #40 round 8, D3. The only check here whose subject is the other checks'
+    // *behaviour* rather than their text.
+    check: 'controlProblems',
+    definedIn: 'scripts/ci/positive-control.mjs',
+    fn: controlProblems,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'no rule about the text of a file can tell an assertion from a shape that looks like one — `assert-page-serves.mjs` replaced by `report(…)` printed "passed." and exited 0 with no stack running, and every syntactic gate here stayed green. This is the one thing that says no, so a version of it that accepts an exit of 0 puts the whole deploy job back to being a list of scripts nobody ran',
+    contract: (grade) => {
+      const control = {
+        id: 'assert-x',
+        world: 'nothing is running',
+        expect: /assert-x: \d+ assertion\(s\) failed\./,
+        because: 'a probe',
+      };
+      const red = { status: 1, output: 'assert-x: 3 assertion(s) failed.\n' };
+      return [
+        ...expectProblem(
+          grade(control, red).length === 0,
+          'it reports a control that failed, visibly, for the reason it planted',
+        ),
+        ...expectProblem(
+          grade(control, { status: 0, output: 'assert-x: passed.\n' }).some((problem) =>
+            /exited 0 when/.test(problem),
+          ),
+          'it accepts an entry point that exits 0 in a world it cannot have checked — the measured D3 exploit exactly, and the one thing this check exists for',
+        ),
+        ...expectProblem(
+          grade(control, { status: 1, output: 'command not found: docker\n' }).some((problem) =>
+            /did not visibly fail for the reason this control planted/.test(problem),
+          ),
+          'it accepts any red at all, so a runner with no docker would read as every assertion working',
+        ),
+        ...expectProblem(
+          grade(control, {
+            status: undefined,
+            output: '',
+            error: { code: 'ETIMEDOUT', killed: true },
+          }).some((problem) => /did not reach a verdict/.test(problem)),
+          "it reads a child killed by its own timeout as a control that came back red — the ledger's CAUGHT-vs-crashed defect, one file over",
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'grades everything as satisfied', fn: () => [] },
+      { name: 'grades everything as broken', fn: () => ['a problem'] },
+      {
+        name: 'accepts an exit of 0 — the D3 exploit, unopposed',
+        fn: (control, outcome) => (outcome.status === 0 ? [] : controlProblems(control, outcome)),
+      },
+    ],
+  },
+  {
+    // The attack on `controlProblems`'s own scope sentence: take a script out of
+    // the table and the control step still passes, with the script back to being
+    // unproven. Found attacking this round's own fix.
+    check: 'controlCoverageProblems',
+    definedIn: 'scripts/ci/checker-graph.mjs',
+    fn: (root, read, controls) => controlCoverageProblems(root, read, controls),
+    subjects: ['scripts/', '.github/workflows/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'the positive controls are a table in the same commit as the scripts they control, so a one-line deletion puts an assertion back to being unproven with every gate green. The set that has to be covered is read out of the workflow instead — and this found a real gap the moment it was written: assert-migration-image.mjs had no control at all',
+    contract: (coverage, { root, read }) => [
+      ...expectProblem(
+        coverage(root, read).length === 0,
+        'it reports a gap against the real workflow, where every assertion the deploy job runs is controlled or exempted with a reason',
+      ),
+      ...expectProblem(
+        coverage(root, read, { deploy: [] }).some((problem) =>
+          /no positive control .* ever requires it to fail/.test(problem),
+        ),
+        'it says nothing when the control table is emptied, which is the one-line edit that puts every stack assertion back to being unproven',
+      ),
+    ],
+    mutants: [
+      { name: 'sees no gaps', fn: () => [] },
+      { name: 'sees nothing but gaps', fn: () => ['a gap'] },
+    ],
+  },
+  {
+    // #40 round 8, D5. Two importers and no row, and its `notAVerdict` is the
+    // whole CAUGHT-vs-crashed distinction for the deploy mutation ledger — the
+    // round-5 defect's own fix, whose only witness was gate-selftest.mjs, inside
+    // scripts/. `positive-control.mjs` is the third importer, so the threshold
+    // rule below now demands this row rather than a person remembering it.
+    check: 'notAVerdict',
+    definedIn: 'scripts/ci/child-verdict.mjs',
+    fn: notAVerdict,
+    subjects: ['scripts/'],
+    // Not `positive-control.mjs`, which *calls* it: presence is not use, and a
+    // call inside a function this file never asserts on is the round-6 defect
+    // this rule was written for.
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      "the ledger reads `!ok` as 'this stage went red', so a child killed by a timeout, an out-of-memory kill, or a binary that was not on PATH is written down as CAUGHT — an assertion credited with a verdict it never reached. A version of this that returns undefined turns every crash into agreement, in the file whose whole subject is telling those apart",
+    contract: (why) => {
+      const cases = [
+        ['a child that exited by itself', { status: 7 }, undefined],
+        [
+          'a child killed by the caller’s own timeout',
+          { status: null, signal: 'SIGTERM', code: 'ETIMEDOUT' },
+          /killed by this ledger's own/,
+        ],
+        [
+          'a child the kernel killed',
+          { status: null, signal: 'SIGKILL' },
+          /killed by SIGKILL rather than exiting on its own/,
+        ],
+        [
+          'a binary that does not exist',
+          { status: null, signal: null, code: 'ENOENT' },
+          /never started/,
+        ],
+      ];
+      return cases.flatMap(([what, error, expected]) => {
+        const answer = why(error, 420_000);
+        if (expected === undefined) {
+          return expectProblem(
+            answer === undefined,
+            `it calls ${what} something other than a verdict, so a real disagreement would be reported as a crash`,
+          );
+        }
+        return expectProblem(
+          typeof answer === 'string' && expected.test(answer),
+          `it reads ${what} as the child's verdict, which credits an assertion with an answer nothing observed`,
+        );
+      });
+    },
+    mutants: [
+      { name: 'every failure is a verdict', fn: () => undefined },
+      { name: 'no failure is ever a verdict', fn: () => 'not a verdict' },
+      {
+        name: 'the documented-but-wrong reading: `killed` as the timeout flag',
+        fn: (error) => (error?.killed === true ? 'timed out' : undefined),
+      },
+    ],
+  },
+  {
+    check: 'repoRoot',
+    definedIn: 'scripts/ci/repo-root.mjs',
+    fn: repoRoot,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'every path these scripts read is resolved against what this returns, so a version that answers `/` makes every scan read an empty tree and report it clean — and `checkReadmeClaims` used to catch its own `readFileSync` and return `[]`, which is that failure already having happened once, quietly, from the wrong working directory',
+    contract: (root, { workspace }) => {
+      const tree = join(workspace, 'repo-root-probe');
+      const nested = join(tree, 'packages', 'x', 'src');
+      mkdirSync(nested, { recursive: true });
+      mkdirSync(join(tree, '.github', 'workflows'), { recursive: true });
+      mkdirSync(join(tree, 'scripts', 'ci'), { recursive: true });
+      writeFileSync(join(tree, 'pnpm-workspace.yaml'), 'packages:\n');
+      let threw = false;
+      try {
+        root(join(workspace, 'nowhere-near-a-repository'));
+      } catch {
+        threw = true;
+      }
+      return [
+        ...expectProblem(
+          root(nested) === tree,
+          'it does not walk up from a nested directory to the root that holds every marker',
+        ),
+        ...expectProblem(root(tree) === tree, 'it does not recognise the root when handed it'),
+        ...expectProblem(
+          threw,
+          'a directory with no repository above it resolves to something anyway, so every scan below it reads an empty tree and calls it clean',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'always the filesystem root', fn: () => '/' },
+      { name: 'always whatever it was handed', fn: (from) => from },
     ],
   },
   {
@@ -1556,14 +1796,89 @@ function enrolledWorkspaces(root, read) {
 const isTestFile = (path) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path);
 
 /**
- * How many other scripts must import a module before it needs a registry row.
+ * How many other scripts must import a shared decision before it needs a row.
  *
  * Three, because two callers is a pair and three is a habit — and because the
  * three-caller line is where the arithmetic in `sharedModuleProblems` starts
  * being about a *class* of failure rather than about one file. `main-module.mjs`
- * has seventeen.
+ * has nineteen.
+ *
+ * The number is a judgement and the edge is occupied: a blind critic measured
+ * `child-verdict.mjs` at two importers, no row, sole enforcer of the entire
+ * CAUGHT-vs-crashed distinction and witnessed only from inside `scripts/`. That
+ * is not an argument for a different number — at two, `checker-graph.mjs` itself
+ * would need a row in its own registry — it is an argument that the threshold
+ * cannot be the only thing that puts a decision in the table. What actually
+ * closed it was a third importer arriving (`positive-control.mjs`) and the rule
+ * then demanding the row, which is the rule working; and the row exists now
+ * whatever the count does next.
  */
 const SHARED_MODULE_THRESHOLD = 3;
+
+/**
+ * Shared bindings that no contract in this file can reach, and why, and who
+ * witnesses them instead.
+ *
+ * ── THE UNIT OF APPLICATION WAS WRONG (#40 round 8, D5) ─────────────────────
+ * `described` was a set of `definedIn` paths, so a module cleared the rule with
+ * a row for *any one* of its exports. A new shared decision added to
+ * `main-module.mjs` — nineteen importers, the file whose one-statement mutation
+ * cost 358 assertions — needed no row at all, because `isMainModule` already had
+ * one. The rule counted files and meant decisions.
+ *
+ * It counts bindings now: `module#export`, one row per decision, declared by
+ * each row's `covers` (which defaults to the single name the row already
+ * names). That immediately exposes eight bindings over the threshold whose
+ * behaviour no in-process contract can assert, and pretending otherwise would be
+ * worse than saying so. Each is written down here with the reason no contract is
+ * possible *and* the thing that exercises it instead — because "no test" and "no
+ * test in this file" are different claims, and the first one is the one that
+ * should be expensive to write.
+ *
+ * This is an exemption list, which this repository refuses elsewhere and for
+ * good reason. The difference is what it is a list *of*: the lists this
+ * campaign deleted were lists of files a rule would skip, invisible at the point
+ * of the skip. This one is enumerated against the live import graph — an entry
+ * for a binding that stopped being shared is an error, a binding that becomes
+ * shared and is in neither table is an error, and both are printed with the
+ * count. It is a written debt, not a silence.
+ */
+const UNCONTRACTED = {
+  'scripts/ci/stack-client.mjs#report': {
+    why: 'it is `process.exit(verdict(what))` and nothing else, so a contract that called it would end the process running the contract. `verdict` — the decision it acts on — has a row above with three mutants.',
+    witness:
+      'packages/ci-guard/test/checkers.test.ts runs it in a real child process and requires exit 1 for a recorded failure and 0 for a clean run; and every deploy control in positive-control.mjs requires a script that ends on it to come back red.',
+  },
+  'scripts/ci/compose.mjs#docker': {
+    why: 'it is `execFileSync("docker", args)`. A contract in the verify job would either need a docker daemon with this stack running, or would assert that a shell-out wrapper shells out, which is a test of node.',
+    witness:
+      'the deploy job, where the health, config, identity and origin assertions all read the stack through it — and the positive control, which requires each of them to fail when there is nothing to read.',
+  },
+  'scripts/ci/compose.mjs#psAll': {
+    why: 'same: `docker compose ps` and a JSON parse of what came back.',
+    witness:
+      'assert-stack-health.mjs, whose positive control requires it to report "the compose project has no containers at all" when none are running — which is this function returning an honest empty list.',
+  },
+  'scripts/ci/compose.mjs#inspect': {
+    why: 'same: `docker inspect` and a JSON parse.',
+    witness:
+      'assert-stack-config.mjs reads the production configuration back out of the containers through it, and its positive control requires that to fail with nothing to inspect.',
+  },
+  'scripts/ci/compose.mjs#queryDatabase': {
+    why: 'it runs `psql` inside the deployment’s own postgres container, with credentials read out of that container.',
+    witness:
+      'assert-stack-schema.mjs and assert-page-serves.mjs, which compare the rendered page against what the database holds; the positive control requires both to fail with no database.',
+  },
+  'scripts/ci/stack-client.mjs#establishSession': {
+    why: 'it signs an account up through the real form, reads the mail out of the real relay and follows the link in it. There is no half of that which is not a live stack.',
+    witness:
+      'assert-signup-verifies.mjs is exactly this path as an assertion, and assert-page-serves.mjs and assert-ws-upgrade.mjs both depend on the session it produces.',
+  },
+  'scripts/ci/stack-client.mjs#mailpit': {
+    why: 'it talks to the mail catcher the overlay adds; with no overlay there is nothing to talk to.',
+    witness: 'the same three, and the `no-transport` case in deploy-mutation-ledger.mjs.',
+  },
+};
 
 /**
  * Every module many scripts depend on that nothing in the registry describes.
@@ -1597,6 +1912,8 @@ export function sharedModuleProblems(
 ) {
   const problems = [];
   const importers = new Map();
+  /** `module#export` → the scripts that import that binding by name. */
+  const bindingImporters = new Map();
   for (const file of sourceFiles(root, list)) {
     if (!file.startsWith('scripts/')) continue;
     let source;
@@ -1611,6 +1928,20 @@ export function sharedModuleProblems(
       const specifier = statement.moduleSpecifier;
       if (!ts.isStringLiteral(specifier)) continue;
       if (!specifier.text.startsWith('.') || !specifier.text.endsWith('.mjs')) continue;
+      // Every *name* this file takes out of that module, which is the unit the
+      // rule is about: a module clears with one row, a decision does not.
+      const bindings = statement.importClause?.namedBindings;
+      if (bindings !== undefined && ts.isNamedImports(bindings)) {
+        const target = toPosix(posix.join(posix.dirname(file), specifier.text));
+        for (const element of bindings.elements) {
+          // The *imported* name, not the local alias: `import { check as c }`
+          // depends on `check`.
+          const imported = (element.propertyName ?? element.name).text;
+          const key = `${target}#${imported}`;
+          if (!bindingImporters.has(key)) bindingImporters.set(key, new Set());
+          bindingImporters.get(key).add(file);
+        }
+      }
       // Resolved against the *importing file's* directory, not assumed to be
       // `scripts/ci/`. `scripts/ci` is flat today and "the directory happens to
       // be flat today" is this ticket's own founding assumption: a script at
@@ -1629,6 +1960,138 @@ export function sharedModuleProblems(
     problems.push(
       `${module} is imported by ${files.size} other scripts (${[...files].sort().join(', ')}) and has no row in the registry in ${REGISTRY_FILE}. A module this many scripts depend on decides something on behalf of all of them: replacing N copies of a decision with one shared implementation converts N independent failures into one total failure, and the tests written for the N copies do not transfer. Round 6 learned that by centralising the main-module guard and leaving its predicate untested, which one statement then took 358 assertions out of CI over. Give it a row with a behavioural contract, a mutant that contract rejects, and a witness outside scripts/.`,
     );
+  }
+
+  // ── And the same question about each *decision*, not each file (D5) ────────
+  const covered = new Set(
+    registry.flatMap((entry) =>
+      (entry.covers ?? [entry.check]).map((name) => `${entry.definedIn}#${name}`),
+    ),
+  );
+  const shared = new Set();
+  for (const [key, files] of [...bindingImporters].sort()) {
+    if (files.size < SHARED_MODULE_THRESHOLD) continue;
+    shared.add(key);
+    if (covered.has(key) || Object.hasOwn(UNCONTRACTED, key)) continue;
+    const [module, name] = key.split('#');
+    problems.push(
+      `\`${name}\` from ${module} is imported by ${files.size} scripts (${[...files].sort().join(', ')}) and no row in ${REGISTRY_FILE} covers it. ${module} having a row for some *other* export is not this decision being tested: the registry keyed coverage on the file until round 8, so a new shared decision could land in an already-described module — main-module.mjs, say, whose one-statement mutation cost 358 assertions — with nothing anywhere running it. Give it a row, add it to an existing row's \`covers\` if that row's contract really does exercise it, or put it in UNCONTRACTED with the reason no contract can reach it and the thing that exercises it instead.`,
+    );
+  }
+  for (const [key, entry] of Object.entries(UNCONTRACTED)) {
+    if (!shared.has(key)) {
+      problems.push(
+        `UNCONTRACTED names \`${key}\`, which fewer than ${SHARED_MODULE_THRESHOLD} scripts import any more. A stale acknowledged debt is a debt nobody re-read — which is the failure mode of every exemption list this campaign has deleted. Take it out, or write down why it is still shared.`,
+      );
+    }
+    if (covered.has(key)) {
+      problems.push(
+        `\`${key}\` is both covered by a registry row and listed in UNCONTRACTED as untestable. One of the two is out of date, and the debt entry is the one that reads as an excuse.`,
+      );
+    }
+    if (typeof entry?.why !== 'string' || typeof entry?.witness !== 'string') {
+      problems.push(
+        `UNCONTRACTED's entry for \`${key}\` does not say both why no contract can reach it and what exercises it instead. An entry with only the first half is a list of things nobody tests.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
+ * Assertions the deploy job runs that no positive control ever breaks.
+ *
+ * ── FOUND ATTACKING THIS ROUND'S OWN FIX (#40 round 8) ──────────────────────
+ * `positive-control.mjs` closes D3 — an assertion script that asserts nothing —
+ * by running each script in a world where it must fail. Its scope sentence is
+ * "the entry points named in `CONTROLS`", and the attack on that sentence is one
+ * line long: take a script out of `CONTROLS`. The control step still passes, the
+ * script is still in the workflow, and it is back to being unproven. That is the
+ * registry's own failure mode (a row is data in the same commit) and it gets the
+ * registry's own answer, one turn stronger than a count in the README: the
+ * required set is *derived from the workflow* rather than declared, so the
+ * question is not "is the table the right size" but "does the table cover what
+ * the job actually runs".
+ *
+ * Two assertions are exempt and both would be *false* controls rather than
+ * missing ones, which is why the exemption is a reason rather than a name in a
+ * list: with nothing deployed, `assert-stack-teardown` legitimately passes —
+ * that is precisely what it asserts — and `assert-deploy-preflight` is about the
+ * host, which is there whether or not anything is running.
+ */
+const CONTROL_EXEMPT = {
+  'assert-stack-teardown':
+    "it asserts that nothing of this project is left running, which is *true* before anything is brought up. A cold control for it would require it to fail at telling the truth. Its world is the other one — after `down` — and the `teardown-keeps-volumes` case in deploy-mutation-ledger.mjs mutates that stage's own flags and requires this script to catch the result.",
+  'assert-deploy-preflight':
+    'it is the only check in the job about the *machine* rather than the deployment, so "no stack is up" is not a broken world for it. Its mutations are `old-engine` and `routed-gateway` in deploy-mutation-ledger.mjs, which change what it observes about the host.',
+};
+
+/**
+ * @param {string} [root]
+ * @param {typeof readFileSync} [read]
+ * @param {object} [controls] injectable so the self-tests can hand in a table
+ *   with a known hole
+ * @returns {string[]}
+ */
+export function controlCoverageProblems(
+  root = process.cwd(),
+  read = readFileSync,
+  controls = CONTROLS,
+) {
+  const problems = [];
+  let document;
+  try {
+    document = parseYaml(String(read(join(root, `${WORKFLOW_DIRECTORY}/ci.yml`), 'utf8')));
+  } catch (error) {
+    return [
+      `${WORKFLOW_DIRECTORY}/ci.yml could not be read to check control coverage: ${error.message}`,
+    ];
+  }
+  const steps = document?.jobs?.deploy?.steps;
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return [
+      `${WORKFLOW_DIRECTORY}/ci.yml has no \`deploy\` job with steps, so "every assertion it runs has a control" is true of nothing. A rule whose subject set is empty is satisfied by anything.`,
+    ];
+  }
+  const controlled = new Set((controls.deploy ?? []).map((control) => control.id));
+  const asserted = [];
+  for (const step of steps) {
+    if (typeof step?.run !== 'string') continue;
+    let commands;
+    try {
+      commands = completedCommands(step.run);
+    } catch {
+      continue;
+    }
+    for (const command of commands) {
+      for (const word of command.argv) {
+        const found = /^(?:\.\.\/)*scripts\/ci\/(assert-[a-z0-9-]+)\.mjs$/.exec(String(word));
+        if (found !== null) asserted.push(found[1]);
+      }
+    }
+  }
+  if (asserted.length === 0) {
+    return [
+      'no assertion script could be read out of the deploy job at all, so this check has nothing to be about. Either the job stopped asserting anything or the parse stopped working; both are worse than a missing control.',
+    ];
+  }
+  for (const name of [...new Set(asserted)].sort()) {
+    if (controlled.has(name) || Object.hasOwn(CONTROL_EXEMPT, name)) continue;
+    problems.push(
+      `the deploy job runs ${name}.mjs and no positive control in scripts/ci/positive-control.mjs ever requires it to fail. Nothing else in this repository can tell that script apart from one gutted to \`report('${name}')\`, which was measured to print "passed." and exit 0 with no stack running while every other gate stayed green. Give it a control, or exempt it with the reason a broken world for it would be a false red.`,
+    );
+  }
+  for (const [name, why] of Object.entries(CONTROL_EXEMPT)) {
+    if (!asserted.includes(name)) {
+      problems.push(
+        `${name} is exempted from the positive controls and the deploy job does not run it any more. A stale exemption is one nobody re-read: ${why}`,
+      );
+    }
+    if (controlled.has(name)) {
+      problems.push(
+        `${name} is both controlled and exempted from control. One of the two is out of date, and the exemption is the one that reads as an excuse.`,
+      );
+    }
   }
   return problems;
 }
@@ -1762,6 +2225,11 @@ export function checkerGraphProblems({
   // about whatever fixture registry a self-test happened to hand in. Passing the
   // fixture here would make every one-row fixture report twelve missing modules.
   problems.push(...sharedModuleProblems(root, read, list));
+
+  // And every assertion the deploy job runs has to have a world in which it
+  // must fail. `CONTROLS` is data in this same commit; the set it has to cover
+  // is read out of the workflow.
+  problems.push(...controlCoverageProblems(root, read));
 
   // And the half none of the above can reach: does each check still *do*
   // anything, and would its own fixture notice if it stopped? A perfect graph

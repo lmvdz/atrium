@@ -56,19 +56,29 @@ import { parse } from 'yaml';
 import {
   assertedNames,
   checkerGraphProblems,
+  controlCoverageProblems,
   ENFORCEMENT,
   exportedNames,
   sharedModuleProblems,
 } from '../../../scripts/ci/checker-graph.mjs';
+import { notAVerdict } from '../../../scripts/ci/child-verdict.mjs';
 import { composeArgs } from '../../../scripts/ci/compose.mjs';
 import { guardProblems, mainGuardProblems } from '../../../scripts/ci/guard-scan.mjs';
 import { requireFrom } from '../../../scripts/ci/import-from.mjs';
 import { isMainModule } from '../../../scripts/ci/main-module.mjs';
+import { CONTROLS, controlProblems } from '../../../scripts/ci/positive-control.mjs';
 import { manifestPath } from '../../../scripts/ci/record-built-images.mjs';
+import { repoRoot } from '../../../scripts/ci/repo-root.mjs';
 import { readFreshReport } from '../../../scripts/ci/report-file.mjs';
 import { scanForExpectedFailures } from '../../../scripts/ci/scan-expected-failures.mjs';
 import { completedCommands } from '../../../scripts/ci/shell-command.mjs';
-import { check, failures, resetFailures, verdict } from '../../../scripts/ci/stack-client.mjs';
+import {
+  check,
+  failures,
+  resetFailures,
+  stackTarget,
+  verdict,
+} from '../../../scripts/ci/stack-client.mjs';
 import {
   checkWorkflowFile,
   protectedCommandCoverage,
@@ -76,6 +86,13 @@ import {
 
 const REPO = fileURLToPath(new URL('../../../', import.meta.url));
 const at = (relative: string) => `${REPO}${relative}`;
+/** A synthetic control, for the cases about how an outcome is graded. */
+const PROBE_CONTROL = {
+  id: 'assert-x',
+  world: 'nothing is running',
+  expect: /assert-x: \d+ assertion\(s\) failed\./,
+  because: 'a probe',
+};
 const IMPORT = "import { isMainModule } from './main-module.mjs';\n";
 const REPORTS = "import { report } from './stack-client.mjs';\n";
 const SOUND = `${IMPORT}if (isMainModule(import.meta.url)) {\n  process.exit(main());\n}\n`;
@@ -622,11 +639,21 @@ describe('the registry proves the check still does something', () => {
     const problems = checkerGraphProblems({
       root: REPO,
       // Runs the check and asserts nothing about what came back.
+      //
+      // `at('scripts')`, not `'scripts'` (#40 round 8, D7): a relative path here
+      // resolves against the working directory, so `pnpm --filter
+      // @atrium/ci-guard test` — which runs from `packages/ci-guard` — made this
+      // contract throw ENOENT instead of reporting nothing, and the suite failed
+      // with a message about a directory rather than about the rule. Measured on
+      // r7: exit 1 from the package directory, exit 0 from the root. CI runs
+      // from the root, so it was a hazard rather than a live break, and a gate
+      // that only works from one directory is a gate that will be run from
+      // another one.
       registry: [
         {
           ...row(),
           contract: (scan: (directory: string) => string[]) => {
-            scan('scripts');
+            scan(at('scripts'));
             return [];
           },
         },
@@ -795,6 +822,25 @@ describe('the invocation graph', () => {
    * The generalisation of the round-7 critical finding: the next helper someone
    * extracts must arrive with a registry row, or the build says so.
    */
+  /**
+   * The attack on the positive control's own scope sentence (#40 round 8).
+   *
+   * "The entry points named in `CONTROLS`" is a scope, and a one-line deletion
+   * from that table puts an assertion back to being unproven with every gate
+   * green. The set that has to be covered is read out of the workflow instead —
+   * which found a real gap the moment it was written: `assert-migration-image`
+   * had no control at all.
+   */
+  it('every assertion the deploy job runs is controlled or exempted with a reason', () => {
+    expect(controlCoverageProblems(REPO)).toEqual([]);
+  });
+
+  it('reports the control table emptied while the deploy job still asserts', () => {
+    expect(controlCoverageProblems(REPO, readFileSync, { deploy: [] }).join(' | ')).toMatch(
+      /no positive control .* ever requires it to fail/,
+    );
+  });
+
   it('every shared module under scripts/ci has a row', () => {
     expect(sharedModuleProblems(REPO)).toEqual([]);
   });
@@ -958,6 +1004,113 @@ describe('the shared decisions many scripts depend on', () => {
   it('requireFrom resolves from the directory it is given, and fails when it cannot', () => {
     expect(typeof requireFrom(REPO, 'node:path').join).toBe('function');
     expect(() => requireFrom(REPO, './nothing-of-this-name-exists.cjs')).toThrow();
+  });
+
+  /**
+   * The positive control, from outside `scripts/` (#40 round 8, D3).
+   *
+   * Nothing in this repository required an assertion script to contain an
+   * assertion. `assert-page-serves.mjs` replaced with two lines that import the
+   * reporter and call it printed `assert-page-serves: passed.` and exited 0 with
+   * no stack running at all — and the guard scanner, the registry, both
+   * self-tests, vitest and biome were every one of them green. No rule about the
+   * *text* of a file can catch that, which is why this one runs the file.
+   */
+  it('controlProblems reports an entry point that exits 0 in a world it cannot have checked', () => {
+    expect(
+      controlProblems(PROBE_CONTROL, { status: 0, output: 'assert-x: passed.\n' }).join(' | '),
+    ).toMatch(/exited 0 when/);
+  });
+
+  it('controlProblems does not accept a red for an unrelated reason', () => {
+    expect(
+      controlProblems(PROBE_CONTROL, { status: 1, output: 'command not found: docker\n' }).join(
+        ' | ',
+      ),
+    ).toMatch(/did not visibly fail for the reason this control planted/);
+  });
+
+  it('controlProblems does not accept a child killed by its own timeout', () => {
+    expect(
+      controlProblems(PROBE_CONTROL, {
+        status: undefined,
+        output: '',
+        error: { code: 'ETIMEDOUT', killed: true },
+      }).join(' | '),
+    ).toMatch(/did not reach a verdict/);
+  });
+
+  it('controlProblems accepts a control that failed visibly for the reason it planted', () => {
+    expect(
+      controlProblems(PROBE_CONTROL, { status: 1, output: 'assert-x: 3 assertion(s) failed.\n' }),
+    ).toEqual([]);
+  });
+
+  it('every control names a group, an expectation and why the entry point matters', () => {
+    const thin = Object.entries(CONTROLS).flatMap(([group, controls]) =>
+      (controls as Array<Record<string, unknown>>)
+        .filter(
+          (control) =>
+            typeof control.id !== 'string' ||
+            typeof control.world !== 'string' ||
+            typeof control.because !== 'string' ||
+            !(control.expect instanceof RegExp),
+        )
+        .map((control) => `${group}: ${String(control.id)}`),
+    );
+    expect(thin).toEqual([]);
+  });
+
+  /**
+   * The CAUGHT-vs-crashed distinction, which is round 5's own fix and had two
+   * importers, no registry row and no witness outside `scripts/`.
+   */
+  it('notAVerdict calls a child that exited on its own a verdict', () => {
+    expect(notAVerdict({ status: 7, signal: null }, 420_000)).toBeUndefined();
+  });
+
+  it('notAVerdict refuses to credit a timeout, a kernel kill or a missing binary', () => {
+    expect(notAVerdict({ status: null, signal: 'SIGTERM', code: 'ETIMEDOUT' }, 420_000)).toMatch(
+      /killed by this ledger's own/,
+    );
+    expect(notAVerdict({ status: null, signal: 'SIGKILL' }, 420_000)).toMatch(/killed by SIGKILL/);
+    expect(notAVerdict({ status: null, signal: null, code: 'ENOENT' }, 420_000)).toMatch(
+      /never started/,
+    );
+  });
+
+  it('repoRoot walks up to the marked root and refuses to invent one', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'atrium-root-'));
+    const nested = join(workspace, 'packages', 'x', 'src');
+    mkdirSync(nested, { recursive: true });
+    mkdirSync(join(workspace, '.github', 'workflows'), { recursive: true });
+    mkdirSync(join(workspace, 'scripts', 'ci'), { recursive: true });
+    writeFileSync(join(workspace, 'pnpm-workspace.yaml'), 'packages:\n');
+    expect(repoRoot(nested)).toBe(workspace);
+    expect(() => repoRoot(tmpdir())).toThrow(/no repository root at or above/);
+  });
+
+  it('repoRoot finds this repository from a package directory rather than from the cwd', () => {
+    expect(repoRoot(at('packages/ci-guard'))).toBe(REPO.replace(/\/$/, ''));
+  });
+
+  it('stackTarget aims at the configured domain over TLS with the deployment’s own CA', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'atrium-target-'));
+    const ca = join(workspace, 'ca.pem');
+    writeFileSync(ca, 'a certificate\n');
+    const target = stackTarget({
+      ATRIUM_STACK_DOMAIN: 'atrium.localhost',
+      ATRIUM_STACK_CA: ca,
+      ATRIUM_STACK_HTTPS_PORT: '8443',
+    });
+    expect(target.origin).toBe('https://atrium.localhost');
+    expect(target.httpsPort).toBe(8443);
+    expect(String(target.ca)).toContain('a certificate');
+  });
+
+  it('stackTarget falls back to the published loopback port with no CA', () => {
+    const bare = stackTarget({});
+    expect([bare.address, bare.httpsPort, bare.ca]).toEqual(['127.0.0.1', 443, undefined]);
   });
 
   it('scanForExpectedFailures sees a literal `it.fails` and nothing in a clean file', () => {

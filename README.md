@@ -149,6 +149,26 @@ Not a health endpoint, deliberately: `app` reported healthy for three rounds
 while 500ing, and a check that cannot tell those apart is the instrument that
 allowed it.
 
+**And every one of those assertions is run twice — once against the deployment,
+once against a world where it has to fail.** Nothing in this repository required
+an assertion script to contain an assertion: replacing the whole of
+`assert-page-serves.mjs` with two lines that import the reporter and call it
+printed `assert-page-serves: passed.` and exited 0 **with no stack running at
+all**, while the guard scanner, the registry, both self-tests, vitest and biome
+stayed green. No rule about the *text* of a file can catch that — `main()`
+rewritten to `() => 0` satisfies every syntactic rule here and always will. So
+`scripts/ci/positive-control.mjs` runs each script before anything is built,
+where there is no deployment to check, and fails unless every one comes back red
+saying so; the same file runs both self-tests against a copy of the tree with a
+real defect planted in it. The real steps later in the job are the other half of
+the pair. A script that always passes fails the first half, one that always fails
+fails the second, and only a script whose answer comes from the world passes
+both. Which scripts must be covered is read out of the `deploy` job's own steps
+rather than declared in that file, because a table of controls in the same commit
+as the scripts it controls is one deletion from covering nothing —
+`controlCoverageProblems` found `assert-migration-image` uncontrolled the moment
+it was written.
+
 **Docker Engine ≥ 28 is a hard deployment prerequisite, not a nicety.** Earlier
 engines insert their DNAT rules ahead of the filter chain, so a port published to
 `127.0.0.1` — mailpit's UI here, a store of live single-use sign-in links — is
@@ -164,9 +184,9 @@ of `ci.yml`'s `deploy` job, every case runs it from the top, and the stage that
 actually fires is what gets credited. A case whose declared check is not the one
 that fired fails the ledger, which is how three cases that had been crediting a
 later check came to name the earlier gate that really stops them. It also refuses
-to run if the job grows a stage no case names and no exemption explains — 5
+to run if the job grows a stage no case names and no exemption explains — 6
 stages are exempt, each with the reason no mutation of it exists, and the number
-is asserted against the table so that exempting a sixth is a visible edit
+is asserted against the table so that exempting a seventh is a visible edit
 rather than a quiet one. Round 4 removed one of them: `assert-image-origins` was
 required by policy and never mutation-proven, and now has `origin-baked-into-the-image`,
 which re-points the tag `compose build` produced at an image carrying a `wss://`
@@ -667,6 +687,16 @@ zero tests exits 0 just like one that passed 315:
   that matches no actual decrease fails too — nobody pre-authorises next month's
   cut. Until a manifest exists on `main` the script says `no baseline` out loud
   and checks only that every floor is at least 1.
+- **And the window where that is not yet a ratchet is covered by prose.** While
+  `origin/main` carries no manifest, a floor can be lowered and nothing will
+  object — `packages/ci-guard`'s floor of 115 could be set to 1 today, the suite
+  would still pass, and seventy tests could then be deleted quietly. Nothing
+  inside one commit can prove otherwise, because the checker and the checked come
+  out of the same revision. So the manifest declares **floors totalling 1441**,
+  and `gate-selftest.mjs` reads that number back out of this sentence and
+  compares it against the sum of every floor in the file. Lowering one now costs
+  an edit to a sentence that says the floors got smaller. That is loudness, not
+  proof, and it keeps working after the ratchet activates.
 - Skipped, todo and *expected-failure* tests all fail the gate. That last one is
   invisible in the stock reports: Vitest records `it.fails()` as `passed` with an
   empty `failureMessages`, and Playwright records `test.fail()` as `expected`,
@@ -854,6 +884,27 @@ zero tests exits 0 just like one that passed 315:
   `&& process.env.CI === undefined`, a guard nested inside `if (false)`, a
   ternary, an `else` branch and a locally redefined predicate are all refused
   without the scanner having heard of any of them.
+- **A rule's scope is a claim of its own, and it has to be attacked separately
+  from the rule.** Round 7 argued — correctly, and in writing — that denylisting
+  evasions is unbounded, and built an allowlist over the *value* an entry point
+  exits with. Then it scoped that allowlist to the guard body and wrote no
+  sentence saying so. One statement one line above the guard,
+  `if (process.env.CI !== undefined) process.exit(0);`, put both self-tests at
+  `exit=0` with zero bytes of output under `CI=true` with every gate green: 184
+  gate cases and 197 policy mutations, for two files and one insertion each — the
+  same price and the same result as round 5, in the commit that fixed round 5.
+  Two more spellings sat *inside* the declared scope and were accepted anyway:
+  `process.on('exit', () => { process.exitCode = 0; })`, which lets node rewrite
+  the status a terminator already chose, and a block-scoped `const code = 0`
+  shadowing the name the exit reads. So the scope is now a sentence at the top of
+  `guard-scan.mjs` — *every node of every file this scanner reads, at any
+  nesting depth, inside functions and outside them* — and the things that can
+  move an exit status some other way are refused by not being the one allowed
+  shape: `process.exitCode`, every listener registration whatever event it names,
+  a `process.exit` reference that is not a call, an assignment to `process.argv`,
+  an `import` of `node:process`, and the identifier `process` used as anything
+  but the object of a member access. Being right about what happens *within* a
+  scope is exactly what makes the scope invisible.
 - **A check whose only invoker is one of its subjects cannot be trusted.** That
   guard scanner was called from exactly one place in the repository: the file it
   was scanning. Measured on the round-5 branch — one `&&` in `gate-selftest.mjs`
@@ -861,7 +912,7 @@ zero tests exits 0 just like one that passed 315:
   policy mutations plus 142 gate cases) with the workflow policy clean, biome
   clean, both steps green, and no output at all under `CI=true`.
   `scripts/ci/checker-graph.mjs` makes that a property with a test: an
-  invocation graph of 14 enforcement checks — what each one reads and every place
+  invocation graph of 19 enforcement checks — what each one reads and every place
   it is called from, its size read back out of this sentence because a deleted
   row is a check that quietly stops being in the graph — and three assertions
   over it: the discovered witnesses must equal the declared ones, every
@@ -975,7 +1026,7 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 197
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 200
   mutated copies of the real workflow and additionally asserts that every one of
   the 28 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
@@ -984,7 +1035,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 184 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 206 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

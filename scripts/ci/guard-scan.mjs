@@ -65,6 +65,68 @@
  * that third caller keeps existing. A check whose only invoker is inside the set
  * of files it checks cannot be trusted, and that is now a property with a test
  * rather than a habit.
+ *
+ * ── THE SCOPE SENTENCE, WHICH IS WHERE ROUND 7 PUT THE DEFECT (#40 round 8) ──
+ * Round 7 argued — in this file, in the comment on `exitProblem` — that
+ * denylisting evasions is unbounded, and built an allowlist over the exit
+ * *value*. It then scoped that allowlist to the guard body and wrote no sentence
+ * saying so. A blind critic put one statement one line above the guard:
+ *
+ *     if (process.env.CI !== undefined) process.exit(0);   ← module top level
+ *
+ *     if (isMainModule(import.meta.url)) {
+ *
+ * Measured on `fix/deploy-serves-r7` as committed, under `CI=true`, which is how
+ * GitHub runs both self-tests: `gate-selftest exit=0 bytes=0 ·
+ * workflow-policy-selftest exit=0 bytes=0`, `mainGuardProblems: 0`, policy 0,
+ * biome 0, vitest 0 (766). 184 gate cases and 197 policy mutations gone for two
+ * files and one insertion each — the same price and the same result as round 5,
+ * against the commit that fixed round 5. And one line further, deleting a row
+ * from `ENFORCEMENT`, is then invisible too, because the README-size ratchet
+ * that exists for exactly that deletion lives inside the file the insertion
+ * silenced.
+ *
+ * The same defect had two more spellings *inside* the declared scope, which is
+ * how little the scope was worth even where it applied:
+ *
+ *     process.on('exit', () => { process.exitCode = 0; });  ← node rewrites the
+ *     process.exit(await main());                              status afterwards
+ *
+ *     const code = await main();                            ← a block-scoped
+ *     if (process.env.CI) { const code = 0; process.exit(code); }  shadow, which
+ *     process.exit(code);                                      is not a
+ *                                                              reassignment
+ *
+ * So this round writes the scope down and then attacks the sentence:
+ *
+ *   **In every file this scanner reads, the exit status of the process is
+ *   decided in exactly one way — `process.exit` carrying the result of the work
+ *   or a non-zero literal — wherever in the file it is written, at any nesting
+ *   depth, inside a function or outside one.**
+ *
+ * `exitMachineryProblems` is that sentence. Everything that can move the exit
+ * status some other way is refused by not being the one allowed shape:
+ * `process.exitCode`, every `process.on`/`once`/`addListener` registration
+ * (whatever event it names — an `exit` listener rewrites the status a terminator
+ * already chose, and enumerating the safe events would be a denylist), a
+ * `process.exit` *reference* that is not a call (an alias is a call with the
+ * name filed off), an assignment to `process.argv` (the guard's only input), and
+ * the identifier `process` used as anything but the object of a member access,
+ * which is what closes `const p = process; p.exit(0);`.
+ *
+ * ── AND WHERE *THAT* SENTENCE STOPS ─────────────────────────────────────────
+ * It reads one directory. A script under `scripts/` that imports a module under
+ * `packages/` inherits whatever that module does at load time, and nothing here
+ * looks: `sharedModuleProblems` in checker-graph.mjs is what requires a shared
+ * decision to have an outside witness, and it counts imports within `scripts/`.
+ * It reads syntax, so `globalThis['pro' + 'cess'].exit(0)` is a computed access
+ * this does not resolve. And it says nothing about whether the work the status
+ * comes from does anything — a `main()` rewritten to `() => 0` satisfies every
+ * rule here and always will. The backstop for all three is behavioural rather
+ * than syntactic and it is new this round: `positive-control.mjs` runs the
+ * shipped entry points against a deliberately broken world and requires each one
+ * to go red. A file silenced by any means whatsoever fails that, including the
+ * means nobody has thought of.
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
@@ -333,12 +395,30 @@ function isWorkExpression(node) {
 }
 
 /**
- * Names the guard body binds at its own top level, and why each is or is not an
- * exit status this rule will accept.
+ * Names a statement list binds at its own top level, and why each is or is not
+ * an exit status this rule will accept.
  *
- * A name reassigned anywhere in the body is refused whatever it was bound to:
+ * A name reassigned anywhere in the list is refused whatever it was bound to:
  * `let code = await main(); if (process.env.CI) code = 0; process.exit(code);`
  * is the ternary with more lines.
+ *
+ * ── AND A NAME *REDECLARED* ANYWHERE IN IT (#40 round 8, D4) ────────────────
+ * Round 7 recorded only the list's own top-level declarations and recognised
+ * only `=`. A blind critic wrote the shadow instead of the assignment:
+ *
+ *     const code = await main();
+ *     if (process.env.CI !== undefined) { const code = 0; process.exit(code); }
+ *     process.exit(code);
+ *
+ * The inner `code` is a different binding in a nested block, so it was neither a
+ * top-level declaration nor a reassignment, and the `process.exit(code)` inside
+ * the branch resolved against a name this map said was the work. Accepted, and
+ * biome accepts it too. So the question this asks is no longer "was it
+ * reassigned with `=`" but "is this name, anywhere in this list at any depth,
+ * ever bound or written a second time" — a redeclaration, a destructuring, a
+ * parameter, a `catch` binding, `+=`, `??=`, `++`. One write is a binding; two
+ * is a decision, and a decision is what may not live between the work and the
+ * exit.
  */
 function topLevelBindings(body) {
   const bindings = new Map();
@@ -354,17 +434,37 @@ function topLevelBindings(body) {
       );
     }
   }
+  const poison = (name, why) => {
+    if (bindings.has(name)) bindings.set(name, why);
+  };
   for (const statement of body) {
     const visit = (node) => {
-      if (
-        ts.isBinaryExpression(node) &&
-        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        ts.isIdentifier(node.left) &&
-        bindings.has(node.left.text)
-      ) {
-        bindings.set(
+      if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && isAssignment(node)) {
+        poison(
           node.left.text,
           `reassigns \`${node.left.text}\` after binding it, so what it exits with is decided somewhere between the two`,
+        );
+      }
+      if (
+        (ts.isPostfixUnaryExpression(node) || ts.isPrefixUnaryExpression(node)) &&
+        ts.isIdentifier(node.operand) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken ||
+          node.operator === ts.SyntaxKind.MinusMinusToken)
+      ) {
+        poison(
+          node.operand.text,
+          `reassigns \`${node.operand.text}\` after binding it, so what it exits with is decided somewhere between the two`,
+        );
+      }
+      // Every *other* binding of the same name, at any depth: a nested `const`,
+      // a destructured element, a parameter, a `catch (code)`. `node.parent` is
+      // the declaration the name belongs to, so a top-level declaration this
+      // map already recorded is not counted twice.
+      for (const name of boundNames(node)) {
+        if (name.node === node && isTopLevelDeclarationOf(node, body)) continue;
+        poison(
+          name.text,
+          `declares \`${name.text}\` a second time — a nested \`const ${name.text}\`, a parameter or a destructured binding shadows the one bound to the work, and \`process.exit(${name.text})\` inside that scope exits with the shadow. A block-scoped redeclaration is not a reassignment and satisfies every rule about \`=\``,
         );
       }
       node.forEachChild(visit);
@@ -372,6 +472,59 @@ function topLevelBindings(body) {
     visit(statement);
   }
   return bindings;
+}
+
+const ASSIGNMENT_OPERATORS = new Set([
+  ts.SyntaxKind.EqualsToken,
+  ts.SyntaxKind.PlusEqualsToken,
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.AmpersandEqualsToken,
+  ts.SyntaxKind.BarEqualsToken,
+  ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
+function isAssignment(node) {
+  return ASSIGNMENT_OPERATORS.has(node.operatorToken.kind);
+}
+
+/** Every identifier this node binds, as a declaration rather than a use. */
+function boundNames(node) {
+  const found = [];
+  const add = (name) => {
+    if (name === undefined) return;
+    if (ts.isIdentifier(name)) {
+      found.push({ text: name.text, node });
+      return;
+    }
+    if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (ts.isBindingElement(element)) add(element.name);
+      }
+    }
+  };
+  if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) {
+    add(node.name);
+  }
+  if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) add(node.name);
+  if (ts.isCatchClause(node)) add(node.variableDeclaration?.name);
+  return found;
+}
+
+/** True when this declaration is one of `body`'s own top-level `const`s. */
+function isTopLevelDeclarationOf(node, body) {
+  if (!ts.isVariableDeclaration(node)) return false;
+  const list = node.parent;
+  return list !== undefined && list.parent !== undefined && body.includes?.(list.parent) === true;
 }
 
 /** Whether one `process.exit(x)` argument is a status this rule accepts. */
@@ -400,6 +553,211 @@ function statusProblem(argument, bindings, sourceFile) {
   return say(
     `it exits with \`${text(sourceFile, node)}\`, whose value is decided by something other than the work`,
   );
+}
+
+/**
+ * Every property of `process` that can decide what this run exited with.
+ *
+ * `exit` is the one allowed shape and is checked by `statusProblem`. The rest
+ * have no allowed position at all in a file under `scripts/`, which is what
+ * makes this an allowlist rather than a list of the tricks somebody has already
+ * played: `exitCode` sets the status without terminating, and *any* listener
+ * registration can run code after the terminator chose — an `exit` listener that
+ * writes `process.exitCode = 0` turns a red run green while the annotations it
+ * already printed stay on the page, which is louder than round 5's silence and
+ * exactly as green.
+ */
+const STATUS_WRITE = new Set(['exitCode']);
+const LISTENER_REGISTRATION = new Set([
+  'on',
+  'once',
+  'addListener',
+  'prependListener',
+  'prependOnceListener',
+]);
+
+/** The property `node` accesses, when it is a member access with a fixed name. */
+function memberName(node) {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node)) {
+    const argument = unwrap(node.argumentExpression);
+    return argument !== undefined && ts.isStringLiteralLike(argument) ? argument.text : undefined;
+  }
+  return undefined;
+}
+
+/** The `process` object, however it is reached: `process`, `globalThis.process`. */
+function isProcessObject(node) {
+  const inner = unwrap(node);
+  if (ts.isIdentifier(inner)) return inner.text === 'process';
+  if (!ts.isPropertyAccessExpression(inner) && !ts.isElementAccessExpression(inner)) return false;
+  if (memberName(inner) !== 'process') return false;
+  const object = unwrap(inner.expression);
+  return ts.isIdentifier(object) && object.text === 'globalThis';
+}
+
+/** The member access this node is the object of, looking through parentheses. */
+function accessOf(node) {
+  let current = node;
+  while (current.parent !== undefined && ts.isParenthesizedExpression(current.parent)) {
+    current = current.parent;
+  }
+  const parent = current.parent;
+  if (parent === undefined) return undefined;
+  if (ts.isPropertyAccessExpression(parent) && parent.expression === current) return parent;
+  if (ts.isElementAccessExpression(parent) && parent.expression === current) return parent;
+  return undefined;
+}
+
+/** The call this node is the callee of, looking through parentheses. */
+function calleeOf(node) {
+  let current = node;
+  while (current.parent !== undefined && ts.isParenthesizedExpression(current.parent)) {
+    current = current.parent;
+  }
+  const parent = current.parent;
+  return parent !== undefined && ts.isCallExpression(parent) && parent.expression === current
+    ? parent
+    : undefined;
+}
+
+/** The nearest statement list around `node`, which is where its names are bound. */
+function enclosingStatements(node) {
+  for (let current = node.parent; current !== undefined; current = current.parent) {
+    if (ts.isBlock(current) || ts.isSourceFile(current)) return current.statements;
+    if (ts.isCaseClause(current) || ts.isDefaultClause(current)) return current.statements;
+  }
+  return [];
+}
+
+/**
+ * The exit status of the whole file, wherever in it the decision is written.
+ *
+ * ── THE SCOPE, AS A SENTENCE (#40 round 8, D1/D2) ───────────────────────────
+ * *Every node of this file, at every nesting depth, inside functions and outside
+ * them.* Not "the guard body" — which is the scope round 7 gave the same
+ * allowlist and did not write down, and which one statement one line above the
+ * guard walks straight past for the price of round 5 and the result of round 5.
+ *
+ * `skip` is the guard bodies whose status `exitProblem` has already reported on,
+ * so a body ending `process.exit(0)` is one message rather than two.
+ */
+function exitMachineryProblems(sourceFile, path, skip = []) {
+  const problems = [];
+  const inSkipped = (node) => {
+    for (let current = node; current !== undefined; current = current.parent) {
+      if (skip.includes(current)) return true;
+    }
+    return false;
+  };
+  const say = (node, what) => problems.push(`${path}:${line(sourceFile, node)} ${what}`);
+
+  // `import proc from 'node:process'` binds the same object under a name this
+  // rule cannot follow, which is the aliasing hole one import further out.
+  // Found attacking this round's own fix: the identifier rule below closes
+  // `const p = process`, and closing it there and not here would be a rule about
+  // one of the two ways to spell the same thing.
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const specifier = statement.moduleSpecifier;
+    if (!ts.isStringLiteral(specifier)) continue;
+    if (specifier.text === 'node:process' || specifier.text === 'process') {
+      say(
+        statement,
+        `imports \`${specifier.text}\`, which binds the process object under a name of this file's choosing. Every rule here about how the exit status may be spelled reads \`process.exit\`; a second name for the same object walks past all of them. The global is always available in a module — reach for it there.`,
+      );
+    }
+  }
+
+  const visit = (node) => {
+    if (
+      ts.isIdentifier(node) &&
+      node.text === 'process' &&
+      accessOf(node) === undefined &&
+      // `globalThis.process` and `{ process: … }` spell the word in a position
+      // that is a *name*, not a reference to the object.
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) &&
+      !ts.isImportSpecifier(node.parent) &&
+      !ts.isExportSpecifier(node.parent)
+    ) {
+      // Not the object of a member access, so it is the object itself changing
+      // hands: `const p = process;`, `f(process)`, `const { exit } = process;`.
+      // The rule above is about `process.exit`; a rule about a *spelling* is
+      // defeated by a second name for the same object, which is the
+      // lookalike-module defect with no import in it.
+      say(
+        node,
+        'names `process` as a value rather than as the object of a member access. `const p = process; p.exit(0);` is `process.exit(0)` with the name filed off, and every rule about how the exit status is spelled is defeated by a second name for the same object. Reach for `process.env`, `process.argv` and the rest through `process` itself.',
+      );
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const name = memberName(node);
+      if (name !== undefined && isProcessObject(node.expression)) {
+        if (STATUS_WRITE.has(name)) {
+          say(
+            node,
+            `writes the exit status through \`process.${name}\`, which no file under scripts/ may. It sets what the run exited with *without* terminating, so it survives every rule about what \`process.exit\` may carry — \`process.on('exit', () => { process.exitCode = 0; })\` was measured to leave a self-test printing three \`::error::\` lines about a real regression and exiting 0. The status of an entry point is \`process.exit(main())\` and nothing else.`,
+          );
+        } else if (LISTENER_REGISTRATION.has(name)) {
+          say(
+            node,
+            `registers a \`process.${name}\` listener. A listener runs after the terminator has already chosen a status and can replace it — that is node's documented behaviour for \`exit\`, and naming the events that cannot would be a denylist of exactly the kind this file refuses. A script under scripts/ decides its status once, in \`process.exit(main())\`.`,
+          );
+        } else if (name === 'exit') {
+          const call = calleeOf(node);
+          if (call === undefined) {
+            say(
+              node,
+              'refers to `process.exit` without calling it. A reference is an alias waiting for a name — `const done = process.exit; done(0);` — and the status allowlist can only read a call it can see.',
+            );
+          } else if (!inSkipped(call)) {
+            const problem = statusProblem(
+              call.arguments[0],
+              topLevelBindings(enclosingStatements(call)),
+              sourceFile,
+            );
+            if (problem !== undefined) say(call, problem);
+          }
+        } else if (name === 'argv' && writesTo(node)) {
+          say(
+            node,
+            'assigns to `process.argv`, which is the only input the main-module guard has. Rewriting it above the guard makes `isMainModule(import.meta.url)` false with the guard untouched and every rule about the guard satisfied.',
+          );
+        }
+      }
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return problems;
+}
+
+/** True when this expression is written to rather than read. */
+function writesTo(node) {
+  let current = node;
+  while (current.parent !== undefined) {
+    const parent = current.parent;
+    if (ts.isBinaryExpression(parent) && isAssignment(parent) && parent.left === current)
+      return true;
+    if (
+      (ts.isPostfixUnaryExpression(parent) || ts.isPrefixUnaryExpression(parent)) &&
+      parent.operand === current
+    ) {
+      return true;
+    }
+    // `process.argv[1] = x` writes through an element access on this node.
+    if (ts.isElementAccessExpression(parent) && parent.expression === current) {
+      current = parent;
+      continue;
+    }
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === current) {
+      current = parent;
+      continue;
+    }
+    return false;
+  }
+  return false;
 }
 
 /** An empty `catch` in an entry point turns every failure into exit 0. */
@@ -500,9 +858,12 @@ function guardShape(statement) {
         'its body is empty, so the script establishes that it was run and then does nothing and exits 0 — which passes any check that reads the condition alone',
     };
   }
+  // From here the body's own statuses are this function's business, so the
+  // file-wide pass is told not to report them a second time.
+  const checkedBody = statement.thenStatement;
   const exit = exitProblem(statement.thenStatement, statement.getSourceFile());
   if (exit !== undefined) {
-    return { node: statement, reason: exit };
+    return { node: statement, reason: exit, checkedBody };
   }
   if (swallowsFailure(statement.thenStatement)) {
     return {
@@ -514,7 +875,7 @@ function guardShape(statement) {
   // The unwrapped call, not `statement.expression`: with parentheses round the
   // condition those are different nodes, and the caller needs the one that has
   // `arguments` on it.
-  return { node: statement, call: condition };
+  return { node: statement, call: condition, checkedBody };
 }
 
 /** Every binding of `name` this file imports, and where from. */
@@ -609,6 +970,8 @@ export function guardProblems(path, source) {
   }
 
   const guards = [];
+  /** Guard bodies whose exit statuses `exitProblem` has already reported on. */
+  const checkedBodies = [];
   // `import.meta` nodes that have already been spoken for: the argument of a
   // sound guard, and everything in the condition of an unsound one, which has
   // just been reported by name. Without the second the same line is reported
@@ -617,6 +980,7 @@ export function guardProblems(path, source) {
   for (const statement of sourceFile.statements) {
     const shape = guardShape(statement);
     if (shape === undefined) continue;
+    if (shape.checkedBody !== undefined) checkedBodies.push(shape.checkedBody);
     if (shape.reason === undefined) {
       guards.push(shape.call);
       continue;
@@ -666,6 +1030,9 @@ export function guardProblems(path, source) {
     node.forEachChild(argvVisit);
   };
   sourceFile.forEachChild(argvVisit);
+
+  // And the whole file, not just the twelve lines the guard happens to be in.
+  problems.push(...exitMachineryProblems(sourceFile, path, checkedBodies));
 
   // The predicate has to be the shared one — and so does the reporter, when the
   // guard body ends on it. `report` from anywhere else is `process.exit(0)`

@@ -26,13 +26,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
-import { checkHostNetworkPolicy } from './assert-deploy-preflight.mjs';
-import { checkRatchet, readBaseline } from './assert-floor-ratchet.mjs';
+import { checkHostNetworkPolicy, publishedPortProblems } from './assert-deploy-preflight.mjs';
+import { checkRatchet, floorsOf, readBaseline } from './assert-floor-ratchet.mjs';
 import { checkImageIdentity } from './assert-image-identity.mjs';
 import { checkMigrationImage } from './assert-migration-image.mjs';
 import { checkPlaywrightReport } from './assert-playwright-report.mjs';
@@ -42,6 +42,7 @@ import { checkEnrollment } from './assert-workspace-enrollment.mjs';
 import {
   assertedNames,
   checkerGraphProblems,
+  controlCoverageProblems,
   ENFORCEMENT,
   sharedModuleProblems,
 } from './checker-graph.mjs';
@@ -50,12 +51,71 @@ import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
 import { mainGuardProblems } from './guard-scan.mjs';
 import { isMainModule } from './main-module.mjs';
+import { controlProblems, runControls } from './positive-control.mjs';
+import { repoRoot } from './repo-root.mjs';
 import { readFreshReport } from './report-file.mjs';
 import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
-import { buildAssetProblems, buildAssets, forgeLike, servableAssets } from './stack-client.mjs';
+import {
+  buildAssetProblems,
+  buildAssets,
+  forgeLike,
+  servableAssets,
+  stackTarget,
+} from './stack-client.mjs';
 import { workflowFiles } from './workflow-policy.mjs';
 
-const WORKFLOW = process.env.CI_WORKFLOW ?? '.github/workflows/ci.yml';
+/**
+ * The repository, found by walking up rather than by trusting the cwd.
+ *
+ * ── WHY (#40 round 8, D7) ───────────────────────────────────────────────────
+ * Every path below used to be relative to the working directory. CI runs from
+ * the root so it all worked, and from anywhere else `checkReadmeClaims` caught
+ * its own `readFileSync`, returned `[]`, and reported nothing — the readback
+ * that keeps every count in the prose honest, silently not running. A check that
+ * skips what it cannot find is a check with a hole shaped like a directory.
+ *
+ * `repoRoot()` still starts from the cwd, deliberately: that is how
+ * `positive-control.mjs` points this file at a copy of the tree with a defect
+ * planted in it, without an environment variable that could point it anywhere.
+ */
+const ROOT = repoRoot();
+const at = (relative) => join(ROOT, relative);
+const WORKFLOW = process.env.CI_WORKFLOW ?? at('.github/workflows/ci.yml');
+
+/**
+ * The `services` block of the shipped compose files, merged the shallow way.
+ *
+ * Read out of the YAML rather than out of `docker compose config`, because the
+ * verify job has no `.env` and compose refuses to interpolate without one — and
+ * the assertion this feeds is about the *shipped* files, which is what a reader
+ * of docker-compose.yml sees. `assert-deploy-preflight.mjs` asks the resolved
+ * configuration the same question in the deploy job, where an overlay could have
+ * changed the answer; these two readers are the point, not a duplication.
+ */
+function resolvedComposeServices() {
+  const files = (
+    process.env.ATRIUM_COMPOSE_FILES ?? 'docker-compose.yml:docker-compose.mailpit.yml'
+  )
+    .split(/[:,]/)
+    .map((file) => file.trim())
+    .filter(Boolean);
+  const services = {};
+  for (const file of files) {
+    const document = parse(readFileSync(at(file), 'utf8'));
+    for (const [name, definition] of Object.entries(document?.services ?? {})) {
+      services[name] = { ...services[name], ...definition };
+    }
+  }
+  return services;
+}
+
+/** A synthetic control, for the cases about how outcomes are graded. */
+const PROBE_CONTROL = {
+  id: 'assert-x',
+  world: 'nothing is running',
+  expect: /assert-x: \d+ assertion\(s\) failed\./,
+  because: 'a probe',
+};
 
 const MANIFEST = {
   vitest: {
@@ -1551,6 +1611,176 @@ const CASES = [
     expect: /never started: ENOENT/,
   },
 
+  // ---- an assertion that asserts nothing (#40 round 8, D3) ----------------
+  // Nothing in this repository required an assertion script to contain an
+  // assertion. Measured on r7: `assert-page-serves.mjs` replaced by two lines
+  // that import the reporter and call it printed "passed." and exited 0 with no
+  // stack running at all, with every gate here green. No rule about the text of
+  // a file can catch that; only running it in a world where it must fail can.
+  {
+    name: 'an entry point that exits 0 in a world it cannot have checked',
+    run: () => controlProblems(PROBE_CONTROL, { status: 0, output: 'assert-x: passed.\n' }),
+    expect: /exited 0 when/,
+  },
+  {
+    name: 'a red for an unrelated reason is not the control working',
+    run: () => controlProblems(PROBE_CONTROL, { status: 1, output: 'command not found: docker\n' }),
+    expect: /did not visibly fail for the reason this control planted/,
+  },
+  {
+    name: 'a child killed by the control’s own timeout is not a red either',
+    run: () =>
+      controlProblems(PROBE_CONTROL, {
+        status: undefined,
+        output: '',
+        error: { code: 'ETIMEDOUT', killed: true },
+      }),
+    expect: /did not reach a verdict/,
+  },
+  {
+    name: 'a control that failed, visibly, for the reason it planted',
+    run: () =>
+      controlProblems(PROBE_CONTROL, { status: 1, output: 'assert-x: 3 assertion(s) failed.\n' }),
+    expect: 'clean',
+  },
+  {
+    // The whole mechanism, end to end, against the exploit as the critic wrote
+    // it. No stack and no network: a script gutted to `report(…)` exits
+    // immediately, which is precisely what makes it invisible to everything
+    // else and instant to catch here.
+    name: 'the shipped control, run against a gutted copy of an assertion script',
+    run: () => {
+      const workspace = mkdtempSync(join(tmpdir(), 'atrium-gutted-'));
+      const script = join(workspace, 'assert-gutted.mjs');
+      writeFileSync(
+        script,
+        `import { report } from ${JSON.stringify(pathToFileURL(at('scripts/ci/stack-client.mjs')).href)};\nreport('assert-gutted');\n`,
+      );
+      return runControls(
+        [
+          {
+            id: 'assert-gutted',
+            argv: [script],
+            world: 'nothing is listening on the deployment’s port',
+            expect: /assert-gutted: \d+ assertion\(s\) failed\./,
+            because: 'the D3 exploit, verbatim',
+          },
+        ],
+        ROOT,
+      );
+    },
+    expect: /exited 0 when/,
+  },
+
+  // ---- a premise in a comment is not a check (#40 round 8, D6) -------------
+  // The deploy job's own step comment said "a runner with no published database
+  // port". Nothing asserted it and it was false: Postgres and MinIO are
+  // published with no interface prefix, and a blind critic connected from a
+  // non-loopback address with the credentials from .env and dumped the schema.
+  // The exposure is #51; what these cases hold is that the *claim* is now a
+  // table that has to keep matching the resolved configuration.
+  {
+    name: 'the real compose files publish exactly the ports the preflight writes down',
+    run: () => publishedPortProblems(resolvedComposeServices()),
+    expect: 'clean',
+  },
+  {
+    name: 'a service that publishes a port nobody declared',
+    run: () =>
+      publishedPortProblems({
+        redis: { ports: [{ target: 6379, published: '6379', mode: 'ingress' }] },
+      }),
+    expect: /nothing in this file says it does/,
+  },
+  {
+    name: 'a declared port that moves off loopback onto every interface',
+    run: () =>
+      publishedPortProblems(
+        { mailpit: { ports: [{ target: 8025, published: '8025', mode: 'ingress' }] } },
+        { 'mailpit:8025': { interface: '127.0.0.1', why: 'a store of live sign-in links' } },
+      ),
+    expect: /publishes its port 8025 on every interface this host answers on/,
+  },
+  {
+    name: 'a written entry that has stopped describing anything',
+    run: () => publishedPortProblems({}, { 'postgres:5432': { interface: '', why: 'issue #51' } }),
+    expect: /has stopped describing anything/,
+  },
+  {
+    // The host port is `${HTTPS_PORT}` on purpose — a machine with 443 taken
+    // has to be able to run this stack — so a remap must not be a red.
+    name: 'a host-port remap is not a change to which interface a port is on',
+    run: () =>
+      publishedPortProblems(
+        { proxy: { ports: [{ target: 443, published: '8443', mode: 'ingress' }] } },
+        { 'proxy:443': { interface: '', why: 'the deployment is a web server' } },
+      ),
+    expect: 'clean',
+  },
+
+  // ---- and the attack on the control table's own scope sentence -----------
+  // "The entry points named in CONTROLS" is a scope, and taking a script out of
+  // the table is a one-line way past it. The required set is read out of the
+  // workflow rather than out of the table.
+  {
+    name: 'every assertion the deploy job runs is controlled or exempted with a reason',
+    run: () => controlCoverageProblems(ROOT),
+    expect: 'clean',
+  },
+  {
+    name: 'the control table emptied, with the deploy job still running its assertions',
+    run: () => controlCoverageProblems(ROOT, readFileSync, { deploy: [] }),
+    expect: /no positive control .* ever requires it to fail/,
+  },
+
+  // ---- where the repository is, asked from anywhere (#40 round 8, D7) ------
+  {
+    name: 'the root is found by walking up rather than by trusting the working directory',
+    run: () => {
+      const workspace = mkdtempSync(join(tmpdir(), 'atrium-root-'));
+      const nested = join(workspace, 'packages', 'x', 'src');
+      mkdirSync(nested, { recursive: true });
+      mkdirSync(join(workspace, '.github', 'workflows'), { recursive: true });
+      mkdirSync(join(workspace, 'scripts', 'ci'), { recursive: true });
+      writeFileSync(join(workspace, 'pnpm-workspace.yaml'), 'packages:\n');
+      return repoRoot(nested) === workspace ? [] : ['it did not walk up to the marked root'];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'a directory with no repository above it is an error, not an empty tree',
+    run: () => {
+      try {
+        repoRoot(tmpdir());
+        return ['it invented a root'];
+      } catch (error) {
+        return [error.message];
+      }
+    },
+    expect: /no repository root at or above/,
+  },
+
+  // ---- where every request in the deploy job is aimed ----------------------
+  {
+    name: 'the stack target is the configured domain over TLS, with the deployment’s own CA',
+    run: () => {
+      const workspace = mkdtempSync(join(tmpdir(), 'atrium-target-'));
+      const ca = join(workspace, 'ca.pem');
+      writeFileSync(ca, 'a certificate\n');
+      const target = stackTarget({
+        ATRIUM_STACK_DOMAIN: 'atrium.localhost',
+        ATRIUM_STACK_CA: ca,
+        ATRIUM_STACK_HTTPS_PORT: '8443',
+      });
+      const problems = [];
+      if (target.origin !== 'https://atrium.localhost') problems.push(`aimed at ${target.origin}`);
+      if (target.httpsPort !== 8443) problems.push('ignored ATRIUM_STACK_HTTPS_PORT');
+      if (!String(target.ca ?? '').includes('a certificate')) problems.push('read no CA');
+      return problems;
+    },
+    expect: 'clean',
+  },
+
   // ---- the main-module guard, in every file that has one ------------------
   // Fifteen scripts decided "was I run?" by comparing `import.meta.url` against
   // `file://` + `process.argv[1]`. Measured: with a space anywhere in the path,
@@ -1559,7 +1789,7 @@ const CASES = [
   // noticed was disarmed by the same line.
   {
     name: 'every guard under scripts/ is the sound one',
-    run: () => mainGuardProblems('scripts'),
+    run: () => mainGuardProblems(at('scripts')),
     expect: 'clean',
   },
   {
@@ -1677,6 +1907,89 @@ const CASES = [
       ),
     expect: 'clean',
   },
+  // ---- one line ABOVE the guard, which was outside every rule (#40 round 8) -
+  // Round 7's allowlist over the exit value governed the guard body. The twelve
+  // lines above it were governed by nothing at all, and the statement below was
+  // measured on r7 as committed: `CI=true node gate-selftest.mjs` → exit 0, 0
+  // bytes; the same insertion in workflow-policy-selftest.mjs → exit 0, 0 bytes;
+  // scanner 0 problems, policy 0, biome 0. 184 cases and 197 mutations gone for
+  // two files and one insertion each. The first two cases plant it in the two
+  // files that are each other's only witness, which is where it costs the most.
+  {
+    name: 'a top-level exit above this file’s own guard, silent exactly under CI',
+    run: () =>
+      guardScanWith('gate-selftest.mjs', (source) =>
+        source.replace(
+          `\n${CANONICAL_GUARD_LINE}`,
+          `\nif (process.env.CI !== undefined) process.exit(0);\n${CANONICAL_GUARD_LINE}`,
+        ),
+      ),
+    expect: /exits with the literal `0`/,
+  },
+  {
+    name: 'the same insertion in the other self-test, which is the file that would notice',
+    run: () =>
+      guardScanWith('workflow-policy-selftest.mjs', (source) =>
+        source.replace(
+          `\n${CANONICAL_GUARD_LINE}`,
+          `\nif (process.env.CI !== undefined) process.exit(0);\n${CANONICAL_GUARD_LINE}`,
+        ),
+      ),
+    expect: /exits with the literal `0`/,
+  },
+  {
+    name: 'an `exit` listener that resets the status the terminator chose',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  process.on('exit', () => {\n    process.exitCode = 0;\n  });\n  process.exit(await main());\n}\n`,
+      ),
+    expect: /registers a `process\.on` listener/,
+  },
+  {
+    name: 'a block-scoped shadow of the name the exit reads',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}${CANONICAL_GUARD_LINE}\n  const code = await main();\n  if (process.env.CI !== undefined) { const code = 0; process.exit(code); }\n  process.exit(code);\n}\n`,
+      ),
+    expect: /declares `code` a second time/,
+  },
+  {
+    name: 'the exit machinery reached through a second name for `process`',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}const p = process;\np.exit(0);\n${CANONICAL_GUARD_LINE}\n  process.exit(await main());\n}\n`,
+      ),
+    expect: /names `process` as a value/,
+  },
+  {
+    name: 'the guard’s only input rewritten above it',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          `${GUARD_IMPORT}process.argv[1] = '/nope';\n${CANONICAL_GUARD_LINE}\n  process.exit(await main());\n}\n`,
+      ),
+    expect: /assigns to `process\.argv`/,
+  },
+  {
+    // The other polarity for the file-wide rule: the three entry points that
+    // have no guard at all do their work at module scope and exit with it, and
+    // a rule that refused them would be a rule somebody deletes.
+    name: 'a guardless script that runs its work at module scope and exits with it',
+    run: () =>
+      guardScanWith(
+        'assert-tables.mjs',
+        () =>
+          "import { existsSync } from 'node:fs';\nfunction main() {\n  return existsSync('x') ? 0 : 1;\n}\nprocess.exit(main());\n",
+      ),
+    expect: 'clean',
+  },
   {
     name: 'the guard nested inside a branch that is never taken',
     run: () =>
@@ -1708,13 +2021,14 @@ const CASES = [
   // anything under scripts/.
   {
     name: 'every check has an invoker that is not one of its own subjects',
-    run: () => checkerGraphProblems(),
+    run: () => checkerGraphProblems({ root: ROOT }),
     expect: 'clean',
   },
   {
     name: "the round-5 graph, restored: this file as mainGuardProblems' only caller",
     run: () =>
       checkerGraphProblems({
+        root: ROOT,
         registry: [{ ...ENFORCEMENT[0], invokers: ['scripts/ci/gate-selftest.mjs'] }],
       }),
     expect: /Sole enforcer, sole exception/,
@@ -1776,7 +2090,8 @@ const CASES = [
     // The general form, and the one that closes what dead-code analysis cannot:
     // a check gutted to `return []` has a *perfect* invocation graph.
     name: 'a check with a flawless graph that no longer does anything',
-    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], fn: () => [] }] }),
+    run: () =>
+      checkerGraphProblems({ root: ROOT, registry: [{ ...ENFORCEMENT[0], fn: () => [] }] }),
     expect: /does not satisfy its own contract/,
   },
   {
@@ -1787,6 +2102,7 @@ const CASES = [
     name: 'a contract that runs the check and asserts nothing about the answer',
     run: () =>
       checkerGraphProblems({
+        root: ROOT,
         registry: [
           {
             ...ENFORCEMENT[0],
@@ -1806,13 +2122,15 @@ const CASES = [
     // referenced the same thing, not that the thing did anything. So the handing
     // is counted, and a contract that never calls what it was given is refused.
     name: 'a contract that never calls the implementation it was handed',
-    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], contract: () => [] }] }),
+    run: () =>
+      checkerGraphProblems({ root: ROOT, registry: [{ ...ENFORCEMENT[0], contract: () => [] }] }),
     expect: /never called the implementation it was handed/,
   },
   {
     name: 'a row whose only mutant is rejected by throwing rather than by the contract',
     run: () =>
       checkerGraphProblems({
+        root: ROOT,
         registry: [
           {
             ...ENFORCEMENT[0],
@@ -1836,18 +2154,20 @@ const CASES = [
     name: 'a registry row whose module does not export the check it names',
     run: () =>
       checkerGraphProblems({
+        root: ROOT,
         registry: [{ ...ENFORCEMENT[0], definedIn: 'scripts/ci/compose.mjs' }],
       }),
     expect: /exports no such name/,
   },
   {
     name: 'a registry row with no contract at all',
-    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], contract: undefined }] }),
+    run: () =>
+      checkerGraphProblems({ root: ROOT, registry: [{ ...ENFORCEMENT[0], contract: undefined }] }),
     expect: /has no `contract`/,
   },
   {
     name: 'a registry row whose contract nothing could fail',
-    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], mutants: [] }] }),
+    run: () => checkerGraphProblems({ root: ROOT, registry: [{ ...ENFORCEMENT[0], mutants: [] }] }),
     expect: /has no mutants declared/,
   },
   // ---- the shared predicate itself (#40 round 7's critical finding) ---------
@@ -1860,7 +2180,7 @@ const CASES = [
     run: () => {
       // A real file, reached by a path rather than by `import.meta` — which
       // this file may not say outside its own guard, by its own rule.
-      const entry = resolve('scripts/ci/main-module.mjs');
+      const entry = at('scripts/ci/main-module.mjs');
       const url = pathToFileURL(entry).href;
       const ask = () => [
         isMainModule(url, ['node', entry]),
@@ -1895,7 +2215,7 @@ const CASES = [
   },
   {
     name: 'every shared module under scripts/ci is described by the registry',
-    run: () => sharedModuleProblems(),
+    run: () => sharedModuleProblems(ROOT),
     expect: 'clean',
   },
   {
@@ -1915,13 +2235,15 @@ const CASES = [
     // the files it reads" is true of every invoker. Found attacking this round's
     // own fix.
     name: 'a registry row that declares no subjects at all',
-    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], subjects: [] }] }),
+    run: () =>
+      checkerGraphProblems({ root: ROOT, registry: [{ ...ENFORCEMENT[0], subjects: [] }] }),
     expect: /is in the registry with no subjects/,
   },
   {
     name: 'an invoker CI never runs is not a witness',
     run: () =>
       checkerGraphProblems({
+        root: ROOT,
         registry: [{ ...ENFORCEMENT[0], invokers: ['packages/ci-guard/vitest.config.ts'] }],
       }),
     expect: /nothing in \.github\/workflows runs/,
@@ -1930,6 +2252,7 @@ const CASES = [
     name: 'a call site the registry has forgotten',
     run: () =>
       checkerGraphProblems({
+        root: ROOT,
         registry: [
           {
             ...ENFORCEMENT[0],
@@ -2177,7 +2500,7 @@ const CI_CONJUNCT = 'process.env.CI === undefined';
  * in a tree that fires for six other reasons is not a test.
  */
 function guardScanWith(target, rewrite) {
-  return mainGuardProblems('scripts', (path) => {
+  return mainGuardProblems(at('scripts'), (path) => {
     const source = readFileSync(path, 'utf8');
     return path.endsWith(target) ? rewrite(source) : source;
   });
@@ -2514,7 +2837,7 @@ async function main() {
 function checkReadmeClaims() {
   let readme;
   try {
-    readme = readFileSync('README.md', 'utf8');
+    readme = readFileSync(at('README.md'), 'utf8');
   } catch {
     return [];
   }
@@ -2539,6 +2862,32 @@ function checkReadmeClaims() {
       what: 'stated blind spots',
       pattern: phrase('(\\d+) stated blind spots'),
       actual: Object.keys(BLIND_SPOTS).length,
+    },
+    {
+      /**
+       * The floors, as a number in prose (#40 round 8, D8).
+       *
+       * `assert-floor-ratchet.mjs` compares every floor against `origin/main`,
+       * and `origin/main` carries no manifest until this work merges — so today
+       * the ratchet says "no baseline" loudly, checks only that each floor is a
+       * whole number ≥ 1, and exits 0. In that window `packages/ci-guard`'s
+       * floor of 115 could be set to 1 and nothing anywhere would object: the
+       * suite would still pass, and seventy tests could then be deleted.
+       *
+       * Nothing in a single commit can *prove* a floor was not lowered — the
+       * checker and the checked come out of the same revision, which this
+       * repository says out loud at the top of ci.yml. What it can do is make
+       * the edit cost two files that have to agree. So the sum of every floor is
+       * prose that is read back, exactly like the rule and case counts: lowering
+       * one now means editing a sentence that says the floors got smaller. This
+       * is a loudness measure, not a proof, and it keeps working after the
+       * ratchet activates.
+       */
+      what: 'the sum of every floor in the CI manifest',
+      pattern: phrase('floors totalling (\\d+)'),
+      actual: [
+        ...floorsOf(JSON.parse(readFileSync(at('.github/ci-manifest.json'), 'utf8'))),
+      ].reduce((total, [, floor]) => total + floor, 0),
     },
     {
       // Found by attacking round 6's own fix. `checkerGraphProblems` asserts a

@@ -240,6 +240,21 @@ jobs:
         # which must be caught by the gates that run later in this job.
         run: node scripts/ci/gate-selftest.mjs
 
+      - name: Prove the self-tests would notice if they stopped noticing
+        # The positive half of every pair in this job. Both self-tests above
+        # report green; nothing there distinguishes "green because the tree is
+        # clean" from "green because the file was silenced". On
+        # fix/deploy-serves-r7 one statement one line above each one's guard —
+        # `if (process.env.CI !== undefined) process.exit(0);` — left both at
+        # `exit=0 bytes=0` under CI, with the guard scanner, biome and the policy
+        # engine all clean: 184 gate cases and 197 policy mutations gone for one
+        # insertion each.
+        #
+        # This runs the same two entry points against a copy of the tree with a
+        # real defect planted in it and fails unless each one comes back red
+        # saying so. A file that exits 0 there cannot be reporting on anything.
+        run: node scripts/ci/positive-control.mjs verify
+
       - name: Assert every workspace is enrolled in the CI manifest
         # A package added without tests must fail here rather than disappear into
         # a global count that its neighbours keep above the floor.
@@ -542,11 +557,15 @@ jobs:
       ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml
       ATRIUM_STACK_DOMAIN: atrium.localhost
       ATRIUM_STACK_CA: ${{ github.workspace }}/caddy-root.crt
-      # Where this run writes down the image IDs `compose build` produced. There
-      # is deliberately no ATRIUM_WEB_IMAGE any more: a tag configured beside the
-      # build rather than derived from it is what let the scanner read an image
-      # nobody was running (round 1's gauntlet). The manifest binds built,
-      # scanned and running to one content-addressed identity.
+      # Where this run writes down the image IDs `compose build` produced. A tag
+      # configured beside the build rather than derived from it is what let the
+      # scanner read an image nobody was running (round 1's gauntlet), so the
+      # manifest binds built, scanned and running to one content-addressed
+      # identity — asserted by assert-image-identity.mjs and mutation-proven by
+      # the `swapped-image` case in deploy-mutation-ledger.mjs. (The line here
+      # used to add "there is deliberately no ATRIUM_WEB_IMAGE any more", which
+      # nothing checked: the sweep in #40 round 8 kept the half with a check
+      # behind it and dropped the half that was a memory.)
       ATRIUM_IMAGE_MANIFEST: ${{ github.workspace }}/built-images.json
 
     steps:
@@ -557,6 +576,13 @@ jobs:
         # No pnpm here: every script this job runs is dependency-free by design,
         # so the assertions cannot be broken by an install that resolved
         # differently from the one inside the images.
+        #
+        # And that is enforced by the absence rather than by a rule: this job
+        # never installs anything, so a script here that imported a third-party
+        # module would fail at load with a resolution error on the first run —
+        # loudly, and before it could assert anything. `compose-through-one-
+        # entrypoint` in the policy engine refuses a package manager in front of
+        # the node invocation, which is the other half.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -564,8 +590,20 @@ jobs:
       - name: Write the deployment environment
         # docker-compose.yml refuses to interpolate without these; that refusal
         # is a feature and it is why they are written out rather than defaulted.
-        # The secrets are CI values for a stack that lives for ten minutes on a
-        # runner with no published database port.
+        # The secrets are CI values for a stack that lives for ten minutes.
+        #
+        # This comment used to end "…on a runner with no published database
+        # port", and that was false: docker-compose.yml publishes Postgres on
+        # 5432 and MinIO on 9000/9001 with no interface prefix, so a blind critic
+        # connected from a non-loopback address with the credentials below and
+        # dumped the schema. The exposure is issue #51 and is not fixed here. The
+        # *claim* is fixed here: `publishedPortProblems` in
+        # scripts/ci/assert-deploy-preflight.mjs enumerates every publication out
+        # of the resolved configuration and compares it against a table that
+        # names, per port, which interface it is on and why — so the state of
+        # this stack's ports is now a check that runs before anything is built
+        # rather than a sentence in a comment. A premise stated in a comment and
+        # not asserted is this campaign's oldest defect class.
         #
         # One command, like every step in this job: the heredoc is a redirection,
         # not a second command, and a `set -e` of its own would be redundant —
@@ -594,6 +632,26 @@ jobs:
           ATRIUM_MAIL_TRANSPORT=smtp
           ATRIUM_MAIL_FROM=Atrium CI <no-reply@atrium.test>
           ENVIRONMENT
+
+      - name: Prove the stack assertions fail when there is no stack
+        # Here, before anything is built or brought up, because "there is no
+        # deployment yet" is the one broken world this job gets for free — and
+        # every assertion below is supposed to be a function of the deployment.
+        #
+        # Measured on fix/deploy-serves-r7: replacing the whole of
+        # assert-page-serves.mjs with `import { report } from
+        # './stack-client.mjs'; report('assert-page-serves');` printed
+        # `assert-page-serves: passed.` and exited 0 with no stack running at
+        # all, and every gate in this repository stayed green — the guard
+        # scanner, the registry, both self-tests, vitest and biome. Nothing
+        # required an assertion script to contain an assertion.
+        #
+        # So this is the positive half and the steps further down are the
+        # negative half: each script must be red here and green there. A script
+        # that always passes fails this step; a script that always fails fails
+        # the real one; only a script whose answer comes from the deployment
+        # passes both.
+        run: node scripts/ci/positive-control.mjs deploy
 
       - name: Preflight the host before anything is built
         # Routed here from #26 round 6, and the only check in this job that is
@@ -640,8 +698,18 @@ jobs:
         # Caddy's internal root, copied out of the running proxy. Every
         # assertion below verifies the certificate chain against it, so a stack
         # whose TLS was broken fails rather than being waved through — which is
-        # what `rejectUnauthorized: false` would have done, and it appears
-        # nowhere in this repository. compose-stack.mjs refuses an empty copy.
+        # what `rejectUnauthorized: false` would have done.
+        #
+        # The sweep this round did over this job's comments (#40 round 8, D6)
+        # narrowed that claim to what is actually checked. The policy engine's
+        # `INJECTING_VARIABLES` table refuses `NODE_TLS_REJECT_UNAUTHORIZED`
+        # anywhere in this file, which is the one way to disable verification
+        # without editing code, and stack-client.mjs writes
+        # `rejectUnauthorized: true` out rather
+        # than relying on the default. Nothing here asserts that no future edit
+        # writes `false` there instead; that is a code property this job does not
+        # check, and the sentence no longer says it does. compose-stack.mjs
+        # refuses an empty copy.
         run: node scripts/ci/compose-stack.mjs trust-ca
 
       - name: Assert every container is healthy

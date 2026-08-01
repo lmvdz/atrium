@@ -795,6 +795,43 @@ const RUNS_ACTIONLINT = command(
   },
   ACTIONLINT_FLAGS,
 );
+/**
+ * The positive control for one group of entry points (#40 round 8, D3).
+ *
+ * The group is part of the invocation and not decoration: `node
+ * scripts/ci/positive-control.mjs` with no argument, or with a group that does
+ * not exist, checks nothing — which is the failure mode of a file whose whole
+ * subject is checks that check nothing. The script refuses both; this refuses
+ * them a second time, in the file that decides whether the step is present at
+ * all, because "the step is there" and "the step does something" came apart
+ * three times in this ticket already.
+ *
+ * ── AND WHY THERE IS NO ORDERING RULE HERE ──────────────────────────────────
+ * Every other check in this job that depends on an earlier step gets a
+ * `required-step-prerequisites` pair, and this one deliberately does not. Its
+ * ordering is enforced by what it *is*: the deploy control asserts that nine
+ * scripts fail when no stack is up, so a step moved after `compose-stack up`
+ * finds a healthy deployment, watches all nine pass, and reports that as its own
+ * failure. A rule that cannot be broken without the check failing does not need
+ * a second rule saying so — and a redundant rule is one more thing that can be
+ * true while the thing it stands for is false.
+ */
+const runsPositiveControl = (group) =>
+  command(
+    `\`node scripts/ci/positive-control.mjs ${group}\``,
+    ['node'],
+    ({ argv }) => {
+      if (argv[0] !== 'node' || !runsItsScript(argv)) return false;
+      const script = firstOperand(argv);
+      if (script === undefined || !/^(?:\.\.\/)*scripts\/ci\/positive-control\.mjs$/.test(script)) {
+        return false;
+      }
+      return firstOperand(argv, argv.indexOf(script) + 1) === group;
+    },
+    NODE_FLAG_SPECS,
+  );
+const CONTROLS_THE_GATES = runsPositiveControl('verify');
+const CONTROLS_THE_STACK_ASSERTIONS = runsPositiveControl('deploy');
 const RUNS_LINT = packageScript('lint');
 const RUNS_TYPECHECK = packageScript('typecheck');
 const RUNS_BUILD = packageScript('build');
@@ -1077,6 +1114,15 @@ const REQUIRED_STEPS = {
       what: "the test gates' self-test",
       test: invokes('gate-selftest\\.mjs'),
     },
+    {
+      // The two steps above report green, and nothing in either distinguishes
+      // "green because the tree is clean" from "green because the file was
+      // silenced". On r7, one statement one line above each one's guard left
+      // both at exit=0 with no output under CI, with every other gate clean.
+      rule: 'policy-steps-present',
+      what: 'the positive control over both self-tests',
+      test: CONTROLS_THE_GATES,
+    },
     { rule: 'required-job-steps', what: 'the linter', test: RUNS_LINT },
     { rule: 'required-job-steps', what: 'the typechecker', test: RUNS_TYPECHECK },
     { rule: 'required-job-steps', what: 'the build', test: RUNS_BUILD },
@@ -1208,6 +1254,15 @@ const REQUIRED_STEPS = {
    * volumes nobody deleted.
    */
   deploy: [
+    {
+      // #40 round 8, D3. Nothing required an assertion script to contain an
+      // assertion: `assert-page-serves.mjs` replaced with two lines that import
+      // the reporter and call it printed "passed." and exited 0 with no stack
+      // running, and every gate in the repository stayed green.
+      rule: 'required-job-steps',
+      what: 'the positive control over the stack assertions',
+      test: CONTROLS_THE_STACK_ASSERTIONS,
+    },
     {
       rule: 'required-job-steps',
       what: 'the deployment preflight',

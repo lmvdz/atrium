@@ -185,6 +185,138 @@ export function checkHostNetworkPolicy({
 }
 
 /**
+ * Every port this deployment publishes, against what it is *written down* as
+ * publishing.
+ *
+ * ── THE DEFECT CLASS (#40 round 8, D6) ──────────────────────────────────────
+ * The deploy job's own step comment described the runner as "a stack that lives
+ * for ten minutes on a runner with no published database port". Nothing asserted
+ * it, and it was **not true**: `docker-compose.yml` publishes Postgres on 5432
+ * and MinIO on 9000 and 9001 with no interface prefix, which on a host with a
+ * routable address means every address that host answers on. A blind critic
+ * connected from a non-loopback address with the credentials from `.env` and
+ * dumped the schema. Mailpit, in the overlay, does it the other way — `127.0.0.1:`
+ * in front of the port — which is what makes the difference deliberate rather
+ * than a convention nobody wrote down.
+ *
+ * **A premise stated in a comment and not asserted is this campaign's oldest
+ * defect class.** The exposure itself is #51 and is not fixed here; what is
+ * fixed here is that it is no longer a sentence in a comment. Every publication
+ * is enumerated out of the resolved configuration and compared against the table
+ * below, which says, per port, which interface it is on and why. A new
+ * publication, a publication that moves off loopback, or a written entry that
+ * stops being true is a red preflight before a single image is built.
+ *
+ * The table is not a *permission*; it is a description that has to keep
+ * matching. `PUBLISHED` says what is true today, and every entry that is not
+ * loopback names the issue that owns it.
+ */
+const PUBLISHED = {
+  'proxy:80': {
+    interface: '',
+    why: 'the deployment is a web server; this is the redirect to TLS and it is the point of the stack',
+  },
+  'proxy:443': {
+    interface: '',
+    why: 'the deployment is a web server; every assertion in this job reaches it here',
+  },
+  'postgres:5432': {
+    interface: '',
+    why: 'ISSUE #51 — published on every interface this host answers on, with the credentials in `.env`. Loopback-only is the fix and it is not made here; this entry exists so the exposure is a line in a check rather than a claim in a comment that was false.',
+  },
+  'minio:9000': {
+    interface: '',
+    why: 'ISSUE #51 — same: the object store, published off-box, reachable with S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY from `.env`.',
+  },
+  'minio:9001': {
+    interface: '',
+    why: 'ISSUE #51 — the MinIO console, same exposure and the same fix.',
+  },
+  'mailpit:8025': {
+    interface: '127.0.0.1',
+    why: 'a store of live sign-in links, deliberately bound to loopback — and the reason the engine floor above exists, because engines before 28.0.0 publish loopback-bound ports off-box anyway',
+  },
+};
+
+/**
+ * The short form's fields, without splitting a `${VAR:-default}` in half.
+ *
+ * `'${POSTGRES_PORT:-5432}:5432'` has *two* fields and three colons, and reading
+ * it naively makes `${POSTGRES_PORT` look like a bind address — which would have
+ * reported the whole shipped file as misdescribed while saying nothing about any
+ * real interface. Found by running this against docker-compose.yml, which is why
+ * the self-test reads the YAML rather than only the resolved configuration.
+ */
+function splitPublication(publication) {
+  const masked = String(publication).replace(/\$\{[^}]*\}/g, (match) => ' '.repeat(match.length));
+  const text = String(publication);
+  const fields = [];
+  let start = 0;
+  for (let index = 0; index <= masked.length; index += 1) {
+    if (index === masked.length || masked[index] === ':') {
+      fields.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  return fields;
+}
+
+/**
+ * @param {object} services the `services` block of `docker compose config --format json`
+ * @param {object} [expected] injectable so the self-tests can state a different world
+ * @returns {string[]}
+ */
+export function publishedPortProblems(services, expected = PUBLISHED) {
+  const problems = [];
+  const seen = new Set();
+  for (const [service, definition] of Object.entries(services ?? {})) {
+    for (const publication of definition?.ports ?? []) {
+      // Keyed on the *container* port. The host port is `${HTTPS_PORT}` and
+      // friends — configurable on purpose, so that a machine with 443 already
+      // taken can still run this stack — and a table keyed on it would go red
+      // for a port remap, which is a change to nothing that matters here. What
+      // matters is which interface the host side is bound to.
+      //
+      // Two shapes, because there are two readers: `docker compose config`
+      // resolves every publication to an object, and `gate-selftest.mjs` reads
+      // the shipped YAML directly (the verify job has no `.env`, so it cannot
+      // ask compose to interpolate one). The short form is
+      // `[host_ip:][host:]container`, so the *last* field is the container port
+      // and a three-field form is the only one that names an interface.
+      const short = typeof publication === 'object' ? undefined : splitPublication(publication);
+      const target = String(publication?.target ?? short?.at(-1) ?? '');
+      const host = String(publication?.published ?? short?.at(-2) ?? target);
+      const address = String(
+        publication?.host_ip ?? (short !== undefined && short.length >= 3 ? short[0] : ''),
+      );
+      const key = `${service}:${target}`;
+      seen.add(key);
+      const declared = expected[key];
+      if (declared === undefined) {
+        problems.push(
+          `${service} publishes its port ${target} (as host port ${host || '(unnamed)'}) and nothing in this file says it does. Every port this deployment opens is written down with the interface it is on and why — a publication nobody declared is the "runner with no published database port" comment all over again, and that comment was false for three rounds.`,
+        );
+        continue;
+      }
+      const on = address === '0.0.0.0' || address === '::' ? '' : address;
+      if (on !== declared.interface) {
+        problems.push(
+          `${service} publishes its port ${target} on ${on === '' ? 'every interface this host answers on' : on}, and this file says ${declared.interface === '' ? 'every interface' : declared.interface}. ${declared.why}. Whichever of the two moved, a published port changing interface is the whole difference between "reachable from this machine" and "reachable from anything that can route a packet here".`,
+        );
+      }
+    }
+  }
+  for (const key of Object.keys(expected)) {
+    if (!seen.has(key)) {
+      problems.push(
+        `this file says ${key} is published and the resolved configuration does not publish it. A description that has stopped describing anything is one nobody re-read — take the entry out, or find out which file stopped opening the port.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
  * What the daemon's default bridge is, or that we could not find out.
  *
  * Absence and failure are asked as two questions, because they were one answer
@@ -232,19 +364,22 @@ function firstLine(message) {
  * `-f` file plus `.env` interpolation, which is the only form that reflects what
  * an overlay actually asked for.
  */
-function composeNetworks() {
-  const resolved = JSON.parse(compose(['config', '--format', 'json']));
-  return resolved.networks ?? {};
+function composeConfig() {
+  return JSON.parse(compose(['config', '--format', 'json']));
 }
 
 if (isMainModule(import.meta.url)) {
   const engineVersion = docker(['version', '--format', '{{.Server.Version}}']).trim();
   const defaultBridge = observeDefaultBridge();
-  const problems = checkHostNetworkPolicy({
-    engineVersion,
-    defaultBridge,
-    composeNetworks: composeNetworks(),
-  });
+  const resolved = composeConfig();
+  const problems = [
+    ...checkHostNetworkPolicy({
+      engineVersion,
+      defaultBridge,
+      composeNetworks: resolved.networks ?? {},
+    }),
+    ...publishedPortProblems(resolved.services ?? {}),
+  ];
   for (const problem of problems) check(false, problem);
   if (problems.length === 0) {
     // What was observed, not what was hoped for. The old line said "default NAT"
