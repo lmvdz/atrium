@@ -5,7 +5,8 @@
     "body": "Some rough notes from a conversation.\r\n\r\nThe primary question is: when a function is invoked, what should we assume its side effects are?\r\n",
     "user": { "login": "RyanCavanaugh" },
     "created_at": "2016-07-28T00:03:48Z",
-    "author_association": "MEMBER"
+    "author_association": "MEMBER",
+    "comments": 3
   },
   "comments": [
     {

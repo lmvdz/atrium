@@ -1,4 +1,9 @@
-import { extractAttachments, normalizeText, normalizeTimestamp } from './text.js';
+import {
+  extractAttachments,
+  normalizeDocument,
+  normalizeTimestamp,
+  trimBlockBody,
+} from './text.js';
 import type { IngestMessage } from './validate.js';
 
 /**
@@ -128,7 +133,7 @@ export function markdownToMessages(source: string, options: MarkdownOptions = {}
   }
 
   const blocks: Block[] = [];
-  const lines = normalizeText(source).split('\n');
+  const lines = normalizeDocument(source).split('\n');
   let current: Block | undefined;
 
   let insideFence = false;
@@ -201,6 +206,8 @@ export function markdownToMessages(source: string, options: MarkdownOptions = {}
     `md:${sourceId}:${String(ordinal).padStart(width, '0')}`;
 
   const messages: IngestMessage[] = [];
+  /** Ordinal and source line per emitted message, for the order check below. */
+  const emitted: Array<{ ordinal: number; line: number }> = [];
   let previousTs: string | undefined;
 
   for (let index = 0; index < blocks.length; index++) {
@@ -229,14 +236,56 @@ export function markdownToMessages(source: string, options: MarkdownOptions = {}
       continue;
     }
 
-    const text = normalizeText(block.body.join('\n'));
+    const text = trimBlockBody(block.body.join('\n'));
     const attachments = extractAttachments(text);
     const message: IngestMessage = { id: idFor(ordinal), author: block.author, ts, text };
     if (block.replyOrdinal !== undefined) message.reply_to = idFor(block.replyOrdinal);
     if (attachments.length > 0) message.attachments = attachments;
     messages.push(message);
+    emitted.push({ ordinal, line: block.line });
   }
 
+  issues.push(...replyOrderIssues(messages, emitted));
   if (issues.length > 0) throw new MarkdownConversionError(issues);
   return messages;
+}
+
+/**
+ * Transcript order and timestamp order can disagree, and a reply is where that
+ * stops being cosmetic.
+ *
+ * Ids here are positional, so a reply marker always points *backwards in the
+ * transcript*. But the corpus is stored in canonical `(ts, id)` order, so if a
+ * reply is stamped earlier than the message it answers, it sorts *ahead of its
+ * own parent* — a reply arriving before the thing it replies to. Ties are safe:
+ * ordinals are zero-padded to a fixed width, so equal timestamps still order by
+ * transcript position.
+ *
+ * Round 1 left this to `serializeCorpus`, which does reject the result, but
+ * only when the CLI writes a file, only as a `forward-reply` on a *sorted* line
+ * number, and never at all for a caller using the converter as a library.
+ * Catching it here names the transcript line and the reply marker instead.
+ */
+function replyOrderIssues(
+  messages: readonly IngestMessage[],
+  emitted: ReadonlyArray<{ ordinal: number; line: number }>,
+): MarkdownIssue[] {
+  const issues: MarkdownIssue[] = [];
+  const tsById = new Map(messages.map((message) => [message.id, message.ts]));
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const where = emitted[i];
+    if (!message || !where || message.reply_to === undefined) continue;
+    const parentTs = tsById.get(message.reply_to);
+    if (parentTs === undefined || message.ts >= parentTs) continue;
+    issues.push({
+      line: where.line,
+      message:
+        `message #${where.ordinal} is timestamped ${message.ts} but replies to ${message.reply_to}, ` +
+        `timestamped ${parentTs} — in canonical (ts, id) order the reply would come before its parent`,
+    });
+  }
+
+  return issues;
 }
