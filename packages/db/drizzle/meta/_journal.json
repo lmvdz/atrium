@@ -36,6 +36,13 @@
       "when": 1785640000000,
       "tag": "0004_trusted_actor_and_append_boundary",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785571559347,
+      "tag": "0005_receipt_snapshot_and_canonical_subset",
+      "breakpoints": true
     }
   ]
 }

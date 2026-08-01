@@ -87,12 +87,30 @@ import { declaredRoomId, isCoreEvent, provenanceMessageIds, RoomEvent } from './
  * context — because replaying a payload under a different actor is replaying a
  * different event.
  *
- * The second trusted column is the message window, and it is derived rather than
- * remembered: `provenanceMessageIds` reads the cited ids out of the payload and
- * both the live append and the replay load those bodies from `messages`, which
- * is append-only substrate. That is what keeps live ≡ replay true across #21's
- * receipt checks — a window the append had and the replay lacked would fold the
- * same row two different ways.
+ * ## The receipt window is remembered, not re-derived (r3 delta, blocking 2)
+ *
+ * Round 3 derived the second trusted column — the message window a receipt is
+ * checked against — on *both* paths, from the same payload field against the same
+ * table, and treated that sameness as the guarantee. The delta gauntlet found the
+ * guarantee is not in the function:
+ *
+ * > the bodies come from `messages` whose `authorId` is `onDelete: 'set null'`
+ * > […] Delete a human author and a model `object_accepted` that folded cleanly
+ * > under a real `authorId` replays with `''`, fails the receipt, and is absent
+ * > from replayed state. Same derivation code, different substrate.
+ *
+ * A deterministic function of mutable inputs is not deterministic. So the window
+ * is read from `messages` **once**, by the append, and written into
+ * `core_events.trusted_messages` in the same transaction; every fold after that —
+ * `catchUp` on this instance, `catchUp` on a peer, `replayCoreEvents` a year
+ * later — reads the column. `messages` is not consulted by any fold path at all,
+ * which is what makes the guarantee hold for *any* future mutation of it rather
+ * than for the one the gauntlet happened to name.
+ *
+ * The general rule, since it outlives this column: anything a fold validates
+ * against belongs in the event or on the event's row. See the FK audit in the
+ * head of `drizzle/0005_receipt_snapshot_and_canonical_subset.sql` for every
+ * `SET NULL`/`CASCADE` in the schema checked against it.
  *
  * ## `seq` may gap. `room_seq` may not.
  *
@@ -332,11 +350,6 @@ export interface Ledger {
    * replaying different events.
    */
   replayCoreEvents: () => Promise<AuthoredEvent[]>;
-  /** The message window a receipt is checked against. Exposed for the command layer. */
-  messageWindow: (
-    runner: Pick<Database, 'select'>,
-    messageIds: readonly string[],
-  ) => Promise<ProvenanceMessage[]>;
 }
 
 const PAGE = 500;
@@ -409,7 +422,23 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     payload: coreEvents.payload,
     actorKind: coreEvents.actorKind,
     actorId: coreEvents.actorId,
+    trustedMessages: coreEvents.trustedMessages,
   } as const;
+
+  /**
+   * A row as this module reads it: the entry everything downstream sees, plus
+   * the receipt window it folded under.
+   *
+   * The window is deliberately **not** on `LedgerEntry`. That type is what the
+   * wire is built from, and a snapshot of message bodies riding on every fan-out
+   * frame would be a payload nobody asked for — the client already has the
+   * messages, through the projection, and the window exists for the reducer.
+   */
+  interface LedgerRow {
+    entry: LedgerEntry;
+    /** `null` when no window was supplied; `[]` when one was and it was empty. */
+    trustedMessages: ProvenanceMessage[] | null;
+  }
 
   function parseRow(row: {
     seq: number | string;
@@ -418,27 +447,46 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     payload: unknown;
     actorKind: string;
     actorId: string | null;
-  }): LedgerEntry {
+    trustedMessages: ProvenanceMessage[] | null;
+  }): LedgerRow {
     // A payload that does not parse means the ledger disagrees with the code
     // reading it. There is no safe way to skip it: skipping changes the fold.
     const event = RoomEvent.parse(row.payload);
     return {
-      seq: Number(row.seq),
-      roomSeq: Number(row.roomSeq),
-      roomId: row.roomId,
-      event,
-      actor: actorFromColumns(row.actorKind, row.actorId),
+      entry: {
+        seq: Number(row.seq),
+        roomSeq: Number(row.roomSeq),
+        roomId: row.roomId,
+        event,
+        actor: actorFromColumns(row.actorKind, row.actorId),
+      },
+      trustedMessages: row.trustedMessages,
     };
   }
 
+  function parseEntry(row: Parameters<typeof parseRow>[0]): LedgerEntry {
+    return parseRow(row).entry;
+  }
+
   /**
-   * Load the bodies of the messages a receipt cites.
+   * Load the bodies of the messages a receipt cites — **on the append path
+   * only**, exactly once per event.
    *
-   * Both the live append and the replay call this, with ids derived from the
-   * same payload field, against the same append-only table. That sameness is the
-   * point: #21's reducer refuses a non-human acceptance whose window is absent
-   * *or empty*, so a path that supplies one and a path that does not would fold
-   * the identical row two different ways and live ≡ replay would be false.
+   * Round 3 called this from the replay path too, and the r3-delta gauntlet's
+   * blocking finding 2 is what that cost: `messages.author_id` is
+   * `ON DELETE SET NULL`, so an acceptance that folded cleanly under a real
+   * author replayed under `''` once the author was deleted, failed its receipt,
+   * and vanished from replayed state. Same code, different substrate.
+   *
+   * Now it runs once, its result is written to `core_events.trusted_messages` in
+   * the same transaction, and every fold reads that column. This function is
+   * private for that reason: a caller that could ask for a window would be a
+   * caller that could derive one at fold time, which is the defect.
+   *
+   * `ORDER BY seq` because the window is now durable and a durable value should
+   * not depend on which plan Postgres chose. It also matters to the reducer: a
+   * quote carried by several cited messages is reported with the first match's
+   * id, and "first" must be the room's order rather than the planner's.
    */
   async function messageWindow(
     runner: Pick<Database, 'select'>,
@@ -448,22 +496,28 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     const rows = await runner
       .select({ id: messages.id, authorId: messages.authorId, body: messages.body })
       .from(messages)
-      .where(inArray(messages.id, [...new Set(messageIds)]));
+      .where(inArray(messages.id, [...new Set(messageIds)]))
+      .orderBy(asc(messages.seq));
     return rows.map((row) => ({
       id: row.id,
       // A message whose author was deleted keeps its text and loses its name.
       // Empty rather than the id of nobody: attribution to "" matches no actor,
-      // which is the conservative reading the receipt checks want.
+      // which is the conservative reading the receipt checks want. It is also
+      // now a fact about the moment of the append rather than about today.
       authorId: row.authorId ?? '',
       body: row.body,
     }));
   }
 
   /**
-   * The trusted context one row folds under: its actor columns, plus the window
-   * its own payload cites. Never anything the caller happened to have to hand.
+   * The trusted context one row folds under, **at append time**: its actor, plus
+   * the window its own payload cites, read from `messages` once.
+   *
+   * What this returns is both what `appendEvent` folds and what is written to the
+   * row, which is the whole of live ≡ replay for the receipt checks: the replay
+   * does not reconstruct this, it reads it.
    */
-  async function trustFor(
+  async function trustToRecord(
     runner: Pick<Database, 'select'>,
     event: RoomEvent,
     actor: Actor,
@@ -472,6 +526,23 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     const ids = provenanceMessageIds(event);
     if (ids.length === 0) return trustedContext({ actor });
     return trustedContext({ actor, messages: await messageWindow(runner, ids) });
+  }
+
+  /**
+   * The trusted context a stored row folds under: its own columns, and nothing
+   * else. No query, no clock, no `messages`.
+   *
+   * `null` and `[]` are kept apart on purpose. #21's reducer refuses a non-human
+   * acceptance whose window is absent *or* empty, and reports the two
+   * differently — "no window was supplied, so the receipt could not be checked"
+   * against "the window is empty". Collapsing them here would make a replay
+   * report a different reason than the live append did, which is a smaller
+   * version of the same divergence.
+   */
+  function trustFromRow(actor: Actor, snapshot: ProvenanceMessage[] | null): TrustedContext {
+    return snapshot === null
+      ? trustedContext({ actor })
+      : trustedContext({ actor, messages: snapshot });
   }
 
   /**
@@ -491,13 +562,16 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         .limit(PAGE);
       if (rows.length === 0) break;
 
-      const entries = rows.map(parseRow);
+      const parsed = rows.map(parseRow);
+      const entries = parsed.map((row) => row.entry);
       const core = [];
-      for (const entry of entries) {
-        if (!isCoreEvent(entry.event)) continue;
+      for (const row of parsed) {
+        if (!isCoreEvent(row.entry.event)) continue;
+        // From the row's own columns. No read of `messages` on any fold path —
+        // see the module note on r3-delta blocking 2.
         core.push({
-          ...(await trustFor(runner, entry.event, entry.actor)),
-          event: entry.event,
+          ...trustFromRow(row.entry.actor, row.trustedMessages),
+          event: row.entry.event,
         });
       }
       if (core.length > 0) {
@@ -625,11 +699,21 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           const before = state;
           let after = state;
           let outcome: EventOutcome | null = null;
+          /**
+           * The window this event folded under, on its way to the row.
+           *
+           * `undefined` means no window was supplied and the column stays NULL;
+           * an array — including an empty one — is written verbatim, because a
+           * replay must read back the same absence or the same emptiness that the
+           * live fold saw. See `trustFromRow`.
+           */
+          let recordedWindow: readonly ProvenanceMessage[] | undefined;
           if (isCoreEvent(event)) {
-            // The same context a replay will reconstruct — the actor from the
-            // session, and the window derived from the payload rather than from
-            // whatever the caller had open. See `trustFor`.
-            const trusted = await trustFor(tx, event, actor);
+            // Read once, folded, and written to the row below. A replay reads the
+            // column; it never re-derives this. See the module note on r3-delta
+            // blocking 2.
+            const trusted = await trustToRecord(tx, event, actor);
+            recordedWindow = trusted.messages;
             const applied = appendEvent(state, event, trusted);
             if (applied.outcome === 'rejected' || applied.outcome === 'malformed') {
               // The whole point. Throwing here aborts the transaction, so the
@@ -666,6 +750,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             ${columns.id}::text,
             ${JSON.stringify(event)}::jsonb,
             ${event.at}::timestamptz,
+            ${recordedWindow === undefined ? null : JSON.stringify(recordedWindow)}::jsonb,
             ${instanceId ?? null}::text
           )
         `)) as unknown as Array<{ seq: string | number; room_seq: string | number }>;
@@ -716,7 +801,6 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     serialize: () => serializeState(state),
     lastSeq: () => lastSeq,
     append,
-    messageWindow,
     /**
      * Fold whatever a peer instance committed, and report it.
      *
@@ -740,7 +824,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         .where(and(eq(coreEvents.roomId, roomId), gt(coreEvents.roomSeq, roomSeq)))
         .orderBy(asc(coreEvents.roomSeq))
         .limit(limit);
-      return rows.map(parseRow);
+      return rows.map(parseEntry);
     },
     /**
      * The page and the head, read in **one transaction**.
@@ -775,7 +859,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             .from(coreEvents)
             .where(eq(coreEvents.roomId, roomId));
 
-          const entries = rows.map(parseRow);
+          const entries = rows.map(parseEntry);
           const head = Number(headRow?.head ?? 0);
           const to = entries.at(-1)?.roomSeq ?? roomSeq;
           return { entries, head, to, more: to < head };
@@ -824,10 +908,14 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           .limit(PAGE);
         if (page.length === 0) break;
         for (const row of page) {
-          const entry = parseRow(row);
+          const { entry, trustedMessages } = parseRow(row);
           cursor = Math.max(cursor, entry.seq);
           if (!isCoreEvent(entry.event)) continue;
-          rows.push({ ...(await trustFor(db, entry.event, entry.actor)), event: entry.event });
+          // The row's own snapshot, not a fresh read of `messages`. This is the
+          // replay half of r3-delta blocking 2: the substrate a replay folds is
+          // the substrate the append folded, whatever has happened to the
+          // conversation since.
+          rows.push({ ...trustFromRow(entry.actor, trustedMessages), event: entry.event });
         }
         if (page.length < PAGE) break;
       }

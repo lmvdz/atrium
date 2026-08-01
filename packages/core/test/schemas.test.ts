@@ -5,6 +5,9 @@ import {
   AttentionItem,
   CoreEvent,
   type CoreEventInput,
+  compareCursor,
+  ID_MAX_LENGTH,
+  Id,
   Proposal,
   Relation,
   RelationKind,
@@ -333,5 +336,54 @@ describe('attention item schema', () => {
     const item = AttentionItem.parse({ ...base, reason });
     expect(renderRationale(item)).toBe(rationaleFor(ALICE, item.reason));
     expect(renderRationale(item).startsWith(`@${ALICE} — `)).toBe(true);
+  });
+});
+
+/**
+ * The id charset (#22 gauntlet r3 delta, major 1).
+ *
+ * `id` is the second half of the canonical `(at, id)` order, and that order is
+ * evaluated twice by two different rules: here by JavaScript's `<` (UTF-16
+ * code-unit order) and in the ledger's SQL append gate by `COLLATE "C"` (UTF-8
+ * byte order). They agree throughout the Basic Multilingual Plane and disagree
+ * above it. `core_events.id` carries the same rule as a CHECK, for writers that
+ * never come through this package; this is the half that stops one being minted.
+ */
+describe('an id is restricted to the charset both orderings agree on', () => {
+  it('accepts the ids anything in this system actually mints', () => {
+    for (const id of [
+      '018f2a3c-9b6e-7c21-8e33-3f0a1b2c3d4e',
+      'u1',
+      'room-a',
+      'msg.1:2',
+      '~',
+      '!',
+    ]) {
+      expect(Id.parse(id)).toBe(id);
+    }
+  });
+
+  it('refuses an id outside the Basic Multilingual Plane', () => {
+    // The concrete divergence: an astral code point is a surrogate pair
+    // beginning at U+D800, so UTF-16 sorts it *before* U+E000–U+FFFF while byte
+    // order sorts it after. Catches: dropping the charset regex from `Id`.
+    const astral = 'e-\u{1F600}';
+    const bmp = 'e-\uE000';
+    expect(compareCursor({ at: 'x', id: astral }, { at: 'x', id: bmp })).toBeLessThan(0);
+    // …while the same two, compared by their UTF-8 bytes, go the other way.
+    const bytes = (value: string) => [...new TextEncoder().encode(value)];
+    expect(bytes(astral) > bytes(bmp)).toBe(true);
+
+    expect(Id.safeParse(astral).success).toBe(false);
+    expect(Id.safeParse(bmp).success).toBe(false);
+  });
+
+  it('refuses whitespace, control characters, and an unbounded length', () => {
+    // Space and controls on a second ground: two ids differing only by an
+    // invisible character are two ids a person cannot tell apart.
+    for (const bad of ['a b', ' a', 'a\n', 'a\t', '', 'x'.repeat(ID_MAX_LENGTH + 1)]) {
+      expect(Id.safeParse(bad).success).toBe(false);
+    }
+    expect(Id.safeParse('x'.repeat(ID_MAX_LENGTH)).success).toBe(true);
   });
 });

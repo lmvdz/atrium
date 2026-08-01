@@ -12,6 +12,7 @@ import type {
   ObjectivePayload,
   OpenQuestionPayload,
   ProposalStatus,
+  ProvenanceMessage,
   RationaleReason,
   RelationKind,
 } from '@atrium/core';
@@ -350,6 +351,43 @@ export const coreEvents = pgTable(
      */
     actorKind: actorKind('actor_kind').notNull(),
     actorId: text('actor_id'),
+    /**
+     * The receipt window this row folded under, **snapshotted at append**
+     * (#22 gauntlet r3 delta, blocking 2).
+     *
+     * `NULL` means no window was supplied — a human actor, or an event with no
+     * provenance to check. An array means one was, and `[]` is a window that was
+     * looked for and came back empty, which the reducer refuses. Absent and empty
+     * are different facts and are stored differently, because #21's contract
+     * treats them as the same *refusal* for different *reasons* and a replay that
+     * could not tell them apart would report the wrong one.
+     *
+     * ## Why it is a column and not a join
+     *
+     * Round 3 derived this window on both paths — live append and replay — from
+     * `provenance.messageIds` against the `messages` table, and called the
+     * sameness of the derivation the guarantee. The delta gauntlet found the
+     * guarantee is not in the function:
+     *
+     * > the bodies come from `messages` whose `authorId` is `onDelete: 'set
+     * > null'` […] Delete a human author and a model `object_accepted` that
+     * > folded cleanly under a real `authorId` replays with `''`, fails the
+     * > receipt, and is absent from replayed state. Same derivation code,
+     * > different substrate.
+     *
+     * A deterministic function of mutable inputs is not deterministic. What the
+     * receipt validates — the author identity and the text a quote is matched
+     * against — has to be as immutable as the event, so it lives on the event's
+     * own row, written by the transaction that assigned `room_seq` and never
+     * updated (the append-only trigger from 0003 sees to that).
+     *
+     * The weaker alternative was a tombstone instead of `ON DELETE SET NULL`,
+     * which fixes this one mutation and leaves the class open: an author renamed,
+     * a message edited, a row moved between rooms all reopen it. Denormalising at
+     * append holds for any future mutation of `messages`, because after the
+     * append the fold does not read `messages` at all.
+     */
+    trustedMessages: jsonb('trusted_messages').$type<ProvenanceMessage[]>(),
     /** The complete event. `reduce` folds `payload`, not a reassembly of it. */
     payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
     /** The event's own `at` — the first half of the canonical `(at, id)` key. */
@@ -399,9 +437,75 @@ export const coreEvents = pgTable(
       'core_events_payload_at_matches',
       sql`(${t.payload}->>'at')::timestamptz = ${t.occurredAt}`,
     ),
+    /**
+     * **One spelling of one instant** (#22 gauntlet r3 delta, major 1).
+     *
+     * r2 required a timezone designator, which makes the `::timestamptz` cast
+     * above session-independent. That is necessary and it is not sufficient,
+     * because the canonical `(at, id)` order is evaluated in two places by two
+     * different rules:
+     *
+     *  - the SQL append gate compares `p_occurred_at` as a **`timestamptz`**, so
+     *    `…05.000Z` and `…05Z` and `…05+00:00` are one value and tie;
+     *  - `orderEvents` in @atrium/core compares `event.at` as a **string**, so the
+     *    same three are three different values in an arbitrary order.
+     *
+     * Two events one millisecond apart in the reducer's eyes and simultaneous in
+     * the database's is the ordering gate and the reducer disagreeing about what
+     * the log says — the r1 lock-key lesson again: two components that must agree
+     * on a shared rule, agreeing only because production happens to mint one
+     * spelling. This makes the subset a constraint instead of a habit: exactly
+     * `YYYY-MM-DDTHH:MM:SS.mmmZ`, which is what `Date#toISOString` produces and
+     * what `nextTimestamp` in `ledger.ts` mints. Inside it, string order and
+     * `timestamptz` order are the same order for every value.
+     */
     check(
-      'core_events_payload_at_has_offset',
-      sql`${t.payload}->>'at' ~ '(Z|[+-][0-9]{2}:?[0-9]{2})$'`,
+      'core_events_payload_at_is_canonical_utc',
+      sql`${t.payload}->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'`,
+    ),
+    /**
+     * The other half of the same rule: the id's charset.
+     *
+     * The SQL gate compares ids under `COLLATE "C"` (UTF-8 byte order); the
+     * reducer compares them with JavaScript's `<` (UTF-16 code-unit order). Those
+     * two agree for every code point in the Basic Multilingual Plane and disagree
+     * above it — an astral-plane character is a surrogate pair starting at
+     * U+D800, so UTF-16 sorts it before U+E000–U+FFFF while byte order sorts it
+     * after. `Id` in @atrium/core carries the same rule for anything that goes
+     * through the application; this carries it for anything that does not.
+     *
+     * See `ID_CHARSET` there for the derivation, and
+     * `integration/db/ledger-constraints.test.ts` for the fuzz that compares the
+     * two orders directly across both dimensions.
+     */
+    // Two clauses rather than `{1,256}`: Postgres caps a regex repetition count
+    // at 255, and a bound expressed as a regex quantifier would have silently
+    // been 255 or a syntax error depending on the number chosen. `ID_MAX_LENGTH`
+    // in @atrium/core is the same 256.
+    check('core_events_id_is_safe_to_order', sql`${t.id} ~ '^[!-~]+$' AND length(${t.id}) <= 256`),
+    /**
+     * The snapshot is a list of `{id, authorId, body}`, all strings.
+     *
+     * Checked rather than trusted, for the same reason every other lifted column
+     * here is: this row is what a replay folds, and a writer that never went
+     * through the server must not be able to leave a window a replay cannot read.
+     * Expressed as "count the good elements and require them all", rather than as
+     * "find a bad one". The natural-looking negative form —
+     * `NOT jsonb_path_exists(…, '$[*] ? (@.id.type() != "string" || …)')` — was
+     * the first draft and it is wrong in a way worth recording: a jsonpath filter
+     * over a *missing* member yields unknown rather than true, so an element with
+     * no `body` at all matches nothing and passes. It rejects wrong types and
+     * admits absent keys, which is the more likely mistake of the two.
+     *
+     * `jsonb_path_query_array` is immutable, which is what makes it usable in a
+     * CHECK; a subquery over `jsonb_array_elements` would not be.
+     */
+    check(
+      'core_events_trusted_messages_shape',
+      sql`${t.trustedMessages} IS NULL OR (
+        jsonb_typeof(${t.trustedMessages}) = 'array'
+        AND jsonb_array_length(${t.trustedMessages}) = jsonb_array_length(jsonb_path_query_array(${t.trustedMessages}, '$[*] ? (@.id.type() == "string" && @.authorId.type() == "string" && @.body.type() == "string")'))
+      )`,
     ),
     /**
      * The actor rule, **inverted** by #21's contract — and it is the same rule.

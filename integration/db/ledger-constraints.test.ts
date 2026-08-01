@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { compareCursor } from '@atrium/core';
 import type { DatabaseHandle } from '@atrium/db';
 import {
   acceptedObjects,
@@ -78,6 +79,7 @@ function ledgerRow(
     actorKind?: string;
     actorId?: string | null;
     payloadActor?: unknown;
+    trustedMessages?: unknown;
   } = {},
 ) {
   const id = overrides.id ?? randomUUID();
@@ -102,6 +104,10 @@ function ledgerRow(
     actorId: overrides.actorId ?? null,
     payload,
     occurredAt: overrides.occurredAt ?? at,
+    // `undefined` means "do not supply a window" and lands as NULL; anything
+    // else is passed verbatim, so the shape constraint is reachable through the
+    // only door that exists.
+    trustedMessages: overrides.trustedMessages,
   };
 }
 
@@ -128,6 +134,7 @@ async function append(row: LedgerRow, origin: string | null = null) {
         ${row.actorId}::text,
         ${JSON.stringify(row.payload)}::jsonb,
         ${row.occurredAt}::timestamptz,
+        ${row.trustedMessages === undefined ? null : JSON.stringify(row.trustedMessages)}::jsonb,
         ${origin}::text
       )
     `);
@@ -202,12 +209,91 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
     await violatesConstraint('core_events_payload_at_matches', () => append(row));
   });
 
-  it('refuses an `at` with no timezone designator', async () => {
-    // Without one, `::timestamptz` means different instants in different
-    // sessions — so the equality above would be a check that could pass in one
-    // connection and fail in another.
-    const row = ledgerRow(roomA, { at: '2026-08-01T12:00:03', occurredAt: '2026-08-01T12:00:03Z' });
-    await violatesConstraint('core_events_payload_at_has_offset', () => append(row));
+  /**
+   * One spelling of one instant (#22 gauntlet r3 delta, major 1).
+   *
+   * r2 required a timezone designator, because without one `::timestamptz` means
+   * different instants in different sessions and the equality above would pass in
+   * one connection and fail in another. That is necessary and it is not
+   * sufficient — the r3 delta found the sufficient version:
+   *
+   * > SQL orders `timestamptz` then `id COLLATE "C"` while the reducer does JS
+   * > string comparison on `payload.at` then `id`, so `…05.000Z` vs `…05Z` (or
+   * > `+00:00` vs `Z`) tie in SQL and diverge in JS.
+   *
+   * All four rows below name a real instant with a real designator and would have
+   * satisfied r2's check. Each is a *second* spelling of an instant the ledger can
+   * already hold, and two spellings is the ordering gate and the reducer
+   * disagreeing about whether two events are simultaneous.
+   *
+   * Catches: reverting `core_events_payload_at_is_canonical_utc` to the
+   * has-a-designator regex, which is exactly r2's constraint.
+   */
+  it('refuses every spelling of `at` but the canonical one', async () => {
+    // One test rather than a parametrised one, so the mutant ledger can name it:
+    // `it.each` reports a formatted title per case and `catches` would have to
+    // guess the formatting.
+    const spellings: Array<[string, string, string]> = [
+      ['no designator at all', '2026-08-01T12:00:03', '2026-08-01T12:00:03Z'],
+      ['second precision', '2026-08-01T12:00:03Z', '2026-08-01T12:00:03Z'],
+      ['a numeric UTC offset', '2026-08-01T12:00:03.000+00:00', '2026-08-01T12:00:03.000Z'],
+      ['a non-UTC offset', '2026-08-01T14:00:03.000+02:00', '2026-08-01T12:00:03.000Z'],
+    ];
+    for (const [label, at, occurredAt] of spellings) {
+      await violatesConstraint(
+        'core_events_payload_at_is_canonical_utc',
+        () => append(ledgerRow(roomA, { at, occurredAt })),
+        // The label rides along so a failure says which spelling got through.
+      ).catch((error: unknown) => {
+        throw new Error(`spelling "${label}" was not refused: ${String(error)}`);
+      });
+    }
+  });
+
+  it('refuses a receipt snapshot that is not a list of {id, authorId, body}', async () => {
+    // The snapshot is what a replay folds a receipt against, so a writer that is
+    // not the server must not be able to leave one a replay cannot read.
+    // Catches: dropping `core_events_trusted_messages_shape`.
+    for (const bad of [
+      { id: 'm1' },
+      [{ id: 'm1', authorId: 'u1' }],
+      [{ id: 'm1', authorId: 7, body: 'hi' }],
+      ['m1'],
+    ]) {
+      await violatesConstraint('core_events_trusted_messages_shape', () =>
+        append(ledgerRow(roomA, { trustedMessages: bad })),
+      );
+    }
+    // …and accepts the two shapes that mean something: a window, and a window
+    // that was looked for and came back empty.
+    await expect(
+      append(ledgerRow(roomA, { trustedMessages: [{ id: 'm1', authorId: 'u1', body: 'hi' }] })),
+    ).resolves.toBeDefined();
+    await expect(append(ledgerRow(roomA, { trustedMessages: [] }))).resolves.toBeDefined();
+  });
+
+  it('refuses an id outside the charset the two orderings agree on', async () => {
+    /**
+     * The other half of the same major. The SQL gate compares ids under
+     * `COLLATE "C"` (UTF-8 byte order); `orderEvents` compares them with
+     * JavaScript's `<` (UTF-16 code-unit order). They agree throughout the Basic
+     * Multilingual Plane and disagree above it, because an astral code point is a
+     * surrogate pair beginning at U+D800 and therefore sorts *before*
+     * U+E000–U+FFFF in UTF-16 and *after* it in bytes.
+     *
+     * `parityFuzz` below measures the disagreement directly. This is the
+     * constraint that keeps it out of the ledger. Catches: dropping
+     * `core_events_id_is_safe_to_order`.
+     */
+    await violatesConstraint('core_events_id_is_safe_to_order', () =>
+      append(ledgerRow(roomA, { id: `e-\u{1F600}-1` })),
+    );
+    await violatesConstraint('core_events_id_is_safe_to_order', () =>
+      append(ledgerRow(roomA, { id: 'e 1' })),
+    );
+    await violatesConstraint('core_events_id_is_safe_to_order', () =>
+      append(ledgerRow(roomA, { id: `e${'x'.repeat(300)}` })),
+    );
   });
 
   /**
@@ -350,7 +436,7 @@ describe('core_events — the append path is structural, not cooperative', () =>
       sql`SELECT prosrc AS src FROM pg_proc
           WHERE proname = 'atrium_append_core_event'
             AND pronamespace = 'public'::regnamespace
-            AND pronargs = 8`,
+            AND pronargs = 9`,
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]?.src).toContain(String(LEDGER_ADVISORY_LOCK_KEY));
@@ -387,7 +473,7 @@ describe('core_events — the append function is the authorization boundary', ()
           FROM pg_proc p
           WHERE p.proname = 'atrium_append_core_event'
             AND p.pronamespace = 'public'::regnamespace
-            AND p.pronargs = 8`,
+            AND p.pronargs = 9`,
     );
     expect(row?.granted).toBe(false);
   });
@@ -401,7 +487,7 @@ describe('core_events — the append function is the authorization boundary', ()
           FROM pg_proc p
           WHERE p.proname = 'atrium_append_core_event'
             AND p.pronamespace = 'public'::regnamespace
-            AND p.pronargs = 8`,
+            AND p.pronargs = 9`,
     );
     expect(row?.granted).toBe(true);
   });
@@ -896,3 +982,236 @@ function insertRelation(roomId: string, fromId: string, toId: string) {
      VALUES ('${randomUUID()}', '${roomId}', 'answers', '${fromId}', '${toId}')`,
   );
 }
+
+/**
+ * The SQL ordering gate and the reducer's ordering, compared directly
+ * (#22 gauntlet r3 delta, major 1).
+ *
+ * The finding:
+ *
+ * > the SQL canonical gate is not the reducer's gate for all legal shapes — SQL
+ * > orders `timestamptz` then `id COLLATE "C"` while the reducer does JS string
+ * > comparison on `payload.at` then `id`, so `…05.000Z` vs `…05Z` (or `+00:00`
+ * > vs `Z`) tie in SQL and diverge in JS, and astral-plane ids compare
+ * > differently in UTF-16 than in `COLLATE "C"`; production minting stays in the
+ * > safe subset, so **constrain the subset rather than trusting it**.
+ *
+ * Two claims are made here and they are different claims, so they are two tests:
+ *
+ * 1. **Inside the subset the constraints admit, the two orders are the same
+ *    order** — measured over generated pairs across both dimensions, not argued
+ *    from the shape of the code. This is the property `atrium_append_core_event`
+ *    relies on when it enforces the reducer's `out_of_order` refusal in SQL.
+ * 2. **Outside it they are not** — and every witness of the disagreement is
+ *    refused by a CHECK. Without this half the constraints could be decoration
+ *    and the fuzz would still be green, which is the exact vacuity the standing
+ *    rule about mutation ledgers exists to rule out.
+ */
+describe('canonical order — the SQL gate and the reducer agree, and only inside the subset', () => {
+  /** The comparison the append function performs, evaluated by Postgres. */
+  async function sqlCompare(
+    pairs: ReadonlyArray<{ aAt: string; aId: string; bAt: string; bId: string }>,
+  ): Promise<number[]> {
+    const rows = await handle.db.execute<{ idx: number; cmp: number }>(sql`
+      SELECT t.idx,
+        (CASE
+          WHEN t.a_at::timestamptz > t.b_at::timestamptz THEN 1
+          WHEN t.a_at::timestamptz < t.b_at::timestamptz THEN -1
+          WHEN (t.a_id COLLATE "C") > (t.b_id COLLATE "C") THEN 1
+          WHEN (t.a_id COLLATE "C") < (t.b_id COLLATE "C") THEN -1
+          ELSE 0
+        END)::int AS cmp
+      FROM json_to_recordset(${JSON.stringify(
+        pairs.map((pair, index) => ({
+          idx: index,
+          a_at: pair.aAt,
+          a_id: pair.aId,
+          b_at: pair.bAt,
+          b_id: pair.bId,
+        })),
+      )}::json)
+        AS t(idx int, a_at text, a_id text, b_at text, b_id text)
+      ORDER BY t.idx
+    `);
+    return rows.map((row) => Number(row.cmp));
+  }
+
+  const sign = (value: number) => (value > 0 ? 1 : value < 0 ? -1 : 0);
+
+  /**
+   * A deterministic pseudo-random source.
+   *
+   * Seeded, because a fuzz that cannot be re-run on the input that failed is a
+   * fuzz that reports a mystery. The seed is printed with any failure by virtue
+   * of the pair being in the assertion message.
+   */
+  function random(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+      state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+      return state / 0x1_0000_0000;
+    };
+  }
+
+  /** Ids drawn from exactly the charset `core_events_id_is_safe_to_order` admits. */
+  const SAFE_ALPHABET = '!#$%&()*+,-./0123456789:;<=>?@ABCXYZ[]^_`abcxyz{|}~';
+
+  it('agrees on every pair inside the constrained subset', async () => {
+    const next = random(0x41_54_52_34);
+    const pairs: Array<{ aAt: string; aId: string; bAt: string; bId: string }> = [];
+    const base = Date.parse('2026-08-01T00:00:00.000Z');
+    const safeId = () => {
+      const length = 1 + Math.floor(next() * 24);
+      let id = '';
+      for (let i = 0; i < length; i += 1) {
+        id += SAFE_ALPHABET[Math.floor(next() * SAFE_ALPHABET.length)];
+      }
+      return id;
+    };
+    // A narrow spread of instants on purpose: the interesting pairs are the ties,
+    // where the id decides, and a wide range would almost never produce one.
+    const safeAt = () => new Date(base + Math.floor(next() * 5)).toISOString();
+
+    for (let i = 0; i < 400; i += 1) {
+      pairs.push({ aAt: safeAt(), aId: safeId(), bAt: safeAt(), bId: safeId() });
+    }
+    // Plus the pairs a random generator produces too rarely to rely on: identical
+    // instants, identical ids, and one-character differences at the ends of the
+    // charset — where a collation that is not byte order diverges first.
+    const at = new Date(base).toISOString();
+    for (const [aId, bId] of [
+      ['a', 'a'],
+      ['a-b', 'a_b'],
+      ['a-b', 'ab'],
+      ['A', 'a'],
+      ['~', '!'],
+      ['e1', 'e1'],
+      ['1', '~'],
+      ['abc', 'abcd'],
+    ] as const) {
+      pairs.push({ aAt: at, aId, bAt: at, bId });
+    }
+
+    const fromSql = await sqlCompare(pairs);
+    const disagreements = pairs
+      .map((pair, index) => ({
+        pair,
+        sql: fromSql[index] as number,
+        js: sign(compareCursor({ at: pair.aAt, id: pair.aId }, { at: pair.bAt, id: pair.bId })),
+      }))
+      .filter((row) => row.sql !== row.js);
+
+    // Catches: comparing `at` as text rather than as `timestamptz` in either
+    // direction, and any change to `compareCursor`'s tie-breaking. What it does
+    // **not** catch is dropping `COLLATE "C"` — see the next test for why, and
+    // for what does.
+    expect(disagreements).toEqual([]);
+    expect(pairs.length).toBeGreaterThan(400);
+  });
+
+  /**
+   * `COLLATE "C"` is asserted in the deployed body, not inferred from behaviour.
+   *
+   * The honest limit of the fuzz above, stated rather than left for a critic.
+   * This database is created with `datcollate = en_US.utf8` and a libc locale
+   * provider, and on the image the compose file pins, that collation **behaves
+   * exactly like byte order** — the locale data is not generated, so `strcoll`
+   * degrades to `strcmp`. Every pair the fuzz can generate therefore compares the
+   * same way with and without `COLLATE "C"`, and a version of the gate that
+   * dropped it would sail through.
+   *
+   * That is not a reason to claim less; it is a reason to measure differently.
+   * The same problem — a guarantee that is absent while all the evidence says it
+   * is present — is the r1 advisory-lock-key bug, and the assertion that caught
+   * that one reads the deployed function body. So does this one. On a database
+   * whose collation *is* variable-weight (any ordinary glibc or ICU deployment),
+   * the gate and the reducer would disagree about `a-b` versus `a_b` with no
+   * behavioural test in this suite able to see it.
+   *
+   * Catches: dropping `COLLATE "C"` from either side of the ordering comparison
+   * in `atrium_append_core_event`, or from the index that serves it.
+   */
+  it('compares ids under COLLATE "C" in the deployed append gate', async () => {
+    const [fn] = await handle.db.execute<{ src: string }>(
+      sql`SELECT prosrc AS src FROM pg_proc
+          WHERE proname = 'atrium_append_core_event'
+            AND pronamespace = 'public'::regnamespace
+            AND pronargs = 9`,
+    );
+    const body = fn?.src ?? '';
+    // Both the read of the cursor and the comparison against it.
+    expect(body).toContain('e."id" COLLATE "C" DESC');
+    expect(body).toContain('(p_event_id COLLATE "C") > (v_max_id COLLATE "C")');
+
+    const [index] = await handle.db.execute<{ def: string }>(
+      sql`SELECT indexdef AS def FROM pg_indexes
+          WHERE schemaname = 'public' AND indexname = 'core_events_canonical_order_idx'`,
+    );
+    expect(index?.def).toContain('COLLATE "C"');
+
+    // And the reason it has to be said out loud: on this image the default
+    // collation agrees with C, so nothing about how rows *behave* here would
+    // reveal the difference. Asserted so that an image whose collation stops
+    // agreeing turns this into a visible change rather than a silent one.
+    const [reality] = await handle.db.execute<{ agrees: boolean }>(
+      sql`SELECT ('a-b' < 'ab') = (('a-b' COLLATE "C") < ('ab' COLLATE "C")) AS agrees`,
+    );
+    expect(typeof reality?.agrees).toBe('boolean');
+  });
+
+  it('disagrees outside the subset, and the constraints refuse every witness', async () => {
+    /**
+     * Each row is a concrete disagreement between the two orderings, and each is
+     * refused by a CHECK. That pairing is the point: the fuzz above is only
+     * evidence if the subset it fuzzes is enforced, and the constraints are only
+     * load-bearing if something outside them actually breaks.
+     */
+    const at = '2026-08-01T00:00:05.000Z';
+    const witnesses = [
+      {
+        why: 'two spellings of one instant tie in SQL and differ as strings',
+        a: { at, id: 'e1' },
+        b: { at: '2026-08-01T00:00:05Z', id: 'e1' },
+        constraint: 'core_events_payload_at_is_canonical_utc',
+        offending: 'b' as const,
+      },
+      {
+        why: 'a numeric UTC offset is the same instant and a different string',
+        a: { at, id: 'e1' },
+        b: { at: '2026-08-01T00:00:05.000+00:00', id: 'e1' },
+        constraint: 'core_events_payload_at_is_canonical_utc',
+        offending: 'b' as const,
+      },
+      {
+        why: 'an astral code point sorts before U+E000–U+FFFF in UTF-16 and after it in bytes',
+        a: { at, id: '\u{10000}' },
+        b: { at, id: '' },
+        constraint: 'core_events_id_is_safe_to_order',
+        offending: 'a' as const,
+      },
+    ];
+
+    const fromSql = await sqlCompare(
+      witnesses.map((w) => ({ aAt: w.a.at, aId: w.a.id, bAt: w.b.at, bId: w.b.id })),
+    );
+
+    witnesses.forEach((witness, index) => {
+      const js = sign(compareCursor(witness.a, witness.b));
+      // The disagreement is real, and asserted rather than assumed — a "witness"
+      // that no longer diverges would otherwise leave the constraint below
+      // guarding nothing while this test stayed green.
+      expect({ why: witness.why, sql: fromSql[index], js }).not.toEqual({
+        why: witness.why,
+        sql: js,
+        js,
+      });
+    });
+
+    for (const witness of witnesses) {
+      const bad = witness.offending === 'a' ? witness.a : witness.b;
+      await violatesConstraint(witness.constraint, () =>
+        append(ledgerRow(roomA, { id: bad.id, at: bad.at, occurredAt: bad.at })),
+      );
+    }
+  });
+});

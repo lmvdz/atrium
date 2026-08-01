@@ -11,7 +11,7 @@ import {
   objectRelations,
   proposals,
 } from '@atrium/db/schema';
-import { and, count, eq } from 'drizzle-orm';
+import { and, count, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Command, ProposalDraft } from '../../apps/server/src/commands.js';
 import {
@@ -501,6 +501,143 @@ describe('advance_seen', () => {
 });
 
 describe('live ≡ replay', () => {
+  /**
+   * The receipt's inputs are immutable, so a later mutation of `messages` cannot
+   * rewrite a fold that already happened (#22 gauntlet r3 delta, blocking 2).
+   *
+   * The finding, verbatim:
+   *
+   * > Both paths share `trustFor`/`provenanceMessageIds`, but the bodies come
+   * > from `messages` whose `authorId` is `onDelete: 'set null'` […] Delete a
+   * > human author and a model `object_accepted` that folded cleanly under a real
+   * > `authorId` replays with `''`, fails the receipt, and is absent from
+   * > replayed state. Same derivation code, different substrate.
+   *
+   * A **claim** is the sharpest instance, because `attributed_person_not_author`
+   * is the one receipt problem whose verdict is a function of `authorId` and
+   * whose severity is `reject`: a claim whose claimant wrote none of the cited
+   * messages is a wrong receipt, and the whole acceptance is refused. Alice
+   * claims something in her own words, a model reads it, the room accepts it —
+   * and then Alice's account is deleted, which is an ordinary thing for a product
+   * to allow.
+   *
+   * Under r3 the replay re-reads `messages`, finds `author_id` NULL, maps it to
+   * `''`, and refuses the acceptance that a live fold had allowed: the object is
+   * simply missing from replayed state and `replayed !== live`. Under r4 the
+   * window the fold saw is on the row, so the deletion changes nothing about
+   * history — which is what an append-only ledger is supposed to mean.
+   *
+   * Catches: re-deriving the trusted window from `messages` on any fold path
+   * (`catchUp`, `replayCoreEvents`), and not writing `trusted_messages` at
+   * append.
+   */
+  it('replays an accepted claim identically after its author is deleted', async () => {
+    const alice = await connect(room.people.alice as string);
+    await alice.subscribe(room.roomId);
+
+    const quote = 'the deploy pipeline is green';
+    await alice.command(send(room.roomId, quote));
+    const cited = (await lastEvent<{ messageId: string }>(room.roomId)).messageId;
+
+    await alice.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        ...modelDraft(cited, quote),
+        type: 'claim',
+        payload: {
+          statement: quote,
+          claimant: room.people.alice as string,
+          verification: 'unverified',
+        },
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+
+    /**
+     * Accepted by a **model**, through the ledger's own append.
+     *
+     * Not a shortcut, and worth saying why rather than leaving it to be
+     * questioned. #21's receipt gate runs for non-human acceptances only — a
+     * person accepting a reading has read it, and their judgement is the receipt
+     * — so a human-accepted object never touches the trusted window and cannot
+     * demonstrate anything about it. No *command* carries a model actor today,
+     * which r3's receipt admitted as its deviation 4: "the non-human path is
+     * currently exercised by construction rather than by a test — worth a
+     * critic's eye." This is that test. `ledger.append` is the production append,
+     * with the actor the interpretation worker will supply.
+     */
+    const stored = server.ledger.coreState().proposals[proposalId];
+    if (!stored) throw new Error('the proposal did not reach core state');
+    const objectId = randomUUID();
+    await server.ledger.append({
+      roomId: room.roomId,
+      actor: { kind: 'model', model: 'test-model' },
+      build: ({ id, at }) =>
+        ({
+          id,
+          at,
+          type: 'object_accepted',
+          object: {
+            id: objectId,
+            roomId: room.roomId,
+            type: stored.proposal.type,
+            payload: stored.proposal.payload,
+            objectiveId: null,
+            provenance: {
+              messageIds: stored.proposal.provenance,
+              proposalId,
+              interpretationId: null,
+            },
+            createdAt: at,
+            updatedAt: at,
+          },
+        }) as never,
+    });
+
+    const live = server.ledger.serialize();
+    const before = JSON.parse(live) as { objects: Record<string, unknown> };
+    // Not vacuous: the model acceptance really did land, so its absence after the
+    // deletion would be a change rather than a room that never had one.
+    expect(Object.keys(before.objects)).toEqual([objectId]);
+
+    // The snapshot the append recorded, read from the ledger row rather than
+    // inferred — "we wrote a column" is the claim being made.
+    const [row] = await handle.db
+      .select({ trusted: coreEvents.trustedMessages })
+      .from(coreEvents)
+      .where(eq(coreEvents.type, 'object_accepted'));
+    expect(row?.trusted).toEqual([
+      { id: cited, authorId: room.people.alice as string, body: quote },
+    ]);
+
+    // The substrate moves. `messages.author_id` is ON DELETE SET NULL, so this is
+    // the ordinary consequence of an ordinary product feature — not a corruption,
+    // not an operator error, and nothing a migration could have anticipated.
+    await handle.db.execute(sql`DELETE FROM users WHERE id = ${room.people.alice as string}`);
+    const [message] = await handle.db
+      .select({ authorId: messages.authorId })
+      .from(messages)
+      .where(eq(messages.id, cited));
+    expect(message?.authorId).toBeNull();
+
+    // The snapshot did not move with it.
+    const [stillThere] = await handle.db
+      .select({ trusted: coreEvents.trustedMessages })
+      .from(coreEvents)
+      .where(eq(coreEvents.type, 'object_accepted'));
+    expect(stillThere?.trusted).toEqual([
+      { id: cited, authorId: room.people.alice as string, body: quote },
+    ]);
+
+    // Under r3 this is where it breaks: the replay re-reads `messages`, finds
+    // `author_id` NULL, maps it to `''`, raises `attributed_person_not_author`
+    // with severity `reject`, and the object is simply missing from replayed
+    // state.
+    const events = await server.ledger.replayCoreEvents();
+    expect(serializeState(reduce(events))).toBe(live);
+  });
+
   it('folds the ledger from scratch into byte-identical state', async () => {
     const alice = await connect(room.people.alice as string);
     await alice.subscribe(room.roomId);
