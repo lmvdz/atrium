@@ -175,9 +175,17 @@ test.describe('gallery', () => {
           500,
         );
 
+        /* The claim underline is the meaningful non-text graphic this audit
+           had no category for until round 4; a run that measures none of them
+           is a run whose zero failures mean nothing. */
+        expect(
+          audit.graphicsChecked,
+          'the non-text-graphic sweep found no graphics to measure',
+        ).toBeGreaterThan(10);
+
         // Reported so the numbers land in the run log, not just the assertions.
         console.info(
-          `${theme} @ ${width}: ${audit.elementsChecked} text elements · smallest font ${audit.smallestFont}px · lowest contrast ${audit.lowestContrast}:1 · scrollWidth ${audit.overflow.documentScrollWidth} / clientWidth ${audit.overflow.documentClientWidth}`,
+          `${theme} @ ${width}: ${audit.elementsChecked} text elements · smallest font ${audit.smallestFont}px · lowest contrast ${audit.lowestContrast}:1 · ${audit.graphicsChecked} non-text graphics · lowest ${audit.lowestGraphic}:1 · scrollWidth ${audit.overflow.documentScrollWidth} / clientWidth ${audit.overflow.documentClientWidth}`,
         );
 
         expect(audit.overflow.widest, 'unclipped elements past the right edge').toEqual([]);
@@ -187,6 +195,10 @@ test.describe('gallery', () => {
         );
         expect(audit.fontFailures, 'text below the 10px floor').toEqual([]);
         expect(audit.contrastFailures, 'text below AA').toEqual([]);
+        expect(
+          audit.graphicFailures,
+          'a meaningful non-text graphic below WCAG 1.4.11’s 3:1',
+        ).toEqual([]);
       });
     }
   }
@@ -251,12 +263,30 @@ test.describe('gallery', () => {
          An unfocused control's outline-color is `currentColor`, so measuring it
          at rest measures the text colour and calls it a ring — which is a check
          that would pass on a ring that never appears. `:focus-visible` only
-         matches for keyboard focus, so the keyboard is what has to do it. */
+         matches for keyboard focus, so the keyboard is what has to do it.
+
+         A CONTROL WITH NO RING IS THE FAILURE, NOT A CONTROL OUTSIDE THE CHECK.
+         This used to read `if (outlineStyle === 'none') return null`, which
+         dropped ring-less controls out of `measured` instead of putting them in
+         `failures` — so a rule named "the focus ring clears 3:1 on every control
+         it lands on" could only ever be tripped by controls that already had a
+         ring. It was the THIRD instance in this codebase of an audit written to
+         skip the case its rule covers (after audit.ts's opacity guard and
+         CONVENTIONS' inactive-control paragraph), and the one control in the app
+         that tripped it was the composer — the primary input. CONVENTIONS now
+         forbids this explicitly: an audit may not exempt the case its rule
+         covers. `ratio: null` means "no ring at all", and the assertion below
+         treats it as worse than a bad ring rather than as no data. */
       const MEASURE = `(() => {
         const el = document.activeElement;
+        /* Nothing is focused. Absence, not exemption — the same distinction
+           audit.ts draws between opacity 0 and a fade. */
         if (el === null || el === document.body) return null;
         const style = getComputedStyle(el);
-        if (style.outlineStyle === 'none' || parseFloat(style.outlineWidth) === 0) return null;
+        const label = (el.getAttribute('aria-label') || el.textContent || el.tagName).trim().slice(0, 28);
+        const where = el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/)[0] : '');
+        const none = { ratio: null, colour: style.outlineColor, surface: 'n/a', label, where };
+        if (style.outlineStyle === 'none' || parseFloat(style.outlineWidth) === 0) return none;
         const parse = (value) => {
           const m = value.match(/rgba?\\(([^)]+)\\)/);
           if (!m) return null;
@@ -266,9 +296,12 @@ test.describe('gallery', () => {
         const channel = (c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
         const lum = (c) => 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
         const ratio = (a, b) => { const la = lum(a), lb = lum(b); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05); };
-        /* The ring sits outside the border box with a 1px offset, so the colour
-           adjacent to it is the PARENT's surface, not the control's own fill. */
-        let node = el.parentElement;
+        /* The ring's adjacent colour. Positive offset puts it outside the border
+           box, so what it sits on is the PARENT's surface; a negative offset
+           (the composer, which fills its own box) puts it over the control's own
+           background, so that is what it has to clear. */
+        const inset = parseFloat(style.outlineOffset) < 0;
+        let node = inset ? el : el.parentElement;
         let behind = { r: 255, g: 255, b: 255, a: 1 };
         while (node) {
           const bg = parse(getComputedStyle(node).backgroundColor);
@@ -276,28 +309,47 @@ test.describe('gallery', () => {
           node = node.parentElement;
         }
         const ring = parse(style.outlineColor);
-        if (!ring) return null;
+        /* An outline whose colour cannot be read is a ring that cannot be
+           checked, which is not the same as a ring that passed. */
+        if (!ring) return { ...none, surface: 'unparseable' };
         return {
           ratio: Math.round(ratio(ring, behind) * 100) / 100,
           colour: style.outlineColor,
           surface: 'rgb(' + Math.round(behind.r) + ', ' + Math.round(behind.g) + ', ' + Math.round(behind.b) + ')',
-          label: (el.textContent || el.tagName).trim().slice(0, 28),
+          label,
+          where,
         };
       })()`;
 
-      const measured: { ratio: number; colour: string; surface: string; label: string }[] = [];
+      type Ring = {
+        ratio: number | null;
+        colour: string;
+        surface: string;
+        label: string;
+        where: string;
+      };
+      const measured: Ring[] = [];
       for (let i = 0; i < 90; i += 1) {
         await page.keyboard.press('Tab');
-        const one = (await page.evaluate(MEASURE)) as (typeof measured)[number] | null;
+        const one = (await page.evaluate(MEASURE)) as Ring | null;
         if (one !== null) measured.push(one);
       }
 
-      expect(measured.length, 'no focused control painted a ring').toBeGreaterThan(40);
-      const worst = measured.reduce((a, b) => (a.ratio < b.ratio ? a : b));
+      expect(measured.length, 'tabbing focused nothing').toBeGreaterThan(40);
+      const ringless = measured.filter((m) => m.ratio === null);
+      const rings = measured.filter((m): m is Ring & { ratio: number } => m.ratio !== null);
+      const worst = rings.reduce((a, b) => (a.ratio < b.ratio ? a : b));
       console.info(
-        `focus ring ${theme}: ${measured.length} controls tabbed · worst ${worst.ratio}:1 (${worst.colour} on ${worst.surface}) at "${worst.label}"`,
+        `focus ring ${theme}: ${measured.length} controls tabbed · ${ringless.length} with no ring at all · worst ${worst.ratio}:1 (${worst.colour} on ${worst.surface}) at "${worst.label}"`,
       );
-      const failures = measured.filter((m) => m.ratio + 0.005 < 3);
+      /* Reported first and separately, because "no indicator" and "a weak
+         indicator" are different defects and collapsing them into one number is
+         how the weaker one hides. */
+      expect(
+        ringless.map((m) => `${m.where} "${m.label}"`),
+        'focused controls that paint no focus indicator at all — WCAG 2.4.7',
+      ).toEqual([]);
+      const failures = rings.filter((m) => m.ratio + 0.005 < 3);
       expect(failures.slice(0, 5), 'focus ring below WCAG 1.4.11').toEqual([]);
     });
   }
@@ -522,6 +574,111 @@ test.describe('gallery', () => {
       ).toEqual([]);
     });
   }
+
+  /* -------------------------------------------------------------------------
+   * THE BINDING CUE UNDER FOCUS.
+   *
+   * `.cbox:focus-within` out-ranked `.cboxBound`, so focusing the composer
+   * replaced the amber ANSWERING border with grey — the cue that says "your
+   * next message resolves this item" destroyed by focusing the field you are
+   * meant to answer in. The token-contrast test asserts the specificity; this
+   * asserts what the browser actually paints, because specificity arithmetic
+   * done by hand is how the defect got in.
+   * ---------------------------------------------------------------------- */
+  for (const theme of THEMES) {
+    test(`the answer-binding border survives focus — ${theme}`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/gallery?theme=${theme}`);
+      const bar = page.locator('[data-binding="bound"]').first();
+      await expect(bar).toBeVisible();
+
+      const read = () =>
+        page.evaluate(() => {
+          const bound = document.querySelector('[data-binding="bound"]');
+          const box = bound?.parentElement?.querySelector('textarea')?.parentElement;
+          if (box === null || box === undefined) return null;
+          return {
+            border: getComputedStyle(box).borderTopColor,
+            within: box.matches(':focus-within'),
+          };
+        });
+
+      const resting = await read();
+      expect(resting, 'no bound composer on the page').not.toBeNull();
+
+      await page.evaluate(() => {
+        const bound = document.querySelector('[data-binding="bound"]');
+        bound?.parentElement?.querySelector('textarea')?.focus();
+      });
+      /* `border-color` carries a 120ms transition, and getComputedStyle DURING a
+         transition returns the interpolated value — reading it synchronously
+         after focus reports the RESTING colour and passes on a border that is
+         about to change. The first version of this measurement did exactly
+         that and reported the r3 stylesheet as fixed. */
+      await expect.poll(async () => (await read())?.within, { timeout: 2000 }).toBe(true);
+      await page.waitForTimeout(400);
+      const focused = await read();
+
+      console.info(
+        `bound composer ${theme}: resting ${resting?.border} · focused ${focused?.border}`,
+      );
+      expect(
+        focused?.border,
+        'focusing the composer replaced the answer-binding border with the generic focus grey',
+      ).toBe(resting?.border);
+    });
+  }
+
+  /* -------------------------------------------------------------------------
+   * THE NAME A SCREEN READER HEARS IS A RENDERED STRING TOO.
+   *
+   * Round 3's gauntlet found two: the hold control announced as "0 Authorise the
+   * drop — hold" (a `role="progressbar"` descendant contributes its value to its
+   * ancestor's name) and the disabled chip as "NEEDS YOU0" (a label and a count
+   * with no text node between them). Sweeping every button's COMPUTED name found
+   * three more of the second kind — two rail room chips and the routine strip,
+   * where the only whitespace was inside an `aria-hidden` separator.
+   *
+   * COMPUTED, not `textContent`. `textContent` never inserts a space between
+   * adjacent elements and the accname algorithm does for block-level ones, so a
+   * textContent sweep reports a dozen welds a screen reader never hears — and
+   * would send the next person to redesign the lens rows, which are fine. This
+   * reads Playwright's aria snapshot, which is the browser's own computation.
+   * ---------------------------------------------------------------------- */
+  test('no control announces a value welded to its label', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/gallery?theme=light');
+    await expect(page.locator('[data-gallery-frame]').first()).toBeVisible();
+
+    const snapshot = await page.locator('body').ariaSnapshot();
+    const names = [...snapshot.matchAll(/- (?:button|link) "([^"]*)"/g)].map((m) =>
+      (m[1] ?? '').replace(/\s+/g, ' ').trim(),
+    );
+    expect(names.length, 'the aria snapshot found no named controls').toBeGreaterThan(40);
+
+    /* A digit stuck to a letter with no separator, in either direction. Real
+       words that contain digits are exempt by SHAPE, not by name: a unit
+       ("16h", "90-day"), a time ("11:50"), an issue number ("#418"), an ordinal.
+       An exemption that named a component would be the defect this round exists
+       to stop. */
+    const welded = names.filter((name) => {
+      const stripped = name
+        .replace(/#\d+/g, '') //   issue numbers
+        .replace(/\b\d+:\d+\b/g, '') // times
+        .replace(/\b\d+(h|m|s|px|d)\b/gi, '') // durations and units
+        .replace(/\b\d+-\w+/g, '') //   "90-day"
+        .replace(/\b\d+(st|nd|rd|th)\b/gi, ''); // ordinals
+      return /[A-Za-z]\d|\d[A-Za-z]/.test(stripped);
+    });
+    console.info(`accessible names: ${names.length} controls · ${welded.length} welded`);
+    expect(welded, 'a control announces a number welded to its label').toEqual([]);
+
+    /* And the hold control specifically, which is the one the gauntlet named:
+       its name is the label, and the progress it exposes is a description. */
+    const hold = names.filter((n) => n.includes('— hold'));
+    expect(hold.length, 'no hold control on the page').toBeGreaterThan(0);
+    for (const name of hold) expect(name).toMatch(/^[A-Z]/);
+  });
 
   test('the theme switch is the only theme mechanism', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });

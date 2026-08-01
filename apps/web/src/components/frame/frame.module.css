@@ -540,11 +540,32 @@
   border-radius: 0 0 5px 5px;
 }
 
+/* THE BINDING CUE SURVIVES FOCUS.
+
+   `.cbox:focus-within` and `.cboxBound` are both one class deep, so source
+   order decided which won — and `:focus-within` came second. Focusing the
+   composer therefore replaced the amber ANSWERING border with grey: the cue
+   saying "your next message resolves this item" was destroyed by focusing the
+   field you are meant to answer in, which is the one moment it has to hold.
+   (Round 3's gauntlet measured 1.19:1 between the two states.)
+
+   Both classes are on the same element, so `.cbox.cboxBound:focus-within` is
+   genuinely more specific rather than merely later — the fix does not depend on
+   where in the file it sits. The rule underneath: a state cue is not decoration
+   for the resting state, and a hover/focus rule may not out-rank the state the
+   surface is IN. */
+.cbox.cboxBound:focus-within {
+  border-color: var(--ambbd);
+}
+
+.cbox.cboxReplying:focus-within {
+  border-color: var(--filebd);
+}
+
 .cbox textarea {
   border: 0;
   background: transparent;
   resize: none;
-  outline: none;
   font-family: Inter, sans-serif;
   font-size: 12.5px;
   color: var(--tx1);
@@ -553,6 +574,26 @@
   min-width: 0;
   width: 100%;
   line-height: 1.45;
+}
+
+/* THE PRIMARY INPUT PAINTS THE SAME RING AS EVERY OTHER CONTROL.
+
+   `outline: none` used to sit in the block above. Being two classes deep it
+   out-ranked the global `:focus-visible` in globals.css, so 89 of the app's 90
+   controls painted the 2px --tx1 ring at 8.80:1 light / 11.20:1 dark and the
+   composer painted nothing — the app's primary input, and the control whose
+   keyboard contract the footer advertises, was the single one with no focus
+   indicator. Its only signal was the --line3 border at 2.23:1 light / 1.81:1
+   dark, the exact token this codebase rejected for this job in round 2.
+
+   Same colour and same width as everywhere else; the offset is NEGATIVE because
+   this control fills its container. A +1px ring would be drawn on top of
+   `.cbox`'s own border and read as a thickened box rather than a ring. Inset,
+   the ring's adjacent colour is `.cbox`'s --bg3 fill, which is what the rendered
+   audit measures it against. */
+.cbox textarea:focus-visible {
+  outline: 2px solid var(--tx1);
+  outline-offset: -1px;
 }
 
 .cbox textarea::placeholder {

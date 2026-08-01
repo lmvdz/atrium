@@ -293,11 +293,204 @@ describe('a disabled control stays readable', () => {
     const guards = [...AUDIT_SOURCE.matchAll(/if\s*\([^)]*\)\s*continue/g)]
       .map((match) => match[0].replace(/\s+/g, ' '))
       .filter((guard) => /alpha|opacity/i.test(guard));
-    expect(guards, 'the audit skips elements on an opacity threshold').toEqual([
-      'if (alpha === 0) continue',
-    ]);
+    /* EVERY such guard, not a fixed count of them. The round-3 version asserted
+       the array equalled exactly one entry, which made it fail when round 4
+       added a second loop with the identical legitimate guard — a test that
+       breaks on a correct change is a test that gets relaxed under pressure, and
+       the relaxation is where the exemption comes back. The invariant is about
+       what a guard may say, so that is what is asserted; a threshold of any kind
+       fails here however many loops there are. */
+    expect(guards.length, 'the audit stopped consulting opacity at all').toBeGreaterThan(0);
+    for (const guard of guards) {
+      expect(guard, 'the audit skips elements on an opacity threshold').toBe(
+        'if (alpha === 0) continue',
+      );
+    }
     // and the fade is folded into the measurement rather than dropped
     expect(AUDIT_SOURCE).toMatch(/parsed\.a \* alpha/);
+  });
+
+  /* CATCHES the same defect in the RING audit, which is where round 3's
+     gauntlet found the third instance of it. `gallery.spec.ts` returned `null`
+     for a control with no outline, dropping it out of `measured` instead of
+     into `failures` — so a check named "the focus ring clears 3:1 on every
+     control it lands on" could only ever be tripped by a control that already
+     had a ring, and the one control in the app that tripped the skip was the
+     composer. CONVENTIONS now states the general rule; this is the check that
+     holds the second implementation of it.
+
+     Comments stripped first, for the reason this file's `code()` states: the
+     paragraph above quotes the very construct it forbids. */
+  it('the ring audit does not exempt controls that paint no ring', () => {
+    const ring = code(readFileSync(find('apps/web/e2e/gallery.spec.ts'), 'utf8'));
+    const measure = ring.match(/const MEASURE = `([\s\S]*?)`;/)?.[1] ?? '';
+    expect(measure, 'gallery.spec.ts has no ring MEASURE block').not.toBe('');
+    /* Line-wise rather than by regexing the whole condition: the guard reads
+       `parseFloat(style.outlineWidth) === 0`, and a `\([^)]*\)` condition match
+       stops dead at that inner paren — the first version of this check did
+       exactly that and passed against its own mutation, which is the same way
+       round 3's audit-harness grep matched a comment instead of the code. Every
+       line that consults the outline's presence must exist, and none of them may
+       return `null`: null means "no data", and no data is how a missing ring
+       reads as a passing one. */
+    const guards = measure
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => /outlineStyle|outlineWidth/.test(line));
+    expect(guards.length, 'the ring audit no longer checks whether a ring exists').toBeGreaterThan(
+      0,
+    );
+    expect(
+      guards.filter((line) => /return\s+null/.test(line)),
+      'the ring audit drops a control with no outline instead of failing it',
+    ).toEqual([]);
+    // and the ring-less case has somewhere to land, and something that fails on it
+    expect(measure).toMatch(/ratio:\s*null/);
+    expect(ring).toMatch(/paint no focus indicator at all/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE COMPOSER'S RING, AND THE BINDING CUE UNDER IT.
+ *
+ * Round 3's gauntlet: 89 of 90 controls painted the 2px --tx1 ring; the one
+ * that did not was the composer — the app's primary input, and the control
+ * whose keyboard contract the footer advertises. `.cbox textarea { outline:
+ * none }` is two classes deep and out-ranked the global `:focus-visible`. The
+ * rendered ring audit could not see it, because that audit was written to drop
+ * ring-less controls rather than fail them (fixed in e2e/gallery.spec.ts).
+ * ------------------------------------------------------------------------- */
+describe('the primary input paints the app’s focus ring', () => {
+  /* CATCHES: `outline: none` coming back on the composer, in any block. Every
+     other control in the app inherits the ring from globals.css; the only way
+     to lose it is to out-rank that rule, and this is where that was done.
+     Comments are stripped first — this file's house style quotes the defect it
+     forbids in the comment above the fix, and a check that matched its own
+     documentation would pass on the mutated file (round 3, the audit-harness
+     grep that matched the comment describing the old guard). */
+  it('no rule in the composer suppresses the outline', () => {
+    const suppressed = [...(MODULES.frame as string).matchAll(/outline:\s*(none|0)\b/g)].map(
+      (match) => match[0],
+    );
+    expect(suppressed, 'a frame rule suppresses the focus outline').toEqual([]);
+  });
+
+  /* CATCHES: the composer painting a ring in some OTHER colour or width — a
+     1px --line3 hairline would satisfy "has an outline" and be the 2.23:1 the
+     gauntlet measured. The token is read out of globals.css, so the composer's
+     ring and the app's ring cannot drift apart. */
+  it('the composer’s ring is the same token and width as every other control', () => {
+    const rule = (MODULES.frame as string).match(/\.cbox\s+textarea:focus-visible\s*\{([^}]*)\}/);
+    expect(rule?.[1], 'the composer declares no focus-visible ring').toBeDefined();
+    const declaration = rule?.[1] ?? '';
+    expect(declaration).toMatch(new RegExp(`var\\(--${FOCUS_RING_TOKEN}\\)`));
+    const global = GLOBALS.match(/:focus-visible\s*\{[^}]*?outline:\s*([\d.]+)px/s);
+    expect(declaration).toMatch(new RegExp(`outline:\\s*${global?.[1]}px`));
+  });
+
+  /* CATCHES: the ring landing on a surface it cannot clear. The composer's is
+     INSET (negative offset) because the textarea fills its container, so the
+     colour adjacent to it is `.cbox`'s own fill rather than the parent's — a
+     different surface from every other control's, and therefore one this file
+     has to name rather than assume is covered by RING_SURFACES. */
+  it.each(THEMES)('the inset ring clears 3:1 on the composer’s own fill — %s', (name, theme) => {
+    const fill = (MODULES.frame as string).match(
+      /\n\.cbox\s*\{[^}]*background:\s*var\(--([\w-]+)\)/,
+    );
+    expect(fill?.[1], 'frame.module.css states no composer fill').toBeDefined();
+    const ratio = contrast(theme[FOCUS_RING_TOKEN] as string, theme[fill?.[1] as string] as string);
+    console.info(
+      `composer ring ${name}: --${FOCUS_RING_TOKEN} on --${fill?.[1]} = ${ratio.toFixed(2)}:1`,
+    );
+    expect(ratio).toBeGreaterThanOrEqual(3);
+  });
+
+  /* CATCHES: `.cbox:focus-within` out-ranking the binding cue again. Focusing
+     the composer used to replace the amber ANSWERING border with grey — the cue
+     saying "your next message resolves this item" destroyed by focusing the
+     field you are meant to answer in. Asserted as SPECIFICITY (two classes plus
+     the pseudo-class, so it wins wherever it sits in the file) rather than as
+     source order, because source order is what made this fragile. */
+  it.each(['cboxBound', 'cboxReplying'])('the %s cue survives focus', (state) => {
+    const resting = (MODULES.frame as string).match(
+      new RegExp(`\\n\\.${state}\\s*\\{[^}]*border-color:\\s*var\\(--([\\w-]+)\\)`),
+    );
+    expect(resting?.[1], `frame.module.css states no resting border for .${state}`).toBeDefined();
+    const focused = (MODULES.frame as string).match(
+      new RegExp(
+        `\\.cbox\\.${state}:focus-within\\s*\\{[^}]*border-color:\\s*var\\(--([\\w-]+)\\)`,
+      ),
+    );
+    expect(
+      focused?.[1],
+      `.${state} has no focus-within rule, so .cbox:focus-within's grey wins`,
+    ).toBe(resting?.[1]);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE CLAIM UNDERLINE IS A MEANINGFUL NON-TEXT GRAPHIC.
+ *
+ * globals.css's own words: "the dotted underline is the visual difference
+ * between 'someone said it' and 'the system checked it'". That is a definition
+ * of a 1.4.11 graphic, and it shipped as --line3 at 1.32–2.23:1 for three
+ * rounds because neither the text audit nor the ring audit had a category for
+ * it.
+ * ------------------------------------------------------------------------- */
+describe('the claim underline clears WCAG 1.4.11', () => {
+  function claimToken(): string {
+    const match = code(GLOBALS).match(/\.atr-claim\s*\{[^}]*border-bottom:[^;]*var\(--([\w-]+)\)/s);
+    if (match?.[1] === undefined) {
+      throw new Error('globals.css has no .atr-claim underline colour to measure');
+    }
+    return match[1];
+  }
+
+  /* CATCHES: putting the underline back on --line3, or on any other token that
+     fails against a surface a claim can land on. EVERY surface, not the ring's
+     list: a claim's underline sits on the row it is in, so a claim inside a red
+     failure block is on --redbg3 — the worst surface in the app and the one
+     --line3 measured 1.32:1 against. */
+  it.each(THEMES)('is at least 3:1 on every surface a claim lands on — %s', (name, theme) => {
+    const token = claimToken();
+    const surfaces = Object.keys(theme).filter((t) =>
+      /^(bg|ambbg|redbg|grnbg|grnav|replybg|filebg)/.test(t),
+    );
+    expect(surfaces.length).toBeGreaterThan(15);
+    let worst = { surface: '', ratio: Number.POSITIVE_INFINITY };
+    for (const surface of surfaces) {
+      const ratio = contrast(theme[token] as string, theme[surface] as string);
+      if (ratio < worst.ratio) worst = { surface, ratio };
+    }
+    console.info(
+      `claim underline ${name}: --${token} worst ${worst.ratio.toFixed(2)}:1 on --${worst.surface}`,
+    );
+    expect(
+      worst.ratio,
+      `claim underline --${token} on --${worst.surface} is ${worst.ratio.toFixed(2)}:1`,
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  /* CATCHES: fixing the contrast by making the underline as loud as the words,
+     which would delete the distinction it exists to draw. It has to be quieter
+     than body text AND above the graphic floor; that band is the constraint. */
+  it('stays quieter than the words it sits under', () => {
+    const token = claimToken();
+    expect(token, 'the claim underline is the same token as primary body text').not.toBe('tx0');
+    expect(token).not.toBe(FOCUS_RING_TOKEN);
+    expect(code(GLOBALS)).toMatch(/\.atr-claim\s*\{[^}]*border-bottom:\s*1px dotted/s);
+  });
+
+  /* CATCHES: the rendered audit losing its non-text-graphic sweep — the check
+     that measures this on the page rather than in the token file. A registry
+     with the claim underline removed from it is the exemption this round exists
+     to stop, one indirection out. */
+  it('the rendered audit measures it as a non-text graphic', () => {
+    expect(AUDIT_SOURCE).toMatch(/data-claim="true"/);
+    expect(AUDIT_SOURCE).toMatch(/graphicFailures/);
+    expect(AUDIT_SOURCE, 'the graphic sweep uses a floor other than 1.4.11’s 3:1').toMatch(
+      /ratio \+ 0\.005 < 3/,
+    );
   });
 });
 
