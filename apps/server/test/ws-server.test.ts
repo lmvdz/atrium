@@ -252,6 +252,74 @@ describe('the upgrade', () => {
     expect(welcome.user).toEqual({ id: ada.userId, displayName: 'ada' });
     socket.close();
   });
+
+  /**
+   * The `rawPathname` guard, tested at the boundary it is actually load-bearing
+   * on — the round-4 delta's third finding, answered.
+   *
+   * Codex was right that the web route cannot prove this: a Next route handler
+   * is handed a `Request`, and constructing one already ran the WHATWG URL
+   * parser, so `rawPathname` and `new URL().pathname` return the same string
+   * there for every input (`mounted.test.ts` measures it). **Here they do not.**
+   * Node's HTTP parser passes the request target through verbatim, so
+   * `req.url` really is `/nope/../ws`, and the choice of function decides
+   * whether this server answers an upgrade for a path it never registered.
+   *
+   * So the request line is written onto a raw socket by hand rather than handed
+   * to a WebSocket client library, which would normalise it before it left.
+   *
+   * Catches: reverting `ws-server.ts`'s `rawPathname(request.url ?? '/')` to
+   * `new URL(request.url ?? '/', 'http://localhost').pathname`. That turns the
+   * path into `/ws`, the request gets past the path check, and the assertion
+   * below reads 101 (or 401/403 from the checks after it) instead of 404.
+   */
+  it('refuses a request line whose dot segments would canonicalize to /ws', async () => {
+    const { createConnection } = await import('node:net');
+
+    const statusFor = (target: string): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const socket = createConnection({ host: '127.0.0.1', port }, () => {
+          socket.write(
+            [
+              `GET ${target} HTTP/1.1`,
+              'Host: 127.0.0.1',
+              'Upgrade: websocket',
+              'Connection: Upgrade',
+              'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version: 13',
+              `Origin: ${appOrigin}`,
+              'Cookie: who=ada',
+              '',
+              '',
+            ].join('\r\n'),
+          );
+        });
+        let received = '';
+        socket.on('data', (chunk) => {
+          received += chunk.toString('utf8');
+          const line = received.split('\r\n')[0];
+          if (line !== undefined && received.includes('\r\n')) {
+            socket.destroy();
+            resolve(line);
+          }
+        });
+        socket.on('error', reject);
+        socket.setTimeout(5_000, () => {
+          socket.destroy();
+          reject(new Error(`no response to ${target}`));
+        });
+      });
+
+    // The premise, measured on this very request: Node hands the target over
+    // un-canonicalized, and a URL parser would rewrite it to the mounted path.
+    expect(new URL('/nope/../ws', 'http://127.0.0.1').pathname).toBe('/ws');
+
+    await expect(statusFor('/nope/../ws')).resolves.toContain('404');
+    await expect(statusFor('/ws/../ws')).resolves.toContain('404');
+    // The control: the path it really does publish still upgrades, so a guard
+    // that simply refused everything would not pass this test either.
+    await expect(statusFor('/ws')).resolves.toContain('101');
+  });
 });
 
 /**

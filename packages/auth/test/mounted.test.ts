@@ -325,16 +325,16 @@ describe('the table matches what Better Auth actually registers', () => {
  * in its code.
  *
  * "The raw pathname, exactly as `new URL(url).pathname` hands it over" — except
- * `new URL` is a canonicalising parser. It removes dot segments, so the route
- * handler was asking the guard about a path the client never sent, and the guard
- * was answering correctly about the wrong question. Nothing was exposed because
- * Next rejects a request line carrying `..` with a 400 first; that is Next's
- * behaviour, and depending on a second layer's strictness is the exact thing
- * `mounted.ts` exists to stop doing.
+ * `new URL` is a canonicalising parser. It removes dot segments, so a caller
+ * that hands the guard a canonicalised path is asking about a path the client
+ * never sent, and the guard answers correctly about the wrong question.
  *
- * Catches: reverting `apps/web/app/api/auth/[...all]/route.ts` to
- * `new URL(request.url).pathname` — the first assertion below is what that
- * change makes false.
+ * **What this describe block does and does not prove.** It pins `rawPathname`'s
+ * own behaviour, which is what the *realtime server* consumes: there,
+ * `req.url` is the literal request target from Node's HTTP parser, the mutation
+ * is real, and `apps/server/test/ws-server.test.ts` catches it by writing the
+ * request line onto a socket. It does **not** prove anything about the Next
+ * route handler — see the block below, which measures why.
  */
 describe('rawPathname — the path as sent, not as a URL parser would rather have it', () => {
   it('does not resolve dot segments, which is the whole point', () => {
@@ -387,5 +387,85 @@ describe('rawPathname — the path as sent, not as a URL parser would rather hav
     expect(rawPathname('/ws')).toBe('/ws');
     expect(rawPathname('/ws/../ws')).toBe('/ws/../ws');
     expect(rawPathname('')).toBe('');
+  });
+});
+
+/**
+ * The premise the web route's `rawPathname` call rests on, measured rather than
+ * asserted.
+ *
+ * Codex's round-4 delta: the `rawPathname` guard "does not prove its claim" on
+ * the web side, because at a route handler the raw request target is already
+ * gone and the unit test only calls the helper directly — so reverting the
+ * route to `new URL().pathname` survives. That is correct, and this block is
+ * the honest answer to it: **the platform owns canonicalization there, and here
+ * is the measurement that says so.**
+ *
+ * `new Request(url)` runs the WHATWG URL parser while constructing, so by the
+ * time any route handler exists the dot segments are already resolved. The two
+ * functions therefore agree on every input a route handler can be given, and no
+ * test at that boundary can catch the mutation. Round 4's receipt claimed
+ * otherwise; this is what replaces the claim.
+ *
+ * What these assertions *are* for: if a future runtime stops canonicalizing —
+ * a different fetch implementation, a Next change, a polyfill — they fail, and
+ * whoever reads the failure learns that the web-side `rawPathname` call has
+ * just become load-bearing and now needs a boundary test of its own. That is
+ * the only thing this can usefully guard, so it is what it guards.
+ */
+describe('on the web side the platform canonicalizes first — measured, not assumed', () => {
+  const boundary = (url: string) => new Request(url).url;
+
+  it('resolves dot segments while the Request is being constructed', () => {
+    expect(boundary('http://atrium.test/api/auth/organization/../verify-email')).toBe(
+      'http://atrium.test/api/auth/verify-email',
+    );
+    // Percent-encoded dot segments too: the URL standard matches `%2e` case
+    // insensitively when it decides what a double-dot segment is.
+    expect(boundary('http://atrium.test/api/auth/organization/%2E%2E/verify-email')).toBe(
+      'http://atrium.test/api/auth/verify-email',
+    );
+  });
+
+  it('leaves rawPathname and new URL().pathname indistinguishable at that boundary', () => {
+    /**
+     * The finding, stated as an assertion. Every input a route handler can be
+     * handed produces the same answer from both, which is precisely why
+     * reverting the route survives — and why the route's doc comment now calls
+     * the helper defense-in-depth instead of a proved guard.
+     */
+    for (const url of [
+      'http://atrium.test/api/auth/organization/../verify-email',
+      'http://atrium.test/api/auth/%2e%2e/verify-email',
+      'http://atrium.test/api/auth//verify-email',
+      'http://atrium.test/api/auth/verify-email/',
+      'http://atrium.test/api/auth/verify-email?token=abc',
+      'http://atrium.test/api/auth/callback/github',
+      'http://atrium.test/api/auth/./verify-email',
+    ]) {
+      const at = boundary(url);
+      expect(rawPathname(at), at).toBe(new URL(at).pathname);
+    }
+  });
+
+  it('still refuses the canonicalized survivors that should not route', () => {
+    // The guard is not idle at that boundary — it is just not the thing that
+    // resolved the dots. Doubled slashes and trailing slashes reach it intact
+    // (see the first block), and it refuses them the way better-call would.
+    expect(isMountedAuthPath(rawPathname(boundary('http://a/api/auth//verify-email')), GET)).toBe(
+      false,
+    );
+    expect(isMountedAuthPath(rawPathname(boundary('http://a/api/auth/verify-email/')), GET)).toBe(
+      false,
+    );
+    // And `/api/auth/organization/../verify-email` arrives already rewritten to
+    // the verification path, which the guard admits — that is the exposure the
+    // platform is standing in front of, written down rather than glossed.
+    expect(
+      isMountedAuthPath(
+        rawPathname(boundary('http://a/api/auth/organization/../verify-email')),
+        GET,
+      ),
+    ).toBe(true);
   });
 });

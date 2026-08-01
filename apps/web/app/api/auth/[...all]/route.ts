@@ -24,14 +24,28 @@ import { auth } from '@/lib/auth';
  * router does, so the guard's answer and the router's cannot diverge; passing a
  * pre-decoded or pre-normalised path here would undo that.
  *
- * Which is why this uses `rawPathname` and not `new URL(request.url).pathname`.
- * Round 3 used the latter and described it as raw; it is not. WHATWG URL parsing
- * removes dot segments, so `/api/auth/organization/../verify-email` would have
- * reached the guard as `/api/auth/verify-email` and been admitted. Next happens
- * to reject a request line carrying `..` with a 400 first — which is why nothing
- * was exposed and why round 3's own e2e asserts a 400 there rather than a 404 —
- * but "a different layer normalised it for us" is the shape of guarantee this
- * whole file exists to stop depending on.
+ * ## `rawPathname` here is defense-in-depth, and that is the honest word
+ *
+ * It uses `rawPathname` rather than `new URL(request.url).pathname`, but round
+ * 4's receipt claimed more for that than the code can deliver, and codex's
+ * round-4 delta was right. **At this boundary the two are the same function.**
+ * A route handler is handed a `Request`, and constructing one already runs the
+ * WHATWG URL parser: `new Request('http://x/api/auth/organization/../verify-
+ * email').url` is `http://x/api/auth/verify-email` before this module sees it,
+ * dot segments resolved and `%2e%2e` with them. Next also rejects such a
+ * request line with a 400 of its own first, which is why round 3's e2e asserts
+ * a 400 rather than a 404.
+ *
+ * So: **Next and the URL parser own canonicalization on this path.** Reverting
+ * this line to `new URL(request.url).pathname` would change nothing observable,
+ * and no test at this boundary can catch it — which is exactly why it is
+ * written down here instead of being described as a guard that was proved.
+ * `rawPathname` stays because it costs nothing, because it is the same function
+ * the realtime server calls (where the request target really is raw and the
+ * mutation *is* caught, in `apps/server/test/ws-server.test.ts`), and because if
+ * a future runtime stops canonicalizing, this call site is already right —
+ * `mounted.test.ts` measures that premise so its failure is the thing that
+ * tells you.
  */
 export const dynamic = 'force-dynamic';
 

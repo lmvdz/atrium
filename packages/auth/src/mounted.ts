@@ -52,13 +52,11 @@
  *    hands it over", and `new URL` does **not** hand it over raw. It is a
  *    canonicalising parser — it resolves `.` and `..`, so
  *    `new URL('http://x/api/auth/organization/../verify-email').pathname` is
- *    `/api/auth/verify-email`, and the guard would have been asked about a path
- *    nobody sent. Nothing was exposed, because Next rejects a request line
- *    carrying `..` with a 400 before a route handler sees it — but that is
- *    Next's behaviour, not this code's, and a guard whose input has already been
- *    rewritten by somebody else is precisely the divergence this file exists to
- *    refuse. So the pathname is sliced out of the request URL by hand;
- *    `mounted.test.ts` pins both halves;
+ *    `/api/auth/verify-email`. Read `rawPathname`'s own doc comment before
+ *    citing that as a defence of the web route: on the web side the platform
+ *    has already canonicalised the URL before this function is reached, so the
+ *    helper is defense-in-depth there and load-bearing only on the realtime
+ *    server's raw request target. Round 4 claimed both; round 5 measured it;
  *  - percent-encoding is refused outright. Decoding *is* a second semantics, so
  *    rather than admit anything whose raw and decoded forms differ, a path that
  *    is not already its own decoded form is denied. None of the three mounted
@@ -133,6 +131,37 @@ export const mountedAuthRoutes: readonly MountedAuthRoute[] = [
  * which is what the realtime server's `/ws` check wants and what a test fixture
  * looks like. A URL with no path at all is `/`, matching both the URL standard
  * and better-call.
+ *
+ * ## Where this is load-bearing, and where it is not — measured, in round 5
+ *
+ * Round 4 described this as closing the divergence at *both* boundaries.
+ * Codex's round-4 delta showed that claim was unproved on the web side, and
+ * measurement agrees with codex:
+ *
+ *  - **`apps/server` (the WebSocket upgrade): load-bearing, and now proved at
+ *    the boundary.** Node's HTTP parser hands `req.url` over as the literal
+ *    request target — `/nope/../ws` stays `/nope/../ws`. Reverting that call
+ *    site to `new URL(req.url, base).pathname` turns it into `/ws` and admits
+ *    an upgrade for a path nobody registered. `ws-server.test.ts` writes that
+ *    request line onto a raw socket and asserts the 404, so the mutation fails
+ *    a test rather than a paragraph.
+ *  - **`apps/web` (the Better Auth route handler): defense-in-depth, and the
+ *    platform owns the canonicalization.** By the time a route handler exists
+ *    there is a `Request`, and `new Request(url)` has already run the WHATWG
+ *    parser: `new Request('http://x/api/auth/organization/../verify-email').url`
+ *    is `http://x/api/auth/verify-email`, dot segments already resolved, and
+ *    `%2e%2e` with it. So at that boundary `rawPathname` and `new
+ *    URL(request.url).pathname` return the same string for every input, and
+ *    reverting the route survives every test that could exist. Saying otherwise
+ *    would be the "guarantee that lives in somebody else's system" this file
+ *    exists to refuse — so it is said plainly instead: **Next and the WHATWG
+ *    URL parser own path canonicalization on the web side; `rawPathname` there
+ *    is a second layer that costs nothing and currently proves nothing.**
+ *
+ * `mounted.test.ts` pins the premise rather than asserting it: it measures that
+ * `new Request` canonicalizes, so if a future runtime stops doing so, that test
+ * fails and tells whoever reads it that the web-side call has just become
+ * load-bearing.
  */
 export function rawPathname(url: string): string {
   if (typeof url !== 'string') return '';
