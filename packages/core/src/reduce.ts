@@ -145,12 +145,15 @@ export function appendEvent(state: CoreState, event: CoreEvent): AppendResult {
  *    acceptance matrix holds regardless of what any layer above did — see
  *    `authority.ts`.
  *
- * `reduce(events)` sorts, so nothing in a fresh replay is ever out of order and
- * nothing is rejected but a duplicate id. `reduce(events, state)` is the same
- * fold continued: events that precede `state.cursor` are rejected and skipped,
- * exactly as `appendEvent` would reject them. Use `foldEvents` when you need to
- * see *which* ones, and `appendEvent` when you are consuming one at a time —
- * that is where the outcome matters.
+ * `reduce(events)` sorts, so nothing in a fresh replay is genuinely out of
+ * order: the only events rejected are repeats. A verbatim repeat sorts onto the
+ * position its twin just took and is refused there (`out_of_order`); a repeated
+ * id carrying a different timestamp sorts elsewhere and is refused by the id
+ * (`duplicate`). `reduce(events, state)` is the same fold continued: events at
+ * or before `state.cursor` are rejected and skipped, exactly as `appendEvent`
+ * would reject them. Use `foldEvents` when you need to see *which* ones, and
+ * `appendEvent` when you are consuming one at a time — that is where the
+ * outcome matters.
  */
 export function reduce(events: readonly CoreEvent[], initial?: CoreState): CoreState {
   return foldEvents(events, initial).state;
