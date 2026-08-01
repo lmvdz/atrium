@@ -2247,7 +2247,25 @@ function fieldView(o, field, at) {
      nothing could re-ask it. Every query below is logged onto the say() that is
      minting, with the answer it gave, and checkQueries() asks the record the
      same question again on every render. */
-  const note = (q, arg, got) => { if (SAYING) SAYING.push({ of: field, at: i, q: q, arg: arg, got: got }); return got; };
+  /* AND A QUERY THAT COULD NOT HAVE CHANGED THE SENTENCE DID NOT PRODUCE IT
+     (round 11 self-review — the eighth door, as a class). "A query was run" is
+     not "the sentence came from the query": `v.ever("verified"); return
+     "nothing has checked it";` runs the query, logs it, satisfies every clause
+     round 11 added, and prints the exact literal round 11's D2 was. Every layer
+     of this class since r4 has been a guarantee about WHERE the operands came
+     from, and each one was escaped by a branch that took the operands and
+     ignored them. So say() re-runs its own phrase with each query's answer
+     FLIPPED: if the sentence does not move, the query is decoration and the
+     words beside it are a literal. This is the property both foreign lineages
+     named as the residual at the end of round 10 — `say()` mints, it does not
+     prove the phrase used what it was handed — and it is provable after all,
+     by mutation rather than by reading English. */
+  const note = (q, arg, got) => {
+    if (!SAYING) return got;
+    if (QSTUB) return QSTUB.n++ === QSTUB.k ? QSTUB.flip(got, arg) : got;
+    SAYING.push({ of: field, at: i, q: q, arg: arg, got: got });
+    return got;
+  };
   const v = {
     of: field, at: i, value: e.value, tm: e.tm, by: e.by,
     /* has this field EVER held this value? "nobody had settled it" and "nobody
@@ -2295,12 +2313,39 @@ function reads(o, fields) {
 /* the query log of the say() currently minting. A phrase that asks the history
    a question does it through a view, and the view writes the question here. */
 let SAYING = null;
+/* the replay in progress, when say() is re-running its own phrase to find out
+   whether a query it recorded could have changed the sentence */
+let QSTUB = null;
+/* the flip of an answer: a yes/no becomes its opposite, and a point in the
+   history becomes its absence or a plausible presence */
+function flipAnswer(got, arg) {
+  if (typeof got === "boolean") return !got;
+  return got == null ? { value: arg, tm: "00:00", by: "somebody", how: "flipped for the mutation" } : null;
+}
 /* a sentence about the record, and the record facts it asserts. The ONLY way to
    produce one — a string written beside a correction entry is refused. */
 function say(views, phrase, owner) {
   const outer = SAYING, log = (SAYING = []);
   let said;
   try { said = phrase.apply(null, views); } finally { SAYING = outer; }
+  /* THE MUTATION, at the moment of minting rather than in a checker, because
+     the phrase is only in hand here. Skipped inside a replay (a nested say
+     would re-enter) and when the phrase asked nothing. */
+  if (DEV && !QSTUB && log.length) {
+    const base = normText(quantText(said));
+    log.forEach((q, k) => {
+      let alt;
+      QSTUB = { n: 0, k: k, flip: flipAnswer };
+      const keep = SAYING; SAYING = [];
+      try { alt = normText(quantText(phrase.apply(null, views))); }
+      catch (e) { alt = null; }
+      finally { QSTUB = null; SAYING = keep; }
+      if (alt !== null && alt === base)
+        console.error("[atrium invariant] a sentence asked this record's " + q.of + " history a question and would " +
+          "have said exactly the same thing either way — the query is decoration and the words beside it are a " +
+          "literal:", (owner || (views.length && views[0].owner) || {}).id, q.q + "(" + q.arg + ")", base);
+    });
+  }
   const box = { said: said,
                 claims: views.map(v => ({ of: v.of, at: v.at, value: v.value })),
                 /* WHAT THE SENTENCE ASKED THE HISTORY, and what it was told
@@ -4368,7 +4413,11 @@ function objectTag(r, m, o) {
       return `<button class="tag amber" ${rc}>` +
         voiced(stated(o, ["answer", "statement", "settlement"], (a, st, s) =>
           `answer reopened ${fieldOr(o.reopenedAt, "· time not recorded")} · ` +
-          ((a.everSet() || st.everSet()) ? "still the answer on the record · " : "nothing is recorded as its answer · ") +
+          /* the field that CARRIES the answer of record differs by kind — a
+             question keeps it in `answer`, a decision in `statement`. Asking
+             both and or-ing them made the first query decoration, because the
+             second can never be false. */
+          ((o.kind === "question" ? a : st).everSet() ? "still the answer on the record · " : "nothing is recorded as its answer · ") +
           `${o.kind} ${enumText(s.value)}${s.before(s.value) ? " again" : ""}`)) +
         `${where}</button>`;
     /* SETTLED WITHOUT BEING ACCEPTED (round 5 D2). An answered question is not
@@ -5570,10 +5619,15 @@ function reopen(objectId, reason) {
   };
   const nowLabel = say([nowVr, nowSr].concat(wasContent), (v, s) => {
     /* "pending again" is a claim that this record has stood pending BEFORE,
-       and it is false the first time (round 11 D4) */
-    const head = { decision: "Pending" + (s.before("pending") ? " again" : ""),
-                   question: "Open question", commitment: "Awaiting sign-off",
-                   claim: "Claim — " + enumText(v.value) }[o.kind];
+       and it is false the first time (round 11 D4). The query is asked in the
+       branch that uses it — a table literal computes every arm, so asking it
+       for all four kinds and discarding three answers is a query that could not
+       have changed the sentence, which is the eighth door this round found in
+       its own fix. */
+    const head = o.kind === "decision" ? "Pending" + (s.before("pending") ? " again" : "")
+               : o.kind === "question" ? "Open question"
+               : o.kind === "commitment" ? "Awaiting sign-off"
+               : "Claim — " + enumText(v.value);
     return head + (owed && back !== S.me ? ` · back to ${back}, not to ${S.me}` : "");
   });
 
@@ -5905,14 +5959,20 @@ function applyEffect(objectId, fx) {
          still on the record" is a claim about HOW; `settlement.last("settled")`
          only knows WHETHER. Both are asked, and the word comes from the state
          standing at the point the settlement records. */
-      was: say([wasS, wasD, wasV], (s, d, v) => {
+      was: say([wasS, wasD], (s, d) => {
         const prev = s.last("settled");
+        /* THE CLAUSE NAMES THE FIELD ITS QUERY ASKED. Calling the earlier state
+           a "sign-off" here means asking the VERIFICATION history how it
+           settled, and every version of that question this clause can ask is
+           answered by the value already standing — so the query was decoration
+           and the word was a literal. What `last("settled")` knows is that it
+           settled, when, and by whom; that is what this says. How it settled is
+           named where a query decides it, in the reopen entry above. */
         return (prev ? "Reopened commitment — " : "Open commitment — ") +
           (d.value == null ? "no due date is on the record" : "was due " + d.value) +
           (prev
             ? ", settled before" + (prev.by ? " by " + prev.by : "") + (prev.tm ? " at " + prev.tm : "") +
-              " and reopened since — that " + preservedName(v.last("self_reported") ? "self_reported" : v.value) +
-              " is still on the record"
+              " and reopened since — that settlement is still on the record"
             : ", nobody had settled it");
       }),
       after: say([nowV, nowS], (v, s) =>

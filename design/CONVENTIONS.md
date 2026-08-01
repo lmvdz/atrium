@@ -264,6 +264,20 @@ Three consequences worth stating separately, because each was its own bug:
 
 **And the record's own words are not the page's sentence.** A recorded statement can contain the word "still"; a rule about what the *page* writes must not fire on a value the record holds, for exactly the reason the quotation rules already exempt a person's own characters. Multi-word recorded values are removed from the text before the test; a *state name* is not, because `unverified` on screen is the page's word for a state and removing it would open a hole the size of the vocabulary being policed.
 
+### A query that could not have changed the sentence did not produce it
+
+**"A query was run" is not "the sentence came from the query."** `v.ever("verified"); return "nothing other than the claimant has checked it";` runs the query, records it, satisfies every clause of the rule above, and prints the exact literal that rule was written to catch. This is the eighth door, and it is the same door as all seven before it: every layer of this class since r4 has been a guarantee about **where the operands came from**, and each one was escaped by a branch that took the operands and ignored them. Both blind foreign-lineage reviewers named it at the end of round 10 in its narrower form — *`say()` mints, it does not prove the phrase used what it was handed* — and concluded that no check for it existed short of reading English.
+
+There is one, and it is not a reading of English. **`say()` re-runs its own phrase with each recorded query's answer flipped. If the sentence does not move, the query is decoration and the words beside it are a literal.** A yes/no flips to its opposite; a point in a history flips to its absence, or to a presence. The mutation runs at the moment of minting, because that is the only moment the phrase is in hand.
+
+It fired eight times on the round that introduced it, against its own fix, in three shapes worth naming because each is a way to write a decorative query without noticing:
+
+- **A table literal computes every arm.** `{ decision: … s.before("pending") …, question: …, commitment: … }[o.kind]` asks the question for all four kinds and throws three answers away. Ask it in the branch that uses it.
+- **A fallback that can never be false.** `(a.everSet() || st.everSet())` — a decision's statement is always set, so the `answer` query could not decide anything. Pick the field the kind actually keeps the answer in.
+- **A query redundant with a value already in hand.** `v.last("self_reported")` asked of a record whose verification is standing at `self_reported` can only agree with it. If a clause cannot ask a question its own operands do not already answer, the clause is naming the wrong field — name the one its query is really about.
+
+The generalisation, which is the useful part: **a guarantee about provenance is escaped by ignoring what was provided. Provenance is checked by construction; USE is checked by mutation.** Wherever this file says "read out of the record", the second half now has a test.
+
 **And a control may only offer an action whose write it can survive.** Same round, #10 r9 D4: the bound composer offered "Answer in your own words →" on four kinds and `send()` called the *decision* path for all of them, so typing at a commitment owned by someone else recorded the typist's sentence as the commitment's own text and accepted it in their name — around an ownership guard that had been enforced on the button beside it since r4. A dead attention item is one failure; an item offering an action it cannot honestly take is the other. The guard belongs on the **write path**, not only on the render, and the invariant that proves it asserts the rendered control against the same predicate.
 
 Two corollaries, both found by review of r10's own fix:
