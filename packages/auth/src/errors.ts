@@ -40,6 +40,26 @@
  *
  * Every one of those is therefore attempted inside its own `try` rather than
  * assumed, and each has a fallback that reads no property of the value at all.
+ *
+ * **And the second half of that sentence is a separate obligation, which round 9
+ * stated and did not meet.** `describeUnknown` returned `value.message` for an
+ * `Error` — guarded against the getter *throwing*, and not against it returning
+ * a Symbol, which `message` is perfectly able to do: it is a plain writable
+ * property, redefinable as a getter, and nothing about `instanceof Error` says
+ * otherwise. So the function did not throw and did not return a string, which is
+ * the harder failure of the two to notice — no stack trace, just a
+ * `string`-typed Symbol travelling until something calls `.slice` on it, on a
+ * post-commit path. The round-9 delta found it. **Totality is about the type as
+ * much as the control flow**, so every early return below coerces at the
+ * boundary rather than trusting a declaration, and `errors.test.ts` asserts the
+ * returned type rather than merely the absence of a throw.
+ *
+ * One exception, stated because an unstated one is how this happens again:
+ * `toReportableError` hands an `Error` back by *identity*, so the `.message` on
+ * its result is whatever the caller put there. It promises an `Error`, not a
+ * readable one — the reading is guarded at the use site (`org.ts` builds those
+ * fields inside `logSafely`'s thunk), and `describeUnknown` is the function that
+ * promises a string.
  */
 
 /**
@@ -85,12 +105,36 @@ export function guardedErrorLog(logger: GuardableErrorLogger): GuardedErrorLog {
  */
 export function describeUnknown(value: unknown): string {
   try {
-    if (value instanceof Error) return value.message;
+    if (value instanceof Error) {
+      /**
+       * **`message` is `unknown`, whatever the type says.**
+       *
+       * `Error.prototype.message` is a plain writable property and `message` can
+       * be redefined as a getter, so an `Error` reaching here from another realm,
+       * a library, or a test double can carry a Symbol, a number, `null` — any
+       * value at all. Round 9 returned it directly: no throw, and a `string`
+       * return type over a `Symbol`, which is the contract this module's own
+       * header states being violated silently rather than loudly. The round-9
+       * delta caught it, and a caller doing `described.slice(0, 200)` on the
+       * result would have caught it the expensive way.
+       *
+       * A non-string is described rather than discarded — `String(message)`
+       * handles a Symbol, which `${message}` and `message + ''` both throw on —
+       * and if describing it also fails, the outer `catch` carries on to the
+       * conversion below exactly as it does for a throwing getter.
+       */
+      const message: unknown = value.message;
+      return typeof message === 'string' ? message : String(message);
+    }
   } catch {
-    // A hostile prototype chain or a throwing `message` getter. Fall through to
-    // the string conversion, which is guarded in its turn.
+    // A hostile prototype chain, a throwing `message` getter, or a `message`
+    // whose own conversion throws. Fall through to the string conversion, which
+    // is guarded in its turn.
   }
   try {
+    // `String` is the one conversion that is total over every value it does not
+    // throw on: it returns a primitive string or nothing at all, including for a
+    // Symbol, where the template and `+` forms throw.
     return String(value);
   } catch {
     // `Object.create(null)`, a throwing `Symbol.toPrimitive`, a Proxy.
