@@ -115,6 +115,60 @@ install chromium`. Without it the smoke test skips with a reason instead of
 failing — a red e2e run should mean "the app is broken", never "no browser
 here".
 
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request, every merge-queue entry,
+and every push to `main`. Three jobs: `verify` (lint, typecheck, migrations
+against a real Postgres, unit tests, build), `e2e` (Playwright on chromium), and
+`gate`.
+
+**`gate` is the only check that should ever be marked required.** GitHub scores
+a *skipped* required check as a *successful* one, so marking `verify` required
+means a pull request can bypass it wholesale by adding `if: ${{ false }}` to the
+job. `gate` needs every other job, runs `if: always()`, and fails unless each
+one reported literally `success` — skipped, cancelled and failed are all red
+there. One required check, and it cannot be skipped into a pass.
+
+The gates count rather than trust an exit code, because a runner that collected
+zero tests exits 0 just like one that passed 85:
+
+- Per-project floors live in `.github/ci-manifest.json`. Every workspace pnpm
+  resolves must be enrolled there with a floor, or exempted with a written
+  reason; a new package that has no tests fails the build instead of hiding
+  inside a global count. Adding tests means raising a floor — a deliberate,
+  reviewable edit.
+- Skipped, todo and *expected-failure* tests all fail the gate. That last one is
+  invisible in the stock reports: Vitest records `it.fails()` as `passed`, and
+  Playwright records `test.fail()` as `expected`, i.e. green. Both are caught
+  here.
+- The database is proven by set equality against the schema, derived from
+  `@atrium/db`'s built export — a missing table and an unexpected extra one both
+  fail.
+- Reports are deleted immediately before each runner starts and rejected unless
+  their mtime post-dates that moment, so a leftover file cannot stand in for a
+  run.
+- `scripts/ci/workflow-policy.mjs` enforces the house rules over the parsed
+  workflow: no `continue-on-error`, no job conditions, no step conditions beyond
+  `failure()` on an artifact upload, no shell overrides, no step timeouts, every
+  action pinned to a commit SHA, and `gate.needs` covering every job in the file.
+  `actionlint` runs alongside it. Both self-tests
+  (`workflow-policy-selftest.mjs`, `gate-selftest.mjs`) run in CI: they feed the
+  policy mutated copies of the real workflow and the gates deliberately broken
+  reports, and fail if anything goes unnoticed.
+
+### Governance trigger (recorded)
+
+Branch rulesets are deliberately **not** enabled while this is a solo repo:
+merges happen from the campaign's own train and there is nobody to review a pull
+request. `.github/CODEOWNERS` is committed now so the rule has something to
+point at.
+
+**Before a second contributor gets write access, or before this repository goes
+public — whichever comes first — turn on a ruleset for `main` that requires the
+`gate` check, requires a pull request, and requires review from code owners.**
+Until then, a workflow edit is validated by the very revision that proposes it,
+which is a trust boundary a solo repo can hold and a shared one cannot.
+
 ## Notes for the next change
 
 - `design/tokens.css` is a placeholder transcribed from the settled Atrium token

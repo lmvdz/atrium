@@ -1,0 +1,19 @@
+# Code owners.
+#
+# GitHub requests a review from the owner on every pull request that touches a
+# matching path. On its own that is a notification, not a control: enforcement
+# needs "Require review from Code Owners" in a ruleset, which is deliberately
+# not on yet — see the governance note in README.md's CI section for the trigger
+# that turns it on (a second contributor, or the repo going public).
+#
+# It is here now because the file has to exist and be correct *before* the
+# ruleset can reference it, and because CI configuration is the one place where
+# an unreviewed change can disable every other check in the repository.
+
+# Everything, by default.
+*                       @lmvdz
+
+# CI, its gates, and the policy engine that keeps them honest. A change here can
+# turn every other check in the repo green without running any of it.
+/.github/               @lmvdz
+/scripts/ci/            @lmvdz
