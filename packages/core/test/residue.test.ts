@@ -219,6 +219,34 @@ describe('r5 — normalization may not do semantic damage', () => {
     ).not.toEqual([]);
   });
 
+  it('does not delete a bidi override, which decides what the reader sees', () => {
+    // The review's second pass, and it broke this file's own comment. The claim
+    // was that dropping a format character "cannot map two texts a reader sees as
+    // different onto one". A body of `Bob will \u202Eton\u202C deploy production
+    // Friday.` **renders as** "Bob will not deploy production Friday." — deleting
+    // the override normalized the source to `ton`, a quote of `ton` matched it,
+    // and the record minted the affirmative of what its author visibly wrote.
+    const rendered = 'Bob will \u202Eton\u202C deploy production Friday.';
+    const bytes = 'Bob will ton deploy production Friday.';
+    expect(normalizeForReceipt(rendered)).not.toBe(normalizeForReceipt(bytes));
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: bytes,
+          statement: bytes,
+          proposer: { kind: 'model' },
+          attributedTo: BOB,
+        },
+        [{ id: 'msg_1', authorId: BOB, body: rendered }],
+      ),
+    ).not.toEqual([]);
+    // …and a character that really does render as nothing is still dropped, so
+    // r3's finding stays closed.
+    expect(normalizeForReceipt('ship\u200B it')).toBe('ship it');
+  });
+
   it('does not fold distinct identifiers onto each other', () => {
     // NFKC maps the fullwidth and compatibility forms onto ASCII, so two
     // different hostnames, two different identifiers, compare equal.
@@ -284,6 +312,34 @@ describe('r5 — a later correction is part of the receipt', () => {
         [
           { id: 'msg_1', authorId: ALICE, body: STATEMENT },
           { id: 'msg_2', authorId: ALICE, body: 'Correction: the deployment is cancelled.' },
+        ],
+      ),
+    ).toEqual(['superseded_by_later_message']);
+  });
+
+  it('cannot be skipped by padding the citation list', () => {
+    // The review's second pass. The scan used to start after the *last* cited
+    // message, so citing the message that carries the sentence **and** an
+    // unrelated later one put the correction behind the scan's start. Padding a
+    // citation list to move a boundary is r1's attribution attack, one guard over.
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1', 'msg_3'],
+          quote: STATEMENT,
+          statement: STATEMENT,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        [
+          { id: 'msg_1', authorId: ALICE, body: STATEMENT },
+          {
+            id: 'msg_2',
+            authorId: ALICE,
+            body: 'Correction: we will not deploy production Friday.',
+          },
+          { id: 'msg_3', authorId: BOB, body: 'The staging cluster is green.' },
         ],
       ),
     ).toEqual(['superseded_by_later_message']);
@@ -386,7 +442,7 @@ describe('r5 — speech-act fitness', () => {
     // receipt fold was right — it made distinct hostnames compare equal — and it
     // left this check reading one spelling of a mark that has several. `？`
     // (U+FF1F) is a distinct token, and the claim auto-accepted.
-    for (const mark of ['?', '？', '⁇', '؟']) {
+    for (const mark of ['?', '？', '⁇', '؟', '﹖', '⸮']) {
       const body = `Would we deploy production Friday${mark}`;
       expect(
         kinds(
@@ -402,6 +458,25 @@ describe('r5 — speech-act fitness', () => {
         ),
       ).toContain('statement_is_not_an_assertion');
     }
+  });
+
+  it('reads a mark that opens the sentence instead of closing it', () => {
+    // The review's second pass, after its first pass found the fullwidth form:
+    // a Spanish interrogative opens with `¿` and need carry no other mark.
+    const body = '¿Bob will deploy production Friday';
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: body,
+          statement: body,
+          proposer: { kind: 'model' },
+          attributedTo: BOB,
+        },
+        [{ id: 'msg_1', authorId: BOB, body }],
+      ),
+    ).toContain('statement_is_not_an_assertion');
   });
 
   it('mints the same sentence as an open question', () => {
@@ -507,6 +582,14 @@ describe('r5 — a detected fault is not weakness', () => {
 describe('r5 — an emoji is content', () => {
   it('counts an emoji-only message as having something in it', () => {
     expect(hasContent('🚫🚫🚫')).toBe(true);
+  });
+
+  it('counts a flag as content, which is not a pictograph', () => {
+    // The review's second pass. 🇺🇸 is two regional-indicator letters and matches
+    // `\p{Extended_Pictographic}` nowhere, so the first draft of the emoji fix
+    // still called a flag-only message nothing.
+    expect(hasContent('🇺🇸')).toBe(true);
+    expect(hasContent('🇺🇸🇯🇵')).toBe(true);
   });
 
   it('does not disguise an emoji-only quote as a blank one', () => {

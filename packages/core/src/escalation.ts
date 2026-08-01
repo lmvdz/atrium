@@ -1173,6 +1173,33 @@ export function validateProposalProvenance(
  *
  * Returns the tokens the later message added, because a refusal that does not
  * say what changed is a dead end.
+ *
+ * ## What this does **not** catch, and what the code does with it
+ *
+ * A contradiction phrased in fresh words — *"Bob will deploy production Friday."*
+ * followed by *"That statement is false; production will not be deployed
+ * Friday."* — reuses none of the sentence and performs no marked retraction. It
+ * **auto-accepts**, and that is stated as a disposition rather than a residue,
+ * because r4 was failed for doing the opposite.
+ *
+ * The argument that this disposition is right, and it is a different argument
+ * from every other limit in this file: the receipt's guarantee is *somebody in
+ * this room wrote this sentence, in these words*, and a later contradiction does
+ * not make that false. Bob did write it. What the later message changes is the
+ * **world**, not the quote — and the product has machinery for that which this
+ * check is not: supersession (human-only for decisions, commitments and
+ * objectives, per `decideSupersession`), the correction verbs, and #5/#17's
+ * correction-rate telemetry. A model-accepted object also renders as `~` and
+ * never as a fact.
+ *
+ * Compare what this file refuses: those inputs make the record assert something
+ * its named author *never wrote*. That is unrecoverable, because nothing in the
+ * room contradicts it. A stale-but-verbatim record is contradicted by the very
+ * message that makes it stale, three lines further down the same window.
+ *
+ * Detecting an arbitrary natural-language contradiction needs a model, and #8's
+ * escalation tier is where a model belongs. This is a deterministic check, and
+ * it says exactly what it proves.
  */
 export function laterRevision(
   statement: string,
@@ -1187,14 +1214,26 @@ export function laterRevision(
   // gives: not checked, therefore not passed.
   if (wanted.length > policy.maxAlignedTokens) return 'unscanned';
 
+  // ── What counts as "later", and the padding attack that decided it ────────
+  //
+  // **After the *earliest* cited message, skipping the cited ones.** The first
+  // draft scanned after the *last* citation, and this round's own blind review
+  // walked through it: cite `m1` — where the sentence is — **and** an unrelated
+  // later `m3`, and the correction sitting in `m2` is behind the scan's start.
+  // Padding the citation list to move a boundary is the same attack r1's
+  // gauntlet found against the attribution check, one guard over: a value the
+  // proposal controls was being used to decide how much evidence gets read.
+  //
+  // The earliest citation is the floor because nothing before the sentence can
+  // be a correction of it, and a cited message is not a revision of itself.
   const cited = new Set(citedIds);
-  let lastCited = -1;
+  let firstCited = -1;
   for (const [index, message] of messages.entries()) {
-    if (cited.has(message.id)) lastCited = index;
+    if (cited.has(message.id) && firstCited === -1) firstCited = index;
   }
-  if (lastCited === -1) return null;
+  if (firstCited === -1) return null;
 
-  const later = messages.slice(lastCited + 1);
+  const later = messages.slice(firstCited + 1).filter((message) => !cited.has(message.id));
   // ── The cap fails closed, and that is r5 auditing its own first draft ──────
   //
   // The first version of this scan stopped at the cap and returned "nothing

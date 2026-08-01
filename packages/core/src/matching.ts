@@ -64,7 +64,7 @@ import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
  *
  * The fix is not a list of invisible characters — that list is unbounded in
  * exactly the way a stopword list is. It is the complement: **content is a
- * letter, a digit, or a pictograph.**
+ * letter, a digit, a pictograph, or a flag.**
  *
  * **The pictograph is r5.** Until r5 this read `[\p{L}\p{N}]`, and a message
  * that is a row of 🚫 reduced to "nothing" — so `proposal.ts` refused it as a
@@ -75,13 +75,19 @@ import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
  * has said since r4 that "every script, every mark and every emoji is content".
  * Two answers to "is this text?" in one package is one answer too many.
  *
+ * `\p{Regional_Indicator}` is beside it because a flag is not a pictograph:
+ * 🇺🇸 is two regional-indicator letters and matches `\p{Extended_Pictographic}`
+ * nowhere, so the first draft of this fix still called a flag-only message
+ * nothing. Found by the second pass of this round's own blind review, which is
+ * the argument for re-running a critic on what it made you change.
+ *
  * Everything else — spaces of every width, zero-width joiners, format and
  * control codes, unassigned code points, lone combining marks, punctuation on
  * its own — is still absence, whether or not anybody has enumerated it. A quote
  * of `"…"`, a message body of `"​"`, and `""` are the same fact about the world
  * and get the same answer.
  */
-const CONTENTFUL = /[\p{L}\p{N}\p{Extended_Pictographic}]/u;
+const CONTENTFUL = /[\p{L}\p{N}\p{Extended_Pictographic}\p{Regional_Indicator}]/u;
 
 /**
  * True when `text` carries at least one letter, digit or pictograph.
@@ -106,19 +112,39 @@ export function isBlank(text: string | null | undefined): boolean {
  * ───────────────────────────────────────────────────────────────────────── */
 
 /**
- * Format and control characters, which render as nothing and must not survive
- * into a comparison. `\p{Cf}` covers U+200B–U+200F, U+2060–U+2064, U+00AD and
- * U+FEFF; `\p{Cc}` covers the C0/C1 controls. Whitespace of every width is
- * handled by `\s`, which in JavaScript already includes NBSP, the en/em spaces
- * and U+3000.
+ * The characters that reorder text rather than disappearing from it: the marks,
+ * embeddings, overrides and isolates of the Unicode bidirectional algorithm.
  *
- * Admitted because a character with no rendering cannot carry an assertion:
- * deleting them maps texts a reader sees as identical onto each other, and it
- * cannot map two texts a reader sees as *different* onto one — a bidi override
- * that reverses a sentence is deleted, and the reversed bytes stay reversed, so
- * the comparison still refuses.
+ * **Excluded from the fold, and this round's own blind review is why.** The
+ * comment that used to sit below claimed deleting a format character "cannot map
+ * two texts a reader sees as *different* onto one — a bidi override that
+ * reverses a sentence is deleted, and the reversed bytes stay reversed, so the
+ * comparison still refuses." That is confidently wrong, and the reviewer built
+ * the input: a message body of `Bob will \u202Eton\u202C deploy production
+ * Friday.` **renders as** *"Bob will not deploy production Friday."* Deleting the
+ * override normalized the source to `ton`, a quote of `ton` matched it, and the
+ * record minted the affirmative of what its author visibly wrote.
+ *
+ * These are not invisible. They are instructions about what the reader sees, so
+ * dropping them is the one thing this file forbids everywhere else: comparing
+ * two texts neither author wrote. Kept, they are ordinary tokens, and a quote
+ * that omits them is simply not the text in the message.
  */
-const INVISIBLE = /[\p{Cf}\p{Cc}]/gu;
+const BIDI = '\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069';
+
+/**
+ * Format and control characters that render as nothing at all, which must not
+ * survive into a comparison. `\p{Cf}` covers U+200B–U+200D, U+2060–U+2064,
+ * U+00AD and U+FEFF; `\p{Cc}` covers the C0/C1 controls. Whitespace of every
+ * width is handled by `\s`, which in JavaScript already includes NBSP, the en/em
+ * spaces and U+3000. The bidi set above is subtracted.
+ *
+ * Admitted because a character with **no rendering at all** cannot carry an
+ * assertion: deleting one maps texts a reader sees as identical onto each other.
+ * That argument is about characters nobody can see, and it never covered
+ * characters that decide the order of the ones they can.
+ */
+const INVISIBLE = new RegExp(`(?![${BIDI}])[\\p{Cf}\\p{Cc}]`, 'gu');
 
 /**
  * A **paired** run of asterisks around a non-empty span — Markdown emphasis, in
@@ -650,9 +676,12 @@ export function quoteCoversOwnText(
  * `?`. `QUESTION_MARKS` then carries the ones Unicode gives no decomposition —
  * a **closed, published inventory**, not an open-ended list of things somebody
  * might try, which is the distinction `RETRO.md` draws between an enumeration
- * that is safe and one that is not.
+ * that is safe and one that is not. `¿` is on it because a Spanish interrogative
+ * opens with one and need carry no other mark at all — the review's second pass
+ * found that omission after its first pass found the fullwidth form, which is
+ * the argument for running the critic again after fixing what it found.
  */
-const QUESTION_MARKS = /[?؟፧⸮꘏\u{11143}]/u;
+const QUESTION_MARKS = /[?¿؟፧⸮꘏\u{11143}]/u;
 
 export function isAssertion(text: string): boolean {
   return !QUESTION_MARKS.test(text.normalize('NFKC'));

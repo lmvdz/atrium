@@ -312,15 +312,34 @@ describe('#4 acceptance matrix — one test per cell', () => {
     });
   }
 
-  it('covers all eighteen cells, so none can be quietly dropped', () => {
+  it('covers every (type, attribution, band) the matrix has, so none can be dropped', () => {
+    /**
+     * **Derived from the types, not counted by hand.** The title used to say
+     * "eighteen" against a table of nineteen, and the arithmetic beside it was a
+     * second hand-maintained restatement of the same fact — this round's own
+     * blind review flagged the shape. The cross-product is built from
+     * `AcceptedObjectType` and the three bands, with `commitment` split by
+     * attribution because that split is a real row of #4's table, so a type
+     * added to `objects.ts` makes this fail until it has cells.
+     */
+    const expected = new Set<string>();
+    for (const type of OBJECT_TYPES) {
+      for (const band of ['below', 'between', 'above'] as const) {
+        if (type === 'commitment') {
+          expected.add(`commitment:self:${band}`);
+          expected.add(`commitment:third_party:${band}`);
+        } else {
+          expected.add(`${type}:-:${band}`);
+        }
+      }
+    }
     const covered = new Set(
       CELLS.map((cell) => `${cell.type}:${cell.attribution ?? '-'}:${cell.band}`),
     );
-    // 2 auto-accepting types × 3 bands + objective × 3 + commitment 2
-    // attributions × 3 bands + decision × 3
-    expect(covered.size).toBe(2 * 3 + 3 + 2 * 3 + 3);
-    // One extra row: decision at 1.0, pinning that "never" is not a threshold.
-    expect(CELLS).toHaveLength(19);
+    expect([...covered].sort()).toEqual([...expected].sort());
+    // One extra row beyond the cross-product: decision at 1.0, pinning that
+    // "never" is a rule and not a threshold.
+    expect(CELLS).toHaveLength(expected.size + 1);
   });
 
   it('probes the band each literal claims to be in', () => {

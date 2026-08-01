@@ -617,7 +617,7 @@
       "id": "blank_is_trim",
       "why": "r3 gauntlet polish: emptiness goes back to being whitespace-only, so a zero-width space counts as content and every required-input refusal becomes incidental.",
       "file": "src/matching.ts",
-      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}]/u;",
+      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}\\p{Regional_Indicator}]/u;",
       "replace": "const CONTENTFUL = /\\S/u;",
       "catches": [
         "reads a zero-width character as no content at all",
@@ -780,11 +780,14 @@
     },
     {
       "id": "content_excludes_pictographs",
-      "why": "Takes emoji back out of what counts as content, so a message that is a row of 🚫 reduces to \"nothing\" and its quote is refused as blank — a failure wearing another failure's clothes, and a package disagreeing with its own tokenizer.",
+      "why": "Takes emoji and flags back out of what counts as content, so a message that is a row of 🚫 or a single 🇺🇸 reduces to \"nothing\" and its quote is refused as blank — a failure wearing another failure's clothes, and a package disagreeing with its own tokenizer.",
       "file": "src/matching.ts",
-      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}]/u;",
+      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}\\p{Regional_Indicator}]/u;",
       "replace": "const CONTENTFUL = /[\\p{L}\\p{N}]/u;",
-      "catches": ["counts an emoji-only message as having something in it"]
+      "catches": [
+        "counts an emoji-only message as having something in it",
+        "counts a flag as content, which is not a pictograph"
+      ]
     },
     {
       "id": "receipt_after_confidence_floor",
@@ -825,6 +828,30 @@
       "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
       "replace": "  const dupFirst = context.acceptedObjects\n    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)\n    : null;\n  if (dupFirst) {\n    return {\n      ...base,\n      verdict: 'discard',\n      visibility: 'none',\n      rule: 'duplicate_of_accepted',\n      duplicateOf: dupFirst.objectId,\n      reason: `the room already accepted \"${dupFirst.objectId}\"`,\n    };\n  }\n  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
       "catches": ["does not let deduplication destroy a discrepancy nobody has seen"]
+    },
+    {
+      "id": "bidi_controls_deleted",
+      "why": "Folds the bidi overrides away with the genuinely invisible characters, which is what the first draft did and what its comment wrongly defended. A body of `Bob will \\u202Eton\\u202C deploy production Friday.` renders as \"Bob will not deploy production Friday.\", and deleting the override let a quote of `ton` match it — the record minting the affirmative of what its author visibly wrote.",
+      "file": "src/matching.ts",
+      "find": "const INVISIBLE = new RegExp(`(?![${BIDI}])[\\\\p{Cf}\\\\p{Cc}]`, 'gu');",
+      "replace": "const INVISIBLE = /[\\p{Cf}\\p{Cc}]/gu;",
+      "catches": ["does not delete a bidi override, which decides what the reader sees"]
+    },
+    {
+      "id": "later_scan_starts_after_last_citation",
+      "why": "Starts the later-correction scan after the *last* cited message instead of the first, so padding the citation list with an unrelated later message hides a correction behind the scan's start. The same attack r1's gauntlet found against the attribution check.",
+      "file": "src/escalation.ts",
+      "find": "    if (cited.has(message.id) && firstCited === -1) firstCited = index;",
+      "replace": "    if (cited.has(message.id)) firstCited = index;",
+      "catches": ["cannot be skipped by padding the citation list"]
+    },
+    {
+      "id": "question_mark_set_narrowed",
+      "why": "Drops the inverted question mark, which a Spanish interrogative opens with and may carry no other mark at all — `¿Bob will deploy production Friday` minted as a claim.",
+      "file": "src/matching.ts",
+      "find": "const QUESTION_MARKS = /[?¿؟፧⸮꘏\\u{11143}]/u;",
+      "replace": "const QUESTION_MARKS = /[?؟፧⸮꘏\\u{11143}]/u;",
+      "catches": ["reads a mark that opens the sentence instead of closing it"]
     }
   ]
 }
