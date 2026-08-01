@@ -195,8 +195,8 @@ export type CoreEventType = CoreEvent['type'];
  * ───────────────────────────────────────────────────────────────────────── */
 
 /**
- * Everything the reducer is allowed to believe that did **not** come out of the
- * event payload. This is the interface #22 implements.
+ * The two trusted columns, as a caller supplies them. `trustedContext` turns one
+ * of these into the branded value the reducer takes.
  *
  * ## `actor`
  *
@@ -217,15 +217,78 @@ export type CoreEventType = CoreEvent['type'];
  * accepted proposal cites. Also a trusted read (the room's own message table),
  * also never payload.
  *
- * **Required for any non-human acceptance.** Round 1's second blocking finding
- * was that provenance validation was opt-in: omit the window and the problem
- * set came back empty and the reading auto-accepted. Now the reducer refuses a
- * non-human `object_accepted` whose cited messages it cannot see. A human
- * acceptance needs nothing here — a person reading the room *is* the receipt.
+ * **Required, and non-empty, for any non-human acceptance.** Round 1's second
+ * blocking finding was that provenance validation was opt-in: omit the window
+ * and the problem set came back empty and the reading auto-accepted. Round 2's
+ * was the same hole through a different door: `messages: []` passed an
+ * `undefined`-only check and came out the far side as "nothing to check". Absent
+ * and empty are one case now, and it is a refusal. A human acceptance needs
+ * nothing here — a person reading the room *is* the receipt.
  */
-export interface TrustedContext {
+export interface TrustedContextInput {
   actor: Actor;
   messages?: readonly ProvenanceMessage[];
+}
+
+declare const trustedContextBrand: unique symbol;
+
+/**
+ * Everything the reducer is allowed to believe that did **not** come out of the
+ * event payload. This is the interface #22 implements.
+ *
+ * ## Why it is branded
+ *
+ * r2's gauntlet, major 2: the type was a plain `{ actor, messages? }`, so any
+ * object literal anywhere satisfied it. Nothing distinguished "derived at the
+ * seam from an authenticated session" from "assembled three layers down out of
+ * whatever was to hand", which is precisely the distinction the type exists to
+ * carry. It cannot be written by accident now: the only way to obtain one is
+ * `trustedContext(...)` or `authored(...)`, so every place a trusted context is
+ * *created* is a place somebody had to type the word `trusted`, and `grep` finds
+ * all of them.
+ *
+ * ## What core does **not** guarantee — stated plainly, because the brand looks
+ * like more than it is
+ *
+ * The brand is a **compile-time discipline, not an authentication mechanism.**
+ * `trustedContext({ actor: req.body.actor })` compiles, produces a valid
+ * `TrustedContext`, and core will believe every word of it. Concretely, core
+ * cannot and does not check:
+ *
+ *  1. **That `actor` came from an authenticated session.** Core has no session,
+ *     no signature, no clock and no I/O — it cannot. If the command layer reads
+ *     an actor off a request body, a client is a human as far as every gate in
+ *     `authority.ts` is concerned, and nothing here will notice.
+ *  2. **That `messages` are the room's real messages.** A caller that fabricates
+ *     a window fabricates the receipt with it. The window must be read from the
+ *     room's own message table inside the same request.
+ *  3. **That a replay reconstructs the authority the live append had.** That
+ *     needs the actor stored as immutable ledger columns and read back from
+ *     them; core folds whatever the caller hands it. Replaying a payload under a
+ *     different actor is replaying a different event, and `replay.test.ts` pins
+ *     that the same bytes under a human and a model fold to different states —
+ *     which is a demonstration that the actor matters, *not* a guarantee that it
+ *     is preserved.
+ *
+ * All three are #22's, are required for this half to mean anything, and are
+ * recorded there. What core does guarantee is the other half and only the other
+ * half: given a truthful trusted context, no machine-authored event reaches an
+ * accepted or verified object without a receipt that holds.
+ */
+export interface TrustedContext extends TrustedContextInput {
+  readonly [trustedContextBrand]: 'derived at the seam, never from a payload';
+}
+
+/**
+ * Mint a trusted context. **The only producer**, so the set of places that claim
+ * something is trusted is enumerable.
+ *
+ * This function checks nothing, and that is not an oversight — see
+ * `TrustedContext` for the three things core cannot check and #22 must. Calling
+ * it is an assertion by the caller, made once, where a reader can find it.
+ */
+export function trustedContext(input: TrustedContextInput): TrustedContext {
+  return input as TrustedContext;
 }
 
 /**
@@ -238,7 +301,10 @@ export interface AuthoredEvent extends TrustedContext {
   event: CoreEvent;
 }
 
-/** Pair an event with its trusted context. */
-export function authored(event: CoreEvent, trusted: TrustedContext): AuthoredEvent {
-  return { ...trusted, event };
+/**
+ * Pair an event with its trusted context — the producer #22's replay path uses,
+ * turning a ledger row's columns back into a foldable row.
+ */
+export function authored(event: CoreEvent, trusted: TrustedContextInput): AuthoredEvent {
+  return { ...trusted, event } as AuthoredEvent;
 }

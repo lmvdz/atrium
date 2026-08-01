@@ -9,7 +9,7 @@ import {
 } from './authority.js';
 import type { Actor } from './common.js';
 import { ATTRIBUTION_FIELD, retypeCarryOver } from './corrections.js';
-import type { AuthoredEvent, CoreEvent, TrustedContext } from './events.js';
+import { type AuthoredEvent, CoreEvent, type TrustedContext } from './events.js';
 import {
   AcceptedObject,
   type AcceptedObjectType,
@@ -47,7 +47,7 @@ export type RejectionReason =
   | 'duplicate';
 
 /**
- * The reducer's two answers to one event.
+ * The reducer's three answers to one event.
  *
  * A **consumed** event took a position in the log. It is part of the history
  * this state is a fold of, whether it applied cleanly (`applied`) or recorded a
@@ -61,9 +61,16 @@ export type RejectionReason =
  * entry, no cursor movement, no `consumedEventIds` entry. The state handed back
  * is the state handed in, byte for byte and reference for reference.
  *
- * Every outcome carries the **trusted actor** the event was folded under, not
- * one read out of the payload — the payload has no such field. A caller logging
- * "who did this" is logging the authenticated identity or nothing.
+ * A **malformed** event never even became an event. It failed `CoreEvent.parse`,
+ * so there is no `type` to dispatch on, no `(at, id)` to sort by, and nothing to
+ * fold — the value is handed back verbatim as `unknown`, because typing it as a
+ * `CoreEvent` would be the lie the parse just refused. Like a rejection it
+ * changes nothing; unlike a rejection its problem is the payload rather than the
+ * payload's position, so re-minting it at a later timestamp will not help.
+ *
+ * Every non-malformed outcome carries the **trusted actor** the event was folded
+ * under, not one read out of the payload — the payload has no such field. A
+ * caller logging "who did this" is logging the authenticated identity or nothing.
  */
 export type EventOutcome =
   | { outcome: 'applied'; event: CoreEvent; actor: Actor }
@@ -74,7 +81,8 @@ export type EventOutcome =
       actor: Actor;
       reason: RejectionReason;
       detail: string;
-    };
+    }
+  | { outcome: 'malformed'; event: unknown; actor: Actor; detail: string };
 
 /** The three-way taxonomy, for callers that switch on it. */
 export type AppendOutcome = EventOutcome['outcome'];
@@ -155,19 +163,62 @@ export interface FoldResult {
  * A rejection is an error for the caller to handle, not a silent drop — a
  * command whose event lost the ordering race is re-minted at the current
  * position and appended again.
+ *
+ * ## The payload is parsed here, not trusted here
+ *
+ * The parameter is typed `CoreEvent`, and the runtime does not believe the type.
+ * Round 2's gauntlet found the gap: every existing test parsed its fixtures
+ * before folding them, so the *boundary* had never been exercised, and a caller
+ * handing over a plain object — a row read back from jsonb, a decoded request
+ * body, anything that reached TypeScript as `any` — got it folded unvalidated. A
+ * model claim with no `quote` at all went in and came out an accepted object,
+ * with the schema that forbids it sitting one layer up, never called.
+ *
+ * So every event is run through `CoreEvent.parse` on the way in, and the
+ * *parsed* value is what gets folded — which also means defaults (`patch: {}`,
+ * `toType: null`, a proposal's `status`) are applied here rather than assumed to
+ * have been applied by somebody else. A payload that fails is `malformed`: not
+ * consumed, not recorded, state untouched.
  */
 export function appendEvent(
   state: CoreState,
   event: CoreEvent,
   trusted: TrustedContext,
 ): AppendResult {
-  const entry: AuthoredEvent = { ...trusted, event };
-  const rejection = rejectionFor(state, event);
+  const parsed = CoreEvent.safeParse(event);
+  if (!parsed.success) {
+    return {
+      outcome: 'malformed',
+      event,
+      actor: trusted.actor,
+      detail: parseFailureDetail(parsed.error),
+      state,
+    };
+  }
+  const entry: AuthoredEvent = { ...trusted, event: parsed.data };
+  const rejection = rejectionFor(state, parsed.data);
   if (rejection) {
-    return { outcome: 'rejected', event, actor: trusted.actor, ...rejection, state };
+    return { outcome: 'rejected', event: parsed.data, actor: trusted.actor, ...rejection, state };
   }
   const next = cloneState(state);
   return { ...consume(next, entry), state: next };
+}
+
+/**
+ * A parse failure, as a sentence a caller can act on.
+ *
+ * The actor guard gets its own opening line because it is the one failure whose
+ * cause is a *design* the caller has not read yet, rather than a field they got
+ * wrong: somebody is sending an actor in the payload and believes it is doing
+ * something. Telling them "invalid input" would be true and useless.
+ */
+function parseFailureDetail(error: z.core.$ZodError): string {
+  const issues = error.issues.map(describeIssue);
+  const forgedActor = error.issues.some((issue) => issue.path[0] === 'actor');
+  const preamble = forgedActor
+    ? 'event payload carries an actor and was refused at the boundary'
+    : 'event payload does not parse as a CoreEvent and was refused at the boundary';
+  return `${preamble} — not consumed, not recorded, nothing folded: ${issues.join('; ')}`;
 }
 
 /**
@@ -178,8 +229,14 @@ export function appendEvent(
  *    returns a state that serializes byte-identically, on any machine, in any
  *    order of arrival — rows are canonically ordered by `(at, id)` before
  *    folding.
- *  - Total. A malformed or unapplicable event never throws; it lands in
- *    `state.issues` so replay of a real log can never wedge.
+ *  - **Validating.** Every row's payload goes through `CoreEvent.parse` before
+ *    anything else looks at it, and the parsed value is what is folded. A row
+ *    that does not parse is reported as `malformed` by `foldEvents` and takes no
+ *    part in the fold. Round 2's gauntlet: the schemas that forbid a model claim
+ *    without a quote were only ever run by tests that parsed their own fixtures,
+ *    so the boundary they were guarding had never been crossed in anger.
+ *  - Total. An unapplicable event never throws; it lands in `state.issues` so
+ *    replay of a real log can never wedge.
  *  - Append-only. Corrections and supersessions change *status*, never history:
  *    the prior value is written to `state.corrections` and the object stays.
  *  - Trust-preserving. The proposal → acceptance boundary is enforced here, not
@@ -202,11 +259,37 @@ export function reduce(log: readonly AuthoredEvent[], initial?: CoreState): Core
   return foldEvents(log, initial).state;
 }
 
-/** `reduce`, plus the per-event outcome. Same fold, nothing hidden. */
+/**
+ * `reduce`, plus the per-event outcome. Same fold, nothing hidden.
+ *
+ * Rows are **parsed before they are ordered**, because a row that does not parse
+ * has no `(at, id)` to be ordered by — asking where a malformed value sorts is
+ * asking a question about a field it may not have. Malformed rows come back
+ * first, in the order they were supplied, and take no part in the fold. That is
+ * the one place output order depends on input order, and it is confined to rows
+ * that are not ledger rows: the *state* is unchanged by them, so the
+ * live≡replay guarantee below is untouched.
+ */
 export function foldEvents(log: readonly AuthoredEvent[], initial?: CoreState): FoldResult {
   const state = initial ? cloneState(initial) : emptyState();
   const outcomes: EventOutcome[] = [];
-  for (const entry of orderEvents(log)) {
+  const rows: AuthoredEvent[] = [];
+
+  for (const entry of log) {
+    const parsed = CoreEvent.safeParse(entry.event);
+    if (!parsed.success) {
+      outcomes.push({
+        outcome: 'malformed',
+        event: entry.event,
+        actor: entry.actor,
+        detail: parseFailureDetail(parsed.error),
+      });
+      continue;
+    }
+    rows.push({ ...entry, event: parsed.data });
+  }
+
+  for (const entry of orderEvents(rows)) {
     const rejection = rejectionFor(state, entry.event);
     outcomes.push(
       rejection
@@ -219,12 +302,17 @@ export function foldEvents(log: readonly AuthoredEvent[], initial?: CoreState): 
 
 /** True when the event was consumed — i.e. it belongs in the durable log. */
 export function wasConsumed(outcome: EventOutcome): boolean {
-  return outcome.outcome !== 'rejected';
+  return outcome.outcome === 'applied' || outcome.outcome === 'applied_with_issue';
 }
 
 /**
  * Canonical event order: ascending timestamp, ties broken by event id. Two
  * nodes handed the same set in different orders reduce to the same state.
+ *
+ * This is a sort and only a sort — it does not parse. `foldEvents` parses first
+ * and orders the survivors, because a row whose payload is not a `CoreEvent` has
+ * no `(at, id)` to sort by. A caller ordering rows it has not had parsed is
+ * ordering them by whatever `at` and `id` they happen to carry.
  */
 export function orderEvents(log: readonly AuthoredEvent[]): AuthoredEvent[] {
   return [...log].sort((a, b) => compareCursor(cursorOf(a.event), cursorOf(b.event)));
