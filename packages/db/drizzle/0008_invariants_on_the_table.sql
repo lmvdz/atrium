@@ -86,9 +86,16 @@
 -- and the guard requires *that*, schema qualifier included. A function in `evil2`
 -- can be called `atrium_append_core_event` but `format_procedure` will never
 -- print `public.` in front of it, so the collision is no longer available at any
--- search path or in any compilation order. What is left costs CREATE on schema
--- `public` — which is the table owner, who can also drop this trigger, which is
--- the limit `0003` already stated and this file does not pretend to move.
+-- search path or in any compilation order.
+--
+-- **THE NEXT SENTENCE USED TO SAY "what is left costs CREATE on schema `public`".
+-- IT WAS FALSE, AND 0009 IS WHY.** What is left costs no CREATE anywhere: it
+-- costs one SQL comment. `GET DIAGNOSTICS … PG_CONTEXT` includes the verbatim
+-- statement text of every caller frame, and this guard is a substring search over
+-- it, so a bare `DO` block that writes the expected frame label into a comment
+-- inside its own INSERT satisfies the check. Executed, r7 gauntlet, defect 1. Do
+-- not read the paragraph above as a bound on an adversary — read `0009`, which
+-- states what this check is and proves what it cannot be.
 --
 -- The expected signature is **derived, not restated**: the guard asks
 -- `to_regprocedure(…)::text` under its own identical search path, and
@@ -107,6 +114,12 @@
 -- every caller, including one that fakes the call stack; they do not bind an
 -- operator who turns triggers off.** That is strictly stronger than "the only
 -- function that can put a row in this table" was, and unlike it, it is true.
+--
+-- That sentence survived r7's gauntlet intact and is worth keeping separate from
+-- the one above it that did not: the r7 critic tested all five invariants and the
+-- doorbell **using defect 1 as the vehicle** — the strongest available faked
+-- frame — and every one of them held. What defect 1 falsifies is the guard's
+-- claim, not the invariants'. See `0009`.
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ─────────────────────────────────────────────────────────────────────────────

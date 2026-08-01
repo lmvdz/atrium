@@ -64,6 +64,13 @@
       "when": 1785840000000,
       "tag": "0008_invariants_on_the_table",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1785926400000,
+      "tag": "0009_the_guard_stops_claiming_an_author",
+      "breakpoints": true
     }
   ]
 }

@@ -51,3 +51,7 @@ yarn-error.log*
 # and undoing it, deleted after; a leftover one is recovered on the next start.
 # Never a committed artifact — it holds a file's pre-mutation bytes.
 mutants/.inflight.json
+
+# Round 8's scratch lab for #22 — private-Postgres exploit reproductions and
+# helper scripts. Evidence, not source; the tests carry what has to survive.
+tmp-r8/

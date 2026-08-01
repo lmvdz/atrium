@@ -320,17 +320,25 @@ export const memberships = pgTable(
  *    search path so PL/pgSQL labelled its frame unqualified, and satisfied the
  *    call-stack check with a plain INSERT. Only rules attached to the table
  *    survived that, so the rules are attached to the table.
- *  - **`atrium_append_core_event(...)` is still the door, and the guard still
- *    refuses a stranger.** `core_events_append_guard` reads its own `PG_CONTEXT`
- *    call stack and now compares it against the *schema-qualified* signature it
- *    reads back out of the catalog, which no function outside `public` can render.
- *    It binds the table owner and a superuser, neither of whom a `REVOKE` does,
- *    **because they are roles**; it does not bind an operator who disables the
- *    trigger, and `ALTER TABLE … DISABLE TRIGGER` is what the migrations
- *    themselves use to re-derive a column. Privileged bypasses are operator
- *    territory and out of scope, which is what the function's own `COMMENT` says
- *    — and, since r7, so is what happens if somebody takes that door off its
- *    hinges: the invariants above still hold.
+ *  - **`atrium_append_core_event(...)` is the door a `REVOKE` controls.
+ *    `core_events_append_guard` is an accident check, and r8 stopped calling it
+ *    anything else** (#22 gauntlet r7, defect 1, and `drizzle/0009` is the whole
+ *    argument). The guard reads its own `PG_CONTEXT` call stack and substring-
+ *    matches the schema-qualified signature — and `PG_CONTEXT` carries the
+ *    verbatim SQL text of every caller frame, so **one SQL comment satisfies it,
+ *    from a bare `DO` block, at the cost of no privilege anywhere.** The
+ *    paragraph here used to say it "binds the table owner and a superuser"; it
+ *    binds neither, and no rewrite of it could, because every session-scoped
+ *    token it might read instead is one the caller can mint too. What binds is
+ *    privilege: after `0003` only the owner and a superuser can INSERT into this
+ *    table at all, anyone else is refused by the `REVOKE` before the trigger
+ *    runs, and anyone inside that set can disable the trigger. What the check is
+ *    worth keeping for is the accident the lock half cannot see — a stray direct
+ *    INSERT in a transaction that already made a legitimate append.
+ *
+ *    This is a claim being narrowed, not a guarantee being lost: the rules above
+ *    live on the table, and r7's critic verified all five of them **using this
+ *    bypass as the vehicle**. Getting past the guard buys nothing against them.
  *  - **The advisory lock is asserted, not assumed.** The function takes it and
  *    the guard re-checks `pg_locks` before letting the row through.
  *  - **Nothing lands silently.** `core_events_doorbell` is an `AFTER INSERT`

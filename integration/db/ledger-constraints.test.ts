@@ -619,10 +619,21 @@ describe('core_events — the append path is structural, not cooperative', () =>
    * `public` (wrong schema, and no search path can make `format_procedure` print
    * `public.` in front of an `evil2` function) miss it.
    *
-   * The limit that remains is stated rather than hidden: a role holding CREATE on
-   * schema `public` could define the colliding function there — and that role can
-   * also drop this trigger, so the guard is aimed at the accidental bypass and at
-   * the cross-schema one, not at the table's owner.
+   * **The limit is far larger than this comment said until r8, and the sentence
+   * it said it in was false.** It read: "the limit that remains is stated rather
+   * than hidden: a role holding CREATE on schema `public` could define the
+   * colliding function there". It costs no CREATE anywhere. `PG_CONTEXT` carries
+   * the verbatim statement text of every caller frame and this guard is a
+   * substring search over it, so a bare `DO` block with the expected frame label
+   * in a comment inside its own INSERT satisfies it — executed by r7's gauntlet,
+   * and reproduced by `satisfies the call-stack check with one SQL comment` below.
+   *
+   * So what this test still proves is narrower than the name suggests, and worth
+   * being precise about: the *name collision* of r6 is dead — an overload and a
+   * function in another schema both miss the schema-qualified signature, at any
+   * search path. What it does not prove, and no test of this guard could, is that
+   * a caller cannot satisfy it. See `drizzle/0009` for why no rewrite fixes that
+   * and what the actual boundary is.
    */
   it('refuses a spoofed call frame that borrows the append function’s name', async () => {
     await handle.db.execute(
@@ -752,6 +763,264 @@ describe('core_events — the append path is structural, not cooperative', () =>
       await client.unsafe('DROP SCHEMA IF EXISTS evil2 CASCADE').catch(() => undefined);
       await client.end({ timeout: 5 });
     }
+  });
+
+  /**
+   * The guard is an accident check, and this is the test that says so out loud
+   * (#22 gauntlet r7, defect 1 — executed).
+   *
+   * `GET DIAGNOSTICS … PG_CONTEXT` is the live PL/pgSQL call stack, and every
+   * frame in it carries **the verbatim SQL text of the statement executing in
+   * that frame**. The guard substring-searches that text for the append
+   * function's label. So the evidence it reads is a document the caller wrote,
+   * and the caller writes it with a comment. No CREATE, no schema, no function —
+   * a bare `DO` block.
+   *
+   * This test asserts the bypass **works**, which is an unusual shape and the
+   * right one: the defect was never the code, it was three sentences claiming
+   * this guard bound an author. Those sentences are gone (`drizzle/0009`,
+   * `0008`'s header, `schema.ts`, and the comment on the r6 test above). What
+   * remains is a check that has to keep being *described* accurately, and a test
+   * that fails the moment somebody "hardens" the substring and re-earns the
+   * belief will keep it that way. If this test ever fails, the fix is not to
+   * delete it — it is to read `0009` and decide whether the new claim is true.
+   */
+  it('satisfies the call-stack check with one SQL comment, and no privilege at all', async () => {
+    const row = ledgerRow(roomA);
+    const label =
+      'function public.atrium_append_core_event(uuid,text,public.event_type,' +
+      'public.actor_kind,text,jsonb,timestamp with time zone,text) line 1';
+    // Two statements differing by exactly one comment. `body` is built once so
+    // the pair genuinely cannot differ anywhere else.
+    const body = (id: string, at: string, frame: string) => `
+      DO $pwn$ BEGIN
+        PERFORM pg_catalog.pg_advisory_xact_lock(${LEDGER_ADVISORY_LOCK_KEY}::bigint);
+        INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at)
+        ${frame}
+        VALUES ('${roomA}'::uuid, '${id}', 'message_posted', 'system', NULL,
+                '${JSON.stringify({ ...row.payload, id, at })}'::jsonb, '${at}'::timestamptz);
+      END $pwn$;`;
+
+    const controlId = randomUUID();
+    const controlAt = nextAt();
+    // Control: no comment, refused.
+    await violatesConstraint('core_events_append_through_procedure', () =>
+      handle.db.execute(sql.raw(body(controlId, controlAt, ''))),
+    );
+
+    const pwnId = randomUUID();
+    const pwnAt = nextAt();
+    // Exploit: the same statement with the frame label in a comment. It lands.
+    await handle.db.execute(sql.raw(body(pwnId, pwnAt, `/* ${label} */`)));
+    const landed = await handle.db
+      .select({ id: coreEvents.id, roomSeq: coreEvents.roomSeq })
+      .from(coreEvents)
+      .where(eq(coreEvents.id, pwnId));
+    expect(landed).toHaveLength(1);
+
+    // And the bound that makes this MEDIUM rather than blocking: `room_seq` was
+    // still minted by `core_events_invariants`, from the table, not by the
+    // caller. Getting past the guard buys nothing against the rules.
+    expect(Number(landed[0]?.roomSeq)).toBe(1);
+  });
+
+  /**
+   * There is no unforgeable replacement, and this is the proof rather than the
+   * assertion (`drizzle/0009` §"Why there is no unforgeable replacement").
+   *
+   * Every tempting fix for the above is session state minted inside the append
+   * function and read back by the trigger. Each one is run here by a bare caller
+   * in a bare `DO` block. If any of these ever stops being caller-authorable,
+   * this test fails and the guard has a real option it did not have — which is
+   * the only thing that would justify reopening the choice made in 0009.
+   */
+  it('cannot be fixed by a token, because the caller mints every one of them', async () => {
+    // A transaction-local GUC — the caller sets it.
+    const [guc] = await handle.db.execute<{ v: string }>(
+      sql`SELECT set_config('atrium.appending', 'yes', true) AS v`,
+    );
+    expect(guc?.v).toBe('yes');
+
+    // An advisory-lock token minted "inside the function" — the caller takes it,
+    // exactly as the exploit above already takes the ledger lock itself.
+    const [lock] = await handle.db.execute<{ held: number }>(
+      sql`SELECT pg_advisory_xact_lock(8675309::bigint),
+                 (SELECT count(*)::int FROM pg_locks
+                   WHERE locktype='advisory' AND pid=pg_backend_pid()
+                     AND objid=8675309 AND granted) AS held`,
+    );
+    expect(Number(lock?.held)).toBeGreaterThan(0);
+
+    // A temp-table witness — the caller creates it. `TEMPORARY` is granted to
+    // PUBLIC on every database by default, so this costs no privilege either.
+    await handle.db.execute(
+      sql.raw(`DO $t$ BEGIN
+        CREATE TEMP TABLE atrium_append_witness(token uuid) ON COMMIT DROP;
+        INSERT INTO atrium_append_witness VALUES (gen_random_uuid());
+      END $t$;`),
+    );
+
+    // An unpredictable nonce — the caller mints its own and publishes it, because
+    // nothing can check *which* nonce without a store the caller cannot write,
+    // and caller and function are the same session and the same role.
+    const [nonce] = await handle.db.execute<{ v: string }>(
+      sql`SELECT set_config('atrium.append_nonce', gen_random_uuid()::text, true) AS v`,
+    );
+    expect(nonce?.v).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  /**
+   * What the guard is worth keeping for: the one accident the lock check cannot
+   * see.
+   *
+   * A stray direct INSERT in a transaction that has already made a legitimate
+   * append. The ledger advisory lock is transaction-scoped and still held, so
+   * `core_events_append_lock_held` passes it — only the frame half refuses,
+   * because the append function has returned and its frame is off the stack.
+   *
+   * This is the non-vacuity for keeping two lines that bind no adversary, and it
+   * is why 0009 narrows the claim instead of deleting the check.
+   */
+  it('refuses a stray second write in a transaction that already appended', async () => {
+    const row = ledgerRow(roomA);
+    const strayId = randomUUID();
+    const strayAt = nextAt();
+    await violatesConstraint('core_events_append_through_procedure', () =>
+      handle.db.transaction(async (tx) => {
+        await tx.execute(
+          sql`SELECT * FROM atrium_append_core_event(${row.roomId}::uuid, ${row.id}, ${row.type}::event_type,
+              ${row.actorKind}::actor_kind, ${row.actorId}, ${JSON.stringify(row.payload)}::jsonb,
+              ${row.occurredAt}::timestamptz, NULL)`,
+        );
+        // The lock is held by this transaction now, so the lock half is satisfied
+        // and any refusal below can only be the frame half.
+        const [held] = await tx.execute<{ n: number }>(
+          sql`SELECT count(*)::int AS n FROM pg_locks
+              WHERE locktype='advisory' AND pid=pg_backend_pid()
+                AND objid=${LEDGER_ADVISORY_LOCK_KEY} AND granted`,
+        );
+        expect(Number(held?.n)).toBeGreaterThan(0);
+        await tx.execute(
+          sql.raw(`
+          INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at)
+          VALUES ('${roomA}'::uuid, '${strayId}', 'message_posted', 'system', NULL,
+                  '${JSON.stringify({ ...row.payload, id: strayId, at: strayAt })}'::jsonb,
+                  '${strayAt}'::timestamptz)`),
+        );
+      }),
+    );
+  });
+
+  /**
+   * The boundary, since it is not the guard: **INSERT privilege on the table**
+   * (`drizzle/0009` §"What actually separates them").
+   *
+   * A role outside {owner, superuser} never reaches the trigger at all. Run as
+   * such a role, the comment exploit is refused by the `REVOKE` one layer
+   * earlier — while the legitimate call through the SECURITY DEFINER function
+   * still works, which is what makes this a boundary rather than a ban.
+   */
+  it('refuses the comment exploit outright for a role that is not the table owner', async () => {
+    const roleName = `atrium_guard_probe_${randomUUID().slice(0, 8)}`;
+    await handle.db.execute(sql.raw(`CREATE ROLE ${roleName} LOGIN PASSWORD 'probe'`));
+    try {
+      await handle.db.execute(sql.raw(`GRANT USAGE ON SCHEMA public TO ${roleName}`));
+      await handle.db.execute(
+        sql.raw(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${roleName}`),
+      );
+      await handle.db.execute(
+        sql.raw(`GRANT EXECUTE ON FUNCTION public.atrium_append_core_event(
+          uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text) TO ${roleName}`),
+      );
+      // 0003's own rule, restated for a role created after it ran.
+      await handle.db.execute(
+        sql.raw(
+          `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.core_events FROM ${roleName}`,
+        ),
+      );
+
+      const url = new URL(databaseUrl());
+      url.username = roleName;
+      url.password = 'probe';
+      const asRole = postgres(url.toString(), { max: 1, onnotice: () => undefined });
+      try {
+        const row = ledgerRow(roomA);
+        const label =
+          'function public.atrium_append_core_event(uuid,text,public.event_type,' +
+          'public.actor_kind,text,jsonb,timestamp with time zone,text) line 1';
+        const pwnId = randomUUID();
+        const pwnAt = nextAt();
+        // The exploit that lands as the owner. As this role it never reaches the
+        // guard — the table refuses it first.
+        await expect(
+          asRole.unsafe(`
+            DO $pwn$ BEGIN
+              PERFORM pg_catalog.pg_advisory_xact_lock(${LEDGER_ADVISORY_LOCK_KEY}::bigint);
+              INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at)
+              /* ${label} */
+              VALUES ('${roomA}'::uuid, '${pwnId}', 'message_posted', 'system', NULL,
+                      '${JSON.stringify({ ...row.payload, id: pwnId, at: pwnAt })}'::jsonb,
+                      '${pwnAt}'::timestamptz);
+            END $pwn$;`),
+        ).rejects.toThrow(/permission denied for table core_events/);
+
+        // Non-vacuity, and the half that makes it a boundary and not a wall: the
+        // door still opens for this role, because the function is SECURITY
+        // DEFINER and runs as the owner.
+        const legit = ledgerRow(roomA);
+        const landed = await asRole.unsafe(
+          `SELECT * FROM atrium_append_core_event('${legit.roomId}'::uuid, '${legit.id}',
+             '${legit.type}'::event_type, '${legit.actorKind}'::actor_kind, NULL,
+             '${JSON.stringify(legit.payload)}'::jsonb, '${legit.occurredAt}'::timestamptz, NULL)`,
+        );
+        expect(landed).toHaveLength(1);
+      } finally {
+        await asRole.end({ timeout: 5 });
+      }
+    } finally {
+      await handle.db.execute(
+        sql.raw(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${roleName}`),
+      );
+      await handle.db.execute(
+        sql.raw(`REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM ${roleName}`),
+      );
+      await handle.db.execute(sql.raw(`REVOKE ALL ON SCHEMA public FROM ${roleName}`));
+      await handle.db.execute(sql.raw(`DROP ROLE IF EXISTS ${roleName}`));
+    }
+  });
+
+  /**
+   * The claim in the database matches the claim in the source.
+   *
+   * The sentence is the thing that was wrong, and a sentence with no test rots.
+   * `COMMENT ON FUNCTION` is what an operator reads from `\df+` at 3am, so it is
+   * the copy most worth pinning.
+   */
+  it('says in its own COMMENT that the guard is an accident check, not a boundary', async () => {
+    // The defect, first and in the words it was written in. On r7 the migration
+    // said the remaining bypass "costs CREATE on schema `public`"; it costs one
+    // SQL comment, which the test above executes.
+    const migrations = [
+      '0008_invariants_on_the_table.sql',
+      '0009_the_guard_stops_claiming_an_author.sql',
+    ]
+      .map((f) => readFileSync(join(migrationsFolder, f), 'utf8'))
+      .join('\n');
+    expect(migrations).not.toContain('What is left costs CREATE on schema\n-- `public`');
+
+    // And the database's own copy, which is what an operator reads from `\df+`
+    // at 3am with no migration header in front of them. On r7 this function had
+    // no COMMENT at all, so the only claim about it available in the database was
+    // the refusal message — which asserted append-only-ness.
+    const [guard] = await handle.db.execute<{ c: string | null }>(
+      sql`SELECT obj_description('public.atrium_core_events_append_guard()'::regprocedure, 'pg_proc') AS c`,
+    );
+    expect(guard?.c, 'the append guard has no COMMENT describing what it is').toEqual(
+      expect.any(String),
+    );
+    expect(guard?.c).toContain('ACCIDENT CHECK');
+    expect(guard?.c).toContain('does NOT bind an adversary');
+    expect(guard?.c).toContain('one SQL comment');
   });
 
   it('refuses to rewrite a ledger row after the fact', async () => {
