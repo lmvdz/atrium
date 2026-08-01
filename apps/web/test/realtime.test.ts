@@ -586,7 +586,10 @@ describe('the durable journal writes both halves or neither', () => {
     // history": that is a legitimate answer meaning "fresh room", and returning it
     // here would silently re-fetch for ever.
     expect(degraded).toHaveLength(1);
-    expect(degraded[0]).toContain('localStorage refused the write');
+    // "unusable", not "refused the write": this failure is a refused *read*, and
+    // r5's wording named the wrong operation for two of the three throws it
+    // described.
+    expect(degraded[0]).toContain('localStorage is unusable');
     expect(journal.load(ROOM)).toMatchObject({ lastSeq: 2 });
     expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
   });
@@ -651,6 +654,115 @@ describe('the durable journal writes both halves or neither', () => {
       expect(warnings).toHaveLength(1);
     } finally {
       console.warn = original;
+    }
+  });
+
+  /**
+   * The fourth way out (#22 gauntlet r5 delta, major 3).
+   *
+   * > `storage()` returns `null` when access itself throws (private mode), and
+   * > `commit` falls back to memory without `report`/`warnDegraded`. The three
+   * > closed throws are real; "never degrades in silence" is not yet true.
+   *
+   * Granted, and it is the same shape as the three round 5 did close: a `catch`
+   * that answers with a *value* instead of reporting a *fact*. `storage()`
+   * collapsed both "this browser refuses storage on access" and "there is no
+   * `localStorage` here at all" into `null`, and `null` gave every caller
+   * downstream something to fall back to and nothing to say.
+   *
+   * ## Two tests, and the split is `commit` against `load` rather than the two
+   * ways of getting `null`
+   *
+   * That was the first draft's split and **the mutant ledger refused it**: the
+   * mutation that removes the report from `commit` left the second test green,
+   * because that test committed first and then loaded, and `load` reported for
+   * it. Recorded rather than only fixed — a test that passes because a *different*
+   * site did the work is the "caught by the wrong test" vacuity this ledger exists
+   * to rule out, and here it was the ledger that said so rather than a reviewer.
+   *
+   * `commit` and `load` are two entry points and either can be the first call a
+   * room ever makes, so both have to report. Once a room is degraded the other one
+   * short-circuits, which means the only way to measure a site is to reach it
+   * first: the first test commits before loading, the second loads before
+   * committing, and each has its own mutant.
+   */
+  it('says so when there is no localStorage to be durable in', () => {
+    /**
+     * Server-side rendering, a hardened embedder, an old WebView: the global is
+     * simply absent. The journal still works — it is a memory journal now — and
+     * the caller is told once per room rather than discovering it as a room that
+     * re-reads its whole history on every load for ever.
+     *
+     * Commits before it loads, so the site under measurement is `commit`'s.
+     * Catches: `journal_null_store_degrades_silently` — the fallback without the
+     * `degrade`, which is r5's `commit` exactly.
+     */
+    (globalThis as { localStorage?: Storage }).localStorage = undefined;
+    const degraded: Array<[string, string]> = [];
+    const journal = localStorageJournal('test', {
+      maxEvents: 10,
+      onDegraded: (roomId, reason) => degraded.push([roomId, reason]),
+    });
+
+    expect(() => journal.commit(ROOM, messageEvent(1, 'a'), 1)).not.toThrow();
+    journal.commit(ROOM, messageEvent(2, 'b'), 2);
+
+    // Once per room, and it says which room and why.
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]?.[0]).toBe(ROOM);
+    expect(degraded[0]?.[1]).toContain('not available');
+    // …and the events are still there, in memory. A journal that reported its
+    // degradation and then dropped the event would be trading one defect for a
+    // worse one.
+    expect(journal.load(ROOM)).toMatchObject({ lastSeq: 2 });
+    expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+  });
+
+  it('says so when the store throws on access, not on use', () => {
+    /**
+     * The private-mode case the finding names. Reading the `localStorage` *getter*
+     * throws before any method is called, so every guard that wrapped `getItem` or
+     * `setItem` was downstream of the failure — which is why this was the one
+     * degradation left silent after the round that closed the other three.
+     *
+     * **Loads before it commits**, which is the whole point of the ordering: a
+     * client that opens a room it has been in before reads first, and `readDurable`
+     * is then the site that has to report. Returning `{events: [], lastSeq: 0}`
+     * there — r5's behaviour — is the worse of the two silences, because "no
+     * history" is a legitimate answer meaning "fresh room".
+     *
+     * Catches: `journal_null_store_reads_as_no_history`.
+     */
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('SecurityError: access to storage is denied');
+      },
+    });
+    try {
+      const degraded: string[] = [];
+      const journal = localStorageJournal('test', {
+        maxEvents: 10,
+        onDegraded: (_roomId, reason) => degraded.push(reason),
+      });
+
+      expect(() => journal.load(ROOM)).not.toThrow();
+      // Reported by the read, before anything was ever committed.
+      expect(degraded).toHaveLength(1);
+      expect(degraded[0]).toContain('SecurityError');
+
+      expect(() => journal.commit(ROOM, messageEvent(1, 'a'), 1)).not.toThrow();
+      // Still once: the room is degraded now and every later call short-circuits.
+      expect(degraded).toHaveLength(1);
+      expect(journal.load(ROOM)).toMatchObject({ lastSeq: 1 });
+    } finally {
+      // Back to a plain data property, or every later test in this file inherits
+      // a throwing global.
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        writable: true,
+        value: storage,
+      });
     }
   });
 });

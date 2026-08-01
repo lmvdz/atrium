@@ -328,6 +328,33 @@ function warnDegraded(roomId: string, reason: string): void {
  *
  * `apps/web/test/realtime.test.ts` drives each of the three through a `Storage`
  * stub that throws where the real one would, and asserts `commit` returns.
+ *
+ * ## The fourth way out, which round 5 did not find (r5 delta, major 3)
+ *
+ * > `storage()` returns `null` when access itself throws (private mode), and
+ * > `commit` falls back to memory without `report`/`warnDegraded`. The three
+ * > closed throws are real; "never degrades in silence" is not yet true.
+ *
+ * Correct, and it is the same shape as the three: a `catch` that returns a
+ * *value* instead of reporting a *fact*. `storage()` swallowed the private-mode
+ * throw into `null`, and `null` is indistinguishable from "this environment has
+ * no `localStorage`" — so every caller downstream had a fallback to reach for and
+ * nothing to say. The room worked and re-fetched itself on every load for ever,
+ * which is exactly the silence the round before had ruled out for the other
+ * three doors.
+ *
+ * `storage()` returns the reason with the answer now, and both `null` cases —
+ * refused on access, and absent altogether — go through the same `degrade`, so
+ * they are reported once per room like everything else. Server-side rendering is
+ * the honest cost: a `localStorageJournal` constructed where there is no
+ * `localStorage` will warn once per room rather than pretending it is durable.
+ * That is the report being right, not a regression.
+ *
+ * Which makes the list of ways this journal can stop being durable exactly four,
+ * and every one of them says so: refused on access, refused on read, refused on
+ * write (quota, after eviction), and absent. `onDegraded` throwing is the fifth
+ * door and it is closed differently — swallowed, because the fallback for a
+ * broken reporter would be the reporter.
  */
 export function localStorageJournal(
   namespace: string,
@@ -341,12 +368,29 @@ export function localStorageJournal(
   const report = options.onDegraded ?? warnDegraded;
   /** Rooms this journal has stopped being durable for. */
   const degraded = new Set<string>();
-  const storage = (): Storage | null => {
+  /**
+   * The store, or the reason there is not one.
+   *
+   * A `Storage | null` was the fourth silent path (r5 delta, major 3): `commit`
+   * read the `null`, fell back to memory, and told nobody — so a private-mode
+   * browser, where access itself throws, was the one degradation the round that
+   * closed the other three left open. The reason travels with the answer now,
+   * because a caller holding only `null` has nothing to report.
+   *
+   * Both `null` cases are degradation and both are reported. "No `localStorage`
+   * in this environment" is not a lesser failure than a refused one: a caller
+   * that asked for a durable journal and is not getting one should be told once
+   * per room, whichever way the store is missing.
+   */
+  const storage = (): { store: Storage } | { store: null; reason: string } => {
     try {
-      return typeof localStorage === 'undefined' ? null : localStorage;
-    } catch {
+      if (typeof localStorage === 'undefined') {
+        return { store: null, reason: 'localStorage is not available in this environment' };
+      }
+      return { store: localStorage };
+    } catch (error) {
       // Private-mode and blocked-cookie browsers throw on *access*, not on use.
-      return null;
+      return { store: null, reason: describeStorageError(error) };
     }
   };
   /** Keep the newest `maxEvents`. The cursor names the last of them either way. */
@@ -382,8 +426,15 @@ export function localStorageJournal(
   };
 
   const readDurable = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
-    const store = storage();
-    if (!store) return { events: [], lastSeq: 0 };
+    const access = storage();
+    if (!access.store) {
+      // Not `{events: [], lastSeq: 0}`: "no history" is a legitimate answer that
+      // means "fresh room", and returning it for a store that does not exist is
+      // the same silent lie a store that refuses to be read used to tell.
+      degrade(roomId, fallback.load(roomId), access.reason);
+      return fallback.load(roomId);
+    }
+    const store = access.store;
     let raw: string | null;
     try {
       raw = store.getItem(key(roomId));
@@ -414,15 +465,28 @@ export function localStorageJournal(
   };
 
   const readRoom = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
-    if (!storage() || degraded.has(roomId)) return fallback.load(roomId);
+    if (degraded.has(roomId)) return fallback.load(roomId);
+    // `readDurable` is the single place that decides whether a store exists and
+    // says so. Asking `storage()` here as well was how the answer and the report
+    // came apart: this branch returned the fallback and `readDurable`'s reporting
+    // never ran.
     return readDurable(roomId);
   };
 
   return {
     load: readRoom,
     commit: (roomId, entry, lastSeq) => {
-      const store = storage();
-      if (!store || degraded.has(roomId)) {
+      const access = storage();
+      if (!access.store) {
+        // Degrade *then* commit, in that order: `degrade` seeds the fallback with
+        // what was held before this entry, so committing first would file it
+        // twice. Reported once per room, like every other way out of durability.
+        degrade(roomId, fallback.load(roomId), access.reason);
+        fallback.commit(roomId, entry, lastSeq);
+        return;
+      }
+      const store = access.store;
+      if (degraded.has(roomId)) {
         fallback.commit(roomId, entry, lastSeq);
         return;
       }
@@ -459,14 +523,21 @@ export function localStorageJournal(
   };
 }
 
-/** A storage failure in words, without assuming `DOMException` exists. */
+/**
+ * A storage failure in words, without assuming `DOMException` exists.
+ *
+ * "…refused the write" until r6, which was true of one of the three throws it
+ * describes: this is also what a refused *read* and a refused *access* are
+ * reported as. A message that names the wrong operation sends the next person
+ * looking at the wrong half of the journal.
+ */
 function describeStorageError(error: unknown): string {
   const name = (error as { name?: unknown } | null)?.name;
   if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED') {
     return 'localStorage is full — this room is now kept in memory and will be re-read from the server on the next load';
   }
   const message = error instanceof Error ? error.message : String(error);
-  return `localStorage refused the write (${message}) — this room is now kept in memory`;
+  return `localStorage is unusable (${message}) — this room is now kept in memory`;
 }
 
 export interface RoomView {
