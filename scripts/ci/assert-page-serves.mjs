@@ -48,6 +48,16 @@
  *  3. **The same URL answers differently to a different request.** `/` is
  *     fetched twice, once signed out and once signed in, and the signed-out
  *     response must *not* carry the name. One static body cannot satisfy both.
+ *  4. **The signed-out half is obtained from a request a proxy would have routed
+ *     to the app.** Round 3 proved only "`/` is not a *session-independent*
+ *     fixture": a Caddyfile answering a fixture to callers *without* a session
+ *     cookie passed everything, because the authenticated branch really was the
+ *     app. So `/` is fetched a third time carrying the session cookie's names
+ *     with values that are not a session — a request every cookie-presence rule
+ *     routes to the app, and one the app answers with the signed-out page — and
+ *     the two signed-out responses must reference the same `/_next/static/…`
+ *     build assets. See the long note beside that check for what it still is
+ *     not.
  *
  * `/app` is asserted the same way: it is behind `requireSession`, it renders the
  * account's address and its (empty) workspace list, and it is a second route
@@ -83,6 +93,7 @@
 
 import { queryDatabase, sqlLiteral } from './compose.mjs';
 import {
+  Jar,
   check,
   establishSession,
   follow,
@@ -190,30 +201,96 @@ check(
 );
 
 /**
- * And the signed-out half is the app too.
+ * And the signed-out half is the app too — by asking the app for it.
  *
- * A blind cross-lineage review of the version above found what it still allowed:
+ * ## What round 3 had, and what was wrong with it
+ *
+ * A blind cross-lineage review of round 2's version found what it still allowed:
  * a Caddyfile that proxies `/` **when a session cookie is present** and answers
- * a fixture otherwise passes every check so far, because the authenticated
- * branch is the real app and the polarity holds by construction. What is proven
- * is therefore narrower than "`/` cannot be a fixture" — it is "`/` cannot be a
- * *session-independent* fixture".
+ * a fixture otherwise passes every check above, because the authenticated branch
+ * is the real app and the polarity holds by construction. Round 3 answered that
+ * by comparing `x-powered-by` and `Vary` against `/sign-in`'s — and the round-3
+ * gauntlet was right that this is no answer at all: those are *constants*, and a
+ * Caddyfile writes a header with the same one line it writes a body with. A
+ * check whose operands the mutation can supply is not a check.
  *
- * So the signed-out response is compared against a route that is definitely the
- * app: `/sign-in`, whose Server Action id could not have been guessed. Next
- * writes `x-powered-by` and a `Vary` naming its RSC headers on every rendered
- * page, and `respond` writes neither. Stated for what it is: this is a
- * *constant* again, and a Caddyfile can forge a header as easily as markup — but
- * forging these means impersonating the app rather than serving a stale copy of
- * it, and the boundary this file draws has always been at deliberate
- * impersonation.
+ * ## The request the fixture cannot be shown to
+ *
+ * The mutation's discriminator is the *presence* of a session cookie, because
+ * that is the only thing a proxy can see. So this sends one: the same cookie
+ * names the real session used, carrying values that are not a session. Every
+ * cookie-presence rule a Caddyfile can express routes that request to the app —
+ * and the app, finding no valid session, renders the *signed-out* page. That is
+ * a signed-out `/` obtained from a request the fixture cannot have been
+ * conditioned on, and it is then compared against the one fetched with no
+ * cookies at all:
+ *
+ *   - both must be 200 and both must render the sign-in link, so the app really
+ *     did treat the forged cookie as no session (and a deployment that 500s on a
+ *     stale cookie is a defect this catches on the way past);
+ *   - neither may carry the account name;
+ *   - and the two must reference **the same set of build assets**. A Next page
+ *     names its `/_next/static/…` chunks by content hash; two responses rendered
+ *     by the same build name the same ones, and a hand-written fixture names
+ *     none. That is the comparison round 3 should have made instead of the
+ *     header one: the operand is not a constant the mutation chooses, it is a
+ *     set of names produced by the build under test.
+ *
+ * ## What this is still not
+ *
+ * It is not proof that a signed-out `/` cannot be forged. A Caddyfile that
+ * serves a byte-for-byte copy of a real render — chunk names and all — to
+ * everyone without a *valid* session would still pass, and no check written from
+ * outside can distinguish a perfect copy from the thing it copies. What has
+ * changed is the cost: the fixture must now be a current render of this build
+ * rather than four lines of markup, and it must be conditioned on something a
+ * proxy cannot see. The boundary this file draws has always been at deliberate
+ * impersonation, and it is drawn one long step further out.
+ *
+ * The header comparison is kept below because it is free and it does catch the
+ * lazy version — labelled as what it is, rather than as the argument.
  */
+const forged = new Jar();
+for (const name of session.jar.names) {
+  forged.accept([`${name}=${'0'.repeat(24)}.${'f'.repeat(24)}; Path=/`]);
+}
+const withForgedCookie = await follow(target, '/', { jar: forged });
+check(
+  withForgedCookie.status === 200,
+  `GET / with a session cookie that is not a session returned ${withForgedCookie.status}, not 200 (trail: ${trail(withForgedCookie)}). A stale or forged cookie is an ordinary visitor, and the signed-out page is what they must get.`,
+);
+check(
+  withForgedCookie.body.includes('data-testid="sign-in-link"') &&
+    !withForgedCookie.body.includes(session.displayName),
+  'GET / with a forged session cookie did not render the signed-out page. The forged request exists to obtain a signed-out `/` that a cookie-presence rule in the proxy would have routed to the app, so it has to be the signed-out page that comes back.',
+);
+
+/** The build's own asset names, which only this build produces. */
+function buildAssets(html) {
+  return [...new Set([...html.matchAll(/\/_next\/static\/[^"'\s)]+/g)].map((match) => match[0]))]
+    .sort()
+    .join(' ');
+}
+
+const assets = buildAssets(anonymous.body);
+check(
+  assets !== '',
+  'GET / signed out references no `/_next/static/…` asset at all, so nothing about it was produced by a Next build. Four lines of `respond` in the Caddyfile look exactly like this.',
+);
+check(
+  assets === buildAssets(withForgedCookie.body),
+  'GET / signed out and GET / with a cookie that is not a session reference different build assets, so the two are not being rendered by the same thing. A proxy that answers `/` from a fixture *unless a session cookie is present* is precisely this: the second request carries a cookie, reaches the app, and comes back naming chunks the first response does not.',
+);
+
+// The lazy version of the same mutation, caught cheaply. Stated for what it is:
+// these are constants, a Caddyfile can write a header as easily as a body, and
+// this is a tripwire rather than the argument. The argument is above.
 for (const header of ['x-powered-by', 'vary']) {
   const fromSignIn = String(signIn.headers[header] ?? '');
   const fromRoot = String(anonymous.headers[header] ?? '');
   check(
     fromRoot === fromSignIn && fromRoot !== '',
-    `GET / answers with ${header}: ${JSON.stringify(fromRoot || null)} while GET /sign-in — which is unquestionably the app — answers ${JSON.stringify(fromSignIn || null)}. The two routes are not being served by the same thing, which is what a proxy answering \`/\` from a fixture looks like when the fixture is only shown to callers without a session.`,
+    `GET / answers with ${header}: ${JSON.stringify(fromRoot || null)} while GET /sign-in — which is unquestionably the app — answers ${JSON.stringify(fromSignIn || null)}. The two routes are not being served by the same thing.`,
   );
 }
 

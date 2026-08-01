@@ -136,6 +136,7 @@ export const RULES = [
   'no-command-shadowing',
   'protected-steps-run-one-command',
   'compose-through-one-entrypoint',
+  'protected-commands-cover-the-verbs',
 ];
 
 /** The deployment job, whose extra rules are about a stack rather than a repo. */
@@ -249,7 +250,7 @@ function invokes(script) {
  */
 function packageScript(name) {
   return command(`\`pnpm ${name}\``, [...PACKAGE_MANAGER_NAMES], ({ via, argv }) => {
-    return via.some((word) => PACKAGE_MANAGER_NAMES.includes(word)) && argv[0] === name;
+    return via.some(({ name: word }) => PACKAGE_MANAGER_NAMES.includes(word)) && argv[0] === name;
   });
 }
 
@@ -889,6 +890,84 @@ export const PROTECTED_COMMANDS = [
   ]),
 ].sort();
 
+/**
+ * The set above is *declared*, and a declaration can be emptied.
+ *
+ * ── THE DEFECT (#40 round 4, from a blind review of the shared engine) ──────
+ * `PROTECTED_COMMANDS` is derived from each matcher's `names`, and `names` is a
+ * field a matcher carries alongside the `match` predicate that does the work.
+ * Zero every matcher's `names` — or replace this export with `[]` — and every
+ * presence rule still fires, because `match` is untouched; `no-command-shadowing`
+ * still refuses `PATH`, `hash -p` and `$GITHUB_PATH`, because those are matched
+ * by name in the rule itself. What silently stops being caught is
+ * `git() { :; }` and `alias git=…`: the words are gone from the set the rule
+ * checks against, and the rule goes quiet while looking exactly as green.
+ *
+ * Deriving the *count* from the table (round 3) made exempting a stage visible.
+ * Nothing did the same for the *set*, so this does. For every required step and
+ * every prerequisite this policy declares, the real workflow is parsed and the
+ * command words that step actually uses — the word in command position, and
+ * every launcher and package manager unwrapped to reach it — must be in
+ * `PROTECTED_COMMANDS`. Empty a matcher's `names` and its verb drops out of the
+ * set while the step still satisfies the matcher, and this rule names it.
+ *
+ * It is deliberately computed from the workflow rather than from the matchers:
+ * a check that asked the matchers what they depend on would be asking the thing
+ * under test. The workflow is the independent witness — these are the words CI
+ * really runs.
+ *
+ * @param {object} jobs the workflow's `jobs` mapping
+ * @param {string[]} protectedCommands the set to check against; a parameter so
+ *   the self-test can hand it a gutted one and watch this fire
+ */
+export function protectedCommandCoverage(jobs, protectedCommands = PROTECTED_COMMANDS) {
+  const held = new Set(protectedCommands);
+  const problems = [];
+  for (const [jobId, required] of Object.entries(REQUIRED_STEPS)) {
+    const job = jobs[jobId];
+    if (!isPlainObject(job)) continue;
+    const scripts = (Array.isArray(job.steps) ? job.steps : [])
+      .filter((step) => isPlainObject(step) && typeof step.run === 'string')
+      .map((step) => step.run);
+    const matchers = [];
+    for (const step of required) {
+      matchers.push([step.what, step.test]);
+      for (const prerequisite of step.requires ?? []) {
+        matchers.push([prerequisite.what, prerequisite.test]);
+      }
+    }
+    for (const [what, matcher] of matchers) {
+      for (const script of scripts) {
+        for (const command of completedCommands(script)) {
+          if (!matcher.match(command)) continue;
+          // The words a *shell* resolves, which is what shadowing is about. The
+          // first word written, and every launcher and package manager stripped
+          // to reach the real command — plus the unwrapped command word itself,
+          // unless a package manager did the unwrapping, because `pnpm lint`
+          // resolves `lint` in package.json and bash never sees it. That last
+          // clause is not a convenience: without it this rule demanded that
+          // `lint`, `typecheck` and `build` be protected against a shell
+          // function that could not affect them, which is a false red and the
+          // fastest way to get a rule deleted.
+          const via = command.via ?? [];
+          const words = [
+            basename(command.raw[0] ?? ''),
+            ...via.map(({ name }) => name),
+            ...(via.some(({ kind }) => kind === 'manager') ? [] : [basename(command.argv[0] ?? '')]),
+          ].filter(Boolean);
+          for (const word of words) {
+            if (held.has(word)) continue;
+            problems.push(
+              `jobs.${jobId}: the step satisfying "${what}" runs \`${word}\` in command position, and \`${word}\` is not in PROTECTED_COMMANDS — so \`${word}() { :; }\` and \`alias ${word}=…\` are not refused by \`no-command-shadowing\`, and this rule is recognising a word anybody can redefine. PROTECTED_COMMANDS is derived from each matcher's \`names\`; a matcher whose \`names\` no longer lists the verbs its \`match\` depends on is a rule that still fires and no longer protects anything.`,
+            );
+          }
+        }
+      }
+    }
+  }
+  return [...new Set(problems)];
+}
+
 /** Ways to make a command word mean something other than the command. */
 const SHADOWING_BUILTINS = new Set(['alias', 'export', 'declare', 'typeset', 'readonly', 'local']);
 
@@ -925,7 +1004,22 @@ function checkCommandShadowing(script, where, add, path) {
     }
   }
 
-  for (const { raw, argv, assignments, redirections } of commands) {
+  for (const { raw, argv, assignments, redirections, via } of commands) {
+    // `env PATH=/tmp/fake node …` survives `unwrap()` — the launcher's own
+    // assignments are not the shell's, so the loop below never saw them. Round
+    // 3's gauntlet filed it as polish, and it is the same rule: the protected
+    // word stops meaning the runner's binary. On a *protected* step `env` is
+    // refused outright by the launcher allowlist; this covers every other step.
+    for (const assignment of via?.flatMap(({ name, assignments: words }) =>
+      name === 'env' ? words : [],
+    ) ?? []) {
+      if (assignment.startsWith('PATH=')) {
+        add(
+          'no-command-shadowing',
+          `${path}: the script at ${where} runs \`env PATH=…\`. That is an assignment the shell never sees — it is an argument to \`env\` — and it decides which binary every command word after it resolves to, which is the same bypass as redefining the command outright.`,
+        );
+      }
+    }
     for (const { name } of assignments) {
       if (name === 'PATH') {
         add(
@@ -1074,10 +1168,83 @@ function checkProtectedStepShape(jobs, path, add) {
  * compose invocation this rule used to read as an unrelated command, and
  * `sh -c '…'` hides an entire script from an engine that parses `run:`. Neither
  * has any business in this job, so both are refused by name.
+ *
+ * ── ROUND 4: BY NAME WAS THE PROBLEM ────────────────────────────────────────
+ * The round-3 gauntlet: "`compose-through-one-entrypoint` is a closed list of
+ * binaries. Standalone `compose`, `podman compose`, and `node -e` with an inline
+ * `execFileSync("docker", ["compose", …])` all pass — the same shape as `sh -c`
+ * before it was banned by name." All three reproduced. It is the launcher
+ * denylist again in a second file: an enumeration of ways to reach a container
+ * runtime is unbounded, and the runtime does not have to be called `docker`.
+ *
+ * So this is an allowlist too, and a much shorter one, because the deploy job
+ * genuinely only does two things. Every `run:` step of `deploy` must be either
+ *
+ *   - `node scripts/ci/<name>.mjs [args]`, the one file family that resolves its
+ *     compose file list from `ATRIUM_COMPOSE_FILES` through `composeArgs()`, or
+ *   - the `cat > .env` heredoc that writes the deployment environment.
+ *
+ * and anything else is refused *without this file having heard of it*. `compose
+ * up`, `podman compose up`, `nerdctl compose`, `docker`, `sh -c`, `curl … |
+ * sh`, `node -e "require('child_process').execFileSync('docker', …)"` and the
+ * next container CLI are one clause, not five.
+ *
+ * `DEPLOY_ENTRYPOINTS` is exported and `deploy-mutation-ledger.mjs` classifies
+ * its stages with it, so "what the policy permits in this job" and "what the
+ * ledger knows how to run" are one list rather than two that agree today.
  */
 const COMPOSE_VARIABLES = ['ATRIUM_COMPOSE_FILES', 'ATRIUM_COMPOSE_PROJECT'];
-/** Shells invoked as a command: everything inside `-c` is opaque to this engine. */
-const SHELL_WRAPPERS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'busybox']);
+
+/** `scripts/ci/<name>.mjs`, however many `../` the step's directory needs. */
+export const CI_SCRIPT_PATH = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
+
+/**
+ * The two command shapes the deploy job may run, as predicates over one parsed
+ * command. Anything else is refused.
+ *
+ * `runsItsScript` is part of the first one deliberately: `node --check
+ * scripts/ci/assert-page-serves.mjs` matches the path and executes nothing, and
+ * an entrypoint allowlist that accepted it would re-open the round-3 bypass at
+ * the level below the shell.
+ */
+export const DEPLOY_ENTRYPOINTS = [
+  {
+    id: 'ci-script',
+    describe: '`node scripts/ci/<name>.mjs [args]`',
+    /** @returns {string|null} the script's bare name */
+    match: ({ argv }) => {
+      if (argv[0] !== 'node' || !runsItsScript(argv)) return null;
+      const operand = firstOperand(argv);
+      const found = operand === undefined ? null : CI_SCRIPT_PATH.exec(operand);
+      return found ? found[1] : null;
+    },
+  },
+  {
+    id: 'env-file',
+    describe: '`cat > .env <<…`, the deployment environment heredoc',
+    match: ({ argv, redirections }) =>
+      argv[0] === 'cat' &&
+      redirections.some(
+        ({ op, target }) => (op === '>' || op === '>>') && target.value === '.env',
+      )
+        ? '.env'
+        : null,
+  },
+];
+
+/**
+ * Which deploy entrypoint this command is, or null.
+ *
+ * @param {object} command one entry of `parseScript(step.run).commands`
+ * @returns {{entrypoint: object, name: string}|null}
+ */
+export function deployEntrypoint(command) {
+  for (const entrypoint of DEPLOY_ENTRYPOINTS) {
+    const name = entrypoint.match(command);
+    if (name !== null) return { entrypoint, name };
+  }
+  return null;
+}
 
 function checkComposeEntrypoint(jobs, path, add) {
   const job = jobs[DEPLOY_JOB];
@@ -1101,8 +1268,14 @@ function checkComposeEntrypoint(jobs, path, add) {
       }
     }
     if (typeof step.run !== 'string') continue;
-    for (const { argv, raw, assignments } of parseScript(step.run).commands) {
-      for (const { name } of assignments) {
+    // A step the shape rule already refuses is refused; naming it twice would
+    // make every `false && node …` mutation trip two rules, and "each mutation
+    // fires exactly its own rule" is what makes the self-test's purity check
+    // mean anything. `protected-steps-run-one-command` owns *is it one
+    // unconditional command*; this owns *which command*.
+    if (singleCommandProblems(step.run).length > 0) continue;
+    for (const command of parseScript(step.run).commands) {
+      for (const { name } of command.assignments) {
         if (COMPOSE_VARIABLES.includes(name)) {
           add(
             'compose-through-one-entrypoint',
@@ -1110,20 +1283,10 @@ function checkComposeEntrypoint(jobs, path, add) {
           );
         }
       }
-      const word = basename(argv[0] ?? '');
-      if (SHELL_WRAPPERS.has(word) && raw.includes('-c')) {
-        add(
-          'compose-through-one-entrypoint',
-          `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run invokes \`${word} -c\`. Everything inside that string is opaque to this engine — including a second \`docker compose\` with its own \`-f\` list — so it is refused rather than parsed at one remove.`,
-        );
-        continue;
-      }
-      const isCompose =
-        word === 'docker-compose' || (word === 'docker' && argv.slice(1).includes('compose'));
-      if (!isCompose) continue;
+      if (deployEntrypoint(command) !== null) continue;
       add(
         'compose-through-one-entrypoint',
-        `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run invokes \`${word}\` directly. It would carry its own \`-f\` list, and a second file list is one the preflight, the image record and every assertion here cannot see — which is exactly how a "safe" overlay let the preflight approve one stack while another came up. Use \`node scripts/ci/compose-stack.mjs <verb>\`, which resolves the list from ATRIUM_COMPOSE_FILES like everything else in this job.`,
+        `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run runs \`${command.raw.join(' ')}\`, which is not one of the entrypoints this job may use: ${DEPLOY_ENTRYPOINTS.map(({ describe }) => describe).join(', or ')}. This is an allowlist because the previous version was a list of binaries — \`docker\`, \`docker-compose\`, \`sh -c\` — and a blind review walked past it three ways in one line each: standalone \`compose\`, \`podman compose\`, and \`node -e\` with an inline \`execFileSync("docker", ["compose", …])\`. Anything that can reach a container runtime carries its own \`-f\` list, and a second file list is one the preflight, the image record and every assertion here cannot see. Put the work in a \`scripts/ci/*.mjs\` file, which resolves the list from ATRIUM_COMPOSE_FILES through \`composeArgs()\` like everything else in this job — and give it a mutation in \`deploy-mutation-ledger.mjs\`, which classifies stages with this same list.`,
       );
     }
   }
@@ -1400,6 +1563,9 @@ export function checkWorkflow(source, path = '<workflow>') {
   // ---- the protected steps are canonical, and compose is resolved once ----
   checkProtectedStepShape(jobs, path, add);
   checkComposeEntrypoint(jobs, path, add);
+  for (const problem of protectedCommandCoverage(jobs)) {
+    add('protected-commands-cover-the-verbs', `${path}: ${problem}`);
+  }
 
   // ---- the gate ----------------------------------------------------------
   const gate = jobs[GATE_JOB];

@@ -549,69 +549,289 @@ export function singleCommandProblems(script) {
   if (commands.some((command) => command.background)) {
     problems.push('it backgrounds the command, so the step reports before it has finished');
   }
-  // ── LAUNCHERS THAT NEED NOT LAUNCH ──────────────────────────────────────
-  // Found by a blind cross-lineage review of the first version of this rule,
-  // which had closed `false && … ; true` and left the same property open one
-  // level down. `unwrap()` sees through a launcher so the command it launches is
-  // recognised where it really is — right for recognition, and it means a
-  // launcher's own options are invisible to every rule that reads `argv`. Two
-  // of them decide whether the command runs at all:
-  //
-  //   xargs -r node scripts/ci/assert-page-serves.mjs   # empty stdin: runs it zero times, exits 0
-  //   sudo -b node scripts/ci/assert-page-serves.mjs    # detaches; the step reports before it finishes
-  //
-  // Both satisfy every presence matcher and, before this, the shape rule too.
-  // This is a list of spellings rather than a proof, exactly like
-  // `no-command-shadowing` — stated there and true here.
-  for (const command of commands) {
-    if ((command.via ?? []).includes('xargs')) {
+  for (const command of commands) problems.push(...launcherProblems(command));
+  return problems;
+}
+
+/**
+ * Launchers a protected step may reach its command through, and the options of
+ * theirs it may pass.
+ *
+ * ── WHY THIS IS AN ALLOWLIST (#40 round 4) ──────────────────────────────────
+ * Round 3 refused two spellings by name — `xargs`, and a `-b`/`--background`
+ * anywhere in a launcher's prefix — and said out loud that it was "a list of
+ * spellings rather than a proof". The round-3 gauntlet spent one line proving
+ * it: `setsid -f node scripts/ci/assert-page-serves.mjs`. `setsid` was in the
+ * recognised-launcher table, so `unwrap()` saw straight through it; `-f` is
+ * neither `-b` nor `--background`; and `bash -eo pipefail -c 'setsid -f sleep
+ * 30'` exits 0 in two milliseconds. Policy-clean, CI-green, and the assertion's
+ * exit status never observed by anything.
+ *
+ * That was the fifteenth spelling of "invoked is not runs" across #28 and #40,
+ * and each of the previous fourteen was closed one at a time by adding it to a
+ * list of refusals. A list of ways to evade is unbounded by construction: the
+ * sixteenth exists before anybody writes it down. So the polarity is inverted
+ * here. A protected step may reach its command through the launchers in this
+ * table **and nothing else**, with the options in this table **and no others**.
+ * `setsid`, `nohup`, `env`, `exec`, `xargs`, `flock`, `systemd-run`, `nice`,
+ * `stdbuf`, `doas`, `builtin`, `ionice` and every launcher nobody has thought of
+ * yet are all refused by the same clause, which is the point: the refusal does
+ * not have to have heard of them.
+ *
+ * Measured here, under `bash --noprofile --norc -eo pipefail -c`, which is the
+ * shell a runner uses for a step with no `shell:` key:
+ *
+ *     setsid -f false                              exit 0,    2ms
+ *     setsid sleep 3                               exit 0, 3003ms
+ *     flock -n -E 0 <a held lock> false            exit 0,    2ms
+ *     timeout 5 false                              exit 1,    3ms
+ *     timeout 0 false                              exit 1,    3ms
+ *     command false                                exit 1,    2ms
+ *     command sleep 2                              exit 0, 2003ms
+ *     nohup false                                  exit 1,    3ms
+ *
+ * Two of those are worth reading twice. **Bare `setsid` waited**, because it
+ * execs its argument when the caller is not already a process group leader and
+ * forks when it is — so whether the step waits depends on how the runner
+ * happened to start the shell, which is not a property the workflow controls or
+ * can test. A launcher whose waiting is conditional on its caller fails
+ * property 3 whichever way today's measurement came out. And **`nohup` passes
+ * all three properties**: it is refused for not being on the list, not for being
+ * unsafe. That is the allowlist working as intended — absence is the default,
+ * and "nobody has needed it" is a sufficient reason to leave a launcher out.
+ *
+ * ── WHAT AN ENTRY HAS TO PROVE ──────────────────────────────────────────────
+ * Three properties, all three, for the launcher *and* for every option listed
+ * beside it. They are the definition of "the step takes the command's exit
+ * status", broken into the three ways a launcher can fail to give it:
+ *
+ *   1. **It execs the command.** The words after it are an argv it runs, not a
+ *      string it interprets (`sh -c`) and not a name it looks up (`command -v`).
+ *   2. **It runs it exactly once, unconditionally.** Not "once per input line,
+ *      which may be zero" (`xargs -r`), not "unless a lock is held" (`flock -n
+ *      -E 0`), not "as a transient unit and return" (`systemd-run` without
+ *      `--wait`).
+ *   3. **It waits for it and exits with its status.** Not "forks and returns"
+ *      (`setsid -f`, `sudo -b`, `screen -dm`), and not "reports its own success
+ *      at having started something".
+ *
+ * The evidence for each is written in `why` below and has two parts: the
+ * sentence of the manual that states the property, and a measurement under the
+ * shell GitHub Actions uses — `bash --noprofile --norc -eo pipefail -c '<the
+ * launcher> false'` must exit non-zero, and `… '<the launcher> sleep 2'` must
+ * take about two seconds. A launcher that passes the first and not the second
+ * has property 3 exactly backwards, which is what `setsid -f` does.
+ *
+ * The rule those two measurements encode, stated once so a future entry can be
+ * argued about rather than guessed at: **no value of any listed option may
+ * produce exit 0 without the command having run to completion.** It is a rule
+ * about the *worst* case, not the usual one — which is why `timeout 0` is
+ * admissible (a duration of 0 means no limit, and an expiry is 124, so neither
+ * branch is a silent success) and `flock -n -E 0` is not (the lock-held branch
+ * is exit 0 with the command never started).
+ *
+ * ── HOW A FUTURE LAUNCHER GETS ADDED ────────────────────────────────────────
+ * Four things in one commit, or it does not go in:
+ *
+ *   a. an entry here whose `why` cites the manual sentence for each of the three
+ *      properties, for the launcher and for each option added beside it;
+ *   b. the two measurements above, quoted in `why` with the exit status and the
+ *      elapsed time, taken under `bash --noprofile --norc -eo pipefail -c`;
+ *   c. an ACCEPTED_FORMS fixture in `workflow-policy-selftest.mjs` — the real
+ *      workflow rewritten to use it must come back *completely clean*, which is
+ *      what proves the entry is reachable rather than decorative;
+ *   d. a REJECTED fixture for the nearest option that breaks one of the three
+ *      properties, so the entry's boundary is a test rather than a claim.
+ *
+ * An option is added the same way and separately: being on this table is not a
+ * property of the binary, it is a property of the binary *with these flags*.
+ * `timeout` waits; `timeout` is on the list. `sudo` waits; `sudo -b` is not on
+ * the list, and it is refused for not being on it rather than for being `-b`.
+ *
+ * ── WHAT IT STILL DOES NOT PROVE ────────────────────────────────────────────
+ * The same boundary `no-command-shadowing` states: this reads *words*, and a
+ * shell function or a PATH entry can make `timeout` mean anything. Executable
+ * provenance is governance-bound and is not claimed here. What changed is only
+ * the polarity of the enumeration — an unknown spelling now fails closed.
+ */
+export const PROTECTED_STEP_LAUNCHERS = {
+  command: {
+    options: { '-p': true },
+    why: 'POSIX: `command` executes the utility "in the current shell environment" with the argv it is given, suppressing function lookup — one exec, one wait, and the status is the utility\'s. `-p` only changes which PATH is searched. Measured: `command false` exits 1 in 2ms, `command sleep 2` takes 2003ms. `-v`/`-V` print a path instead of running anything and are refused by `unwrap` itself, one layer earlier.',
+  },
+  timeout: {
+    options: {
+      '-s': true,
+      '--signal': true,
+      '-k': true,
+      '--kill-after': true,
+      '--preserve-status': true,
+      '--foreground': true,
+      '-v': true,
+      '--verbose': true,
+    },
+    why: 'coreutils: "Start COMMAND, and kill it if still running after DURATION"; the exit status is the command\'s, or 124 when the duration expired. Every listed option changes which signal is sent or when — none of them stops the wait, and 124 is non-zero, so a timed-out assertion fails the step rather than passing it. Measured: `timeout 5 false` exits 1 in 3ms, `timeout 5 sleep 2` takes 2003ms, and `timeout 0 false` exits 1 — a duration of 0 is documented as no limit, so neither branch of the argument is a silent success.',
+  },
+  sudo: {
+    options: {
+      '-u': true,
+      '--user': true,
+      '-g': true,
+      '--group': true,
+      '-n': true,
+      '--non-interactive': true,
+      '-E': true,
+      '--preserve-env': true,
+      '-H': true,
+      '--set-home': true,
+    },
+    why: 'sudo(8): "sudo will wait until the command has completed" and "exits with the exit status of the command". The listed options choose the target user, group and environment and change nothing about the wait. Not independently measured here: this sandbox has no sudo privileges, so `sudo -n true` exits 1 without running anything — which is fail-closed and therefore says nothing either way about propagation. The manual sentence is the evidence, and it is quoted rather than paraphrased for that reason. `-b`/`--background` is the documented exception — "the command is run in the background … sudo will exit immediately" — and it is refused for not being on this list, which is also why `-B`, `--bell`, or whatever the next release adds is refused without anybody editing anything.',
+  },
+};
+
+/**
+ * Package managers a protected step may run its command through.
+ *
+ * Half this repository's gates are `pnpm --filter @atrium/db exec node …`, so
+ * these have to be reachable, and they satisfy the same three properties: `pnpm`
+ * spawns the child, waits for it, and exits with its status (`pnpm exec false`
+ * exits 1, `pnpm exec sleep 2` takes 2.0s). Their options are enumerated for the
+ * same reason the launchers' are — `--filter` and `--frozen-lockfile` are what
+ * the workflow uses, and an option nobody has justified is refused rather than
+ * assumed harmless.
+ *
+ * Stated rather than implied: what a package.json script *does* once pnpm has
+ * waited for it is semantics, and semantics is out of scope for every rule in
+ * this repository's policy engine (see the SCOPE block in ci.yml).
+ */
+export const PROTECTED_STEP_MANAGERS = {
+  pnpm: {
+    '--filter': true,
+    '-F': true,
+    '--dir': true,
+    '-C': true,
+    '--frozen-lockfile': true,
+    '--recursive': true,
+    '-r': true,
+    '--workspace-root': true,
+    '-w': true,
+    '--silent': true,
+    '--reporter': true,
+    '--if-present': true,
+  },
+  npm: { '--prefix': true, '-w': true, '--workspace': true, '--silent': true },
+  yarn: { '--cwd': true, '--silent': true },
+  bun: { '--cwd': true, '--silent': true },
+  npx: { '--package': true, '-p': true, '--yes': true, '-y': true, '--no-install': true },
+  bunx: { '--package': true, '-p': true, '--yes': true, '-y': true },
+};
+
+/** `--user=root` and `--user root` name the same option. */
+function optionName(word) {
+  const equals = word.indexOf('=');
+  return equals === -1 ? word : word.slice(0, equals);
+}
+
+/**
+ * The launchers this command reaches its real command through, checked against
+ * the two tables above.
+ *
+ * Reads `command.via`, which `unwrap()` fills in with the launcher name, its
+ * kind, and the option words that were consumed on its behalf — so the check is
+ * over what was actually stripped, not over a re-scan of the prefix. Round 3
+ * re-scanned (`raw.slice(0, raw.length - argv.length)`) and therefore could not
+ * tell whose option a word was.
+ */
+export function launcherProblems(command) {
+  const problems = [];
+  const allowed = Object.keys(PROTECTED_STEP_LAUNCHERS).map((name) => `\`${name}\``);
+  const managers = Object.keys(PROTECTED_STEP_MANAGERS).map((name) => `\`${name}\``);
+  for (const { name, kind, options } of command.via ?? []) {
+    const table =
+      kind === 'manager'
+        ? PROTECTED_STEP_MANAGERS[name]
+        : PROTECTED_STEP_LAUNCHERS[name]?.options;
+    if (table === undefined) {
       problems.push(
-        'it reaches the command through `xargs`, which decides how many times to run it — including none: `xargs -r … </dev/null` is a real invocation that runs nothing and exits 0',
+        `it reaches the command through \`${name}\`, which is not on the allowlist of launchers a protected step may use (${allowed.join(', ')}, and the package managers ${managers.join(', ')}). This is an allowlist rather than a list of refusals because fifteen ways of writing "invoked but not run" were enumerated one round at a time and the next one always existed: \`setsid -f node x\` exits 0 in two milliseconds and never observes x's status. To add \`${name}\`, prove the three properties in PROTECTED_STEP_LAUNCHERS — it execs the command, it runs it exactly once, and it waits for it and exits with its status — with the manual sentence and the two measurements each entry there carries`,
       );
+      continue;
     }
-    const prefix = command.raw.slice(0, command.raw.length - (command.argv?.length ?? 0));
-    const detaches = prefix.find((word) => word === '-b' || word === '--background');
-    if (detaches !== undefined) {
-      problems.push(
-        `it launches the command with \`${detaches}\`, which detaches it — the step reports success before the command has an exit status`,
-      );
+    for (const option of options ?? []) {
+      const flag = optionName(option);
+      if (!Object.hasOwn(table, flag)) {
+        problems.push(
+          `it passes \`${flag}\` to \`${name}\`, which is not one of the options a protected step may use it with (${Object.keys(table)
+            .map((word) => `\`${word}\``)
+            .join(', ')}). Being on the launcher allowlist is a property of the binary *with these flags*: \`sudo\` waits for its command and exits with its status, and \`sudo -b\` returns immediately. An option is justified one at a time, with the manual sentence and the two measurements, or it is refused`,
+        );
+      }
     }
   }
   return problems;
 }
 
 /**
- * Node flags that make `node <script>` compile, describe or ignore the script
- * rather than run it.
+ * Node flags a protected `node <script>` may carry.
  *
- * `node --check scripts/ci/assert-page-serves.mjs` parses the file, prints
- * nothing, exits 0, and executes not one line of it. Every recognition rule here
- * is satisfied — `node` is the command word and the script is the first operand
- * — and so was the shape rule, because it is one unconditional command. It is
- * the round-2 bypass again, at the level below the shell.
+ * ── THE DENYLIST THIS REPLACES, AND WHY (#40 round 4) ───────────────────────
+ * Round 3 listed the flags that make `node <script>` *not* run the script —
+ * `--check`, `-c`, `--version`, `-e`, `-p` and the rest — after a blind review
+ * found `node --check scripts/ci/assert-page-serves.mjs` clean: it parses the
+ * file, prints nothing, exits 0, and is one unconditional command, so the shape
+ * rule had nothing to say either.
  *
- * So a matcher asks this too: a `node` invocation carrying one of these is not
- * an invocation of the script, and reads as *missing*, which is the loud answer.
+ * It was the same denylist mistake as the launcher table, one layer down, and it
+ * had the same sequel. Measured against the round-3 engine, three more spellings
+ * were clean:
+ *
+ *     node --test scripts/ci/assert-page-serves.mjs        # runs it as a test file
+ *     node -r ./nobble.mjs scripts/ci/assert-page-serves.mjs
+ *     node --experimental-loader ./x.mjs scripts/ci/assert-page-serves.mjs
+ *
+ * `--test` changes what the exit status means; `-r` and `--experimental-loader`
+ * run somebody else's code first, in the same process, before a line of the
+ * assertion — which can stub `process.exit`, `fetch`, or the reporter the
+ * assertion writes its verdict through. None of them is on any denylist because
+ * nobody had thought of them, and the next release of Node ships more.
+ *
+ * So the polarity is inverted here too. A `node` invocation of a protected
+ * script may carry **only** the flags below, each of which changes diagnostics
+ * and nothing else: no code is loaded, no module hook is installed, and the exit
+ * status is still the script's. Everything else — every flag that exists and
+ * every flag that does not yet — reads as *not an invocation of the script*,
+ * which makes the step **missing**, which is the loud answer.
+ *
+ * Adding one takes the same evidence as a launcher: the manual sentence saying
+ * it neither loads code nor changes the exit status, and a measurement that
+ * `node <flag> -e 'process.exit(3)'` still exits 3.
  */
-export const NON_EXECUTING_NODE_FLAGS = new Set([
-  '--check',
-  '-c',
-  '--version',
-  '-v',
-  '--help',
-  '-h',
-  '--eval',
-  '-e',
-  '--print',
-  '-p',
-  '--completion-bash',
-  '--v8-options',
+export const NODE_FLAGS_ALLOWED = new Set([
+  '--enable-source-maps',
+  '--no-warnings',
+  '--trace-warnings',
+  '--trace-uncaught',
+  '--disable-warning',
+  '--max-old-space-size',
+  '--stack-size',
+  '--use-strict',
 ]);
 
-/** True when this argv is `node` doing something other than running its script. */
+/**
+ * True when this argv is `node` running its script as a program.
+ *
+ * Non-`node` argvs are not this function's business and answer true; the
+ * launcher allowlist is what governs those.
+ */
 export function runsItsScript(argv) {
   if (argv[0] !== 'node') return true;
-  return !argv.slice(1).some((word) => NON_EXECUTING_NODE_FLAGS.has(word));
+  for (const word of argv.slice(1)) {
+    if (!word.startsWith('-') || word === '-' || word === '--') return true; // the script
+    const equals = word.indexOf('=');
+    if (!NODE_FLAGS_ALLOWED.has(equals === -1 ? word : word.slice(0, equals))) return false;
+  }
+  // Only flags, no operand: `node --no-warnings` runs a REPL, not a script.
+  return false;
 }
 
 /**
@@ -623,6 +843,27 @@ export function runsItsScript(argv) {
  * the command they launch is seen where it actually is. Each one genuinely
  * *execs* its argument — that is the entry criterion, and it is why `echo` will
  * never appear in this table.
+ *
+ * ── THIS TABLE IS RECOGNITION, NOT PERMISSION (#40 round 4) ─────────────────
+ * `setsid` sat here for two rounds and that was correct: `setsid node x` really
+ * does run x, and a policy that reads it as "the assertion is missing" is wrong
+ * in the direction that gets rules deleted. What was wrong was that being here
+ * was also, silently, permission — nothing else asked whether a launcher waits
+ * for what it launched. Recognition and permission are two questions now:
+ * everything here is *seen through*, and only `PROTECTED_STEP_LAUNCHERS` above
+ * may appear on a step whose failure is the point.
+ *
+ * `flock` and `systemd-run` were added in round 4 by asking "what else execs an
+ * argv on a GitHub runner", before anybody found them in a workflow. Both are
+ * recognised, both are refused on a protected step, and each has a fixture:
+ * `flock -n -E 0 <a held lock> false` was measured here at **exit 0 in 2ms**
+ * with `false` never run, and `systemd-run --user node x` returns as soon as the
+ * transient unit is queued (the manual's `--wait` exists precisely because the
+ * default does not). They are here so that the *allowlist* is what refuses them,
+ * rather than their absence from a table — an evasion that is merely
+ * unrecognised is an evasion the engine reports as a missing step, and the
+ * fixtures in the self-test prove these two trip the shape rule and nothing
+ * else.
  */
 const LAUNCHERS = {
   sudo: { value: ['-u', '-g', '-p', '-U', '-C', '-h', '--user', '--group', '--prompt'] },
@@ -633,6 +874,16 @@ const LAUNCHERS = {
   exec: { value: ['-a'] },
   nohup: { value: [] },
   setsid: { value: [] },
+  // `flock [options] <file> command …` — the lock path is a positional. With
+  // `-n` it gives up rather than waiting, and `-E <status>` chooses what "gave
+  // up" exits with, so `flock -n -E 0 /tmp/lock node x` is a real invocation
+  // that runs x zero times and exits 0.
+  flock: { value: ['-E', '--conflict-exit-code', '-w', '--wait', '--timeout'], positional: 1 },
+  // `systemd-run [options] command …` queues a transient unit and returns as
+  // soon as it has been started, unless `--wait` is given.
+  'systemd-run': {
+    value: ['--unit', '-u', '--property', '-p', '--uid', '--gid', '--setenv', '-E', '--machine'],
+  },
   stdbuf: { value: ['-i', '-o', '-e'] },
   nice: { value: ['-n'] },
   ionice: { value: ['-c', '-n', '-p'] },
@@ -700,9 +951,12 @@ function isOption(word) {
  */
 function unwrap(argv) {
   let words = argv;
-  // The prefix words that were stripped, in order. A rule that means "run
-  // through the workspace's package manager" asks about this rather than about
-  // `argv[0]`, so `sudo pnpm build` is still a `pnpm build`.
+  // The prefix words that were stripped, in order, as
+  // `{name, kind, options, assignments}`. A rule that means "run through the
+  // workspace's package manager" asks about this rather than about `argv[0]`, so
+  // `sudo pnpm build` is still a `pnpm build` — and `singleCommandProblems()`
+  // asks it which launcher owned which option word, which is a question round
+  // 3's "everything before the argv" prefix scan could not answer.
   const via = [];
   for (let guard = 0; guard < 8 && words.length > 0; guard += 1) {
     const head = words[0];
@@ -710,27 +964,35 @@ function unwrap(argv) {
     if (launcher !== undefined) {
       let index = 1;
       let rejected = false;
+      const options = [];
+      const assignments = [];
       while (index < words.length && isOption(words[index])) {
         // `command -v pnpm` looks up a path; it does not run pnpm.
         if ((launcher.reject ?? []).includes(words[index])) rejected = true;
+        options.push(words[index]);
         if (launcher.value.includes(words[index])) index += 1;
         index += 1;
       }
       if (launcher.assignments === true) {
-        while (index < words.length && ASSIGNMENT.test(words[index])) index += 1;
+        while (index < words.length && ASSIGNMENT.test(words[index])) {
+          assignments.push(words[index]);
+          index += 1;
+        }
       }
       for (let skipped = 0; skipped < (launcher.positional ?? 0); skipped += 1) {
         if (index < words.length) index += 1;
       }
       if (rejected || index >= words.length) return { argv: words, via };
-      via.push(head);
+      via.push({ name: head, kind: 'launcher', options, assignments });
       words = words.slice(index);
       continue;
     }
     const manager = Object.hasOwn(PACKAGE_MANAGERS, head) ? PACKAGE_MANAGERS[head] : undefined;
     if (manager !== undefined) {
       let index = 1;
+      const options = [];
       while (index < words.length && isOption(words[index])) {
+        options.push(words[index]);
         if (manager.value.includes(words[index])) index += 1;
         index += 1;
       }
@@ -741,7 +1003,7 @@ function unwrap(argv) {
       if (index >= words.length) return { argv: words, via };
       if (EXEC_WORDS.has(words[index])) index += 1;
       if (index >= words.length) return { argv: words, via };
-      via.push(head);
+      via.push({ name: head, kind: 'manager', options, assignments: [] });
       words = words.slice(index);
       continue;
     }

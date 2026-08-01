@@ -94,6 +94,33 @@
  *     execute (an expansion it would have to resolve, a shape the policy would
  *     refuse) is a hard error, not a stage quietly modelled.
  *
+ * ## Round 4: the same command is not the same execution
+ *
+ * The round-3 gauntlet, on `setsid -f node scripts/ci/assert-page-serves.mjs`:
+ * "CI (bash, parent returns) and the ledger (`execFileSync`, Node waits on the
+ * child tree) again describe different executions." Exactly so, and it is worth
+ * being precise about the mechanism, because the two halves fail in opposite
+ * directions. GitHub runs the step as `bash -e <file>`: `setsid -f` forks, the
+ * parent exits 0 in about two milliseconds, and the runner marks the step green
+ * while the assertion is still starting. This file ran the same words through
+ * `execFileSync` with piped stdio — which returns when the pipes reach EOF, and
+ * the detached grandchild inherited them, so Node waited for the whole tree and
+ * saw the assertion's real outcome. A ledger that reports CAUGHT for an
+ * execution CI never performed is the round-2 defect with the halves swapped.
+ *
+ * So the ledger stopped having an execution model of its own. Each stage's
+ * `run:` script is written to a file and executed the way the runner executes
+ * it — `bash -e <file>`, with `-o pipefail` deliberately *not* added, because
+ * GitHub's default shell for a step with no `shell:` key does not add it either
+ * and the point is to be the same shell rather than a better one. The workflow
+ * is checked for anything that would make that untrue (a `defaults.run.shell`,
+ * a job or step `shell:`) and refuses to run if it finds one, rather than
+ * trusting `no-shell-override` to have been enforced by a different program.
+ *
+ * The shape rule is still asked first, so nothing conditional or multi-command
+ * reaches bash here; what bash adds is the *process semantics* — who waits for
+ * whom — which is the half an argv cannot carry.
+ *
  * The mutation overlay reaches those commands the way the real job's file list
  * reaches them: through `ATRIUM_COMPOSE_FILES`, which
  * `scripts/ci/compose-stack.mjs` and every assertion resolve from. That is why
@@ -120,12 +147,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import {
-  firstOperand,
-  parseScript,
-  runsItsScript,
-  singleCommandProblems,
-} from './shell-command.mjs';
+import { firstOperand, parseScript, singleCommandProblems } from './shell-command.mjs';
+import { deployEntrypoint } from './workflow-policy.mjs';
 
 const project = process.env.ATRIUM_COMPOSE_PROJECT?.trim() || 'atrium-ledger';
 const baseFiles = (
@@ -174,8 +197,6 @@ const COMPOSE_VERBS = {
   down: { kind: 'down', id: 'the teardown' },
 };
 
-const CI_SCRIPT = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
-
 /**
  * One step's argv, classified — never its text.
  *
@@ -184,51 +205,72 @@ const CI_SCRIPT = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
  * `false && node …assert-page-serves.mjs; true` produced a ledger line
  * certifying an assertion CI had skipped. The argv comes from the same parser
  * `workflow-policy.mjs` uses, and it is the thing that gets executed.
+ *
+ * Round 4: *which* commands are classifiable is no longer decided here. It is
+ * `deployEntrypoint()`, exported by the policy engine, which is the same list
+ * `compose-through-one-entrypoint` allows in this job. Two files agreeing about
+ * what may run in the deploy job used to be two lists that happened to match;
+ * now it is one list, and teaching the policy a new entrypoint without teaching
+ * this file is a syntax error rather than a silently skipped stage.
  */
-function classify(command) {
-  const { argv, raw, redirections } = command;
-  // `raw`, not `argv`: the argv has been unwrapped past any launcher, so
-  // `timeout 30 node x` would execute as `node x` — a different command from the
-  // one the workflow runs, which is the whole thing this file claims not to do.
-  // Classification reads the unwrapped form; execution replays the written one.
-  const run = { argv: raw };
-  if (argv[0] === 'node') {
-    const script = firstOperand(argv);
-    const found = script === undefined ? null : CI_SCRIPT.exec(script);
-    if (!found) return null;
-    // `node --check x.mjs` compiles the file and runs none of it. It reads as
-    // absent to the policy engine now; here it is a hard error, because a stage
-    // whose command does nothing would make every case after it meaningless.
-    if (!runsItsScript(argv)) return null;
-    const name = found[1];
-    if (name === 'compose-stack') {
-      const verb = firstOperand(argv, argv.indexOf(script) + 1);
-      const definition = verb && Object.hasOwn(COMPOSE_VERBS, verb) ? COMPOSE_VERBS[verb] : null;
-      return definition ? { ...definition, ...run } : null;
-    }
-    const kind = name.startsWith('assert-')
-      ? 'assertion'
-      : name === RECORDS_WHAT_WAS_BUILT
-        ? 'record'
-        : 'script';
-    return { kind, id: name, ...run };
-  }
-  // The only non-node step of the job: the heredoc that writes `.env`. It is a
-  // redirection, so there is no argv to run without a shell, and there is
-  // nothing in it an overlay could reach. Recognised by *what it writes* — any
-  // `cat` used to satisfy this, so a second one anywhere in the job became a
-  // second "deployment environment" stage and was silently skipped.
-  if (
-    argv[0] === 'cat' &&
-    redirections.some(({ op, target }) => (op === '>' || op === '>>') && target.value === '.env')
-  ) {
+function classify(command, script) {
+  const found = deployEntrypoint(command);
+  if (found === null) return null;
+  // `script`, not the argv: the step is executed by bash exactly as the runner
+  // executes it, so what a stage carries is the text of its own `run:` block.
+  // Round 3 executed the argv and had to reason about which launcher it had
+  // unwrapped; round 4 does not reason about it at all.
+  const run = { argv: command.raw, script };
+  if (found.entrypoint.id === 'env-file') {
     return { kind: 'environment', id: 'the deployment environment', ...run };
   }
-  return null;
+  const name = found.name;
+  if (name === 'compose-stack') {
+    const operand = firstOperand(command.argv);
+    const verb = firstOperand(command.argv, command.argv.indexOf(operand) + 1);
+    const definition = verb && Object.hasOwn(COMPOSE_VERBS, verb) ? COMPOSE_VERBS[verb] : null;
+    return definition ? { ...definition, ...run } : null;
+  }
+  const kind = name.startsWith('assert-')
+    ? 'assertion'
+    : name === RECORDS_WHAT_WAS_BUILT
+      ? 'record'
+      : 'script';
+  return { kind, id: name, ...run };
+}
+
+/**
+ * The shell GitHub Actions runs a `run:` step with, and the proof that it is
+ * still that one.
+ *
+ * A step with no `shell:` key runs as `bash -e <file>` on a Linux runner. Every
+ * way of changing that — `defaults.run.shell` at workflow or job level, a
+ * `shell:` on the step — is refused by `no-shell-override` in the policy engine,
+ * and is re-checked here rather than assumed: this file's whole claim in round 4
+ * is that it executes what CI executes, and "a different program enforces that"
+ * is not a claim, it is a dependency.
+ */
+const RUNNER_SHELL = ['bash', '-e'];
+
+function requireDefaultShell(workflow) {
+  const overrides = [];
+  if (workflow?.defaults?.run?.shell !== undefined) overrides.push('defaults.run.shell');
+  for (const [jobId, job] of Object.entries(workflow?.jobs ?? {})) {
+    if (job?.defaults?.run?.shell !== undefined) overrides.push(`jobs.${jobId}.defaults.run.shell`);
+    for (const [index, step] of (Array.isArray(job?.steps) ? job.steps : []).entries()) {
+      if (step?.shell !== undefined) overrides.push(`jobs.${jobId}.steps.${index}.shell`);
+    }
+  }
+  if (overrides.length > 0) {
+    throw new Error(
+      `${WORKFLOW} sets a shell at ${overrides.join(', ')}. This ledger runs every stage as \`${RUNNER_SHELL.join(' ')} <script>\` because that is what the runner does with a step that has no \`shell:\` key, and a receipt from a different shell is a receipt about a different execution — which is exactly how \`setsid -f node …\` came to be green in CI and caught here at the same time.`,
+    );
+  }
 }
 
 function readPipeline() {
   const workflow = parse(readFileSync(WORKFLOW, 'utf8'));
+  requireDefaultShell(workflow);
   const steps = workflow?.jobs?.deploy?.steps;
   if (!Array.isArray(steps)) throw new Error(`${WORKFLOW} has no \`deploy\` job with steps`);
   const pipeline = [];
@@ -254,7 +296,7 @@ function readPipeline() {
     const expandable = command.words.find((word) => word.expandable);
     if (expandable) {
       throw new Error(
-        `${WORKFLOW}: ${where} contains the word ${JSON.stringify(expandable.value)}, which the shell would expand. This ledger runs the argv directly, with no shell, so it cannot know what that becomes — and substituting a guess would mean running a command the workflow does not.`,
+        `${WORKFLOW}: ${where} contains the word ${JSON.stringify(expandable.value)}, which the shell would expand. The deploy job's steps are executed here under a bash whose environment is this ledger's, not the runner's, so a \`$VAR\` would resolve to a different value — or to nothing — and the stage would be a different command from the one CI runs.`,
       );
     }
     if (command.assignments.length > 0) {
@@ -263,10 +305,10 @@ function readPipeline() {
       );
     }
 
-    const stage = classify(command);
+    const stage = classify(command, step.run);
     if (stage === null) {
       throw new Error(
-        `${WORKFLOW}: ${where} runs \`${command.raw.join(' ')}\`, which this ledger cannot classify, so every case below would skip it silently. Teach classify() what it is, and give it a mutation.`,
+        `${WORKFLOW}: ${where} runs \`${command.raw.join(' ')}\`, which this ledger cannot classify, so every case below would skip it silently. It is not one of the entrypoints \`compose-through-one-entrypoint\` allows in this job either — the policy engine and this file read the same list — so teach both, and give it a mutation.`,
       );
     }
     pipeline.push({ ...stage, name: step.name ?? stage.id });
@@ -437,6 +479,13 @@ const CASES = [
     caddyfile: (text) =>
       text.replace(/\thandle \/ws\* \{\n\t\treverse_proxy server:4000\n\t\}\n/, ''),
     note: "The websocket assertion's own mutation, replacing the credit `split-secret` used to take. The realtime server is untouched and healthy, every page serves, signup verifies — and the upgrade falls through to the catch-all and reaches the Next app, which does not speak RFC 6455. Nothing else in the job routes anything to `/ws`, so nothing else notices.",
+  },
+  {
+    id: 'origin-baked-into-the-image',
+    what: 'a `wss://` realtime origin compiled into the web image the stack runs',
+    catches: 'assert-image-origins',
+    prepare: bakeRealtimeOrigin,
+    note: "Round 3's gauntlet: the origin scan was required by policy and never mutation-proven — the one stage exempted for a reason that was about how the original defect got authored rather than about what the check can see. It is not an overlay, because the scan reads the recorded image ID rather than a tag: the tag `compose build` produced is re-pointed at a derived image carrying one unreferenced `.js` file with a `wss://` URL in it, and the pipeline's own `record-built-images` then resolves it. Built, recorded, running and scanned all move together, which is why `assert-image-identity` — the only stage that could have fired first — stays green, along with the boot, the pages, the signup and the websocket upgrade. The file is inert on purpose: the original defect (`next.config.ts` carrying `NEXT_PUBLIC_WS_URL`) breaks the boot as well, and a mutation that breaks four things proves nothing about which check caught it.",
   },
   {
     id: 'trusted-cidr-swallows-caller',
@@ -642,6 +691,82 @@ function buildImageDoppelganger(entry, service = 'app') {
   };
 }
 
+/**
+ * A realtime origin baked into the shipped web image (#40 round 4).
+ *
+ * ── WHY THIS CASE EXISTS ────────────────────────────────────────────────────
+ * The round-3 gauntlet: "`assert-image-origins` is `EXEMPT` in the ledger —
+ * required by policy, never mutation-proven." It was exempted on the grounds
+ * that its mutation is "a `next.config.ts` revert and a rebuild", which is true
+ * of the *original* defect and was the wrong question. What has to be
+ * demonstrated is that the scan goes red when the literal is in the image, not
+ * that one particular authoring mistake puts it there.
+ *
+ * ── HOW IT REACHES THE SCANNER, WHICH IS THE INTERESTING PART ───────────────
+ * `assert-image-origins` deliberately scans the image ID `record-built-images`
+ * wrote down, never a tag — that was round 1's fix, and it means an overlay
+ * pointing `services.app.image` somewhere else does not move the scan at all.
+ * So this case does not use an overlay. It re-points the *tag* `docker compose
+ * build` produced, at an image derived from it that carries one extra file, and
+ * then lets the pipeline's own `record-built-images` stage resolve that tag —
+ * exactly as the real job does. Built, recorded, running and scanned all move
+ * together, which is why `assert-image-identity` (two stages earlier, and the
+ * one thing that could have fired first) stays green.
+ *
+ * The extra file is an unreferenced `.js` under `.next` holding a `wss://` URL.
+ * Deliberately inert: the app must boot, serve, sign users up and answer a
+ * websocket upgrade, so that the only stage with anything to say about it is the
+ * scan. A `next.config.ts` revert would fail the boot as well, and a case that
+ * breaks four things proves nothing about which check caught it.
+ */
+function bakeRealtimeOrigin(entry, service = 'app') {
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+  const built = manifest[service];
+  if (!built?.id || !built?.image) {
+    throw new Error(`no \`${service}\` image in the manifest to bake an origin into`);
+  }
+  const original = execFileSync(
+    'docker',
+    ['image', 'inspect', built.image, '--format', '{{.Id}}'],
+    { encoding: 'utf8' },
+  ).trim();
+  if (original !== built.id) {
+    throw new Error(
+      `\`${built.image}\` resolves to ${original}, not the recorded ${built.id}; this case would bake an origin into an image nobody built`,
+    );
+  }
+  // Assembled rather than written, so that this source file does not itself
+  // contain the literal the scan forbids — the file would then be a hit for
+  // anybody who ever pointed the scan at the repository instead of the image.
+  const probe = `export const realtime = ${JSON.stringify(`${'ws'}s://probe.example/ws`)};\n`;
+  const probeFile = join(workDir, 'atrium-ledger-probe.js');
+  writeFileSync(probeFile, probe);
+  execFileSync('docker', ['build', '-t', built.image, '-f', '-', workDir], {
+    input: `FROM ${built.image}\nCOPY atrium-ledger-probe.js /app/apps/web/.next/atrium-ledger-probe.js\n`,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const mutated = execFileSync(
+    'docker',
+    ['image', 'inspect', built.image, '--format', '{{.Id}}'],
+    { encoding: 'utf8' },
+  ).trim();
+  if (mutated === original) {
+    throw new Error(
+      `building a layer onto \`${built.image}\` produced the same image ID ${original}; the tag was not re-pointed and this case would assert nothing`,
+    );
+  }
+  return {
+    // The tag is put back on the image this tree actually built. Without this
+    // every later case would run against the mutant — the crash-safety lesson
+    // from #22 r5, applied to a tag rather than to a file.
+    cleanup: () => {
+      attempt(() => execFileSync('docker', ['tag', original, built.image]));
+      attempt(() => execFileSync('docker', ['rmi', '-f', mutated]));
+    },
+  };
+}
+
 /** The shipped Caddyfile with one thing changed, mounted over the shipped one. */
 function writeCaddyfile(entry) {
   const original = readFileSync('deploy/Caddyfile', 'utf8');
@@ -671,17 +796,44 @@ function writeCaddyfile(entry) {
 const CONTAINER_FAILURE = /container .* (is unhealthy|exited|has no healthcheck configured)/i;
 
 /**
- * The workflow's own command, run with this case's file list in the environment.
+ * The workflow's own step, run the way the runner runs it.
  *
- * `stage.argv` came out of `ci.yml` and is executed with no shell — the whole
- * point of round 3. Everything a stage needs to know about *which* stack it is
- * looking at arrives through the environment, because that is how the real job
- * tells it too: `compose-stack.mjs` and every assertion resolve their file list
- * from `ATRIUM_COMPOSE_FILES` via `composeArgs`.
+ * ── WHY A SHELL, AFTER ROUND 3 REMOVED ONE (#40 round 4) ────────────────────
+ * Round 3 executed `execFileSync(argv[0], argv.slice(1))` precisely so that no
+ * shell could be involved, and that was the right answer to round 2's defect
+ * (a *name* recovered by regex and run in place of the step). It introduced a
+ * different one. `execFileSync` with piped stdio returns when the pipes reach
+ * EOF, so a step that detaches its command — `setsid -f node …` — was waited for
+ * here and not waited for on the runner. This file reported CAUGHT for an
+ * execution CI never performs.
+ *
+ * Two verifiers that disagree about what "ran" means is the whole ticket. So the
+ * step's own `run:` text is written to a file and executed as `bash -e <file>`,
+ * which is what a runner does with a step that has no `shell:` key — verified at
+ * startup by `requireDefaultShell`. `bash` reaps nothing the runner would not
+ * reap: `setsid -f node x` now returns here in milliseconds, the stage goes
+ * green, and the mutation the assertion was supposed to catch is reported MISSED
+ * — which is the true answer.
+ *
+ * Nothing conditional reaches this function: `singleCommandProblems` has already
+ * refused every shape that could skip or background the command, and the policy
+ * engine refuses the same shapes in the workflow. What bash contributes is only
+ * the process semantics — who waits for whom — which is the half an argv cannot
+ * carry.
+ *
+ * Everything a stage needs to know about *which* stack it is looking at arrives
+ * through the environment, because that is how the real job tells it too:
+ * `compose-stack.mjs` and every assertion resolve their file list from
+ * `ATRIUM_COMPOSE_FILES` via `composeArgs`.
  */
+let stepSerial = 0;
+
 function runValidatedCommand(stage, files, env) {
+  stepSerial += 1;
+  const scriptFile = join(workDir, `step-${stepSerial}.sh`);
+  writeFileSync(scriptFile, stage.script);
   return attempt(() =>
-    execFileSync(stage.argv[0], stage.argv.slice(1), {
+    execFileSync(RUNNER_SHELL[0], [...RUNNER_SHELL.slice(1), scriptFile], {
       encoding: 'utf8',
       env: {
         ...env,
@@ -904,6 +1056,17 @@ function lastLines(text, count) {
  * closed from inside — but it can stop being quiet. `EXEMPT_COUNT` is asserted
  * against the table and quoted in the README, so exempting a stage is an edit to
  * a number a reviewer sees, next to a reason they can read.
+ *
+ * ── ROUND 4: ONE OF THE SIX WAS AN EXCUSE AFTER ALL ─────────────────────────
+ * The round-3 gauntlet: "`assert-image-origins` is EXEMPT — required by policy,
+ * never mutation-proven." Its entry read "its mutation is a `next.config.ts`
+ * revert and a rebuild", which is a true statement about how the *original*
+ * defect was authored and the wrong question entirely: what needs demonstrating
+ * is that the scan goes red when the literal is in the image, not that one
+ * particular mistake puts it there. `origin-baked-into-the-image` does that
+ * without a rebuild, and the table is five. Worth keeping as a lesson about
+ * exemption prose: an entry that describes the *cause* rather than the
+ * *observation* is an entry nobody has re-derived.
  */
 const EXEMPT = {
   'the deployment environment':
@@ -916,8 +1079,6 @@ const EXEMPT = {
     'copies one file out of the proxy and refuses an empty result. It has no configuration an overlay could reach; its one real failure mode is running before the proxy exists, which is a `required-step-prerequisites` pair in the workflow policy with a mutation of its own.',
   'the teardown':
     "`docker compose down` fails for reasons that are the machine's, not a configuration's. Its argv is exercised rather than assumed: `teardown-keeps-volumes` mutates this stage's own flags and `assert-stack-teardown` catches the result, so what is missing is a failure *of* this stage, not a test *through* it.",
-  'assert-image-origins':
-    'scans the compiled bundle for a build-time constant, which requires building the web image with `next.config.ts` reverted — a rebuild, not an overlay. The measurement establishing that the literal lands in the bundle is on the issue.',
 };
 
 /**
@@ -926,7 +1087,7 @@ const EXEMPT = {
  * Asserted against `EXEMPT` rather than derived from it, so that exempting a new
  * stage is an edit to a number a reviewer can see, in a file the README quotes.
  */
-export const EXEMPT_COUNT = 6;
+export const EXEMPT_COUNT = 5;
 
 function checkCoverage() {
   const named = new Set(CASES.map((entry) => entry.catches));
@@ -1087,5 +1248,5 @@ if (bad.length > 0) {
   process.exit(1);
 }
 console.info(
-  `\nAll ${results.length} mutations caught by the stage of the real ${WORKFLOW} pipeline that names them, with no earlier stage firing. Every stage ran the command ${WORKFLOW} runs, argv for argv, at ${tree.head} on a clean tree.`,
+  `\nAll ${results.length} mutations caught by the stage of the real ${WORKFLOW} pipeline that names them, with no earlier stage firing. Every stage ran that step's own \`run:\` script under \`${RUNNER_SHELL.join(' ')}\` — the shell the runner uses for a step with no \`shell:\` key — at ${tree.head} on a clean tree.`,
 );

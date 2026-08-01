@@ -164,10 +164,13 @@ of `ci.yml`'s `deploy` job, every case runs it from the top, and the stage that
 actually fires is what gets credited. A case whose declared check is not the one
 that fired fails the ledger, which is how three cases that had been crediting a
 later check came to name the earlier gate that really stops them. It also refuses
-to run if the job grows a stage no case names and no exemption explains — 6
+to run if the job grows a stage no case names and no exemption explains — 5
 stages are exempt, each with the reason no mutation of it exists, and the number
-is asserted against the table so that exempting a seventh is a visible edit
-rather than a quiet one.
+is asserted against the table so that exempting a sixth is a visible edit
+rather than a quiet one. Round 4 removed one of them: `assert-image-origins` was
+required by policy and never mutation-proven, and now has `origin-baked-into-the-image`,
+which re-points the tag `compose build` produced at an image carrying a `wss://`
+literal and lets the job's own `record-built-images` resolve it.
 
 Since round 3 the ledger **executes each step's own argv**, parsed out of
 `ci.yml` with the parser the policy engine uses, instead of recovering a script
@@ -740,7 +743,7 @@ zero tests exits 0 just like one that passed 315:
   subshells — and yields simple commands; a rule is a predicate over the words
   of one command, and `echo exec node x` is an `echo` with two arguments however
   it is spaced. Both polarities are fixtures: the evasions are mutations that
-  must go red, and 10 legitimate rewrites of the real steps must leave the whole
+  must go red, and 14 legitimate rewrites of the real steps must leave the whole
   file clean, because a guard that is wrong in that direction is one somebody
   deletes.
 - **Recognising a command is not proving it runs.** Six rounds asked whether a
@@ -778,7 +781,7 @@ zero tests exits 0 just like one that passed 315:
 - Reports are deleted immediately before each runner starts and rejected unless
   their mtime post-dates that moment, so a leftover file cannot stand in for a
   run.
-- `scripts/ci/workflow-policy.mjs` enforces 25 house rules over the parsed
+- `scripts/ci/workflow-policy.mjs` enforces 26 house rules over the parsed
   workflow: no `continue-on-error`, no job conditions, no step conditions beyond
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
   action pinned to a commit SHA, no reusable workflows (a job body that is not in
@@ -789,16 +792,16 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 118
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 132
   mutated copies of the real workflow and additionally asserts that every one of
-  the 25 declared rules has a mutation proving it fires — coverage derived from
+  the 26 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
   went unexercised through round 2. Each mutation must also name *what* it broke
   (a message pattern, or the exact step→prerequisite edge) and must trip nothing
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 112 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 118 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

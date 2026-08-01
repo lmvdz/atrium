@@ -47,7 +47,15 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions, quoted verbatim
 
 import { readFileSync } from 'node:fs';
-import { checkWorkflowFile, PREREQUISITE_PAIRS, pairId, RULES } from './workflow-policy.mjs';
+import { parse } from 'yaml';
+import { LAUNCHER_NAMES, PACKAGE_MANAGER_NAMES } from './shell-command.mjs';
+import {
+  PREREQUISITE_PAIRS,
+  RULES,
+  checkWorkflowFile,
+  pairId,
+  protectedCommandCoverage,
+} from './workflow-policy.mjs';
 
 const WORKFLOW = process.argv[2] ?? '.github/workflows/ci.yml';
 
@@ -194,6 +202,25 @@ const ACCEPTED_FORMS = {
   'the fetch behind `command`, which bypasses functions and aliases': rewritesFetch(
     `command ${FETCH}`,
   ),
+  // Requirement (c) of the launcher allowlist's admission criteria: every entry
+  // and every option beside it has a fixture the real workflow must accept
+  // completely clean. An allowlist nobody can satisfy is a denylist with extra
+  // steps, and these are what stop it drifting into one.
+  'the fetch behind sudo as a named user, non-interactively': rewritesFetch(
+    `sudo -n -u runner ${FETCH}`,
+  ),
+  'the fetch behind a timeout with a signal and a kill-after': rewritesFetch(
+    `timeout -s TERM -k 5s 30 ${FETCH}`,
+  ),
+  'the fetch behind `command -p`, which searches the standard PATH': rewritesFetch(
+    `command -p ${FETCH}`,
+  ),
+  // The same requirement for the node-flag allowlist: a diagnostic flag must
+  // still read as a real invocation, or the allowlist is a ban on flags.
+  'the policy engine run with source maps and no warnings': [
+    '        run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml\n',
+    '        run: node --enable-source-maps --no-warnings scripts/ci/workflow-policy.mjs .github/workflows/*.yml\n',
+  ],
   'the fetch with a per-invocation git config': rewritesFetch(
     `git -c protocol.version=2 fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main`,
   ),
@@ -241,6 +268,17 @@ const ACCEPTED_FORMS = {
  * has an honest one-command equivalent.
  */
 const SHAPE_REJECTED_FORMS = {
+  // The option half of the round-4 allowlist, from the rejecting side. `sudo` is
+  // permitted and `sudo --background` is not, and the refusal is "that option is
+  // not on the list" rather than "that option is `-b`" — which is the difference
+  // between closing a spelling and closing a class. `--wow` is deliberately not
+  // a real `timeout` flag: an option nobody has justified is refused whether or
+  // not it exists, so the next release of coreutils cannot add a bypass.
+  'the fetch behind `sudo --background`, the long spelling of the round-3 finding': [
+    `sudo --background ${FETCH}`,
+  ],
+  'the fetch behind a `timeout` option nobody put on the list': [`timeout --wow 30 ${FETCH}`],
+  'the fetch behind `setsid -f`': [`setsid -f ${FETCH}`],
   'the fetch inside a subshell': [`(${FETCH})`],
   'the fetch after a `&&` list, which is the bypass with a true guard': [`true && ${FETCH}`],
   'the fetch driven by xargs at the end of a pipeline': [`echo main | xargs -I{} ${FETCH}`],
@@ -1120,7 +1158,7 @@ const MUTATIONS = [
       moveStepAfter(
         s,
         "Trust the deployment's certificate authority",
-        'Assert the app serves a real page',
+        "Assert the app renders / and /app from this run's database",
       ),
     pair: PAIRS.pageNeedsCa,
   },
@@ -1169,6 +1207,11 @@ const MUTATIONS = [
     rule: 'required-step-prerequisites',
     mutate: (s) => decoyStep(s, 'Tear down the stack'),
     pair: PAIRS.teardownAssertionNeedsTeardown,
+    // The decoy is `echo '<the teardown>'`, and `echo` is not one of the two
+    // things the deploy job may run. Both violations are true and neither is
+    // redundant: one says the teardown does not happen, the other says this job
+    // ran a binary nobody justified.
+    also: ['compose-through-one-entrypoint'],
   },
   // ---- the compose verbs (#40 round 3) ------------------------------------
   // `--wait` and `-v` used to be words in the workflow, and two mutations here
@@ -1244,7 +1287,7 @@ const MUTATIONS = [
     mutate: (s) =>
       moveStepAfter(
         s,
-        'Assert the app serves a real page',
+        "Assert the app renders / and /app from this run's database",
         'Assert the deployed database matches the migrations',
       ),
     pair: PAIRS.pageNeedsSignup,
@@ -1329,6 +1372,12 @@ const MUTATIONS = [
     // What is wrong is that it is not an invocation of the script at all, so the
     // honest answer is that the step is missing.
     message: /never runs the real-page assertion/,
+    // Two true statements about one line, and both are the point. `node --check`
+    // is not an invocation of the assertion (so the step is *missing*), and it is
+    // not one of the two entrypoints the deploy job may run either — the round-4
+    // allowlist refuses it without having heard of `--check`, which is the whole
+    // argument for inverting that rule.
+    also: ['compose-through-one-entrypoint'],
   },
   {
     name: 'the same, spelled `node -c`',
@@ -1340,6 +1389,7 @@ const MUTATIONS = [
         'run: node -c scripts/ci/assert-ws-upgrade.mjs',
       ),
     message: /never runs the websocket-upgrade assertion/,
+    also: ['compose-through-one-entrypoint'],
   },
   {
     name: 'a version banner instead of an assertion: `node --version`',
@@ -1351,6 +1401,48 @@ const MUTATIONS = [
         'run: node --version scripts/ci/assert-stack-config.mjs',
       ),
     message: /never runs the production-configuration assertion/,
+    also: ['compose-through-one-entrypoint'],
+  },
+  // ---- the node-flag denylist, inverted (#40 round 4) ---------------------
+  // `--check` and `-c` were closed by name in round 3, and the same question
+  // asked once more found three more the list had never heard of. All three
+  // read as *missing* now — not because they are on a list, but because they are
+  // not on the short list of flags that change diagnostics and nothing else.
+  {
+    name: 'the assertion run as a test file: `node --test`, which changes what the exit status means',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-stack-teardown.mjs',
+        'run: node --test scripts/ci/assert-stack-teardown.mjs',
+      ),
+    message: /never runs the teardown assertion/,
+    also: ['compose-through-one-entrypoint'],
+  },
+  {
+    name: "somebody else's code loaded into the assertion's process first: `node -r`",
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-rate-limit.mjs',
+        'run: node -r ./nobble.mjs scripts/ci/assert-rate-limit.mjs',
+      ),
+    message: /never runs the per-address rate-limit assertion/,
+    also: ['compose-through-one-entrypoint'],
+  },
+  {
+    name: 'the same through a module hook: `node --experimental-loader`',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-stack-health.mjs',
+        'run: node --experimental-loader ./hook.mjs scripts/ci/assert-stack-health.mjs',
+      ),
+    message: /never runs the container-health assertion/,
+    also: ['compose-through-one-entrypoint'],
   },
   {
     name: 'the assertion behind `xargs -r`, which runs it zero times on empty stdin',
@@ -1372,7 +1464,71 @@ const MUTATIONS = [
         'run: node scripts/ci/assert-rate-limit.mjs',
         'run: sudo -b node scripts/ci/assert-rate-limit.mjs',
       ),
-    message: /which detaches it/,
+    message: /is not one of the options a protected step may use it with/,
+  },
+  // ---- the fifteenth spelling, and the ones nobody had looked for ----------
+  // `setsid -f` is the round-3 gauntlet's blocking finding, measured: `bash -eo
+  // pipefail -c 'setsid -f sleep 30'` exits 0 in 2ms. It defeated round 3's rule
+  // twice over — `setsid` was in the recognised-launcher table, so `unwrap()`
+  // saw through it, and `-f` is neither `-b` nor `--background`. `flock` and
+  // `systemd-run` are not findings; they were added by asking what *else* execs
+  // an argv on a runner, before anybody used them. All four trip the shape rule
+  // and nothing else, which is the proof that recognition has not moved: each is
+  // still read as a genuine invocation of the assertion it wraps.
+  {
+    name: 'the page assertion detached with `setsid -f`, the fifteenth spelling of "invoked is not run"',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: setsid -f node scripts/ci/assert-page-serves.mjs',
+      ),
+    message: /reaches the command through `setsid`, which is not on the allowlist/,
+  },
+  {
+    name: 'the same, spelled `setsid --fork`',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-ws-upgrade.mjs',
+        'run: setsid --fork node scripts/ci/assert-ws-upgrade.mjs',
+      ),
+    message: /reaches the command through `setsid`, which is not on the allowlist/,
+  },
+  {
+    name: 'a bare `setsid`, which forks anyway when the shell is the group leader',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-stack-health.mjs',
+        'run: setsid node scripts/ci/assert-stack-health.mjs',
+      ),
+    message: /reaches the command through `setsid`, which is not on the allowlist/,
+  },
+  {
+    name: 'the assertion behind `flock -n -E 0`, which exits 0 without running it when the lock is held',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-stack-config.mjs',
+        'run: flock -n -E 0 /tmp/atrium.lock node scripts/ci/assert-stack-config.mjs',
+      ),
+    message: /reaches the command through `flock`, which is not on the allowlist/,
+  },
+  {
+    name: 'the assertion started as a transient unit: `systemd-run`, which returns when it is queued',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-rate-limit.mjs',
+        'run: systemd-run --user node scripts/ci/assert-rate-limit.mjs',
+      ),
+    message: /reaches the command through `systemd-run`, which is not on the allowlist/,
   },
   {
     name: 'PATH redefined in a step `env:` rather than in a script',
@@ -1430,7 +1586,7 @@ const MUTATIONS = [
         '      - name: A second stack',
         '        run: docker-compose -f other.yml -p atrium-ci up -d',
       ]),
-    message: /invokes `docker-compose` directly/,
+    message: /is not one of the entrypoints this job may use/,
   },
   {
     name: 'a compose invocation hidden inside `sh -c`, where this engine cannot read it',
@@ -1441,7 +1597,7 @@ const MUTATIONS = [
         '      - name: A second stack',
         '        run: sh -c "docker compose -f other.yml -p atrium-ci up -d"',
       ]),
-    message: /invokes `sh -c`/,
+    message: /is not one of the entrypoints this job may use/,
   },
   {
     name: 'a bare `docker compose` in the deploy job, carrying its own file list',
@@ -1452,7 +1608,44 @@ const MUTATIONS = [
         '      - name: Show what came up',
         '        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml ps',
       ]),
-    message: /invokes `docker` directly/,
+    message: /is not one of the entrypoints this job may use/,
+  },
+  // ---- the three the round-3 review walked past the closed list with --------
+  // Each reproduced against the round-3 engine, which printed the mutated
+  // workflow clean: the rule knew `docker`, `docker-compose` and `sh -c` by
+  // name, and none of these is any of those. They are one clause now.
+  {
+    name: 'the standalone `compose` binary, which is not spelled `docker`',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      insertAfter(s, '        run: node scripts/ci/compose-stack.mjs up', [
+        '',
+        '      - name: A second stack',
+        '        run: compose -f other.yml -p atrium-ci up -d',
+      ]),
+    message: /is not one of the entrypoints this job may use/,
+  },
+  {
+    name: 'a second runtime entirely: `podman compose`',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      insertAfter(s, '        run: node scripts/ci/compose-stack.mjs up', [
+        '',
+        '      - name: A second stack',
+        '        run: podman compose -f other.yml -p atrium-ci up -d',
+      ]),
+    message: /is not one of the entrypoints this job may use/,
+  },
+  {
+    name: 'compose reached from inside `node -e`, where no rule about binaries can see it',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      insertAfter(s, '        run: node scripts/ci/compose-stack.mjs up', [
+        '',
+        '      - name: A second stack',
+        `        run: node -e "require('node:child_process').execFileSync('docker', ['compose', '-f', 'other.yml', 'up', '-d'])"`,
+      ]),
+    message: /is not one of the entrypoints this job may use/,
   },
   {
     name: 'the deploy job losing the one variable every compose invocation resolves from',
@@ -1476,6 +1669,42 @@ const MUTATIONS = [
   })),
 ];
 
+/**
+ * Mutations of the *engine* rather than of the workflow.
+ *
+ * Every other entry in this file mutates `ci.yml`, because that is where the
+ * defects this policy exists for live. `protected-commands-cover-the-verbs` is
+ * the exception and it has to be, which is worth stating rather than hiding in
+ * a coverage exemption: the defect it guards against is `names: []` on a
+ * matcher, or `PROTECTED_COMMANDS` replaced with `[]` — an edit to
+ * `workflow-policy.mjs`, invisible to any rewriting of the workflow, and one
+ * that leaves every presence rule firing exactly as before while
+ * `no-command-shadowing` quietly stops catching `git() { :; }`.
+ *
+ * So the mutation is applied where the defect is: the coverage function takes
+ * the protected set as a parameter, and these hand it the gutted versions. The
+ * real set must produce nothing, and each gutted one must name the verb that
+ * fell out. That is the same shape as every mutation here — break it, watch the
+ * right thing go red — one file over.
+ */
+const ENGINE_MUTATIONS = [
+  {
+    name: "every matcher's `names` emptied, leaving `match` intact",
+    rule: 'protected-commands-cover-the-verbs',
+    // What `PROTECTED_COMMANDS` becomes when the matcher half contributes
+    // nothing: the launchers and package managers still there, `git`, `node`,
+    // `actionlint` and `rm` gone.
+    protectedCommands: [...LAUNCHER_NAMES, ...PACKAGE_MANAGER_NAMES],
+    expect: /runs `git` in command position/,
+  },
+  {
+    name: 'the whole set replaced with `[]`',
+    rule: 'protected-commands-cover-the-verbs',
+    protectedCommands: [],
+    expect: /is not in PROTECTED_COMMANDS/,
+  },
+];
+
 function main() {
   const pristine = readFileSync(WORKFLOW, 'utf8');
   const failures = [];
@@ -1490,7 +1719,28 @@ function main() {
   // Coverage, derived rather than counted. A rule with no mutation is a rule
   // with an unknown pass rate; a mutation for a rule the engine cannot emit is
   // a test asserting on a typo.
-  const exercised = new Set(MUTATIONS.map((mutation) => mutation.rule));
+  // The engine mutations, run before coverage is derived so they count towards
+  // it. The real set must be clean first: a check that fires on everything
+  // proves nothing by firing on a gutted set too.
+  const jobs = parse(pristine)?.jobs ?? {};
+  if (protectedCommandCoverage(jobs).length > 0) {
+    failures.push(
+      `protectedCommandCoverage reports problems against the real ${WORKFLOW} and the real PROTECTED_COMMANDS: ${protectedCommandCoverage(jobs).join(' | ')}`,
+    );
+  }
+  for (const mutation of ENGINE_MUTATIONS) {
+    const problems = protectedCommandCoverage(jobs, mutation.protectedCommands);
+    if (!problems.some((problem) => mutation.expect.test(problem))) {
+      failures.push(
+        `engine mutation "${mutation.name}" produced no ${mutation.rule} problem matching ${mutation.expect}; it reported: ${problems.slice(0, 2).join(' | ') || '(nothing)'}`,
+      );
+    }
+  }
+
+  const exercised = new Set([
+    ...MUTATIONS.map((mutation) => mutation.rule),
+    ...ENGINE_MUTATIONS.map((mutation) => mutation.rule),
+  ]);
   for (const rule of RULES) {
     if (!exercised.has(rule)) {
       failures.push(

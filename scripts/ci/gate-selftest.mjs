@@ -35,7 +35,7 @@ import { checkRatchet } from './assert-floor-ratchet.mjs';
 import { checkImageIdentity } from './assert-image-identity.mjs';
 import { checkMigrationImage } from './assert-migration-image.mjs';
 import { checkPlaywrightReport } from './assert-playwright-report.mjs';
-import { checkSchema } from './assert-stack-schema.mjs';
+import { checkSchema, readSchema } from './assert-stack-schema.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
 import { composeArgs } from './compose.mjs';
@@ -1055,19 +1055,89 @@ const CASES = [
     name: 'a deployed database carrying a table no migration in this tree makes',
     run: () => {
       const actual = deployedFixture();
-      actual.tables.set('leftovers', new Set(['id']));
+      actual.tables.set('leftovers', {
+        columns: new Map(),
+        constraints: new Set(),
+        indexes: new Set(),
+      });
       return checkSchema(schemaFixture(), actual);
     },
     expect: /table\(s\) no migration in this tree creates: leftovers/,
   },
   {
     name: 'a table with the right name and a column short',
-    run: () => {
-      const actual = deployedFixture();
-      actual.tables.get('users').delete('email_verified');
-      return checkSchema(schemaFixture(), actual);
-    },
+    run: () =>
+      checkSchema(
+        schemaFixture(),
+        deployedFixture(drift('columns', 'users|email_verified|')),
+      ),
     expect: /`users` does not match the migrations: missing email_verified/,
+  },
+
+  // ---- what "every column" has to mean, if the copy is going to say it -----
+  // Round 3 compared column *names* while its success line said "every column";
+  // the round-3 gauntlet's second major. Each of these is one field of one psql
+  // row, so a case that goes green for the wrong reason has nowhere to hide.
+  {
+    name: 'a column widened from `text` to `jsonb` by a migration that reported success',
+    run: () =>
+      checkSchema(
+        schemaFixture(),
+        deployedFixture(drift('columns', 'users|email|', 'users|email|jsonb|t|f')),
+      ),
+    expect: /`users\.email` is `jsonb` and the migrations say `text`/,
+  },
+  {
+    name: 'a `not null` dropped, so the application may now store nothing there',
+    run: () =>
+      checkSchema(
+        schemaFixture(),
+        deployedFixture(drift('columns', 'users|display_name|', 'users|display_name|text|f|f')),
+      ),
+    expect: /`users\.display_name` is nullable and the migrations say `not null`/,
+  },
+  {
+    name: 'a default that is not there any more',
+    run: () =>
+      checkSchema(
+        schemaFixture(),
+        deployedFixture(
+          drift('columns', 'users|email_verified|', 'users|email_verified|boolean|t|f'),
+        ),
+      ),
+    expect: /`users\.email_verified` has no default and the migrations give it one/,
+  },
+  {
+    name: 'a foreign key that lost its `on delete cascade`',
+    run: () =>
+      checkSchema(
+        schemaFixture(),
+        deployedFixture(
+          drift(
+            'constraints',
+            'auth_sessions|f|',
+            'auth_sessions|f|auth_sessions_user_id_users_id_fk|user_id|users|id|n',
+          ),
+        ),
+      ),
+    expect: /is missing 1 constraint\(s\).*on delete cascade/s,
+  },
+  {
+    name: 'a check constraint the migrations create and the database does not have',
+    run: () =>
+      checkSchema(schemaFixture(), deployedFixture(drift('constraints', 'users|c|'))),
+    expect: /`users` is missing 1 constraint\(s\).*users_email_present/s,
+  },
+  {
+    name: 'a unique index that stopped being unique',
+    run: () =>
+      checkSchema(
+        schemaFixture(),
+        deployedFixture(
+          drift('indexes', 'auth_sessions|', 'auth_sessions|auth_sessions_token_idx|f|token'),
+        ),
+      ),
+    expect: /is missing 1 index\(s\).*unique index/s,
   },
   {
     name: 'a migration folder that never reached the image, so nothing was applied',
@@ -1264,24 +1334,126 @@ function composeEnv() {
   };
 }
 
-/** A three-table schema, the way `expectedSchema()` reports one. */
+/**
+ * A three-table schema, the way `expectedSchema()` reads one out of drizzle's
+ * snapshot.
+ *
+ * `t|f` per column is not-null and has-a-default, in that order — the two facts
+ * round 4 added beside the type, after the round-3 gauntlet pointed out that the
+ * success line said "every column" over a comparison of column *names*.
+ */
 function schemaFixture() {
+  const table = (columns, constraints, indexes = []) => ({
+    columns: new Map(
+      Object.entries(columns).map(([name, spec]) => {
+        const [type, notNull, hasDefault] = spec.split('|');
+        return [name, { type, notNull: notNull === 't', hasDefault: hasDefault === 't' }];
+      }),
+    ),
+    constraints: new Set(constraints),
+    indexes: new Set(indexes),
+  });
   return {
     migrations: 1,
+    snapshot: '0000_snapshot.json',
     tables: new Map([
-      ['users', new Set(['id', 'email', 'display_name', 'email_verified'])],
-      ['auth_sessions', new Set(['id', 'user_id', 'token', 'expires_at'])],
-      ['corrections', new Set(['id', 'message_id', 'action'])],
+      [
+        'users',
+        table(
+          {
+            id: 'uuid|t|t',
+            email: 'text|t|f',
+            display_name: 'text|t|f',
+            email_verified: 'boolean|t|t',
+          },
+          ['primary key (id)', 'check `users_email_present`'],
+        ),
+      ],
+      [
+        'auth_sessions',
+        table(
+          {
+            id: 'uuid|t|t',
+            user_id: 'uuid|t|f',
+            token: 'text|t|f',
+            expires_at: 'timestamp with time zone|t|f',
+          },
+          [
+            'primary key (id)',
+            'foreign key (user_id) references users (id) on delete cascade',
+          ],
+          ['unique index `auth_sessions_token_idx` (token)'],
+        ),
+      ],
+      [
+        'corrections',
+        table(
+          { id: 'uuid|t|t', message_id: 'uuid|t|f', action: 'correction_action|t|f' },
+          ['primary key (id)'],
+        ),
+      ],
     ]),
   };
 }
 
-/** The same schema, as `deployedSchema()` reads it back out of Postgres. */
-function deployedFixture() {
-  const fixture = schemaFixture();
-  return {
-    migrations: fixture.migrations,
-    tables: new Map([...fixture.tables].map(([name, columns]) => [name, new Set(columns)])),
+/**
+ * The same schema as psql hands it back, through the real parser.
+ *
+ * Deliberately not a copy of the fixture above: these are `pg_catalog` rows in
+ * Postgres's vocabulary, folded by `readSchema()` — the function the deployed
+ * side really uses. So a case that passes here has exercised the translation
+ * (`confdeltype` `c` → `on delete cascade`, `format_type` → the snapshot's type
+ * spelling) rather than asserting that a Map equals itself, which is what the
+ * round-3 fixture did.
+ */
+const DEPLOYED_ROWS = {
+  columns: [
+    'users|id|uuid|t|t',
+    'users|email|text|t|f',
+    'users|display_name|text|t|f',
+    'users|email_verified|boolean|t|t',
+    'auth_sessions|id|uuid|t|t',
+    'auth_sessions|user_id|uuid|t|f',
+    'auth_sessions|token|text|t|f',
+    'auth_sessions|expires_at|timestamp with time zone|t|f',
+    'corrections|id|uuid|t|t',
+    'corrections|message_id|uuid|t|f',
+    'corrections|action|correction_action|t|f',
+  ],
+  constraints: [
+    'users|p|users_pkey|id|||a',
+    'users|c|users_email_present|email|||a',
+    'auth_sessions|p|auth_sessions_pkey|id|||a',
+    'auth_sessions|f|auth_sessions_user_id_users_id_fk|user_id|users|id|c',
+    'corrections|p|corrections_pkey|id|||a',
+  ],
+  indexes: ['auth_sessions|auth_sessions_token_idx|t|token'],
+};
+
+function deployedFixture(edit = (rows) => rows) {
+  const rows = edit({
+    columns: [...DEPLOYED_ROWS.columns],
+    constraints: [...DEPLOYED_ROWS.constraints],
+    indexes: [...DEPLOYED_ROWS.indexes],
+  });
+  return readSchema({
+    columns: rows.columns.join('\n'),
+    constraints: rows.constraints.join('\n'),
+    indexes: rows.indexes.join('\n'),
+    migrations: '1',
+  });
+}
+
+/** One psql row rewritten, so a case is one field of one line. */
+function drift(kind, match, replacement) {
+  return (rows) => {
+    const index = rows[kind].findIndex((row) => row.startsWith(match));
+    if (index === -1) {
+      throw new Error(`no ${kind} row starting ${match} — the fixture moved under the case`);
+    }
+    if (replacement === undefined) rows[kind].splice(index, 1);
+    else rows[kind][index] = replacement;
+    return rows;
   };
 }
 

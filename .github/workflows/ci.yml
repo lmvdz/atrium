@@ -454,9 +454,40 @@ jobs:
           if-no-files-found: ignore
 
   deploy:
-    name: compose stack (serves a page)
+    name: the deployment serves (not the product works)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # ┌─ WHAT A GREEN `deploy` COVERS, AND WHAT IT DOES NOT ─────────────────────
+    # │ Round 3's gauntlet asked for this in writing, in the job's own
+    # │ description, because "compose stack (serves a page)" was being read as
+    # │ broader than it is. Eighteen mutations, nineteen with the origin scan,
+    # │ and this is their reach.
+    # │
+    # │ COVERED — each of these has a mutation in
+    # │ scripts/ci/deploy-mutation-ledger.mjs that only the named stage catches:
+    # │   host preflight (engine version, gateway mode) · the boot itself
+    # │   (transport, health checks) · image identity (built = running = scanned)
+    # │   · the migration image, before it runs · container health enrolment ·
+    # │   the production configuration read back out of the containers · the
+    # │   deployed schema against the migrations (names, types, nullability,
+    # │   defaults, keys, checks, indexes) · signup through the real form and the
+    # │   real SMTP relay · `/` and `/app` rendered by the app from this run's
+    # │   database · an authenticated websocket upgrade · the rate limiter
+    # │   counting per address · the teardown taking its volumes with it.
+    # │
+    # │ NOT COVERED, deliberately: workspace and room flows, invitations,
+    # │ membership and roles, object and proposal paths, acceptance and
+    # │ correction, and websocket *payload* behaviour beyond the upgrade
+    # │ handshake. Those are the product's own behaviour and they belong to
+    # │ `verify` and `e2e`, which run against a runner-provided database rather
+    # │ than the deployment.
+    # │
+    # │ So: this is a "the deployment serves" gate. A green run says the shipped
+    # │ compose stack boots, is the images this run built, is configured the way
+    # │ production is, has the schema its migrations describe, and answers the
+    # │ four request paths above. It does not say the product works.
+    # └──────────────────────────────────────────────────────────────────────────
 
     # ┌─ WHY THIS JOB EXISTS ────────────────────────────────────────────────────
     # │ Issue #40. Three rounds of gauntlet receipts described the compose
@@ -623,11 +654,18 @@ jobs:
         # means the ledger credits the check that is actually about mail.
         run: node scripts/ci/assert-signup-verifies.mjs
 
-      - name: Assert the app serves a real page
+      - name: Assert the app renders / and /app from this run's database
         # Authenticated and per-run: `/` is fetched as an account this run
         # created, and the name it renders is compared against the one Postgres
         # holds. A `handle /` in the Caddyfile answering with a copy of the page
         # passes every structural check and fails there.
+        #
+        # The signed-out half is narrower and the script says so at length: `/`
+        # is fetched a third time carrying a cookie that is not a session — a
+        # request any cookie-presence rule in a proxy routes to the app — and
+        # the two signed-out responses must name the same build assets. That
+        # raises the cost of a fixture from four lines of markup to a current
+        # render of this build; it does not make one impossible.
         run: node scripts/ci/assert-page-serves.mjs
 
       - name: Assert an authenticated websocket upgrade completes
