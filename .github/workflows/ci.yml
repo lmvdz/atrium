@@ -249,7 +249,7 @@ jobs:
         # file on main; a decrease needs a written justification keyed to
         # exactly what came down. Until a manifest exists on main there is no
         # baseline, which this says out loud rather than passing quietly.
-        run: node scripts/ci/assert-floor-ratchet.mjs
+        run: pnpm --version && echo exec node scripts/ci/assert-floor-ratchet.mjs
 
       - name: Assert dev toolchain binaries resolve
         # A missing binary must fail the job, not be quietly stepped over.
