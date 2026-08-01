@@ -11,10 +11,10 @@ decided, what is owed and by whom, and what is waiting on you.
 ```
 
 The bet: what is worth keeping from a conversation is not the transcript. It is
-a list of what the group decided, promised, asked and claimed, each line
-pointing back at the message it came from. A machine can draft that list. A
-machine can never be the thing that certifies it, so every line says which of
-the two it is.
+a list of what the group decided, promised, asked, claimed and set out to do,
+each line pointing back at the messages it came from. A machine can draft that
+list. A machine can never be the thing that certifies it, so every line says
+which of the two it is.
 
 `~` is a *reading*: something in the transcript looked like a decision, and
 nothing has checked it. `✓` is the same sentence after a person accepted it. The
@@ -144,7 +144,7 @@ narrower than `✓` implies:
 third-party commitment naming a human — is accepted on a model actor's word with
 no issue raised. `authority.ts`'s own header concedes why: deciding whether a
 commitment is self-stated or third-party needs the message it was drawn from,
-which the reducer does not have, so the row is routed to
+which the reducer does not have, so the commitment row is routed to
 [#21](https://github.com/lmvdz/atrium/issues/21) and the gap is scheduled. Until
 #21 lands, "`✓` means a human checked it" is true of decisions and of verified
 claims, and false of commitments and objectives.
@@ -269,22 +269,28 @@ it through CRDTs. Messages are append-only and semantic state changes through
 server commands, so there is nothing to merge. Who may change shared
 understanding is an access-control question, not a convergence question, and
 [`plans/research-terminal-multiplexing/`](plans/research-terminal-multiplexing/)
-found the same answer in a different field: none of the collaborative terminals
-surveyed resolves concurrent input by merging, and they all push the conflict up
-to the access-control layer instead.
+found the same answer in a different field: of the collaborative terminals
+surveyed — sshx, tmate, Zellij, VS Code Live Share — not one resolves concurrent
+input by merging, and they all push the conflict up to the access-control layer
+instead, though how far varies: Zellij mints distinct read and read-write tokens
+and Live Share can hold a whole session read-only, while an sshx link gives every
+viewer the ability to type.
 
 **Patterns are borrowed; dependencies are not.** The design system, the glyph
 grammar and the attention rules come from the prior Atrium design lineage
 recorded in
 [`plans/research-live-call-design-system/`](plans/research-live-call-design-system/).
 Three things came back from reading `block/buzz`, the closest live analog,
-Apache-2.0, read at a pinned commit in
+Apache-2.0, read at a pinned commit — source and specifications together — in
 [`plans/research-buzz/`](plans/research-buzz/): the authorization shape the agent
 phase is now designed toward, where a machine acting under a person's authority
 never *becomes* that person; a name for a failure Atrium had already ruled out
-for actors, a confused deputy; and the activity-feed doctrine the Conversation
-surface inherits. Both bodies of work were read as patterns. Neither was taken
-as a dependency.
+for actors, a confused deputy, avoided by resolving the tenant server-side from
+the connection rather than from a tag on the event the client sends; and the
+activity-feed doctrine the Conversation surface inherits, where every item
+renders as verb, object and outcome, waiting and timeout are rendered states
+rather than silence, and references resolve to names rather than ids. Both
+bodies of work were read as patterns. Neither was taken as a dependency.
 
 ## How the work gets reviewed
 
@@ -368,7 +374,12 @@ stack on a public VPS with those values.
 Two things enforce that: the three secrets in `docker-compose.yml` have no
 default, so compose refuses to start when one of them is unset, and an unset
 `NODE_ENV` is treated as production, because "nobody said" on a bare host is a
-host on the internet.
+host on the internet. That default holds only because `NODE_ENV` is read from
+the process environment and nowhere else: the `.env` you copied above says
+`development`, and a file may supply a value nobody set but may never set
+`NODE_ENV`, or the strict default would be decoration. `docker run
+atrium-server` with no environment at all fails at boot with a named error
+rather than reaching for a public secret.
 
 Before exposing anything: set real values in `.env` (or the deployment's own
 secret store), and do not publish 5432 / 9000 / 9001 at all unless you mean to.
@@ -448,22 +459,26 @@ the route that stays open, and every gate is tested in both directions.
 
 ### Consumed, or rejected
 
-`appendEvent(state, event)` either consumes an event or rejects it. A consumed
-event takes its position even when its business checks failed, and its problem
-is recorded in `state.issues`. A rejected one, out of order or a duplicate id
-arriving ahead of the cursor, leaves nothing behind: no issue, no cursor
-movement, no `consumedEventIds` entry, and the state handed back is the state
-handed in.
+`appendEvent(state, event)` either consumes an event or rejects it. The gate is
+`state.cursor`, the canonical `(at, id)` position of the last event this state
+consumed; an event that does not sort **strictly after** it is rejected outright.
+A consumed event takes its position even when its business checks failed, and its
+problem is recorded in `state.issues`. A rejected one, out of order or a
+duplicate id arriving ahead of the cursor, leaves nothing behind: no issue, no
+cursor movement, no `consumedEventIds` entry, and the state handed back is the
+state handed in.
 
 Consumption only ever moves forward, and the consumed sequence is in
 canonical order by construction. For any log `L` of consumed events, folding
 `L` one event at a time in arrival order and replaying `L` in one `reduce` call
 produce byte-identical states — `issues` and `consumedEventIds` included. That
 is the entire live≡replay claim, and it is checked property-style over generated
-logs (`packages/core/test/replay.test.ts`). The replay side does not ask the
-reducer what it consumed. It reconstructs that from the input stream with an
-independent filter written in the test, so a defect shared by both paths cannot
-cancel out.
+logs (`packages/core/test/replay.test.ts`): two rooms with deliberate same-`at`
+cross-room ties, verbatim redeliveries, redeliveries that re-minted their
+timestamp, model actors reaching for every gate above, and both shuffled and
+near-in-order delivery. The replay side does not ask the reducer what it
+consumed — it reconstructs that from the input stream with an independent filter
+written in the test, so a defect shared by both paths cannot cancel out.
 
 The other half of the invariant is the ledger's, and it is recorded on
 [#22](https://github.com/lmvdz/atrium/issues/22): the durable log must contain
