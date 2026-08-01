@@ -47,3 +47,24 @@ export const Proposal = z.discriminatedUnion('type', [
 
 export type Proposal = z.infer<typeof Proposal>;
 export type ProposalInput = z.input<typeof Proposal>;
+
+/** `Omit` that distributes over a union, so the `type` discriminator survives. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+/**
+ * A proposal as the reducer stores it: everything the event carried *except*
+ * `status`.
+ *
+ * Status is lifecycle, and lifecycle belongs to the log — `proposal_rejected`
+ * and `object_accepted` move it. Keeping a second, mutable copy inside the
+ * stored proposal gave two answers to one question, and only one of them was
+ * ever updated. `ProposalRecord.status` is the only status there is; use
+ * `proposalWithStatus` when a caller wants the whole proposal back.
+ */
+export type StoredProposal = DistributiveOmit<Proposal, 'status'>;
+
+/** Drops the wire status so the record cannot hold a stale second copy of it. */
+export function storeProposal(proposal: Proposal): StoredProposal {
+  const { status: _status, ...rest } = proposal;
+  return rest as StoredProposal;
+}

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { type CoreEvent, type CoreState, reduce, serializeState } from '../src/index.js';
-import { ALICE, at, BOB, event, human, ROOM, sampleLog } from './fixtures.js';
+import {
+  appendEvent,
+  type CoreEvent,
+  foldEvents,
+  proposalWithStatus,
+  reduce,
+  serializeState,
+} from '../src/index.js';
+import { ALICE, at, BOB, event, human, model, ROOM, sampleLog } from './fixtures.js';
 
 /**
  * The trust boundary, pinned. Every case here is one a reducer that "mostly
@@ -54,6 +61,10 @@ function acceptEvent(
     roomId?: string;
     proposalId?: string | null;
     type?: 'decision' | 'claim';
+    actor?:
+      | { kind: 'human'; userId: string }
+      | { kind: 'model'; model: string }
+      | { kind: 'system' };
   } = {},
 ): CoreEvent {
   const minute = overrides.at ?? at(2);
@@ -61,7 +72,7 @@ function acceptEvent(
   return event({
     id: overrides.id ?? 'ev_accept',
     at: minute,
-    actor: human(),
+    actor: overrides.actor ?? human(),
     type: 'object_accepted',
     object: {
       id: overrides.objectId ?? 'obj_x',
@@ -81,17 +92,11 @@ function acceptEvent(
   } as Parameters<typeof event>[0]);
 }
 
-/** The parts of a state that must be untouched when an event is refused. */
-function materialState(state: CoreState) {
-  return serializeState({ ...state, issues: [], appliedEventIds: [] });
-}
-
 describe('proposal lifecycle — a proposal may never arrive pre-blessed', () => {
   it('forces a pre-accepted proposal back to "proposed" and records the coercion', () => {
     const state = reduce([proposalEvent({ status: 'accepted' })]);
 
     expect(state.proposals.prop_x?.status).toBe('proposed');
-    expect(state.proposals.prop_x?.proposal.status).toBe('proposed');
     expect(state.proposals.prop_x?.acceptedObjectId).toBeNull();
     expect(state.issues).toHaveLength(1);
     expect(state.issues[0]).toMatchObject({ eventId: 'ev_prop' });
@@ -103,6 +108,45 @@ describe('proposal lifecycle — a proposal may never arrive pre-blessed', () =>
     const state = reduce([proposalEvent()]);
     expect(state.issues).toEqual([]);
     expect(state.proposals.prop_x?.status).toBe('proposed');
+  });
+
+  it('stores no second copy of the status — the record is the only holder', () => {
+    const state = reduce([proposalEvent()]);
+    const record = state.proposals.prop_x;
+    expect(record).toBeDefined();
+    // Not "the nested copy agrees": there is no nested copy to disagree.
+    expect(record?.proposal).not.toHaveProperty('status');
+    expect(Object.keys(record?.proposal ?? {})).not.toContain('status');
+  });
+
+  it('reports the accepted status through every reader, with nothing left stale', () => {
+    const state = reduce([proposalEvent(), acceptEvent()]);
+    const record = state.proposals.prop_x;
+    if (!record) throw new Error('proposal missing');
+
+    expect(record.status).toBe('accepted');
+    expect(record.acceptedObjectId).toBe('obj_x');
+    expect(proposalWithStatus(record).status).toBe('accepted');
+    // The whole-proposal view is the record's fields plus the record's status.
+    expect(proposalWithStatus(record)).toMatchObject({ id: 'prop_x', roomId: ROOM });
+  });
+
+  it('reports the rejected status through the same reader', () => {
+    const state = reduce([
+      proposalEvent(),
+      event({
+        id: 'ev_r',
+        at: at(2),
+        actor: human(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+        reason: 'not what was said',
+      }),
+    ]);
+    const record = state.proposals.prop_x;
+    if (!record) throw new Error('proposal missing');
+    expect(proposalWithStatus(record).status).toBe('rejected');
+    expect(record.rejectedReason).toBe('not what was said');
   });
 
   it('refuses a second rejection of the same proposal', () => {
@@ -206,6 +250,59 @@ describe('acceptance — an accepted object may only cite a live, matching propo
     expect(state.issues).toEqual([]);
     expect(state.proposals.prop_x?.status).toBe('accepted');
     expect(state.proposals.prop_x?.acceptedObjectId).toBe('obj_x');
+  });
+});
+
+describe('the actor gate — a model may not mint a fact without a human', () => {
+  /**
+   * The proposal boundary only means something if going around it is closed
+   * too. An interpreter that cannot hand itself a pre-accepted proposal can
+   * otherwise just skip the proposal: emit `object_accepted` with
+   * `proposalId: null` and the fact is in the room, unaccepted by anyone.
+   */
+  it('refuses a proposal-less acceptance from a model actor', () => {
+    const state = reduce([acceptEvent({ proposalId: null, at: at(1), actor: model() })]);
+
+    expect(state.objects).toEqual({});
+    expect(state.appliedEventIds).toEqual([]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.eventId).toBe('ev_accept');
+    expect(state.issues[0]?.reason).toContain('only a human may accept an object directly');
+    expect(state.issues[0]?.reason).toContain('model actor');
+  });
+
+  it('refuses a proposal-less acceptance from a system actor too', () => {
+    const state = reduce([acceptEvent({ proposalId: null, at: at(1), actor: { kind: 'system' } })]);
+    expect(state.objects).toEqual({});
+    expect(state.issues[0]?.reason).toContain('system actor');
+  });
+
+  it('allows a proposal-less acceptance from a human — the answer-binding path', () => {
+    const state = reduce([acceptEvent({ proposalId: null, at: at(1) })]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x?.object.provenance.proposalId).toBeNull();
+    expect(state.appliedEventIds).toEqual(['ev_accept']);
+  });
+
+  it('lets a model actor accept through a proposal — the route that stays open', () => {
+    // The event's actor is the model, but the object cites a proposal a human
+    // path staged; the gate is about proposal-less minting, not about which
+    // process happens to emit the acceptance event.
+    const state = reduce([proposalEvent(), acceptEvent({ actor: model() })]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+    expect(state.proposals.prop_x?.status).toBe('accepted');
+  });
+
+  it('gates on the acceptance actor, not on who proposed', () => {
+    // A human-proposed reading still cannot be self-accepted by a model with no
+    // proposal cited: the citation is the whole check.
+    const state = reduce([
+      proposalEvent({ id: 'ev_prop_human', proposalId: 'prop_h' }),
+      acceptEvent({ id: 'ev_a', objectId: 'obj_a', proposalId: null, at: at(3), actor: model() }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain('must record a proposal');
   });
 });
 
@@ -547,116 +644,110 @@ describe('relations — typed edges must actually type-check against their endpo
   });
 });
 
-describe('the room watermark — a live fold can never diverge from a replay', () => {
-  const late = event({
-    id: 'ev_late',
-    at: at(3),
-    actor: human(),
-    type: 'object_accepted',
-    object: {
-      id: 'obj_late',
-      roomId: ROOM,
-      type: 'objective',
-      payload: { title: 'Arrived after the fact' },
-      createdAt: at(3),
-      updatedAt: at(3),
-    },
-  });
+describe('the ordering gate — an out-of-order event is rejected, not recorded', () => {
+  const objective = (id: string, minute: string, roomId = ROOM) =>
+    event({
+      id: `ev_${id}`,
+      at: minute,
+      actor: human(),
+      type: 'object_accepted',
+      object: {
+        id: `obj_${id}`,
+        roomId,
+        type: 'objective',
+        payload: { title: id },
+        createdAt: minute,
+        updatedAt: minute,
+      },
+    });
+
+  const late = objective('late', at(3));
 
   it('tracks the last consumed position per room', () => {
     const state = reduce(sampleLog());
     expect(state.watermarks[ROOM]).toEqual({ at: at(8), id: 'ev_08' });
+    expect(state.cursor).toEqual({ at: at(8), id: 'ev_08' });
   });
 
-  it('keeps rooms independent', () => {
-    const state = reduce([
-      ...sampleLog(),
-      event({
-        id: 'ev_other_room',
-        at: at(2),
-        actor: human(),
-        type: 'object_accepted',
-        object: {
-          id: 'obj_other_room',
-          roomId: OTHER_ROOM,
-          type: 'objective',
-          payload: { title: 'A different room entirely' },
-          createdAt: at(2),
-          updatedAt: at(2),
-        },
-      }),
-    ]);
+  it('tracks each room separately while the gate stays global', () => {
+    const state = reduce([...sampleLog(), objective('other', at(9), OTHER_ROOM)]);
     expect(state.issues).toEqual([]);
     expect(state.watermarks[ROOM]).toEqual({ at: at(8), id: 'ev_08' });
-    expect(state.watermarks[OTHER_ROOM]).toEqual({ at: at(2), id: 'ev_other_room' });
+    expect(state.watermarks[OTHER_ROOM]).toEqual({ at: at(9), id: 'ev_other' });
+    expect(state.cursor).toEqual({ at: at(9), id: 'ev_other' });
   });
 
-  it('refuses an incremental event that sorts before the watermark, and holds', () => {
+  it('rejects a stale event from another room too — ordering is a log property', () => {
+    // Deliberate: `issues`, `corrections` and `appliedEventIds` are global
+    // ordered lists, so a per-room gate would let two rooms interleave them one
+    // way live and another way on replay. The gate is the log position.
     const live = reduce(sampleLog());
-    const after = reduce([late], live);
+    const result = appendEvent(live, objective('other_late', at(2), OTHER_ROOM));
 
-    expect(after.issues).toHaveLength(1);
-    expect(after.issues[0]?.eventId).toBe('ev_late');
-    expect(after.issues[0]?.reason).toContain('precedes the watermark');
-    expect(after.objects.obj_late).toBeUndefined();
-    expect(after.appliedEventIds).toEqual(live.appliedEventIds);
-    expect(after.watermarks[ROOM]).toEqual({ at: at(8), id: 'ev_08' });
+    expect(result.outcome).toBe('rejected');
+    expect(result.state).toBe(live);
+  });
 
-    // The refusal is total: nothing but `issues` moved, so the live fold still
-    // equals a replay of exactly the sequence it accepted.
-    expect(materialState(after)).toBe(materialState(reduce(sampleLog())));
+  it('rejects an event that sorts before the cursor, changing nothing at all', () => {
+    const live = reduce(sampleLog());
+    const result = appendEvent(live, late);
+
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    expect(result.reason).toBe('out_of_order');
+    expect(result.detail).toContain('sorts before the consumed position');
+
+    // Total: not the same *values*, the same object. Nothing was cloned and
+    // nothing was written — no issue, no watermark move, no applied id.
+    expect(result.state).toBe(live);
+    expect(live.issues).toEqual([]);
+    expect(live.objects.obj_late).toBeUndefined();
+    expect(serializeState(result.state)).toBe(serializeState(reduce(sampleLog())));
+  });
+
+  it('rejects a redelivered event as a duplicate, also without a trace', () => {
+    const events = sampleLog();
+    const live = reduce(events);
+    const replayed = events.at(-1);
+    if (!replayed) throw new Error('fixture changed');
+
+    const result = appendEvent(live, replayed);
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    expect(result.reason).toBe('duplicate');
+    expect(result.state).toBe(live);
+    expect(live.issues).toEqual([]);
   });
 
   it('breaks a tie on event id, not just timestamp', () => {
-    const first = reduce([
-      event({
-        id: 'ev_b',
-        at: at(1),
-        actor: human(),
-        type: 'object_accepted',
-        object: {
-          id: 'obj_b',
-          roomId: ROOM,
-          type: 'objective',
-          payload: { title: 'b' },
-          createdAt: at(1),
-          updatedAt: at(1),
-        },
-      }),
-    ]);
-    const after = reduce(
-      [
-        event({
-          id: 'ev_a',
-          at: at(1),
-          actor: human(),
-          type: 'object_accepted',
-          object: {
-            id: 'obj_a',
-            roomId: ROOM,
-            type: 'objective',
-            payload: { title: 'a' },
-            createdAt: at(1),
-            updatedAt: at(1),
-          },
-        }),
-      ],
-      first,
-    );
+    const first = reduce([objective('b', at(1))]);
+    const result = appendEvent(first, objective('a', at(1)));
 
-    expect(after.objects.obj_a).toBeUndefined();
-    expect(after.issues[0]?.reason).toContain('precedes the watermark');
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    expect(result.reason).toBe('out_of_order');
+    expect(result.state.objects.obj_a).toBeUndefined();
+    expect(result.state.issues).toEqual([]);
+  });
+
+  it('consumes an equal-cursor event rather than rejecting it', () => {
+    // `<` not `<=`: an event at exactly the consumed position is the next
+    // event, not a stale one. Only a repeated *id* is a redelivery.
+    const first = reduce([objective('a', at(1))]);
+    const result = appendEvent(first, objective('b', at(1)));
+    expect(result.outcome).toBe('applied');
+    expect(result.state.objects.obj_b).toBeDefined();
   });
 
   it('accepts the same late event in a full replay, where it is in order', () => {
-    // The contract is about *incremental* application. Handed the whole log at
-    // once, `reduce` sorts it and the event applies exactly where it belongs.
+    // The gate is about *arrival*. Handed the whole log at once, `reduce` sorts
+    // it and the event applies exactly where it belongs.
     const replay = reduce([...sampleLog(), late]);
     expect(replay.issues).toEqual([]);
     expect(replay.objects.obj_late).toBeDefined();
   });
 
-  it('advances the watermark even when an event is refused', () => {
+  it('consumes — and advances — an event refused on business grounds', () => {
     const state = reduce([
       ...sampleLog(),
       event({
@@ -674,13 +765,31 @@ describe('the room watermark — a live fold can never diverge from a replay', (
         },
       }),
     ]);
+    // A business refusal is history: it happened, in order, and a replay of the
+    // log reproduces it. That is why it lands in `issues` and moves the cursor,
+    // and why an out-of-order event does neither.
     expect(state.issues).toHaveLength(1);
     expect(state.watermarks[ROOM]).toEqual({ at: at(9), id: 'ev_refused' });
+    expect(state.cursor).toEqual({ at: at(9), id: 'ev_refused' });
+  });
+
+  it('reports the outcome of every event in a fold', () => {
+    const { outcomes } = foldEvents([
+      ...sampleLog(),
+      proposalEvent({ id: 'ev_coerced', proposalId: 'prop_c', at: at(9), status: 'accepted' }),
+      late,
+    ]);
+    const byId = new Map(outcomes.map((o) => [o.event.id, o.outcome]));
+    expect(byId.get('ev_01')).toBe('applied');
+    expect(byId.get('ev_coerced')).toBe('applied_with_issue');
+    // `late` sorts into position 3 of the batch, so in a full replay it is in
+    // order and applies; nothing in a sorted fold is ever out of order.
+    expect(byId.get('ev_late')).toBe('applied');
   });
 
   it('still folds the sample log incrementally to the full-replay state', () => {
     const events = sampleLog();
-    const incremental = events.reduce((state, next) => reduce([next], state), reduce([]));
+    const incremental = events.reduce((state, next) => appendEvent(state, next).state, reduce([]));
     expect(serializeState(incremental)).toBe(serializeState(reduce(events)));
   });
 });

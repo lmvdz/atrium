@@ -2,7 +2,7 @@ import type { AttentionItem } from './attention.js';
 import type { Actor, Id, Timestamp } from './common.js';
 import type { CorrectionAction } from './events.js';
 import type { AcceptedObject } from './objects.js';
-import type { Proposal, ProposalStatus } from './proposal.js';
+import type { Proposal, ProposalStatus, StoredProposal } from './proposal.js';
 import type { Relation } from './relations.js';
 
 /** One accepted object plus the bookkeeping the reducer maintains for it. */
@@ -18,12 +18,23 @@ export interface ObjectRecord {
   supersededById: Id | null;
 }
 
+/**
+ * A staged proposal plus its lifecycle. `status` here is the *only* status:
+ * `proposal` is stored without one (see `StoredProposal`), because a nested
+ * copy that acceptance forgot to update is a second answer to a question that
+ * has one answer.
+ */
 export interface ProposalRecord {
-  proposal: Proposal;
+  proposal: StoredProposal;
   status: ProposalStatus;
   /** The accepted object this proposal turned into, if any. */
   acceptedObjectId: Id | null;
   rejectedReason: string | null;
+}
+
+/** The whole proposal, status included — assembled from the single source. */
+export function proposalWithStatus(record: ProposalRecord): Proposal {
+  return { ...record.proposal, status: record.status } as Proposal;
 }
 
 /** Append-only correction log — the "nothing is erased" guarantee, materialised. */
@@ -39,11 +50,15 @@ export interface CorrectionRecord {
 }
 
 /**
- * An event the reducer refused, or applied only after coercing it. Replay is
- * total: it records, never throws. Most issues mean "the event changed
- * nothing"; the exception is a proposal recorded with a pre-decided status,
- * which is applied with the status forced back to `proposed` and the coercion
- * noted here.
+ * A *business* problem with an event the reducer consumed: it was in order, it
+ * occupies a position in the log, and it either changed nothing (an amendment
+ * to an unknown object) or was applied only after coercion (a proposal that
+ * arrived pre-accepted). Replay is total: issues are recorded, never thrown.
+ *
+ * Every issue is a function of the log alone, so a replay of the same log
+ * reproduces the same issues in the same order. Out-of-order and duplicate
+ * events are *not* issues — those are rejections, and a rejection leaves no
+ * trace in state at all. See `appendEvent`.
  */
 export interface ReducerIssue {
   eventId: Id;
@@ -68,10 +83,21 @@ export interface CoreState {
   /** Event ids in the order they were applied. */
   appliedEventIds: Id[];
   /**
-   * Per-room high-water mark: the canonical position of the last event this
-   * room's state consumed. An event that sorts before its room's watermark is
-   * refused (it lands in `issues`), which is what makes an incremental fold
-   * indistinguishable from a full replay of the same log. See `reduce`.
+   * The canonical position of the last event this state consumed, or `null`
+   * before the first one. This is the gate: an event that sorts *before* the
+   * cursor is rejected outright and changes nothing at all. Consumption
+   * therefore only ever moves forward, so the consumed sequence is in canonical
+   * order by construction — which is exactly what makes a live fold and a full
+   * replay of that sequence land on the same bytes. See `appendEvent`.
+   */
+  cursor: EventCursor | null;
+  /**
+   * Per-room record of the last position each room consumed. Derived
+   * bookkeeping, not a gate — the gate is `cursor`, and it is global because
+   * `issues`, `corrections` and `appliedEventIds` are global ordered lists: a
+   * per-room gate would let two rooms interleave those lists one way live and
+   * another way on replay. Kept because a room's own position is what #22's
+   * `core_events.room_seq` maps onto.
    */
   watermarks: Record<Id, EventCursor>;
 }
@@ -84,6 +110,7 @@ export function emptyState(): CoreState {
     corrections: [],
     issues: [],
     appliedEventIds: [],
+    cursor: null,
     watermarks: {},
   };
 }

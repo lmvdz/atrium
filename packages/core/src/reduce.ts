@@ -8,6 +8,7 @@ import {
   ObjectivePayload,
   OpenQuestionPayload,
 } from './objects.js';
+import { storeProposal } from './proposal.js';
 import { relationShapeError } from './relations.js';
 import {
   type CoreState,
@@ -19,8 +20,106 @@ import {
   type ReducerIssue,
 } from './state.js';
 
+/** Why an event was refused entry. Both are properties of position, not content. */
+export type RejectionReason =
+  /** It sorts before `state.cursor`: consuming it would rewrite settled history. */
+  | 'out_of_order'
+  /** Its id has already been applied. At-least-once delivery, made a no-op. */
+  | 'duplicate';
+
 /**
- * The deterministic reducer.
+ * The reducer's two answers to one event.
+ *
+ * A **consumed** event took a position in the log. It is part of the history
+ * this state is a fold of, whether it applied cleanly (`applied`) or recorded a
+ * business problem on the way (`applied_with_issue` — a proposal coerced back
+ * to `proposed`, an amendment to an object that does not exist, a relation that
+ * fails its type signature). Either way the outcome is a function of the log
+ * alone, so replaying the log reproduces it exactly.
+ *
+ * A **rejected** event was never consumed. It is not history; it is a command
+ * the reducer declined to accept, and it leaves *nothing* behind: no `issues`
+ * entry, no cursor movement, no `appliedEventIds` entry. The state handed back
+ * is the state handed in, byte for byte and reference for reference.
+ */
+export type EventOutcome =
+  | { outcome: 'applied'; event: CoreEvent }
+  | { outcome: 'applied_with_issue'; event: CoreEvent; issues: ReducerIssue[] }
+  | { outcome: 'rejected'; event: CoreEvent; reason: RejectionReason; detail: string };
+
+/** The three-way taxonomy, for callers that switch on it. */
+export type AppendOutcome = EventOutcome['outcome'];
+
+/** What `appendEvent` returns: an outcome plus the state that goes with it. */
+export type AppendResult = EventOutcome & { state: CoreState };
+
+export interface FoldResult {
+  state: CoreState;
+  /** One outcome per input event, in canonical order. */
+  outcomes: EventOutcome[];
+}
+
+/**
+ * Append one event to a state. **This is the command-layer entry point** — the
+ * call a server makes for each event as it arrives, and the only one that
+ * reports back what happened.
+ *
+ * ## The contract, stated exactly
+ *
+ * 1. `appendEvent` never mutates the state it is given. On `applied` /
+ *    `applied_with_issue` the result carries a new state; on `rejected` it
+ *    carries the *same object*, untouched.
+ * 2. An event is **rejected** if it sorts before `state.cursor` in the
+ *    canonical `(at, id)` order, or if its id has already been applied.
+ *    Rejection is total: no issue, no cursor move, no watermark move, no
+ *    applied id. A rejected event must not be persisted (see below).
+ * 3. Any other event is **consumed**: `state.cursor` advances to it, its room's
+ *    watermark advances to it, and it either applies or records one or more
+ *    `ReducerIssue`s. Business validity is judged here — the proposal boundary,
+ *    the actor gate, the correction and relation guards — and none of those
+ *    judgements depend on when the event arrived, only on the log before it.
+ * 4. Therefore the consumed sequence is in canonical order **by construction**.
+ *    Write `L` for the events a state consumed, in the order it consumed them.
+ *    Then, whatever order those events *arrived* in:
+ *
+ *        serializeState(state) === serializeState(reduce(L))
+ *
+ *    because `reduce` sorts `L` and `L` is already sorted. `issues` and
+ *    `appliedEventIds` are included in that — they are built in consumption
+ *    order on one side and in sorted order on the other, and those are the same
+ *    order. This is the whole live≡replay guarantee, and the only one claimed:
+ *    it says nothing about rejected events, which is the point — they are in
+ *    neither `L` nor, per #22, the ledger.
+ *
+ * ## Why this is safe to rely on
+ *
+ * Half of the invariant lives in the durable ledger, and it is recorded on
+ * issue #22:
+ *
+ * > "the durable ledger must contain ONLY events accepted in canonical order —
+ * > room_seq is assigned transactionally at append, so an out-of-order event is
+ * > rejected at the command layer and never persisted. The reducer watermark is
+ * > a defense-in-depth guard, not a data path; if refused events could reach the
+ * > log, full replay (which re-sorts) would accept what live ingestion refused
+ * > and the two states would diverge."
+ *
+ * So: rejected events never enter state (this file) *and* never enter the log
+ * (#22). `fold(log) === live state` holds because the two sides are folding the
+ * identical sequence, not because anything reconciles them afterwards.
+ *
+ * A rejection is an error for the caller to handle, not a silent drop — a
+ * command whose event lost the ordering race is re-minted at the current
+ * position and appended again.
+ */
+export function appendEvent(state: CoreState, event: CoreEvent): AppendResult {
+  const rejection = rejectionFor(state, event);
+  if (rejection) return { outcome: 'rejected', event, ...rejection, state };
+  const next = cloneState(state);
+  return { ...consume(next, event), state: next };
+}
+
+/**
+ * The deterministic reducer: fold a whole log into a state.
  *
  * Contract:
  *  - Pure. No clock, no randomness, no I/O. Given the same events it returns a
@@ -31,39 +130,36 @@ import {
  *  - Append-only. Corrections and supersessions change *status*, never history:
  *    the prior value is written to `state.corrections` and the object stays.
  *  - Trust-preserving. The proposal → acceptance boundary is enforced here, not
- *    upstream: a recorded proposal is always `proposed`, and an acceptance that
+ *    upstream: a recorded proposal is always `proposed`; an acceptance that
  *    cites a proposal must cite one that exists, is still open, has not already
- *    been accepted, and is of the object's own type.
+ *    been spent, and matches the object's type; and an acceptance that cites no
+ *    proposal at all must come from a human actor.
  *
- * ## Incremental application and the room watermark
- *
- * `reduce(events)` sorts the whole batch, so a full replay is canonically
- * ordered by construction. `reduce([next], state)` — the live fold a server
- * runs per arriving event — has no such luxury: it cannot re-sort events it has
- * already folded. Without a rule, feeding a late-arriving event into a live
- * fold would produce a state that a replay of the same accepted sequence would
- * never produce.
- *
- * The rule: `CoreState.watermarks[roomId]` holds the canonical `(at, id)`
- * position of the last event that room consumed. An event that sorts *before*
- * its room's watermark is never applied — it lands in `state.issues` and the
- * watermark holds. So for any sequence of events a state actually accepted,
- * folding them one at a time and replaying them all at once land on the same
- * state; a stale event is refused loudly instead of being silently applied out
- * of order.
- *
- * The watermark advances on every consumed event, applied or refused: it
- * records the log position the room's state reflects, not a success count. It
- * does not advance for an event whose room cannot be resolved (a correction to
- * an unknown object, a rejection of an unknown proposal) — those events change
- * nothing and are recorded as issues regardless.
+ * `reduce(events)` sorts, so nothing in a fresh replay is ever out of order and
+ * nothing is rejected but a duplicate id. `reduce(events, state)` is the same
+ * fold continued: events that precede `state.cursor` are rejected and skipped,
+ * exactly as `appendEvent` would reject them. Use `foldEvents` when you need to
+ * see *which* ones, and `appendEvent` when you are consuming one at a time —
+ * that is where the outcome matters.
  */
 export function reduce(events: readonly CoreEvent[], initial?: CoreState): CoreState {
+  return foldEvents(events, initial).state;
+}
+
+/** `reduce`, plus the per-event outcome. Same fold, nothing hidden. */
+export function foldEvents(events: readonly CoreEvent[], initial?: CoreState): FoldResult {
   const state = initial ? cloneState(initial) : emptyState();
+  const outcomes: EventOutcome[] = [];
   for (const event of orderEvents(events)) {
-    applyEvent(state, event);
+    const rejection = rejectionFor(state, event);
+    outcomes.push(rejection ? { outcome: 'rejected', event, ...rejection } : consume(state, event));
   }
-  return state;
+  return { state, outcomes };
+}
+
+/** True when the event was consumed — i.e. it belongs in the durable log. */
+export function wasConsumed(outcome: EventOutcome): boolean {
+  return outcome.outcome !== 'rejected';
 }
 
 /**
@@ -137,33 +233,56 @@ function resolveRoomId(state: CoreState, event: CoreEvent): string | null {
   }
 }
 
-function applyEvent(state: CoreState, event: CoreEvent): void {
+/**
+ * The command-layer gate. Returns why the event may not be consumed, or `null`
+ * if it may.
+ *
+ * Order matters: out-of-order is checked *first*. An event that is both stale
+ * and a duplicate must be rejected as stale, because the duplicate branch is
+ * about an id already spent at a position, and the stale branch is about the
+ * position itself. Getting this backwards is how a re-delivered event with an
+ * older timestamp would sneak past the ordering gate.
+ */
+function rejectionFor(
+  state: CoreState,
+  event: CoreEvent,
+): { reason: RejectionReason; detail: string } | null {
+  const cursor = cursorOf(event);
+  if (state.cursor && compareCursor(cursor, state.cursor) < 0) {
+    return {
+      reason: 'out_of_order',
+      detail: `event (${event.at}, ${event.id}) sorts before the consumed position (${state.cursor.at}, ${state.cursor.id}) — rejected, not applied and not recorded`,
+    };
+  }
   if (state.appliedEventIds.includes(event.id)) {
-    fail(state, event.id, 'duplicate event id — already applied');
-    return;
+    return {
+      reason: 'duplicate',
+      detail: `event "${event.id}" has already been applied — rejected as a redelivery`,
+    };
   }
+  return null;
+}
 
+/**
+ * Consume one event into `state`, mutating it. The caller has already cleared
+ * the gate, so this always advances the cursor: the event is history now,
+ * whether or not it changed anything.
+ */
+function consume(state: CoreState, event: CoreEvent): EventOutcome {
+  const issuesBefore = state.issues.length;
   const roomId = resolveRoomId(state, event);
-  if (roomId !== null) {
-    const mark = state.watermarks[roomId];
-    if (mark && compareCursor(cursorOf(event), mark) < 0) {
-      fail(
-        state,
-        event.id,
-        `event (${event.at}, ${event.id}) precedes the watermark (${mark.at}, ${mark.id}) of room "${roomId}" — out-of-order application refused`,
-      );
-      return;
-    }
-  }
-
   const applied = dispatch(state, event);
 
+  state.cursor = cursorOf(event);
   // Advances whether or not the event applied: it is the log position this
-  // room's state reflects, which is what keeps a live fold and a replay
-  // indistinguishable. See the contract on `reduce`.
+  // room's state reflects, not a success count.
   if (roomId !== null) state.watermarks[roomId] = cursorOf(event);
-
   if (applied) state.appliedEventIds.push(event.id);
+
+  const issues = state.issues.slice(issuesBefore);
+  return issues.length > 0
+    ? { outcome: 'applied_with_issue', event, issues }
+    : { outcome: 'applied', event };
 }
 
 /** Applies one event. Returns whether it was applied; issues are recorded in state. */
@@ -209,8 +328,11 @@ function applyProposalRecorded(state: CoreState, event: EventOf<'proposal_record
     );
   }
 
+  // The wire status is dropped rather than copied: `record.status` is the only
+  // status a proposal has, so acceptance cannot leave a stale second copy
+  // behind. See `StoredProposal`.
   state.proposals[proposal.id] = {
-    proposal: { ...proposal, status: 'proposed' },
+    proposal: storeProposal(proposal),
     status: 'proposed',
     acceptedObjectId: null,
     rejectedReason: null,
@@ -244,11 +366,31 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
     return false;
   }
 
-  // An object may be born without a proposal — a human writing a decision
-  // directly, or answer-bound creation. But an object that *claims* a proposal
-  // must claim a real, still-open, type-matching one: that citation is the
-  // provenance the UI shows, so an unverifiable one is worse than none.
+  // An object may be born without a proposal — but only from a human. That is
+  // the answer-binding path: a person writes a decision, or binds an answer,
+  // and a person's word is not an interpretation that needs accepting.
+  //
+  // A model or a system actor has exactly one way to mint a fact: propose it,
+  // and have a human accept the proposal. Without this gate the whole
+  // acceptance boundary is optional — an interpreter that cannot hand itself a
+  // pre-accepted proposal can simply skip the proposal and emit the object.
+  //
+  // This is the one actor rule the scaffold enforces. Per-type acceptance rules
+  // (confidence thresholds, which types a model may propose at all) and the
+  // correction verbs are #21's, and they layer on top of this, not around it.
   const proposalId = object.provenance.proposalId;
+  if (proposalId === null && event.actor.kind !== 'human') {
+    fail(
+      state,
+      event.id,
+      `object "${object.id}" was accepted with no proposal by a ${event.actor.kind} actor — only a human may accept an object directly; a ${event.actor.kind} actor must record a proposal and have it accepted`,
+    );
+    return false;
+  }
+
+  // An object that *claims* a proposal must claim a real, still-open,
+  // type-matching one: that citation is the provenance the UI shows, so an
+  // unverifiable one is worse than none.
   let proposal: ProposalRecord | undefined;
   if (proposalId !== null) {
     proposal = state.proposals[proposalId];

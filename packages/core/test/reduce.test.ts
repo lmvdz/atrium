@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeAttention, reduce, serializeState } from '../src/index.js';
+import { appendEvent, computeAttention, foldEvents, reduce, serializeState } from '../src/index.js';
 import { ALICE, at, BOB, event, human, ROOM, sampleLog, shuffle } from './fixtures.js';
 
 describe('reduce — determinism', () => {
@@ -27,18 +27,31 @@ describe('reduce — determinism', () => {
   it('folds incrementally to the same state as a full replay', () => {
     const events = sampleLog();
     const full = reduce(events);
-    const incremental = events.reduce((state, next) => reduce([next], state), reduce([]));
+    const incremental = events.reduce((state, next) => appendEvent(state, next).state, reduce([]));
     expect(serializeState(incremental)).toBe(serializeState(full));
   });
 
-  it('is idempotent per event id — a replayed event is refused, not double-applied', () => {
+  it('is idempotent per event id — a redelivery is rejected, not double-applied', () => {
     const events = sampleLog();
     const once = reduce(events);
     const twice = reduce([...events, ...events]);
-    expect(twice.objects).toEqual(once.objects);
-    expect(twice.relations).toEqual(once.relations);
-    expect(twice.corrections).toEqual(once.corrections);
-    expect(twice.issues).toHaveLength(events.length);
+
+    // A duplicate is a rejection, not a business issue: it never happened, so
+    // it leaves nothing in `issues` for a replay to have to reproduce. The
+    // second copy of the log is simply not there.
+    expect(serializeState(twice)).toBe(serializeState(once));
+    expect(twice.issues).toEqual([]);
+  });
+
+  it('reports each redelivery as a rejection rather than swallowing it', () => {
+    const events = sampleLog();
+    const { outcomes } = foldEvents([...events, ...events]);
+    const rejected = outcomes.filter((o) => o.outcome === 'rejected');
+    expect(rejected).toHaveLength(events.length);
+    for (const outcome of rejected) {
+      if (outcome.outcome !== 'rejected') throw new Error('unreachable');
+      expect(outcome.reason).toBe('duplicate');
+    }
   });
 });
 

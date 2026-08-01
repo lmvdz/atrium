@@ -26,6 +26,8 @@ export function event(input: CoreEventInput): CoreEvent {
 }
 
 export const human = (userId = ALICE) => ({ kind: 'human', userId }) as const;
+export const model = (name = 'test-model') => ({ kind: 'model', model: name }) as const;
+export const system = () => ({ kind: 'system' }) as const;
 
 /**
  * A small but complete log: a model proposes a decision, a human accepts it,
