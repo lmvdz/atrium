@@ -116,8 +116,15 @@ async function main(): Promise<void> {
     });
   }
 
+  // An unhandled rejection means a promise chain died without anyone catching
+  // it: the process is in a state nobody reasoned about. Logging and carrying
+  // on is how a server ends up serving stale reads or half-open sockets for
+  // hours. Exit, and let compose's `restart: unless-stopped` bring back a
+  // process whose state we understand. Deliberately not a graceful shutdown —
+  // the shutdown path itself may be what failed.
   process.on('unhandledRejection', (reason) => {
-    logger.error('unhandled rejection', { reason: String(reason) });
+    logger.error('unhandled rejection — exiting', { reason: String(reason) });
+    process.exit(1);
   });
   process.on('uncaughtException', (error: Error) => {
     logger.error('uncaught exception', { error: error.message, stack: error.stack });

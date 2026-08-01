@@ -7,6 +7,7 @@
  * testable in isolation (issue #11).
  */
 export * from './attention.js';
+export * from './authority.js';
 export * from './common.js';
 export * from './events.js';
 export * from './objects.js';

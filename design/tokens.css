@@ -1,44 +1,23 @@
-/*
- * Atrium design tokens — PLACEHOLDER
+/* ---------------------------------------------------------------------------
+ * Atrium design tokens
  *
- * TODO(design/tokens): the `design/tokens` branch did not exist when the
- * scaffold was built (`git fetch origin design/tokens` → "couldn't find remote
- * ref"). When that branch lands, replace this file wholesale with its
- * `design/tokens.css`; nothing else needs to change, because the app only ever
- * reads the variables below and never hardcodes a colour.
+ * Provenance: extracted verbatim from the `:root` and `html.atr-dark` blocks of
+ * "Atrium v6.dc.html" (design-canvas prototype, "Design system for live call
+ * interface" corpus), 2026-07-31. Values are byte-identical to the source; the
+ * only changes are grouping comments and the ordering of the call-era tokens
+ * into their own section. See plans/research-live-call-design-system/BRIEF.md
+ * concept 9 for what this system is and why it is adopted wholesale.
  *
- * Until then these values are not invented: they are transcribed from the
- * settled six-version Atrium token system recorded in
- * `plans/research-live-call-design-system/` (scout-early.md §"Palette
- * structure", scout-late.md §"Color tokens"), which is prior art for this same
- * product. Structure:
+ * Light (`:root`) is the default theme - warm paper. Dark is opt-in by putting
+ * `atr-dark` on <html>. Both themes define the same token names, so nothing
+ * downstream ever branches on theme.
  *
- *   --strip/--stile/--stx…   the dark pine icon rail ("strip"), light or dark
- *   --bg0 … --bg7            7-step background ramp   (page → card → elevated)
- *   --line, --line2, --line3 3-step hairline border ramp
- *   --tx0 … --tx4            5-step text ramp         (0 = primary, 4 = faintest)
- *   --grn*                   verified / settled       (epistemic ✓)
- *   --amb*                   needs-you / pending gate (epistemic ~, attention)
- *   --red*                   blocking / failed / destructive
- *   --blu*                   human identity, links
- *
- * Light (warm paper) is the default; dark is opt-in via `html.atr-dark`.
- * Semantic meaning is load-bearing: green never means "in progress", amber
- * always means "a human is required". See the research brief, concept 9.
- */
+ * Usage conventions (ramps, typography, glyphs, density): design/CONVENTIONS.md
+ * ------------------------------------------------------------------------- */
 
+/* light - warm paper (default) */
 :root {
-  color-scheme: light;
-
-  /* icon rail ("strip") — dark pine even in light mode */
-  --strip: #173a32;
-  --stile: rgb(244 241 234 / 10%);
-  --stileac: #f4f1ea;
-  --stbd: rgb(244 241 234 / 25%);
-  --stx: #c9d6cb;
-  --stxac: #173a32;
-
-  /* backgrounds — warm cream/tan, never pure white */
+  /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
   --bg0: #e6e2da;
   --bg1: #f4f1ea;
   --bg2: #ece8df;
@@ -48,75 +27,75 @@
   --bg6: #ddd6c8;
   --bg7: #efeae0;
 
-  /* hairlines */
+  /* neutral rules - line (hairline) / line2 (divider) / line3 (emphatic) */
   --line: #d4cdbd;
   --line2: #c8c1b4;
   --line3: #b0a896;
 
-  /* text */
+  /* neutral text - tx0 (primary) ... tx4 (faintest) */
   --tx0: #171a18;
   --tx1: #3a362e;
   --tx2: #57534a;
   --tx3: #7d7666;
   --tx4: #a39b89;
 
-  /* green — verified / settled */
+  /* green - verified / settled / passing */
   --grn: #4e9161;
   --grn2: #3e7b52;
   --grn3: #5b8a6b;
   --grnbd: #9dc4a8;
   --grnbg: #e3ede2;
+  --grnav: #cbe0ce;
 
-  /* amber — needs you / pending gate */
+  /* amber - needs you / gate awaiting a human */
   --amb: #b07d2a;
   --amb2: #8a6220;
   --ambbd: #d9b36a;
+  --ambbd2: #e3c88f;
   --ambbg: #f5e9cd;
   --ambbg2: #f0e2c2;
+  --ambbg3: #ebdab1;
+  --ambbg4: #efdfb9;
+  --ambbg5: #f6edda;
 
-  /* red — blocking / failed / destructive */
+  /* red - destructive / failed */
   --red: #b3402e;
   --red2: #a63a28;
+  --red3: #8f3222;
   --redbd: #dba090;
   --redbg: #f6dfd7;
+  --redbg2: #f1d3ca;
+  --redbg3: #e4b8ac;
 
-  /* blue — human identity, links */
+  /* blue - human / person-authored surfaces */
   --blu: #3d6bb3;
   --blu2: #2f5590;
   --blu3: #8a97ac;
   --replybg: #dfe7f2;
+  --filebg: #dfe9f4;
+  --filebd: #b7cce4;
 
-  /* typography — mono for machine/timeline rows, sans for human chrome */
-  --font-sans: var(--font-inter, 'Inter'), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-plex-mono, 'IBM Plex Mono'), ui-monospace, 'SFMono-Regular', monospace;
-  --fs-micro: 10px;
-  --fs-row: 11.5px;
-  --fs-base: 12.5px;
-  --fs-lg: 15px;
-  --fs-xl: 20px;
-  --ls-label: 0.14em;
-
-  /* geometry — the prior system used ad-hoc px; these name the common steps */
-  --sp-1: 4px;
-  --sp-2: 6px;
-  --sp-3: 10px;
-  --sp-4: 14px;
-  --sp-5: 20px;
-  --sp-6: 28px;
-  --radius-card: 10px;
-  --radius-pill: 999px;
+  /* -------------------------------------------------------------- */
+  /* call-era - unused in v1, kept for Phase 4.                      */
+  /* Live-call chrome from the Atrium fleet-ops era: the pine call   */
+  /* strip (--strip) and its live indicator (--live), plus the       */
+  /* speaker-tile ramp - fill, active fill, border, text, active     */
+  /* text (--stile, --stileac, --stbd, --stx, --stxac). Atrium v1    */
+  /* is human-only with no voice surface, so nothing consumes these  */
+  /* yet; they are kept verbatim for when calls return in Phase 4.   */
+  /* -------------------------------------------------------------- */
+  --live: #9bb3a0;
+  --strip: #173a32;
+  --stile: rgba(244, 241, 234, 0.1);
+  --stileac: #f4f1ea;
+  --stbd: rgba(244, 241, 234, 0.25);
+  --stx: #c9d6cb;
+  --stxac: #173a32;
 }
 
+/* dark - near-black (opt-in via `atr-dark` on <html>) */
 html.atr-dark {
-  color-scheme: dark;
-
-  --strip: #0e1a15;
-  --stile: #16241d;
-  --stileac: #1e3a2a;
-  --stbd: #2e5a40;
-  --stx: #7fa98a;
-  --stxac: #5cb27a;
-
+  /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
   --bg0: #0a0b0c;
   --bg1: #0c0d0f;
   --bg2: #0b0c0e;
@@ -126,83 +105,68 @@ html.atr-dark {
   --bg6: #1a1d21;
   --bg7: #0e1012;
 
+  /* neutral rules - line (hairline) / line2 (divider) / line3 (emphatic) */
   --line: #1f2226;
   --line2: #2a2e33;
   --line3: #3a3f45;
 
+  /* neutral text - tx0 (primary) ... tx4 (faintest) */
   --tx0: #e8eaec;
   --tx1: #c9ced3;
   --tx2: #9aa1a8;
   --tx3: #6d747c;
   --tx4: #575e66;
 
+  /* green - verified / settled / passing */
   --grn: #5cb27a;
   --grn2: #4ea76b;
   --grn3: #6fa383;
   --grnbd: #2e5a40;
   --grnbg: #14261b;
+  --grnav: #1e3a2a;
 
+  /* amber - needs you / gate awaiting a human */
   --amb: #c99a3f;
   --amb2: #e0c077;
   --ambbd: #6e5320;
+  --ambbd2: #57431c;
   --ambbg: #221c0e;
   --ambbg2: #2a2210;
+  --ambbg3: #332a14;
+  --ambbg4: #332a14;
+  --ambbg5: #201a0e;
 
+  /* red - destructive / failed */
   --red: #d4604a;
   --red2: #c25340;
+  --red3: #e06a52;
   --redbd: #6e3427;
   --redbg: #261311;
+  --redbg2: #2e1714;
+  --redbg3: #57271e;
 
+  /* blue - human / person-authored surfaces */
   --blu: #8ab4f8;
   --blu2: #aecbfa;
   --blu3: #6b89b3;
   --replybg: #1c2836;
-}
+  --filebg: #16222f;
+  --filebd: #24435f;
 
-/* Base reset — deliberately tiny; component styling belongs with components. */
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
+  /* -------------------------------------------------------------- */
+  /* call-era - unused in v1, kept for Phase 4.                      */
+  /* Live-call chrome from the Atrium fleet-ops era: the pine call   */
+  /* strip (--strip) and its live indicator (--live), plus the       */
+  /* speaker-tile ramp - fill, active fill, border, text, active     */
+  /* text (--stile, --stileac, --stbd, --stx, --stxac). Atrium v1    */
+  /* is human-only with no voice surface, so nothing consumes these  */
+  /* yet; they are kept verbatim for when calls return in Phase 4.   */
+  /* -------------------------------------------------------------- */
+  --live: #3e5748;
+  --strip: #0e1a15;
+  --stile: #16241d;
+  --stileac: #1e3a2a;
+  --stbd: #2e5a40;
+  --stx: #7fa98a;
+  --stxac: #5cb27a;
 }
-
-html,
-body {
-  height: 100%;
-}
-
-body {
-  margin: 0;
-  background: var(--bg0);
-  color: var(--tx0);
-  font-family: var(--font-sans);
-  font-size: var(--fs-base);
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-}
-
-/* Machine rows — timeline, receipts, provenance — are monospace by rule. */
-.atr-mono {
-  font-family: var(--font-mono);
-}
-
-.atr-label {
-  font-size: var(--fs-micro);
-  font-weight: 600;
-  letter-spacing: var(--ls-label);
-  text-transform: uppercase;
-  color: var(--tx3);
-}
-
-/* biome-ignore-start lint/complexity/noImportantStyles: a reduced-motion opt-out must beat every component animation, by design */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-/* biome-ignore-end lint/complexity/noImportantStyles: end reduced-motion block */

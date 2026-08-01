@@ -1,0 +1,1215 @@
+import { describe, expect, it } from 'vitest';
+import {
+  appendEvent,
+  type CoreEvent,
+  foldEvents,
+  proposalWithStatus,
+  reduce,
+  serializeState,
+} from '../src/index.js';
+import { ALICE, at, BOB, event, human, model, ROOM, sampleLog } from './fixtures.js';
+
+/**
+ * The trust boundary, pinned. Every case here is one a reducer that "mostly
+ * works" would wave through: a proposal that arrives pre-accepted, an
+ * acceptance citing a proposal that was already rejected or already spent, an
+ * amendment to something the room retracted, two decisions superseding each
+ * other into a loop. None of them may change state; all of them must be
+ * visible in `state.issues`.
+ */
+
+const OTHER_ROOM = 'room_2';
+
+type TestActor =
+  | { kind: 'human'; userId: string }
+  | { kind: 'model'; model: string }
+  | { kind: 'system' };
+
+function proposalEvent(
+  overrides: {
+    id?: string;
+    proposalId?: string;
+    at?: string;
+    roomId?: string;
+    status?: 'proposed' | 'accepted' | 'rejected' | 'superseded';
+    type?: 'decision' | 'claim';
+  } = {},
+): CoreEvent {
+  const minute = overrides.at ?? at(1);
+  return event({
+    id: overrides.id ?? 'ev_prop',
+    at: minute,
+    actor: { kind: 'model', model: 'test-model' },
+    type: 'proposal_recorded',
+    proposal: {
+      id: overrides.proposalId ?? 'prop_x',
+      roomId: overrides.roomId ?? ROOM,
+      type: overrides.type ?? 'decision',
+      payload:
+        (overrides.type ?? 'decision') === 'claim'
+          ? { statement: 'the build is green', claimant: ALICE }
+          : { statement: 'Adopt the watermark contract' },
+      confidence: 0.9,
+      proposer: { kind: 'model', model: 'test-model' },
+      provenance: ['msg_9'],
+      createdAt: minute,
+      ...(overrides.status ? { status: overrides.status } : {}),
+    },
+  } as Parameters<typeof event>[0]);
+}
+
+function acceptEvent(
+  overrides: {
+    id?: string;
+    objectId?: string;
+    at?: string;
+    roomId?: string;
+    proposalId?: string | null;
+    type?: 'decision' | 'claim';
+    actor?: TestActor;
+  } = {},
+): CoreEvent {
+  const minute = overrides.at ?? at(2);
+  const type = overrides.type ?? 'decision';
+  return event({
+    id: overrides.id ?? 'ev_accept',
+    at: minute,
+    actor: overrides.actor ?? human(),
+    type: 'object_accepted',
+    object: {
+      id: overrides.objectId ?? 'obj_x',
+      roomId: overrides.roomId ?? ROOM,
+      type,
+      payload:
+        type === 'claim'
+          ? { statement: 'the build is green', claimant: ALICE }
+          : { statement: 'Adopt the watermark contract', decidedBy: ALICE },
+      provenance: {
+        messageIds: ['msg_9'],
+        proposalId: overrides.proposalId === undefined ? 'prop_x' : overrides.proposalId,
+      },
+      createdAt: minute,
+      updatedAt: minute,
+    },
+  } as Parameters<typeof event>[0]);
+}
+
+describe('proposal lifecycle — a proposal may never arrive pre-blessed', () => {
+  it('forces a pre-accepted proposal back to "proposed" and records the coercion', () => {
+    const state = reduce([proposalEvent({ status: 'accepted' })]);
+
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+    expect(state.proposals.prop_x?.acceptedObjectId).toBeNull();
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]).toMatchObject({ eventId: 'ev_prop' });
+    expect(state.issues[0]?.reason).toContain('forced to "proposed"');
+    expect(Object.keys(state.objects)).toEqual([]);
+  });
+
+  it('records a normally-proposed proposal without an issue', () => {
+    const state = reduce([proposalEvent()]);
+    expect(state.issues).toEqual([]);
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+  });
+
+  it('stores no second copy of the status — the record is the only holder', () => {
+    const state = reduce([proposalEvent()]);
+    const record = state.proposals.prop_x;
+    expect(record).toBeDefined();
+    // Not "the nested copy agrees": there is no nested copy to disagree.
+    expect(record?.proposal).not.toHaveProperty('status');
+    expect(Object.keys(record?.proposal ?? {})).not.toContain('status');
+  });
+
+  it('reports the accepted status through every reader, with nothing left stale', () => {
+    const state = reduce([proposalEvent(), acceptEvent()]);
+    const record = state.proposals.prop_x;
+    if (!record) throw new Error('proposal missing');
+
+    expect(record.status).toBe('accepted');
+    expect(record.acceptedObjectId).toBe('obj_x');
+    expect(proposalWithStatus(record).status).toBe('accepted');
+    // The whole-proposal view is the record's fields plus the record's status.
+    expect(proposalWithStatus(record)).toMatchObject({ id: 'prop_x', roomId: ROOM });
+  });
+
+  it('reports the rejected status through the same reader', () => {
+    const state = reduce([
+      proposalEvent(),
+      event({
+        id: 'ev_r',
+        at: at(2),
+        actor: human(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+        reason: 'not what was said',
+      }),
+    ]);
+    const record = state.proposals.prop_x;
+    if (!record) throw new Error('proposal missing');
+    expect(proposalWithStatus(record).status).toBe('rejected');
+    expect(record.rejectedReason).toBe('not what was said');
+  });
+
+  it('refuses a second rejection of the same proposal', () => {
+    const reject = (id: string, minute: string) =>
+      event({
+        id,
+        at: minute,
+        actor: human(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+        reason: 'not what was said',
+      });
+    const state = reduce([proposalEvent(), reject('ev_r1', at(2)), reject('ev_r2', at(3))]);
+    expect(state.proposals.prop_x?.status).toBe('rejected');
+    expect(state.issues).toEqual([
+      { eventId: 'ev_r2', reason: 'proposal "prop_x" was already rejected' },
+    ]);
+  });
+});
+
+describe('acceptance — an accepted object may only cite a live, matching proposal', () => {
+  it('refuses an acceptance citing a proposal that does not exist', () => {
+    const state = reduce([acceptEvent({ at: at(1) })]);
+    expect(state.objects).toEqual({});
+    expect(state.issues).toEqual([
+      { eventId: 'ev_accept', reason: 'object "obj_x" cites unknown proposal "prop_x"' },
+    ]);
+    // Consumed, not applied. The event took its position in the log and spent
+    // its id there; refusing it on business grounds does not hand it back.
+    expect(state.consumedEventIds).toEqual(['ev_accept']);
+  });
+
+  it('refuses an acceptance of an already-rejected proposal', () => {
+    const state = reduce([
+      proposalEvent(),
+      event({
+        id: 'ev_reject',
+        at: at(2),
+        actor: human(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+        reason: 'that is not what she said',
+      }),
+      acceptEvent({ at: at(3) }),
+    ]);
+
+    expect(state.objects).toEqual({});
+    expect(state.proposals.prop_x?.status).toBe('rejected');
+    expect(state.proposals.prop_x?.acceptedObjectId).toBeNull();
+    expect(state.issues).toEqual([
+      { eventId: 'ev_accept', reason: 'proposal "prop_x" was already rejected' },
+    ]);
+  });
+
+  it('refuses a second object accepted from one proposal', () => {
+    const state = reduce([
+      proposalEvent(),
+      acceptEvent({ id: 'ev_a1', objectId: 'obj_first', at: at(2) }),
+      acceptEvent({ id: 'ev_a2', objectId: 'obj_second', at: at(3) }),
+    ]);
+
+    expect(Object.keys(state.objects)).toEqual(['obj_first']);
+    expect(state.proposals.prop_x?.acceptedObjectId).toBe('obj_first');
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_a2',
+        reason: 'proposal "prop_x" was already accepted as object "obj_first"',
+      },
+    ]);
+  });
+
+  it('refuses an acceptance whose type does not match its proposal', () => {
+    const state = reduce([proposalEvent({ type: 'decision' }), acceptEvent({ type: 'claim' })]);
+
+    expect(state.objects).toEqual({});
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_accept',
+        reason: 'proposal "prop_x" is a decision, cannot be accepted as a claim',
+      },
+    ]);
+  });
+
+  it('refuses an acceptance that drags a proposal across rooms', () => {
+    const state = reduce([
+      proposalEvent({ roomId: ROOM }),
+      acceptEvent({ roomId: OTHER_ROOM, at: at(3) }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues[0]?.reason).toContain('belongs to room');
+  });
+
+  it('still accepts an object with no proposal at all — humans write facts directly', () => {
+    const state = reduce([acceptEvent({ proposalId: null, at: at(1) })]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x?.object.provenance.proposalId).toBeNull();
+    expect(state.consumedEventIds).toEqual(['ev_accept']);
+  });
+
+  it('accepts normally when the proposal is live and matching', () => {
+    const state = reduce([proposalEvent(), acceptEvent()]);
+    expect(state.issues).toEqual([]);
+    expect(state.proposals.prop_x?.status).toBe('accepted');
+    expect(state.proposals.prop_x?.acceptedObjectId).toBe('obj_x');
+  });
+});
+
+describe('the actor floor — gate 1: an acceptance with no proposal is human-only', () => {
+  /**
+   * The proposal boundary only means something if going around it is closed
+   * too. An interpreter that cannot hand itself a pre-accepted proposal can
+   * otherwise just skip the proposal: emit `object_accepted` with
+   * `proposalId: null` and the fact is in the room, unaccepted by anyone.
+   */
+  it('refuses a proposal-less acceptance from a model actor', () => {
+    const state = reduce([
+      acceptEvent({ proposalId: null, at: at(1), type: 'claim', actor: model() }),
+    ]);
+
+    expect(state.objects).toEqual({});
+    // Refused, but consumed: the id is spent whatever the outcome was.
+    expect(state.consumedEventIds).toEqual(['ev_accept']);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.eventId).toBe('ev_accept');
+    expect(state.issues[0]?.reason).toContain('only a human may accept an object directly');
+    expect(state.issues[0]?.reason).toContain('model actor');
+  });
+
+  it('refuses a proposal-less acceptance from a system actor too', () => {
+    const state = reduce([
+      acceptEvent({ proposalId: null, at: at(1), type: 'claim', actor: { kind: 'system' } }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues[0]?.reason).toContain('system actor');
+  });
+
+  it('allows a proposal-less acceptance from a human — the answer-binding path', () => {
+    const state = reduce([acceptEvent({ proposalId: null, at: at(1) })]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x?.object.provenance.proposalId).toBeNull();
+    expect(state.consumedEventIds).toEqual(['ev_accept']);
+  });
+
+  it('lets a model actor accept its own claim proposal — the route that stays open', () => {
+    // #4's auto-accept path, and the one this whole floor must not break: a
+    // claim is inherently "X said Y", its truth status lives in `verification`,
+    // and the cost asymmetry favours recall. So a model may close the loop on
+    // its own claim proposal — and only on the types #4 says it may.
+    const state = reduce([
+      proposalEvent({ type: 'claim' }),
+      acceptEvent({ type: 'claim', actor: model() }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+    expect(state.proposals.prop_x?.status).toBe('accepted');
+  });
+
+  it('gates on the acceptance actor, not on who proposed', () => {
+    // A human-proposed reading still cannot be self-accepted by a model with no
+    // proposal cited: the citation is the whole check.
+    const state = reduce([
+      proposalEvent({ id: 'ev_prop_human', proposalId: 'prop_h', type: 'claim' }),
+      acceptEvent({
+        id: 'ev_a',
+        objectId: 'obj_a',
+        proposalId: null,
+        at: at(3),
+        type: 'claim',
+        actor: model(),
+      }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain('must record a proposal');
+  });
+});
+
+describe('the actor floor — gate 2: a decision never auto-accepts', () => {
+  /**
+   * #4, verbatim: "Decisions — **never auto-accept.** Accepted only via (a)
+   * answer-binding or (b) explicit accept from Needs-you/Current-state. This is
+   * where 'that sounds good' ambiguity lives, so inference is banned at exactly
+   * this point." The reducer holds that floor: a proposal the model wrote and
+   * the model accepted is inference, however many events it took.
+   */
+  it('refuses a model actor accepting a decision through its own proposal', () => {
+    const state = reduce([proposalEvent({ type: 'decision' }), acceptEvent({ actor: model() })]);
+
+    expect(state.objects).toEqual({});
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+    expect(state.proposals.prop_x?.acceptedObjectId).toBeNull();
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('is a decision accepted by a model actor');
+    expect(state.issues[0]?.reason).toContain('never auto-accepts');
+    expect(state.consumedEventIds).toEqual(['ev_prop', 'ev_accept']);
+  });
+
+  it('refuses a system actor accepting a decision too', () => {
+    const state = reduce([proposalEvent(), acceptEvent({ actor: { kind: 'system' } })]);
+    expect(state.objects).toEqual({});
+    expect(state.issues[0]?.reason).toContain('system actor');
+  });
+
+  it('allows a human to accept a decision through a proposal', () => {
+    const state = reduce([proposalEvent(), acceptEvent()]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+    expect(state.proposals.prop_x?.status).toBe('accepted');
+  });
+
+  it('leaves the model free to propose the decision it may not accept', () => {
+    const state = reduce([proposalEvent({ type: 'decision' })]);
+    expect(state.issues).toEqual([]);
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+  });
+});
+
+describe('the actor floor — gate 3: only a human marks a claim verified', () => {
+  const claimEvent = (overrides: {
+    id?: string;
+    objectId?: string;
+    at?: string;
+    verification?: 'unverified' | 'verified' | 'disputed';
+    actor?: TestActor;
+  }) => {
+    const minute = overrides.at ?? at(1);
+    return event({
+      id: overrides.id ?? 'ev_claim',
+      at: minute,
+      actor: overrides.actor ?? human(),
+      type: 'object_accepted',
+      object: {
+        id: overrides.objectId ?? 'obj_claim',
+        roomId: ROOM,
+        type: 'claim',
+        payload: {
+          statement: 'the migration ran clean',
+          claimant: BOB,
+          verification: overrides.verification ?? 'unverified',
+        },
+        createdAt: minute,
+        updatedAt: minute,
+      },
+    } as Parameters<typeof event>[0]);
+  };
+
+  it('refuses a claim born verified on a model actor’s word', () => {
+    const state = reduce([claimEvent({ verification: 'verified', actor: model() })]);
+    expect(state.objects).toEqual({});
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('would become a verified claim');
+    expect(state.issues[0]?.reason).toContain('unverified or disputed');
+  });
+
+  it('still lets a model accept the same claim unverified — the `~` path', () => {
+    const state = reduce([claimEvent({ verification: 'unverified', actor: model() })]);
+    // Proposal-less, so gate 1 catches it; through a proposal it is legal.
+    expect(state.issues[0]?.reason).toContain('only a human may accept an object directly');
+
+    const viaProposal = reduce([
+      proposalEvent({ type: 'claim' }),
+      acceptEvent({ type: 'claim', actor: model() }),
+    ]);
+    expect(viaProposal.issues).toEqual([]);
+    const accepted = viaProposal.objects.obj_x?.object;
+    expect(accepted?.type === 'claim' && accepted.payload.verification).toBe('unverified');
+  });
+
+  it('lets a model accept a disputed claim — only ✓ is gated', () => {
+    const state = reduce([
+      claimEvent({ verification: 'disputed', actor: model(), objectId: 'obj_disputed' }),
+    ]);
+    // Gate 1, not gate 3: the refusal is about the missing proposal.
+    expect(state.issues[0]?.reason).toContain('only a human may accept an object directly');
+    expect(state.issues[0]?.reason).not.toContain('verified claim');
+  });
+
+  it('allows a human to accept a verified claim', () => {
+    const state = reduce([claimEvent({ verification: 'verified' })]);
+    expect(state.issues).toEqual([]);
+    const accepted = state.objects.obj_claim?.object;
+    expect(accepted?.type === 'claim' && accepted.payload.verification).toBe('verified');
+  });
+
+  it('refuses a model amending a claim to verified, naming the verification rule', () => {
+    // Doubly closed: corrections are human-only (gate 5) *and* verification is
+    // human-only (gate 3). The reported reason is the specific one.
+    const state = reduce([
+      claimEvent({}),
+      event({
+        id: 'ev_verify',
+        at: at(2),
+        actor: model(),
+        type: 'object_corrected',
+        objectId: 'obj_claim',
+        action: 'amend',
+        patch: { verification: 'verified' },
+      }),
+    ]);
+    const claim = state.objects.obj_claim?.object;
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('unverified');
+    expect(state.corrections).toEqual([]);
+    expect(state.issues.at(-1)?.reason).toContain('would become a verified claim');
+  });
+
+  it('allows a human to amend a claim to verified', () => {
+    const state = reduce([
+      claimEvent({}),
+      event({
+        id: 'ev_verify',
+        at: at(2),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_claim',
+        action: 'amend',
+        patch: { verification: 'verified' },
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const claim = state.objects.obj_claim?.object;
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('verified');
+    expect(state.corrections).toHaveLength(1);
+  });
+});
+
+describe('the actor floor — gate 4: superseding a decision is human-only', () => {
+  const supersede = (actor: TestActor, targetId: string, id: string) =>
+    event({
+      id,
+      at: at(10),
+      actor,
+      type: 'relation_added',
+      relation: {
+        id: `rel_${id}`,
+        roomId: ROOM,
+        kind: 'supersedes',
+        fromObjectId: 'obj_decision_2',
+        to: { kind: 'object', objectId: targetId },
+        createdAt: at(10),
+      },
+    } as Parameters<typeof event>[0]);
+
+  const question = event({
+    id: 'ev_q2',
+    at: at(9),
+    actor: human(),
+    type: 'object_accepted',
+    object: {
+      id: 'obj_question_2',
+      roomId: ROOM,
+      type: 'open_question',
+      payload: { question: 'Is the flag still needed?' },
+      createdAt: at(9),
+      updatedAt: at(9),
+    },
+  } as Parameters<typeof event>[0]);
+
+  it('refuses a model superseding an accepted decision', () => {
+    // sampleLog's obj_decision_1 is already superseded, so target the live one.
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_d3',
+        at: at(9),
+        actor: human(),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_decision_3',
+          roomId: ROOM,
+          type: 'decision',
+          payload: { statement: 'A newer reading', decidedBy: ALICE },
+          createdAt: at(9),
+          updatedAt: at(9),
+        },
+      }),
+      event({
+        id: 'ev_model_super',
+        at: at(10),
+        actor: model(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_model_super',
+          roomId: ROOM,
+          kind: 'supersedes',
+          fromObjectId: 'obj_decision_3',
+          to: { kind: 'object', objectId: 'obj_decision_2' },
+          createdAt: at(10),
+        },
+      }),
+    ]);
+
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('retires an accepted decision');
+    expect(state.objects.obj_decision_2?.supersededById).toBeNull();
+    expect(state.relations.map((r) => r.id)).toEqual(['rel_1', 'rel_2']);
+  });
+
+  it('allows a model to supersede an open question — #4 auto-accepts that one', () => {
+    const state = reduce([...sampleLog(), question, supersede(model(), 'obj_question_2', 'ev_ms')]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_question_2?.supersededById).toBe('obj_decision_2');
+  });
+
+  it('allows a human to supersede a decision', () => {
+    const state = reduce(sampleLog());
+    expect(state.objects.obj_decision_1?.supersededById).toBe('obj_decision_2');
+    expect(state.issues).toEqual([]);
+  });
+});
+
+describe('the actor floor — gate 5: every correction verb is human-only', () => {
+  for (const action of ['amend', 'retract', 'restore'] as const) {
+    it(`refuses a model "${action}"`, () => {
+      const base = sampleLog();
+      const state = reduce([
+        ...base,
+        event({
+          id: `ev_${action}`,
+          at: at(9),
+          actor: model(),
+          type: 'object_corrected',
+          objectId: 'obj_decision_2',
+          action,
+          ...(action === 'amend' ? { patch: { statement: 'quietly reworded' } } : {}),
+        }),
+      ]);
+
+      expect(state.issues).toHaveLength(1);
+      expect(state.issues[0]?.reason).toContain('corrections (amend, retract, restore)');
+      expect(state.issues[0]?.reason).toContain('model actor');
+      expect(state.corrections).toEqual(reduce(base).corrections);
+      expect(state.objects.obj_decision_2?.revision).toBe(0);
+      expect(state.objects.obj_decision_2?.retractedAt).toBeNull();
+      // Consumed, though: the refusal is history, and a redelivery gets nothing.
+      expect(state.consumedEventIds).toContain(`ev_${action}`);
+    });
+  }
+
+  it('refuses a system actor correction as well', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_sys',
+        at: at(9),
+        actor: { kind: 'system' },
+        type: 'object_corrected',
+        objectId: 'obj_decision_2',
+        action: 'retract',
+      }),
+    ]);
+    expect(state.issues[0]?.reason).toContain('system actor');
+    expect(state.objects.obj_decision_2?.retractedAt).toBeNull();
+  });
+
+  it('allows every verb from a human', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_h_amend',
+        at: at(9),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_decision_2',
+        action: 'amend',
+        patch: { statement: 'Drop the flag; ship it on, today' },
+      }),
+      event({
+        id: 'ev_h_retract',
+        at: at(10),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_decision_2',
+        action: 'retract',
+      }),
+      event({
+        id: 'ev_h_restore',
+        at: at(11),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_decision_2',
+        action: 'restore',
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.corrections.map((c) => c.action)).toEqual([
+      'amend',
+      'amend',
+      'retract',
+      'restore',
+    ]);
+    expect(state.objects.obj_decision_2?.retractedAt).toBeNull();
+  });
+
+  it('leaves proposal_rejected open to a model — withdrawing a reading is not a correction', () => {
+    // Deliberate, and recorded in `authority.ts`: a rejected proposal stays in
+    // state, visible; nothing accepted is touched. An interpreter retiring its
+    // own low-confidence reading is a path #4 wants open.
+    const state = reduce([
+      proposalEvent(),
+      event({
+        id: 'ev_model_reject',
+        at: at(3),
+        actor: model(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+        reason: 'confidence fell below θ on re-read',
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.proposals.prop_x?.status).toBe('rejected');
+  });
+});
+
+describe('corrections — retraction is withdrawal, and a no-op is not history', () => {
+  it('refuses to amend a retracted object', () => {
+    const base = [
+      ...sampleLog(),
+      event({
+        id: 'ev_retract',
+        at: at(9),
+        actor: human(BOB),
+        type: 'object_corrected',
+        objectId: 'obj_commitment_1',
+        action: 'retract',
+        note: 'bob was estimating',
+      }),
+    ];
+    const retracted = reduce(base);
+    const state = reduce([
+      ...base,
+      event({
+        id: 'ev_amend_dead',
+        at: at(10),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_commitment_1',
+        action: 'amend',
+        patch: { statement: 'quietly bring it back' },
+      }),
+    ]);
+
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_amend_dead',
+        reason: 'object "obj_commitment_1" is retracted — restore it before amending',
+      },
+    ]);
+    const record = state.objects.obj_commitment_1;
+    expect(record?.revision).toBe(retracted.objects.obj_commitment_1?.revision);
+    expect(record?.object.type === 'commitment' && record.object.payload.statement).toBe(
+      'Wire the flag into the server',
+    );
+    expect(state.corrections).toHaveLength(retracted.corrections.length);
+  });
+
+  it('treats an empty amend patch as a no-op — no correction, no revision bump', () => {
+    const before = reduce(sampleLog());
+    const after = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_empty',
+        at: at(9),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_decision_1',
+        action: 'amend',
+      }),
+    ]);
+
+    expect(after.issues).toEqual([]);
+    expect(after.objects.obj_decision_1?.revision).toBe(before.objects.obj_decision_1?.revision);
+    expect(after.objects.obj_decision_1?.updatedAt).toBe(before.objects.obj_decision_1?.updatedAt);
+    expect(after.corrections).toHaveLength(before.corrections.length);
+    expect(after.consumedEventIds).toContain('ev_empty');
+  });
+
+  it('treats a patch that changes nothing as a no-op too', () => {
+    const before = reduce(sampleLog());
+    const after = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_same',
+        at: at(9),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_decision_1',
+        action: 'amend',
+        patch: { statement: 'Ship the scaffold behind a flag, default off' },
+      }),
+    ]);
+
+    expect(after.issues).toEqual([]);
+    expect(after.objects.obj_decision_1?.revision).toBe(before.objects.obj_decision_1?.revision);
+    expect(after.corrections).toHaveLength(before.corrections.length);
+  });
+
+  it('records retract and restore in consumedEventIds like every other event', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_retract',
+        at: at(9),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_commitment_1',
+        action: 'retract',
+      }),
+      event({
+        id: 'ev_restore',
+        at: at(10),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_commitment_1',
+        action: 'restore',
+      }),
+    ]);
+    expect(state.consumedEventIds).toContain('ev_retract');
+    expect(state.consumedEventIds).toContain('ev_restore');
+  });
+});
+
+describe('relations — typed edges must actually type-check against their endpoints', () => {
+  const decision3 = event({
+    id: 'ev_d3',
+    at: at(9),
+    actor: human(),
+    type: 'object_accepted',
+    object: {
+      id: 'obj_decision_3',
+      roomId: ROOM,
+      type: 'decision',
+      payload: { statement: 'A third reading of the same call', decidedBy: ALICE },
+      createdAt: at(9),
+      updatedAt: at(9),
+    },
+  });
+
+  it('refuses a supersession cycle', () => {
+    // sampleLog already has obj_decision_2 supersedes obj_decision_1.
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_cycle',
+        at: at(9),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_cycle',
+          roomId: ROOM,
+          kind: 'supersedes',
+          fromObjectId: 'obj_decision_1',
+          to: { kind: 'object', objectId: 'obj_decision_2' },
+          createdAt: at(9),
+        },
+      }),
+    ]);
+
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('cannot supersede');
+    expect(state.relations.map((r) => r.id)).toEqual(['rel_1', 'rel_2']);
+    expect(state.objects.obj_decision_2?.supersededById).toBeNull();
+    expect(state.objects.obj_decision_1?.supersededById).toBe('obj_decision_2');
+  });
+
+  it('refuses a second superseder rather than overwriting the first', () => {
+    const state = reduce([
+      ...sampleLog(),
+      decision3,
+      event({
+        id: 'ev_second_super',
+        at: at(10),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_second_super',
+          roomId: ROOM,
+          kind: 'supersedes',
+          fromObjectId: 'obj_decision_3',
+          to: { kind: 'object', objectId: 'obj_decision_1' },
+          createdAt: at(10),
+        },
+      }),
+    ]);
+
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_second_super',
+        reason: 'object "obj_decision_1" is already superseded by "obj_decision_2"',
+      },
+    ]);
+    expect(state.objects.obj_decision_1?.supersededById).toBe('obj_decision_2');
+    expect(state.relations.map((r) => r.id)).toEqual(['rel_1', 'rel_2']);
+  });
+
+  it('refuses an "answers" edge that does not start at an open question', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_bad_answers_from',
+        at: at(9),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_bad_from',
+          roomId: ROOM,
+          kind: 'answers',
+          fromObjectId: 'obj_commitment_1',
+          to: { kind: 'object', objectId: 'obj_decision_2' },
+          createdAt: at(9),
+        },
+      }),
+    ]);
+
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_bad_answers_from',
+        reason: 'relation "answers" must originate from an open_question, got "commitment"',
+      },
+    ]);
+    expect(state.relations.map((r) => r.id)).toEqual(['rel_1', 'rel_2']);
+  });
+
+  it('refuses an "answers" edge that does not land on a decision or a claim', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_bad_answers_to',
+        at: at(9),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_bad_to',
+          roomId: ROOM,
+          kind: 'answers',
+          fromObjectId: 'obj_question_1',
+          to: { kind: 'object', objectId: 'obj_commitment_1' },
+          createdAt: at(9),
+        },
+      }),
+    ]);
+
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_bad_answers_to',
+        reason: 'relation "answers" must target a decision or a claim, got "commitment"',
+      },
+    ]);
+  });
+
+  it('allows an "answers" edge onto a claim', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_claim',
+        at: at(9),
+        actor: human(),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_claim_1',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: 'the flag defaults off in prod', claimant: BOB },
+          createdAt: at(9),
+          updatedAt: at(9),
+        },
+      }),
+      event({
+        id: 'ev_answers_claim',
+        at: at(10),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_answers_claim',
+          roomId: ROOM,
+          kind: 'answers',
+          fromObjectId: 'obj_question_1',
+          to: { kind: 'object', objectId: 'obj_claim_1' },
+          createdAt: at(10),
+        },
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.relations.map((r) => r.id)).toContain('rel_answers_claim');
+  });
+
+  it('refuses a relation whose target object lives in another room', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_far',
+        at: at(9),
+        actor: human(),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_elsewhere',
+          roomId: OTHER_ROOM,
+          type: 'decision',
+          payload: { statement: 'Something another room decided', decidedBy: ALICE },
+          createdAt: at(9),
+          updatedAt: at(9),
+        },
+      }),
+      event({
+        id: 'ev_cross_room',
+        at: at(10),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_cross',
+          roomId: ROOM,
+          kind: 'depends_on',
+          fromObjectId: 'obj_decision_2',
+          to: { kind: 'object', objectId: 'obj_elsewhere' },
+          createdAt: at(10),
+        },
+      }),
+    ]);
+
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_cross_room',
+        reason:
+          'relation "rel_cross" is in room "room_1" but its target object "obj_elsewhere" is in room "room_2"',
+      },
+    ]);
+    expect(state.relations.map((r) => r.id)).toEqual(['rel_1', 'rel_2']);
+  });
+
+  it('refuses a relation whose own room disagrees with its source object', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_wrong_room',
+        at: at(9),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_wrong_room',
+          roomId: OTHER_ROOM,
+          kind: 'depends_on',
+          fromObjectId: 'obj_decision_2',
+          to: { kind: 'object', objectId: 'obj_commitment_1' },
+          createdAt: at(9),
+        },
+      }),
+    ]);
+    expect(state.issues[0]?.reason).toContain('its source object');
+    expect(state.relations.map((r) => r.id)).toEqual(['rel_1', 'rel_2']);
+  });
+});
+
+describe('the ordering gate — an out-of-order event is rejected, not recorded', () => {
+  const objective = (id: string, minute: string, roomId = ROOM) =>
+    event({
+      id: `ev_${id}`,
+      at: minute,
+      actor: human(),
+      type: 'object_accepted',
+      object: {
+        id: `obj_${id}`,
+        roomId,
+        type: 'objective',
+        payload: { title: id },
+        createdAt: minute,
+        updatedAt: minute,
+      },
+    });
+
+  const late = objective('late', at(3));
+
+  it('tracks the last consumed position per room', () => {
+    const state = reduce(sampleLog());
+    expect(state.watermarks[ROOM]).toEqual({ at: at(8), id: 'ev_08' });
+    expect(state.cursor).toEqual({ at: at(8), id: 'ev_08' });
+  });
+
+  it('tracks each room separately while the gate stays global', () => {
+    const state = reduce([...sampleLog(), objective('other', at(9), OTHER_ROOM)]);
+    expect(state.issues).toEqual([]);
+    expect(state.watermarks[ROOM]).toEqual({ at: at(8), id: 'ev_08' });
+    expect(state.watermarks[OTHER_ROOM]).toEqual({ at: at(9), id: 'ev_other' });
+    expect(state.cursor).toEqual({ at: at(9), id: 'ev_other' });
+  });
+
+  it('rejects a stale event from another room too — ordering is a log property', () => {
+    // Deliberate: `issues`, `corrections` and `consumedEventIds` are global
+    // ordered lists, so a per-room gate would let two rooms interleave them one
+    // way live and another way on replay. The gate is the log position.
+    const live = reduce(sampleLog());
+    const result = appendEvent(live, objective('other_late', at(2), OTHER_ROOM));
+
+    expect(result.outcome).toBe('rejected');
+    expect(result.state).toBe(live);
+  });
+
+  it('rejects an event that sorts before the cursor, changing nothing at all', () => {
+    const live = reduce(sampleLog());
+    const result = appendEvent(live, late);
+
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    expect(result.reason).toBe('out_of_order');
+    expect(result.detail).toContain('does not sort strictly after the consumed position');
+
+    // Total: not the same *values*, the same object. Nothing was cloned and
+    // nothing was written — no issue, no watermark move, no applied id.
+    expect(result.state).toBe(live);
+    expect(live.issues).toEqual([]);
+    expect(live.objects.obj_late).toBeUndefined();
+    expect(serializeState(result.state)).toBe(serializeState(reduce(sampleLog())));
+  });
+
+  it('rejects a verbatim redelivery, also without a trace', () => {
+    const events = sampleLog();
+    const live = reduce(events);
+    const replayed = events.at(-1);
+    if (!replayed) throw new Error('fixture changed');
+
+    const result = appendEvent(live, replayed);
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    // A verbatim redelivery lands on exactly the cursor, so the *position*
+    // gate is what refuses it — and the detail says the id is spent too, so a
+    // caller is never told to re-mint an event that is already in the log.
+    expect(result.reason).toBe('out_of_order');
+    expect(result.detail).toContain('do not re-mint it');
+    expect(result.state).toBe(live);
+    expect(live.issues).toEqual([]);
+  });
+
+  it('rejects a redelivery that re-minted its timestamp, as a duplicate', () => {
+    // The case position cannot see: same id, a *later* `at`. It clears the
+    // ordering gate and is caught by the id, which is why both checks exist.
+    const events = sampleLog();
+    const live = reduce(events);
+    const original = events.at(-1);
+    if (!original) throw new Error('fixture changed');
+
+    const result = appendEvent(live, { ...original, at: at(30) });
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    expect(result.reason).toBe('duplicate');
+    expect(result.detail).toContain('whatever timestamp it now carries');
+    expect(result.state).toBe(live);
+  });
+
+  it('spends the id of an event that was consumed but did not apply', () => {
+    // The r3 hole: only *applied* events were recorded as spent, so an event
+    // that failed its business checks could be redelivered at a later
+    // timestamp and retried against a state that had moved on — the same id
+    // flipping failure into success. Consumption spends the id, not success.
+    const ghost = event({
+      id: 'ev_ghost',
+      at: at(1),
+      actor: human(),
+      type: 'object_corrected',
+      objectId: 'obj_x',
+      action: 'amend',
+      patch: { statement: 'an amendment that arrived before its object' },
+    });
+    const first = reduce([ghost]);
+    expect(first.issues).toEqual([{ eventId: 'ev_ghost', reason: 'unknown object "obj_x"' }]);
+    expect(first.consumedEventIds).toEqual(['ev_ghost']);
+
+    // The object arrives afterwards, so the amendment would now succeed…
+    const withObject = appendEvent(first, acceptEvent({ proposalId: null, at: at(2) })).state;
+    expect(withObject.objects.obj_x).toBeDefined();
+
+    // …and the same id comes back carrying a fresh timestamp. Rejected.
+    const retry = appendEvent(withObject, { ...ghost, at: at(30) });
+    expect(retry.outcome).toBe('rejected');
+    if (retry.outcome !== 'rejected') throw new Error('unreachable');
+    expect(retry.reason).toBe('duplicate');
+    expect(retry.state).toBe(withObject);
+    expect(withObject.corrections).toEqual([]);
+  });
+
+  it('breaks a tie on event id, not just timestamp', () => {
+    const first = reduce([objective('b', at(1))]);
+    const result = appendEvent(first, objective('a', at(1)));
+
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    expect(result.reason).toBe('out_of_order');
+    expect(result.state.objects.obj_a).toBeUndefined();
+    expect(result.state.issues).toEqual([]);
+  });
+
+  it('rejects an event that lands on exactly the cursor', () => {
+    // `<=`, not `<`. `(at, id)` is a total order, so one position holds one
+    // event; a second event claiming it is a redelivery or a forged id, and
+    // admitting it would let two payloads share a place in the log.
+    const first = reduce([objective('a', at(1))]);
+    const result = appendEvent(first, objective('a', at(1)));
+
+    expect(result.outcome).toBe('rejected');
+    if (result.outcome !== 'rejected') throw new Error('unreachable');
+    expect(result.reason).toBe('out_of_order');
+    expect(result.state).toBe(first);
+  });
+
+  it('still consumes the next event at the same timestamp with a higher id', () => {
+    // Strict inequality is about the whole key, not about `at`: same minute,
+    // larger id, is forward motion and is consumed.
+    const first = reduce([objective('a', at(1))]);
+    const result = appendEvent(first, objective('b', at(1)));
+    expect(result.outcome).toBe('applied');
+    expect(result.state.objects.obj_b).toBeDefined();
+  });
+
+  it('accepts the same late event in a full replay, where it is in order', () => {
+    // The gate is about *arrival*. Handed the whole log at once, `reduce` sorts
+    // it and the event applies exactly where it belongs.
+    const replay = reduce([...sampleLog(), late]);
+    expect(replay.issues).toEqual([]);
+    expect(replay.objects.obj_late).toBeDefined();
+  });
+
+  it('consumes — and advances — an event refused on business grounds', () => {
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_refused',
+        at: at(9),
+        actor: human(),
+        type: 'relation_added',
+        relation: {
+          id: 'rel_refused',
+          roomId: ROOM,
+          kind: 'blocks',
+          fromObjectId: 'obj_nonexistent',
+          to: { kind: 'object', objectId: 'obj_decision_1' },
+          createdAt: at(9),
+        },
+      }),
+    ]);
+    // A business refusal is history: it happened, in order, and a replay of the
+    // log reproduces it. That is why it lands in `issues` and moves the cursor,
+    // and why an out-of-order event does neither.
+    expect(state.issues).toHaveLength(1);
+    expect(state.watermarks[ROOM]).toEqual({ at: at(9), id: 'ev_refused' });
+    expect(state.cursor).toEqual({ at: at(9), id: 'ev_refused' });
+  });
+
+  it('reports the outcome of every event in a fold', () => {
+    const { outcomes } = foldEvents([
+      ...sampleLog(),
+      proposalEvent({ id: 'ev_coerced', proposalId: 'prop_c', at: at(9), status: 'accepted' }),
+      late,
+    ]);
+    const byId = new Map(outcomes.map((o) => [o.event.id, o.outcome]));
+    expect(byId.get('ev_01')).toBe('applied');
+    expect(byId.get('ev_coerced')).toBe('applied_with_issue');
+    // `late` sorts into position 3 of the batch, so in a full replay it is in
+    // order and applies; nothing in a sorted fold is ever out of order.
+    expect(byId.get('ev_late')).toBe('applied');
+  });
+
+  it('still folds the sample log incrementally to the full-replay state', () => {
+    const events = sampleLog();
+    const incremental = events.reduce((state, next) => appendEvent(state, next).state, reduce([]));
+    expect(serializeState(incremental)).toBe(serializeState(reduce(events)));
+  });
+});
