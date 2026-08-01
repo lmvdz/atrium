@@ -6,6 +6,7 @@ import {
   type CoreState,
   reduce,
   serializeState,
+  wasConsumed,
 } from '../src/index.js';
 import { ALICE, BOB, shuffle } from './fixtures.js';
 
@@ -258,6 +259,7 @@ function foldLive(events: readonly CoreEvent[]): Run {
       counts[result.reason] = (counts[result.reason] ?? 0) + 1;
       continue;
     }
+    expect(wasConsumed(result)).toBe(true);
     counts[result.outcome] = (counts[result.outcome] ?? 0) + 1;
     consumed.push(event);
     state = result.state;
