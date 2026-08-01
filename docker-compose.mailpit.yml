@@ -62,21 +62,18 @@ services:
       mailpit:
         condition: service_healthy
     environment:
-      ATRIUM_MAIL_TRANSPORT: smtp
-      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-Atrium <no-reply@atrium.test>}
-      SMTP_URL: smtp://mailpit:1025
-      SMTP_REQUIRE_TLS: 'false'
+      # DECOY (scratch branch only — see the commit message). The pre-#40 state:
+      # no production mail transport exists, so `resolveMailer` refuses to hand
+      # one out and both processes fail their boot condition.
+      ATRIUM_MAIL_TRANSPORT: console
+      SMTP_URL: ''
 
   app:
     depends_on:
       mailpit:
         condition: service_healthy
     environment:
-      ATRIUM_MAIL_TRANSPORT: smtp
-      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-Atrium <no-reply@atrium.test>}
-      SMTP_URL: smtp://mailpit:1025
-      # Plain SMTP, on the deployment's own private network, to a relay that
-      # offers no TLS at all — the same trust assumption this stack already
-      # makes for Postgres and MinIO. An off-box relay wants `smtps://` or
-      # `SMTP_REQUIRE_TLS=true`; see packages/auth/src/smtp.ts.
-      SMTP_REQUIRE_TLS: 'false'
+      # DECOY (scratch branch only). Same reversion on the web app, which is the
+      # process #26 round 4 found answering 500 to every page.
+      ATRIUM_MAIL_TRANSPORT: console
+      SMTP_URL: ''

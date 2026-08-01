@@ -473,7 +473,7 @@ jobs:
           BETTER_AUTH_SECRET=atrium-ci-secret-not-for-production-0123456789
           S3_ACCESS_KEY_ID=atrium
           S3_SECRET_ACCESS_KEY=atrium-ci-not-a-real-secret
-          ATRIUM_MAIL_TRANSPORT=smtp
+          ATRIUM_MAIL_TRANSPORT=console
           ATRIUM_MAIL_FROM=Atrium CI <no-reply@atrium.test>
           ENVIRONMENT
           test -s .env
