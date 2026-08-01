@@ -1,0 +1,584 @@
+/* The app frame: workspace strip | rail | workspace | lens.
+   No hex, rgb() or hsl(): every colour is a token from design/tokens.css. */
+
+.app {
+  display: grid;
+  grid-template-columns: 52px 234px minmax(560px, 1fr) 376px;
+  height: 100vh;
+  /* the narrowest supported width is 1124 CSS px; a classic scrollbar eats ~15
+     of those, so the floor is set below the viewport target rather than at it.
+     The ≤1279 track set needs 998px, so 1024 is a real floor, not a guess. */
+  min-width: 1024px;
+  overflow: hidden;
+}
+
+/* grid and flex items default to min-width:auto, which lets a long mono line
+   push a column past its track and paint over its neighbour. Every track in
+   this shell is authoritative; content ellipsises or wraps inside it. */
+.app > *,
+.center > * {
+  min-width: 0;
+}
+
+/* The gallery renders frames at a fixed size rather than at viewport height,
+   so a full frame can sit inside a scrolling page and still be a full frame. */
+.boxed {
+  height: 100%;
+}
+
+/* --- workspace strip ----------------------------------------------------- */
+
+.ws {
+  background: var(--bg5);
+  border-right: 1px solid var(--line2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0 12px;
+  gap: 8px;
+}
+
+.wsTile {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid var(--tx1);
+  background: var(--tx1);
+  color: var(--bg1);
+  display: grid;
+  place-items: center;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wsSpacer {
+  flex: 1;
+}
+
+.wsYou {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--replybg);
+  border: 1px solid var(--filebd);
+  display: grid;
+  place-items: center;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--blu2);
+}
+
+.iconbtn {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  color: var(--tx2);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.iconbtn:hover {
+  background: var(--bg7);
+  color: var(--tx0);
+  border-color: var(--line);
+}
+
+.iconbtn svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
+/* --- rail ---------------------------------------------------------------- */
+
+.rail {
+  background: var(--bg2);
+  border-right: 1px solid var(--line);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+}
+
+.railHead {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.railHead h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx0);
+}
+
+.railHeadSub {
+  margin-top: 4px;
+}
+
+.railBody {
+  overflow-y: auto;
+  padding: 4px 0 10px;
+  min-height: 0;
+}
+
+.railSec {
+  padding: 12px 12px 5px;
+}
+
+.railSecLabel {
+  color: var(--tx2);
+}
+
+.rrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 12px 4px 11px;
+  border-left: 2px solid transparent;
+  color: var(--tx2);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.rrow:hover {
+  background: var(--bg4);
+  color: var(--tx1);
+}
+
+.rrowOn {
+  background: var(--bg4);
+  border-left-color: var(--tx1);
+  color: var(--tx0);
+}
+
+.hash {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--tx2);
+  width: 9px;
+}
+
+.rrowName {
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rrowUnread .rrowName {
+  font-weight: 600;
+  color: var(--tx0);
+}
+
+.count {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+/* owed never hides: the badge is amber and it is not a hover affordance */
+.owedPill {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--amb2);
+  background: var(--ambbg);
+  border: 1px solid var(--ambbd);
+  border-radius: 8px;
+  padding: 0 5px 1px;
+  line-height: 1.3;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* humans are a roster, not navigation — non-interactive rows */
+.hrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3.5px 12px 3.5px 13px;
+}
+
+/* presence uses BLUE (= human), never green: green is reserved for "verified" */
+.pres {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.presHere {
+  background: var(--blu);
+}
+
+.presIdle {
+  background: transparent;
+  border: 1.5px solid var(--blu2);
+}
+
+.presAway {
+  background: transparent;
+  border: 1.5px solid var(--line3);
+}
+
+.hrowName {
+  font-size: 11.5px;
+  color: var(--tx2);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hrowMe .hrowName {
+  color: var(--tx1);
+  font-weight: 500;
+}
+
+.railFoot {
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.railFootAvatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--replybg);
+  border: 1px solid var(--filebd);
+  display: grid;
+  place-items: center;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--blu2);
+}
+
+.railFootName {
+  font-size: 11.5px;
+  color: var(--tx1);
+  line-height: 1.25;
+}
+
+/* --- centre column ------------------------------------------------------- */
+
+.center {
+  background: var(--bg1);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.roomhead {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 16px 0;
+  background: var(--bg1);
+}
+
+.roomheadTop {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.roomheadTop h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--tx0);
+  flex: none;
+  white-space: nowrap;
+}
+
+.roomheadHash {
+  color: var(--tx2);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+/* the topic survives to the narrowest supported width — it is what the room is
+   for, and dropping it is a defect, not a responsive concession */
+.topic {
+  font-size: 11.5px;
+  color: var(--tx2);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+
+.faces {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.face {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg1);
+  background: var(--bg5);
+  display: grid;
+  place-items: center;
+  margin-left: -5px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--tx2);
+}
+
+/* --- surface indicators -------------------------------------------------- */
+/* the three surfaces are all on screen at once — these focus, they do not
+   navigate. That fact lives in the group's accessible name. */
+
+.surfaces {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.surf {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px 5px;
+  border-bottom: 2px solid transparent;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.surfLabel {
+  color: var(--tx2);
+  transition: color 0.12s ease;
+}
+
+.surf:hover {
+  background: var(--bg7);
+}
+
+.surf[aria-pressed='true'] {
+  border-bottom-color: var(--tx1);
+}
+
+.surf[aria-pressed='true'] .surfLabel {
+  color: var(--tx0);
+}
+
+.surf:hover .surfLabel {
+  color: var(--tx0);
+}
+
+.surf[disabled] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.surf[disabled]:hover {
+  background: none;
+}
+
+.surf[disabled]:hover .surfLabel {
+  color: var(--tx2);
+}
+
+.surfCount {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  background: var(--bg7);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 4px;
+}
+
+.surfWarn .surfCount {
+  color: var(--amb2);
+  background: var(--ambbg);
+  border-color: var(--ambbd);
+}
+
+.surfWarn[disabled] .surfCount {
+  color: var(--tx2);
+  background: var(--bg7);
+  border-color: var(--line);
+}
+
+/* --- composer ------------------------------------------------------------ */
+
+.composer {
+  border-top: 1px solid var(--line);
+  background: var(--bg1);
+  padding: 9px 16px 8px;
+}
+
+/* BRIEF concept 4: the binding banner. Your next message resolves the named
+   item and nothing is inferred from it. */
+.ctxbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--ambbd);
+  border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+  background: var(--ambbg);
+  color: var(--amb2);
+  padding: 5px 9px 5px 10px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.ctxbarReply {
+  border-color: var(--filebd);
+  background: var(--replybg);
+  color: var(--blu2);
+}
+
+.ctxbar b {
+  font-weight: 600;
+  font-size: 10px;
+}
+
+.ctxbarPromise {
+  flex: none;
+  white-space: nowrap;
+}
+
+.ctxbarIn {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.ctxbarClose {
+  color: inherit;
+  padding: 0 2px;
+}
+
+.cbox {
+  border: 1px solid var(--line2);
+  border-radius: 5px;
+  background: var(--bg3);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  transition: border-color 0.12s ease;
+}
+
+.cbox:focus-within {
+  border-color: var(--line3);
+}
+
+.cboxBound {
+  border-color: var(--ambbd);
+  border-radius: 0 0 5px 5px;
+}
+
+.cboxReplying {
+  border-color: var(--filebd);
+  border-radius: 0 0 5px 5px;
+}
+
+.cbox textarea {
+  border: 0;
+  background: transparent;
+  resize: none;
+  outline: none;
+  font-family: Inter, sans-serif;
+  font-size: 12.5px;
+  color: var(--tx1);
+  padding: 8px 10px 8px 11px;
+  min-height: 36px;
+  min-width: 0;
+  width: 100%;
+  line-height: 1.45;
+}
+
+.cbox textarea::placeholder {
+  color: var(--tx2);
+}
+
+.cboxRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 6px 0;
+}
+
+.cfoot {
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+.key {
+  border: 1px solid var(--line);
+  background: var(--bg7);
+  border-radius: 3px;
+  padding: 0 3px;
+  color: var(--tx1);
+}
+
+.cfootSpacer {
+  flex: 1;
+}
+
+/* --- lens ---------------------------------------------------------------- */
+
+.lens {
+  background: var(--bg3);
+  border-left: 1px solid var(--line);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+/* --- responsive: laptop -------------------------------------------------- */
+
+@media (max-width: 1439px) {
+  .app {
+    grid-template-columns: 48px 216px minmax(500px, 1fr) 344px;
+  }
+}
+
+@media (max-width: 1279px) {
+  .app {
+    grid-template-columns: 44px 198px minmax(440px, 1fr) 316px;
+  }
+
+  .faces {
+    display: none;
+  }
+}

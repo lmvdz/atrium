@@ -1,0 +1,44 @@
+'use client';
+
+/* ---------------------------------------------------------------------------
+ * Trailer — "everything else is green", except it is only allowed to say that
+ * when it is true.
+ *
+ * The lead AND the glyph are derived by `trailerFor()` from verification and
+ * attention (model/records.ts). Green means checked by something other than the
+ * claimant, so a room with eight unchecked claims outside the pin gets
+ * "8 of 11 still unverified" and a `~`, not a reassurance. Hardcoding the
+ * sentence over derived numbers is how a room with a failure in it still
+ * announces that everything is green.
+ *
+ * It wraps rather than clipping: below 1340 a nowrap trailer eats the checkable
+ * half of the sentence and leaves only the summary clause. A fact you cannot
+ * read is not on the page.
+ * ------------------------------------------------------------------------- */
+
+import type { NoGlyph } from '../model/glyph';
+import type { TrailerSummary } from '../model/records';
+import { plural } from '../model/text';
+import { Glyph } from '../primitives/Glyph';
+import styles from './attention.module.css';
+
+export type TrailerProps = {
+  readonly summary: TrailerSummary;
+  readonly lastCheck: string;
+} & NoGlyph;
+
+export function Trailer({ summary, lastCheck }: TrailerProps) {
+  return (
+    <div className={styles.trailer} data-row="trailer" data-voice="system">
+      <Glyph className={styles.trailerGlyph} decorative={false} state={summary.state} />
+      <span>
+        {summary.lead} —{' '}
+        <b>
+          {summary.objectivesClear}/{summary.objectivesTotal} objectives
+        </b>{' '}
+        clear of you · <b>{plural(summary.commitments, 'commitment')}</b>, {summary.overdue} overdue
+        · <b>{plural(summary.failures, 'failure')}</b> · last check {lastCheck}
+      </span>
+    </div>
+  );
+}

@@ -1,0 +1,54 @@
+'use client';
+
+/* ---------------------------------------------------------------------------
+ * ObjectRow — one semantic object in the state lens.
+ *
+ * Glyph derived, claim treatment derived, both from the same state. Clicking a
+ * row opens its receipt: every rendered derived object gets an inspect
+ * affordance from day one, not as polish (BRIEF concept 5).
+ * ------------------------------------------------------------------------- */
+
+import type { NoGlyph } from '../model/glyph';
+import { glyphFor } from '../model/glyph';
+import type { StateObject } from '../model/records';
+import { ClaimText } from '../primitives/ClaimText';
+import { Glyph } from '../primitives/Glyph';
+import styles from './lens.module.css';
+
+export type ObjectRowProps = {
+  readonly object: StateObject;
+  readonly onOpenReceipt?: (objectId: string) => void;
+} & NoGlyph;
+
+/** facts that report something unfinished read amber, so the row scans right */
+const WARN = /overdue|not accepted|open |blocked|reopened|unverified|late/i;
+
+export function ObjectRow({ object, onOpenReceipt }: ObjectRowProps) {
+  const settled = glyphFor(object.state) === '✓';
+  return (
+    <button
+      className={[styles.oitem, settled ? styles.oitemSettled : null, 'atr-rise']
+        .filter(Boolean)
+        .join(' ')}
+      data-object-id={object.id}
+      onClick={onOpenReceipt === undefined ? undefined : () => onOpenReceipt(object.id)}
+      title="open the receipt — what happened, who checked it, and what it rests on"
+      type="button"
+    >
+      <Glyph className={styles.oitemGlyph} decorative={false} state={object.state} />
+      <span>
+        <span className={styles.oitemText}>
+          <ClaimText state={object.state}>{object.text}</ClaimText>
+        </span>
+        <span className={styles.oitemMeta}>
+          {object.facts.map((fact, index) => (
+            <span key={fact}>
+              {index === 0 ? null : <span aria-hidden="true">· </span>}
+              <span className={WARN.test(fact) ? styles.warn : undefined}>{fact}</span>
+            </span>
+          ))}
+        </span>
+      </span>
+    </button>
+  );
+}
