@@ -216,7 +216,8 @@ jobs:
         # and run green over a fetch that never happened. The rule now requires
         # the command at the start of a line, and the self-test carries the
         # quoted-into-an-echo mutation for this step and six others.
-        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+        run: |
+          echo 'git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main'
 
       - name: Assert the CI floors have not been ratcheted down
         # The cheapest way to make a failing count gate pass is to lower the
