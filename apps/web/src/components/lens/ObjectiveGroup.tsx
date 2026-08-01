@@ -11,6 +11,7 @@
 
 import type { ObjectKind } from '../model/glyph';
 import { needsViewer } from '../model/glyph';
+import { systemText } from '../model/quotation';
 import type { ObjectiveRecord, StateObject } from '../model/records';
 import { plural } from '../model/text';
 import styles from './lens.module.css';
@@ -65,14 +66,16 @@ export function ObjectiveGroup({
           {objective.open ? '▾' : '▸'}
         </span>
         <span>
-          <span className={styles.objTitle}>{objective.title}</span>
+          <span className={styles.objTitle}>
+            {systemText(objective.title, 'ObjectiveGroup title')}
+          </span>
           <span className={styles.objCount}>
             {plural(mine.length, 'object')} ·{' '}
             {owedHere > 0 ? <span className={styles.warn}>{owedHere} need you</span> : 'all clear'}
           </span>
         </span>
         <span className={`${styles.status} ${STATUS_CLASS[objective.status] ?? ''} atr-lbl`}>
-          {objective.status.toUpperCase()}
+          {systemText(objective.status, 'ObjectiveGroup status').toUpperCase()}
         </span>
       </button>
 

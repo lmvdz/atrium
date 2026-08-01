@@ -136,15 +136,58 @@ test.describe('shell', () => {
    * directions: an entry that no longer matches anything fails too, because a
    * stale exemption is how a carve-out outlives the thing it was written for.
    * ---------------------------------------------------------------------- */
-  test('every visible control on / changes something, or is listed inert', async ({ page }) => {
+  /* -------------------------------------------------------------------------
+   * TWO STATES, AND THE BINDING THEME.
+   *
+   * ROUND 7. The sweep below ran on `/` IN ITS INITIAL STATE, where
+   * `receiptId === null` — so the receipt's six controls were never in the
+   * denominator it reports. That is exactly where D3's dead `onJump` lived:
+   * deleting it killed five visible controls and this test still said "71
+   * visible · 0 dead", because the receipt was not on the page.
+   *
+   * And the run was in the WRONG THEME. The theme toggle is control #1, clicking
+   * it counts as "changed", and the remaining 70 controls were then measured in
+   * DARK — while CONVENTIONS' binding measurement is LIGHT. The theme is restored
+   * after every control that moves it, so the sweep covers the binding theme and
+   * the toggle stays in the denominator.
+   * ---------------------------------------------------------------------- */
+  for (const state of ['initial', 'receipt-open'] as const) {
+    test(`every visible control on / changes something, or is listed inert — ${state}`, async ({
+      page,
+    }) => {
+      await runControlSweep(page, state);
+    });
+  }
+
+  async function runControlSweep(
+    page: import('@playwright/test').Page,
+    state: 'initial' | 'receipt-open',
+  ) {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto('/');
+    await page.goto('/?theme=light');
     await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
     /* MARK THE DOM ONLY AFTER REACT OWNS IT. Writing an attribute into
        server-rendered markup before hydration makes React report a mismatch,
        and this project's standing claim is zero console warnings — a harness
        that dirties the console it is meant to be watching is measuring itself. */
     await expect(page.getByTestId('theme-toggle')).toHaveAttribute('data-hydrated', 'true');
+    /* THE BINDING THEME IS LIGHT (CONVENTIONS). `?theme=` pins it before first
+       paint; asserted rather than assumed, because a sweep that silently ran in
+       the other theme is what round 6 shipped. */
+    expect(await page.evaluate(() => document.documentElement.classList.contains('atr-dark'))).toBe(
+      false,
+    );
+
+    if (state === 'receipt-open') {
+      /* THE RECEIPT IS ON THE PAGE FOR THIS RUN. P1 specifically: it is the one
+         object with a hand-written receipt carrying real provenance rows and a
+         real correction chain, and those are the controls the initial-state
+         sweep has never once looked at. Opening whichever row happens to be
+         first would open a DERIVED receipt with no excerpts, which is a
+         denominator that quietly excludes the thing being measured. */
+      await page.locator('[data-object-id="P1"]').click();
+      await expect(page.locator('[data-receipt-id="P1"]')).toBeVisible();
+    }
 
     /**
      * Controls that legitimately change nothing, each with the reason.
@@ -197,33 +240,57 @@ test.describe('shell', () => {
        one of them was reached. */
     expect(visible.length, 'the page renders almost no controls').toBeGreaterThan(40);
 
-    const state = () =>
+    const snapshot = () =>
       page.evaluate(() => ({
         className: document.documentElement.className,
         length: document.body.innerHTML.length,
         text: document.body.innerText,
       }));
 
+    /* THE CONTROLS THAT REPLACE THE PAGE GO LAST.
+       Round 7 made the rail's chips switch the ROOM rather than the header, so
+       clicking one unmounts every row, card and object the sweep had marked —
+       and a control the page removed is skipped, which would quietly drop most
+       of the denominator this test exists to assert. Ordering them last measures
+       every other control in one room and still leaves the chips in the count;
+       the room switch itself is asserted in "the rail, the objectives and the
+       object rows are wired". */
+    const REPLACES_THE_PAGE = /^#/;
+    const ordered = [
+      ...visible.filter((control) => !REPLACES_THE_PAGE.test(control.name)),
+      ...visible.filter((control) => REPLACES_THE_PAGE.test(control.name)),
+    ];
+    expect(
+      ordered.filter((control) => REPLACES_THE_PAGE.test(control.name)).length,
+      'the rail renders no room chips, so the ordering above is measuring nothing',
+    ).toBeGreaterThan(3);
+
     const dead: string[] = [];
     const inertHit = new Set<string>();
-    for (const control of visible) {
+    for (const control of ordered) {
       const target = page.locator(`[data-control-index="${control.index}"]`);
       /* A control the page removed while we were clicking other controls is not
          a dead control — acting on an owed item takes its card out of the pin.
          It is reported separately so "gone" cannot quietly become "passed". */
       if ((await target.count()) === 0 || !(await target.isVisible())) continue;
       const exemption = INERT.find((entry) => entry.name.test(control.name));
-      const before = await state();
+      const before = await snapshot();
       await target.click({ force: true, timeout: 5_000 }).catch(() => undefined);
       /* Give React a paint. The alternative — waiting for a specific selector —
          would be a per-control expectation, which is the thing this test refuses
          to be: it asks one question of all of them. */
       await page.waitForTimeout(60);
-      const after = await state();
+      const after = await snapshot();
       const changed =
         before.className !== after.className ||
         before.length !== after.length ||
         before.text !== after.text;
+      /* PUT THE BINDING THEME BACK. The toggle is a control like any other and it
+         belongs in the denominator; what must not happen is that flipping it once
+         measures every control after it in the theme CONVENTIONS does not bind. */
+      if (before.className !== after.className) {
+        await page.evaluate(() => document.documentElement.classList.remove('atr-dark'));
+      }
       if (exemption !== undefined) {
         inertHit.add(exemption.why);
         continue;
@@ -232,8 +299,20 @@ test.describe('shell', () => {
     }
 
     console.info(
-      `/ controls: ${visible.length} visible · ${INERT.length} listed inert · ${dead.length} dead`,
+      `/ controls (${state}, light): ${visible.length} visible · ${INERT.length} listed inert · ${dead.length} dead`,
     );
+    /* THE RECEIPT'S OWN CONTROLS ARE IN THIS RUN, by name rather than by count —
+       a count is satisfied by reaching different ones (CONVENTIONS). */
+    if (state === 'receipt-open') {
+      expect(
+        visible.map((control) => control.name),
+        'the receipt-open sweep did not see the receipt',
+      ).toContain('← BACK TO CURRENT STATE');
+      expect(
+        visible.filter((control) => /jump to source|in #/.test(control.name)).length,
+        'the receipt-open sweep saw no provenance rows',
+      ).toBeGreaterThan(2);
+    }
     expect(dead, 'visible controls on / that change nothing when clicked').toEqual([]);
     /* AND THE EXEMPTION LIST IS EXHAUSTIVE IN BOTH DIRECTIONS. An entry nothing
        matches is a carve-out that outlived its subject, and it reports exactly
@@ -242,7 +321,7 @@ test.describe('shell', () => {
       INERT.filter((entry) => !inertHit.has(entry.why)).map((entry) => String(entry.name)),
       'an inert-control exemption matched nothing on the page',
     ).toEqual([]);
-  });
+  }
 
   /* THE THREE HANDLERS THE FRAME FORGOT, NAMED. The sweep above proves the
      denominator; these prove the specific defect is closed, so a regression
@@ -252,11 +331,14 @@ test.describe('shell', () => {
     await page.goto('/');
     const note = page.locator('[data-composer-note]');
 
-    await page.locator('nav[aria-label="Rooms and people"] button').nth(1).click();
-    await expect(note).toContainText('switched to #');
-
     /* THE COLLAPSED OBJECTIVE CAN BE OPENED. It held four objects, two of which
-       need this person, behind a triangle with no handler. */
+       need this person, behind a triangle with no handler.
+
+       BEFORE the room switch, deliberately. Round 7 made the chip switch the
+       ROOM rather than the header, so `o2` is an objective in #users-migration
+       and does not exist in #identity-service — a test that switched first and
+       then looked for it would be asserting against the wrong room, which is
+       the defect it is checking for, committed by the check. */
     const collapsed = page.locator('[data-objective-id="o2"]');
     await expect(collapsed.locator('button[aria-expanded]').first()).toHaveAttribute(
       'aria-expanded',
@@ -277,6 +359,19 @@ test.describe('shell', () => {
     await expect(note).toContainText('opened the receipt');
     await page.getByRole('button', { name: /BACK TO CURRENT STATE/ }).click();
     await expect(page.locator('[data-receipt-id]')).toHaveCount(0);
+
+    /* AND THE RAIL CHIP SWITCHES THE ROOM. Round 6 wired it to the header and
+       nothing else; round 7 requires the feed, the pin and the lens to follow,
+       and the rail to stop marking the room you left. */
+    const feedBefore = await page.locator('[data-row="message"]').count();
+    await page.locator('nav[aria-label="Rooms and people"] button').nth(1).click();
+    await expect(note).toContainText('switched to #identity-service');
+    await expect(page.locator('header h2')).toContainText('identity-service');
+    expect(await page.locator('[data-row="message"]').count()).not.toBe(feedBefore);
+    await expect(
+      page.locator('nav[aria-label="Rooms and people"] [aria-current="true"]'),
+    ).toHaveAttribute('aria-label', /#identity-service/);
+    await expect(page.locator('[data-objective-id="o2"]')).toHaveCount(0);
   });
 
   /* -------------------------------------------------------------------------
@@ -294,11 +389,162 @@ test.describe('shell', () => {
    * element, not the ones somebody remembered.
    * ---------------------------------------------------------------------- */
   for (const width of [1124, 1440] as const) {
+    for (const state of ['initial', 'receipt-open'] as const) {
+      test(`every clipped string on / names a route that is TRUE — @ ${width} ${state}`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto('/?theme=light');
+        await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
+        if (state === 'receipt-open') {
+          /* THE RECEIPT WAS NEVER IN THIS SWEEP EITHER. Round 7 measured all
+             three of its `provExcerpt` elements at `scrollHeight 31 /
+             clientHeight 15` — clipped quotations, in the one artifact whose job
+             is being the trustworthy record — and this test had never looked at
+             them, because it ran with `receiptId === null`. */
+          await page.locator('[data-object-id="P1"]').click();
+          await expect(page.locator('[data-receipt-id="P1"]')).toBeVisible();
+        }
+
+        /* ---------------------------------------------------------------------
+         * THE ROUTE IS CHECKED, NOT COUNTED.
+         *
+         * Round 6 asserted the PRESENCE of `data-truncates` and never its truth,
+         * so the receipt's clipped quotation carried "focusing this row expands
+         * it; the cited record is on this page" — a `:focus-visible` clamp
+         * expansion, which is none of the three routes CONVENTIONS permits,
+         * followed by a claim that is false for `msg:m-legal@identity-service`.
+         * The attribute is a grammar now and each kind is verified against the
+         * page that is actually rendered.
+         * ------------------------------------------------------------------ */
+        const broken = await page.evaluate(() => {
+          const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+          /* TEXT NODES JOINED BY A SPACE, not `textContent`. Adjacent inline
+             elements concatenate with nothing between them — the m17 row reads
+             `12:31✗justinParity check 418…` as one string — so a word-level
+             comparison against `textContent` reports "justin" and "parity"
+             missing from a row that plainly states both. The same defect
+             `RoutineCollapse`'s header records for the accessible-name
+             computation, in an instrument instead of in a component. */
+          const spaced = (el: Element): string => {
+            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+            const parts: string[] = [];
+            let node = walker.nextNode();
+            while (node !== null) {
+              parts.push(node.nodeValue ?? '');
+              node = walker.nextNode();
+            }
+            return norm(parts.join(' '));
+          };
+          /* WORD CONTAINMENT, NOT SUBSTRING. A route may legitimately restate
+             the content in another order or with other separators — the routine
+             strip's accessible name says "8 routine rows between 11:50 and
+             11:57" where the strip says "8 routine · 11:50 – 11:57", and the
+             feed row a reply cites carries the actor, the time and the words in
+             a different layout. What must be true is that nothing the reader was
+             shown a fragment of is MISSING from the route, which is what caught
+             "the item's card in Needs you" (it does not state the objective at
+             all). Short tokens are dropped because punctuation and articles say
+             nothing about whether the content is there. */
+          const missing = (full: string, route: string): string[] => {
+            const inRoute = new Set(
+              norm(route.toLowerCase())
+                .split(/[^\p{L}\p{N}]+/u)
+                .filter(Boolean),
+            );
+            return norm(full.toLowerCase())
+              .split(/[^\p{L}\p{N}]+/u)
+              .filter((word) => word.length > 2 && !inRoute.has(word));
+          };
+          const out: { selector: string; route: string; why: string }[] = [];
+          let checked = 0;
+          for (const el of document.querySelectorAll('[data-truncates]')) {
+            /* A check may skip what is NOT RENDERED and may not skip what is
+               (CONVENTIONS). Below 1280 the compressed row's facts are
+               `display: none`, so there is no clipped string there to owe
+               anybody a route. The count of what WAS checked is returned, so a
+               sweep that skipped everything cannot report like a clean one. */
+            const style = getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            if (el.getClientRects().length === 0) continue;
+            checked += 1;
+            const route = el.getAttribute('data-truncates') ?? '';
+            const full = spaced(el);
+            const describe =
+              el.tagName.toLowerCase() +
+              (typeof el.className === 'string' && el.className
+                ? `.${el.className.trim().split(/\s+/)[0]}`
+                : '');
+            const fail = (why: string) => out.push({ selector: describe, route, why });
+            const [kind, ...rest] = route.split(':');
+            const detail = rest.join(':');
+            if (kind === 'none') {
+              /* `none` claims this element cannot lose letters. If it is actually
+                 clipping, the claim is false. */
+              if (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1) {
+                fail('declares it cannot truncate, and it is truncating');
+              }
+              continue;
+            }
+            if (kind === 'name') {
+              const named = el.closest('[aria-label]');
+              if (named === null) fail('no ancestor carries an accessible name');
+              else {
+                const gone = missing(full, named.getAttribute('aria-label') ?? '');
+                if (gone.length > 0) {
+                  fail(`the accessible name is missing ${JSON.stringify(gone)}`);
+                }
+              }
+              continue;
+            }
+            if (kind === 'control') {
+              const control = el.closest(
+                'button:not([disabled]), a[href], [role="button"]:not([aria-disabled="true"])',
+              );
+              if (control === null) fail('nothing here is a control a reader can press');
+              else if (control.getClientRects().length === 0) fail('the control is not on screen');
+              continue;
+            }
+            if (kind === 'element') {
+              let other: Element | null = null;
+              try {
+                other = document.querySelector(detail);
+              } catch {
+                fail(`the route is not a selector: ${detail}`);
+                continue;
+              }
+              if (other === null) fail(`the route names ${detail}, which is not on this page`);
+              else if (other.getClientRects().length === 0) {
+                fail(`the route names ${detail}, which is not visible`);
+              } else {
+                const gone = missing(full, spaced(other));
+                if (gone.length > 0) fail(`${detail} is missing ${JSON.stringify(gone)}`);
+              }
+              continue;
+            }
+            fail('not one of the kinds CONVENTIONS permits');
+          }
+          return { broken: out, checked };
+        });
+
+        console.info(
+          `/ @ ${width} ${state}: ${broken.checked} rendered routes checked · ${broken.broken.length} untrue`,
+        );
+        expect(broken.checked, 'no rendered element declares a truncation route').toBeGreaterThan(
+          3,
+        );
+        expect(
+          broken.broken,
+          'an element names a route to the rest of its text that the rendered page does not have',
+        ).toEqual([]);
+      });
+    }
+
     test(`every clipped string on / names its route to the full text — @ ${width}`, async ({
       page,
     }) => {
       await page.setViewportSize({ width, height: 900 });
-      await page.goto('/');
+      await page.goto('/?theme=light');
       await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
 
       const clipped = await page.evaluate(() => {

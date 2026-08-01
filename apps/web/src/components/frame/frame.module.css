@@ -247,13 +247,20 @@
   border: 1.5px solid var(--tx2);
 }
 
+/* A PERSON'S NAME IS NOT CLIPPED HERE ANY MORE. Round 7: its declared route was
+   "the row's title" — and `title=` is precisely what CONVENTIONS refuses as a
+   route ("invisible to touch, invisible to a keyboard, announced inconsistently
+   by screen readers"). The roster is not a deliberately compressed surface, it
+   is a column that happened to be laid out on one line, so the honest fix is to
+   stop cutting the name rather than to invent a route to it. The rail is also
+   the element the feed's actor column routes TO, and a route to a clip is a
+   route to nothing. */
 .hrowName {
   font-size: 11.5px;
   color: var(--tx2);
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .hrowMe .hrowName {
@@ -330,14 +337,14 @@
 
 /* the topic survives to the narrowest supported width — it is what the room is
    for, and dropping it is a defect, not a responsive concession */
+/* The topic wraps rather than clipping, for the same reason as `.hrowName`: its
+   only route was the `title` attribute. */
 .topic {
   font-size: 11.5px;
   color: var(--tx2);
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   border-left: 1px solid var(--line);
   padding-left: 10px;
 }
@@ -540,12 +547,14 @@
   white-space: nowrap;
 }
 
+/* The binding scope wraps. Its declared route was "the item's card in Needs
+   you", which does not state the OBJECTIVE at all and states the label under a
+   different sentence — a route that is not true is worse than none, because the
+   check reads it as satisfied (round 7, D4). */
 .ctxbarIn {
   margin-left: auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ctxbarClose {

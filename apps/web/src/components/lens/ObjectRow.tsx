@@ -10,6 +10,7 @@
 
 import type { NoGlyph } from '../model/glyph';
 import { glyphFor } from '../model/glyph';
+import { systemText } from '../model/quotation';
 import type { StateObject } from '../model/records';
 import { slot } from '../model/slot';
 import { ClaimText } from '../primitives/ClaimText';
@@ -42,10 +43,15 @@ export function ObjectRow({ object, onOpenReceipt }: ObjectRowProps) {
           <ClaimText content={slot(object.text)} state={object.state} />
         </span>
         <span className={styles.oitemMeta}>
+          {/* EVERY FACT IS A CALLER STRING THIS ROW PRINTS. Round 7: the same
+              shape as `AttentionItem.facts` — a metadata line under an object's
+              own sentence, page-authored, and printed raw. */}
           {object.facts.map((fact, index) => (
             <span key={fact}>
               {index === 0 ? null : <span aria-hidden="true">· </span>}
-              <span className={WARN.test(fact) ? styles.warn : undefined}>{fact}</span>
+              <span className={WARN.test(fact) ? styles.warn : undefined}>
+                {systemText(fact, 'ObjectRow fact')}
+              </span>
             </span>
           ))}
         </span>

@@ -24,8 +24,8 @@
  * would attribute a prop to whichever element happened to be nearest.
  * ------------------------------------------------------------------------- */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { cleanup, fireEvent, render } from '@testing-library/react';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -87,6 +87,53 @@ function handlersDeclaredBy(relative: string): readonly string[] {
   return [...out];
 }
 
+/** Every JSX tag name a file renders. */
+function jsxTagsIn(relative: string): readonly string[] {
+  const file = parse(relative);
+  const out: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isJsxSelfClosingElement(node)) out.push(node.tagName.getText(file));
+    if (ts.isJsxOpeningElement(node)) out.push(node.tagName.getText(file));
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return out;
+}
+
+/** Every prop of every `*Props` type in a component file whose type is `Slot`. */
+function slotPropsIn(relative: string): readonly string[] {
+  const file = parse(relative);
+  const out: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertySignature(node) && node.type !== undefined) {
+      const printed = node.type.getText(file).replace(/\s+/g, ' ');
+      if (/^Slot(\s*\|\s*undefined)?$/.test(printed)) out.push(node.name.getText(file));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return out;
+}
+
+/** Every `<X …/>` handed to `slot(...)` in a file. */
+function slotFillsIn(relative: string): readonly string[] {
+  const file = parse(relative);
+  const out = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === 'slot') {
+      const inner = (child: ts.Node): void => {
+        if (ts.isJsxSelfClosingElement(child)) out.add(child.tagName.getText(file));
+        if (ts.isJsxOpeningElement(child)) out.add(child.tagName.getText(file));
+        ts.forEachChild(child, inner);
+      };
+      for (const argument of node.arguments) inner(argument);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return [...out];
+}
+
 /** Which props the frame passes to `<Name …>`, by reading the JSX element. */
 function propsPassedTo(relative: string, element: string): readonly string[] {
   const file = parse(relative);
@@ -109,70 +156,115 @@ function propsPassedTo(relative: string, element: string): readonly string[] {
 }
 
 /**
- * Every component `RoomFrame` composes, and where its props live.
+ * EVERY COMPONENT FILE IN THE LIBRARY, READ OFF THE FILESYSTEM.
+ *
+ * ROUND 7, D8 AND THE HALF OF D3 THAT MADE IT INVISIBLE. Round 6 derived the
+ * EDGES and left the NODES hand-written — a 24-path list inside the test whose
+ * entire purpose is to replace a hand-maintained claim with a count.
+ * `harness-integrity.test.ts` asserted the edges were derived and never asked
+ * where the node set came from, so the derivation was exactly as complete as
+ * somebody's memory. It matched the filesystem on the day it was written, which
+ * is what "latent" means.
+ */
+function componentFiles(): readonly { readonly name: string; readonly source: string }[] {
+  const root = find('apps/web/src/components');
+  const out: { name: string; source: string }[] = [];
+  for (const area of readdirSync(root).sort()) {
+    const dir = join(root, area);
+    if (!statSync(dir).isDirectory()) continue;
+    for (const file of readdirSync(dir).sort()) {
+      if (!file.endsWith('.tsx')) continue;
+      out.push({
+        name: file.replace(/\.tsx$/, ''),
+        source: `apps/web/src/components/${area}/${file}`,
+      });
+    }
+  }
+  return out;
+}
+
+const COMPONENT_FILES = componentFiles();
+
+const BY_NAME = new Map(COMPONENT_FILES.map((entry) => [entry.name, entry.source]));
+
+const FRAME_SOURCE = 'apps/web/app/gallery/RoomFrame.tsx';
+
+/**
+ * Every component `RoomFrame` composes, DERIVED from the frame rather than
+ * listed. Round 6 wrote seven of them down by hand; the same argument that made
+ * the edge list a derivation makes this one.
  *
  * `ObjectRow` and `AttentionCompact` are reached THROUGH a composed component
  * rather than directly, so the frame cannot pass their props itself — what it
- * owes is a path, and the path is the parent's own handler. They are listed with
- * the parent that must forward them, so the chain is enumerated rather than
- * assumed to be complete at the first hop.
+ * owes is a path, and the path is the parent's own handler. The second-hop check
+ * below covers those.
  */
 const COMPOSED: readonly { readonly element: string; readonly source: string }[] = [
-  { element: 'Rail', source: 'apps/web/src/components/frame/Rail.tsx' },
-  { element: 'StateLens', source: 'apps/web/src/components/lens/StateLens.tsx' },
-  { element: 'Pin', source: 'apps/web/src/components/attention/Pin.tsx' },
-  { element: 'Timeline', source: 'apps/web/src/components/timeline/Timeline.tsx' },
-  { element: 'Composer', source: 'apps/web/src/components/frame/Composer.tsx' },
-  { element: 'SurfaceIndicators', source: 'apps/web/src/components/frame/SurfaceIndicators.tsx' },
-  { element: 'CrossRoomJump', source: 'apps/web/src/components/attention/CrossRoomJump.tsx' },
-];
+  ...new Set(jsxTagsIn(FRAME_SOURCE)),
+]
+  .filter((tag) => BY_NAME.has(tag))
+  .map((tag) => ({ element: tag, source: BY_NAME.get(tag) as string }))
+  .sort((a, b) => a.element.localeCompare(b.element));
 
 /**
- * EVERY COMPONENT-TO-COMPONENT EDGE IN THE LIBRARY, DERIVED.
+ * A COMPONENT REACHED THROUGH AN OPAQUE VALUE IS INVISIBLE TO JSX DERIVATION —
+ * SO IT IS ENUMERATED FROM THE TYPE OF THE HOLE INSTEAD.
  *
- * This was a HAND-MAINTAINED list of six edges, inside a test whose entire
- * purpose is to replace a hand-maintained claim with a count — and the blind
- * cross-lineage review of round 6's own fix said so, naming four edges it did
- * not contain (`Pin → AttentionCard`, `StateLens → ObjectiveGroup`,
- * `Timeline → SinceYouLeftDivider`, `Timeline → RoutineCollapse`). A list of
- * edges is exactly the artifact that goes stale the day a component is added,
- * and it reports as thoroughly as a complete one.
+ * ROUND 7, D3. `ReceiptView` was in neither of round 6's hand-written lists AND
+ * COULD NOT BE: it reaches the screen through a `Slot` (`StateLens` renders
+ * `receipt.node`), so no `<ReceiptView>` JSX exists in any file the edge
+ * derivation scanned, and the two files that do render it — `RoomSession` and
+ * `gallery/page` — were not in the scan set. Its `onBack`, `onReopen` and
+ * `onJump` were required by nothing. Deleting `onJump` from `RoomSession`'s
+ * `<ReceiptView>` killed five visible controls with `tsc` at 0, 675 unit tests
+ * green and 73 e2e green.
  *
- * So the edges are read out of the source: every component file, every JSX
- * element in it whose tag names another component in the library, is an edge.
- * Adding a component to the library adds its edges on the day it is added.
+ * The general rule, which now belongs in CONVENTIONS: when a component is
+ * reached through an opaque value — a `Slot`, a render prop, `cloneElement`, a
+ * dynamic import — JSX derivation cannot see the edge, so ENUMERATE IT FROM THE
+ * TYPE OF THE HOLE. Every prop in the library declared `Slot` is a hole; every
+ * `slot(<X …/>)` in the app is something filling one; and the filler owes `X`
+ * every handler `X` declares, exactly as a parent owes its child.
  */
-const COMPONENT_FILES: readonly { readonly name: string; readonly source: string }[] = [
-  'frame/AppFrame',
-  'frame/Composer',
-  'frame/Rail',
-  'frame/RoomHead',
-  'frame/SurfaceIndicators',
-  'timeline/Timeline',
-  'timeline/TimelineRow',
-  'timeline/SystemRow',
-  'timeline/RoutineCollapse',
-  'timeline/SinceYouLeftDivider',
-  'lens/StateLens',
-  'lens/ObjectiveGroup',
-  'lens/ObjectRow',
-  'lens/ReceiptView',
-  'attention/Pin',
-  'attention/AttentionCard',
-  'attention/AttentionCompact',
-  'attention/CrossRoomJump',
-  'attention/Trailer',
-  'primitives/HoldToAct',
-  'primitives/Glyph',
-  'primitives/ClaimText',
-  'primitives/MessageBody',
-  'primitives/Voice',
-].map((path) => ({
-  name: path.split('/')[1] as string,
-  source: `apps/web/src/components/${path}.tsx`,
-}));
+const SLOT_HOLES: readonly { readonly component: string; readonly prop: string }[] =
+  COMPONENT_FILES.flatMap((entry) =>
+    slotPropsIn(entry.source).map((prop) => ({
+      component: entry.name,
+      prop,
+    })),
+  );
 
-const BY_NAME = new Map(COMPONENT_FILES.map((entry) => [entry.name, entry.source]));
+/** Files that can fill a hole: everything under `app` that renders. */
+function appFiles(): readonly string[] {
+  const root = find('apps/web/app');
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir).sort()) {
+      if (name.startsWith('.') || name === 'node_modules') continue;
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (name.endsWith('.tsx')) out.push(full.slice(full.indexOf('apps/web/')));
+    }
+  };
+  walk(root);
+  return out;
+}
+
+const APP_FILES = appFiles();
+
+/** Every `slot(<X …/>)` in the app, where X is a library component. */
+const SLOT_FILLS: readonly {
+  readonly filler: string;
+  readonly child: string;
+  readonly childSource: string;
+}[] = APP_FILES.flatMap((source) =>
+  slotFillsIn(source)
+    .filter((child) => BY_NAME.has(child))
+    .map((child) => ({ filler: source, child, childSource: BY_NAME.get(child) as string })),
+);
 
 /** Every `<Child …>` a component file renders, where Child is in the library. */
 function edgesFrom(parent: { name: string; source: string }): readonly {
@@ -219,9 +311,25 @@ const NOT_FORWARDED: readonly {
   readonly why: string;
 }[] = [];
 
-const FRAME = 'apps/web/app/gallery/RoomFrame.tsx';
+const FRAME = FRAME_SOURCE;
 
 describe('the frame forwards every handler the library exposes', () => {
+  /* CATCHES: the NODE SET going stale — the half round 6 left hand-written
+     inside the test whose purpose is counting, and the half that made
+     `ReceiptView` structurally invisible. Both lists are derivations now, so a
+     component added to the library is covered on the day it is added. */
+  it('the component list is the filesystem, and the frame’s children are read off the frame', () => {
+    const onDisk = componentFiles().map((entry) => entry.name);
+    expect(COMPONENT_FILES.map((entry) => entry.name)).toEqual(onDisk);
+    expect(onDisk.length, 'the component sweep found almost no files').toBeGreaterThan(20);
+    expect(onDisk, 'the component sweep cannot see the receipt').toContain('ReceiptView');
+    expect(COMPOSED.length, 'the frame composes almost nothing').toBeGreaterThan(5);
+    /* …and the derivation is not a spelling of the old hand-written list: it
+       found what the list found, from the frame. */
+    expect(COMPOSED.map((c) => c.element)).toContain('Rail');
+    expect(COMPOSED.map((c) => c.element)).toContain('CrossRoomJump');
+  });
+
   /* CATCHES: the enumeration going blind. If no component declares a handler,
      every assertion below is vacuous — and a vacuous check reports exactly like
      a passing one, which is how `graphicsChecked > 10` survived. */
@@ -268,6 +376,46 @@ describe('the frame forwards every handler the library exposes', () => {
           ).includes(entry.handler),
       ).map((entry) => `${entry.edge}.${entry.handler}`),
       'a forwarding exemption names an edge or a handler that no longer exists',
+    ).toEqual([]);
+  });
+
+  /* ---------------------------------------------------------------------------
+   * THE EDGE JSX DERIVATION CANNOT SEE.
+   *
+   * ROUND 7, D3. `StateLens` renders `receipt.node` — an opaque value — so there
+   * is no `<ReceiptView>` anywhere in the library for `edgesFrom` to find, and
+   * the app files that DO render one were outside the scan. The receipt's three
+   * seams were therefore required by nothing: deleting `onJump` from
+   * `RoomSession`'s `<ReceiptView>` took the receipt's only outbound navigation
+   * — five visible controls — dead, with tsc 0, 675 unit tests green and 73 e2e
+   * green. The browser backstop missed it too, because `e2e/smoke.spec.ts` swept
+   * `/` in its initial state, where `receiptId === null`.
+   * ------------------------------------------------------------------------- */
+  it('every Slot-typed hole in the library is filled by something this sweep can see', () => {
+    expect(SLOT_HOLES.length, 'the library declares no composition holes').toBeGreaterThan(4);
+    expect(
+      SLOT_HOLES.map((hole) => `${hole.component}.${hole.prop}`),
+      'the receipt’s hole is not enumerated',
+    ).toContain('StateLens.receipt');
+    /* And something actually fills them. A hole with no known filler is a
+       component nothing in this sweep can reach — report it rather than let the
+       edge derivation quietly return an empty set. */
+    expect(SLOT_FILLS.length, 'no app file fills a Slot with a library component').toBeGreaterThan(
+      3,
+    );
+    expect(
+      SLOT_FILLS.map((fill) => fill.child),
+      'nothing in the app is seen filling a hole with the receipt',
+    ).toContain('ReceiptView');
+    expect(APP_FILES.length, 'the app sweep found almost no files').toBeGreaterThan(3);
+  });
+
+  it.each(SLOT_FILLS)('$filler fills a slot with $child and passes its handlers', (fill) => {
+    const declared = handlersDeclaredBy(fill.childSource);
+    const passed = new Set(propsPassedTo(fill.filler, fill.child));
+    expect(
+      declared.filter((handler) => !passed.has(handler)),
+      `${fill.filler} hands ${fill.child} across a slot and drops handlers on the way`,
     ).toEqual([]);
   });
 

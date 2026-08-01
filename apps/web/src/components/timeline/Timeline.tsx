@@ -13,6 +13,7 @@
  * Every handler a child accepts is now reachable from here.
  * ------------------------------------------------------------------------- */
 
+import { systemText } from '../model/quotation';
 import type { AttentionClass, TimelineEntry } from '../model/records';
 import { RoutineCollapse } from './RoutineCollapse';
 import { SinceYouLeftDivider } from './SinceYouLeftDivider';
@@ -57,7 +58,7 @@ export function Timeline({
 }: TimelineProps) {
   return (
     <section
-      aria-label={label}
+      aria-label={systemText(label, 'Timeline label')}
       className={[styles.feed, 'atr-scroll', filtered ? styles.feedFiltered : null]
         .filter(Boolean)
         .join(' ')}

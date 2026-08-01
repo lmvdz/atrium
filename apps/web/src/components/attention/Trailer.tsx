@@ -57,8 +57,20 @@ export function Trailer({ summary, lastCheck, onShowRest }: TrailerProps) {
         <b>
           {summary.objectivesClear}/{summary.objectivesTotal} objectives
         </b>{' '}
-        clear of you · <b>{plural(summary.commitments, 'commitment')}</b>, {summary.overdue} overdue
-        · <b>{plural(summary.failures, 'failure')}</b> · last check{' '}
+        clear of you · <b>{plural(summary.commitments, 'commitment')}</b>
+        {/* THE TAIL DOES NOT REPEAT THE LEAD. Round 7: "1 failure outside your
+            list — … · 1 failure · last check 12:29". The lead is derived from
+            whichever count is worst and the tail printed every count, so the
+            worst one was said twice in one sentence. `leadsWith` is what the
+            derivation already knew and was not returning. */}
+        {summary.leadsWith === 'overdue' ? '' : `, ${summary.overdue} overdue`}
+        {summary.leadsWith === 'failures' ? null : (
+          <>
+            {' · '}
+            <b>{plural(summary.failures, 'failure')}</b>
+          </>
+        )}{' '}
+        · last check{' '}
         {/* A clock is a page-authored string with no constructor to be checked
             at, painted inside `data-voice="system"`. The renderer is not merely
             the last place the check can go — it is the only place. */}

@@ -43,7 +43,13 @@
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution, useCitedRecord } from '../model/ledger';
 import type { MessageId, Quotation } from '../model/quotation';
-import { chosenAct, quotationRef, statementText } from '../model/quotation';
+import {
+  chosenAct,
+  offeredText,
+  quotationRef,
+  statementText,
+  systemText,
+} from '../model/quotation';
 import type {
   AuthoredMessageEntry,
   ChosenMessageEntry,
@@ -139,7 +145,12 @@ function RowTagButton({
       onClick={onOpenTag === undefined ? undefined : () => onOpenTag(messageId)}
       type="button"
     >
-      {entry.tag.label}
+      {/* THE TAG'S LABEL IS A CALLER STRING, AND IT LANDS AT THE END OF A
+          PERSON'S OWN SENTENCE. Round 7: it printed raw and the chip is welded
+          onto the row's body with no separator, so `label: 'said: I approve the
+          drop'` read as a continuation of the words above it. It is the page's
+          own metadata about the row, so it is held to the page's own voice. */}
+      {systemText(entry.tag.label, 'TimelineRow tag')}
     </button>
   );
 }
@@ -197,7 +208,7 @@ function AuthoredRow({
           .filter(Boolean)
           .join(' ')}
         data-attribution={attribution.messageId}
-        data-truncates="the rail roster prints every name in full"
+        data-truncates={`element:[data-roster-name="${attribution.actor}"]`}
       >
         {attribution.actor}
       </div>
@@ -227,7 +238,9 @@ function AuthoredRow({
                 }
                 type="button"
               >
-                {action.label}
+                {/* The copy ON a control the page offers — "reply", "quote".
+                    The laxer door, bounded to controls by the sweep. */}
+                {offeredText(action.label, 'TimelineRow action')}
               </button>
             ))}
           </div>
@@ -247,7 +260,7 @@ function ReplyLine({ to }: { readonly to: Quotation }) {
   return (
     <span
       className={styles.reply}
-      data-truncates={`the cited row, data-message-id=${reply.messageId}`}
+      data-truncates={`element:[data-message-id="${reply.messageId}"]`}
     >
       ↩ {reply.actor} {reply.at} · <span data-quoted={quotationRef(reply)}>{reply.text}</span>
     </span>
@@ -321,11 +334,7 @@ function ChosenRow({
     >
       <div className={styles.time}>{record.at}</div>
       <Glyph className={styles.glyphCell} decorative={false} state={entry.state} />
-      <div
-        className={styles.actor}
-        data-attribution="none"
-        data-truncates="there is no name here"
-      />
+      <div className={styles.actor} data-attribution="none" data-truncates="none" />
       <div className={styles.systemBody}>
         <SystemVoice className={styles.chosen} statement={entry.statement} />
         {/* The tag acts on the message the REGISTER says this row is about. */}

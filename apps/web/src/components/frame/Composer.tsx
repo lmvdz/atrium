@@ -37,7 +37,7 @@ import type { ChangeEvent, KeyboardEvent, Ref } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAttribution } from '../model/ledger';
 import type { Quotation } from '../model/quotation';
-import { quotationRef } from '../model/quotation';
+import { quotationRef, systemText } from '../model/quotation';
 import type { ComposerBinding } from '../model/records';
 import styles from './frame.module.css';
 
@@ -156,6 +156,16 @@ export function Composer({
     [textareaRef],
   );
 
+  /* THE ROOM NAME AND THE FOOT NOTE ARE STRINGS THIS COMPONENT PRINTS. The foot
+     note is a whole page-authored sentence the consumer supplies — it is what
+     `/` writes every handler's outcome into — and it printed raw. */
+  const room = systemText(roomName, 'Composer roomName');
+  const foot = systemText(footNote, 'Composer footNote');
+  const boundLabel =
+    binding.mode === 'bound' ? systemText(binding.itemLabel, 'Composer binding') : '';
+  const boundObjective =
+    binding.mode === 'bound' ? systemText(binding.objective, 'Composer binding') : '';
+
   return (
     <div className={styles.composer}>
       {binding.mode === 'bound' ? (
@@ -171,12 +181,8 @@ export function Composer({
               does. A clip owes the reader a route (CONVENTIONS), and the route
               is the item's own card in Needs you, which is on the same screen
               and states the label and the objective in full. */}
-          <span
-            className={styles.ctxbarIn}
-            data-truncates="the item's card in Needs you"
-            title={`${binding.itemLabel} · in: ${binding.objective}`}
-          >
-            {binding.itemLabel} · in: {binding.objective}
+          <span className={styles.ctxbarIn}>
+            {boundLabel} · in: {boundObjective}
           </span>
           <button
             aria-label="Cancel answering"
@@ -211,9 +217,7 @@ export function Composer({
       >
         <textarea
           aria-label={
-            binding.mode === 'bound'
-              ? `Answer ${binding.itemLabel} in your own words`
-              : `Message #${roomName}`
+            binding.mode === 'bound' ? `Answer ${boundLabel} in your own words` : `Message #${room}`
           }
           data-composing={composingNow ? 'true' : 'false'}
           onBlur={() => setComposing(false)}
@@ -238,7 +242,7 @@ export function Composer({
           placeholder={
             binding.mode === 'bound'
               ? 'answer in your own words — it is recorded verbatim'
-              : `message #${roomName}…`
+              : `message #${room}…`
           }
           ref={attach}
           rows={1}
@@ -288,7 +292,7 @@ export function Composer({
           )}
         </span>
         <span className={styles.cfootSpacer} />
-        <span data-composer-note="true">{footNote}</span>
+        <span data-composer-note="true">{foot}</span>
       </div>
     </div>
   );
@@ -321,7 +325,7 @@ function ReplyBanner({ to, onCancel }: { readonly to: Quotation; readonly onCanc
       <span
         className={styles.ctxbarIn}
         data-quoted={quotationRef(reply)}
-        data-truncates={`the cited row, data-message-id=${reply.messageId}`}
+        data-truncates={`element:[data-message-id="${reply.messageId}"]`}
         title={reply.text}
       >
         “{reply.text}”

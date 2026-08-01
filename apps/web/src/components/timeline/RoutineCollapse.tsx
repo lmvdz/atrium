@@ -28,6 +28,10 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
   const shown = entry.open ? entry.rows.slice(0, peekLimit) : [];
   const remaining = count - shown.length;
   const actors = systemText(entry.actors.join(', '), 'RoutineCollapse actors');
+  /* The range is two more caller strings this strip prints — in the summary and
+     in the accessible name. Same door, same reason as the actors beside them. */
+  const from = systemText(entry.from, 'RoutineCollapse from');
+  const to = systemText(entry.to, 'RoutineCollapse to');
 
   return (
     <div className={styles.routine} data-row="routine" data-open={entry.open ? 'true' : 'false'}>
@@ -42,7 +46,7 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
            insert a space for block-level parts. A `·` that is decoration to the
            eye is not decoration to the name computation once it is the only
            thing between two runs of text. */
-        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${actors} — ${entry.open ? 'click to hide' : 'click to peek'}`}
+        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${from} and ${to}, from ${actors} — ${entry.open ? 'click to hide' : 'click to peek'}`}
         className={styles.routineStrip}
         onClick={onTogglePeek}
         title="routine = no state change, no claim, nothing owed to anyone"
@@ -50,13 +54,10 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
       >
         {/* count · range · actors, on one line. Never a bare "N hidden": the
             fold has to say what it swallowed or nobody trusts it. */}
-        <span
-          className={styles.routineSummary}
-          data-truncates="the strip's accessible name, and peeking opens the rows"
-        >
+        <span className={styles.routineSummary} data-truncates="name">
           <b>{count} routine</b>
           <span aria-hidden="true"> · </span>
-          {entry.from} – {entry.to}
+          {from} – {to}
           <span aria-hidden="true"> · </span>
           {/* NAMES IN A COUNT, NOT NAMES BESIDE WORDS — and held to the system's
               voice anyway. The blind cross-lineage review of round 6 named this

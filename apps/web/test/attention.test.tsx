@@ -8,8 +8,9 @@ import {
   Rail,
   RoutineCollapse,
   SurfaceIndicators,
+  Trailer,
 } from '../src/components';
-import type { AttentionItem, TrailerSummary } from '../src/components/model';
+import type { AttentionItem, StateObject, TrailerSummary } from '../src/components/model';
 import {
   hardestFirst,
   isRationale,
@@ -237,6 +238,36 @@ describe('the trailer', () => {
     });
     expect(summary.lead.text).toBe('1 of 1 still unverified');
     expect(summary.state.verification).toBe('self_reported');
+    expect(summary.leadsWith).toBe('unverified');
+  });
+
+  /* CATCHES: the tail printing the count the lead is already about. ROUND 7:
+     the shipped trailer read "1 failure outside your list — 1/2 objectives clear
+     of you · 1 commitment, 1 overdue · 1 failure · last check 12:29". The lead is
+     derived from whichever count is worst and the tail printed every count, so
+     the worst one appeared twice in one sentence. */
+  it('the trailer does not say the count its lead is about twice', () => {
+    const failing: StateObject = {
+      id: 'F1',
+      kind: 'claim',
+      state: { kind: 'claim', verification: 'failed', owedToViewer: false, irreversible: false },
+      text: 'parity check 418',
+      facts: [],
+      objectives: ['o1'],
+    };
+    const summary = trailerFor({
+      objects: [failing],
+      objectives: [{ id: 'o1', title: 'o', status: 'active', open: true }],
+      overdue: 0,
+    });
+    expect(summary.leadsWith).toBe('failures');
+    const { container } = render(<Trailer lastCheck="12:29" summary={summary} />);
+    const line = (container.textContent ?? '').replace(/\s+/g, ' ');
+    expect(line, 'the lead says it').toContain('1 failure outside your list');
+    expect(
+      line.match(/1 failure(?! outside)/g) ?? [],
+      'the tail repeats the count the lead is already about',
+    ).toEqual([]);
   });
 
   /* CATCHES: letting a failure outside the pin be described as lateness or as

@@ -25,10 +25,12 @@ import {
   initials,
   Pin,
   Rail,
+  ReceiptView,
   RoomHead,
   StateLens,
   SurfaceIndicators,
   slot,
+  systemText,
   Timeline,
   WorkspaceSpacer,
   WorkspaceTile,
@@ -42,9 +44,9 @@ import type {
   HumanSummary,
   MessageRecord,
   ObjectiveRecord,
+  ReceiptRecord,
   RoomHeadRecord,
   RoomSummary,
-  Slot,
   StateObject,
   SurfaceId,
   TimelineEntry,
@@ -75,7 +77,14 @@ export interface RoomFrameHandlers {
   readonly onSelectRoom?: (roomId: string) => void;
   readonly onToggleObjective?: (objectiveId: string) => void;
   readonly onOpenReceipt?: (objectId: string) => void;
-  /** the receipt's own three seams, for the consumer that opens one */
+  /* THE RECEIPT'S OWN THREE SEAMS — declared here since round 6 and wired to
+     nothing until round 7, because both consumers built `<ReceiptView>` by hand
+     and handed it across a `Slot`. A component reached through an opaque value
+     is invisible to JSX derivation (D3), so `ReceiptView`'s `onBack`, `onReopen`
+     and `onJump` were required by nothing: deleting `onJump` from
+     `RoomSession`'s copy killed the receipt's only outbound navigation with tsc
+     at 0 and every suite green. The frame constructs the receipt now, so the
+     receipt is an ordinary child with an ordinary prop table. */
   readonly onCloseReceipt?: () => void;
   readonly onReopen?: (receiptId: string) => void;
   readonly onJumpToMessage?: (messageId: string) => void;
@@ -143,7 +152,12 @@ export interface RoomFrameProps {
   readonly binding: ComposerBinding;
   readonly composerNote: string;
   readonly jump?: CrossRoomJumpRecord;
-  readonly receipt?: Slot;
+  /**
+   * The receipt to show in the lens, as a RECORD rather than as pre-built
+   * content. A `Slot` here meant every consumer wrote its own `<ReceiptView>`
+   * and its own three handlers, outside every enumeration this file has.
+   */
+  readonly receipt?: ReceiptRecord;
   readonly boxed?: boolean;
   readonly label?: string;
   readonly handlers?: RoomFrameHandlers;
@@ -176,7 +190,19 @@ function Frame(props: RoomFrameProps) {
           objects={props.objects}
           onOpenReceipt={on.onOpenReceipt}
           onToggleObjective={on.onToggleObjective}
-          receipt={props.receipt}
+          receipt={
+            props.receipt === undefined
+              ? undefined
+              : slot(
+                  <ReceiptView
+                    key={props.receipt.id}
+                    onBack={on.onCloseReceipt}
+                    onJump={on.onJumpToMessage}
+                    onReopen={on.onReopen}
+                    receipt={props.receipt}
+                  />,
+                )
+          }
           roomName={props.room.name}
           updatedAt={props.updatedAt}
         />,
@@ -210,7 +236,7 @@ function Frame(props: RoomFrameProps) {
         <WorkspaceYou
           initials={initials(props.viewer.name)}
           key="you"
-          title={`${props.viewer.name} — you`}
+          title={`${systemText(props.viewer.name, 'RoomFrame viewer')} — you`}
         />,
       ])}
       workspace={slot([

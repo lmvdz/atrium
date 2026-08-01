@@ -145,13 +145,30 @@ const TSX = Object.fromEntries(
   }),
 ) as Record<string, string>;
 
+/**
+ * The same source with its comments removed, for the route scan.
+ *
+ * A component's doc comment QUOTES the route it used to carry — `ReceiptView`'s
+ * explains at length why the quotation is no longer clamped and what the old
+ * `data-truncates` said. Scanning the raw file reads that prose as a live
+ * declaration, which is CONVENTIONS' "a source-grep fails by matching the wrong
+ * occurrence, not only by matching nothing", one instrument over.
+ */
+const TSX_CODE = Object.fromEntries(
+  Object.entries(TSX).map(([file, source]) => [file, stripComments(source)]),
+) as Record<string, string>;
+
 describe('a string that can be truncated names its route to the rest', () => {
   /* CATCHES: the sweep going blind. If no stylesheet in the library truncates
      anything, the assertion below is vacuous — and a vacuous check reports
      exactly like a passing one. */
   it('the library truncates in more than one place, so there is something to sweep', () => {
     const all = AREAS.flatMap((area) => truncatingClasses(CSS[area] as string));
-    expect(all.length, 'no CSS rule in the library truncates at all').toBeGreaterThan(8);
+    /* Round 7 removed four rules whose declared route was the `title` attribute
+       or a card stating a different sentence, so the floor moved with them. It
+       is a floor rather than an equality on purpose: what has to be impossible
+       is a sweep with nothing in it. */
+    expect(all.length, 'no CSS rule in the library truncates at all').toBeGreaterThan(5);
   });
 
   /* CATCHES: a truncating rule shipped without a route — the D13 defect, at any
@@ -159,7 +176,7 @@ describe('a string that can be truncated names its route to the rest', () => {
   it.each(AREAS)('every truncating class in %s is worn with a data-truncates', (area) => {
     const unrouted: string[] = [];
     for (const className of truncatingClasses(CSS[area] as string)) {
-      const wearers = Object.entries(TSX).flatMap(([file, source]) =>
+      const wearers = Object.entries(TSX_CODE).flatMap(([file, source]) =>
         tagsWearing(source, className).map((tag) => ({ file, tag })),
       );
       /* A class nothing wears is dead CSS, not an unrouted truncation. It is
@@ -178,24 +195,83 @@ describe('a string that can be truncated names its route to the rest', () => {
     expect(unrouted, 'a truncating element does not say how to reach the rest').toEqual([]);
   });
 
-  /* CATCHES: a route that is a hover. `title=` is the affordance round 1 moved
-     the rationale OFF, and a route that only a pointer can take is not a route
-     for a keyboard or a touch reader. The attribute's value is prose on purpose
-     — it is read by a person deciding whether the claim is true — so what is
-     checked is that it does not claim the hover IS the route. */
+  /* ---------------------------------------------------------------------------
+   * A ROUTE IS ONE OF THE THREE CONVENTIONS PERMITS, SAID IN A FORM SOMETHING
+   * CAN CHECK.
+   *
+   * ROUND 7, D4. `data-truncates` was PROSE, and the only thing anything checked
+   * was that it was present. So the receipt's clipped quotation could carry
+   * `"focusing this row expands it; the cited record is on this page"` — a
+   * `:focus-visible` clamp expansion, which is none of the three permitted
+   * routes, followed by a claim that was FALSE for the excerpt of
+   * `m-legal@identity-service` (that record is not in this room's feed, and the
+   * row's own adjacent label says "jump to source in #identity-service →").
+   * Three more said "the row's title" or "the item's card in Needs you", which is
+   * the `title` attribute CONVENTIONS explicitly refuses, and a card stating a
+   * different sentence. Every one of them satisfied "a route is named".
+   *
+   * The attribute is a GRAMMAR now, one kind per permitted route, and the browser
+   * sweep in `e2e/smoke.spec.ts` verifies each kind against the rendered page —
+   * the control exists and is pressable, the element exists and states the text
+   * in full, the accessible name contains it. A route that is not true fails
+   * there; a route that is not one of the three fails here.
+   * ------------------------------------------------------------------------- */
+  const ROUTE = /^(?:name|control|none|element:\S.*)$/;
+
+  it('every declared route is one of the permitted kinds', () => {
+    const claimed = Object.entries(TSX_CODE).flatMap(([file, source]) =>
+      [...source.matchAll(/data-truncates=(?:"([^"]*)"|\{`([^`]*)`\})/g)].map((m) => ({
+        file,
+        route: (m[1] ?? m[2] ?? '').replace(/\$\{[^}]*\}/g, 'X'),
+      })),
+    );
+    expect(claimed.length, 'nothing in the library declares a truncation route').toBeGreaterThan(6);
+    expect(
+      claimed.filter((entry) => !ROUTE.test(entry.route)).map((e) => `${e.file}: ${e.route}`),
+      'a truncation route is prose rather than one of the kinds CONVENTIONS permits',
+    ).toEqual([]);
+    /* CATCHES the grammar collapsing to one kind that means nothing: the three
+       permitted routes are genuinely different affordances and the library uses
+       more than one of them. */
+    const kinds = new Set(claimed.map((entry) => entry.route.split(':')[0]));
+    expect([...kinds].sort()).toEqual(['control', 'element', 'name', 'none']);
+  });
+
+  /* CATCHES: a route going back to a hover. `title=` is the affordance round 1
+     moved the rationale OFF, and CONVENTIONS names it explicitly as not a route.
+     The grammar has no kind for it, and this asserts nothing smuggles one in. */
   it('no route is a tooltip', () => {
-    const claimed = Object.entries(TSX).flatMap(([file, source]) =>
+    const claimed = Object.entries(TSX_CODE).flatMap(([file, source]) =>
       [...source.matchAll(/data-truncates=(?:"([^"]*)"|\{`([^`]*)`\})/g)].map((m) => ({
         file,
         why: m[1] ?? m[2] ?? '',
       })),
     );
-    expect(claimed.length, 'nothing in the library declares a truncation route').toBeGreaterThan(
-      10,
-    );
     expect(
-      claimed.filter((entry) => /tooltip|hover|title attribute/i.test(entry.why)),
+      claimed.filter((entry) => /tooltip|hover|title|focus/i.test(entry.why)),
       'a truncation route is a hover affordance',
     ).toEqual([]);
+  });
+
+  /* CATCHES: the stylesheet growing a hover-expands-the-clamp rule again. That
+     is what the receipt's excerpt did, and it is not one of the three routes:
+     it is invisible to touch, and a keyboard reader who focuses a row to read it
+     loses it again the moment they move on. */
+  it('no clamp is widened by a hover or a focus', () => {
+    const widened: string[] = [];
+    for (const area of AREAS) {
+      for (const [, selectors, body] of stripComments(CSS[area] as string).matchAll(
+        /([^{}]+)\{([^{}]*)\}/g,
+      )) {
+        if (selectors === undefined || body === undefined) continue;
+        if (!/:hover|:focus/.test(selectors)) continue;
+        if (/-webkit-line-clamp|max-height|text-overflow/.test(body)) {
+          widened.push(`${area}: ${selectors.trim().replace(/\s+/g, ' ')}`);
+        }
+      }
+    }
+    expect(widened, 'a truncation is undone by hovering or focusing, which is not a route').toEqual(
+      [],
+    );
   });
 });

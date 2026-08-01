@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import { ReceiptView, slot } from '../../src/components';
 import * as f from './fixtures';
 import styles from './gallery.module.css';
 import type { RoomFrameProps } from './RoomFrame';
@@ -80,7 +79,7 @@ const FRAMES: readonly GalleryFrame[] = [
       ...base,
       entries: f.timeline({ seen: true, filter: null, routineOpen: false }),
       openAttentionId: 'P1',
-      receipt: slot(<ReceiptView receipt={f.RECEIPT} />),
+      receipt: f.RECEIPT,
       label: 'receipt-open',
     },
   },

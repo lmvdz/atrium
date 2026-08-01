@@ -18,22 +18,28 @@ export function MessageBody({ body }: MessageBodyProps) {
   return (
     <>
       {body.map((segment, index) => {
-        const key = `${segment.kind}-${index}-${segment.text}`;
+        /* ONE READ OF WHAT THIS RUN PUTS ON SCREEN, painted by all three arms.
+           `segmentText` is the same function `messageEntry` and `TimelineRow`
+           use to prove the body reads as the record it is attributed to, so
+           deriving the printed string anywhere else would be a second
+           definition of what a mention says. */
+        const words = segmentText(segment);
+        const key = `${segment.kind}-${index}-${words}`;
         if (segment.kind === 'code') {
           return (
             <code className={styles.code} key={key}>
-              {segment.text}
+              {words}
             </code>
           );
         }
         if (segment.kind === 'mention') {
           return (
             <span className={styles.mention} key={key}>
-              {segmentText(segment)}
+              {words}
             </span>
           );
         }
-        return <span key={key}>{segmentText(segment)}</span>;
+        return <span key={key}>{words}</span>;
       })}
     </>
   );

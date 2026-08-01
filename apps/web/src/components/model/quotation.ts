@@ -200,13 +200,38 @@ export function messageLedger(records: Iterable<MessageRecord>): MessageLedger {
   const byId = new Map<MessageId, MessageRecord>();
   for (const record of records) {
     const existing = byId.get(record.id);
+    /* TWO RECORDS CLAIMING ONE ID IS A THROW, NOT LAST-WRITE-WINS — and "two
+       records" means TWO DIFFERENT RECORDS, compared by what a reader can see.
+       ROUND 7, D5: this compared by REFERENCE (`existing !== record`), so two
+       VALUE-IDENTICAL records for one id threw as loudly as a forgery. That is
+       not a hypothetical difference. It is what a live adapter does every time
+       it re-delivers a message the page already holds — an at-least-once
+       delivery, a reconnect replay, a React re-render that rebuilt the array —
+       and on `/` it was reachable from two clicks of Send in one task:
+
+         [pageerror] messageLedger: two different records both claim the id "local-1"
+         body.innerText → "This page couldn't load | Reload to try again, or go back."
+
+       The rule is right and the implementation was measuring identity instead of
+       disagreement. `recordFingerprint` is already the one description of "every
+       field a reader can see", and it is what `resolveCitation` compares two
+       registers with; comparing the same thing here makes idempotent
+       re-delivery a no-op and a genuine disagreement a throw. */
     if (existing !== undefined && existing !== record) {
-      /* Two records claiming one id is not a near-miss to be resolved by
-         last-write-wins: it is precisely the state in which a lookup returns
-         somebody else's name for a real message. */
-      throw new Error(
-        `messageLedger: two different records both claim the id ${JSON.stringify(record.id)} — a citation resolved against this ledger could name either of them`,
-      );
+      const before = recordFingerprint(existing);
+      const after = recordFingerprint(record);
+      if (before !== after) {
+        throw new Error(
+          `messageLedger: two DIFFERENT records both claim the id ${JSON.stringify(record.id)} — a citation resolved against this ledger could name either of them.\n` +
+            `  already held: ${before}\n` +
+            `  offered:      ${after}\n` +
+            '  Re-delivering a record this page already holds is fine; changing what it says is not.',
+        );
+      }
+      /* Same id, same visible facts: the same message, delivered twice. Keep the
+         one already held so the identity of what the ledger returns is stable
+         across a re-delivery. */
+      continue;
     }
     byId.set(record.id, record);
   }
@@ -808,10 +833,21 @@ export function systemVoiceDefect(text: string): string | null {
  * a prop with no door at all; what the value needs is the check on the path, and
  * a fourth brand would suggest the doors were the guarantee.
  *
- * The general rule, which is what the sweep is really for: **anything a caller
- * supplies that renders inside `data-voice="system"` goes through a check on the
- * render path**, and `test/system-voice.test.tsx` enumerates those elements from
- * the source so the next sink is caught by counting rather than by reading.
+ * ROUND 7 CORRECTED THE RULE'S SCOPE. It used to read "anything a caller
+ * supplies that renders inside `data-voice="system"`" — which is a denominator
+ * supplied by the claim, the exact thing CONVENTIONS' harness section condemns,
+ * and `test/system-voice.test.tsx` took its count from that attribute. The blind
+ * review of round 6's fix found four sinks outside it, two of them in the
+ * receipt: `ProvenanceEntry.note` printed inside the same `<button>` as a
+ * resolved quotation on the line after the quoted words, `CorrectionEntry.heading`
+ * in the layout slot round 6 had just deleted `HappenedLine.who` from,
+ * `RowTag.label` welded onto the end of a person's own sentence, and
+ * `AttentionItem.facts`.
+ *
+ * The general rule is: **every caller-supplied string the page prints goes
+ * through a check on the render path**, and `test/printed-strings.test.tsx`
+ * enumerates those from the TYPES and the JSX rather than from an attribute the
+ * page chose to write.
  */
 export function systemText(value: string, from: string): string {
   const painted = String(value);
@@ -820,6 +856,45 @@ export function systemText(value: string, from: string): string {
     throw new Error(
       `${from}: ${defect}.\n` +
         '  This string is painted in the system’s own voice; it is never somebody’s words.\n' +
+        `  rejected: ${JSON.stringify(painted.slice(0, 120))}`,
+    );
+  }
+  return painted;
+}
+
+/**
+ * THE OTHER DOOR, AND WHY THERE ARE EXACTLY TWO.
+ *
+ * `systemText` holds a string to the whole system-voice rule, which is right for
+ * everything the page STATES and wrong for the copy ON A CONTROL. Round 4 already
+ * shipped that mistake once, at the model layer: the first-person ban was applied
+ * to the option payload, so "Keep it behind our retention window", "Give us
+ * another day", "Yes — I approve" and "Ship it, we agreed" all threw at render.
+ * A product whose buttons cannot contain the five commonest pronouns in English
+ * is not a product, and CONVENTIONS records the fix as a split by WHO IS
+ * SPEAKING rather than by which letters are in the string.
+ *
+ * `offeredText` is that same split, applied to a printed string rather than to a
+ * span of a `SystemStatement`. It is the text of something the page is OFFERING
+ * — a button's label, its tooltip, the hold control's contract line. It keeps its
+ * pronouns, exactly as a `verbatim` span does; what it may not do is wear
+ * quotation marks, because that is the one thing that makes page-authored text
+ * read as an utterance.
+ *
+ * It is the WEAKER door, so it is bounded structurally rather than by care:
+ * `test/printed-strings.test.tsx` requires every call site to sit inside a
+ * control (`<button>`, `<HoldToAct>`, `<a>`, `<summary>`), and asserts that list.
+ * CONVENTIONS' rule for the `verbatim` exemption is that it belongs to a sentence
+ * SHAPE and not to a span; this is the same rule for a printed string — it
+ * belongs to a CONTROL, not to whoever reaches for the laxer function.
+ */
+export function offeredText(value: string, from: string): string {
+  const painted = String(value);
+  const hit = QUOTATION_MARKS.pattern.exec(painted);
+  if (hit !== null) {
+    throw new Error(
+      `${from}: ${QUOTATION_MARKS.why} (rejected ${JSON.stringify(hit[0])}).\n` +
+        '  This is the copy on a control the page offers. It keeps its pronouns — it is not the system speaking — but quotation marks are what make offered text read as somebody’s utterance.\n' +
         `  rejected: ${JSON.stringify(painted.slice(0, 120))}`,
     );
   }

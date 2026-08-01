@@ -14,6 +14,7 @@
  *     the same line that reports the mark. No fake mark-all-read lie.
  * ------------------------------------------------------------------------- */
 
+import { systemText } from '../model/quotation';
 import type { AttentionClass, SinceYouLeftEntry } from '../model/records';
 import { plural, text } from '../model/text';
 import styles from './timeline.module.css';
@@ -47,8 +48,15 @@ export function SinceYouLeftDivider({
   onMarkSeen,
   onUnmarkSeen,
 }: SinceYouLeftDividerProps) {
-  const window = text(entry.window);
-  const seenAt = text(entry.seenAt);
+  const window =
+    text(entry.window) === null
+      ? null
+      : systemText(entry.window ?? '', 'SinceYouLeftDivider window');
+  const seenAt =
+    text(entry.seenAt) === null
+      ? null
+      : systemText(entry.seenAt ?? '', 'SinceYouLeftDivider seenAt');
+  const label = systemText(entry.label, 'SinceYouLeftDivider label');
   return (
     <div
       className={[styles.syl, entry.seen ? styles.sylSeen : null].filter(Boolean).join(' ')}
@@ -56,7 +64,7 @@ export function SinceYouLeftDivider({
       data-seen={entry.seen ? 'true' : 'false'}
     >
       <div className={styles.sylBar}>
-        <span className={`${styles.sylLabel} atr-lbl`}>{entry.label}</span>
+        <span className={`${styles.sylLabel} atr-lbl`}>{label}</span>
         <div className={styles.sylCounts}>
           {CLASS_ORDER.map((attentionClass) => {
             const n = entry.counts[attentionClass];

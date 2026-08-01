@@ -388,7 +388,7 @@ const LEDGER = [
   {
     name: 'the surface chip welds its label to its count again',
     file: 'src/components/frame/SurfaceIndicators.tsx',
-    find: '            aria-label={\n              surface.count === null ? surface.label : `${surface.label} — ${surface.count}`\n            }\n',
+    find: '            aria-label={surface.count === null ? label : `${label} — ${surface.count}`}\n',
     replace: '',
     test: 'test/attention.test.tsx',
   },
@@ -402,7 +402,7 @@ const LEDGER = [
   {
     name: 'the routine strip’s count, window and actors run together',
     file: 'src/components/timeline/RoutineCollapse.tsx',
-    find: "        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${actors} — ${entry.open ? 'click to hide' : 'click to peek'}`}\n",
+    find: "        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${from} and ${to}, from ${actors} — ${entry.open ? 'click to hide' : 'click to peek'}`}\n",
     replace: '',
     test: 'test/attention.test.tsx',
   },
@@ -913,23 +913,43 @@ const LEDGER = [
 
   /* D6 — the structural backstop. There is no field a renderer can put a name
      in, on either of the two rows that had one. */
+  /* ---------------------------------------------------------------------------
+   * ROUND 7, D2: THESE TWO ENTRIES PROVED THE WRONG THING.
+   *
+   * Both added a NEW REQUIRED property and required `tsc` to fail. What that
+   * proves is that adding a required property breaks the fixtures — which is true
+   * of every interface in the program and says nothing about whether a free
+   * string field already exists. `CorrectionEntry.heading: string` sat there
+   * through the whole of round 6, unconstrained and rendered one line above the
+   * correction's words, while CONVENTIONS said the property was "checkable by
+   * reading the types" and this ledger reported it covered.
+   *
+   * The entries below break the claim the way a defect would: an OPTIONAL free
+   * string that a renderer prints. The catcher is the type-reading test, not
+   * `tsc` — a compiler cannot refuse an optional property, which is exactly why
+   * the compiler was the wrong instrument for this claim.
+   * ------------------------------------------------------------------------- */
   {
-    name: 'a receipt history line gets an actor field beside the words again',
+    name: 'a correction’s heading goes back to a free string',
+    file: 'src/components/model/records.ts',
+    find: '  readonly heading: SystemStatement;',
+    replace: '  readonly heading: string;',
+    test: 'test/record-integrity.test.tsx',
+  },
+  {
+    name: 'a receipt history line gets an optional free string beside the words',
     file: 'src/components/model/records.ts',
     find: 'export interface HappenedLine {\n  readonly id: string;\n  readonly kind: HappenedKind;\n',
     replace:
-      'export interface HappenedLine {\n  readonly id: string;\n  readonly who: string;\n  readonly kind: HappenedKind;\n',
-    typecheck: true,
-    test: 'tsc --noEmit',
+      'export interface HappenedLine {\n  readonly id: string;\n  readonly whoSaid?: string;\n  readonly kind: HappenedKind;\n',
+    test: 'test/record-integrity.test.tsx',
   },
   {
-    name: 'a correction gets an actor field beside the words again',
+    name: 'a provenance note goes back to a free string beside the quoted words',
     file: 'src/components/model/records.ts',
-    find: 'export interface CorrectionEntry {\n  readonly id: string;\n  readonly heading: string;\n',
-    replace:
-      'export interface CorrectionEntry {\n  readonly id: string;\n  readonly who: string;\n  readonly heading: string;\n',
-    typecheck: true,
-    test: 'tsc --noEmit',
+    find: 'one field\n   * over.\n   */\n  readonly note: Maybe<SystemStatement>;',
+    replace: 'one field\n   * over.\n   */\n  readonly note: Maybe<string>;',
+    test: 'test/record-integrity.test.tsx',
   },
 
   /* D10 — the denylist sees the spelling the platform produces. */
@@ -1057,7 +1077,7 @@ const LEDGER = [
   {
     name: 'the compressed reason goes back to a clip with no route out',
     file: 'src/components/attention/AttentionCompact.tsx',
-    find: '<span className={styles.acompWhyText} data-truncates="opens the full card">',
+    find: '<span className={styles.acompWhyText} data-truncates="control">',
     replace: '<span className={styles.acompWhyText}>',
     test: 'test/truncation.test.tsx',
   },
@@ -1106,7 +1126,7 @@ const LEDGER = [
     file: 'src/components/attention/Trailer.tsx',
     find: "{systemText(lastCheck, 'Trailer last check')}",
     replace: '{lastCheck}',
-    test: 'test/system-voice.test.tsx',
+    test: 'test/printed-strings.test.tsx',
   },
   {
     /* grok-4.5: the trailer's lead is a whole page-authored SENTENCE. */
@@ -1114,7 +1134,7 @@ const LEDGER = [
     file: 'src/components/attention/Trailer.tsx',
     find: '<SystemVoice inline statement={summary.lead} />',
     replace: '{summary.lead.text}',
-    test: 'test/system-voice.test.tsx',
+    test: 'test/printed-strings.test.tsx',
   },
   {
     /* grok-4.5: the room name in the trace, inside the same treatment. */
@@ -1122,7 +1142,7 @@ const LEDGER = [
     file: 'src/components/attention/CrossRoomJump.tsx',
     find: "{systemText(jump.fromRoom, 'CrossRoomJump room')}",
     replace: '{jump.fromRoom}',
-    test: 'test/system-voice.test.tsx',
+    test: 'test/printed-strings.test.tsx',
   },
   {
     /* gpt-5.6: React renders any Iterable; the walk tested Array.isArray. */
@@ -1157,6 +1177,146 @@ const LEDGER = [
     find: 'const FORWARDED = COMPONENT_FILES.flatMap(edgesFrom);',
     replace: 'const FORWARDED = COMPONENT_FILES.flatMap(edgesFrom).slice(0, 6);',
     test: 'test/harness-integrity.test.ts',
+  },
+  /* ---------------------------------------------------------------------------
+   * ROUND 7 — the denominator, the Slot boundary, the ledger, the route.
+   * ------------------------------------------------------------------------- */
+
+  /* D1 — every caller-supplied string the page prints goes through a door. */
+  {
+    name: 'the receipt prints a page-authored note beside the quoted words again',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: '        <SystemVoice className={styles.provNote} inline statement={entry.note} />',
+    replace: '        <span className={styles.provNote}>{String(entry.note)}</span>',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'a correction heading goes back to being printed raw above the words',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: '        <SystemVoice className={styles.corrHeading} inline statement={entry.heading} />',
+    replace: '        <span>{String(entry.heading)}</span>',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'a row tag welds an unchecked label onto a person’s sentence',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: "      {systemText(entry.tag.label, 'TimelineRow tag')}",
+    replace: '      {entry.tag.label}',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the open card prints its facts unchecked',
+    file: 'src/components/attention/AttentionCard.tsx',
+    find: "  const facts = list(item.facts.map((fact) => systemText(fact, 'AttentionCard fact')));",
+    replace: '  const facts = list(item.facts);',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'a state-object row prints its facts unchecked',
+    file: 'src/components/lens/ObjectRow.tsx',
+    find: "                {systemText(fact, 'ObjectRow fact')}",
+    replace: '                {fact}',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the receipt prints its status parts unchecked',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: "              {systemText(part, 'ReceiptView status')}",
+    replace: '              {part}',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'a slot goes back to letting a raw caller string through',
+    file: 'src/components/model/slot.ts',
+    find: "  if (typeof node === 'string') {\n    systemText(node, 'slot');\n    return;\n  }",
+    replace: "  if (typeof node === 'string') return;",
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the printed-string sweep stops seeing announced-text attributes',
+    file: 'test/printed.ts',
+    find: '    if (!ANNOUNCED_ATTRIBUTES.includes(name)) return [];',
+    replace: '    return [];',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the printed-string sweep stops tracing into the object that holds the string',
+    file: 'test/printed.ts',
+    find: '      return this.compliant(node.expression, next, true);\n    }\n    if (ts.isElementAccessExpression(node))',
+    replace: '      return null;\n    }\n    if (ts.isElementAccessExpression(node))',
+    test: 'test/printed-strings.test.tsx',
+  },
+
+  /* D3 — the component reached through an opaque value. */
+  {
+    name: 'the consumer stops passing the receipt’s jump handler',
+    file: 'app/gallery/RoomFrame.tsx',
+    find: '                    onJump={on.onJumpToMessage}\n',
+    replace: '',
+    test: 'test/frame-handlers.test.tsx',
+  },
+  {
+    name: 'the component node set goes back to being written by hand',
+    file: 'test/frame-handlers.test.tsx',
+    find: 'const COMPONENT_FILES = componentFiles();',
+    replace: "const COMPONENT_FILES = componentFiles().filter((e) => e.name !== 'ReceiptView');",
+    test: 'test/frame-handlers.test.tsx',
+  },
+  {
+    name: 'the Slot holes stop being enumerated from the type of the hole',
+    file: 'test/frame-handlers.test.tsx',
+    find: '      if (/^Slot(\\s*\\|\\s*undefined)?$/.test(printed)) out.push(node.name.getText(file));',
+    replace: '      void printed;',
+    test: 'test/frame-handlers.test.tsx',
+  },
+
+  /* D5 — two records under one id, and the boundary that catches the throw. */
+  {
+    name: 'the ledger compares records by reference again',
+    file: 'src/components/model/quotation.ts',
+    find: '      const before = recordFingerprint(existing);\n      const after = recordFingerprint(record);',
+    replace: "      const before = 'a';\n      const after = 'b';",
+    test: 'test/session.test.tsx',
+  },
+  {
+    name: 'the ledger goes all the way to last-write-wins',
+    file: 'src/components/model/quotation.ts',
+    find: '      if (before !== after) {',
+    replace: '      if (before === after && before !== after) {',
+    test: 'test/session.test.tsx',
+  },
+  {
+    name: 'the sent id is minted from rendered state again',
+    file: 'app/RoomSession.tsx',
+    find: '      id: `local-${minted.current}`,',
+    replace: '      id: `local-${(sentIn[here.current] ?? []).length + 1}`,',
+    test: 'test/session.test.tsx',
+  },
+
+  /* D6 — a room chip that changes the room, not the header. */
+  {
+    name: 'the room chip goes back to changing the head and nothing else',
+    file: 'app/RoomSession.tsx',
+    find: '  const view = useMemo(() => roomView(roomId), [roomId]);',
+    replace:
+      "  const view = useMemo(() => ({ ...roomView('r1'), room: roomView(roomId).room }), [roomId]);",
+    test: 'test/session.test.tsx',
+  },
+  {
+    name: 'the rail stops following the room the head names',
+    file: 'app/RoomSession.tsx',
+    find: '      rooms={railRooms(roomId)}',
+    replace: "      rooms={railRooms('r1')}",
+    test: 'test/session.test.tsx',
+  },
+
+  /* D7 — the trailer says the worst count twice. */
+  {
+    name: 'the trailer repeats the count its lead is already about',
+    file: 'src/components/attention/Trailer.tsx',
+    find: "        {summary.leadsWith === 'failures' ? null : (",
+    replace: '        {false ? null : (',
+    test: 'test/attention.test.tsx',
   },
 ];
 

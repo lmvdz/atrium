@@ -36,6 +36,7 @@
  * ------------------------------------------------------------------------- */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { offeredText } from '../model/quotation';
 import styles from './primitives.module.css';
 
 /**
@@ -187,7 +188,14 @@ export function HoldToAct({
   const uid = useId();
   const meterId = `${uid}-hold-progress`;
   const describeId = `${uid}-hold-describe`;
-  const contract = `${describe} — press and hold for ${(holdMs / 1000).toFixed(0)} seconds; the hold is the confirmation, and releasing early cancels it`;
+  /* THE LABEL AND THE DESCRIPTION ARE THE COPY ON A CONTROL, so they go through
+     the offered door rather than the system one: this is the button for
+     "Authorise the drop" and "Keep it behind our retention window", and round 4
+     already shipped the mistake of holding a one-click answer's own words to the
+     interface's first-person ban. Quotation marks are still refused — that is
+     the one thing that makes offered copy read as an utterance. */
+  const spoken = offeredText(label, 'HoldToAct label');
+  const contract = `${offeredText(describe, 'HoldToAct describe')} — press and hold for ${(holdMs / 1000).toFixed(0)} seconds; the hold is the confirmation, and releasing early cancels it`;
 
   return (
     <>
@@ -230,7 +238,7 @@ export function HoldToAct({
           reader hearing it twice would be hearing one fact told two ways. */}
         <span aria-hidden="true" className={styles.holdFill} />
         <span className={styles.holdLabel}>
-          {phase === 'armed' ? `${label} — armed` : `${label} — hold`}
+          {phase === 'armed' ? `${spoken} — armed` : `${spoken} — hold`}
         </span>
       </button>
       <span className={styles.srOnly} id={describeId}>

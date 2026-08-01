@@ -28,6 +28,9 @@ const TONE_CLASS = {
 export function Glyph({ state, decorative = true, className }: GlyphProps) {
   const glyph = glyphFor(state);
   const tone = glyphTone(glyph);
+  /* Derived from the glyph, which is derived from the state: seven possible
+     values, all written in model/glyph.ts. Named here because the printed-string
+     sweep exempts it by name and the exemption has to be findable. */
   const meaning = glyphMeaning(glyph);
   const shared = {
     className: [styles.glyph, TONE_CLASS[tone], className].filter(Boolean).join(' '),

@@ -11,6 +11,7 @@
  * so, because a control that does nothing is worse than one that is not there.
  * ------------------------------------------------------------------------- */
 
+import { systemText } from '../model/quotation';
 import type { SurfaceId, SurfaceIndicator } from '../model/records';
 import styles from './frame.module.css';
 
@@ -29,6 +30,10 @@ export function SurfaceIndicators({ surfaces, focused, onFocus }: SurfaceIndicat
     >
       {surfaces.map((surface) => {
         const empty = surface.count !== null && surface.count === 0;
+        /* The label is a caller string this chip prints three times — visibly,
+           in its accessible name, and in its tooltip. Checked once, painted
+           three times. */
+        const label = systemText(surface.label, 'SurfaceIndicators');
         return (
           <button
             /* The label and the count are two adjacent elements with no text
@@ -38,9 +43,7 @@ export function SurfaceIndicators({ surfaces, focused, onFocus }: SurfaceIndicat
                Stating the name rather than relying on how the platform joins
                two spans: the visible text is unchanged, and the count is said
                as a count. */
-            aria-label={
-              surface.count === null ? surface.label : `${surface.label} — ${surface.count}`
-            }
+            aria-label={surface.count === null ? label : `${label} — ${surface.count}`}
             aria-pressed={surface.id === focused}
             className={[styles.surf, surface.warn ? styles.surfWarn : null]
               .filter(Boolean)
@@ -51,12 +54,12 @@ export function SurfaceIndicators({ surfaces, focused, onFocus }: SurfaceIndicat
             onClick={onFocus === undefined || empty ? undefined : () => onFocus(surface.id)}
             title={
               empty
-                ? `nothing on the ${surface.label.toLowerCase()} surface right now`
-                : `focus ${surface.label.toLowerCase()} — it is already on screen`
+                ? `nothing on the ${label.toLowerCase()} surface right now`
+                : `focus ${label.toLowerCase()} — it is already on screen`
             }
             type="button"
           >
-            <span className={`${styles.surfLabel} atr-lbl`}>{surface.label}</span>
+            <span className={`${styles.surfLabel} atr-lbl`}>{label}</span>
             {surface.count === null ? null : (
               /* The chip's border goes dashed to say the surface it counts has
                  nothing on it, which makes it a non-text graphic carrying state.

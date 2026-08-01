@@ -1,6 +1,9 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import type { RenderResult } from '@testing-library/react';
 import { cleanup } from '@testing-library/react';
 import type { ReactElement } from 'react';
+import ts from 'typescript';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { ReceiptView, Timeline, TimelineRow } from '../src/components';
@@ -172,6 +175,135 @@ describe('no synthesized speech, checked against the rendered DOM', () => {
  * it was installed in") in the one artifact whose whole job is being the
  * trustworthy record.
  * ------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+ * "IT IS CHECKABLE BY READING THE TYPES" — SO SOMETHING READS THEM.
+ *
+ * CONVENTIONS said: "No row that carries page-authored words has a field a
+ * renderer could put a name in. That is now a property of all three
+ * (`ChosenMessageEntry`, `HappenedLine`, `CorrectionEntry`)… It is checkable by
+ * reading the types, and `test/mutations.mjs` re-adds each field and requires
+ * `tsc` to fail."
+ *
+ * It was FALSE, and neither half of the enforcement could see it. `heading:
+ * string` sat on `CorrectionEntry`, unconstrained and caller-supplied, rendered
+ * one line above the correction's words in the exact slot round 6 had just
+ * deleted `who` from. And the mutation entry added a NEW REQUIRED property and
+ * required `tsc` to fail — which proves that adding a required property breaks
+ * the fixtures, not that no such field exists. Every optional free string in the
+ * program passes that mutation.
+ *
+ * So the claim is read off the types here. The rule stated precisely enough to be
+ * true: on a row that carries page-authored words, a member whose type is a bare
+ * `string` may only be an IDENTIFIER or a CLOCK — never words. Anything a reader
+ * reads as words is a `SystemStatement`, which has no actor field and paints
+ * through the one component that paints system voice.
+ * ------------------------------------------------------------------------- */
+describe('a page-authored row has no field a renderer could put words in', () => {
+  function find(relative: string): string {
+    let dir = process.cwd();
+    for (let i = 0; i < 6; i += 1) {
+      const candidate = resolve(dir, relative);
+      if (existsSync(candidate)) return candidate;
+      dir = dirname(dir);
+    }
+    throw new Error(`${relative} not found above ${process.cwd()}`);
+  }
+
+  const path = find('apps/web/src/components/model/records.ts');
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+
+  /** Every member of an interface, as `name: printed type`. */
+  function membersOf(name: string): readonly { readonly name: string; readonly type: string }[] {
+    let found: ts.InterfaceDeclaration | undefined;
+    const visit = (node: ts.Node): void => {
+      if (ts.isInterfaceDeclaration(node) && node.name.getText(source) === name) found = node;
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    if (found === undefined) throw new Error(`records.ts declares no interface ${name}`);
+    return found.members.filter(ts.isPropertySignature).map((member) => ({
+      name: member.name.getText(source),
+      type: (member.type?.getText(source) ?? 'unknown').replace(/\s+/g, ' '),
+    }));
+  }
+
+  /** A type that can hold an arbitrary sentence. */
+  const FREE = /^(?:readonly )?(?:Maybe<)?string(?:>)?(?: \| null)?$/;
+
+  /* THE THREE ROWS THE CLAIM IS ABOUT. Named from the doctrine, and each one's
+     members are read rather than recalled. */
+  const ROWS = ['ChosenMessageEntry', 'HappenedLine', 'CorrectionEntry'] as const;
+
+  /* CATCHES: the enumeration going blind — a renamed interface, or a members
+     list that comes back empty, reports exactly like a clean sweep. */
+  it('there are rows to read, with members on them', () => {
+    for (const row of ROWS) {
+      expect(membersOf(row).length, `${row} has no members to check`).toBeGreaterThan(2);
+    }
+    /* …and the reader can actually see a free string when there is one, or every
+       assertion below is vacuous. `RowTag.label` is the control: it IS a bare
+       string, deliberately (it is a chip's own label, painted through a door). */
+    expect(
+      membersOf('RowTag')
+        .filter((m) => FREE.test(m.type))
+        .map((m) => m.name),
+    ).toEqual(['label']);
+  });
+
+  /* CATCHES the round-7 defect at any address: a free string field on a row that
+     carries page-authored words. The exact list is asserted rather than a count,
+     because a count is satisfied by swapping one for another. */
+  it('the only bare strings on those rows are an id and a clock', () => {
+    const free = ROWS.flatMap((row) =>
+      membersOf(row)
+        .filter((member) => FREE.test(member.type))
+        .map((member) => `${row}.${member.name}`),
+    );
+    expect(
+      free,
+      'a row that carries page-authored words has a field a renderer could put words in',
+    ).toEqual([
+      /* `MessageEntryCommon` holds `ChosenMessageEntry`'s id and at, and the
+         chosen row prints neither — it resolves its citation and prints the
+         record's. */
+      'HappenedLine.id',
+      'HappenedLine.at',
+      'CorrectionEntry.id',
+      'CorrectionEntry.at',
+    ]);
+  });
+
+  /* CATCHES: the words on those rows losing their type. Stated as the positive
+     half so a member that is neither a free string nor a statement — a new shape
+     nobody thought about — is visible. */
+  it('everything a reader reads as words on those rows is a SystemStatement', () => {
+    expect(membersOf('HappenedLine').find((m) => m.name === 'statement')?.type).toBe(
+      'SystemStatement',
+    );
+    const correction = membersOf('CorrectionEntry');
+    for (const name of ['heading', 'was', 'now']) {
+      expect(correction.find((m) => m.name === name)?.type, `${name} is not system voice`).toBe(
+        'SystemStatement',
+      );
+    }
+    expect(correction.find((m) => m.name === 'fact')?.type).toBe('Maybe<SystemStatement>');
+    expect(membersOf('ChosenMessageEntry').find((m) => m.name === 'statement')?.type).toBe(
+      'SystemStatement',
+    );
+    /* And the receipt's provenance row, which is where round 7 found the
+       sharpest instance: a page-authored note printed inside the same button as
+       a resolved quotation. */
+    expect(membersOf('ProvenanceEntry').find((m) => m.name === 'note')?.type).toBe(
+      'Maybe<SystemStatement>',
+    );
+  });
+});
+
 describe('a statement is checked at the boundary where it is printed', () => {
   /** The review's payload, verbatim: a history line with a first-person sentence. */
   const forged = {

@@ -255,6 +255,87 @@ describe('the round’s own enumerators', () => {
     );
   });
 
+  /* ---------------------------------------------------------------------------
+   * ROUND 7, D8 — AND ITS GENERAL FORM, WHICH IS D3.
+   *
+   * The check above asserts the EDGES are derived and never asks where the NODE
+   * SET came from. It was a hand-written list of 24 paths, inside the test whose
+   * whole purpose is to replace a hand-maintained claim with a count, and it
+   * matched the filesystem on the day it was written — which is what "latent"
+   * means. `test/system-voice.test.tsx` read its directories with `readdirSync`
+   * and `frame-handlers` did not, so the repo already held both answers.
+   *
+   * The general form: **when a check's subject is "every X", the first question
+   * is what enumerates X, and the second is what proves the enumerator is
+   * complete** — and an enumerator has TWO halves, the edges and the nodes.
+   * Deriving one and writing the other down is a derivation exactly as complete
+   * as somebody's memory.
+   * ------------------------------------------------------------------------- */
+  it('the component NODE set is derived from the filesystem, not written down', () => {
+    expect(FRAME_HANDLERS, 'the component list is a literal array of paths again').toMatch(
+      /function componentFiles/,
+    );
+    expect(FRAME_HANDLERS).toMatch(/readdirSync/);
+    expect(FRAME_HANDLERS).toMatch(/const COMPONENT_FILES = componentFiles\(\)/);
+    /* …and the frame's own children are read off the frame rather than listed. */
+    expect(FRAME_HANDLERS, 'COMPOSED is a hand-written list again').toMatch(
+      /jsxTagsIn\(FRAME_SOURCE\)/,
+    );
+    /* The same for the sweep whose denominator is every printed string. */
+    const printed = read('apps/web/test/printed-strings.test.tsx');
+    expect(printed, 'the printed-string sweep hard-codes its file list').toMatch(
+      /function tsxUnder/,
+    );
+    expect(printed).toMatch(/readdirSync/);
+  });
+
+  /* CATCHES: the Slot boundary going back to being invisible. `ReceiptView` is
+     reached through an opaque value, so no JSX derivation can see the edge —
+     deleting `onJump` from the consumer's `<ReceiptView>` killed five visible
+     controls with tsc 0 and every suite green. The rule is to enumerate the edge
+     from the TYPE OF THE HOLE, and this asserts the enumerator still does. */
+  it('a component reached through a Slot is enumerated from the type of the hole', () => {
+    expect(FRAME_HANDLERS, 'Slot-typed holes are no longer enumerated').toMatch(
+      /function slotPropsIn/,
+    );
+    expect(FRAME_HANDLERS, 'nothing looks for what fills a hole').toMatch(/function slotFillsIn/);
+    expect(FRAME_HANDLERS).toMatch(/SLOT_FILLS/);
+    expect(FRAME_HANDLERS).toMatch(
+      /every Slot-typed hole in the library is filled by something this sweep can see/,
+    );
+  });
+
+  /* CATCHES: the browser backstop going back to sweeping one page state in the
+     wrong theme. The receipt's controls were outside the sweep because it ran
+     with `receiptId === null`, and 70 of 71 controls were measured in DARK
+     because the theme toggle is control #1 — while CONVENTIONS' binding
+     measurement is LIGHT. */
+  it('the control sweep covers the receipt, and runs in the binding theme', () => {
+    expect(SMOKE, 'the control sweep runs in one page state again').toMatch(
+      /for \(const state of \['initial', 'receipt-open'\] as const\)/,
+    );
+    expect(SMOKE, 'the sweep no longer pins a theme').toMatch(/goto\('\/\?theme=light'\)/);
+    expect(SMOKE, 'a control that flips the theme leaves the sweep in the wrong one').toMatch(
+      /classList\.remove\('atr-dark'\)/,
+    );
+    expect(SMOKE).toMatch(/the receipt-open sweep did not see the receipt/);
+  });
+
+  /* CATCHES: the truncation route going back to unverified prose. Round 6
+     asserted the PRESENCE of `data-truncates` and never its truth, which is how
+     a clipped quotation shipped declaring a focus-clamp expansion and a claim
+     that was false for a cross-room excerpt. */
+  it('a declared truncation route is verified against the rendered page', () => {
+    expect(SMOKE).toMatch(/names a route that is TRUE/);
+    expect(SMOKE, 'the route kinds are no longer distinguished').toMatch(
+      /if \(kind === 'control'\)/,
+    );
+    expect(SMOKE).toMatch(/if \(kind === 'element'\)/);
+    expect(SMOKE).toMatch(/if \(kind === 'name'\)/);
+    expect(TRUNCATION, 'the route grammar is prose again').toMatch(/const ROUTE =/);
+    expect(TRUNCATION).toMatch(/no clamp is widened by a hover or a focus/);
+  });
+
   /* CATCHES: the ledger crediting an entry whose mutation broke the file's
      syntax, so the catcher errored out before running a single assertion — the
      baseline defect (D1) in the other direction. */

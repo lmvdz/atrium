@@ -22,11 +22,10 @@
 
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution, useCitedRecord } from '../model/ledger';
-import { quotationRef } from '../model/quotation';
+import { quotationRef, systemText } from '../model/quotation';
 import type { CorrectionEntry, ProvenanceEntry, ReceiptRecord } from '../model/records';
 import { stateForHappened } from '../model/records';
 import { slot } from '../model/slot';
-import { text } from '../model/text';
 import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
 import { Quoted, SystemVoice } from '../primitives/Voice';
@@ -56,11 +55,14 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
             <ClaimText content={slot(receipt.title)} state={receipt.state} />
           </span>
         </div>
+        {/* THE STATUS PARTS ARE CALLER STRINGS THE RECEIPT PRINTS, and nothing
+            was checking them. Not one of the four the round-7 review named by
+            hand — the fifth, found by counting. */}
         <div className={styles.rcState}>
           {receipt.status.map((part, index) => (
             <span key={part}>
               {index === 0 ? null : <span aria-hidden="true">· </span>}
-              {part}
+              {systemText(part, 'ReceiptView status')}
             </span>
           ))}
         </div>
@@ -87,7 +89,9 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
             />
             <span className={styles.happenedText}>
               <SystemVoice className={styles.happenedVoice} inline statement={line.statement} />
-              <span className={styles.happenedAt}>{line.at}</span>
+              <span className={styles.happenedAt}>
+                {systemText(line.at, 'ReceiptView happened at')}
+              </span>
             </span>
           </div>
         ))}
@@ -118,7 +122,9 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
       </Section>
 
       <div className={styles.rcFoot}>
-        <span className={styles.rcFootNote}>{receipt.reopenNote}</span>
+        <span className={styles.rcFootNote}>
+          {systemText(receipt.reopenNote, 'ReceiptView reopenNote')}
+        </span>
         {receipt.reopenable ? (
           <button
             className="atr-btn atr-btn-sm"
@@ -158,7 +164,6 @@ function ProvenanceRow({
   readonly entry: ProvenanceEntry;
   readonly onJump?: (messageId: string) => void;
 }) {
-  const note = text(entry.note);
   /* WHO, WHEN, WHAT, WHICH ROOM AND WHAT THE CLICK ACTS ON — ALL ONE SOURCE.
      Round 6 found this row taking three of those from three places: it printed
      `entry.excerpt`, labelled itself from `entry.jump.room` and dispatched
@@ -186,19 +191,34 @@ function ProvenanceRow({
             : `jump to source in #${excerpt.room} →`}
         </span>
       </span>
-      {/* QUOTED WORDS, TRUNCATED — the case CONVENTIONS did not govern until
-          round 6. The clamp opens to four lines on hover AND on `:focus-visible`,
-          so the route is reachable from the keyboard rather than only from a
-          pointer, and the cited message is on this page's register by
-          construction. */}
-      <span
-        className={styles.provExcerpt}
-        data-quoted={quotationRef(excerpt)}
-        data-truncates="focusing this row expands it; the cited record is on this page"
-      >
+      {/* THE QUOTATION IS NOT TRUNCATED HERE, AND THAT IS THE FIX.
+          Round 6 clamped it to two lines and declared a route:
+          `data-truncates="focusing this row expands it; the cited record is on
+          this page"`. Both halves were wrong. A `:focus-visible` clamp expansion
+          is none of the three routes CONVENTIONS permits (a control one click
+          away, a name the platform carries, another element on the same screen
+          stating it in full) — and for `msg:m-legal@identity-service` the second
+          clause was simply FALSE: that message is not in this room's feed, and
+          the row's own adjacent label says "jump to source in #identity-service
+          →". Clicking navigates; it never expanded anything.
+          A receipt is the artifact whose whole job is being the trustworthy
+          record, and a quotation is the one string on the page where a
+          hover-only remainder is least defensible (CONVENTIONS). So the excerpt
+          renders in full and the pane scrolls, which is what a record does. */}
+      <span className={styles.provExcerpt} data-quoted={quotationRef(excerpt)}>
         “{excerpt.text}”
       </span>
-      {note === null ? null : <span className={styles.provNote}>{note}</span>}
+      {/* THE PAGE'S NOTE, IN THE PAGE'S VOICE — and structurally so.
+          Round 7: this was `Maybe<string>` printed raw, inside this same
+          `<button>`, on the line immediately after the quoted words and under
+          this row's one `data-attribution`. It is a `SystemStatement` now and it
+          renders through `<SystemVoice>`, which paints the mono-muted treatment,
+          emits `data-voice="system"`, and emits no `<q>`, no `cite`, no
+          `data-quoted` and no `data-attribution` — so it cannot carry the
+          provenance token every check in this repo reads as proof. */}
+      {entry.note === null ? null : (
+        <SystemVoice className={styles.provNote} inline statement={entry.note} />
+      )}
     </button>
   );
 }
@@ -215,9 +235,17 @@ function CorrectionRow({
       {/* No `who`, for the same reason the history line has none: a plain name
           rendered beside page-authored words is an attribution column, whatever
           the type of the words is. The actor of the correction is inside `fact`,
-          which is a SystemStatement. */}
+          which is a SystemStatement.
+          AND NEITHER IS THE HEADING A FREE STRING ANY MORE. Round 6 deleted
+          `who` from this type and left `heading: string` rendering in the slot
+          `who` had just been deleted from, one line above the correction's
+          words: `heading: 'priya wrote: we should just drop it'` printed there.
+          It is a `SystemStatement` now, painted by the one component that paints
+          system voice. */}
       <div className={styles.corrHead}>
-        {entry.heading} · {entry.at}
+        <SystemVoice className={styles.corrHeading} inline statement={entry.heading} />
+        <span aria-hidden="true"> · </span>
+        {systemText(entry.at, 'ReceiptView correction at')}
       </div>
       <div className={styles.corrBody}>
         <SystemVoice className={styles.corrWas} inline statement={entry.was} />
@@ -267,7 +295,7 @@ function CorrectionLink({
         onClick={onJump === undefined ? undefined : () => onJump(record.id)}
         type="button"
       >
-        {link.label}
+        {systemText(link.label, 'ReceiptView correction link')}
         {room === null ? '' : ` (in #${room})`}
       </button>
     </>

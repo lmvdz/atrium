@@ -434,11 +434,14 @@
   color: var(--blu2);
 }
 
+/* The trace's sentence WRAPS. Round 7: it clipped and declared "the owed item
+   this trace came from, in Needs you" as its route — a place that states a
+   different sentence, on a surface that may not be showing that item at all. A
+   route that is not true is worse than no route, because every check reads it as
+   satisfied. */
 .traceText {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .traceText b {

@@ -20,7 +20,7 @@
  * that cannot be compared against the prototype.
  * ------------------------------------------------------------------------- */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type {
   Arming,
   AttentionClass,
@@ -31,9 +31,10 @@ import type {
   SurfaceId,
   TimelineEntry,
 } from '../src/components';
-import { messageEntry, ReceiptView, slot } from '../src/components';
+import { messageEntry } from '../src/components';
 import * as f from './gallery/fixtures';
 import { RoomFrame } from './gallery/RoomFrame';
+import { RECORDS, railRooms, receiptForIn, roomView, trailerForRoom } from './gallery/rooms';
 
 const TALK = {
   kind: 'event',
@@ -56,25 +57,48 @@ export function RoomSession() {
   const [draft, setDraft] = useState('');
   const [openId, setOpenId] = useState<string | undefined>('X1');
   const [actedOn, setActedOn] = useState<readonly string[]>([]);
-  const [sent, setSent] = useState<readonly MessageEntry[]>([]);
   /* The last thing the page did, in words, shown under the composer. Every
      handler writes here, so a control that fires nothing is visible as a
      control that says nothing — which is the failure this page exists to make
      impossible to ship again. */
-  const [note, setNote] = useState('nothing is inferred from a message unless you bind it');
+  /* The banner above the composer already says "nothing is inferred" whenever a
+     binding is live; round 7 measured that clause three times on one screen.
+     This line says what the page IS, once. */
+  const [note, setNote] = useState(
+    'every control on this page is wired — click one and this line reports what it did',
+  );
   /* THE STATE BEHIND THE THREE HANDLERS THE FRAME NEVER FORWARDED. Round 6's
      critic clicked all four rail room chips, both objective triangles and all
      ten object rows and measured no change to `documentElement.className`, to
      `body.innerHTML.length` or to `innerText`. The props existed on `Rail`,
      `StateLens` and `ObjectRow` the whole time; what did not exist was a
      consumer holding the state they change. */
-  const [room, setRoom] = useState(f.ROOM.name);
-  const [objectives, setObjectives] = useState<readonly ObjectiveRecord[]>(f.OBJECTIVES);
+  /* WHICH ROOM YOU ARE IN IS ONE VALUE. Round 7, D6: this held `room`, the NAME,
+     and the chip set it — so the head changed and the feed, the pin, the lens
+     and the composer binding did not, while the rail went on marking a different
+     room current. The two sources of truth this product is about, disagreeing on
+     screen. It holds the room's ID now and everything on the page derives from
+     the view that id names. */
+  const [roomId, setRoomId] = useState('r1');
+  const view = useMemo(() => roomView(roomId), [roomId]);
+  /* A collapsed objective is a per-room fact, so it is stored per room. Leaving
+     it global would carry room one's disclosure state into room two, which is
+     the same "one fact, two rooms" defect one level down. */
+  const [openObjectives, setOpenObjectives] = useState<Readonly<Record<string, boolean>>>({});
   const [receiptId, setReceiptId] = useState<string | null>(null);
 
+  const objectives: readonly ObjectiveRecord[] = useMemo(
+    () =>
+      view.objectives.map((objective) => {
+        const override = openObjectives[`${roomId}:${objective.id}`];
+        return override === undefined ? objective : { ...objective, open: override };
+      }),
+    [view, roomId, openObjectives],
+  );
+
   const attention = useMemo(
-    () => f.ATTENTION.filter((item) => !actedOn.includes(item.id)),
-    [actedOn],
+    () => view.attention.filter((item) => !actedOn.includes(item.id)),
+    [view, actedOn],
   );
 
   /* Every message this session has produced, ON THE SAME REGISTER as the
@@ -82,58 +106,67 @@ export function RoomSession() {
      row does not render, so the consumer holding the draft is also the consumer
      holding the record — which is the shape #25 and #27 will have too. Round 5:
      the actor beside a message is looked up here, never carried on the row. */
-  const [records, setRecords] = useState<readonly MessageRecord[]>(f.RECORDS);
+  const [records, setRecords] = useState<readonly MessageRecord[]>(RECORDS);
+
+  /* Sent rows belong to the room they were sent in. The RECORDS do not move —
+     there is one register for the whole page, because `<AttributionLedger>`
+     refuses to nest and two registers in one tree is the defect, not the
+     feature. */
+  const [sentIn, setSentIn] = useState<Readonly<Record<string, readonly MessageEntry[]>>>({});
 
   const entries: readonly TimelineEntry[] = useMemo(
-    () => [...f.timeline({ seen, filter, routineOpen }), ...sent],
-    [seen, filter, routineOpen, sent],
+    () => [...view.timeline({ seen, filter, routineOpen }), ...(sentIn[roomId] ?? [])],
+    [view, roomId, seen, filter, routineOpen, sentIn],
   );
 
-  const send = useCallback(
-    (text: string) => {
-      const at = clock();
-      /* A sent message is a MESSAGE RECORD first and a row second. It goes
-         through `messageEntry` like every other row, so the words on screen are
-         the words on the record — the same derivation that stops a caller
-         handing a body that disagrees with the message it is attributed to. */
-      const record: MessageRecord = {
-        id: `local-${sent.length + 1}`,
-        at,
-        actor: f.VIEWER.name,
-        text: text.trim(),
-        origin: 'typed',
-      };
-      setRecords((current) => [...current, record]);
-      setSent((current) => [
-        ...current,
-        messageEntry(record, { state: TALK, viewer: f.VIEWER.name }),
-      ]);
-      setDraft('');
-      setBinding(f.FREE);
-      setNote(`sent at ${at} · typed, quotable, attributed to ${f.VIEWER.name}`);
-    },
-    [sent.length],
-  );
+  /* THE ID IS MINTED FROM A COUNTER THIS HANDLER OWNS, NOT FROM RENDERED STATE.
+     ROUND 7, D5: it was `local-${sent.length + 1}`, read out of a closure over
+     `sent.length`. Two sends inside one task — `btn.click(); btn.click()`, which
+     is what a fast double-press and every automated driver produce — see the
+     same `sent.length`, mint `local-1` twice, and put two records under one id
+     on the register. A ref is incremented when the send HAPPENS rather than when
+     the page last rendered, so the id is unique per act. StrictMode's double
+     render does not re-run an event handler, so it does not skip a number. */
+  const minted = useRef(0);
+  /* WHICH ROOM A SEND LANDS IN, read at the moment of the send rather than out
+     of a closure — the same reason the id counter is a ref. A `useCallback` that
+     closed over `roomId` would file a message into the room the page last
+     rendered, which is the D5 shape in a different field. */
+  const here = useRef('r1');
 
-  const receipt =
-    receiptId === null
-      ? undefined
-      : slot(
-          <ReceiptView
-            key={receiptId}
-            onBack={() => {
-              setReceiptId(null);
-              setNote('back to current state · the receipt is a view, not a mode');
-            }}
-            onJump={(messageId: string) => {
-              setNote(`jump to ${messageId} · the id came off the record, not off the row`);
-            }}
-            onReopen={(id: string) => {
-              setNote(`reopened ${id} · corrections are events, not erasures`);
-            }}
-            receipt={f.receiptFor(receiptId)}
-          />,
-        );
+  const send = useCallback((text: string) => {
+    const at = clock();
+    minted.current += 1;
+    /* A sent message is a MESSAGE RECORD first and a row second. It goes
+       through `messageEntry` like every other row, so the words on screen are
+       the words on the record — the same derivation that stops a caller
+       handing a body that disagrees with the message it is attributed to. */
+    const record: MessageRecord = {
+      id: `local-${minted.current}`,
+      at,
+      actor: f.VIEWER.name,
+      text: text.trim(),
+      origin: 'typed',
+    };
+    setRecords((current) => [...current, record]);
+    const row = messageEntry(record, { state: TALK, viewer: f.VIEWER.name });
+    setSentIn((current) => ({
+      ...current,
+      [here.current]: [...(current[here.current] ?? []), row],
+    }));
+    setDraft('');
+    setBinding(f.FREE);
+    setNote(`sent at ${at} · typed, quotable, attributed to ${f.VIEWER.name}`);
+  }, []);
+
+  /* THE RECEIPT IS A RECORD THIS PAGE HANDS DOWN, NOT CONTENT IT BUILDS.
+     Round 7, D3: this used to be `slot(<ReceiptView … onBack onJump onReopen/>)`,
+     and a `Slot` is opaque — no enumeration in the repo could see that edge, so
+     the receipt's three seams were required by nothing and deleting `onJump`
+     here killed five visible controls with every gate green. `RoomFrame` builds
+     the receipt now and its handlers go through `RoomFrameHandlers` like every
+     other seam in the library. */
+  const receipt = receiptId === null ? undefined : receiptForIn(view, receiptId);
 
   return (
     <RoomFrame
@@ -146,20 +179,25 @@ export function RoomSession() {
       focused={focused}
       humans={f.HUMANS}
       handlers={{
-        onSelectRoom: (roomId: string) => {
-          const chosen = f.ROOMS.find((candidate) => candidate.id === roomId);
-          setRoom(chosen?.name ?? f.ROOM.name);
+        onSelectRoom: (next: string) => {
+          const chosen = roomView(next);
+          setRoomId(next);
+          here.current = next;
+          /* Everything scoped to the room you were in goes with it: an open
+             receipt belongs to an object in the room you left, a binding names
+             an item in it, and a filter is a question about its feed. */
+          setReceiptId(null);
+          setBinding(chosen.binding);
+          setFilter(null);
+          setOpenId(chosen.attention[0]?.id);
           setNote(
-            `switched to #${chosen?.name ?? roomId} · #25 owns the feed behind the switch; the frame follows it now`,
+            `switched to #${chosen.room.name} · ${chosen.attention.length} owed to you here, ${chosen.objects.length} objects in the lens`,
           );
         },
         onToggleObjective: (objectiveId: string) => {
-          setObjectives((current) =>
-            current.map((objective) =>
-              objective.id === objectiveId ? { ...objective, open: !objective.open } : objective,
-            ),
-          );
+          const key = `${roomId}:${objectiveId}`;
           const wasOpen = objectives.find((o) => o.id === objectiveId)?.open === true;
+          setOpenObjectives((current) => ({ ...current, [key]: !wasOpen }));
           setNote(
             `${wasOpen ? 'collapsed' : 'expanded'} ${objectiveId} · a collapsed objective hides objects, so it has to be openable`,
           );
@@ -169,7 +207,14 @@ export function RoomSession() {
           setNote(`opened the receipt for ${objectId} · what happened, and what it rests on`);
         },
         onJumpToMessage: (messageId: string) => {
-          setNote(`revealed ${messageId} · the trace resolved it against this room's register`);
+          setNote(`revealed ${messageId} · the id came off the record, not off the row`);
+        },
+        onCloseReceipt: () => {
+          setReceiptId(null);
+          setNote('back to current state · the receipt is a view, not a mode');
+        },
+        onReopen: (id: string) => {
+          setNote(`reopened ${id} · corrections are events, not erasures`);
         },
         onShowRest: () => {
           setFocused('current-state');
@@ -246,12 +291,12 @@ export function RoomSession() {
       lastCheck="12:29"
       messages={records}
       objectives={objectives}
-      objects={f.OBJECTS}
+      objects={view.objects}
       openAttentionId={openId}
       receipt={receipt}
-      room={{ ...f.ROOM, name: room }}
-      rooms={f.ROOMS}
-      trailer={f.TRAILER}
+      room={view.room}
+      rooms={railRooms(roomId)}
+      trailer={trailerForRoom(view)}
       updatedAt="13:41"
       viewer={f.VIEWER}
       viewerNote={`here · ${attention.length} owed to you`}

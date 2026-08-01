@@ -34,12 +34,7 @@ export function CrossRoomJump({ jump, onReveal, onBack, onDismiss }: CrossRoomJu
       <span aria-hidden="true">↪</span>
       {/* The room names are in the sentence and in the back link; repeating
           them a third time is what pushed the reason itself off the end. */}
-      <span
-        className={styles.traceText}
-        data-truncates="the owed item this trace came from, in Needs you"
-      >
-        {statementText(jump.why, 'CrossRoomJump')}
-      </span>
+      <span className={styles.traceText}>{statementText(jump.why, 'CrossRoomJump')}</span>
       <button
         className={styles.traceBack}
         data-jumps-to={target.id}

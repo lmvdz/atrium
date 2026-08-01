@@ -20,6 +20,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
+import { offeredText, systemText } from '../model/quotation';
 import { rationaleText } from '../model/rationale';
 import type { AttentionItem } from '../model/records';
 import { list } from '../model/text';
@@ -40,7 +41,10 @@ export type AttentionCompactProps = {
 
 export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: AttentionCompactProps) {
   const primary = item.actions[0];
-  const facts = list(item.facts.slice(0, 2));
+  const facts = list(
+    item.facts.slice(0, 2).map((fact) => systemText(fact, 'AttentionCompact fact')),
+  );
+  const title = systemText(item.title, 'AttentionCompact title');
   /* ONE CHECKED READ, USED BY ALL THREE PLACES THIS ROW PUTS THE REASON ON
      SCREEN — the visible span and two `title=` attributes. Round 5's
      `statementText` discipline, applied to the second page-authored string type
@@ -58,12 +62,12 @@ export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: Attenti
       <span className={styles.acompText}>
         <button
           className={styles.acompTitle}
-          data-truncates="opens the full card"
+          data-truncates="control"
           onClick={onOpen === undefined ? undefined : () => onOpen(item.id)}
-          title={item.title}
+          title={title}
           type="button"
         >
-          {item.title}
+          {title}
         </button>
         {/* BRIEF concept 8, on screen rather than on hover.
 
@@ -91,16 +95,26 @@ export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: Attenti
               a flex container becomes an anonymous flex item, and `text-overflow`
               does not apply to one — the rationale would be cut mid-word with no
               ellipsis to say it had been. */}
-          <span className={styles.acompWhyText} data-truncates="opens the full card">
+          <span className={styles.acompWhyText} data-truncates="control">
             {why}
           </span>
         </button>
       </span>
       <span className={styles.acompMeta}>
         {facts === null ? null : (
-          <span className={styles.acompFacts} data-truncates="opens the full card">
+          /* THE FACTS ARE A CONTROL TOO, for the same reason the title and the
+             WHY YOU line are: this row shows two of them and clips whatever is
+             left, and the route out of a clip has to be something a reader can
+             press. Round 7 — it was a `<span>` declaring "opens the full card"
+             while being nothing a click could reach. */
+          <button
+            className={styles.acompFacts}
+            data-truncates="control"
+            onClick={onOpen === undefined ? undefined : () => onOpen(item.id)}
+            type="button"
+          >
             {facts}
-          </span>
+          </button>
         )}
         {primary === undefined ? null : item.state.irreversible ? (
           <HoldToAct
@@ -119,7 +133,7 @@ export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: Attenti
             title={why}
             type="button"
           >
-            {primary.label}
+            {offeredText(primary.label, 'AttentionCompact label')}
           </button>
         )}
       </span>

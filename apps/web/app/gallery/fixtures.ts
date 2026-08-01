@@ -293,7 +293,11 @@ export const OBJECTS: readonly StateObject[] = [
     kind: 'question',
     state: { kind: 'question', verification: 'open', owedToViewer: true, irreversible: false },
     text: 'Does legal approve 90-day retention of users_legacy?',
-    facts: ['asked by priya 09:11', 'open 3h', 'nobody assigned'],
+    /* "asked by priya" is a SPEECH REPORT, and round 7 routed every printed
+       fact through the system-voice door — which refused it, correctly: a fact
+       line reports an ACT ("raised"), and "X said/asked/wrote" is the framing
+       the ban exists for. The fixture says the act. */
+    facts: ['raised by priya 09:11', 'open 3h', 'nobody assigned'],
     objectives: ['o1', 'o2'],
   },
   {
@@ -441,7 +445,7 @@ export const ATTENTION: readonly AttentionItem[] = [
     rationale: rationale(
       'you opened the question and legal answers to you — nobody else in this room can carry it, and it has been open 3h',
     ),
-    facts: ['asked by priya 09:11', 'open 3h'],
+    facts: ['raised by priya 09:11', 'open 3h'],
     source: cite('m-legal'),
     actions: [
       { id: 'answer', label: 'Answer it', emphasis: 'primary', statement: null },
@@ -628,6 +632,11 @@ const AFTER: readonly TimelineEntry[] = [
   }),
 ];
 
+/** A feed row for a message in THIS register, for a room module to reuse. */
+export function messageIn(id: string, input: Parameters<typeof message>[1]): MessageEntry {
+  return message(id, input);
+}
+
 export function timeline(options: {
   readonly seen: boolean;
   readonly filter: SinceYouLeftEntry['activeFilter'];
@@ -692,24 +701,31 @@ const PROVENANCE: readonly ProvenanceEntry[] = [
        the row reads it from there — this note used to say #identity-service
        while `m10`'s record says it is in this room, which is what "three facts
        about one row from three sources" buys you. */
-    note: 'the proposal, as she wrote it',
+    /* THE NOTE IS A SYSTEM STATEMENT NOW, not a string. Round 7: this printed
+       inside the same `<button>` as the quotation, one line under the quoted
+       words. "as she wrote it" is also a speech report, which the system-voice
+       bans refuse — the copy says what the row is FOR without reporting an
+       utterance. */
+    note: systemStatement('the proposal this decision answers'),
   },
   {
     id: 'p2',
     excerpt: quote('m21'),
-    note: 'typed into the bound composer — recorded as the answer, not interpreted from it',
+    note: systemStatement(
+      'typed into the bound composer — recorded as the answer, not interpreted from it',
+    ),
   },
   {
     id: 'p3',
     excerpt: quote('m-legal'),
-    note: 'the open question this decision waits on',
+    note: systemStatement('the open question this decision waits on'),
   },
 ];
 
 const CORRECTIONS: readonly CorrectionEntry[] = [
   {
     id: 'c1',
-    heading: 'ANSWERED · PROPOSAL → DECISION',
+    heading: systemStatement('ANSWERED · PROPOSAL → DECISION'),
     at: '13:09',
     was: systemStatement('Proposal: cut over Friday 1 Aug and drop the legacy tokens with it'),
     now: systemStatement(
@@ -724,7 +740,7 @@ const CORRECTIONS: readonly CorrectionEntry[] = [
   },
   {
     id: 'c2',
-    heading: 'REOPENED · PRIOR ANSWER KEPT',
+    heading: systemStatement('REOPENED · PRIOR ANSWER KEPT'),
     at: '13:14',
     was: systemStatement('Answer of 13:09'),
     now: systemStatement('pending again — the previous answer stays on the record'),
@@ -815,7 +831,15 @@ export const RECEIPT: ReceiptRecord = {
  */
 export function receiptFor(objectId: string): ReceiptRecord {
   if (objectId === RECEIPT.id) return RECEIPT;
-  const object = OBJECTS.find((candidate) => candidate.id === objectId);
+  return receiptFromObject(OBJECTS, objectId);
+}
+
+/** The same derivation, over any room's objects. */
+export function receiptFromObject(
+  objects: readonly StateObject[],
+  objectId: string,
+): ReceiptRecord {
+  const object = objects.find((candidate) => candidate.id === objectId);
   if (object === undefined) throw new Error(`fixture: no state object ${objectId}`);
   const kind: HappenedKind =
     object.state.verification === 'failed'

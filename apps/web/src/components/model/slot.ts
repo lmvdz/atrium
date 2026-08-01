@@ -30,6 +30,7 @@
  * ------------------------------------------------------------------------- */
 
 import { isValidElement, type ReactNode } from 'react';
+import { systemText } from './quotation';
 
 declare const slotBrand: unique symbol;
 
@@ -88,7 +89,21 @@ function walk(node: ReactNode, budget: { left: number }): void {
   budget.left -= 1;
 
   if (node === null || node === undefined || typeof node === 'boolean') return;
-  if (typeof node === 'string' || typeof node === 'number') return;
+  if (typeof node === 'number') return;
+  /* A RAW STRING IN A SLOT IS A STRING THE PAGE PRINTS, AND THIS IS ITS ONLY
+     DOOR. Round 7: the walk returned here, so `slot(object.text)` and
+     `slot(receipt.title)` handed a caller's sentence through a hole whose whole
+     purpose is to stop caller content, and `ClaimText` printed `content.node`
+     with nothing between the two. The tag and prop denylists were looking for
+     markup; a bare string is not markup and was never looked at.
+     Held to the SYSTEM's voice, not the offered-copy rule: a slot is a
+     composition hole in the page's own chrome, never the label of a control. A
+     person's words reach a slot as `<Quoted>` or `<MessageBody>`, which are
+     elements, and the walk stops at a component boundary. */
+  if (typeof node === 'string') {
+    systemText(node, 'slot');
+    return;
+  }
 
   /* ANY ITERABLE, NOT ONLY AN ARRAY. Found by the blind cross-lineage review of
      round 6's own fix: React renders any `Iterable<ReactNode>`, and this walk

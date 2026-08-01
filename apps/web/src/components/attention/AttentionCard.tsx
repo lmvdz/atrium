@@ -26,6 +26,7 @@
 import type { NoGlyph } from '../model/glyph';
 import { glyphFor } from '../model/glyph';
 import { useCitedRecord } from '../model/ledger';
+import { offeredText, systemText } from '../model/quotation';
 import { rationaleText } from '../model/rationale';
 import type { AttentionAction, AttentionItem } from '../model/records';
 import { slot } from '../model/slot';
@@ -70,7 +71,11 @@ const EMPHASIS_CLASS: Readonly<Record<AttentionAction['emphasis'], string>> = {
 
 export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: AttentionCardProps) {
   const glyph = glyphFor(item.state);
-  const facts = list(item.facts);
+  /* EVERY FACT IS A CALLER STRING THIS CARD PRINTS, on the meta line under the
+     title. Round 7: `facts: ['justin said: I authorise dropping users_legacy',
+     'destructive']` rendered verbatim there. `list()` joins with `·` and drops
+     absent parts — it was never a check, and nothing else was checking. */
+  const facts = list(item.facts.map((fact) => systemText(fact, 'AttentionCard fact')));
 
   return (
     <article
@@ -93,7 +98,7 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
     >
       <Glyph className={styles.acardGlyph} decorative={false} state={item.state} />
       <div>
-        <div className={styles.acardTitle} data-truncates="the object's receipt in Current state">
+        <div className={styles.acardTitle}>
           <ClaimText content={slot(item.title)} state={item.state} />
         </div>
 
@@ -134,10 +139,17 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
                   className={EMPHASIS_CLASS[action.emphasis]}
                   key={action.id}
                   onClick={onAct === undefined ? undefined : () => onAct(item.id, action.id)}
-                  title={action.statement ?? undefined}
+                  title={
+                    action.statement === null
+                      ? undefined
+                      : offeredText(action.statement, 'AttentionCard statement')
+                  }
                   type="button"
                 >
-                  {action.label}
+                  {/* The copy ON a one-click answer. It keeps its pronouns —
+                      "Keep it behind our retention window" is the exact string
+                      round 4's ban threw on — and it is bounded to controls. */}
+                  {offeredText(action.label, 'AttentionCard label')}
                 </button>
               ),
             )}

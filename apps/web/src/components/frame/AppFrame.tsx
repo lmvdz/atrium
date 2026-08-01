@@ -13,6 +13,7 @@
  * around. See model/slot.ts for what the slot stops and what it does not.
  * ------------------------------------------------------------------------- */
 
+import { systemText } from '../model/quotation';
 import type { Slot } from '../model/slot';
 import styles from './frame.module.css';
 
@@ -53,8 +54,8 @@ export interface WorkspaceTileProps {
 
 export function WorkspaceTile({ code, title }: WorkspaceTileProps) {
   return (
-    <div className={styles.wsTile} title={title}>
-      {code}
+    <div className={styles.wsTile} title={systemText(title, 'WorkspaceTile title')}>
+      {systemText(code, 'WorkspaceTile code')}
     </div>
   );
 }
@@ -70,8 +71,8 @@ export interface WorkspaceYouProps {
 
 export function WorkspaceYou({ initials, title }: WorkspaceYouProps) {
   return (
-    <div className={styles.wsYou} title={title}>
-      {initials}
+    <div className={styles.wsYou} title={systemText(title, 'WorkspaceYou title')}>
+      {systemText(initials, 'WorkspaceYou')}
     </div>
   );
 }

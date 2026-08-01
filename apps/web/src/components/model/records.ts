@@ -518,6 +518,7 @@ export function stateForHappened(kind: HappenedKind): EpistemicState {
 export interface HappenedLine {
   readonly id: string;
   readonly kind: HappenedKind;
+  /** the event's clock — a time, never words; painted through a door */
   readonly at: string;
   readonly statement: SystemStatement;
 }
@@ -544,7 +545,26 @@ export interface ProvenanceEntry {
    * names.
    */
   readonly excerpt: Quotation;
-  readonly note: Maybe<string>;
+  /**
+   * The page's note about why this excerpt is here — and it is a
+   * `SystemStatement`, not a string.
+   *
+   * ROUND 7'S SHARPEST FINDING. It was `Maybe<string>`, printed by
+   * `ReceiptView`'s `ProvenanceRow` INSIDE THE SAME `<button>` AS THE RESOLVED
+   * QUOTATION, on the line immediately after the quoted words, under one
+   * `data-attribution` and one `data-quoted`. Setting it to
+   * `'priya said: I approve dropping users_legacy today.'` rendered that
+   * sentence in priya's name, in the receipt, with nothing marking it as the
+   * page's — while the record it cites holds "Cut over Friday 1 Aug and drop
+   * the legacy tokens with it."
+   *
+   * `AuthoredMessageEntry.note` has been a `SystemStatement` since round 4 for
+   * exactly this reason. The two fields have the same name and the same job and
+   * only one of them had the type — which is CONVENTIONS' "a guarantee applies
+   * to the value, not to the type it happened to be written for", one field
+   * over.
+   */
+  readonly note: Maybe<SystemStatement>;
 }
 
 /**
@@ -562,7 +582,25 @@ export interface ProvenanceEntry {
  */
 export interface CorrectionEntry {
   readonly id: string;
-  readonly heading: string;
+  /**
+   * The correction's own label — and it is a `SystemStatement`, not a string.
+   *
+   * ROUND 7, D2. CONVENTIONS claimed "no row that carries page-authored words has
+   * a field a renderer could put a name in… it is checkable by reading the
+   * types", and reading the types falsified it: `heading: string` was
+   * unconstrained, caller-supplied, and rendered by `ReceiptView` as
+   * `{heading} · {at}` DIRECTLY ABOVE the correction's words — the exact layout
+   * slot `HappenedLine.who` and `CorrectionEntry.who` occupied until round 6
+   * deleted them. `heading: 'priya wrote: we should just drop it'` printed
+   * there, in the receipt.
+   *
+   * The mutation entry that was supposed to prove the claim added a NEW REQUIRED
+   * property and required `tsc` to fail — which proves that adding a required
+   * property breaks the fixtures, not that no such field exists. The claim is
+   * checked from the types now, by `test/record-integrity.test.tsx`.
+   */
+  readonly heading: SystemStatement;
+  /** the correction EVENT's clock — a time, never words; painted through a door */
   readonly at: string;
   readonly was: SystemStatement;
   readonly now: SystemStatement;
@@ -904,6 +942,17 @@ export interface TrailerSummary {
    * short identifier gets a render-boundary check.
    */
   readonly lead: SystemStatement;
+  /**
+   * WHICH COUNT THE LEAD IS ABOUT, so the tail does not say it again.
+   *
+   * Round 7, D7: the trailer read "1 failure outside your list — 1/2 objectives
+   * clear of you · 1 commitment, 1 overdue · 1 failure · last check 12:29". The
+   * lead is DERIVED from whichever count is worst, and the tail printed all of
+   * them unconditionally, so the worst one appeared twice in one sentence. A
+   * derived lead and a fixed tail are two descriptions of the same numbers; this
+   * is what makes them one.
+   */
+  readonly leadsWith: 'failures' | 'overdue' | 'unverified' | 'open' | 'owed' | 'clear';
   readonly objectivesClear: number;
   readonly objectivesTotal: number;
   readonly commitments: number;
@@ -938,9 +987,11 @@ export function trailerFor(input: {
     verification: EpistemicState['verification'],
     kind: ObjectKind,
     lead: string,
+    leadsWith: TrailerSummary['leadsWith'],
   ): TrailerSummary => ({
     state: { kind, verification, owedToViewer: false, irreversible: false },
     lead: systemStatement(lead),
+    leadsWith,
     objectivesClear,
     objectivesTotal: input.objectives.length,
     commitments,
@@ -953,6 +1004,7 @@ export function trailerFor(input: {
       'failed',
       'event',
       `${failures} failure${failures === 1 ? '' : 's'} outside your list`,
+      'failures',
     );
   }
   if (input.overdue > 0) {
@@ -960,20 +1012,27 @@ export function trailerFor(input: {
       'proposed',
       'commitment',
       `${input.overdue} thing${input.overdue === 1 ? ' is' : 's are'} late, none failed`,
+      'overdue',
     );
   }
   if (unverified > 0) {
-    return summary('self_reported', 'claim', `${unverified} of ${rest.length} still unverified`);
+    return summary(
+      'self_reported',
+      'claim',
+      `${unverified} of ${rest.length} still unverified`,
+      'unverified',
+    );
   }
   if (openQuestions > 0) {
     return summary(
       'open',
       'question',
       `${openQuestions} question${openQuestions === 1 ? '' : 's'} still open`,
+      'open',
     );
   }
   if (owed.length > 0) {
-    return summary('proposed', 'decision', 'the list above is all of it');
+    return summary('proposed', 'decision', 'the list above is all of it', 'owed');
   }
-  return summary('verified', 'claim', 'everything else is verified');
+  return summary('verified', 'claim', 'everything else is verified', 'clear');
 }

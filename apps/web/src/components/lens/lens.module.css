@@ -44,30 +44,11 @@
   background: var(--grn2);
 }
 
-/* sub-counts that do not sum, reconciled in prose right under the counts */
-.lensSums {
-  margin-top: 3px;
-  padding-left: 11px;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
-  font-size: 10px;
-  color: var(--tx2);
-  line-height: 1.4;
-}
-
 .lensBody {
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
   padding-bottom: 24px;
-}
-
-.lensNote {
-  padding: 7px 14px 8px;
-  border-bottom: 1px solid var(--line);
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
-  font-size: 10px;
-  color: var(--tx2);
-  line-height: 1.45;
 }
 
 /* --- objective group ----------------------------------------------------- */
@@ -370,45 +351,37 @@
   opacity: 1;
 }
 
+/* THE QUOTATION IS NOT CLAMPED. Round 6 clamped it to one line and opened it to
+   four on hover and on `:focus-visible`, with
+   `data-truncates="focusing this row expands it; the cited record is on this
+   page"`. A focus-clamp expansion is none of the three routes CONVENTIONS
+   permits, and the second half of that sentence was FALSE for the excerpt of
+   `m-legal@identity-service` — that record is not in this room's feed, and the
+   row's own label says so. A receipt is the trustworthy record and a quotation is
+   the one string where a hover-only remainder is least defensible; the pane
+   scrolls instead. */
 .provExcerpt {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
-  line-clamp: 1;
+  display: block;
   max-width: 100%;
-  overflow: hidden;
   margin-top: 2px;
   font-size: 11px;
   color: var(--tx1);
   line-height: 1.4;
   font-style: normal;
+  overflow-wrap: anywhere;
 }
 
-.prov:hover .provExcerpt,
-.prov:focus-visible .provExcerpt {
-  -webkit-line-clamp: 4;
-  line-clamp: 4;
-}
-
+/* AND THE PAGE'S NOTE IS NOT A HOVER AFFORDANCE. It was `max-height: 0;
+   opacity: 0`, revealed on hover — a whole sentence of the page's own account of
+   why this excerpt is on the receipt, invisible to touch and to a keyboard until
+   round 7. "Anything that must be discoverable without hovering is not a hover
+   affordance" (CONVENTIONS); the page explaining its own record qualifies. */
 .provNote {
   display: block;
-  max-height: 0;
-  overflow: hidden;
-  opacity: 0;
-  transition:
-    max-height 0.15s ease,
-    opacity 0.12s ease,
-    margin 0.15s ease;
+  margin-top: 4px;
   font-family: 'IBM Plex Mono', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
-}
-
-.prov:hover .provNote,
-.prov:focus-visible .provNote {
-  max-height: 44px;
-  opacity: 1;
-  margin-top: 4px;
 }
 
 /* the correction chain — two voices, kept visibly apart */

@@ -866,6 +866,23 @@ describe('composition slots', () => {
     expect(() => slot(smuggled)).toThrow(/dangerouslySetInnerHTML/);
   });
 
+  /* CATCHES: the walk going back to `return`ing on a raw string. ROUND 7: a
+     `Slot` is the one boundary the printed-string sweep can see through, on the
+     strength of `slot()` validating what it is handed — and the walk looked only
+     for MARKUP. A bare string is not markup, so `slot(object.text)` and
+     `slot(receipt.title)` carried a caller's sentence through the hole whose
+     entire purpose is stopping caller content, with `ClaimText` printing
+     `content.node` at the other end. */
+  it('a raw string in a slot goes through the same door every printed string does', () => {
+    expect(() => slot('priya said the drop is fine')).toThrow(/no "X said"/);
+    expect(() => slot('I authorise the drop')).toThrow(/no first person/);
+    expect(() => slot(<div>“invented words”</div>)).toThrow(/no quotation marks/);
+    /* …and the shipped content still passes, so this is not a blanket refusal. */
+    expect(() =>
+      slot('Drop users_legacy at cutover rather than after the retention window'),
+    ).not.toThrow();
+  });
+
   /* CATCHES: `RoomHead.surfaces` going back to `ReactNode`. It was the last
      composition hole in the frame taking the widest type React has — in the
      header of every room, above every conversation — so raw attributed markup

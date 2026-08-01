@@ -261,7 +261,7 @@ export function Pin({
                 <span className={styles.moreNext} data-pin-action="true">
                   {nextPageLabel(fold)} · page {fold.page + 1} of {fold.pageCount}
                 </span>
-                <span className={styles.moreHint} data-truncates="the button's accessible name">
+                <span className={styles.moreHint} data-truncates="name">
                   the pin folds rather than pushing the composer off the screen
                 </span>
               </button>
