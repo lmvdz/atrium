@@ -454,6 +454,24 @@ const CASES = [
     note: 'Round 2\'s gauntlet, blocking 3: "`/` can be a static proxy fixture rather than the app. `assert-page-serves` matches fixed HTML markers and a fixed sign-in link, so a first `handle /` returning a stale copy passes while `/sign-up` stays proxied and health, signup, ws and rate-limit all go green." This is that Caddyfile, and it is a *successful non-product response* — the 502 above was the only failure mode the ledger had. Everything else in the job is untouched and passes: the app\'s own health check fetches `127.0.0.1:3000` and never crosses the proxy, and every other assertion uses another route. What catches it is that the fixture cannot name the account looking at it — the page assertion fetches `/` as a per-run account and compares the rendered name against the one Postgres holds — and cannot answer two different requests differently.',
   },
   {
+    id: 'session-conditional-page-fixture',
+    what: 'the same fixture, shown only to callers without a session cookie, with the app’s headers forged',
+    catches: 'assert-page-serves',
+    caddyfile: (text) =>
+      insertIntoSite(text, [
+        '@fixture {',
+        '\tpath /',
+        '\tnot header_regexp Cookie "session"',
+        '}',
+        'handle @fixture {',
+        '\theader X-Powered-By "Next.js"',
+        '\theader Vary "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch"',
+        `\trespond \`${PAGE_FIXTURE}\` 200`,
+        '}',
+      ]),
+    note: "Round 3's own blind review found this and round 3 could not close it: a fixture conditioned on the *presence* of a session cookie leaves the authenticated branch as the real app, so the per-run account name renders, the two polarities differ, and every check round 3 had is satisfied. Round 3 answered it by comparing `x-powered-by` and `Vary` against `/sign-in`'s — and the round-3 gauntlet's first major was that those are constants a Caddyfile writes with one line each, which is what the two `header` directives here demonstrate. What catches it now is a request the fixture cannot be conditioned on: `/` fetched a third time carrying the session cookie's names with values that are not a session, which every cookie-presence rule routes to the app, and a comparison of the `/_next/static/…` chunk names the two signed-out responses reference.",
+  },
+  {
     id: 'schema-short-of-the-migrations',
     what: 'a table dropped from the composed stack after a migration that exited 0',
     catches: 'assert-stack-schema',
