@@ -15,6 +15,12 @@ COPY apps/web/package.json apps/web/
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
 COPY packages/auth/package.json packages/auth/
+# Every workspace package, because the build step below is `--filter
+# "./packages/*"` and a manifest missing here is a package pnpm never installs
+# and then tries to compile. `packages/ingest` landed on main without this line
+# and the image has not built since — found while bringing the stack up to
+# verify round 4's proxy, not by anything that was watching for it.
+COPY packages/ingest/package.json packages/ingest/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
 # ── build ───────────────────────────────────────────────────────────────────

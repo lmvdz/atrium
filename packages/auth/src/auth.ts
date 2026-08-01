@@ -14,6 +14,7 @@ import {
   createDefaultRoom,
   joinWorkspaceRooms,
   loadWorkspaceMemberRole,
+  revokeAcceptedInvitation,
   revokeWorkspaceRooms,
   syncWorkspaceRoomRoles,
   voidInvitation,
@@ -85,6 +86,7 @@ export function atriumOrganizationPorts(
     revokeWorkspaceRooms: (input) => revokeWorkspaceRooms(db, input),
     syncWorkspaceRoomRoles: (input) => syncWorkspaceRoomRoles(db, input, reconcile),
     voidInvitation: (input) => voidInvitation(db, input),
+    revokeAcceptedInvitation: (input) => revokeAcceptedInvitation(db, input),
   };
 }
 
@@ -102,6 +104,26 @@ const consoleLogger: OrganizationLogger = {
  */
 export function ipHeadersFor(strategy: ProxyStrategy): string[] {
   return strategy.kind === 'forwarded' ? [...forwardedHeaderNames] : [];
+}
+
+/**
+ * Which addresses in a forwarded chain are our own proxies.
+ *
+ * Handed to Better Auth as `advanced.ipAddress.trustedProxies`, which is what
+ * makes its `getIp` walk the chain from the right past our hops and stop at the
+ * caller — the same rule `client-ip.ts` applies when the list is configured.
+ * Round 3 configured only the header *names*, so the two agreed about where to
+ * look and not about what to believe: with no `trustedProxies`, `getIp` in
+ * `better-auth@1.6.x` trusts a chain only when it has exactly one entry, and
+ * reads nothing at all from a longer one. That is coarser than ours rather than
+ * laxer, but "coarser" is still a second answer, and a caller bucketed two ways
+ * is a caller counted twice as generously as either limiter intends.
+ *
+ * Empty for every other strategy, which is how the library is told to resolve no
+ * IP rather than a spoofable one.
+ */
+export function trustedProxiesFor(strategy: ProxyStrategy): string[] {
+  return strategy.kind === 'forwarded' ? [...(strategy.trustedProxies ?? [])] : [];
 }
 
 export function createAtriumAuth(options: AtriumAuthOptions) {
@@ -150,7 +172,18 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
        * counts nothing. Given no headers it resolves no IP and falls back to one
        * shared per-path bucket instead: coarse, and honest.
        */
-      ipAddress: { ipAddressHeaders: ipHeadersFor(proxy) },
+      ipAddress: {
+        ipAddressHeaders: ipHeadersFor(proxy),
+        /**
+         * The other half, added in round 4: `ipAddressHeaders` made the two
+         * limiters agree about where to look, and this makes them agree about
+         * what to believe. Without it `getIp` trusts a chain only when it has
+         * exactly one entry and reads nothing from a longer one — coarser than
+         * ours rather than laxer, but still a second answer. See
+         * `trustedProxiesFor`.
+         */
+        trustedProxies: trustedProxiesFor(proxy),
+      },
     },
 
     /**

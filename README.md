@@ -32,10 +32,48 @@ first room.
 Everything in containers instead:
 
 ```bash
-docker compose up --build   # postgres, minio, migrate, server, app
+docker compose up --build   # postgres, minio, migrate, server, app, proxy
 ```
 
 Same compose file locally and on the VPS (issue #18) — only `.env` differs.
+Everything arrives through the `proxy` service (Caddy, `deploy/Caddyfile`) on
+`WEB_PORT`: `/ws` goes to the realtime server, everything else to the app.
+Neither of those two publishes a port of its own, and that is load-bearing
+rather than tidy — see below.
+
+### Why there is a proxy in front
+
+`ATRIUM_TRUSTED_PROXY_HOPS=1` is a *claim* that exactly one proxy appends the
+caller's address to `X-Forwarded-For`. It buys the rate limiter its per-address
+dimension, and it is only as true as the topology: a second, un-proxied way in
+would let a direct caller write the whole chain and name their own address.
+Hence no published ports on `app` and `server`.
+
+The reason it is not optional is on the web side. A Next.js Server Action cannot
+see the socket — `headers()` is the whole request, and Next fills
+`x-forwarded-for` from the peer *only when the client sent none*, so a present
+value there is either the peer or entirely attacker-written with no way to tell.
+Without something in front, the sign-in and sign-up limiters have no address to
+count at all. (They do not then stop counting: an unresolvable caller shares one
+global bucket, `unresolvedIpKey` in `packages/auth/src/client-ip.ts`. That is a
+cap, and it is not a per-address cap.)
+
+TLS belongs there too: point a hostname at the box and replace `:80` in
+`deploy/Caddyfile` with it.
+
+### The compose stack does not serve a page yet
+
+`app` runs `NODE_ENV=production`, and `resolveMailer` refuses to hand out the
+console transport there — it prints verification links, and a verification link
+is a single-use account takeover. There is no production mail transport in this
+repository yet; it lands with the notification work. Until it does, every route
+in `app` answers 500 in this stack. Overriding the variable does not help:
+`next build` inlines `process.env.NODE_ENV` into the standalone bundle.
+
+Everything else comes up: postgres, minio, migrate, `server` and `proxy` are
+healthy, and the realtime upgrade routes through the proxy to its origin and
+session checks. `pnpm dev` is unaffected — it is `NODE_ENV=development`, where
+the console transport is exactly right.
 
 ### The credentials in this repo are development-only
 
@@ -70,7 +108,7 @@ Three things enforce that rather than merely asking:
 
 Before exposing anything: set real values in `.env` (or the deployment's own
 secret store), and do not publish 5432 / 9000 / 9001 at all unless you mean to.
-Only 3000 and 4000 need to face the internet.
+Only `WEB_PORT` — the proxy — needs to face the internet.
 
 ## Layout
 

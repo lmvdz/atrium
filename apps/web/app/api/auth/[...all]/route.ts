@@ -1,4 +1,4 @@
-import { isMountedAuthPath } from '@atrium/auth';
+import { isMountedAuthPath, rawPathname } from '@atrium/auth';
 import { toNextJsHandler } from 'better-auth/next-js';
 import { auth } from '@/lib/auth';
 
@@ -23,6 +23,15 @@ import { auth } from '@/lib/auth';
  * `isMountedAuthPath` deliberately matches on the same terms Better Auth's own
  * router does, so the guard's answer and the router's cannot diverge; passing a
  * pre-decoded or pre-normalised path here would undo that.
+ *
+ * Which is why this uses `rawPathname` and not `new URL(request.url).pathname`.
+ * Round 3 used the latter and described it as raw; it is not. WHATWG URL parsing
+ * removes dot segments, so `/api/auth/organization/../verify-email` would have
+ * reached the guard as `/api/auth/verify-email` and been admitted. Next happens
+ * to reject a request line carrying `..` with a 400 first — which is why nothing
+ * was exposed and why round 3's own e2e asserts a 400 there rather than a 404 —
+ * but "a different layer normalised it for us" is the shape of guarantee this
+ * whole file exists to stop depending on.
  */
 export const dynamic = 'force-dynamic';
 
@@ -33,7 +42,7 @@ const notFound = () =>
   });
 
 function guard(request: Request): Response | null {
-  return isMountedAuthPath(new URL(request.url).pathname, request.method) ? null : notFound();
+  return isMountedAuthPath(rawPathname(request.url), request.method) ? null : notFound();
 }
 
 export async function GET(request: Request): Promise<Response> {

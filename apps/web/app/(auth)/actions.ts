@@ -1,6 +1,6 @@
 'use server';
 
-import { clientIp, createThrottle, type Throttle } from '@atrium/auth';
+import { attemptWithIp, clientIp, createThrottle, type Throttle } from '@atrium/auth';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { z } from 'zod';
@@ -57,11 +57,18 @@ const safeNext = (value: FormDataEntryValue | null) => safeNextPath(value);
  * `@atrium/auth`'s `clientIp`, which believes the forwarded headers only as far
  * as `ATRIUM_TRUSTED_PROXY_HOPS` says to. That variable is **required in
  * production** (`lib/env.ts`): leaving the limiter silently one-dimensional was
- * round 2's finding, and a value nobody set is not a safe default. `0` says
- * there is nothing in front of this process, which on the Server Action path
- * means no address is available at all — Next cannot hand one over — so the
- * per-address limiter carries the load until a proxy is put in front and `hops`
- * says so. Absent, never forged.
+ * round 2's finding, and a value nobody set is not a safe default.
+ *
+ * **And an unresolved address is counted, not skipped.** Round 3 shipped `0` in
+ * compose — "nothing is in front of me", which is true of a published port and
+ * on this path means Next can hand a Server Action no peer address at all. So
+ * `callerIp()` returned null, and `allow()` read null as `true`: the IP
+ * dimension was not merely absent, it was a pass. Both of round 3's critics
+ * found it from opposite ends. Null now goes to `unresolvedIpKey`, one shared
+ * bucket for every caller this deployment cannot tell apart — a real cap,
+ * global rather than per-address, and never a bypass. `docker-compose.yml`
+ * ships a reverse proxy and `hops=1` so the shipped deployment gets the
+ * per-address version rather than the degraded one.
  *
  * Scope caveats (single process, reset on restart) are in
  * `packages/auth/src/throttle.ts` and hold here.
@@ -117,13 +124,14 @@ async function callerIp(): Promise<string | null> {
 /**
  * Record one attempt against both dimensions. False means refused.
  *
- * Both counters are always recorded, even when the first already refuses:
- * otherwise tripping the cheap one would shield the expensive one.
+ * The decision itself is `attemptWithIp` in `@atrium/auth`, deliberately: round
+ * 3's version of this function read `const byIp = ip === null ? true : …`, and
+ * a fail-open living in a `'use server'` module is a fail-open no test in this
+ * repository could reach. Moved into the package, it is one assertion in
+ * `throttle.test.ts` — a null address is a shared bucket, never a pass.
  */
 function allow(kind: 'signIn' | 'signUp' | 'resend', email: string, ip: string | null): boolean {
-  const byEmail = limiters[kind].attempt(limitKey(email));
-  const byIp = ip === null ? true : ipLimiters[kind].attempt(ip);
-  return byEmail && byIp;
+  return attemptWithIp({ byKey: limiters[kind], byIp: ipLimiters[kind] }, limitKey(email), ip);
 }
 
 export async function signUpAction(formData: FormData): Promise<never> {

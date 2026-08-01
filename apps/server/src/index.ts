@@ -80,6 +80,10 @@ async function main(): Promise<void> {
     // …nor the room membership that let it listen. This is the idle half: a
     // socket that only receives never triggers the per-command check.
     sweepIntervalMs: env.WS_SWEEP_INTERVAL_MS,
+    // And a socket the sweep cannot verify does not get to sit there
+    // indefinitely on the strength of a check that never succeeded.
+    sweepFailureLimit: env.WS_SWEEP_FAILURE_LIMIT,
+    sweepUnverifiedMs: env.WS_SWEEP_UNVERIFIED_MS,
   });
 
   await realtime.listen();

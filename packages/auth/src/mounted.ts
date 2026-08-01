@@ -46,8 +46,19 @@
  * So this file now answers the same question the router answers, in the same
  * terms, and refuses anything it cannot answer identically:
  *
- *  - the raw pathname is what is matched, exactly as `new URL(url).pathname`
- *    hands it over — no decoding, no case folding, no segment collapsing;
+ *  - the raw pathname is what is matched — no decoding, no case folding, no
+ *    segment collapsing. `rawPathname` below is how it is obtained, and that is
+ *    a round 4 correction: round 3 said "raw, exactly as `new URL(url).pathname`
+ *    hands it over", and `new URL` does **not** hand it over raw. It is a
+ *    canonicalising parser — it resolves `.` and `..`, so
+ *    `new URL('http://x/api/auth/organization/../verify-email').pathname` is
+ *    `/api/auth/verify-email`, and the guard would have been asked about a path
+ *    nobody sent. Nothing was exposed, because Next rejects a request line
+ *    carrying `..` with a 400 before a route handler sees it — but that is
+ *    Next's behaviour, not this code's, and a guard whose input has already been
+ *    rewritten by somebody else is precisely the divergence this file exists to
+ *    refuse. So the pathname is sliced out of the request URL by hand;
+ *    `mounted.test.ts` pins both halves;
  *  - percent-encoding is refused outright. Decoding *is* a second semantics, so
  *    rather than admit anything whose raw and decoded forms differ, a path that
  *    is not already its own decoded form is denied. None of the three mounted
@@ -104,6 +115,42 @@ export const mountedAuthRoutes: readonly MountedAuthRoute[] = [
   /** The OAuth provider's return leg. Some providers use form_post. */
   { path: '/callback/:id', methods: ['GET', 'POST'] },
 ] as const;
+
+/**
+ * The path portion of a request URL, with nothing resolved on the way out.
+ *
+ * `new URL(url).pathname` is the obvious way to write this and it is not the
+ * same function: WHATWG URL parsing removes dot segments, so a request for
+ * `/api/auth/organization/../verify-email` arrives at the guard spelled
+ * `/api/auth/verify-email` — a path the client never sent, and one the guard
+ * says yes to. Better Auth's router does no such thing (better-call over rou3
+ * matches the pathname it is given, segment by segment), so canonicalising first
+ * reintroduces exactly the two-notions-of-a-path problem round 2's gauntlet
+ * found and round 3 claimed to have closed.
+ *
+ * This slices instead: past the scheme and authority, stop at the first `?` or
+ * `#`. Anything that is not an absolute URL is treated as already being a path,
+ * which is what the realtime server's `/ws` check wants and what a test fixture
+ * looks like. A URL with no path at all is `/`, matching both the URL standard
+ * and better-call.
+ */
+export function rawPathname(url: string): string {
+  if (typeof url !== 'string') return '';
+
+  let rest = url;
+  const scheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.exec(rest);
+  if (scheme) {
+    const authorityStart = scheme[0].length;
+    const pathStart = rest.slice(authorityStart).search(/[/?#]/);
+    // No `/`, `?` or `#` after the authority: `http://host` is the root path.
+    if (pathStart === -1) return '/';
+    rest = rest.slice(authorityStart + pathStart);
+    if (!rest.startsWith('/')) return '/';
+  }
+
+  const end = rest.search(/[?#]/);
+  return end === -1 ? rest : rest.slice(0, end);
+}
 
 /**
  * Decide whether a request may reach Better Auth's router.

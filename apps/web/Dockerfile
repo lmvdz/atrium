@@ -14,6 +14,9 @@ COPY apps/web/package.json apps/web/
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
 COPY packages/auth/package.json packages/auth/
+# See the note in apps/server/Dockerfile: the build below filters over every
+# package, so every package's manifest has to be installed here.
+COPY packages/ingest/package.json packages/ingest/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
 FROM deps AS build

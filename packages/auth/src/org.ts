@@ -2,6 +2,7 @@ import { APIError } from 'better-auth/api';
 import type { OrganizationOptions } from 'better-auth/plugins/organization';
 import { authorize, mayGrantRole, parseRole, roleRank } from './authz.js';
 import type { Mailer } from './mailer.js';
+import type { InvitationVoidOutcome } from './workspace.js';
 
 /**
  * The organization plugin's configuration, and the authorization that has to
@@ -83,21 +84,43 @@ export interface OrganizationPorts {
   }) => Promise<unknown>;
   /** Removes every room membership a user holds in a workspace. */
   revokeWorkspaceRooms: (input: { workspaceId: string; userId: string }) => Promise<unknown>;
-  /** Brings a user's room roles in line with a new workspace role. */
+  /**
+   * Brings a user's room roles in line with the role that is **committed** in
+   * `workspace_members`, serialized per (workspace, member).
+   *
+   * Note what is not in the signature: a role. That is the whole of blocking
+   * finding 1 from round 3's gauntlet — a hook that can pass a role can pass a
+   * *stale* role, and two overlapping role changes then leave the room rows
+   * carrying whichever hook happened to finish last rather than whichever write
+   * landed last. `atMost` is a ceiling, not a value: it lets the pre-write
+   * demotion lower the rooms early without being able to raise them.
+   */
   syncWorkspaceRoomRoles: (input: {
     workspaceId: string;
     userId: string;
-    role: string;
+    atMost?: string;
   }) => Promise<unknown>;
   /**
    * Moves a pending invitation out of `pending` so it can never be accepted.
    *
    * The compensating half of `afterCreateInvitation` — see the hook for why a
-   * check that ran before the write is not enough on its own. Returns whether a
-   * row was actually voided, so a compensation that hit nothing is not reported
-   * as a success.
+   * check that ran before the write is not enough on its own. Reports *what it
+   * found*, not just whether it worked: round 3 returned a bare boolean, which
+   * made "no such invitation" and "somebody accepted it a millisecond ago and is
+   * now an over-privileged member" the same answer.
    */
-  voidInvitation: (input: { invitationId: string; workspaceId: string }) => Promise<boolean>;
+  voidInvitation: (input: {
+    invitationId: string;
+    workspaceId: string;
+  }) => Promise<InvitationVoidOutcome>;
+  /**
+   * Undoes an acceptance that beat the compensation: room rows first, then the
+   * workspace member row. Only called for `{ outcome: 'accepted' }`.
+   */
+  revokeAcceptedInvitation: (input: {
+    workspaceId: string;
+    email: string;
+  }) => Promise<{ removed: boolean; rooms: number }>;
 }
 
 export interface OrganizationLogger {
@@ -303,6 +326,17 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
        *  - if the void itself fails, an over-privileged pending invitation is
        *    live. That case is logged as an error and thrown, so it surfaces as a
        *    failed request rather than a quiet success.
+       *
+       * **And the acceptance that beats the void.** Round 3 could only cancel a
+       * `pending` row, so the one ordering that costs something — created,
+       * inviter demoted, invitee accepts, compensation arrives — hit nothing,
+       * returned `false`, and threw a FORBIDDEN at the inviter while leaving an
+       * over-privileged member and their room rows exactly where the acceptance
+       * put them. The void now reports what it found, and an `accepted` row is
+       * compensated for real: `revokeAcceptedInvitation` takes the room rows and
+       * the member row back out. A cancelled or already-inert row needs nothing.
+       * A missing one is logged, because an invitation that vanished between two
+       * statements is a thing worth knowing about.
        */
       afterCreateInvitation: async (data: {
         invitation: { id: string; role?: string | null; organizationId?: string };
@@ -322,9 +356,9 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
           requestedRole: requested,
         });
 
-        let voided: boolean;
+        let found: InvitationVoidOutcome;
         try {
-          voided = await ports.voidInvitation({ invitationId: data.invitation.id, workspaceId });
+          found = await ports.voidInvitation({ invitationId: data.invitation.id, workspaceId });
         } catch (error) {
           logger.error('failed to void an over-privileged invitation', {
             invitationId: data.invitation.id,
@@ -335,9 +369,43 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
           });
         }
 
-        if (!voided) {
-          logger.error('an over-privileged invitation was not voided', {
+        if (found.outcome === 'accepted') {
+          // The row is out of `pending` and there is a member behind it. This is
+          // the only branch where something was actually granted, and it is the
+          // only one where failing to compensate must not read as success.
+          logger.warn('an over-privileged invitation was accepted before it could be voided', {
+            reason: 'invitation_accepted_before_void',
+            workspaceId,
             invitationId: data.invitation.id,
+            email: found.email,
+          });
+          try {
+            const undone = await ports.revokeAcceptedInvitation({
+              workspaceId,
+              email: found.email,
+            });
+            logger.warn('undid an acceptance of an over-privileged invitation', {
+              workspaceId,
+              invitationId: data.invitation.id,
+              removedMember: undone.removed,
+              revokedRooms: undone.rooms,
+            });
+          } catch (error) {
+            logger.error('failed to undo an accepted over-privileged invitation', {
+              invitationId: data.invitation.id,
+              email: found.email,
+              error: (error as Error).message,
+            });
+            throw new APIError('INTERNAL_SERVER_ERROR', {
+              message:
+                'That invitation was accepted while your permission to send it changed, and ' +
+                'the membership it created could not be undone. It has been logged for an admin.',
+            });
+          }
+        } else if (found.outcome === 'missing') {
+          logger.error('an over-privileged invitation vanished before it could be voided', {
+            invitationId: data.invitation.id,
+            workspaceId,
           });
         }
 
@@ -440,20 +508,31 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
         const currentRole = await ports.memberRole({ workspaceId, userId: data.member.userId });
         if (!isDemotion(currentRole, newRole)) return undefined;
 
+        // A *ceiling*, not a value. The port applies the lower of this and
+        // whatever is committed, so this call can only ever lower the rooms —
+        // and cannot lower them past a demotion that has already committed.
         await ports.syncWorkspaceRoomRoles({
           workspaceId,
           userId: data.member.userId,
-          role: newRole,
+          atMost: newRole,
         });
         return undefined;
       },
 
       /**
-       * The grant half, on the value that actually committed.
+       * The reconciliation, on whatever is committed when it runs.
        *
-       * Runs for every change, not just promotions: re-applying a demotion that
-       * the before-hook already applied is idempotent, and it is the only thing
-       * that makes the landed row the last word if the two ever disagree.
+       * Round 3 passed `data.member.role` — the row this particular call wrote —
+       * which is correct for one role change and wrong for two overlapping ones:
+       * the hook that finished last won, rather than the write that landed last.
+       * The interleaving is drawn at the top of `workspace.ts`. This now names
+       * only *who*, and the port reads the committed role under a lock keyed on
+       * that pair; the last reconciliation to run is necessarily the one that
+       * started after the last commit, so what it reads is what landed.
+       *
+       * Runs for every change, not just promotions: re-applying a demotion the
+       * before-hook already applied is idempotent, and it is what makes the
+       * committed row the last word.
        */
       afterUpdateMemberRole: async (data: {
         member: { userId: string; organizationId: string; role: string };
@@ -462,7 +541,6 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
         await ports.syncWorkspaceRoomRoles({
           workspaceId: data.member.organizationId ?? data.organization.id,
           userId: data.member.userId,
-          role: data.member.role,
         });
       },
 

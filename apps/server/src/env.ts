@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
+import { hasProxyStrategy } from '@atrium/auth';
 import { z } from 'zod';
 
 /**
@@ -113,6 +114,18 @@ const RawEnvSchema = BaseEnvSchema.extend({
    */
   WS_SWEEP_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(15_000),
   /**
+   * How many consecutive sweeps may fail to verify a socket — session lookup or
+   * membership lookup throwing — before it is closed anyway, and the same bound
+   * in wall-clock time.
+   *
+   * Round 3 skipped an unverifiable socket forever, which meant a revoked member
+   * kept receiving broadcasts for as long as the database stayed down. Neither
+   * has an "off" value for the same reason `WS_SWEEP_INTERVAL_MS` does not: the
+   * unbounded case is the behaviour these close.
+   */
+  WS_SWEEP_FAILURE_LIMIT: z.coerce.number().int().min(1).max(100).default(3),
+  WS_SWEEP_UNVERIFIED_MS: z.coerce.number().int().min(1_000).max(900_000).default(60_000),
+  /**
    * Whether a client that sends no `Origin` header may open a socket.
    *
    * Browsers always send one, so `false` — the default — is right for a
@@ -207,13 +220,38 @@ const productionReason: Record<(typeof productionRequired)[number], string> = {
     ' Unset is not 0; it silently disables the rate limiter’s IP dimension',
 };
 
+/**
+ * The reason the gate reads the *parsed* strategy and not the raw string.
+ *
+ * Round 3 checked presence: `source[name]?.trim()` is truthy for `lots`, `-3`,
+ * `1.5` and `0x10`, every one of which `trustedProxyStrategy` refuses and
+ * degrades to `unconfigured`. So a production process booted, reported itself
+ * configured, and ran with the IP dimension dead — the exact failure the check
+ * exists to make loud, reached through the check itself. Both lineages found it
+ * in round 3's gauntlet. `apps/web/lib/env.ts` has always asked the parser; this
+ * now asks the same question of the same parser.
+ */
+const unparseableProxyHops =
+  'set but unreadable — ATRIUM_TRUSTED_PROXY_HOPS must be a non-negative whole' +
+  ' number (0 for a directly published port, N for N reverse proxies that append' +
+  ' to X-Forwarded-For). A value that does not parse is not a configuration: it' +
+  ' leaves the rate limiter’s IP dimension inert while looking configured';
+
 export function assertProductionSafe(source: NodeJS.ProcessEnv, env: Env): void {
   if (env.NODE_ENV !== 'production') return;
-  const missing = productionRequired.filter((name) => !source[name]?.trim());
-  if (missing.length === 0) return;
-  throw new Error(
-    `invalid environment:\n${missing.map((name) => `  ${name}: ${productionReason[name]}`).join('\n')}`,
-  );
+
+  const problems = productionRequired
+    .filter((name) => !source[name]?.trim())
+    .map((name) => `  ${name}: ${productionReason[name]}`);
+
+  // Present but unparseable is its own failure, and a different sentence: the
+  // operator did answer, and the answer was not one of the ones that exist.
+  if (source.ATRIUM_TRUSTED_PROXY_HOPS?.trim() && !hasProxyStrategy(source)) {
+    problems.push(`  ATRIUM_TRUSTED_PROXY_HOPS: ${unparseableProxyHops}`);
+  }
+
+  if (problems.length === 0) return;
+  throw new Error(`invalid environment:\n${problems.join('\n')}`);
 }
 
 /**

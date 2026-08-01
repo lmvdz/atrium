@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { type AtriumSession, authorize, checkOrigin, type MembershipLike } from '@atrium/auth';
+import {
+  type AtriumSession,
+  authorize,
+  checkOrigin,
+  type MembershipLike,
+  rawPathname,
+} from '@atrium/auth';
 import { type WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import type { Logger } from './logger.js';
@@ -130,6 +136,26 @@ export interface RealtimeOptions {
    * for the person to type.
    */
   sweepIntervalMs?: number;
+  /**
+   * How many consecutive sweeps may fail to verify a connection before it is
+   * evicted anyway.
+   *
+   * Round 3's sweep skipped a connection it could not check — `continue`, no
+   * eviction — on the reasoning that "the database did not answer" is not "you
+   * were removed". That is right for a blip and wrong forever: both of round 3's
+   * critics pointed out that a revoked member goes on receiving a room's
+   * broadcasts for exactly as long as the dependency stays down, which is the
+   * one duration nobody controls. So the tolerance is bounded. Below the bound a
+   * failure changes nothing; at it, the socket is closed and can reconnect,
+   * which re-runs the whole upgrade against a database that either answers or
+   * refuses it.
+   */
+  sweepFailureLimit?: number;
+  /**
+   * …and the same bound in time, because a long sweep interval would make the
+   * count alone a promise about nothing. Whichever comes first.
+   */
+  sweepUnverifiedMs?: number;
 }
 
 export interface RealtimeServer {
@@ -179,6 +205,18 @@ interface Connection {
    * socket costs one session read" true rather than aspirational.
    */
   pending: Promise<AtriumSession | null> | null;
+  /**
+   * Consecutive sweeps that could not verify this connection — a session
+   * lookup or a membership lookup that threw. Reset to zero by any sweep that
+   * gets a real answer, whatever that answer was.
+   */
+  sweepFailures: number;
+  /**
+   * When the current run of unverifiable sweeps started, or 0 when the last
+   * sweep got an answer. Together with `sweepFailures` this is what bounds how
+   * long an un-checkable socket keeps receiving.
+   */
+  unverifiedSince: number;
 }
 
 export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
@@ -191,6 +229,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   const revalidateTtlMs = options.revalidateTtlMs ?? 5_000;
   const revalidateBackoffMs = options.revalidateBackoffMs ?? 1_000;
   const sweepIntervalMs = options.sweepIntervalMs ?? 15_000;
+  const sweepFailureLimit = options.sweepFailureLimit ?? 3;
+  const sweepUnverifiedMs = options.sweepUnverifiedMs ?? 60_000;
 
   /**
    * The one thing this server refuses to start without.
@@ -244,7 +284,11 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     socket: Duplex,
     head: Buffer,
   ): Promise<void> {
-    const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    // `rawPathname`, not `new URL(...).pathname`, for the reason given in
+    // `mounted.ts`: URL parsing resolves dot segments, and a guard that is
+    // handed a rewritten path is answering about a request nobody made.
+    // `/ws/../ws` is not `/ws` here, and it should not be.
+    const path = rawPathname(request.url ?? '/');
     if (path !== '/ws') {
       reject(socket, 404, 'Not Found');
       return;
@@ -304,6 +348,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       retryAfter: 0,
       revoked: false,
       pending: null,
+      sweepFailures: 0,
+      unverifiedSince: 0,
     };
     connections.set(socket, connection);
     logger.info('ws connected', {
@@ -362,6 +408,24 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       return;
     }
 
+    /**
+     * **Every** frame asks whether this is still a session, not just commands.
+     *
+     * Round 3 put the check inside `handleCommand`, so `hello`, `ping` and
+     * `echo` were answered without one: a socket whose session had been revoked
+     * on another device went on being told its connection id and the display
+     * name of the person behind it — by `hello`, indefinitely, for as long as it
+     * kept away from commands. Its gauntlet listed this as polish; it is the
+     * same fail-open as the rest of the round, reached through the frames nobody
+     * thought of as privileged.
+     *
+     * The cache is what makes it affordable: at most one session read per
+     * `revalidateTtlMs`, whatever the client sends. A malformed frame is still
+     * answered above — it never got as far as a mandate to check, and telling a
+     * client its JSON is broken reveals nothing about who it is.
+     */
+    if (!(await stillAuthenticated(socket, connection))) return;
+
     switch (frame.data.type) {
       case 'hello':
         send(socket, {
@@ -397,9 +461,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   ): Promise<void> {
     const { command, roomId, requestId } = frame;
 
-    // Is this still a session? A socket that was authenticated an hour ago is
-    // not evidence about now.
-    if (!(await stillAuthenticated(socket, connection))) return;
+    // "Is this still a session?" has already been asked, by `handleFrame`, for
+    // every frame type rather than only this one. See the note there.
 
     let membership: MembershipLike | null;
     try {
@@ -456,6 +519,16 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
 
     switch (decision.command) {
       case 'room.join': {
+        /**
+         * Both awaits above — the session re-validation and the membership
+         * lookup — are suspension points, and a sweep or another frame can
+         * revoke this connection while they are in flight. Round 3 then put the
+         * socket back on the roster it had just been taken off, and the room saw
+         * a member who was on their way out sitting in `presence()` until the
+         * close handshake finished. Re-ask both questions on the near side of
+         * the awaits: they cost nothing and they are the ones that changed.
+         */
+        if (connection.revoked || socket.readyState !== socket.OPEN) return;
         joinRoom(socket, connection, roomId);
         send(socket, { type: 'joined', roomId, ...(requestId ? { requestId } : {}) });
         broadcastPresence(roomId);
@@ -526,7 +599,9 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    * sweep for a socket that only listens.
    */
   async function stillAuthenticated(socket: WebSocket, connection: Connection): Promise<boolean> {
-    // The negative verdict, cached. Nothing this socket sends can reopen it.
+    // The negative verdict, cached. Nothing this socket sends can reopen it,
+    // and — since round 4 — nothing this socket sends is *answered* either,
+    // because every frame type reaches this function.
     if (connection.revoked) return false;
     if (!revalidateSession) {
       // Unreachable in production: the constructor refuses to build a server
@@ -653,15 +728,38 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    * member went on receiving presence and broadcasts from a room they had been
    * thrown out of.
    *
-   * A membership lookup that *throws* changes nothing. "The database did not
-   * answer" is not "you were removed", and evicting on it would turn a database
-   * blip into a mass disconnection.
+   * A lookup that *throws* changes nothing — for a while. "The database did not
+   * answer" is not "you were removed", and evicting on the first blip would turn
+   * a hiccup into a mass disconnection. But round 3 left that tolerance
+   * unbounded, and both critics named the consequence: a revoked member keeps
+   * receiving a room's broadcasts for exactly as long as the dependency stays
+   * down. So the tolerance is now `sweepFailureLimit` consecutive sweeps or
+   * `sweepUnverifiedMs`, whichever arrives first, and then the socket goes. It
+   * can reconnect immediately — the upgrade asks the same questions and either
+   * gets answers or refuses.
+   *
+   * The back-off is honoured here too. Round 3 checked `retryAfter` on the
+   * command path and not on this one, so a socket whose session lookup had just
+   * failed was asked again by the very next sweep — negative caching that held
+   * only for the half of the code that had a client typing into it.
    */
   async function sweepConnections(): Promise<void> {
     for (const [socket, connection] of [...connections]) {
       if (connection.revoked || socket.readyState !== socket.OPEN) continue;
 
-      if (revalidateSession && Date.now() >= connection.validUntil) {
+      const now = Date.now();
+
+      if (revalidateSession && now >= connection.validUntil) {
+        // The negative verdict, on the idle path as well as the command path.
+        // Waiting out the back-off is not a failure to verify — it is the
+        // previous failure still being remembered — so it does not advance the
+        // counter, but it does leave `unverifiedSince` where it is, which is
+        // what makes the time bound cover it.
+        if (now < connection.retryAfter) {
+          evictIfUnverifiableTooLong(socket, connection, now);
+          continue;
+        }
+
         let session: AtriumSession | null;
         try {
           session = await revalidateOnce(connection, revalidateSession);
@@ -671,6 +769,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
             error: (error as Error).message,
           });
           connection.retryAfter = Date.now() + revalidateBackoffMs;
+          recordSweepFailure(connection, Date.now());
+          evictIfUnverifiableTooLong(socket, connection, Date.now());
           continue;
         }
         if (!session || session.sessionId !== connection.session.sessionId) {
@@ -680,8 +780,11 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         connection.session = session;
         connection.validUntil = Date.now() + revalidateTtlMs;
         connection.retryAfter = 0;
+        clearSweepFailures(connection);
       }
 
+      let checkedEveryRoom = true;
+      let evicted = false;
       for (const roomId of [...connection.rooms]) {
         let membership: MembershipLike | null;
         try {
@@ -692,15 +795,65 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
             roomId,
             error: (error as Error).message,
           });
+          checkedEveryRoom = false;
           continue;
         }
         // `room.join` is the least a socket needs to be in a room at all, so it
         // is the right question to ask about staying in one.
         if (authorize('room.join', membership, { scope: 'room' }).allowed) continue;
         revoke(socket, connection, 'membership ended', `no longer a member of ${roomId}`);
+        evicted = true;
         break;
       }
+      if (evicted) continue;
+
+      if (checkedEveryRoom) clearSweepFailures(connection);
+      else {
+        recordSweepFailure(connection, Date.now());
+        evictIfUnverifiableTooLong(socket, connection, Date.now());
+      }
     }
+  }
+
+  /** One more sweep that could not get an answer about this connection. */
+  function recordSweepFailure(connection: Connection, at: number): void {
+    connection.sweepFailures += 1;
+    if (connection.unverifiedSince === 0) connection.unverifiedSince = at;
+  }
+
+  /** An answer arrived — whatever it said, the run of failures is over. */
+  function clearSweepFailures(connection: Connection): void {
+    connection.sweepFailures = 0;
+    connection.unverifiedSince = 0;
+  }
+
+  /**
+   * Close a socket nothing has been able to verify for too long.
+   *
+   * Deliberately not phrased as a denial: `revoke` closes with 1008 and the
+   * client is free to reconnect, at which point the upgrade asks the same
+   * questions. If the dependency is still down the upgrade fails and the client
+   * learns that honestly, rather than sitting inside a room on the strength of a
+   * check that has not succeeded since it joined.
+   */
+  function evictIfUnverifiableTooLong(
+    socket: WebSocket,
+    connection: Connection,
+    at: number,
+  ): boolean {
+    const tooMany = connection.sweepFailures >= sweepFailureLimit;
+    const tooLong =
+      connection.unverifiedSince !== 0 && at - connection.unverifiedSince >= sweepUnverifiedMs;
+    if (!tooMany && !tooLong) return false;
+
+    logger.warn('closing a socket nothing has been able to verify', {
+      connectionId: connection.id,
+      userId: connection.session.userId,
+      failures: connection.sweepFailures,
+      unverifiedMs: connection.unverifiedSince === 0 ? 0 : at - connection.unverifiedSince,
+    });
+    revoke(socket, connection, 'verification unavailable', 'could not be verified for too long');
+    return true;
   }
 
   function joinRoom(socket: WebSocket, connection: Connection, roomId: string): void {

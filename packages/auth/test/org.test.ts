@@ -5,6 +5,7 @@ import {
   isDemotion,
   type OrganizationPorts,
 } from '../src/org.js';
+import { lowerOf } from '../src/workspace.js';
 
 /**
  * The library-layer authorization, tested for what it decides.
@@ -25,7 +26,8 @@ function ports(overrides: Partial<OrganizationPorts> = {}): OrganizationPorts {
     joinWorkspaceRooms: async () => undefined,
     revokeWorkspaceRooms: async () => undefined,
     syncWorkspaceRoomRoles: async () => undefined,
-    voidInvitation: async () => true,
+    voidInvitation: async () => ({ outcome: 'voided' }),
+    revokeAcceptedInvitation: async () => ({ removed: true, rooms: 1 }),
     ...overrides,
   };
 }
@@ -163,6 +165,12 @@ describe('revocation hooks', () => {
     ).rejects.toThrow(/on fire/);
   });
 
+  /**
+   * Catches: deleting the `atMost: newRole` argument from
+   * `beforeUpdateMemberRole` (the demotion would then read as "reconcile to
+   * whatever is committed", which pre-commit is still the *old* role — a
+   * demotion that demotes nothing).
+   */
   it('follows a demotion down into the rooms, before the workspace role changes', async () => {
     const syncWorkspaceRoomRoles = vi.fn(async () => undefined);
     const hooks = options({
@@ -176,10 +184,12 @@ describe('revocation hooks', () => {
       organization: { id: workspaceId },
     });
 
+    // A ceiling, not a value: the port applies the lower of this and whatever is
+    // committed, so this call can lower the rooms and can never raise them.
     expect(syncWorkspaceRoomRoles).toHaveBeenCalledWith({
       workspaceId,
       userId: 'user-2',
-      role: 'member',
+      atMost: 'member',
     });
   });
 
@@ -226,7 +236,13 @@ describe('role changes only move in the safe direction before the commit', () =>
     expect(syncWorkspaceRoomRoles).not.toHaveBeenCalled();
   });
 
-  it('grants the promotion afterwards, on the value that landed', async () => {
+  /**
+   * Catches: re-adding `role: data.member.role` to the `afterUpdateMemberRole`
+   * call. The hook must name only *who* — a hook that can pass a role can pass
+   * a stale one, which is the whole of blocking finding 1 (see the interleaving
+   * test below).
+   */
+  it('reconciles afterwards without telling the port which role to apply', async () => {
     const syncWorkspaceRoomRoles = vi.fn(async () => undefined);
     const hooks = options({ syncWorkspaceRoomRoles }).organizationHooks;
 
@@ -235,11 +251,9 @@ describe('role changes only move in the safe direction before the commit', () =>
       organization: { id: workspaceId },
     });
 
-    expect(syncWorkspaceRoomRoles).toHaveBeenCalledWith({
-      workspaceId,
-      userId: 'user-2',
-      role: 'admin',
-    });
+    expect(syncWorkspaceRoomRoles).toHaveBeenCalledWith({ workspaceId, userId: 'user-2' });
+    const [call] = syncWorkspaceRoomRoles.mock.calls as unknown as [[Record<string, unknown>]];
+    expect(Object.keys(call[0]).sort()).toEqual(['userId', 'workspaceId']);
   });
 
   it('does nothing early for a role that is not changing', async () => {
@@ -290,8 +304,120 @@ describe('role changes only move in the safe direction before the commit', () =>
     expect(syncWorkspaceRoomRoles).toHaveBeenCalledWith({
       workspaceId,
       userId: 'user-2',
-      role: 'admin',
+      atMost: 'admin',
     });
+  });
+
+  /**
+   * Blocking finding 1 from round 3's gauntlet, as a test.
+   *
+   * The stub below is `workspace_members` and `memberships` with the timing
+   * taken out: a committed workspace role, a room role, and a port that behaves
+   * the way `syncWorkspaceRoomRoles` behaves — it reads the committed role and
+   * applies it, capped by `atMost`. No sleeps, no scheduler, no chance of
+   * passing by luck.
+   *
+   * Then the interleaving is written out longhand, in the order that breaks it:
+   * a promotion and a demotion overlap, both writes land, both after-hooks run,
+   * and the *promotion's* after-hook is last. Round 3's hook passed
+   * `data.member.role` — `'admin'`, captured before the demotion existed — so the
+   * room rows ended on `admin` while the workspace row said `member`, and the
+   * realtime server authorizes from the room rows.
+   *
+   * Catches: passing any role from `afterUpdateMemberRole` (`role:
+   * data.member.role`, `atMost: data.member.role`, or a port that honours one).
+   * Restore round 3's hook and this assertion reads `admin`.
+   */
+  it('cannot leave the rooms above the workspace row when two role changes overlap', async () => {
+    /** The two rows, as the database would hold them. */
+    const store = { committed: 'member' as string | null, rooms: 'member' as string | null };
+
+    const hooks = atriumOrganizationOptions({
+      ports: ports({
+        memberRole: async () => store.committed,
+        // Exactly `syncWorkspaceRoomRoles`: read what is committed, apply it,
+        // never above `atMost`. The lock is what makes this atomic in Postgres;
+        // here the whole port is one synchronous step, which is the same thing.
+        syncWorkspaceRoomRoles: async (input: { atMost?: string }) => {
+          if (store.committed === null) {
+            store.rooms = null;
+            return;
+          }
+          store.rooms =
+            input.atMost === undefined ? store.committed : lowerOf(store.committed, input.atMost);
+        },
+      }),
+      baseURL: 'https://atrium.test',
+      mailer: async () => {},
+      schema: {},
+    }).organizationHooks;
+
+    const target = { userId: 'user-2', organizationId: workspaceId };
+    const organization = { id: workspaceId };
+
+    // ── the promotion starts: member → admin. Not a demotion, so nothing early.
+    await hooks.beforeUpdateMemberRole({ member: target, newRole: 'admin', organization });
+    store.committed = 'admin'; //                       …and its write lands.
+
+    // ── the demotion overlaps it: admin → member, all the way through.
+    await hooks.beforeUpdateMemberRole({ member: target, newRole: 'member', organization });
+    store.committed = 'member'; //                      …and its write lands.
+    await hooks.afterUpdateMemberRole({
+      member: { ...target, role: 'member' },
+      organization,
+    });
+
+    // ── and only now does the promotion's after-hook get its turn.
+    await hooks.afterUpdateMemberRole({ member: { ...target, role: 'admin' }, organization });
+
+    expect(store.committed).toBe('member');
+    expect(store.rooms).toBe('member');
+  });
+
+  it('still lets a promotion reach the rooms when nothing is racing it', async () => {
+    // The other half of the same property: reading the committed role must not
+    // quietly turn every promotion into a no-op.
+    // Catches: making `syncWorkspaceRoomRoles` a demotion-only path.
+    const store = { committed: 'member' as string | null, rooms: 'member' as string | null };
+    const hooks = atriumOrganizationOptions({
+      ports: ports({
+        memberRole: async () => store.committed,
+        syncWorkspaceRoomRoles: async (input: { atMost?: string }) => {
+          if (store.committed === null) return;
+          store.rooms =
+            input.atMost === undefined ? store.committed : lowerOf(store.committed, input.atMost);
+        },
+      }),
+      baseURL: 'https://atrium.test',
+      mailer: async () => {},
+      schema: {},
+    }).organizationHooks;
+
+    const target = { userId: 'user-2', organizationId: workspaceId };
+    const organization = { id: workspaceId };
+
+    await hooks.beforeUpdateMemberRole({ member: target, newRole: 'admin', organization });
+    store.committed = 'admin';
+    await hooks.afterUpdateMemberRole({ member: { ...target, role: 'admin' }, organization });
+
+    expect(store.rooms).toBe('admin');
+  });
+
+  /**
+   * Catches: changing `lowerOf` to prefer the argument over the committed value
+   * (i.e. treating `atMost` as an instruction rather than a ceiling). A demotion
+   * hook that arrives after a *further* demotion already committed must not walk
+   * the rooms back up.
+   */
+  it('never raises the rooms through the pre-write ceiling', () => {
+    expect(lowerOf('admin', 'member')).toBe('member');
+    expect(lowerOf('member', 'admin')).toBe('member');
+    expect(lowerOf('owner', 'admin')).toBe('admin');
+    expect(lowerOf('member', 'member')).toBe('member');
+    // An unreadable role on either side wins, because everything else in this
+    // package resolves "I cannot read this" downward.
+    expect(lowerOf('billing,admin', 'owner')).toBe('billing,admin');
+    expect(lowerOf('owner', 'root')).toBe('root');
   });
 
   it('ranks the three roles the way the rest of the system does', () => {
@@ -345,8 +471,10 @@ describe('afterCreateInvitation — the time-of-check/time-of-use compensation',
     organization: { id: workspaceId },
   };
 
+  const voided = async () => ({ outcome: 'voided' }) as const;
+
   it('voids an invitation whose inviter was demoted mid-flight', async () => {
-    const voidInvitation = vi.fn(async () => true);
+    const voidInvitation = vi.fn(voided);
     const hooks = optionsWith(racingPorts('member', { voidInvitation })).organizationHooks;
 
     // The check the invitation was minted under: at this instant it passes.
@@ -360,7 +488,7 @@ describe('afterCreateInvitation — the time-of-check/time-of-use compensation',
   });
 
   it('voids one whose inviter was removed from the workspace entirely', async () => {
-    const voidInvitation = vi.fn(async () => true);
+    const voidInvitation = vi.fn(voided);
     const hooks = optionsWith(racingPorts(null, { voidInvitation })).organizationHooks;
 
     await expect(hooks.beforeCreateInvitation(invitation('admin'))).resolves.toBeUndefined();
@@ -371,7 +499,7 @@ describe('afterCreateInvitation — the time-of-check/time-of-use compensation',
   });
 
   it('leaves an invitation alone when nothing changed underneath it', async () => {
-    const voidInvitation = vi.fn(async () => true);
+    const voidInvitation = vi.fn(voided);
     const hooks = optionsWith(racingPorts('admin', { voidInvitation })).organizationHooks;
 
     await expect(hooks.beforeCreateInvitation(invitation('admin'))).resolves.toBeUndefined();
@@ -381,7 +509,7 @@ describe('afterCreateInvitation — the time-of-check/time-of-use compensation',
 
   it('voids when the inviter is demoted below the role they handed out', async () => {
     // owner → admin is still an inviter, but not one who may mint an owner.
-    const voidInvitation = vi.fn(async () => true);
+    const voidInvitation = vi.fn(voided);
     const hooks = optionsWith(
       ports({
         memberRole: (() => {
@@ -420,17 +548,132 @@ describe('afterCreateInvitation — the time-of-check/time-of-use compensation',
     });
   });
 
-  it('still refuses the request when the row had already moved out of pending', async () => {
-    // Nothing to void — accepted a millisecond earlier, say. The caller is told
-    // no either way; the log is what carries the difference.
+  it('still refuses the request when the invitation had vanished entirely', async () => {
+    // Nothing to void and nothing granted. The caller is told no either way;
+    // the log is what carries the difference.
     const hooks = optionsWith(
-      racingPorts('member', { voidInvitation: async () => false }),
+      racingPorts('member', { voidInvitation: async () => ({ outcome: 'missing' }) }),
     ).organizationHooks;
 
     await expect(hooks.beforeCreateInvitation(invitation('admin'))).resolves.toBeUndefined();
     await expect(hooks.afterCreateInvitation(created)).rejects.toMatchObject({
       status: 'FORBIDDEN',
     });
+  });
+
+  /**
+   * Major finding 5 from round 3's gauntlet: the acceptance that beats the void.
+   *
+   * `voidInvitation` only ever moved a `pending` row, so the one ordering that
+   * costs something — created, inviter demoted, invitee accepts, compensation
+   * arrives — hit nothing, returned `false`, and threw a FORBIDDEN at the
+   * inviter while leaving an over-privileged member and their room rows exactly
+   * where the acceptance put them. Compensating the *pending row* is not
+   * compensating the *state*.
+   *
+   * Catches: deleting the `outcome === 'accepted'` branch from
+   * `afterCreateInvitation`, or collapsing `InvitationVoidOutcome` back to a
+   * boolean — with either, `revokeAcceptedInvitation` is never called and this
+   * fails on the first assertion.
+   */
+  it('undoes the membership when the invitation was accepted before it could be voided', async () => {
+    const revokeAcceptedInvitation = vi.fn(async () => ({ removed: true, rooms: 2 }));
+    const hooks = optionsWith(
+      racingPorts('member', {
+        voidInvitation: async () => ({ outcome: 'accepted', email: 'grace@example.com' }),
+        revokeAcceptedInvitation,
+      }),
+    ).organizationHooks;
+
+    await expect(hooks.beforeCreateInvitation(invitation('admin'))).resolves.toBeUndefined();
+    await expect(hooks.afterCreateInvitation(created)).rejects.toMatchObject({
+      status: 'FORBIDDEN',
+    });
+
+    expect(revokeAcceptedInvitation).toHaveBeenCalledWith({
+      workspaceId,
+      email: 'grace@example.com',
+    });
+  });
+
+  /**
+   * Catches: swallowing an error from `revokeAcceptedInvitation` (a bare
+   * `.catch(() => {})`, or letting the FORBIDDEN below run anyway). An
+   * over-privileged member who could not be removed is a different failure from
+   * "your permission changed", and telling the inviter the second one hides the
+   * first.
+   */
+  it('says so loudly when the acceptance could not be undone', async () => {
+    const hooks = optionsWith(
+      racingPorts('member', {
+        voidInvitation: async () => ({ outcome: 'accepted', email: 'grace@example.com' }),
+        revokeAcceptedInvitation: async () => {
+          throw new Error('database is on fire');
+        },
+      }),
+    ).organizationHooks;
+
+    await expect(hooks.beforeCreateInvitation(invitation('admin'))).resolves.toBeUndefined();
+    await expect(hooks.afterCreateInvitation(created)).rejects.toMatchObject({
+      status: 'INTERNAL_SERVER_ERROR',
+    });
+  });
+
+  /**
+   * Major finding 7: `voidInvitation` returning false surfaced a FORBIDDEN to
+   * the inviter with no way to tell whether anything had been done about it.
+   * An already-inert row genuinely needs nothing — and must not drag a
+   * compensation over a member who was never created.
+   *
+   * Catches: compensating on any non-`voided` outcome (e.g. `if (!voided)
+   * revokeAcceptedInvitation(...)`), which would evict somebody on the strength
+   * of a *cancelled* invitation.
+   */
+  it('compensates nothing when the row was already inert', async () => {
+    const revokeAcceptedInvitation = vi.fn(async () => ({ removed: false, rooms: 0 }));
+    const hooks = optionsWith(
+      racingPorts('member', {
+        voidInvitation: async () => ({ outcome: 'already-inert', status: 'canceled' }),
+        revokeAcceptedInvitation,
+      }),
+    ).organizationHooks;
+
+    await expect(hooks.beforeCreateInvitation(invitation('admin'))).resolves.toBeUndefined();
+    await expect(hooks.afterCreateInvitation(created)).rejects.toMatchObject({
+      status: 'FORBIDDEN',
+    });
+    expect(revokeAcceptedInvitation).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Catches: dropping the `logger.error` on the `missing` branch. The inviter
+   * gets the same sentence either way, so the log is the only place the
+   * difference between "cancelled" and "gone" exists at all.
+   */
+  it('records the difference between an inert invitation and a vanished one', async () => {
+    const error = vi.fn();
+    const build = (outcome: OrganizationPorts['voidInvitation']) =>
+      atriumOrganizationOptions({
+        ports: racingPorts('member', { voidInvitation: outcome }),
+        baseURL: 'https://atrium.test',
+        mailer: async () => {},
+        schema: {},
+        logger: { warn: () => {}, error },
+      }).organizationHooks;
+
+    const missing = build(async () => ({ outcome: 'missing' }));
+    await missing.beforeCreateInvitation(invitation('admin'));
+    await expect(missing.afterCreateInvitation(created)).rejects.toThrow();
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('vanished'),
+      expect.objectContaining({ invitationId: 'inv-1' }),
+    );
+
+    error.mockClear();
+    const inert = build(async () => ({ outcome: 'already-inert', status: 'canceled' }));
+    await inert.beforeCreateInvitation(invitation('admin'));
+    await expect(inert.afterCreateInvitation(created)).rejects.toThrow();
+    expect(error).not.toHaveBeenCalled();
   });
 });
 

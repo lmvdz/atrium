@@ -266,8 +266,75 @@ describe('loadEnv — auth and realtime settings', () => {
     expect(env.NODE_ENV).toBe('production');
   });
 
+  /**
+   * Blocking finding 2, half one: the gate has to ask the *parser*.
+   *
+   * Round 3's check was `!source[name]?.trim()` — presence. Every value below is
+   * present, truthy, and refused by `trustedProxyStrategy`, which degrades to
+   * `unconfigured`. So a production process booted, called itself configured,
+   * and ran with `clientIp` returning null for every caller: the exact failure
+   * the gate exists to make loud, reached through the gate itself. grok found it
+   * in round 3's gauntlet. `apps/web/lib/env.ts` has always asked the parser.
+   *
+   * Catches: reverting `assertProductionSafe` to a presence check — every case
+   * here starts passing.
+   */
+  it('refuses a value it cannot parse, not just a missing one', () => {
+    for (const value of ['lots', '-3', '1.5', '0x10', 'one', '3 hops']) {
+      expect(
+        () =>
+          loadEnv({
+            ...PROD,
+            APP_URL: 'https://atrium.example',
+            ATRIUM_TRUSTED_PROXY_HOPS: value,
+          }),
+        value,
+      ).toThrow(/ATRIUM_TRUSTED_PROXY_HOPS/);
+      expect(
+        () =>
+          loadEnv({
+            ...PROD,
+            APP_URL: 'https://atrium.example',
+            ATRIUM_TRUSTED_PROXY_HOPS: value,
+          }),
+        value,
+      ).toThrow(/set but unreadable/);
+    }
+  });
+
+  it('accepts the values that do parse, including a large clamped one', () => {
+    for (const value of ['0', '1', '2', '500']) {
+      expect(() =>
+        loadEnv({
+          ...PROD,
+          APP_URL: 'https://atrium.example',
+          ATRIUM_TRUSTED_PROXY_HOPS: value,
+        }),
+      ).not.toThrow();
+    }
+  });
+
   it('says nothing about it outside production', () => {
     expect(() => loadEnv({ ...DEV })).not.toThrow();
+    // …including for a value production would refuse: development is where
+    // somebody is mid-way through typing one.
+    expect(() => loadEnv({ ...DEV, ATRIUM_TRUSTED_PROXY_HOPS: 'lots' })).not.toThrow();
+  });
+
+  /**
+   * Major finding 4's configuration half. Both bounds exist so the sweep's
+   * tolerance for a dependency that will not answer is finite; neither has an
+   * "off" value, for the same reason `WS_SWEEP_INTERVAL_MS` does not.
+   *
+   * Catches: giving either field a `.optional()` or a zero floor.
+   */
+  it('bounds how long an unverifiable socket is tolerated', () => {
+    expect(loadEnv({ ...DEV }).WS_SWEEP_FAILURE_LIMIT).toBe(3);
+    expect(loadEnv({ ...DEV }).WS_SWEEP_UNVERIFIED_MS).toBe(60_000);
+    expect(loadEnv({ ...DEV, WS_SWEEP_FAILURE_LIMIT: '5' }).WS_SWEEP_FAILURE_LIMIT).toBe(5);
+    expect(loadEnv({ ...DEV, WS_SWEEP_UNVERIFIED_MS: '5000' }).WS_SWEEP_UNVERIFIED_MS).toBe(5_000);
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_FAILURE_LIMIT: '0' })).toThrow();
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_UNVERIFIED_MS: '0' })).toThrow();
   });
 
   it('bounds the idle sweep instead of offering a way to turn it off', () => {

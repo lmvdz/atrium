@@ -1,6 +1,6 @@
 import { callbackOAuth, error, verifyEmail } from 'better-auth/api';
 import { describe, expect, it } from 'vitest';
-import { authBasePath, isMountedAuthPath, mountedAuthRoutes } from '../src/mounted.js';
+import { authBasePath, isMountedAuthPath, mountedAuthRoutes, rawPathname } from '../src/mounted.js';
 
 /**
  * The mounted surface is a deny-by-default allowlist, so the interesting tests
@@ -242,32 +242,150 @@ describe('isMountedAuthPath — path smuggling', () => {
 describe('the table matches what Better Auth actually registers', () => {
   const published = new Map(mountedAuthRoutes.map((route) => [route.path, route]));
 
-  it.each([
-    ['verify-email', verifyEmail],
-    ['error', error],
-    ['oauth callback', callbackOAuth],
-  ])('mirrors the library’s declaration for %s', (_name, endpoint) => {
+  /** The library's own declarations, read out of the installed endpoints. */
+  const declarations = (
+    [
+      ['verify-email', verifyEmail],
+      ['error', error],
+      ['oauth callback', callbackOAuth],
+    ] as const
+  ).map(([name, endpoint]) => {
     const declared = endpoint as unknown as {
       path: string;
       options: { method: string | string[] };
     };
-    const route = published.get(declared.path);
-    expect(route, `no allowlist entry for ${declared.path}`).toBeDefined();
-    const methods = Array.isArray(declared.options.method)
-      ? declared.options.method
-      : [declared.options.method];
-    expect([...(route?.methods ?? [])].sort()).toEqual([...methods].sort());
+    return {
+      name,
+      path: declared.path,
+      methods: Array.isArray(declared.options.method)
+        ? declared.options.method
+        : [declared.options.method],
+    };
+  });
+
+  it.each(declarations.map((d) => [d.name, d] as const))(
+    'mirrors the library’s declaration for %s',
+    (_name, declared) => {
+      const route = published.get(declared.path);
+      expect(route, `no allowlist entry for ${declared.path}`).toBeDefined();
+      expect([...(route?.methods ?? [])].sort()).toEqual([...declared.methods].sort());
+    },
+  );
+
+  /**
+   * The other direction, which round 3 left open.
+   *
+   * Round 3 checked library → table: every endpoint we publish has an entry. It
+   * did not check table → library, so a spurious fourth entry — say
+   * `/organization/invite-member`, added by a future widening and never
+   * reviewed — passed every assertion in this file while making the guard admit
+   * an endpoint nobody meant to publish. Set equality is the check; the length
+   * bound below is a comment by comparison.
+   *
+   * Catches: adding any entry to `mountedAuthRoutes` that does not correspond
+   * to one of the three installed endpoints, in exactly the way an accidental
+   * widening would.
+   */
+  it('publishes nothing the library did not declare', () => {
+    expect([...published.keys()].sort()).toEqual(declarations.map((d) => d.path).sort());
+    expect(mountedAuthRoutes).toHaveLength(declarations.length);
+  });
+
+  /**
+   * …and the same check where it bites: a spurious entry must not merely be
+   * *listed*, it must not be *reachable*. Deleting the set-equality assertion
+   * above without this one would leave the guard's behaviour untested.
+   */
+  it('refuses a path that only a spurious entry could admit', () => {
+    for (const path of [
+      '/api/auth/organization/invite-member',
+      '/api/auth/sign-in/email',
+      '/api/auth/oauth2/callback/github',
+      '/api/auth/list-sessions',
+    ]) {
+      for (const method of [GET, POST]) {
+        expect(isMountedAuthPath(path, method), `${method} ${path}`).toBe(false);
+      }
+    }
   });
 
   it('is short, and every entry is a sub-path of the base', () => {
     expect(authBasePath).toBe('/api/auth');
     for (const route of mountedAuthRoutes) expect(route.path.startsWith('/')).toBe(true);
-    // Deny-by-default only means something if the list stays reviewable.
-    expect(mountedAuthRoutes.length).toBeLessThanOrEqual(4);
   });
 
   it('does not publish the generic-oauth callback, which no installed plugin registers', () => {
     expect(published.has('/oauth2/callback/:providerId')).toBe(false);
     expect(isMountedAuthPath('/api/auth/oauth2/callback/github', GET)).toBe(false);
+  });
+});
+
+/**
+ * Where the guard's input comes from, which round 3 got wrong in its receipt and
+ * in its code.
+ *
+ * "The raw pathname, exactly as `new URL(url).pathname` hands it over" — except
+ * `new URL` is a canonicalising parser. It removes dot segments, so the route
+ * handler was asking the guard about a path the client never sent, and the guard
+ * was answering correctly about the wrong question. Nothing was exposed because
+ * Next rejects a request line carrying `..` with a 400 first; that is Next's
+ * behaviour, and depending on a second layer's strictness is the exact thing
+ * `mounted.ts` exists to stop doing.
+ *
+ * Catches: reverting `apps/web/app/api/auth/[...all]/route.ts` to
+ * `new URL(request.url).pathname` — the first assertion below is what that
+ * change makes false.
+ */
+describe('rawPathname — the path as sent, not as a URL parser would rather have it', () => {
+  it('does not resolve dot segments, which is the whole point', () => {
+    expect(rawPathname('http://atrium.test/api/auth/organization/../verify-email')).toBe(
+      '/api/auth/organization/../verify-email',
+    );
+    // …and the guard then refuses it, at the guard, for the reason rou3 would.
+    expect(isMountedAuthPath(rawPathname('http://a/api/auth/x/../verify-email'), GET)).toBe(false);
+
+    // The canonicalising alternative, spelled out so the difference is on the
+    // record rather than in a comment.
+    expect(new URL('http://atrium.test/api/auth/organization/../verify-email').pathname).toBe(
+      '/api/auth/verify-email',
+    );
+  });
+
+  it('does not collapse doubled slashes or fold case', () => {
+    expect(rawPathname('http://atrium.test/api/auth//verify-email')).toBe(
+      '/api/auth//verify-email',
+    );
+    expect(rawPathname('http://atrium.test/api/auth/Verify-Email')).toBe('/api/auth/Verify-Email');
+  });
+
+  it('leaves percent-encoding exactly as it arrived', () => {
+    expect(rawPathname('http://atrium.test/api/auth/%2e%2e/verify-email')).toBe(
+      '/api/auth/%2e%2e/verify-email',
+    );
+    expect(rawPathname('http://atrium.test/api/auth/%76erify-email')).toBe(
+      '/api/auth/%76erify-email',
+    );
+  });
+
+  it('stops at the query and the fragment', () => {
+    expect(rawPathname('http://atrium.test/api/auth/verify-email?token=abc')).toBe(
+      '/api/auth/verify-email',
+    );
+    expect(rawPathname('http://atrium.test/api/auth/verify-email#x')).toBe(
+      '/api/auth/verify-email',
+    );
+    expect(rawPathname('/api/auth/verify-email?token=abc')).toBe('/api/auth/verify-email');
+  });
+
+  it('reads a bare authority as the root path', () => {
+    expect(rawPathname('http://atrium.test')).toBe('/');
+    expect(rawPathname('http://atrium.test?x=1')).toBe('/');
+    expect(rawPathname('https://atrium.test:4000')).toBe('/');
+  });
+
+  it('treats something that is already a path as a path', () => {
+    expect(rawPathname('/ws')).toBe('/ws');
+    expect(rawPathname('/ws/../ws')).toBe('/ws/../ws');
+    expect(rawPathname('')).toBe('');
   });
 });

@@ -1,10 +1,13 @@
+import { getIp } from 'better-auth/api';
 import { describe, expect, it } from 'vitest';
-import { ipHeadersFor } from '../src/auth.js';
+import { ipHeadersFor, trustedProxiesFor } from '../src/auth.js';
 import {
   clientIp,
   hasProxyStrategy,
   type ProxyStrategy,
+  parseTrustedProxies,
   trustedProxyStrategy,
+  unresolvedIpKey,
 } from '../src/client-ip.js';
 
 const headers = (values: Record<string, string>) => new Headers(values);
@@ -143,6 +146,237 @@ describe('trustedProxyStrategy', () => {
       kind: 'forwarded',
       hops: 8,
     });
+  });
+
+  /**
+   * Catches: dropping `ATRIUM_TRUSTED_PROXY_CIDRS` from `trustedProxyStrategy`,
+   * or keeping unparseable entries. An entry that is not an address or a CIDR
+   * would otherwise sit in the list matching nothing while making the list
+   * non-empty — which switches the whole read to the trusted-proxy algorithm on
+   * the strength of a typo.
+   */
+  it('reads the proxy addresses and drops the ones that are not addresses', () => {
+    expect(
+      trustedProxyStrategy({
+        ATRIUM_TRUSTED_PROXY_HOPS: '1',
+        ATRIUM_TRUSTED_PROXY_CIDRS: ' 172.28.0.10/32 , not-an-ip, 10.0.0.0/8 ,, fd00::/8 ',
+      }),
+    ).toEqual({
+      kind: 'forwarded',
+      hops: 1,
+      trustedProxies: ['172.28.0.10/32', '10.0.0.0/8', 'fd00::/8'],
+    });
+
+    // Every entry unparseable is the same as none: the hop count still holds,
+    // and the key is absent rather than an empty array pretending to be a list.
+    expect(
+      trustedProxyStrategy({
+        ATRIUM_TRUSTED_PROXY_HOPS: '1',
+        ATRIUM_TRUSTED_PROXY_CIDRS: 'nonsense, 300.1.2.3, 10.0.0.0/64',
+      }),
+    ).toEqual({ kind: 'forwarded', hops: 1 });
+
+    // …and it is only read behind a proxy. `hops=0` has no chain to walk.
+    expect(
+      trustedProxyStrategy({
+        ATRIUM_TRUSTED_PROXY_HOPS: '0',
+        ATRIUM_TRUSTED_PROXY_CIDRS: '10.0.0.0/8',
+      }),
+    ).toEqual({ kind: 'socket' });
+  });
+
+  it('parses addresses, CIDRs and IPv6 the way Better Auth does', () => {
+    expect(parseTrustedProxies('10.0.0.1')).toEqual(['10.0.0.1']);
+    expect(parseTrustedProxies('10.0.0.0/8,192.168.0.0/16')).toEqual([
+      '10.0.0.0/8',
+      '192.168.0.0/16',
+    ]);
+    expect(parseTrustedProxies('::1,2001:db8::/32')).toEqual(['::1', '2001:db8::/32']);
+    expect(parseTrustedProxies('10.0.0.0/33')).toEqual([]);
+    expect(parseTrustedProxies('10.0.0.0/x')).toEqual([]);
+    expect(parseTrustedProxies(undefined)).toEqual([]);
+  });
+});
+
+/**
+ * The trusted-proxy read, which is Better Auth's rule run on our side.
+ *
+ * Catches: deleting the `trustedProxies` branch from `clientIp` (it would fall
+ * back to hop counting, which gives a different answer the moment a chain is
+ * longer or shorter than the count says).
+ */
+describe('clientIp with the proxies named rather than counted', () => {
+  const named = (...trustedProxies: string[]): ProxyStrategy => ({
+    kind: 'forwarded',
+    hops: 1,
+    trustedProxies,
+  });
+
+  it('takes the first hop from the right that is not one of ours', () => {
+    expect(
+      clientIp(headers({ 'x-forwarded-for': '203.0.113.5, 10.0.0.7, 10.0.0.8' }), {
+        strategy: named('10.0.0.0/8'),
+      }),
+    ).toBe('203.0.113.5');
+  });
+
+  it('is not fooled by a caller prefixing an address of its own', () => {
+    // The right-hand entry is the one our own edge wrote, whatever the caller
+    // put in front of it.
+    expect(
+      clientIp(headers({ 'x-forwarded-for': '9.9.9.9, 203.0.113.5' }), {
+        strategy: named('10.0.0.0/8'),
+      }),
+    ).toBe('203.0.113.5');
+  });
+
+  it('reads nothing from a chain that is all ours, or one it cannot parse', () => {
+    // Every hop trusted means the caller never appears in the chain at all.
+    expect(
+      clientIp(headers({ 'x-forwarded-for': '10.0.0.7, 10.0.0.8' }), {
+        strategy: named('10.0.0.0/8'),
+      }),
+    ).toBeNull();
+    // An unreadable entry aborts the header — but only once the walk reaches
+    // it. The rightmost entry is the one our edge wrote, so a caller cannot
+    // blind the read by prefixing junk; it has to be junk we would have had to
+    // look at. Better Auth stops at exactly the same point (see the agreement
+    // suite below), which is why this is spelled out rather than rounded off.
+    expect(
+      clientIp(headers({ 'x-forwarded-for': 'not-an-address, 203.0.113.5' }), {
+        strategy: named('192.0.2.0/24'),
+      }),
+    ).toBe('203.0.113.5');
+    expect(
+      clientIp(headers({ 'x-forwarded-for': '203.0.113.5, not-an-address' }), {
+        strategy: named('192.0.2.0/24'),
+      }),
+    ).toBeNull();
+  });
+
+  it('matches IPv6 proxies by prefix, and collapses the mapped form', () => {
+    expect(
+      clientIp(headers({ 'x-forwarded-for': '2001:db8::9, fd00::1' }), {
+        strategy: named('fd00::/8'),
+      }),
+    ).toBe('2001:db8::9');
+    expect(
+      clientIp(headers({ 'x-forwarded-for': '::ffff:203.0.113.5, 10.0.0.7' }), {
+        strategy: named('10.0.0.0/8'),
+      }),
+    ).toBe('203.0.113.5');
+  });
+});
+
+/**
+ * The claim that the two limiters bucket a caller the same way, asserted
+ * against the library rather than against a comment.
+ *
+ * Round 3 handed Better Auth the header *names* and stopped there, so the two
+ * agreed about where to look and not about what to believe. This calls the
+ * library's own `getIp` with exactly the `advanced.ipAddress` block
+ * `createAtriumAuth` builds, and compares it to ours on the same chain. If a
+ * library upgrade changes `getIp`'s rule, this fails here — which is the point.
+ *
+ * Catches: dropping `trustedProxies` from the `advanced.ipAddress` block in
+ * `auth.ts` (the prefixed-chain case then diverges: ours reads the real caller,
+ * the library reads nothing).
+ */
+describe('Better Auth resolves the same caller from the same configuration', () => {
+  /**
+   * The one thing that has to be subtracted before the two can be compared.
+   *
+   * `getIp` ends with `if (isTest() || isDevelopment()) return LOCALHOST_IP` —
+   * and `NODE_ENV` is read into a module-level constant when `@better-auth/core`
+   * is imported, so a test process cannot stub its way out of it. That fallback
+   * fires exactly when nothing resolved, so "the library returned the fallback"
+   * and "the library resolved nothing" are the same event here. It is subtracted
+   * rather than ignored: the assertion below pins the fallback's existence, so a
+   * library upgrade that removes it turns this into a visible failure instead of
+   * a comparison that quietly changed meaning. No chain in this file resolves to
+   * 127.0.0.1 by any other route.
+   */
+  const localhostUnderTest = '127.0.0.1';
+
+  function advanced(strategy: ProxyStrategy) {
+    return {
+      advanced: {
+        ipAddress: {
+          ipAddressHeaders: ipHeadersFor(strategy),
+          trustedProxies: trustedProxiesFor(strategy),
+        },
+      },
+    };
+  }
+
+  function libraryIp(strategy: ProxyStrategy, chain: string): string | null {
+    const resolved = getIp(headers({ 'x-forwarded-for': chain }), advanced(strategy));
+    return resolved === localhostUnderTest ? null : resolved;
+  }
+
+  it('still has the development fallback this comparison subtracts', () => {
+    expect(getIp(headers({}), advanced(unconfigured))).toBe(localhostUnderTest);
+  });
+
+  const chains = [
+    '203.0.113.5',
+    '9.9.9.9, 203.0.113.5',
+    '9.9.9.9, 198.51.100.1, 203.0.113.5',
+    '10.0.0.7',
+    'not-an-address, 203.0.113.5',
+    '203.0.113.5, not-an-address',
+    '192.0.2.9, 203.0.113.5, 192.0.2.10',
+  ];
+
+  it.each(chains)('agrees on "%s" with the proxy named', (chain) => {
+    const strategy: ProxyStrategy = {
+      kind: 'forwarded',
+      hops: 1,
+      trustedProxies: ['192.0.2.0/24'],
+    };
+    expect(clientIp(headers({ 'x-forwarded-for': chain }), { strategy })).toBe(
+      libraryIp(strategy, chain),
+    );
+  });
+
+  it('hands the library no headers at all when nothing may be believed', () => {
+    for (const strategy of [unconfigured, socketOnly]) {
+      expect(ipHeadersFor(strategy)).toEqual([]);
+      expect(trustedProxiesFor(strategy)).toEqual([]);
+      // With no header list, `getIp` resolves nothing rather than a spoofable
+      // address — and neither do we.
+      expect(libraryIp(strategy, '9.9.9.9')).toBeNull();
+      expect(clientIp(headers({ 'x-forwarded-for': '9.9.9.9' }), { strategy })).toBeNull();
+    }
+  });
+
+  /**
+   * Without `trustedProxies` the two diverge on a prefixed chain — ours reads
+   * the real caller, the library reads nothing and buckets them with everybody
+   * else it could not place. Coarser rather than laxer, and still two answers.
+   * This is what configuring it buys, said as a difference rather than a claim.
+   *
+   * Catches: dropping `trustedProxies` from `auth.ts` — the divergence below
+   * becomes the *configured* behaviour and the agreement suite above fails.
+   */
+  it('would disagree on a prefixed chain if the proxies were not named', () => {
+    const counted: ProxyStrategy = { kind: 'forwarded', hops: 1 };
+    const chain = '9.9.9.9, 203.0.113.5';
+    expect(clientIp(headers({ 'x-forwarded-for': chain }), { strategy: counted })).toBe(
+      '203.0.113.5',
+    );
+    expect(libraryIp(counted, chain)).toBeNull();
+  });
+
+  /**
+   * The property that actually matters, and the one round 3 broke: an
+   * unresolvable caller must land in a *bucket*, not outside the limiter.
+   * Better Auth does this itself (`NO_TRUSTED_IP_KEY` in its rate limiter);
+   * `unresolvedIpKey` is the same decision on our side, and
+   * `apps/web/app/(auth)/actions.ts` is where it is spent.
+   */
+  it('names the shared bucket an unresolvable caller falls into', () => {
+    expect(unresolvedIpKey).toBe('ip:unresolved');
   });
 });
 

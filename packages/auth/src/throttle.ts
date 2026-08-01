@@ -26,6 +26,8 @@
  * would otherwise be an unthrottled way round this file.
  */
 
+import { unresolvedIpKey } from './client-ip.js';
+
 export interface ThrottleOptions {
   /** Attempts allowed inside the window. */
   limit: number;
@@ -63,6 +65,36 @@ export interface Throttle {
   /** Forgets several keys. Mirrors `attemptAll`. */
   resetAll: (keys: readonly (string | null | undefined)[]) => void;
   readonly size: number;
+}
+
+/**
+ * One attempt, recorded against a named key **and** against the caller's
+ * address. False means refused.
+ *
+ * This lives here rather than in the Server Action that calls it because of what
+ * round 3's gauntlet found in that Server Action: `const byIp = ip === null ?
+ * true : ipLimiters[kind].attempt(ip)`. A null address — which is every caller
+ * on the Server Action path under `ATRIUM_TRUSTED_PROXY_HOPS=0`, i.e. every
+ * caller in the deployment round 3 shipped — was not merely unmeasured, it was
+ * *allowed*. The IP dimension was a pass.
+ *
+ * A rate limiter has three honest answers to "who is this?", not two: this
+ * caller, that caller, and one I cannot tell apart from the others. The third
+ * one is a bucket (`unresolvedIpKey`), which is what Better Auth's own limiter
+ * does with the same question (`NO_TRUSTED_IP_KEY`), so the two degrade the same
+ * way. Coarse, global, and never a bypass.
+ *
+ * Both counters are always recorded, even when the first already refuses:
+ * otherwise tripping the cheap dimension would shield the expensive one.
+ */
+export function attemptWithIp(
+  limiters: { byKey: Throttle; byIp: Throttle },
+  key: string,
+  ip: string | null,
+): boolean {
+  const byKey = limiters.byKey.attempt(key);
+  const byIp = limiters.byIp.attempt(ip ?? unresolvedIpKey);
+  return byKey && byIp;
 }
 
 export function createThrottle(options: ThrottleOptions): Throttle {

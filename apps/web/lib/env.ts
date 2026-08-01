@@ -75,9 +75,10 @@ export function databaseUrl(): string {
  *
  * Required in production, exactly like `APP_URL`, and for the same reason: an
  * unset value is not a safe default, it is a limiter running on one dimension
- * while looking like it has two. `ATRIUM_TRUSTED_PROXY_HOPS=0` is a valid answer
- * ("nothing is in front of me") and is what the compose stack sets; `1` is the
- * answer behind a reverse proxy, which is also where TLS gets terminated.
+ * while looking like it has two. This asks the *parser*, not whether the
+ * variable is present — `hops=lots` is an answer nobody can act on, and
+ * `apps/server/src/env.ts` now asks the same question the same way after round
+ * 3 shipped a presence-only gate there.
  *
  * Thrown from here rather than at module load for the reason the whole file is
  * lazy: `next build` imports every route module, and a build machine must not
@@ -88,11 +89,16 @@ export function databaseUrl(): string {
  * way to see it — `headers()` is the whole request, and Next fills
  * `x-forwarded-for` from the peer *only when the client sent none*, so a present
  * value is either the peer or entirely attacker-written with no way to tell.
- * Reading it would be the forged dimension `client-ip.ts` refuses. So on this
- * path `hops=0` means the IP dimension is absent and the per-address limiter
- * carries the load; `hops=1` behind a proxy that appends is what makes it real.
- * `apps/server`'s WebSocket upgrade has a genuine socket address and does not
- * share this limitation.
+ * Reading it would be the forged dimension `client-ip.ts` refuses.
+ *
+ * So `hops=0` on this path means no address is resolvable — and round 3's
+ * mistake was letting that mean *no limit*. It does not any more: an
+ * unresolvable caller is counted against one shared bucket (`unresolvedIpKey`,
+ * see `app/(auth)/actions.ts`), so the dimension degrades from per-address to
+ * one global cap instead of degrading to nothing. `docker-compose.yml` puts a
+ * reverse proxy in front of this process and sets `hops=1` precisely so the
+ * shipped deployment gets the per-address version. `apps/server`'s WebSocket
+ * upgrade has a genuine socket address and never had this limitation.
  */
 export function proxyStrategy(): ProxyStrategy {
   const strategy = trustedProxyStrategy(process.env);

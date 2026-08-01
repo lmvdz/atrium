@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createThrottle } from '../src/throttle.js';
+import { unresolvedIpKey } from '../src/client-ip.js';
+import { attemptWithIp, createThrottle } from '../src/throttle.js';
 
 function clock(start = 1_000_000) {
   let value = start;
@@ -185,5 +186,65 @@ describe('several dimensions at once', () => {
     throttle.attemptAll(['email:ada', 'ip:1.2.3.4']);
     throttle.resetAll(['email:ada', 'ip:1.2.3.4']);
     expect(throttle.size).toBe(0);
+  });
+});
+
+/**
+ * Blocking finding 2, half two: what an unresolvable caller costs.
+ *
+ * Round 3's Server Action read `const byIp = ip === null ? true : …`. Under the
+ * deployment it shipped — `ATRIUM_TRUSTED_PROXY_HOPS=0`, where a Next Server
+ * Action has no peer address to see — that is *every* caller, so the IP
+ * dimension was not absent, it was a pass. Both critics found it, from opposite
+ * ends.
+ *
+ * The decision lives in this package rather than in the `'use server'` module
+ * precisely so these assertions can exist at all.
+ */
+describe('attemptWithIp — a caller nobody can place is counted, not excused', () => {
+  const pair = (limit: number) => ({
+    byKey: createThrottle({ limit, windowMs: 60_000 }),
+    byIp: createThrottle({ limit, windowMs: 60_000 }),
+  });
+
+  /**
+   * Catches: reintroducing `ip === null ? true : …` in `attemptWithIp` (or in
+   * `apps/web/app/(auth)/actions.ts`'s `allow`). With that, an unresolvable
+   * caller never touches the address counter and the third attempt succeeds.
+   */
+  it('shares one bucket rather than skipping the dimension', () => {
+    const limiters = pair(2);
+    expect(attemptWithIp(limiters, 'email:ada', null)).toBe(true);
+    expect(attemptWithIp(limiters, 'email:grace', null)).toBe(true);
+    // Two different addresses would each have their own counter. Two callers
+    // nobody can tell apart share one, and it is now spent.
+    expect(attemptWithIp(limiters, 'email:hopper', null)).toBe(false);
+  });
+
+  it('leaves a caller it *can* place with a counter of their own', () => {
+    const limiters = pair(1);
+    expect(attemptWithIp(limiters, 'email:ada', null)).toBe(true);
+    expect(attemptWithIp(limiters, 'email:grace', null)).toBe(false);
+    // …and the shared bucket being spent does not spend anybody else's.
+    expect(attemptWithIp(limiters, 'email:hopper', '203.0.113.5')).toBe(true);
+  });
+
+  it('records the address dimension even when the key dimension already refused', () => {
+    // Catches: short-circuiting (`byKey && limiters.byIp.attempt(...)`), which
+    // would let a caller dodge the address counter by burning the cheaper one.
+    const limiters = pair(1);
+    expect(attemptWithIp(limiters, 'email:ada', '203.0.113.5')).toBe(true);
+    expect(attemptWithIp(limiters, 'email:ada', '198.51.100.7')).toBe(false);
+    // The second address was counted, despite the email having already refused.
+    expect(attemptWithIp(limiters, 'email:grace', '198.51.100.7')).toBe(false);
+  });
+
+  it('buckets an unresolvable caller under a key no address can collide with', () => {
+    // Catches: changing `unresolvedIpKey` to something an X-Forwarded-For could
+    // contain, which would let a caller choose the global bucket — or poison it.
+    expect(unresolvedIpKey).toContain(':');
+    const limiters = pair(1);
+    expect(attemptWithIp(limiters, 'k', null)).toBe(true);
+    expect(attemptWithIp(limiters, 'k2', '203.0.113.5')).toBe(true);
   });
 });

@@ -1,0 +1,49 @@
+# The one process in front of Atrium.
+#
+# It exists for two reasons, and the second is the one that made it a file
+# rather than a paragraph in the README:
+#
+#  1. TLS terminates here. Point `atrium.example.com` at this host, replace the
+#     `:80` below with the hostname, and Caddy gets a certificate on its own.
+#  2. **It is what makes the rate limiter's IP dimension real.** Both Atrium
+#     processes read the caller's address from `X-Forwarded-For` with
+#     `ATRIUM_TRUSTED_PROXY_HOPS=1` — one proxy, this one, appending the peer
+#     address on the right. Without something in this position the web app has
+#     no address at all: a Next.js Server Action cannot see the socket, and Next
+#     fills `x-forwarded-for` from the peer only when the client sent none, so a
+#     present value there is unfalsifiable. Round 3 of issue #26 shipped exactly
+#     that gap — `hops=0`, a null address, and a per-address limiter that
+#     counted nobody.
+#
+# `reverse_proxy` sets `X-Forwarded-For` by appending the immediate peer, which
+# is the property the hop count depends on: the rightmost entry is written by
+# this process and cannot be forged by a client. A client that sends its own
+# `X-Forwarded-For` gets it prefixed, not honoured — `1.2.3.4, <real peer>` —
+# and both limiters count the real peer.
+
+{
+	# Access logs go to the container's stdout with the rest of the stack.
+	admin off
+}
+
+:80 {
+	log {
+		output stdout
+		format console
+	}
+
+	# The realtime server. WebSocket upgrades pass through untouched; `/health`
+	# is here too so an external checker can reach it through the same entry.
+	handle /ws* {
+		reverse_proxy server:4000
+	}
+	handle /health {
+		reverse_proxy server:4000
+	}
+
+	# Everything else is the Next.js app: pages, Server Actions, the auth
+	# catch-all route.
+	handle {
+		reverse_proxy app:3000
+	}
+}
