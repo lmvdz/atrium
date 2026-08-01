@@ -150,7 +150,13 @@ services:
       NODE_ENV: production
       PORT: 3000
       HOSTNAME: 0.0.0.0
-      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:4000/ws}
+      # Read per request by app/api/runtime-config/route.ts, NOT inlined into
+      # the bundle — that is the difference from the NEXT_PUBLIC_WS_URL this
+      # replaces (#19 gauntlet → #22). Leave it unset behind a reverse proxy
+      # that forwards /ws and the browser derives a same-origin URL itself,
+      # which is the arrangement to prefer: nothing to configure wrong, and
+      # wss: follows https: automatically.
+      ATRIUM_WS_URL: ${ATRIUM_WS_URL:-ws://localhost:4000/ws}
     ports:
       - '${WEB_PORT:-3000}:3000'
 
