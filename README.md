@@ -15,7 +15,7 @@ their own responsibilities substantially faster than in Slack?
 Requires Node 22.12+, pnpm 10, and Docker.
 
 ```bash
-cp .env.example .env      # defaults work as-is
+cp .env.example .env      # required first — compose has no default secrets
 pnpm install
 pnpm infra:up             # postgres:16 + minio, via docker compose
 pnpm db:migrate           # apply the drizzle migrations
@@ -31,6 +31,27 @@ docker compose up --build   # postgres, minio, migrate, server, app
 ```
 
 Same compose file locally and on the VPS (issue #18) — only `.env` differs.
+
+### The credentials in this repo are development-only
+
+`.env.example` ships postgres `atrium:atrium` and MinIO
+`atrium:atrium-dev-secret`. **They are development credentials, published in a
+public repository.** They exist so a laptop boots with no setup, and for nothing
+else. Never run this stack on a public VPS with those values.
+
+Two things enforce that rather than merely asking:
+
+- Every secret in `docker-compose.yml` is `${VAR:?...}` with **no default**.
+  Compose refuses to start when one is unset instead of reusing a known
+  password. That is why `cp .env.example .env` is the first step above.
+- `apps/server/src/env.ts` applies its dev fallback for `S3_ACCESS_KEY_ID` /
+  `S3_SECRET_ACCESS_KEY` **only** when `NODE_ENV=development`. The `server`
+  service runs `NODE_ENV=production`, so a deployment missing them fails at
+  boot with a named error rather than reaching for a public secret.
+
+Before exposing anything: set real values in `.env` (or the deployment's own
+secret store), and do not publish 5432 / 9000 / 9001 at all unless you mean to.
+Only 3000 and 4000 need to face the internet.
 
 ## Layout
 
@@ -60,6 +81,19 @@ one of them must say why it needs *this* person. (Issue #3.)
 are canonically ordered by `(at, id)`, a malformed event is recorded in
 `state.issues` rather than thrown, and the same log always serializes
 byte-identically.
+
+The reducer is also where the trust boundary is enforced, not merely described.
+A recorded proposal is always `proposed` — an interpreter cannot hand itself an
+`accepted` one. An acceptance that cites a proposal must cite one that exists,
+is still open, has not already been spent on another object, and matches the
+object's type; an object with no proposal at all stays legal, because a human
+writing a decision directly is not an interpretation.
+
+Live folding gets the same guarantee. `reduce([next], state)` cannot re-sort
+what it has already folded, so `CoreState.watermarks` holds each room's last
+consumed `(at, id)` and an event arriving before it is refused into
+`state.issues` rather than applied out of order. A live fold and a full replay
+of the same accepted sequence therefore land on the same bytes.
 
 ## Scripts
 

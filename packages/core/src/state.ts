@@ -38,10 +38,25 @@ export interface CorrectionRecord {
   at: Timestamp;
 }
 
-/** An event the reducer could not apply. Replay is total: it records, never throws. */
+/**
+ * An event the reducer refused, or applied only after coercing it. Replay is
+ * total: it records, never throws. Most issues mean "the event changed
+ * nothing"; the exception is a proposal recorded with a pre-decided status,
+ * which is applied with the status forced back to `proposed` and the coercion
+ * noted here.
+ */
 export interface ReducerIssue {
   eventId: Id;
   reason: string;
+}
+
+/**
+ * A position in the canonical event order — the `(at, id)` sort key `reduce`
+ * folds by. Comparing two cursors is the same comparison `orderEvents` uses.
+ */
+export interface EventCursor {
+  at: Timestamp;
+  id: Id;
 }
 
 export interface CoreState {
@@ -52,6 +67,13 @@ export interface CoreState {
   issues: ReducerIssue[];
   /** Event ids in the order they were applied. */
   appliedEventIds: Id[];
+  /**
+   * Per-room high-water mark: the canonical position of the last event this
+   * room's state consumed. An event that sorts before its room's watermark is
+   * refused (it lands in `issues`), which is what makes an incremental fold
+   * indistinguishable from a full replay of the same log. See `reduce`.
+   */
+  watermarks: Record<Id, EventCursor>;
 }
 
 export function emptyState(): CoreState {
@@ -62,6 +84,7 @@ export function emptyState(): CoreState {
     corrections: [],
     issues: [],
     appliedEventIds: [],
+    watermarks: {},
   };
 }
 
@@ -71,7 +94,16 @@ export function emptyState(): CoreState {
  * compare these strings rather than relying on key insertion order.
  */
 export function serializeState(state: CoreState): string {
-  return JSON.stringify(canonicalize(state));
+  return canonicalJson(state);
+}
+
+/**
+ * Canonical JSON for any value: object keys sorted recursively. Used both to
+ * serialize state and to compare two payloads for real equality — key order is
+ * never a difference.
+ */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
 }
 
 function canonicalize(value: unknown): unknown {

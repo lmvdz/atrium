@@ -18,7 +18,18 @@ function loadDotEnv(): void {
   }
 }
 
-const EnvSchema = z.object({
+/**
+ * The MinIO credentials `docker-compose.yml` and `.env.example` ship with.
+ * They exist so `pnpm infra:up && pnpm dev` works on a laptop with no setup —
+ * and for no other reason. They are applied only when `NODE_ENV=development`;
+ * anywhere else the real values must be supplied or the process refuses to
+ * start. A published Atrium that boots on `atrium-dev-secret` is a public
+ * object store.
+ */
+const DEV_S3_ACCESS_KEY_ID = 'atrium';
+const DEV_S3_SECRET_ACCESS_KEY = 'atrium-dev-secret';
+
+const RawEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
@@ -31,7 +42,44 @@ const EnvSchema = z.object({
   INTERPRET_WORKER_CONCURRENCY: z.coerce.number().int().positive().max(50).default(2),
 
   S3_ENDPOINT: z.string().default('http://localhost:9000'),
+  S3_REGION: z.string().default('us-east-1'),
   S3_BUCKET: z.string().default('atrium-attachments'),
+  S3_FORCE_PATH_STYLE: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
+  /**
+   * No default at the field level on purpose — a development-only fallback is
+   * applied below, so an unset credential outside development is a hard error
+   * rather than a silent `undefined` handed to the S3 client.
+   */
+  S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+  S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+});
+
+const EnvSchema = RawEnvSchema.transform((raw, ctx) => {
+  const development = raw.NODE_ENV === 'development';
+
+  const required = (key: string, value: string | undefined, devFallback: string): string => {
+    if (value) return value;
+    if (development) return devFallback;
+    ctx.addIssue({
+      code: 'custom',
+      path: [key],
+      message: `${key} is required when NODE_ENV=${raw.NODE_ENV} — the compose/.env.example value is a development credential and is never applied outside development`,
+    });
+    return '';
+  };
+
+  return {
+    ...raw,
+    S3_ACCESS_KEY_ID: required('S3_ACCESS_KEY_ID', raw.S3_ACCESS_KEY_ID, DEV_S3_ACCESS_KEY_ID),
+    S3_SECRET_ACCESS_KEY: required(
+      'S3_SECRET_ACCESS_KEY',
+      raw.S3_SECRET_ACCESS_KEY,
+      DEV_S3_SECRET_ACCESS_KEY,
+    ),
+  };
 });
 
 export type Env = z.infer<typeof EnvSchema>;

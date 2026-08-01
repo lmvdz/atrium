@@ -4,6 +4,19 @@
 #
 #   docker compose up -d postgres minio   # infra only, then `pnpm dev`
 #   docker compose up --build             # the whole stack in containers
+#
+# ┌─ CREDENTIALS ──────────────────────────────────────────────────────────────
+# │ The values in `.env.example` — postgres `atrium:atrium`, MinIO
+# │ `atrium:atrium-dev-secret` — are DEVELOPMENT CREDENTIALS. They exist so a
+# │ laptop boots with no setup. They are published in this repository, so
+# │ anyone can read them.
+# │
+# │ Never run this file on a public VPS with those values. Every secret below
+# │ is written `${VAR:?...}`, with no default: compose refuses to start rather
+# │ than quietly reusing a known password. Set real values in `.env` (or the
+# │ deployment's own secret store) before exposing any port to the internet,
+# │ and do not publish 5432/9000/9001 at all unless you mean to.
+# └────────────────────────────────────────────────────────────────────────────
 
 name: atrium
 
@@ -13,7 +26,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-atrium}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-atrium}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}
       POSTGRES_DB: ${POSTGRES_DB:-atrium}
     ports:
       - '${POSTGRES_PORT:-5432}:5432'
@@ -30,14 +43,20 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-atrium}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-atrium-dev-secret}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header}
     ports:
       - '${MINIO_PORT:-9000}:9000'
       - '${MINIO_CONSOLE_PORT:-9001}:9001'
     volumes:
       - minio-data:/data
     healthcheck:
+      # `mc` ships inside the minio server image (verified against
+      # RELEASE.2025-09-07T16-13-09Z: /usr/bin/mc, with a preconfigured `local`
+      # alias), and this is MinIO's own documented healthcheck. If a future
+      # image ever drops it, `curl -fsS http://localhost:9000/minio/health/live`
+      # is the equivalent — curl is present too. minio-init and, through it, the
+      # server both gate on this check passing.
       test: ['CMD', 'mc', 'ready', 'local']
       interval: 5s
       timeout: 5s
@@ -51,7 +70,7 @@ services:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set atrium http://minio:9000 ${S3_ACCESS_KEY_ID:-atrium} ${S3_SECRET_ACCESS_KEY:-atrium-dev-secret} &&
+      mc alias set atrium http://minio:9000 ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header} ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header} &&
       mc mb --ignore-existing atrium/${S3_BUCKET:-atrium-attachments} &&
       echo 'bucket ready'
       "
@@ -67,7 +86,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:-atrium}@postgres:5432/${POSTGRES_DB:-atrium}
+      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}@postgres:5432/${POSTGRES_DB:-atrium}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: 'no'
 
@@ -88,11 +107,17 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 4000
-      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:-atrium}@postgres:5432/${POSTGRES_DB:-atrium}
+      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}@postgres:5432/${POSTGRES_DB:-atrium}
       WS_HEARTBEAT_INTERVAL_MS: ${WS_HEARTBEAT_INTERVAL_MS:-30000}
       INTERPRET_WORKER_CONCURRENCY: ${INTERPRET_WORKER_CONCURRENCY:-2}
       S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-atrium-attachments}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      # This service runs NODE_ENV=production, so apps/server/src/env.ts requires
+      # both of these — the development fallback does not apply here.
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header}
     ports:
       - '${SERVER_PORT:-4000}:4000'
     healthcheck:
