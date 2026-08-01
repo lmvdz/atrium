@@ -2,6 +2,7 @@ import type {
   Actor,
   AttentionClass,
   AttentionStatus,
+  AttentionSubjectKind,
   ClaimPayload,
   CommitmentPayload,
   AcceptedObjectType as CoreAcceptedObjectType,
@@ -96,6 +97,14 @@ export const attentionClass = pgEnum('attention_class', [
 
 export const attentionStatus = pgEnum('attention_status', ['pending', 'resolved', 'dismissed']);
 
+/**
+ * What an attention item is *about* — @atrium/core's `AttentionSubjectKind`,
+ * routed here from #21. A `needs_decision` item points at a **proposal**: a
+ * decision never auto-accepts, so at the moment somebody has to rule on one
+ * there is no accepted object to point at yet. See `attention_items`.
+ */
+export const attentionSubjectKind = pgEnum('attention_subject_kind', ['object', 'proposal']);
+
 export const correctionAction = pgEnum('correction_action', ['amend', 'retract', 'restore']);
 
 export const interpretationStatus = pgEnum('interpretation_status', [
@@ -182,6 +191,14 @@ export const memberships = pgTable(
      * global mark-all-read. Typed `bigint` to match `core_events.room_seq` —
      * a read cursor that overflows before the log it points into is a bug
      * waiting on a busy room.
+     *
+     * Bounded **above** by the room's head as well as below by zero, and both
+     * ends are the database's job. The lower bound is the check constraint
+     * here; the upper one is cross-table, so it is a trigger in
+     * `drizzle/0003_append_enforcement.sql` — a cursor pointing past the last
+     * event in the room claims to have read history that does not exist, and
+     * the client that trusts it asks `since(room, n)` for a gap it will never
+     * be sent (#22 gauntlet r1, major 5).
      */
     seenSeq: bigint('seen_seq', { mode: 'number' }).notNull().default(0),
   },
@@ -248,7 +265,40 @@ export const memberships = pgTable(
  * `payload` holds the whole event, envelope included, so replay is a `parse`
  * of one column rather than a re-assembly from six; `id`, `type`, `actor` and
  * `occurred_at` are lifted out for indexing and constraints, and check
- * constraints keep the lifted copies honest.
+ * constraints keep the lifted copies honest — by **equality**, not by
+ * existence. A row whose `occurred_at` disagrees with `payload.at` would sort
+ * one way durably and another way on replay, which is the same divergence the
+ * append invariant exists to exclude (#22 gauntlet r1, major 2).
+ *
+ * ## What is NOT in this file, and cannot be
+ *
+ * Drizzle describes tables. Three of this table's rules are procedural and live
+ * in `drizzle/0003_append_enforcement.sql`, which is the authority on them:
+ *
+ *  - **`atrium_append_core_event(...)` is the only way a row gets here.** A
+ *    `BEFORE INSERT` trigger reads its own `PG_CONTEXT` call stack and refuses
+ *    any insert not made from inside that function. #22's r1 gauntlet found the
+ *    advisory lock to be *cooperative* — a migration, a seed script or an admin
+ *    at a psql prompt could bypass canonical minting entirely — and a call-stack
+ *    assertion is what makes it structural. It holds against the table owner and
+ *    against a superuser, neither of whom a `REVOKE` binds.
+ *  - **The advisory lock is asserted, not assumed.** The function takes it and
+ *    the trigger re-checks `pg_locks` before letting the row through.
+ *  - **Append-only is enforced.** `UPDATE`, `DELETE` and `TRUNCATE` on this
+ *    table raise. "Nothing here is ever updated or deleted" used to be a
+ *    sentence in a comment; it is now a trigger.
+ *
+ * ## `seq` may gap; `room_seq` may not
+ *
+ * `seq` is a `bigserial`, and a sequence does not roll back. A transaction that
+ * takes `seq = n` and then aborts — a rejected event, a failed projection, a
+ * constraint violation — leaves `n` unused forever. That is fine and expected:
+ * `seq` is a total *order*, not a census, and nothing counts it. `room_seq` is
+ * different: it is minted by `max(room_seq) + 1` under the append lock inside
+ * the same transaction as the insert, so an aborted append gives its number
+ * back and the per-room sequence stays contiguous. Only the per-room one is
+ * ever advertised as gap-free, and only it is what `since(room, room_seq)`
+ * walks.
  */
 export const coreEvents = pgTable(
   'core_events',
@@ -297,6 +347,29 @@ export const coreEvents = pgTable(
     // a literal `?` in DDL is a placeholder to half the drivers that will ever
     // read this file back.
     check('core_events_payload_has_at', sql`jsonb_exists(${t.payload}, 'at')`),
+    /**
+     * The two ordering fields, checked for **equality** with the payload the
+     * reducer actually folds — r1's major 2. "The key exists" was never the
+     * claim worth making: what matters is that the durable order (`occurred_at`,
+     * `seq`) and the canonical order (`payload.at`, `payload.id`) are the same
+     * order, so a writer cannot mint a row that replays into a different
+     * position than it occupies.
+     *
+     * The `::timestamptz` cast is only session-independent because the next
+     * check forces a timezone designator onto every `at` — with one, the cast
+     * cannot mean two things in two sessions, which is what makes it safe to
+     * put in a CHECK at all.
+     */
+    check(
+      'core_events_payload_at_matches',
+      sql`(${t.payload}->>'at')::timestamptz = ${t.occurredAt}`,
+    ),
+    check(
+      'core_events_payload_at_has_offset',
+      sql`${t.payload}->>'at' ~ '(Z|[+-][0-9]{2}:?[0-9]{2})$'`,
+    ),
+    /** Same story for the actor: jsonb equality, so a lifted copy cannot lie. */
+    check('core_events_payload_actor_matches', sql`${t.payload}->'actor' = ${t.actor}`),
   ],
 );
 
@@ -611,6 +684,25 @@ export const objectRelations = pgTable(
 
 /* ── attention (stored projection) ──────────────────────────────────────── */
 
+/**
+ * Attention items — a stored projection, and the one table with a polymorphic
+ * subject (routed from #21).
+ *
+ * `object_id` used to be a plain foreign key onto `accepted_objects`, which
+ * made `needs_decision` unstorable: a decision never auto-accepts, so the thing
+ * a person is being asked to rule on is a **proposal**, and no object exists
+ * yet. The column is now `subject_id` with a `subject_kind` discriminator that
+ * matches @atrium/core's `AttentionSubjectKind` exactly (parity asserted at the
+ * bottom of this file).
+ *
+ * Both edges stay room-scoped, which is the part that is easy to lose when a
+ * reference goes polymorphic. Postgres has no "FK to one of two tables", so the
+ * kind is projected into two generated columns — each null unless the
+ * discriminator selects it — and each carries its own composite `(room_id, …)`
+ * foreign key. Generated, not written: nothing can set them inconsistently with
+ * `subject_kind`, and there is no trigger to keep in step. Exactly one is
+ * non-null for every row, by construction rather than by a check.
+ */
 export const attentionItems = pgTable(
   'attention_items',
   {
@@ -621,7 +713,18 @@ export const attentionItems = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    objectId: uuid('object_id').notNull(),
+    /** Which table `subject_id` names. @atrium/core's `AttentionSubjectKind`. */
+    subjectKind: attentionSubjectKind('subject_kind').notNull().default('object'),
+    /** The accepted object, or the staged proposal — see `subject_kind`. */
+    subjectId: uuid('subject_id').notNull(),
+    /** Non-null exactly when `subject_kind = 'object'`. Carries that edge's FK. */
+    subjectObjectId: uuid('subject_object_id').generatedAlwaysAs(
+      sql`CASE WHEN "subject_kind" = 'object' THEN "subject_id" END`,
+    ),
+    /** Non-null exactly when `subject_kind = 'proposal'`. Same, for proposals. */
+    subjectProposalId: uuid('subject_proposal_id').generatedAlwaysAs(
+      sql`CASE WHEN "subject_kind" = 'proposal' THEN "subject_id" END`,
+    ),
     class: attentionClass('class').notNull(),
     /** Why this person specifically. NOT NULL by design — no unexplained pings. */
     rationale: text('rationale').notNull(),
@@ -630,14 +733,32 @@ export const attentionItems = pgTable(
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
   },
   (t) => [
-    uniqueIndex('attention_items_user_object_class_key').on(t.userId, t.objectId, t.class),
+    /**
+     * One item per (person, subject, class). The kind is part of the key: an
+     * object and the proposal it was accepted from are different subjects and
+     * may legitimately both have raised an item.
+     */
+    uniqueIndex('attention_items_user_subject_class_key').on(
+      t.userId,
+      t.subjectKind,
+      t.subjectId,
+      t.class,
+    ),
     index('attention_items_user_status_idx').on(t.userId, t.status),
     check('attention_items_rationale_present', sql`length(btrim(${t.rationale})) > 0`),
-    /** "Needs you" must never point at an object from a room you cannot see. */
+    /**
+     * "Needs you" must never point at something from a room you cannot see —
+     * and that has to keep holding now that "something" is two tables.
+     */
     foreignKey({
       name: 'attention_items_object_same_room_fk',
-      columns: [t.roomId, t.objectId],
+      columns: [t.roomId, t.subjectObjectId],
       foreignColumns: [acceptedObjects.roomId, acceptedObjects.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'attention_items_proposal_same_room_fk',
+      columns: [t.roomId, t.subjectProposalId],
+      foreignColumns: [proposals.roomId, proposals.id],
     }).onDelete('cascade'),
   ],
 );
@@ -720,6 +841,11 @@ export type _AttentionStatusParity = Assert<
   AttentionStatus
 > &
   Assert<AttentionStatus, (typeof attentionStatus.enumValues)[number]>;
+export type _AttentionSubjectKindParity = Assert<
+  (typeof attentionSubjectKind.enumValues)[number],
+  AttentionSubjectKind
+> &
+  Assert<AttentionSubjectKind, (typeof attentionSubjectKind.enumValues)[number]>;
 export type _ProposalStatusParity = Assert<
   (typeof proposalStatus.enumValues)[number],
   ProposalStatus
@@ -739,14 +865,42 @@ export type _CorrectionActionParity = Assert<
  */
 export type _CoreEventTypeCoverage = Assert<CoreEventType, (typeof eventType.enumValues)[number]>;
 
-/** The `event_type` values the reducer folds — everything else is ledger-only. */
+/**
+ * The `event_type` values the reducer folds — everything else is ledger-only.
+ *
+ * Written as a map first, because the direction that bites is the one an array
+ * cannot express. `satisfies readonly CoreEventType[]` only says *every listed
+ * type is a core type*; it says nothing about a core type that was never
+ * listed. That was r1's major 3: add a sixth `CoreEvent`, forget this list, and
+ * it compiles — the new type is silently classified as server-only, never
+ * folded, and vanishes from every replay while live ingestion still applies it.
+ * The two states then diverge with no error anywhere.
+ *
+ * `satisfies Record<CoreEventType, true>` closes it in both directions at once:
+ * a missing key is a missing-property error, and a stray key is an
+ * excess-property error. `_CoreEventTypesAreExhaustive` below states the same
+ * thing a second way, on the derived tuple, so neither the map nor the array
+ * can drift from the union on its own.
+ */
+const coreEventTypeSet = {
+  proposal_recorded: true,
+  proposal_rejected: true,
+  object_accepted: true,
+  object_corrected: true,
+  relation_added: true,
+} as const satisfies Record<CoreEventType, true>;
+
 export const coreEventTypes = [
   'proposal_recorded',
   'proposal_rejected',
   'object_accepted',
   'object_corrected',
   'relation_added',
-] as const satisfies readonly CoreEventType[];
+] as const satisfies readonly (keyof typeof coreEventTypeSet)[];
+
+/** Every core event type is in the list above — the direction `satisfies` misses. */
+export type _CoreEventTypesAreExhaustive = Assert<CoreEventType, (typeof coreEventTypes)[number]> &
+  Assert<keyof typeof coreEventTypeSet, (typeof coreEventTypes)[number]>;
 
 /** True when a ledger row is one @atrium/core's `reduce` consumes. */
 export function isCoreEventType(type: string): type is CoreEventType {

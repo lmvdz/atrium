@@ -181,6 +181,9 @@ export function computeAttention(state: CoreState, now: Timestamp): AttentionIte
       roomId: object.roomId,
       userId: object.payload.owner,
       objectId: object.id,
+      // An owned commitment is always an accepted object; only `needs_decision`
+      // can point at a proposal, and that class is produced upstream.
+      subjectKind: 'object',
       class: 'owned_commitment',
       rationale: `you own this commitment — "${object.payload.statement}"${
         object.payload.due ? ` (due ${object.payload.due})` : ''

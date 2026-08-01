@@ -207,9 +207,28 @@ describe('composite (room_id, id) foreign keys', () => {
     expect(compositeFks(acceptedObjects)).toContainEqual(['room_id', 'objective_id']);
     expect(compositeFks(acceptedObjects)).toContainEqual(['room_id', 'superseded_by_id']);
     expect(compositeFks(acceptedObjects)).toContainEqual(['room_id', 'proposal_id']);
-    expect(compositeFks(attentionItems)).toContainEqual(['room_id', 'object_id']);
+    // Attention went polymorphic (#21 → #22): the subject is an object *or* a
+    // proposal, and both edges have to stay room-scoped. A polymorphic
+    // reference is the easiest place in a schema to quietly lose one.
+    expect(compositeFks(attentionItems)).toContainEqual(['room_id', 'subject_object_id']);
+    expect(compositeFks(attentionItems)).toContainEqual(['room_id', 'subject_proposal_id']);
     expect(compositeFks(corrections)).toContainEqual(['room_id', 'object_id']);
     expect(compositeFks(messages)).toContainEqual(['room_id', 'reply_to_id']);
+  });
+
+  it('keeps the attention subject discriminated, and both targets generated', () => {
+    const columns = getTableConfig(attentionItems).columns;
+    const named = (name: string) => columns.find((column) => column.name === name);
+    expect(named('subject_kind')?.enumValues).toEqual(['object', 'proposal']);
+    expect(named('subject_id')?.notNull).toBe(true);
+    // Generated, not written. It is what makes "exactly one target is set, and
+    // it is the one the discriminator names" true by construction rather than
+    // by a check constraint somebody has to keep in step.
+    expect(named('subject_object_id')?.generated).toBeDefined();
+    expect(named('subject_proposal_id')?.generated).toBeDefined();
+    // And the old bare column is gone, not merely unused: a `needs_decision`
+    // item pointing at a proposal was unstorable while it existed.
+    expect(named('object_id')).toBeUndefined();
   });
 
   it('publishes the (room_id, id) unique keys those foreign keys need', () => {
