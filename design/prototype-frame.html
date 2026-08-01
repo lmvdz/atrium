@@ -477,6 +477,14 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
  * thing this feed is for: seeing a match IN ITS CONTEXT, with the conversation
  * around it still legible.
  *
+ * #39 r2 measured the same arithmetic against the same tokens at the same time
+ * and reached the same place independently — the weakest thing a row can
+ * legitimately carry (`--amb2` on `--ambbg`) is 4.53:1 at FULL opacity, so no
+ * fade clears AA at any alpha. That is now the standing rule: lift the matches,
+ * never dim the rest. This file and the component library express filtering the
+ * same way, which matters because this file is the interaction spec that one
+ * implements.
+ *
  * So the filter highlights instead. A match gets a band, a left rule and
  * full-strength body text; every other row keeps exactly the legibility it had
  * with no filter on. Nothing on this page is less readable than it was, and the

@@ -205,6 +205,7 @@ Enforcement: any quotation-context element must carry provenance proving its tex
 ## Page-integrity rules are about the page's own text
 
 The invariants that police rendered output — no quotation marks outside a checked quotation context, no `undefined`/`null`/`NaN` in a rendered record — are assertions about what the *interface* writes. Applied to a human's own sentence they are false alarms on that person's words, and a checker that cries wolf on ordinary input is a checker people learn to ignore. Every surface that renders human-authored characters marks them (`data-voice="human"`), per fragment, so a page sentence that quotes a person keeps the page's half checked and exempts only the half the person typed. Found twice: round 4 for the quote-mark rule (feed bodies only), round 5 for the record-text rule (feed bodies only again — the correction chain's quote, the receipt's excerpt, an object's own text after a bound answer, and the facts a verification note lands in were all still held to a rule about the page).
+
 ## Measured contrast exceptions
 
 Verified against the tokens as extracted (not guesses — measured at the sizes actually used):
@@ -223,3 +224,7 @@ A filtered-out or de-emphasised row keeps its text, so it must keep its legibili
 Found independently in two artifacts by two critics (#10 r6 and #39 r1) — the same `opacity: .3` decision, wrong in both. Legitimate exemption: a genuinely inactive control (a disabled button at ~2.5:1) is an inactive-state exemption, not body text.
 
 **Measured consequence (#39 r2): with this token set, no fade clears AA at all.** The weakest thing a row can legitimately carry (`--amb2` on `--ambbg`) is 4.53:1 at *full* opacity — the shell's own floor — so any opacity reduction drops it below. Therefore **de-emphasis is expressed by lifting the matches, not by dimming the rest**, and the affordance's copy says so. Do not reintroduce a fade with a gentler alpha; the arithmetic does not work at any value.
+
+**Independently confirmed in #10 r7, on the prototype's own feed** — arrived at before that consequence was written down, and agreeing with it. Measured on the painted rows: `opacity: .3` gives 1.48–1.75:1 light and 1.12–2.14:1 dark, 57 of 57 text elements failing. Solved for the alpha that would clear 4.5:1 and there isn't a usable one — `--tx0` body text needs α ≥ .84 (not a dim, a rounding error) and `--tx2` at 10px, which every row's time/glyph/actor columns use, fails at *every* α below 1. Lifting the matches instead: 0 of 57 failing, 4.76–10.66:1 light and 6.46–12.27:1 dark.
+
+**And lift by BRIGHTENING, not by darkening.** A first pass gave matches a `--bg5` band, which reads as emphasis on paper — and took `--amb2` on the `◆` glyph from 4.84:1 to 3.99:1. A fix for a contrast defect that introduces a contrast defect is not a fix. The band is one step *brighter* than the row in both themes (`--bg3` light, `--bg5` dark), so every token on a highlighted row is on more contrast than it had unfiltered, not less. Emphasis that can only raise ratios cannot fail this rule.
