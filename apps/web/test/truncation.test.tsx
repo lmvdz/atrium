@@ -67,7 +67,22 @@ function truncatingClasses(css: string): readonly string[] {
      .corrFact {`), and each of them wears the truncation. */
   for (const [, selectors, body] of stripComments(css).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     if (selectors === undefined || body === undefined) continue;
-    if (!/text-overflow:\s*ellipsis|-webkit-line-clamp:\s*\d/.test(body)) continue;
+    /* THREE MECHANISMS, NOT TWO. Found by the blind cross-lineage review of
+       round 6's own fix: `.why` clips with `max-height: 29px; overflow: hidden`
+       and neither enumerator could see it — the CSS scan knew only about
+       `text-overflow` and `-webkit-line-clamp`, and the browser sweep skips
+       containers whose text lives in children, which is exactly `.why`'s shape.
+       An enumerator that knows two of the three ways a thing can happen is the
+       "matched a strict subset" failure, in CSS instead of in a regex. */
+    const truncates =
+      /text-overflow:\s*ellipsis/.test(body) ||
+      /-webkit-line-clamp:\s*\d/.test(body) ||
+      /* A POSITIVE max-height with hidden overflow clips text that is there.
+         `max-height: 0` beside `opacity: 0` is a COLLAPSED DISCLOSURE — absence,
+         in the same category as `display: none`, which the contrast audit draws
+         the same line around. Nothing is cut off; there is nothing shown. */
+      (/max-height:\s*(?!0[^\d.])[\d.]+/.test(body) && /overflow(-y)?:\s*hidden/.test(body));
+    if (!truncates) continue;
     for (const selector of selectors.split(',')) {
       const compounds = selector.trim().split(/\s+|>/).filter(Boolean);
       const subject = compounds[compounds.length - 1];

@@ -127,50 +127,97 @@ const COMPOSED: readonly { readonly element: string; readonly source: string }[]
   { element: 'CrossRoomJump', source: 'apps/web/src/components/attention/CrossRoomJump.tsx' },
 ];
 
-/** The second hop: a child reached through a parent, and the parent's forwarder. */
-const FORWARDED: readonly {
-  readonly parent: string;
-  readonly parentSource: string;
-  readonly child: string;
-  readonly childSource: string;
-}[] = [
-  {
-    parent: 'ObjectiveGroup',
-    parentSource: 'apps/web/src/components/lens/ObjectiveGroup.tsx',
-    child: 'ObjectRow',
-    childSource: 'apps/web/src/components/lens/ObjectRow.tsx',
-  },
-  {
-    parent: 'AttentionCard',
-    parentSource: 'apps/web/src/components/attention/AttentionCard.tsx',
-    child: 'HoldToAct',
-    childSource: 'apps/web/src/components/primitives/HoldToAct.tsx',
-  },
-  {
-    parent: 'AttentionCompact',
-    parentSource: 'apps/web/src/components/attention/AttentionCompact.tsx',
-    child: 'HoldToAct',
-    childSource: 'apps/web/src/components/primitives/HoldToAct.tsx',
-  },
-  {
-    parent: 'Pin',
-    parentSource: 'apps/web/src/components/attention/Pin.tsx',
-    child: 'AttentionCompact',
-    childSource: 'apps/web/src/components/attention/AttentionCompact.tsx',
-  },
-  {
-    parent: 'Pin',
-    parentSource: 'apps/web/src/components/attention/Pin.tsx',
-    child: 'Trailer',
-    childSource: 'apps/web/src/components/attention/Trailer.tsx',
-  },
-  {
-    parent: 'Timeline',
-    parentSource: 'apps/web/src/components/timeline/Timeline.tsx',
-    child: 'TimelineRow',
-    childSource: 'apps/web/src/components/timeline/TimelineRow.tsx',
-  },
-];
+/**
+ * EVERY COMPONENT-TO-COMPONENT EDGE IN THE LIBRARY, DERIVED.
+ *
+ * This was a HAND-MAINTAINED list of six edges, inside a test whose entire
+ * purpose is to replace a hand-maintained claim with a count — and the blind
+ * cross-lineage review of round 6's own fix said so, naming four edges it did
+ * not contain (`Pin → AttentionCard`, `StateLens → ObjectiveGroup`,
+ * `Timeline → SinceYouLeftDivider`, `Timeline → RoutineCollapse`). A list of
+ * edges is exactly the artifact that goes stale the day a component is added,
+ * and it reports as thoroughly as a complete one.
+ *
+ * So the edges are read out of the source: every component file, every JSX
+ * element in it whose tag names another component in the library, is an edge.
+ * Adding a component to the library adds its edges on the day it is added.
+ */
+const COMPONENT_FILES: readonly { readonly name: string; readonly source: string }[] = [
+  'frame/AppFrame',
+  'frame/Composer',
+  'frame/Rail',
+  'frame/RoomHead',
+  'frame/SurfaceIndicators',
+  'timeline/Timeline',
+  'timeline/TimelineRow',
+  'timeline/SystemRow',
+  'timeline/RoutineCollapse',
+  'timeline/SinceYouLeftDivider',
+  'lens/StateLens',
+  'lens/ObjectiveGroup',
+  'lens/ObjectRow',
+  'lens/ReceiptView',
+  'attention/Pin',
+  'attention/AttentionCard',
+  'attention/AttentionCompact',
+  'attention/CrossRoomJump',
+  'attention/Trailer',
+  'primitives/HoldToAct',
+  'primitives/Glyph',
+  'primitives/ClaimText',
+  'primitives/MessageBody',
+  'primitives/Voice',
+].map((path) => ({
+  name: path.split('/')[1] as string,
+  source: `apps/web/src/components/${path}.tsx`,
+}));
+
+const BY_NAME = new Map(COMPONENT_FILES.map((entry) => [entry.name, entry.source]));
+
+/** Every `<Child …>` a component file renders, where Child is in the library. */
+function edgesFrom(parent: { name: string; source: string }): readonly {
+  parent: string;
+  parentSource: string;
+  child: string;
+  childSource: string;
+}[] {
+  const file = parse(parent.source);
+  const seen = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    const opening = ts.isJsxSelfClosingElement(node)
+      ? node
+      : ts.isJsxElement(node)
+        ? node.openingElement
+        : undefined;
+    if (opening !== undefined) {
+      const tag = opening.tagName.getText(file);
+      if (BY_NAME.has(tag) && tag !== parent.name) seen.add(tag);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return [...seen].map((child) => ({
+    parent: parent.name,
+    parentSource: parent.source,
+    child,
+    childSource: BY_NAME.get(child) as string,
+  }));
+}
+
+const FORWARDED = COMPONENT_FILES.flatMap(edgesFrom);
+
+/**
+ * Handlers a parent legitimately does not forward, each with the reason.
+ *
+ * Checked exhaustive in BOTH directions, like every other exemption list this
+ * round added: an entry matching nothing is a carve-out that outlived its
+ * subject and reports exactly like one doing its job.
+ */
+const NOT_FORWARDED: readonly {
+  readonly edge: string;
+  readonly handler: string;
+  readonly why: string;
+}[] = [];
 
 const FRAME = 'apps/web/app/gallery/RoomFrame.tsx';
 
@@ -198,13 +245,42 @@ describe('the frame forwards every handler the library exposes', () => {
      a `StateLens` that drops the prop on the way to `ObjectRow` is a dead
      control with a live prop table, which is exactly what the ten object rows
      were. The chain is what has to be complete, not the first link. */
+  it('there are edges to enumerate, and more than the six a person listed', () => {
+    expect(
+      FORWARDED.length,
+      'the edge derivation found almost no component-to-component edges',
+    ).toBeGreaterThan(10);
+  });
+
+  /* CATCHES an exemption that outlived its subject. The list is empty today —
+     every derived edge forwards everything — and it is asserted empty-or-used
+     rather than merely declared, because an entry matching nothing reports
+     exactly like one doing its job. */
+  it('every forwarding exemption still applies to something', () => {
+    const edges = new Set(FORWARDED.map((link) => `${link.parent}→${link.child}`));
+    expect(
+      NOT_FORWARDED.filter(
+        (entry) =>
+          !edges.has(entry.edge) ||
+          !handlersDeclaredBy(
+            FORWARDED.find((link) => `${link.parent}→${link.child}` === entry.edge)?.childSource ??
+              '',
+          ).includes(entry.handler),
+      ).map((entry) => `${entry.edge}.${entry.handler}`),
+      'a forwarding exemption names an edge or a handler that no longer exists',
+    ).toEqual([]);
+  });
+
   it.each(FORWARDED)('$parent forwards every handler $child declares', (link) => {
     const declared = handlersDeclaredBy(link.childSource);
     const passed = new Set(propsPassedTo(link.parentSource, link.child));
-    expect(
-      declared.filter((handler) => !passed.has(handler)),
-      `${link.parent} drops handlers on the way to ${link.child}`,
-    ).toEqual([]);
+    const key = `${link.parent}→${link.child}`;
+    const missing = declared.filter(
+      (handler) =>
+        !passed.has(handler) &&
+        !NOT_FORWARDED.some((entry) => entry.edge === key && entry.handler === handler),
+    );
+    expect(missing, `${link.parent} drops handlers on the way to ${link.child}`).toEqual([]);
   });
 });
 

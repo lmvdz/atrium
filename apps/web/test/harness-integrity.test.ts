@@ -39,6 +39,8 @@ const AUDIT = strip(read('apps/web/e2e/audit.ts'));
 const GALLERY = strip(read('apps/web/e2e/gallery.spec.ts'));
 const SMOKE = strip(read('apps/web/e2e/smoke.spec.ts'));
 const TOKEN = strip(read('apps/web/test/token-contrast.test.ts'));
+const TRUNCATION = strip(read('apps/web/test/truncation.test.tsx'));
+const FRAME_HANDLERS = strip(read('apps/web/test/frame-handlers.test.tsx'));
 
 describe('D2 — a source-grep that enumerates constructs sees every spelling', () => {
   /* CATCHES: the guard enumeration going back to `/if\s*\([^)]*\)\s*continue/`.
@@ -190,5 +192,86 @@ describe('D7 — the control sweep asserts its denominator', () => {
   it('every clipped string is required to name its route', () => {
     expect(SMOKE).toMatch(/every clipped string on \/ names its route to the full text/);
     expect(SMOKE).toMatch(/data-truncates/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * WHAT THE BLIND CROSS-LINEAGE REVIEW OF ROUND 6's OWN FIX FOUND IN THESE
+ * INSTRUMENTS.
+ *
+ * Three of its ten findings were defects in the checks this round wrote, which
+ * is the honest outcome of pointing two foreign lineages at the ENUMERATION
+ * rather than at the fixes: the enumerators are the round's product, so they are
+ * where its defects are.
+ * ------------------------------------------------------------------------- */
+describe('the round’s own enumerators', () => {
+  /* CATCHES: the truncation sweep going back to knowing two of the three ways
+     this stylesheet can clip text. `.why` clipped with `max-height: 29px;
+     overflow: hidden` — on the OPEN CARD, which is the surface a compressed
+     row's clamp routes the reader to — and neither enumerator could see it. An
+     enumerator that knows two of three mechanisms is D2's "matched a strict
+     subset of the syntax", in CSS instead of in a regex. */
+  it('the truncation sweep knows every mechanism this stylesheet clips with', () => {
+    expect(TRUNCATION).toMatch(/text-overflow/);
+    expect(TRUNCATION).toMatch(/-webkit-line-clamp/);
+    expect(TRUNCATION, 'the max-height + overflow mechanism is invisible again').toMatch(
+      /max-height/,
+    );
+    /* …and a max-height of ZERO is still absence rather than truncation, or the
+       sweep demands a route out of elements that are showing nothing. The
+       negative lookahead is the code that draws that line, so it is what is
+       asserted — comments are stripped before any of these rules look at a
+       file. */
+    expect(TRUNCATION, 'a collapsed disclosure counts as a truncation again').toMatch(/\(\?!0\[\^/);
+  });
+
+  /* CATCHES: the overflow denominator going back to a comparison between two
+     loops one of which contains the other by construction. Both walk `body *`
+     with the same visibility filter and the overflow loop's geometry condition
+     is strictly weaker, so `overflowChecked >= elementsChecked` held for every
+     possible page. A comparison that cannot come out the other way is not a
+     measurement — the same sentence as a fill measured against itself. */
+  it('the overflow denominator comes from the DOM, not from the other sweep', () => {
+    expect(AUDIT, 'the audit counts no independent denominator').toMatch(/renderedElements/);
+    expect(GALLERY).toMatch(/\)\.toBe\(audit\.overflow\.renderedElements\);/);
+    expect(GALLERY, 'the overflow sweep is compared against the text sweep again').not.toMatch(
+      /toBeGreaterThanOrEqual\(audit\.elementsChecked\)/,
+    );
+  });
+
+  /* CATCHES: the component edge list going back to being written by hand —
+     inside the test whose whole purpose is to replace a hand-maintained claim
+     with a count. The hand-written version held six edges and was missing four
+     (`Pin → AttentionCard`, `StateLens → ObjectiveGroup`, and both of
+     `Timeline`'s dividers). */
+  it('the component edge list is derived from the source', () => {
+    expect(FRAME_HANDLERS, 'the edges are a literal list again').toMatch(
+      /COMPONENT_FILES\.flatMap\(edgesFrom\)/,
+    );
+    expect(FRAME_HANDLERS).toMatch(/function edgesFrom/);
+    expect(FRAME_HANDLERS).toMatch(/there are edges to enumerate, and more than the six/);
+    expect(FRAME_HANDLERS, 'the derivation is truncated to a fixed count').not.toMatch(
+      /flatMap\(edgesFrom\)\.slice\(/,
+    );
+  });
+
+  /* CATCHES: the ledger crediting an entry whose mutation broke the file's
+     syntax, so the catcher errored out before running a single assertion — the
+     baseline defect (D1) in the other direction. */
+  it('the mutation ledger refuses a mutation that does not parse', () => {
+    const ledger = read('apps/web/test/mutations.mjs');
+    expect(ledger, 'the ledger no longer parses what it mutated').toMatch(/parseDiagnostics/);
+    expect(ledger).toMatch(/BROKEN/);
+  });
+
+  /* CATCHES: the baseline itself being removed. That is D1's whole fix, and
+     without it every number this ledger reports is uncorrelated with the code. */
+  it('the mutation ledger runs a baseline before it mutates anything', () => {
+    const ledger = read('apps/web/test/mutations.mjs');
+    expect(ledger).toMatch(/const baseline = new Map\(\)/);
+    expect(ledger).toMatch(/UNCHECKED/);
+    expect(ledger, 'a red catcher no longer disqualifies its entries').toMatch(
+      /baseline\.get\(entry\.test\) === true/,
+    );
   });
 });

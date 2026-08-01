@@ -11,7 +11,7 @@
  * ------------------------------------------------------------------------- */
 
 import { useCitedRecord } from '../model/ledger';
-import { statementText } from '../model/quotation';
+import { statementText, systemText } from '../model/quotation';
 import type { CrossRoomJumpRecord } from '../model/records';
 import styles from '../timeline/timeline.module.css';
 
@@ -49,7 +49,10 @@ export function CrossRoomJump({ jump, onReveal, onBack, onDismiss }: CrossRoomJu
         the row →
       </button>
       <button className={styles.traceBack} onClick={onBack} type="button">
-        back to #{jump.fromRoom} →
+        {/* The room name is caller-supplied and sits inside the trace's
+            `data-voice="system"` box, so it goes through the same door the
+            statement beside it does. */}
+        back to #{systemText(jump.fromRoom, 'CrossRoomJump room')} →
       </button>
       <button aria-label="Dismiss this trace" onClick={onDismiss} type="button">
         ✕

@@ -230,8 +230,10 @@ export function RoomSession() {
             `armed ${arming.actionId} on ${itemId} by ${arming.actor} at ${arming.armedAt} after ${arming.heldMs}ms held`,
           );
         },
-        onJumpToSource: (itemId: string) => {
-          setNote(`the source of ${itemId} is in another room — #25 owns the jump`);
+        onJumpToSource: (itemId: string, messageId: string) => {
+          setNote(
+            `the source of ${itemId} is ${messageId} — the id came off the record, not off the card`,
+          );
         },
         onPagePin: (page: number, pageCount: number) => {
           setNote(`pin page ${page + 1} of ${pageCount} · every owed item is still reachable`);

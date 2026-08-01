@@ -33,6 +33,8 @@ export interface OverflowReport {
   }[];
   /** rendered elements whose geometry was evaluated — the sweep's denominator */
   readonly overflowChecked: number;
+  /** rendered elements the DOM holds — the independent denominator */
+  readonly renderedElements: number;
   /** of those, how many ran past the edge and were genuinely clipped inside it */
   readonly overflowContained: number;
   /** every box with a non-visible overflow-x, asked whether it hides scroll */
@@ -538,6 +540,20 @@ export const AUDIT = `(() => {
       widest: widest.slice(0, 8),
       scrollingFrames,
       overflowChecked,
+      /* THE DENOMINATOR IS TAKEN FROM THE DOM, NOT FROM THE OTHER LOOP.
+         Found by the blind cross-lineage review of round 6's own fix:
+         \`overflowChecked >= elementsChecked\` cannot fail, because both loops
+         walk \`body *\` with the same visibility filter and the overflow loop's
+         geometry condition is strictly weaker — every element the text sweep
+         counts is already counted here. A comparison between two things one of
+         which contains the other by construction is not a measurement. This is
+         counted independently so the assertion has something that can disagree
+         with it. */
+      renderedElements: [...document.querySelectorAll('body *')].filter((el) => {
+        const s = getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') return false;
+        return el.getBoundingClientRect().width > 0;
+      }).length,
       overflowContained,
       clippersChecked,
     },

@@ -11,6 +11,7 @@
  * alongside them, so "31 routine" cannot disagree with what the peek shows.
  * ------------------------------------------------------------------------- */
 
+import { systemText } from '../model/quotation';
 import type { RoutineEntry } from '../model/records';
 import { SystemRow } from './SystemRow';
 import styles from './timeline.module.css';
@@ -26,6 +27,7 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
   const count = entry.rows.length;
   const shown = entry.open ? entry.rows.slice(0, peekLimit) : [];
   const remaining = count - shown.length;
+  const actors = systemText(entry.actors.join(', '), 'RoutineCollapse actors');
 
   return (
     <div className={styles.routine} data-row="routine" data-open={entry.open ? 'true' : 'false'}>
@@ -40,7 +42,7 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
            insert a space for block-level parts. A `·` that is decoration to the
            eye is not decoration to the name computation once it is the only
            thing between two runs of text. */
-        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${entry.actors.join(', ')} — ${entry.open ? 'click to hide' : 'click to peek'}`}
+        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${actors} — ${entry.open ? 'click to hide' : 'click to peek'}`}
         className={styles.routineStrip}
         onClick={onTogglePeek}
         title="routine = no state change, no claim, nothing owed to anyone"
@@ -56,7 +58,19 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
           <span aria-hidden="true"> · </span>
           {entry.from} – {entry.to}
           <span aria-hidden="true"> · </span>
-          {entry.actors.join(', ')}
+          {/* NAMES IN A COUNT, NOT NAMES BESIDE WORDS — and held to the system's
+              voice anyway. The blind cross-lineage review of round 6 named this
+              as a third instance of the `HappenedLine.who` shape, because
+              `RoutineEntry` carries `actors: string[]` alongside
+              `rows: SystemEntry[]`. It is NOT that shape and the difference is
+              worth being exact about: `who` sat immediately before one
+              statement's words, as that statement's speaker. These names
+              summarise a SET of rows and are adjacent to no statement — the fold
+              has to say whose activity it swallowed or nobody trusts it
+              (CONVENTIONS requires the actors here).
+              What is true of both is that a caller-supplied string is being
+              printed by the page, so it goes through the same door. */}
+          {actors}
         </span>
         <span className={styles.routinePeek}>{entry.open ? 'click to hide' : 'click to peek'}</span>
       </button>

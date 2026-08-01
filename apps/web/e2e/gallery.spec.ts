@@ -242,10 +242,19 @@ test.describe('gallery', () => {
              passed all four overflow assertions. The sweep reports what it
              looked at; the floor is proportional to what the contrast sweep
              found, because both walk `body *`. */
+          /* AGAINST THE DOM, NOT AGAINST THE OTHER SWEEP. The first version of
+             this compared `overflowChecked` with `elementsChecked`, and the
+             overflow loop's filter is strictly weaker than the text loop's — so
+             the inequality held for every possible page. What the sweep owes is
+             every RENDERED element, counted independently. */
           expect(
             audit.overflow.overflowChecked,
-            `the overflow sweep evaluated ${audit.overflow.overflowChecked} elements while the text sweep saw ${audit.elementsChecked}`,
-          ).toBeGreaterThanOrEqual(audit.elementsChecked);
+            `the overflow sweep evaluated ${audit.overflow.overflowChecked} of the ${audit.overflow.renderedElements} rendered elements on this page`,
+          ).toBe(audit.overflow.renderedElements);
+          expect(
+            audit.overflow.renderedElements,
+            'this route rendered almost nothing',
+          ).toBeGreaterThan(100);
           expect(
             audit.overflow.clippersChecked,
             'no box with a non-visible overflow was inspected for hidden horizontal scroll',

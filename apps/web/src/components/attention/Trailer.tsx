@@ -17,9 +17,11 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
+import { systemText } from '../model/quotation';
 import type { TrailerSummary } from '../model/records';
 import { plural } from '../model/text';
 import { Glyph } from '../primitives/Glyph';
+import { SystemVoice } from '../primitives/Voice';
 import styles from './attention.module.css';
 
 export type TrailerProps = {
@@ -49,14 +51,18 @@ export function Trailer({ summary, lastCheck, onShowRest }: TrailerProps) {
           onClick={onShowRest}
           type="button"
         >
-          {summary.lead}
+          <SystemVoice inline statement={summary.lead} />
         </button>{' '}
         —{' '}
         <b>
           {summary.objectivesClear}/{summary.objectivesTotal} objectives
         </b>{' '}
         clear of you · <b>{plural(summary.commitments, 'commitment')}</b>, {summary.overdue} overdue
-        · <b>{plural(summary.failures, 'failure')}</b> · last check {lastCheck}
+        · <b>{plural(summary.failures, 'failure')}</b> · last check{' '}
+        {/* A clock is a page-authored string with no constructor to be checked
+            at, painted inside `data-voice="system"`. The renderer is not merely
+            the last place the check can go — it is the only place. */}
+        {systemText(lastCheck, 'Trailer last check')}
       </span>
     </div>
   );

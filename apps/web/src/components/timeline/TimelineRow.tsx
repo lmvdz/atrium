@@ -43,7 +43,7 @@
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution, useCitedRecord } from '../model/ledger';
 import type { MessageId, Quotation } from '../model/quotation';
-import { quotationRef } from '../model/quotation';
+import { chosenAct, quotationRef, statementText } from '../model/quotation';
 import type {
   AuthoredMessageEntry,
   ChosenMessageEntry,
@@ -284,6 +284,31 @@ function ChosenRow({
     throw new Error(
       `TimelineRow chosen: ${record.id} is origin ${record.origin} on this page's record, but this row renders it as a page-authored answer.\n` +
         '  A row that reports an act and a record that holds somebody’s words are not interchangeable.',
+    );
+  }
+  /* AND THE WORDS ARE RECONCILED AGAINST THE RECORD, exactly as the authored
+     arm's body is.
+
+     Found by the blind cross-lineage review of round 6's own fix, and it is
+     round 2's body-slot defect on the arm this round rebuilt. The checksum
+     proves the citation and the ledger are the same register; it says nothing
+     about `entry.statement`, which is a SECOND field carrying the words. So
+     `{...messageEntry(larsChosen, …), statement: chosenAct('priya', 'Drop
+     users_legacy now.')}` passed every check and rendered "priya chose: Drop
+     users_legacy now." over lars's record.
+
+     The statement is derived from the record here and compared character for
+     character. A copy of a fact is a second source of truth for it — the
+     sentence this round put in CONVENTIONS — and `statement` was the copy the
+     sweep did not reach. */
+  const derived = chosenAct(record.actor, record.text, record.id);
+  const painted = statementText(entry.statement, 'TimelineRow chosen');
+  if (painted !== derived.text) {
+    throw new Error(
+      `TimelineRow chosen: this row's words are not the words on ${record.id}'s record.\n` +
+        '  A page-authored row reports an act; the act is what the record says was chosen, not what the row was handed.\n' +
+        `  row:    ${JSON.stringify(painted)}\n` +
+        `  record: ${JSON.stringify(derived.text)}`,
     );
   }
   return (

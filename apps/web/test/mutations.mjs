@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -401,7 +402,7 @@ const LEDGER = [
   {
     name: 'the routine strip’s count, window and actors run together',
     file: 'src/components/timeline/RoutineCollapse.tsx',
-    find: "        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${entry.actors.join(', ')} — ${entry.open ? 'click to hide' : 'click to peek'}`}\n",
+    find: "        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${actors} — ${entry.open ? 'click to hide' : 'click to peek'}`}\n",
     replace: '',
     test: 'test/attention.test.tsx',
   },
@@ -458,7 +459,7 @@ const LEDGER = [
   {
     name: 'parseQuotation hands the incoming object through instead of the citation',
     file: 'src/components/model/quotation.ts',
-    find: '  const record = ledger.recordFor(id) as MessageRecord;\n  return { messageId: id, mintedFrom: recordFingerprint(record) } as unknown as Quotation;',
+    find: "  return adopt(value, record, 'parseQuotation') as unknown as Quotation;",
     replace: '  return value as Quotation;',
     test: 'test/attribution.test.tsx',
   },
@@ -781,8 +782,8 @@ const LEDGER = [
   {
     name: 'the slot walk’s node budget fails open again',
     file: 'src/components/model/slot.ts',
-    find: '  if (budget.left <= 0) {\n    reject(',
-    replace: '  if (budget.left <= 0) {\n    return void (',
+    find: '  if (budget.left <= 0) {',
+    replace: '  if (budget.left <= 0) return;\n  if (false) {',
     test: 'test/attribution.test.tsx',
   },
   {
@@ -1049,8 +1050,8 @@ const LEDGER = [
   {
     name: 'the trailer’s lead goes back to a sentence nothing can act on',
     file: 'src/components/attention/Trailer.tsx',
-    find: '        <button\n          className={styles.trailerLead}',
-    replace: '        <span\n          className={styles.trailerLead}',
+    find: '          onClick={onShowRest}\n          type="button"\n',
+    replace: '',
     test: 'test/frame-handlers.test.tsx',
   },
   {
@@ -1059,6 +1060,103 @@ const LEDGER = [
     find: '<span className={styles.acompWhyText} data-truncates="opens the full card">',
     replace: '<span className={styles.acompWhyText}>',
     test: 'test/truncation.test.tsx',
+  },
+
+  /* --- round 6, from the blind cross-lineage review of round 6's own fix -----
+   * The standing rule is that a fix round's claims get the same adversarial
+   * treatment as the original. Both foreign lineages were pointed at THE
+   * ENUMERATION rather than at the fixes — "is the sweep complete, and how would
+   * you know" — and between them they found ten more addresses. They overlapped
+   * on exactly one (the trailer's unchecked clock), which is the third round in
+   * a row that pairing has paid for itself.
+   * ---------------------------------------------------------------------- */
+  {
+    /* gpt-5.6, critical: the parser discarded the incoming fingerprint and minted
+       a destination one, so the documented door laundered provenance past the
+       one check that says two registers are the same register. */
+    name: 'the parser launders a citation minted against another register',
+    file: 'src/components/model/quotation.ts',
+    find: "  if (typeof arrived === 'string' && arrived.length > 0 && arrived !== here) {",
+    replace: '  if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    /* gpt-5.6, critical: the chosen arm carried the words in a SECOND field the
+       checksum says nothing about — round 2's body-slot defect on the arm this
+       round rebuilt. */
+    name: 'a chosen row\u2019s words stop being reconciled against its record',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: '  if (painted !== derived.text) {',
+    replace: '  if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    /* gpt-5.6: the sixth handler that takes a message id, missing from the
+       round's own enumeration of five. */
+    name: 'jump-to-source tells the consumer which card, never which message',
+    file: 'src/components/attention/AttentionCard.tsx',
+    find: 'onJumpToSource(itemId, record.id)',
+    replace: 'onJumpToSource(itemId, itemId)',
+    test: 'test/attention.test.tsx',
+  },
+  {
+    /* gpt-5.6 AND grok-4.5, independently: a clock painted inside
+       data-voice="system" with no constructor to have been checked at. */
+    name: 'the trailer\u2019s clock goes back to an unchecked page-authored string',
+    file: 'src/components/attention/Trailer.tsx',
+    find: "{systemText(lastCheck, 'Trailer last check')}",
+    replace: '{lastCheck}',
+    test: 'test/system-voice.test.tsx',
+  },
+  {
+    /* grok-4.5: the trailer's lead is a whole page-authored SENTENCE. */
+    name: 'the trailer\u2019s lead goes back to a free string',
+    file: 'src/components/attention/Trailer.tsx',
+    find: '<SystemVoice inline statement={summary.lead} />',
+    replace: '{summary.lead.text}',
+    test: 'test/system-voice.test.tsx',
+  },
+  {
+    /* grok-4.5: the room name in the trace, inside the same treatment. */
+    name: 'the trace\u2019s room name goes back to an unchecked string',
+    file: 'src/components/attention/CrossRoomJump.tsx',
+    find: "{systemText(jump.fromRoom, 'CrossRoomJump room')}",
+    replace: '{jump.fromRoom}',
+    test: 'test/system-voice.test.tsx',
+  },
+  {
+    /* gpt-5.6: React renders any Iterable; the walk tested Array.isArray. */
+    name: 'a slot walk goes back to seeing only arrays',
+    file: 'src/components/model/slot.ts',
+    find: "  if (typeof node === 'object' && node !== null && Symbol.iterator in node) {",
+    replace: '  if (Array.isArray(node)) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    /* gpt-5.6: a third truncation mechanism neither enumerator could see. */
+    name: 'the truncation sweep goes back to knowing two of the three mechanisms',
+    file: 'test/truncation.test.tsx',
+    find: '      (/max-height:\\s*(?!0[^\\d.])[\\d.]+/.test(body) && /overflow(-y)?:\\s*hidden/.test(body));',
+    replace: '      false;',
+    test: 'test/harness-integrity.test.ts',
+  },
+  {
+    /* gpt-5.6: the overflow denominator compared two loops one of which contains
+       the other by construction. */
+    name: 'the overflow denominator goes back to comparing the sweep with itself',
+    file: 'e2e/gallery.spec.ts',
+    find: '          ).toBe(audit.overflow.renderedElements);',
+    replace: '          ).toBeGreaterThanOrEqual(audit.elementsChecked);',
+    test: 'test/harness-integrity.test.ts',
+  },
+  {
+    /* gpt-5.6: the edge list this test uses was hand-maintained, inside a test
+       whose purpose is to replace hand-maintained claims with counts. */
+    name: 'the component edge list goes back to being written by hand',
+    file: 'test/frame-handlers.test.tsx',
+    find: 'const FORWARDED = COMPONENT_FILES.flatMap(edgesFrom);',
+    replace: 'const FORWARDED = COMPONENT_FILES.flatMap(edgesFrom).slice(0, 6);',
+    test: 'test/harness-integrity.test.ts',
   },
 ];
 
@@ -1128,6 +1226,33 @@ for (const entry of LEDGER) {
     continue;
   }
   const mutated = original.replace(entry.find, entry.replace);
+  /* A MUTATION THAT DOES NOT PARSE IS NOT A MUTATION.
+
+     Found by the blind cross-lineage review of round 6's own fix: one entry
+     replaced `<button` with `<span` and left the `</button>` behind, so the file
+     failed to transform and every test in the catcher errored out. `red()` reads
+     a non-zero exit, which a transform error also produces — so the entry was
+     credited without its catcher ever running a single assertion. That is the
+     baseline defect (D1) in the other direction: there a red gate credited every
+     entry, here a broken file credits one.
+
+     Syntax is checked before the catcher runs. An unparseable mutation is
+     reported as a defect in the LEDGER, not as a caught defect in the code. */
+  const parsed = ts.createSourceFile(
+    entry.file,
+    mutated,
+    ts.ScriptTarget.Latest,
+    true,
+    entry.file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const syntaxErrors = parsed.parseDiagnostics ?? [];
+  if (entry.file.endsWith('.css') === false && syntaxErrors.length > 0) {
+    escaped.push(
+      `${entry.name} — the mutated ${entry.file} does not parse, so the catcher never ran (${ts.flattenDiagnosticMessageText(syntaxErrors[0].messageText, ' ')})`,
+    );
+    console.info(`BROKEN   ${entry.name}`);
+    continue;
+  }
   /* A `find`/`replace` pair that changes nothing is a mutation that was never
      applied, and an unapplied mutation the catcher "survives" reports exactly
      like a defect the catcher misses. */

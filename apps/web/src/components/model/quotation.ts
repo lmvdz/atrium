@@ -378,7 +378,50 @@ export function parseCitation(value: unknown, ledger: MessageLedger): Citation {
   }
   const id = (value as { messageId: MessageId }).messageId;
   const record = ledger.recordFor(id) as MessageRecord;
-  return { messageId: id, mintedFrom: recordFingerprint(record) } as unknown as Citation;
+  return adopt(value, record, 'parseCitation') as unknown as Citation;
+}
+
+/**
+ * THE PARSER MAY NOT LAUNDER PROVENANCE.
+ *
+ * Found by the blind cross-lineage review of round 6's own fix, and it is the
+ * round's own defect committed by the round's own fix. The first version of
+ * these parsers DISCARDED the incoming `mintedFrom` and minted a fresh one from
+ * the destination ledger, justified by a comment saying that data crossing a
+ * process boundary is being adopted into this page's register. The consequence:
+ *
+ *     const foreign = quotationFrom(larsRecord)!;     // register A
+ *     const here = messageLedger([priyaRecordSameId]); // register B
+ *     resolveQuotation(here, parseQuotation(foreign, here), 'x');
+ *     // → priya, "drop it". No throw.
+ *
+ * The one check that says "these two registers are the same register" was
+ * satisfied by a function whose whole job was to replace its evidence. A
+ * laundering step in front of a checksum is worse than no checksum, because the
+ * checksum is what everything downstream now trusts.
+ *
+ * So: a value that ARRIVES WITH a fingerprint must match this page's record —
+ * that is a claim about a register, and a claim that disagrees is refused. A
+ * value that arrives WITHOUT one (genuine external data that never had a
+ * register: a JSON file, a fetch, a JavaScript caller) is adopted, and the
+ * adoption is explicit and happens exactly here, at the boundary whose job it is.
+ */
+function adopt(
+  value: unknown,
+  record: MessageRecord,
+  from: string,
+): { messageId: MessageId; mintedFrom: string } {
+  const here = recordFingerprint(record);
+  const arrived = (value as { mintedFrom?: unknown }).mintedFrom;
+  if (typeof arrived === 'string' && arrived.length > 0 && arrived !== here) {
+    throw new Error(
+      `${from}: this reference was minted from a different record than the one this page holds for ${record.id}.\n` +
+        '  A parser may adopt a reference that never had a register; it may not overwrite one that disagrees with this page.\n' +
+        `  minted from: ${arrived}\n` +
+        `  on this page: ${here}`,
+    );
+  }
+  return { messageId: record.id, mintedFrom: here };
 }
 
 /**
@@ -397,7 +440,7 @@ export function parseQuotation(value: unknown, ledger: MessageLedger): Quotation
   }
   const id = (value as { messageId: MessageId }).messageId;
   const record = ledger.recordFor(id) as MessageRecord;
-  return { messageId: id, mintedFrom: recordFingerprint(record) } as unknown as Quotation;
+  return adopt(value, record, 'parseQuotation') as unknown as Quotation;
 }
 
 /** Same boundary, one step earlier: a message record from untrusted data. */
@@ -745,6 +788,42 @@ export function systemVoiceDefect(text: string): string | null {
     if (hit !== null) return `${ban.why} (rejected ${JSON.stringify(hit[0])})`;
   }
   return null;
+}
+
+/**
+ * THE THIRD PAGE-AUTHORED STRING SINK, and it is a sink rather than a type.
+ *
+ * Round 6 fixed `Rationale` at the renderer because round 5 had fixed only
+ * `SystemStatement`, and wrote down "there are two page-authored string types".
+ * A blind sweep of every element carrying `data-voice="system"` found six render
+ * sites and three unchecked string sinks inside them: the trailer's lead, the
+ * trailer's last-check time, and the room name in the cross-room trace. None of
+ * them has a constructor to be checked at — they are plain props — so the
+ * renderer is not merely the last place the check can go, it is the only place.
+ *
+ * `systemText` is that check, for a string the page states inside the mono-muted
+ * treatment without minting a `SystemStatement` for it: a room name, a clock, a
+ * derived summary clause. It is deliberately NOT a branded type. A brand buys a
+ * compile-time door, and the thing being prevented here reaches the screen from
+ * a prop with no door at all; what the value needs is the check on the path, and
+ * a fourth brand would suggest the doors were the guarantee.
+ *
+ * The general rule, which is what the sweep is really for: **anything a caller
+ * supplies that renders inside `data-voice="system"` goes through a check on the
+ * render path**, and `test/system-voice.test.tsx` enumerates those elements from
+ * the source so the next sink is caught by counting rather than by reading.
+ */
+export function systemText(value: string, from: string): string {
+  const painted = String(value);
+  const defect = systemVoiceDefect(painted);
+  if (defect !== null) {
+    throw new Error(
+      `${from}: ${defect}.\n` +
+        '  This string is painted in the system’s own voice; it is never somebody’s words.\n' +
+        `  rejected: ${JSON.stringify(painted.slice(0, 120))}`,
+    );
+  }
+  return painted;
 }
 
 /** The runtime boundary for system voice, mirroring `parseQuotation`. */

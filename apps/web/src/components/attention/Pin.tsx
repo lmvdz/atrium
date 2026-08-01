@@ -61,7 +61,8 @@ export interface PinProps {
   readonly onAct?: (itemId: string, actionId: string) => void;
   /** the whole arming record — actor, wall clock, and the measured hold */
   readonly onArm?: (itemId: string, arming: Arming) => void;
-  readonly onJumpToSource?: (itemId: string) => void;
+  /** the item, and the message the register resolved for its source */
+  readonly onJumpToSource?: (itemId: string, messageId: string) => void;
   /** the overflow control paged; `page` is 0-based and already normalised */
   readonly onPage?: (page: number, pageCount: number) => void;
   /** the trailer's lead — show what is wrong OUTSIDE the pin */

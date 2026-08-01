@@ -90,8 +90,16 @@ function walk(node: ReactNode, budget: { left: number }): void {
   if (node === null || node === undefined || typeof node === 'boolean') return;
   if (typeof node === 'string' || typeof node === 'number') return;
 
-  if (Array.isArray(node)) {
-    for (const child of node) walk(child as ReactNode, budget);
+  /* ANY ITERABLE, NOT ONLY AN ARRAY. Found by the blind cross-lineage review of
+     round 6's own fix: React renders any `Iterable<ReactNode>`, and this walk
+     tested `Array.isArray`. A `Set` therefore fell through to `isValidElement`,
+     came back false, and was accepted in silence — so
+     `slot(new Set([<q>words priya never wrote</q>]))` validated, and React
+     rendered the `<q>`. A denylist that does not see the shape the platform
+     accepts is the case-sensitivity defect this round already fixed, in the
+     other axis: there it was a spelling, here it is a container. */
+  if (typeof node === 'object' && node !== null && Symbol.iterator in node) {
+    for (const child of node as Iterable<ReactNode>) walk(child, budget);
     return;
   }
 

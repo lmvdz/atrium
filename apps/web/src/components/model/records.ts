@@ -21,7 +21,7 @@ import type {
   Quotation,
   SystemStatement,
 } from './quotation';
-import { chosenAct, citationFrom, quotationFrom } from './quotation';
+import { chosenAct, citationFrom, quotationFrom, systemStatement } from './quotation';
 import type { Rationale } from './rationale';
 import type { Maybe } from './text';
 
@@ -892,7 +892,18 @@ export function foldPin(items: readonly AttentionItem[], options: FoldOptions = 
  */
 export interface TrailerSummary {
   readonly state: EpistemicState;
-  readonly lead: string;
+  /**
+   * The lead clause, as a SystemStatement rather than a string.
+   *
+   * Found by the round-6 blind cross-lineage review, sweeping every element that
+   * carries `data-voice="system"`: this is a whole page-authored SENTENCE
+   * rendered in the mono-muted treatment that tells a reader the system checked
+   * it, and it was a free `string`. `trailerFor` is the only thing that builds
+   * one, so the type costs nothing and closes the sink — which is the difference
+   * between this field and the room name below it: a sentence gets a type, a
+   * short identifier gets a render-boundary check.
+   */
+  readonly lead: SystemStatement;
   readonly objectivesClear: number;
   readonly objectivesTotal: number;
   readonly commitments: number;
@@ -929,7 +940,7 @@ export function trailerFor(input: {
     lead: string,
   ): TrailerSummary => ({
     state: { kind, verification, owedToViewer: false, irreversible: false },
-    lead,
+    lead: systemStatement(lead),
     objectivesClear,
     objectivesTotal: input.objectives.length,
     commitments,

@@ -98,7 +98,7 @@ export interface RoomFrameHandlers {
   readonly onOpenAttention?: (itemId: string) => void;
   readonly onAct?: (itemId: string, actionId: string) => void;
   readonly onArm?: (itemId: string, arming: Arming) => void;
-  readonly onJumpToSource?: (itemId: string) => void;
+  readonly onJumpToSource?: (itemId: string, messageId: string) => void;
   readonly onPagePin?: (page: number, pageCount: number) => void;
   readonly onFoldPin?: (folded: boolean) => void;
   readonly composerValue?: string;

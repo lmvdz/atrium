@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import {
@@ -17,6 +17,7 @@ import {
   rationaleText,
   trailerFor,
 } from '../src/components/model';
+import { renderWith } from './harness';
 
 afterEach(cleanup);
 
@@ -234,7 +235,7 @@ describe('the trailer', () => {
       objectives: [{ id: 'o1', title: 'o', status: 'active', open: true }],
       overdue: 0,
     });
-    expect(summary.lead).toBe('1 of 1 still unverified');
+    expect(summary.lead.text).toBe('1 of 1 still unverified');
     expect(summary.state.verification).toBe('self_reported');
   });
 
@@ -261,7 +262,7 @@ describe('the trailer', () => {
       objectives: [],
       overdue: 3,
     });
-    expect(summary.lead).toBe('1 failure outside your list');
+    expect(summary.lead.text).toBe('1 failure outside your list');
   });
 });
 
@@ -458,3 +459,46 @@ const DECISION = {
   owedToViewer: true,
   irreversible: false,
 };
+
+/* ---------------------------------------------------------------------------
+ * ROUND 6's OWN ENUMERATION MISSED A HANDLER, AND THE BLIND REVIEW COUNTED.
+ *
+ * The round listed five handlers in the library that receive a message id and
+ * fixed all five. `AttentionCard.onJumpToSource` is the sixth: `SourceLink`
+ * resolves the item's source citation against the register — that is what prints
+ * the room — and then dispatched the ITEM's id, so a consumer implementing
+ * "jump to source" was told which card had been clicked and never which message
+ * to jump to. A handler that is not told what it acted on cannot act correctly.
+ * ------------------------------------------------------------------------- */
+describe('jump to source is told which message', () => {
+  it('the handler receives the resolved source message, not only the card', () => {
+    const seen: [string, string][] = [];
+    const { container } = renderWith(
+      f.RECORDS,
+      <AttentionCard
+        item={f.ATTENTION.find((candidate) => candidate.source !== null) as AttentionItem}
+        onJumpToSource={(itemId, messageId) => seen.push([itemId, messageId])}
+        viewer="lars"
+      />,
+    );
+    const link = container.querySelector('[data-jumps-to]');
+    expect(link, 'the card renders no source link').not.toBeNull();
+    const target = link?.getAttribute('data-jumps-to');
+    fireEvent.click(link as Element);
+    expect(seen).toHaveLength(1);
+    const [itemId, messageId] = seen[0] as [string, string];
+    expect(messageId, 'the handler was handed the card id instead of the message').toBe(target);
+    expect(messageId).not.toBe(itemId);
+  });
+
+  /* CATCHES: the room label going back to a carried field. The room is a fact
+     about the record, and the label and the id must name the same one. */
+  it('the room it names and the message it acts on are the same record', () => {
+    const item = f.ATTENTION.find((candidate) => candidate.id === 'Q1') as AttentionItem;
+    const { container } = renderWith(f.RECORDS, <AttentionCard item={item} viewer="lars" />);
+    const link = container.querySelector('[data-jumps-to]');
+    expect(link?.getAttribute('data-jumps-to')).toBe('m-legal');
+    expect(link?.getAttribute('data-source-room')).toBe('identity-service');
+    expect(link?.textContent).toContain('#identity-service');
+  });
+});

@@ -185,8 +185,19 @@
   display: flex;
   gap: 6px;
   line-height: 1.3;
-  max-height: 29px;
-  overflow: hidden;
+  /* NO CLAMP. This block held `max-height: 29px; overflow: hidden` — two lines'
+     worth — on the OPEN card, which is the surface a compressed row's clamp
+     routes the reader TO. A clip at the end of the route is a route to nothing,
+     and neither enumerator could see it: the CSS scan knew only `text-overflow`
+     and `-webkit-line-clamp`, and the browser sweep skips containers whose text
+     lives in children. Found by the blind cross-lineage review of round 6.
+
+     Unclamping is safe here in a way it was not before round 5: the pin's row
+     budget is derived from the room there is rather than from an assumed card
+     height, and the way out of the fold lives outside the clipped box, so a
+     card that grows costs a row and never costs the affordance. A rationale is
+     capped at 240 characters, which is four lines at this size — the reason
+     BRIEF concept 8 requires on screen is on screen. */
 }
 
 /* the WHY YOU label is a real element, not a ::before: it is content a screen

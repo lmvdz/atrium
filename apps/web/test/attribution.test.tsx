@@ -25,18 +25,21 @@ import {
   chosenAct,
   chosenAnswer,
   citationFrom,
+  isCitation,
   isQuotation,
   isRationale,
   isSystemStatement,
   maybe,
   messageEntry,
   messageLedger,
+  parseCitation,
   parseMessageRecord,
   parseQuotation,
   parseSystemStatement,
   quotationFrom,
   rationale,
   recordFingerprint,
+  resolveCitation,
   resolveQuotation,
   slot,
   systemStatement,
@@ -1072,6 +1075,60 @@ describe('the side channels go through the same model as the row', () => {
  * been applied to one row and one neighbour of each kind.
  * ------------------------------------------------------------------------- */
 
+describe('the runtime boundary for a reference of any origin', () => {
+  /* `parseCitation` and `isCitation` are the door #25 and #27 will bring replayed
+     and live message references through, and they had no test at all when they
+     were written — an exported runtime boundary nothing exercises is the
+     "clean today is not checked" case in the module this round added. */
+  it('a citation from outside the compiler is validated against this page’s register', () => {
+    const ledger = messageLedger(RECORDS);
+    /* A reference that never had a register — genuine external data — is
+       ADOPTED, and the adoption happens here, at the boundary whose job it is.
+       A page-authored record IS citable: that is the difference between a
+       citation and a quotation, and the receipt's link to a superseded answer is
+       exactly this case. */
+    const wire = JSON.parse(JSON.stringify({ messageId: 'm-chosen' }));
+    const parsed = parseCitation(wire, ledger);
+    expect(Object.keys(parsed).sort()).toEqual(['messageId', 'mintedFrom']);
+    expect(parsed.mintedFrom).toBe(recordFingerprint(chosen));
+    expect(resolveCitation(ledger, parsed, 'test').actor).toBe('lars');
+  });
+
+  /* CATCHES THE PARSER LAUNDERING PROVENANCE — round 6's own defect, committed
+     by round 6's own fix and found by the blind review of it.
+
+     The first version of these parsers DISCARDED the incoming fingerprint and
+     minted a fresh one from the destination ledger, on the reasoning that data
+     crossing a process boundary is being adopted. The consequence is the exact
+     cross-register forgery the checksum exists to refuse, reachable through the
+     documented door: mint a citation against a register whose `m10` is priya,
+     parse it against a register whose `m10` is lars, and it resolves to lars
+     with no complaint. A laundering step in front of a checksum is worse than no
+     checksum, because the checksum is what everything downstream then trusts. */
+  it('the parser refuses a reference minted against a different register', () => {
+    const here = messageLedger(RECORDS);
+    const elsewhere = messageLedger([{ ...priya, actor: 'someone else' }]);
+    const foreign = quotationFrom({ ...priya, actor: 'someone else' }) as Quotation;
+    expect(resolveQuotation(elsewhere, foreign, 'test').actor).toBe('someone else');
+    expect(() => parseQuotation(foreign, here)).toThrow(/minted from a different record/);
+    expect(() => parseCitation(foreign, here)).toThrow(/minted from a different record/);
+    /* …and the honest one still crosses, so the boundary is not simply closed. */
+    const honest = quotationFrom(priya) as Quotation;
+    expect(parseQuotation(honest, here).mintedFrom).toBe(recordFingerprint(priya));
+  });
+
+  it('a citation this page has never seen is refused outright', () => {
+    const ledger = messageLedger(RECORDS);
+    expect(() => parseCitation({ messageId: 'nope' }, ledger)).toThrow(/not a citation/);
+    expect(() => parseCitation({}, ledger)).toThrow(/not a citation/);
+    expect(isCitation({ messageId: 'nope' }, ledger)).toBe(false);
+    expect(isCitation({ messageId: 'm-chosen' }, ledger)).toBe(true);
+    /* …and a quotation is strictly narrower: a page-authored record is citable
+       and not quotable, which is the whole reason both doors exist. */
+    expect(isQuotation({ messageId: 'm-chosen' }, ledger)).toBe(false);
+  });
+});
+
 describe('two registers in one tree', () => {
   /* CATCHES: `<AttributionLedger>` nesting silently taking the inner one. React
      context is designed to shadow, which is right for a theme and wrong for the
@@ -1165,5 +1222,61 @@ describe('the slot denylist sees the spelling the platform produces', () => {
     }
     /* and the folding does not start rejecting ordinary props */
     expect(() => slot(createElement('span', { 'data-quotient': '3' }, 'ok'))).not.toThrow();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * WHAT THE BLIND CROSS-LINEAGE REVIEW OF ROUND 6's OWN FIX FOUND.
+ *
+ * Both foreign lineages were pointed at the ENUMERATION rather than at the
+ * fixes — "is the sweep complete, and how would you know" — which is the only
+ * question that could have caught round 5's actual failure. They overlapped on
+ * one finding out of ten.
+ * ------------------------------------------------------------------------- */
+describe('the second field that carries the words', () => {
+  /* CATCHES: a page-authored row whose `statement` disagrees with the record it
+     cites. The citation's checksum proves the row and the ledger are the same
+     register; it says nothing about `entry.statement`, which is a SECOND field
+     holding the words — so a brand-preserving spread rendered "priya chose: Drop
+     users_legacy now." over lars's record with every other check green. This is
+     round 2's body-slot defect on the arm round 6 rebuilt, and it is the exact
+     shape the authored arm's `bodyDivergence` has guarded since round 2. */
+  it('a chosen row whose words are not the record’s words does not render', () => {
+    const chosenRecord = f.MESSAGES['m-chosen'] as MessageRecord;
+    const row = messageEntry(chosenRecord, { state: lars_state() });
+    const forged = {
+      ...(row as unknown as Record<string, unknown>),
+      statement: chosenAct('priya', 'Drop users_legacy now.', chosenRecord.id),
+    } as unknown as MessageEntry;
+    expect(() => renderWith(f.RECORDS, <TimelineRow entry={forged} />)).toThrow(
+      /not the words on .* record/,
+    );
+    cleanup();
+    /* …and the honest row still renders, so this is not a check that always
+       fires. */
+    const { container } = renderWith(f.RECORDS, <TimelineRow entry={row} />);
+    expect(container.textContent).toContain('lars chose:');
+  });
+});
+
+describe('a slot walks what React renders, not what an array is', () => {
+  /* CATCHES: the walk testing `Array.isArray`. React renders any
+     `Iterable<ReactNode>`, so a `Set` fell through to `isValidElement`, came
+     back false, and was accepted in silence — and React then rendered the `<q>`
+     inside it. Same shape as the case-sensitivity defect this round fixed, in
+     the other axis: there the denylist missed a spelling, here it missed a
+     container. */
+  it('an attributed element inside a Set is still attributed markup', () => {
+    const forged = new Set([createElement('q', { key: 'x' }, 'words priya never wrote')]);
+    expect(() => slot(forged as never)).toThrow(/may not carry attributed markup/);
+    /* every iterable React accepts, not a list of the ones somebody thought of */
+    const generated = (function* () {
+      yield createElement('blockquote', { key: 'y' }, 'nor these');
+    })();
+    expect(() => slot(generated as never)).toThrow(/may not carry attributed markup/);
+    /* …and an honest iterable still passes */
+    expect(() =>
+      slot(new Set([createElement('span', { key: 'z' }, 'fine')]) as never),
+    ).not.toThrow();
   });
 });

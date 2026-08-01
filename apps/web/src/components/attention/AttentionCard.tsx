@@ -48,7 +48,18 @@ export type AttentionCardProps = {
    * what the caller puts on the record should be what the control measured.
    */
   readonly onArm?: (itemId: string, arming: Arming) => void;
-  readonly onJumpToSource?: (itemId: string) => void;
+  /**
+   * Jump to the message this item came from.
+   *
+   * It receives the ITEM and the RESOLVED MESSAGE, in that order. Round 6's own
+   * enumeration listed five handlers that take a message id and missed this one:
+   * `SourceLink` resolved the source citation against the register and then
+   * dispatched the item's id, so a consumer implementing "jump to source" had
+   * been told which CARD was clicked and never which MESSAGE to jump to. A
+   * handler that is not told what it acted on cannot act correctly — the
+   * sentence this repo already had, at a sixth address.
+   */
+  readonly onJumpToSource?: (itemId: string, messageId: string) => void;
 } & NoGlyph;
 
 const EMPHASIS_CLASS: Readonly<Record<AttentionAction['emphasis'], string>> = {
@@ -153,7 +164,7 @@ function SourceLink({
 }: {
   readonly itemId: string;
   readonly source: NonNullable<AttentionItem['source']>;
-  readonly onJumpToSource?: (itemId: string) => void;
+  readonly onJumpToSource?: (itemId: string, messageId: string) => void;
 }) {
   const record = useCitedRecord(source, 'AttentionCard source');
   const room = record.room ?? null;
@@ -163,7 +174,8 @@ function SourceLink({
       <button
         className={room === null ? styles.link : styles.xroom}
         data-source-room={room ?? 'here'}
-        onClick={onJumpToSource === undefined ? undefined : () => onJumpToSource(itemId)}
+        data-jumps-to={record.id}
+        onClick={onJumpToSource === undefined ? undefined : () => onJumpToSource(itemId, record.id)}
         title={
           room === null
             ? 'the source of this item is a message in this room'
