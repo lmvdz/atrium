@@ -207,14 +207,25 @@ function command(describes, names, match) {
   return matcher;
 }
 
-/** A script in `scripts/ci/` being *invoked*, not merely mentioned. */
-function invokes(script) {
-  const path = new RegExp(String.raw`^(?:\.\.\/)*scripts\/ci\/${script}$`);
-  return command(`\`node …/scripts/ci/${script.replace(/\\/g, '')}\``, ['node'], ({ argv }) => {
+/**
+ * A script being *invoked* under `node`, not merely mentioned.
+ *
+ * @param directory the directory it lives in, as a regexp source
+ * @param script    its filename, as a regexp source
+ */
+function invokesIn(directory, script) {
+  const path = new RegExp(String.raw`^(?:\.\.\/)*${directory}\/${script}$`);
+  const shown = `${directory}/${script}`.replace(/\\/g, '');
+  return command(`\`node …/${shown}\``, ['node'], ({ argv }) => {
     if (argv[0] !== 'node') return false;
     const operand = firstOperand(argv);
     return operand !== undefined && path.test(operand);
   });
+}
+
+/** A script in `scripts/ci/` being *invoked*, not merely mentioned. */
+function invokes(script) {
+  return invokesIn(String.raw`scripts\/ci`, script);
 }
 
 /**
@@ -333,6 +344,7 @@ const WAITS_FOR_POSTGRES = invokes('wait-for-postgres\\.mjs');
 const RUNS_MIGRATIONS = binary('drizzle-kit', 'migrate');
 const RUNS_VITEST = binary('vitest', 'run');
 const INSTALLS_CHROMIUM = binary('playwright', 'install');
+const MIGRATES_E2E_DATABASE = invokesIn(String.raw`e2e\/support`, String.raw`ensure-database\.mjs`);
 const ASSERTS_CHROMIUM = invokes('assert-chromium\\.mjs');
 const RUNS_PLAYWRIGHT = binary('playwright', 'test');
 
@@ -510,6 +522,11 @@ const REQUIRED_STEPS = {
     },
     {
       rule: 'required-job-steps',
+      what: 'the e2e database migration',
+      test: MIGRATES_E2E_DATABASE,
+    },
+    {
+      rule: 'required-job-steps',
       what: 'the Playwright suite',
       test: RUNS_PLAYWRIGHT,
       requires: [
@@ -519,6 +536,12 @@ const REQUIRED_STEPS = {
           test: ASSERTS_CHROMIUM,
           because:
             'the smoke spec skips itself when no browser is installed, which is right on a laptop and a lie in CI; the assertion has to come first or the suite has already reported green over zero executed tests',
+        },
+        {
+          what: 'the e2e database migration',
+          test: MIGRATES_E2E_DATABASE,
+          because:
+            '`pnpm test:e2e` runs it before Playwright on a laptop, and this job invokes `playwright test` directly so the policy can see the command rather than a package.json alias — which means the migration is a step of its own and can be dropped like any other. Playwright starts its `webServer` processes before `globalSetup` would run, so without it two servers query tables that do not exist and every spec fails at sign-up',
         },
       ],
     },

@@ -64,3 +64,28 @@ export function assertServingConfig(): void {
   // reuses this instance rather than building a second one.
   auth();
 }
+
+/**
+ * `assertServingConfig`, and the exit.
+ *
+ * Lives here rather than in `instrumentation.ts` because that file is compiled
+ * for every runtime Next supports, and `process.exit` does not exist on the
+ * edge — the guard in `register()` means the edge never reaches this code, but
+ * the bundler's static analysis cannot know that and says so on every build.
+ * A warning nobody can act on is a warning that teaches people to skim build
+ * logs, which is a bad habit to teach in a repository whose whole subject is
+ * gates that were green while the product was broken.
+ */
+export function assertServingConfigOrExit(): void {
+  try {
+    assertServingConfig();
+  } catch (error) {
+    console.error(
+      '[atrium/web] refusing to serve: this process is not configured well enough ' +
+        'to render a page, so it is exiting instead of answering 500 to every ' +
+        'request. See apps/web/lib/boot.ts.',
+    );
+    console.error(error instanceof Error ? (error.stack ?? error.message) : error);
+    process.exit(1);
+  }
+}

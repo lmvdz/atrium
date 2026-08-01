@@ -305,6 +305,11 @@ const PAIRS = {
     step: 'the e2e report gate',
     needs: 'the Playwright suite',
   },
+  e2eSuiteNeedsMigration: {
+    job: 'e2e',
+    step: 'the Playwright suite',
+    needs: 'the e2e database migration',
+  },
 
   // ---- the deployment job (#40) -------------------------------------------
   bootNeedsBuild: {
@@ -888,6 +893,22 @@ const MUTATIONS = [
     rule: 'required-step-prerequisites',
     mutate: (s) => replaceOnce(s, '>> "$GITHUB_ENV"', ">> '$GITHUB_ENV'"),
     pair: PAIRS.suiteNeedsReset,
+  },
+
+  {
+    name: 'the e2e migration moved after the suite, so both servers query tables that do not exist',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => moveStepAfter(s, 'Migrate the e2e database', 'Run e2e suite'),
+    pair: PAIRS.e2eSuiteNeedsMigration,
+  },
+  {
+    name: 'the e2e migration quoted into an echo: present, named, and migrating nothing',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => decoyStep(s, 'Migrate the e2e database'),
+    pair: PAIRS.e2eSuiteNeedsMigration,
+    // The migration is a required step in its own right as well as a
+    // prerequisite, so an inert one is caught twice. Both are the same edit.
+    also: ['required-job-steps'],
   },
 
   // ---- the deployment job's ten pairs (#40) -------------------------------

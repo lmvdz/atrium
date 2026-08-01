@@ -648,11 +648,12 @@ zero tests exits 0 just like one that passed 315:
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. 19 pairs across 18 steps: the
+  prerequisite is in the same job *and earlier*. 20 pairs across 19 steps: the
   ratchet's fetch of `origin/main`; both report resets, before the runs they
   reset for; both report gates, after those runs; the migration's wait for
   Postgres and the schema assertion's migration; the browser install and browser
-  check the Playwright suite needs; and, in the `deploy` job, everything that
+  check the Playwright suite needs, and the database migration without which
+  its two servers query tables that do not exist; and, in the `deploy` job, everything that
   depends on a running stack — the boot's dependence on the image build, the
   certificate copy's on the boot, four assertions' on that certificate, two
   more on the boot, the image scan's on the build, and the teardown
@@ -707,7 +708,7 @@ zero tests exits 0 just like one that passed 315:
   job, and — self-referentially — `verify`, `e2e` and `deploy` still *containing*
   the steps that do the checking, each assert script named and each one's setup
   ordered before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 85
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 87
   mutated copies of the real workflow and additionally asserts that every one of
   the 23 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules

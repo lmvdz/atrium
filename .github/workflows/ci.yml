@@ -319,6 +319,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # The suite signs people up, verifies addresses, invites members and opens
+    # sockets, all of which is state in Postgres. On a laptop
+    # `e2e/support/ensure-database.mjs` starts a throwaway container; here the
+    # runner provides one, on the port and with the credentials
+    # `e2e/support/config.mjs` defaults to, so nothing has to be told twice.
+    #
+    # Its own database, never the one `verify` uses: the e2e run truncates every
+    # table between runs, and a suite that can truncate the schema-gate's
+    # database is a suite that can make the schema gate flaky.
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_USER: atrium
+          POSTGRES_PASSWORD: atrium
+          POSTGRES_DB: atrium_e2e
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U atrium -d atrium_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -363,6 +387,16 @@ jobs:
         # the download silently failed, stop here rather than report a green run
         # over zero executed browser tests.
         run: pnpm --filter @atrium/web exec node ../../scripts/ci/assert-chromium.mjs
+
+      - name: Migrate the e2e database
+        # `pnpm test:e2e` runs this before Playwright on a laptop; the workflow
+        # invokes `playwright test` directly (so the policy engine can see the
+        # command rather than a package.json alias), which means the migration
+        # has to be its own step. It is not optional: Playwright starts its
+        # `webServer` processes before `globalSetup` would get a chance, so a
+        # suite run against an unmigrated database has two servers querying
+        # tables that do not exist. The policy enforces the pair.
+        run: pnpm --filter @atrium/web exec node e2e/support/ensure-database.mjs
 
       - name: Reset the e2e report
         run: |

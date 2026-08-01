@@ -7,26 +7,17 @@
  * (see `lib/env.ts`) and is also how issue #26 round 4 found a compose stack
  * whose every page answered 500 while every container reported healthy.
  *
- * Kept to three lines and a dynamic import on purpose. `lib/boot` pulls in the
- * database client and Better Auth; importing it at module scope would load both
- * into the edge runtime's compilation as well, and this file is compiled for
- * every runtime Next supports.
+ * Kept to two lines and a dynamic import on purpose. Next compiles this file for
+ * every runtime it supports, edge included; `lib/boot` pulls in the database
+ * client, Better Auth and `process.exit`, none of which exist there. Importing
+ * it at module scope would drag all of that into the edge compilation and earn a
+ * build warning about a Node API on a line the edge runtime can never reach.
  */
 export async function register(): Promise<void> {
   // Only the Node.js server has an environment worth checking — and only it can
   // exit. The edge runtime has neither.
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
-  try {
-    const { assertServingConfig } = await import('./lib/boot');
-    assertServingConfig();
-  } catch (error) {
-    console.error(
-      '[atrium/web] refusing to serve: this process is not configured well enough ' +
-        'to render a page, so it is exiting instead of answering 500 to every ' +
-        'request. See apps/web/lib/boot.ts.',
-    );
-    console.error(error instanceof Error ? (error.stack ?? error.message) : error);
-    process.exit(1);
-  }
+  const { assertServingConfigOrExit } = await import('./lib/boot');
+  assertServingConfigOrExit();
 }

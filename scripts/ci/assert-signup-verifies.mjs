@@ -59,11 +59,14 @@ check(
 );
 check(session.submitted.status === 200, `/check-email returned ${session.submitted.status}`);
 
-// Unverified, no session and no app. Both are asserted *before* the link is
-// used, so the 200 further down means the verification did it.
+// Unverified, no session and no app. Both are read from the state as it was
+// *before* the link was followed — `cookiesBeforeVerifying` is a snapshot, not
+// the live jar, because the live jar necessarily holds a session by the time
+// this file runs. Asserting against the live jar is what the first draft did,
+// and it went red against a stack that was behaving correctly.
 check(
-  !session.jar.has((name) => name.includes('session')),
-  'signing up minted a session before the address was verified — `requireEmailVerification` is off',
+  !session.cookiesBeforeVerifying.some((name) => name.includes('session')),
+  `signing up minted a session before the address was verified — \`requireEmailVerification\` is off (cookies held: ${session.cookiesBeforeVerifying.join(', ') || 'none'})`,
 );
 check(
   session.beforeVerifying.path.startsWith('/sign-in') ||

@@ -276,6 +276,18 @@ export function uniqueEmail(prefix) {
  *
  * It deliberately asserts nothing itself. A helper that threw on a wrong status
  * would decide, in a shared file, which failures the callers are allowed to see.
+ *
+ * ## `cookiesBeforeVerifying`, and why it is a snapshot
+ *
+ * A jar is mutable and this function runs the flow to its end, so by the time a
+ * caller reads `jar` there *is* a session in it — that is the point. Anything
+ * about the state *before* the link was followed therefore has to be captured
+ * while it is true. The first draft of `assert-signup-verifies.mjs` asserted
+ * "no session cookie before verification" against the final jar and went red on
+ * a stack that was behaving perfectly; the proxy's own access log showed the
+ * pre-verification `/app` correctly bouncing to `/sign-in`. The assertion was
+ * right about the property and wrong about the moment. So the moment is
+ * recorded here.
  */
 export async function establishSession(target, mail, prefix) {
   const jar = new Jar();
@@ -292,6 +304,7 @@ export async function establishSession(target, mail, prefix) {
     { jar },
   );
   const beforeVerifying = await follow(target, '/app', { jar });
+  const cookiesBeforeVerifying = [...jar.names];
 
   const summary = await until(
     `the verification mail for ${email}`,
@@ -317,6 +330,7 @@ export async function establishSession(target, mail, prefix) {
     fields,
     submitted,
     beforeVerifying,
+    cookiesBeforeVerifying,
     message,
     link,
     url,

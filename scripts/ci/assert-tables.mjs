@@ -8,9 +8,19 @@
  * database, or a rename that left the old name behind. And the list itself was
  * a copy of the schema, so it went stale the moment the schema moved.
  *
- * Here the expected set is *derived* from the built schema export — the same
+ * Here the expected set is *derived* from the built package export — the same
  * artifact the application imports — and compared for set equality against
  * information_schema. Extra fails. Missing fails.
+ *
+ * **`dist/index.js`, not `dist/schema.js`.** It read the one schema module when
+ * that was the only one; `@atrium/db` then grew `auth-schema.ts` and the two
+ * branches carrying those changes never met until #40's merge. The result was a
+ * gate that derived twelve tables, found seventeen, and reported the five auth
+ * tables as drift — a false red, and the worst kind, because the obvious way to
+ * make it green is to add the names it is missing to a list. The package's own
+ * entry point re-exports every schema module, so a third one added tomorrow is
+ * covered without an edit here. That is the property worth having: the
+ * expectation follows what the application imports, rather than tracking it.
  *
  * Run from packages/db (`pnpm --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs`)
  * so the drizzle-orm instance doing the reflection is the one the schema was
@@ -28,7 +38,7 @@ const INFRASTRUCTURE = new Set(['__drizzle_migrations']);
 const EXPECTED_POSTGRES_MAJOR = process.env.EXPECTED_POSTGRES_MAJOR ?? '16';
 
 const dbDir = process.env.DB_PACKAGE_DIR ?? process.cwd();
-const schemaPath = resolve(dbDir, 'dist/schema.js');
+const schemaPath = resolve(dbDir, 'dist/index.js');
 
 export function diffTables(expected, actual) {
   const expectedSet = new Set(expected);
@@ -48,8 +58,7 @@ async function main() {
     return 1;
   }
   // Resolved from packages/db, not from wherever this script happens to live:
-  // the reflection must use the same drizzle instance that produced
-  // dist/schema.js.
+  // the reflection must use the same drizzle instance that produced the tables.
   const { getTableName, is, Table } = await importFrom(dbDir, 'drizzle-orm');
   const postgres = (await importFrom(dbDir, 'postgres')).default;
 
@@ -60,7 +69,7 @@ async function main() {
 
   if (expected.length === 0) {
     console.error(
-      '::error::The built schema exports no Drizzle tables. Deriving an empty expectation would make this gate assert nothing.',
+      '::error::The built package exports no Drizzle tables. Deriving an empty expectation would make this gate assert nothing.',
     );
     return 1;
   }
