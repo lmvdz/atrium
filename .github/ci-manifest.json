@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "Enrollment manifest for the CI test gates. Every workspace that pnpm-workspace.yaml",
+    "resolves must appear here — either with a floor under `vitest.workspaces`, or with a",
+    "written reason under `vitest.exempt`. A workspace that exists on disk and is missing",
+    "from both fails the gate, so adding a package without adding tests is a red build",
+    "rather than a global count that silently absorbs the gap.",
+    "Floors are per project, not global: a package that stops contributing tests entirely",
+    "cannot hide behind its neighbours' counts. Raising a floor is a normal part of adding",
+    "tests; lowering one is a decision that shows up in review — see `ratchet` below, and",
+    "scripts/ci/assert-floor-ratchet.mjs, which compares every number here against the same",
+    "file on origin/main.",
+    "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
+    "target: the point is to catch a suite that shrank, not to go red every time a test is",
+    "renamed away. Counted from a real run of the merged tree (scaffold-r4 + ingest):",
+    "core 129, db 11, ingest 150, server 25 — 315 tests across 14 files."
+  ],
+  "vitest": {
+    "workspaces": {
+      "apps/server": {
+        "project": "server",
+        "minTests": 22
+      },
+      "packages/core": {
+        "project": "core",
+        "minTests": 120
+      },
+      "packages/db": {
+        "project": "db",
+        "minTests": 10
+      },
+      "packages/ingest": {
+        "project": "ingest",
+        "minTests": 140
+      }
+    },
+    "exempt": {
+      "apps/web": "Browser surface. Its suite is the Playwright project below; the Vitest workspace stays browser-free on purpose, so apps/web contributes zero unit tests by design."
+    },
+    "minTotalTests": 300
+  },
+  "playwright": {
+    "projects": {
+      "chromium": {
+        "minTests": 2
+      }
+    },
+    "minTotalTests": 2
+  },
+  "ratchet": {
+    "_comment": [
+      "Floors ratchet up. scripts/ci/assert-floor-ratchet.mjs reads this same file from",
+      "origin/main and fails if any floor here is lower than the one there — including the",
+      "quiet version, where an enrolled workspace is moved into `exempt` instead.",
+      "A decrease is allowed with a written reason keyed to exactly what came down, e.g.",
+      "  \"vitest.workspaces.packages/core.minTests\": \"why the suite is legitimately smaller\".",
+      "Justifications are checked in both directions: one that does not match an actual",
+      "decrease fails too, so nobody can pre-authorise next month's cut by landing a blanket",
+      "reason today.",
+      "There is no baseline until this branch merges — origin/main carries no manifest yet —",
+      "so today the script says `no baseline` loudly and checks only that every floor is a",
+      "whole number of at least 1. It becomes a real ratchet the moment a manifest exists on",
+      "main."
+    ],
+    "justifications": {}
+  }
+}

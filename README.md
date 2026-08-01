@@ -489,6 +489,208 @@ answers, otherwise starting a `postgres:16-alpine` container on :55432 — then
 migrates and empties it. If neither is available it fails with instructions
 rather than skipping; a green run that tested nothing is worse than a red one.
 
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request, every merge-queue entry,
+and every push to `main`. Three jobs: `verify` (lint, typecheck, migrations
+against a real Postgres, unit tests, build), `e2e` (Playwright on chromium), and
+`gate`.
+
+**What this defends against: accident and drift.** A step deleted during a
+rebase, a floor lowered to make a red build go green, an action tag that moved
+under us, a workspace that stopped contributing tests, a suite that skipped its
+way to silence. Every rule below is aimed at the mistake nobody meant to make.
+
+It does **not** defend against a malicious author with write access, and it
+cannot. The policy engine, its self-test, the reporters, the gates and the
+floors all execute from the revision under test: whoever can edit those files
+can edit what they check. The presence rules and the ratchet make that expensive
+and loud — they do not make it impossible. **Adversarial closure is the
+governance trigger below**, not anything in the workflow: required-check
+rulesets, pull requests, and code-owner review. Reading any part of this CI as
+protection against a hostile contributor is reading it wrong.
+
+Precisely where that line falls, because "not against a malicious author" is too
+vague to act on: the presence rules pin the **invocation shape** of every gate —
+that the script is named, invoked as a command rather than mentioned, in the
+right job, and after the steps it depends on. They say nothing about what the
+script does once it starts. `echo node scripts/ci/assert-tables.mjs` no longer
+satisfies them; replacing `assert-tables.mjs`'s body with `process.exit(0)`
+satisfies all of them and always will, because the rule and the script are read
+out of the same commit. That is malicious editing rather than drift, and it
+belongs to the governance trigger. A green policy run is a claim about the
+workflow's shape, never about its gates' semantics.
+
+**`gate` is the only check that should ever be marked required.** GitHub scores
+a *skipped* required check as a *successful* one, so marking `verify` required
+means a pull request can bypass it wholesale by adding `if: ${{ false }}` to the
+job. `gate` needs every other job, runs `if: always()`, and fails unless each
+one reported literally `success` — skipped, cancelled and failed are all red
+there. One required check, and it cannot be skipped into a pass.
+
+The gates count rather than trust an exit code, because a runner that collected
+zero tests exits 0 just like one that passed 315:
+
+- Per-project floors live in `.github/ci-manifest.json`. Every workspace pnpm
+  resolves must be enrolled there with a floor, or exempted with a written
+  reason; a new package that has no tests fails the build instead of hiding
+  inside a global count. Adding tests means raising a floor — a deliberate,
+  reviewable edit.
+- **Floors ratchet up.** `assert-floor-ratchet.mjs` reads the same manifest from
+  `origin/main` and fails if any floor here is lower, including the quiet
+  version where an enrolled workspace is demoted to `exempt`. A decrease needs a
+  written justification keyed to exactly what came down, and a justification
+  that matches no actual decrease fails too — nobody pre-authorises next month's
+  cut. Until a manifest exists on `main` the script says `no baseline` out loud
+  and checks only that every floor is at least 1.
+- Skipped, todo and *expected-failure* tests all fail the gate. That last one is
+  invisible in the stock reports: Vitest records `it.fails()` as `passed` with an
+  empty `failureMessages`, and Playwright records `test.fail()` as `expected`,
+  i.e. green. Because the stock Vitest report genuinely cannot witness `fails` at
+  any level of effort, `scan-expected-failures.mjs` provides a second witness
+  from outside the reporting path: it parses the test sources and counts the
+  annotations itself. A reporter that lied about the flag while keeping every
+  total honest is caught by the two witnesses disagreeing.
+- That scanner **parses**, and it starts from the test glob rather than from the
+  report. Both matter. A line-oriented matcher cannot see
+  `test.each([...]).fails(...)`, `it['fails']`, `it?.fails`, a chain spread over
+  three lines, or an annotation aliased into a helper — and it fires on
+  `it('rejects it.fails', …)`, which is prose. Reading the TypeScript AST fixes
+  both directions at once: `.fails` counts when it is a member access rooted at a
+  test runner, however it is spelled, and a string that merely contains the text
+  is not one. And because the scan starts from every `*.{test,spec}.*` on disk
+  and follows relative imports transitively, an annotation living in a helper —
+  a file no report will ever name — is still read. "Rooted at a test runner"
+  means rooted at a binding actually *derived* from the runner, per name: a
+  module that imports `vitest` for its own assertions and also exports domain
+  code does not turn that domain code's `.fails` property into an annotation.
+  That holds through a namespace too: `import * as helpers from './lib'` taints
+  the members of `helpers` that are runner-derived and no others, so
+  `helpers.knownBroken.fails` is an annotation and `helpers.validate().fails` is
+  a count of failures in a domain object. 18 spellings and 7 lookalikes are
+  fixtures in `gate-selftest.mjs`.
+- **The source scan is an independent witness, not a complete one**, and the
+  difference is load-bearing. It cannot see an annotation behind a bare or
+  aliased import specifier, a computed key it would have to constant-fold
+  (`it[KEY]`), a `globalThis` root, or a wrapper a `setupFiles` entry registered
+  outside every test file's import graph. All four fail *closed* through the
+  other witness — `vitest-ci-reporter.mjs` reads `options.fails` off the live
+  task object, so an annotation that actually runs raises its count above the
+  scan's and the gate fails on the disagreement. That is the whole design and
+  exactly its strength: it survives *either* witness being wrong, not both. 4
+  stated blind spots are fixtures asserting both halves of that. Closing the
+  conjunction needs a check that does not run from the revision under test,
+  which is the governance trigger below.
+- **Prerequisites are enforced as pairs.** A gate can be present, named, invoked
+  and useless because the step it depends on is gone. `assert-floor-ratchet.mjs`
+  is the case: without the `git fetch` of `origin/main` before it, the shallow
+  clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
+  floor lowered in the same pull request sails through. So required steps declare
+  their setup, and `required-step-prerequisites` fails the build unless the
+  prerequisite is in the same job *and earlier*. 9 pairs across 8 steps: the
+  ratchet's fetch of `origin/main`; both report resets, before the runs they
+  reset for; both report gates, after those runs; the migration's wait for
+  Postgres and the schema assertion's migration; and the browser install and
+  browser check the Playwright suite needs. The count is derived —
+  `PREREQUISITE_PAIRS.length`, printed by the self-test — because a hand-counted
+  number in a receipt is how round 2 claimed 15 rules over an engine with 18.
+  Every number in this section is now read back out of the code by the
+  self-tests, prose included, because deriving a count at the point it is
+  printed does nothing for the copy of it sitting in a README.
+- **A protected step must be *invoked*, not mentioned — and recognition is a
+  parse, not a pattern.** Round 4 matched by substring, so
+  `run: echo 'git fetch … refs/heads/main'` satisfied the pair while
+  `origin/main` never existed and the ratchet took its no-baseline exit-0 path.
+  Round 5 replaced that with a line-start regular expression, and nine words
+  defeated it: `pnpm --version && echo exec node scripts/ci/assert-floor-ratchet.mjs`
+  matched, because arbitrary text was allowed between a package manager and a
+  later `exec`. The same expression was wrong in the other direction too — it
+  rejected `(git fetch …)`, `true && git fetch …`, `VAR=x git fetch …`, `sudo`,
+  `timeout 30`, `command git`, `xargs`, and any line long enough to wrap over a
+  backslash, while accepting `git fetch … &`, which never establishes that the
+  fetch finished. So `scripts/ci/shell-command.mjs` tokenizes the script —
+  quoting, comments, expansions, redirections, here-documents, operators,
+  subshells — and yields simple commands; a rule is a predicate over the words
+  of one command, and `echo exec node x` is an `echo` with two arguments however
+  it is spaced. Both polarities are fixtures: the evasions are mutations that
+  must go red, and 14 legitimate rewrites of the real steps must leave the whole
+  file clean, because a guard that is wrong in that direction is one somebody
+  deletes.
+- **Recognising a command word is not proving what runs.** `git` means "the word
+  `git` in command position", and a shell function, an alias, `hash -p`, a PATH
+  assignment or a write to `$GITHUB_PATH` can all make that word mean something
+  else. `no-command-shadowing` bans those spellings — derived from the command
+  words the rules actually depend on, launchers and package managers included —
+  and that is a list, not a proof. Executable *provenance* cannot be established
+  by reading the workflow, because anything checking it also runs from the
+  revision under test. It belongs to the governance trigger below.
+- The two Vitest reports must describe the same run — every status, the file
+  count, and the identity of every individual test, not just the total. Matching
+  totals prove little; a gutted reporter cannot invent 315 test names that agree
+  file for file with Vitest's own.
+- The database is proven by set equality against the schema, derived from
+  `@atrium/db`'s built export — a missing table and an unexpected extra one both
+  fail.
+- Reports are deleted immediately before each runner starts and rejected unless
+  their mtime post-dates that moment, so a leftover file cannot stand in for a
+  run.
+- `scripts/ci/workflow-policy.mjs` enforces 23 house rules over the parsed
+  workflow: no `continue-on-error`, no job conditions, no step conditions beyond
+  `failure()` on an artifact upload, no shell overrides, no step timeouts, every
+  action pinned to a commit SHA, no reusable workflows (a job body that is not in
+  the file cannot be checked by anything in the file), `gate.needs` covering every
+  job, and — self-referentially — `verify` and `e2e` still *containing* the steps
+  that do the checking, each assert script named and each one's setup ordered
+  before it. `actionlint` runs alongside it.
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 72
+  mutated copies of the real workflow and additionally asserts that every one of
+  the 23 declared rules has a mutation proving it fires — coverage derived from
+  the engine's own rule list rather than counted by hand, which is how four rules
+  went unexercised through round 2. Each mutation must also name *what* it broke
+  (a message pattern, or the exact step→prerequisite edge) and must trip nothing
+  else it has not declared, so a mutation cannot pass for the wrong reason: two
+  of round 4's deleted a step that was required in its own right, and would have
+  gone red with the rule they claimed to test removed from the engine.
+  `gate-selftest.mjs` runs 70 cases, including extracting the `gate` job's
+  verdict script from the workflow and **executing it** against synthetic
+  `needs` payloads: a parser reads shapes, and a shape can be right while the
+  logic is wrong.
+
+### Governance trigger (recorded)
+
+Branch rulesets are deliberately **not** enabled while this is a solo repo:
+merges happen from the campaign's own train and there is nobody to review a pull
+request. `.github/CODEOWNERS` is committed now so the rule has something to
+point at.
+
+**Before a second contributor gets write access, or before this repository goes
+public — whichever comes first — turn on a ruleset for `main` that requires the
+`gate` check, requires a pull request, and requires review from code owners.**
+Until then, a workflow edit is validated by the very revision that proposes it,
+which is a trust boundary a solo repo can hold and a shared one cannot.
+
+Four things this harness deliberately does **not** guarantee, all of them owned
+by that trigger rather than by anything automated:
+
+1. **Semantics.** Every rule pins the *shape* of a gate — named, invoked as a
+   command, in the right job, after its setup. Replacing an assert script's body
+   with `process.exit(0)` satisfies all of them, and reachability is not
+   execution: `false && git fetch …` is a genuine invocation nothing here
+   evaluates.
+2. **Executable provenance.** Commands are recognised by their word.
+   `no-command-shadowing` bans the obvious redefinitions of one; a list of
+   spellings is not a proof that `git` is git.
+3. **Freedom from self-reference.** The policy engine, both self-tests, and the
+   README readback that keeps these numbers honest all run from the revision
+   under test. A hostile revision edits the checker and the checked in one
+   commit, and the readback compares a count against prose that commit wrote.
+4. **Complete mutation purity.** Each mutation must fire its own rule and
+   declare any other rule it trips. A second violation of the *same* rule is
+   invisible, and an `also` entry's justification is prose, not a check.
+
+They are written down because a boundary with a sentence on it can be argued
+about; a boundary that nobody wrote down is one somebody walks over.
+
 ## Notes for the next change
 
 - `design/tokens.css` is a placeholder transcribed from the settled Atrium token
