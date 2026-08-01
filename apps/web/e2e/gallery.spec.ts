@@ -407,6 +407,122 @@ test.describe('gallery', () => {
     expect(elapsed).toBeLessThan(3500);
   });
 
+  /* -------------------------------------------------------------------------
+   * THE DISABLED STATE, MEASURED — the case the harness used to skip.
+   * ---------------------------------------------------------------------- */
+  for (const theme of THEMES) {
+    test(`a disabled control is legible and still reads as inactive — ${theme}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/gallery?theme=${theme}`);
+      await expect(page.locator('[data-gallery-frame]').first()).toBeVisible();
+
+      /* Round 2: `.surf[disabled] { opacity: .55 }` measured 2.49:1 light and
+         2.98:1 dark at 10px — below AA, below the 3:1 large-text floor, and
+         below --tx4, which globals.css bans from carrying text outright. The
+         audit never saw it because it skipped anything under `opacity 0.999`
+         and named "a disabled chip" as the reason. */
+      const report = await page.evaluate(() => {
+        const parse = (value: string) => {
+          const m = value.match(/rgba?\(([^)]+)\)/);
+          if (m === null) return null;
+          const p = (m[1] as string).split(',').map((x) => Number.parseFloat(x.trim()));
+          return { r: p[0] as number, g: p[1] as number, b: p[2] as number, a: p[3] ?? 1 };
+        };
+        const channel = (c: number) => {
+          const s = c / 255;
+          return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+        };
+        const lum = (c: { r: number; g: number; b: number }) =>
+          0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+        const ratio = (a: { r: number; g: number; b: number }, b: typeof a) => {
+          const la = lum(a);
+          const lb = lum(b);
+          return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+        };
+        const fade = (el: Element) => {
+          let node: Element | null = el;
+          let opacity = 1;
+          while (node !== null && node !== document.documentElement) {
+            opacity *= Number.parseFloat(getComputedStyle(node).opacity || '1');
+            node = node.parentElement;
+          }
+          return opacity;
+        };
+        const behind = (el: Element) => {
+          let node: Element | null = el.parentElement;
+          while (node !== null) {
+            const bg = parse(getComputedStyle(node).backgroundColor);
+            if (bg !== null && bg.a > 0) return bg;
+            node = node.parentElement;
+          }
+          return { r: 255, g: 255, b: 255, a: 1 };
+        };
+        const out: {
+          label: string;
+          ratio: number;
+          fontSize: number;
+          opacity: number;
+          colour: string;
+          enabledColour: string;
+        }[] = [];
+        for (const button of document.querySelectorAll('.surf, [disabled]')) {
+          if (!(button as HTMLButtonElement).disabled) continue;
+          const label = button.querySelector('span') ?? button;
+          const style = getComputedStyle(label);
+          const fg = parse(style.color);
+          if (fg === null) continue;
+          const bg = behind(label);
+          const alpha = fade(label);
+          const ink = {
+            r: fg.r * alpha + bg.r * (1 - alpha),
+            g: fg.g * alpha + bg.g * (1 - alpha),
+            b: fg.b * alpha + bg.b * (1 - alpha),
+          };
+          const sibling = [...(button.parentElement?.children ?? [])].find(
+            (el) => el !== button && !(el as HTMLButtonElement).disabled,
+          );
+          const enabled = sibling?.querySelector('span');
+          out.push({
+            label: (label.textContent ?? '').trim().slice(0, 24),
+            ratio: Math.round(ratio(ink, bg) * 100) / 100,
+            fontSize: Number.parseFloat(style.fontSize),
+            opacity: Math.round(alpha * 1000) / 1000,
+            colour: style.color,
+            enabledColour:
+              enabled === undefined || enabled === null ? '' : getComputedStyle(enabled).color,
+          });
+        }
+        return out;
+      });
+
+      expect(report.length, 'no disabled control was on screen to measure').toBeGreaterThan(0);
+      for (const one of report) {
+        console.info(
+          `disabled ${theme}: "${one.label}" ${one.ratio}:1 at ${one.fontSize}px · opacity ${one.opacity} · ${one.colour}`,
+        );
+      }
+      // legible: AA at the size it is actually rendered
+      expect(
+        report.filter((r) => r.ratio + 0.005 < 4.5),
+        'a disabled control is below AA',
+      ).toEqual([]);
+      // and no fade: CONVENTIONS' measurement is that none of them clear AA
+      expect(
+        report.filter((r) => r.opacity < 0.999),
+        'a disabled control is de-emphasised with alpha',
+      ).toEqual([]);
+      // still reads as inactive: a different ink from the enabled one beside it
+      const compared = report.filter((r) => r.enabledColour !== '');
+      expect(compared.length).toBeGreaterThan(0);
+      expect(
+        compared.filter((r) => r.colour === r.enabledColour),
+        'a disabled control looks identical to an enabled one',
+      ).toEqual([]);
+    });
+  }
+
   test('the theme switch is the only theme mechanism', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/gallery?theme=light');

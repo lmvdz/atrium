@@ -98,11 +98,29 @@ export const AUDIT = `(() => {
     return colour;
   };
 
-  /* An element is skipped when it is invisible, deliberately faded (a dimmed
-     row under a filter, a hover affordance at rest, a disabled chip), or has no
-     text of its own. Faded things are excluded because the contrast rule is
-     about text a user is meant to read, and a 30%-opacity row under an active
-     filter is explicitly not that — it is context. */
+  /* PARTIAL OPACITY IS MEASURED, NOT EXCUSED.
+
+     This used to read \`if (effectiveOpacity(el) < 0.999) continue;\`, justified
+     by naming "a disabled chip" as unreadable by design. That is the rule the
+     audit exists to enforce — CONVENTIONS' "de-emphasis must stay readable" has
+     no exemption — and the round-2 gauntlet found exactly what the exemption was
+     hiding: \`.surf[disabled] { opacity: .55 }\` at 2.49:1 light / 2.98:1 dark,
+     shipped, invisible to a harness written to skip it. It is the same species
+     as the prototype's sticky-footer whitelist: an invariant narrowed until it
+     could not see its own counterexample.
+
+     A fade is now FOLDED INTO THE MEASUREMENT: the element's effective opacity
+     multiplies the text colour's alpha, so a 55% grey is measured as the grey
+     the eye actually gets. The only thing still skipped is opacity 0, which is
+     not de-emphasis — it is absence, in the same category as \`display: none\`
+     (the hover strips that live at 0 until hover, and cannot be read at all).
+
+     Scope, stated rather than implied: the composite is exact for a faded
+     element that has no background of its own, because then the colour behind
+     the ink is the unfaded parent surface. An element that fades its own fill
+     AND its own text would need its fill composited separately; nothing in this
+     app does that, and if something starts to, this comment is the place the
+     next person finds out the model got narrower than the code. */
   const effectiveOpacity = (el) => {
     let node = el;
     let opacity = 1;
@@ -134,7 +152,8 @@ export const AUDIT = `(() => {
     if (rect.width === 0 || rect.height === 0) continue;
     const text = ownText(el);
     if (!text) continue;
-    if (effectiveOpacity(el) < 0.999) continue;
+    const alpha = effectiveOpacity(el);
+    if (alpha === 0) continue;
 
     const fontSize = parseFloat(style.fontSize);
     smallestFont = Math.min(smallestFont, fontSize);
@@ -142,8 +161,12 @@ export const AUDIT = `(() => {
       fontFailures.push({ fontSize, text: text.slice(0, 60), selector: describe(el) });
     }
 
-    const fg = parseColor(style.color);
-    if (!fg) continue;
+    const parsed = parseColor(style.color);
+    if (!parsed) continue;
+    /* The fade the element is wearing, applied to the ink. This is the whole
+       point: a token that clears AA at full strength does not clear it at 55%,
+       and the harness has to say so rather than look away. */
+    const fg = { r: parsed.r, g: parsed.g, b: parsed.b, a: parsed.a * alpha };
     const bg = backdrop(el);
     const ratio = contrast(over(fg, bg), bg);
     lowestContrast = Math.min(lowestContrast, ratio);

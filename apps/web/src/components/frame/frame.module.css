@@ -374,8 +374,12 @@
     background 0.12s ease;
 }
 
+/* The enabled label sits one step up the text ramp from the disabled one, so
+   the difference between "you can focus this surface" and "there is nothing on
+   it" is a real, measured step rather than a fade. --tx1 is 10.66:1 light and
+   12.27:1 dark on --bg1. */
 .surfLabel {
-  color: var(--tx2);
+  color: var(--tx1);
   transition: color 0.12s ease;
 }
 
@@ -395,9 +399,30 @@
   color: var(--tx0);
 }
 
+/* DE-EMPHASIS MUST STAY READABLE (design/CONVENTIONS.md).
+
+   Round 2 shipped `opacity: .55` here. Re-measured in Chromium at 10px against
+   the r2 stylesheet: 2.49:1 light and 2.99:1 dark on the label, and 2.43:1 on
+   the count chip beside it, which nobody had measured at all — under AA, under
+   the 3:1 large-text floor, and below --tx4,
+   which globals.css bans from carrying text outright. The audit harness did not
+   see it because the harness skipped anything under `opacity 0.999` and named
+   "a disabled chip" as the reason. A guard written to excuse the rule it audits
+   is not a guard; both halves are fixed, and e2e/audit.ts now composites partial
+   opacity into the measurement instead of skipping it.
+
+   There is no fade that clears AA with this token set — CONVENTIONS records the
+   measurement that settled it for the feed filter, and the same arithmetic
+   applies here. So inactive is said with a TOKEN STEP and a SHAPE, exactly as
+   `.cnt[disabled]` in timeline.module.css already said it: the label drops one
+   step down the text ramp (--tx1 → --tx2, 6.79:1 light / 7.44:1 dark, still
+   past AA at 10px), the count chip goes dashed, and hover stops responding. */
 .surf[disabled] {
   cursor: default;
-  opacity: 0.55;
+}
+
+.surf[disabled] .surfLabel {
+  color: var(--tx2);
 }
 
 .surf[disabled]:hover {
@@ -428,6 +453,14 @@
   color: var(--tx2);
   background: var(--bg7);
   border-color: var(--line);
+}
+
+/* A count that counts nothing focuses nothing: dashed, like `.cnt[disabled]` in
+   timeline.module.css, which is disabled for the same reason. This chip was the
+   OTHER thing the audit's opacity exemption was hiding — at .55 it measured
+   2.43:1 and no receipt in two rounds had ever named it. */
+.surf[disabled] .surfCount {
+  border-style: dashed;
 }
 
 /* --- composer ------------------------------------------------------------ */

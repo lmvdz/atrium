@@ -267,6 +267,22 @@ Entrance animations use `animation: gl-rise … backwards`, never `both`. An ani
 
 A filtered-out or de-emphasised row keeps its text, so it must keep its legibility: **dimming may not drop any text below AA at the size it renders.** `opacity: .3` on a feed row measures 1.47–1.69:1 in both themes — a third of the stated floor, and below the contrast this file already rejects `--tx4` for. If the affordance's own copy claims a dimmed row is still checkable, the measurement has to back it; otherwise hide the row and say so.
 
-Found independently in two artifacts by two critics (#10 r6 and #39 r1) — the same `opacity: .3` decision, wrong in both. Legitimate exemption: a genuinely inactive control (a disabled button at ~2.5:1) is an inactive-state exemption, not body text.
+Found independently in two artifacts by two critics (#10 r6 and #39 r1) — the same `opacity: .3` decision, wrong in both.
+
+**There is no inactive-state exemption. This paragraph used to grant one** — "a genuinely inactive control (a disabled button at ~2.5:1) is an inactive-state exemption, not body text" — and #39 r2 shipped `.surf[disabled] { opacity: .55 }` at 2.49:1 light / 2.99:1 dark behind it, with the audit harness written to skip anything under `opacity 0.999` and citing "a disabled chip" as its reason. The rule had been narrowed until it could not see its own counterexample, in the doctrine and in the harness at once. A control that is disabled still has to be *read* — that is how a person finds out why they cannot use it — and "0 items" at 2.5:1 is a sentence with no reader.
+
+**Inactive is said with a token step and a shape, never with alpha.** Drop the label one step down the text ramp (`--tx1` → `--tx2`, still 6.79:1 light / 7.44:1 dark at 10px), make the chip's border dashed, stop responding to hover, and set `cursor: default`. The state reads as inactive because it is a different *treatment*, not a weaker one.
+
+Corollary for harnesses, which is the half that let this ship: **an audit may not exempt the case its rule covers.** A contrast check may skip what is not rendered (`display: none`, `visibility: hidden`, `opacity: 0`); anything partially faded gets its alpha composited into the measurement and measured. Any skip list that names a component ("a disabled chip", "the sticky footer") is the invariant being narrowed to fit the code rather than the code to the invariant — the same failure as the prototype's sticky-footer whitelist.
 
 **Measured consequence (#39 r2): with this token set, no fade clears AA at all.** The weakest thing a row can legitimately carry (`--amb2` on `--ambbg`) is 4.53:1 at *full* opacity — the shell's own floor — so any opacity reduction drops it below. Therefore **de-emphasis is expressed by lifting the matches, not by dimming the rest**, and the affordance's copy says so. Do not reintroduce a fade with a gentler alpha; the arithmetic does not work at any value.
+
+The binding measurement is the **light** theme: `--amb2` on `--ambbg` is 4.53:1 there and 9.65:1 in dark, and one stylesheet serves both, so a fade has to clear AA in the worse of them. Dark-theme headroom is not licence (#39 r3 — the dark number had never actually been measured; see RETRO on the parametrised test that ran the same case twice).
+
+## The pin pages; it never scrolls
+
+BRIEF concept 3, verbatim: "owed attention never hides… the pin folds rather than scrolls." Both halves bind, and #39 broke them in turn — r1 by not bounding the pin at all (the composer left the viewport at 19 owed items, unreachable), r2 by bounding it and then shipping an idempotent way out of the bound (`showAll` raised the row budget once, stranding 50 of 60 owed items behind a live-looking "50 more owed").
+
+The settled shape: **a fixed row budget in every state, and an affordance that advances a window through the owed items.** The budget never moves, so the pixel bound that keeps the composer on screen is measured once and holds everywhere; the control's label is rendered from the page it is about to show, so it cannot promise more than one click delivers; and the last page wraps back to the hardest rather than becoming inert. A scrolling pin is the unbounded pin with a scrollbar. A cap that rises when you ask for more is a bound with an exception, and the exception is where the owed items go to disappear.
+
+Generally: **an affordance whose label states a quantity must deliver that quantity when used.** This is the same defect class as r1's `data-hold="2000"` — a control whose copy described behaviour the code did not implement. Assert it by clicking through every page and counting distinct items reached, not by checking that the affordance exists.

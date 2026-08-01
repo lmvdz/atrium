@@ -93,7 +93,16 @@
 
    --bg3 on --red3 measures 7.47:1 light and 5.81:1 dark. --red2 would be
    4.21:1 dark, under AA, which is the same latent bug CONVENTIONS records for
-   the ■ and ✗ glyphs. */
+   the ■ and ✗ glyphs.
+
+   THE ARMED STATE IS PART OF THE CONTROL AND IS MEASURED TOO. The button
+   switches to --red once the hold completes (below), which is a different
+   foreground pairing and was uncovered by the note above — round 2's gauntlet
+   caught it as a number nobody had written down. --bg3 on --red is 5.36:1 light
+   and 5.10:1 dark: past AA in both, but with less headroom than the resting
+   state, so it is stated here rather than assumed. The rule this encodes: a
+   state a control can enter is a state the contrast note has to cover. Asserted
+   in test/token-contrast.test.ts against the tokens themselves. */
 .hold {
   position: relative;
   overflow: hidden;
@@ -136,6 +145,7 @@
   position: relative;
 }
 
+/* armed: --bg3 on --red, 5.36:1 light / 5.10:1 dark — see the note above */
 .hold[data-armed='true'] {
   background: var(--red);
   border-color: var(--red);
