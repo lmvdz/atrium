@@ -44,8 +44,25 @@ import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
  *    different words, and a quote is supposed to be verbatim. A model that
  *    re-cases a sentence has edited it, and an edited reading goes to a person.
  *  - **Underscore emphasis.** `_x_` is Markdown emphasis and `__init__` is an
- *    identifier, and no rule separates them. Asterisk emphasis stays, because
- *    `*` is not an identifier character in anything this product reads.
+ *    identifier, and no rule separates them.
+ *  - **Asterisk emphasis**, which survived three drafts and two reviewers before
+ *    the bar caught up with it. It was admitted on the argument that emphasis
+ *    "changes how a sentence is set, never who, whether, how many or when", and
+ *    the spike measured a real cost for refusing it — three of eight apparent
+ *    provenance failures were a model dropping `**` while quoting correctly.
+ *    Then codex folded `a*b*c` to `abc`, and grok folded `2*3*4` to `234` —
+ *    which changes **how many**, in the one direction the justification promised
+ *    it could not. A word-boundary-flanking rule fixed both and left `*.ts*` in
+ *    a glob. Every repair was narrower than the last, which is the signature of
+ *    an entry that does not meet the bar: *an argument nobody can break*. Three
+ *    of the four entries r4 put in `droppableTokens` went the same way, for the
+ *    same reason.
+ *
+ *    The cost is now small, because `quoteCoversOwnText` changed what a quote
+ *    is: it must be the whole message body, so a model reproducing that body
+ *    verbatim carries the `**` with it and is unaffected. Only a model that
+ *    *strips* formatting is refused, and a model that strips formatting has
+ *    edited the text.
  */
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -141,8 +158,15 @@ export function isBlank(text: string | null | undefined): boolean {
  *  - `U+2060` WORD JOINER, and `U+2061`–`U+2064` the invisible mathematical
  *    operators — no glyph, no shaping effect, no joining behaviour.
  *  - `U+FEFF` ZERO WIDTH NO-BREAK SPACE / byte-order mark.
- *  - `\p{Cc}` the C0/C1 controls. The ones that render (tab, newline, carriage
- *    return) are `\s`, so the whitespace rule has already accounted for them.
+ *  - the C0/C1 controls **that are not whitespace**. Tab, newline, vertical tab,
+ *    form feed, carriage return and NEL are `\s`, and the whitespace rule above
+ *    already owns them: it turns a run of them into one space. Deleting them
+ *    here instead **fused the words either side** — `Bob will deploy\tproduction
+ *    Friday.` normalized to `deployproduction`, which a quote of
+ *    `Bob will deployproduction Friday.` then matched, and the record minted a
+ *    word its author never wrote. That was codex's fourth pass, on this
+ *    round's own repair. The two clauses partition the controls; neither is an
+ *    exception to the other.
  *
  * Everything else that used to be swept up here — the bidi marks, embeddings,
  * overrides and isolates; the soft hyphen; the zero-width joiner and
@@ -150,17 +174,7 @@ export function isBlank(text: string | null | undefined): boolean {
  * the order they see them in. Kept, they are ordinary tokens, and a quote that
  * omits them is simply not the text that is in the message.
  */
-const DELETABLE = /[​⁠-⁤﻿\p{Cc}]/gu;
-
-/**
- * A **paired** run of asterisks around a non-empty span — Markdown emphasis, in
- * the only form Markdown itself accepts.
- *
- * Paired rather than "any asterisk", so `2 * 3 * 4` survives: an unpaired
- * asterisk is arithmetic or a glob, not a typeface. Admitted because emphasis
- * changes how a sentence is set, never who, whether, how many or when.
- */
-const PAIRED_EMPHASIS = /(\*{1,3})(?=\S)([\s\S]*?\S)\1/g;
+const DELETABLE = /[​⁠-⁤﻿]|(?!\s)\p{Cc}/gu;
 
 /**
  * `[text](destination)`, and the image form.
@@ -208,12 +222,11 @@ const CODE_SPAN = /(```[\s\S]*?```|``[\s\S]*?``|`[^`\n]*`)/;
  *  3. **A typographic apostrophe is an apostrophe.** `won’t` and `won't` are one
  *     word entered two ways; treating them as two produces a refusal that has
  *     nothing to do with what was said.
- *  4. **Paired asterisk emphasis may be absent.** See `PAIRED_EMPHASIS`.
- *  5. **A link contributes its destination.** See `MARKDOWN_LINK`.
+ *  4. **A link contributes its destination.** See `MARKDOWN_LINK`.
  *
- * Not admitted, and each one used to be: NFKC compatibility folding, case
- * folding, backtick deletion, underscore emphasis, bare link-text substitution.
- * The header of this file says why.
+ * Four entries. Not admitted, and each one used to be: NFKC compatibility
+ * folding, case folding, backtick deletion, underscore emphasis, **asterisk
+ * emphasis**, and bare link-text substitution. The header of this file says why.
  */
 export function normalizeForReceipt(text: string): string {
   const out: string[] = [];
@@ -236,13 +249,7 @@ export function normalizeForReceipt(text: string): string {
 }
 
 function foldProse(text: string): string {
-  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
-  // Emphasis nests (`**bold *and italic* **`), so run to a fixed point rather
-  // than once. Bounded: every pass removes at least two characters.
-  for (let previous = ''; previous !== folded; ) {
-    previous = folded;
-    folded = folded.replace(PAIRED_EMPHASIS, '$2');
-  }
+  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
   return folded
     .replace(MARKDOWN_LINK, (_match, label: string, destination: string) => {
       const text = label.trim();

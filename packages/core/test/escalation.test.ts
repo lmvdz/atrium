@@ -510,10 +510,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
    * may drop is the paired `*…*`, and that is the only difference between this
    * string and the one above.
    */
-  const DISPUTE_SENTENCE_PLAIN =
-    "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5, " +
-    'line 6 (`this.bar()`) changes that, so TypeScript should not be so confident that ' +
-    "`this.state` is still `'online'` after line 6.";
+  const DISPUTE_SENTENCE_PLAIN = DISPUTE_SENTENCE;
 
   const problemKinds = (...args: Parameters<typeof validateProposalProvenance>) =>
     validateProposalProvenance(...args)
@@ -590,12 +587,11 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     ).toEqual([]);
   });
 
-  it('still finds a quote whose emphasis the model dropped', () => {
-    // Three of the eight apparent provenance failures in the spike were exactly
-    // this: the model quoted correctly and dropped the `*…*`. The emphasis is
-    // still forgiven — the *only* finding here is that the author wrote more
-    // around the sentence, not that the quote could not be found or did not bear
-    // its statement.
+  it('finds a quote reproduced exactly, and reports only the scissors', () => {
+    // r5's fourth pass retired the emphasis licence, so the compliant quote is
+    // the sentence as written. The *only* finding here is that the author wrote
+    // more around it — not that the quote could not be found or did not bear its
+    // statement.
     expect(
       problemKinds(
         {

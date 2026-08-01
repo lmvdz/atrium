@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AcceptedObject as AcceptedObjectSchema,
   type AcceptedObjectType,
+  AcceptedObjectType as AcceptedObjectTypeSchema,
   type Actor,
   type AuthoredEvent,
   acceptanceReceiptRefusal,
@@ -456,13 +457,14 @@ function verdictOf(state: CoreState, eventId: string): Gate | 'allowed' {
 // The cases
 // ─────────────────────────────────────────────────────────────────────────────
 
-const OBJECT_TYPES: AcceptedObjectType[] = [
-  'decision',
-  'commitment',
-  'open_question',
-  'claim',
-  'objective',
-];
+/**
+ * **From the schema.** `acceptance.test.ts` was corrected to `.options` and this
+ * one was left restating the list — grok's fourth pass. The oracle in this file
+ * restates the *rules* on purpose, which is what makes it independent; the set
+ * of types is not a rule, it is the domain the rules range over, and a type
+ * missing from it is a whole column of the matrix nobody runs.
+ */
+const OBJECT_TYPES: AcceptedObjectType[] = [...AcceptedObjectTypeSchema.options];
 
 const acceptanceCases: AcceptanceCase[] = [];
 for (const actor of ACTOR_KINDS) {

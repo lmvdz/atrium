@@ -450,16 +450,35 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     expect(statementBearing('bob won’t deploy', "bob won't deploy").borne).toBe(true);
   });
 
-  it('accepts a quote whose emphasis the model dropped', () => {
-    // Catches: removing the paired-emphasis entry from `normalizeForReceipt`.
-    // Three of the spike's eight apparent provenance failures were a dropped
-    // `**` and nothing else, and that difference is still admitted.
+  it('does not accept a quote whose emphasis the model dropped', () => {
+    // r5's fourth pass retired this licence. Three of the spike's eight apparent
+    // provenance failures were a dropped `**` and nothing else — a real cost —
+    // but the entry broke twice on inputs where an asterisk is arithmetic or a
+    // glob, and the bar for this allowlist is an argument nobody can break.
+    // `quoteCoversOwnText` makes the cost small: a quote is the whole message
+    // body now, so a model reproducing it verbatim carries the `**` along.
     expect(
       statementBearing(
         'so **TypeScript** should not be so confident about narrowing',
         'so TypeScript should not be so confident about narrowing',
       ).borne,
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it('does not fold an asterisk that is doing arithmetic or globbing', () => {
+    // grok's fourth pass, against this entry's own justification. Emphasis is
+    // admitted to the allowlist because it "changes how a sentence is set, never
+    // who, whether, how many or when" — and `2*3*4` folded to `234`, which
+    // changes how many. Deliberately stricter than CommonMark, which would fold
+    // both of these: nothing here can tell intraword emphasis from arithmetic.
+    expect(normalizeForReceipt('the answer is 2*3*4 today')).toBe('the answer is 2*3*4 today');
+    expect(normalizeForReceipt('run rm src/*.ts*.map now')).toBe('run rm src/*.ts*.map now');
+    expect(normalizeForReceipt('deploy a*b*c to production')).toBe('deploy a*b*c to production');
+    // …and emphasis is not folded either, since r5's fourth pass: an asterisk is
+    // an asterisk. A model reproducing the whole message body carries it along.
+    expect(normalizeForReceipt('so **TypeScript** should not')).toBe(
+      'so **TypeScript** should not',
+    );
   });
 
   it('does not accept a quote whose code delimiters the model dropped', () => {

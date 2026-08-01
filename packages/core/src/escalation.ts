@@ -1023,7 +1023,7 @@ export function validateProposalProvenance(
         problems.push({
           kind: 'superseded_by_later_message',
           severity: 'refer',
-          detail: `message "${revisited.message.id}" comes after every message this cites and carries ${revisited.added.map((token) => `"${token}"`).join(', ')} — a later message in the same window either restates the quoted sentence with something added or takes something back, and whether that reverses this reading, narrows it or leaves it alone is not something a machine may decide from the words`,
+          detail: `message "${revisited.message.id}" comes after the messages this cites and carries ${revisited.added.map((token) => `"${token}"`).join(', ')} — a later message restates the quoted sentence with something changed, takes something back, or is the same author returning to this subject, and whether that reverses this reading, narrows it or leaves it alone is not something a machine may decide from the words`,
           messageId: revisited.message.id,
         });
       }
@@ -1197,9 +1197,31 @@ export function validateProposalProvenance(
  * room contradicts it. A stale-but-verbatim record is contradicted by the very
  * message that makes it stale, three lines further down the same window.
  *
- * Detecting an arbitrary natural-language contradiction needs a model, and #8's
- * escalation tier is where a model belongs. This is a deterministic check, and
- * it says exactly what it proves.
+ * ## The fail-closed variant was built, measured, and removed
+ *
+ * The fourth review pass proposed the obvious repair — refer whenever a later
+ * message by the **bearing author** shares any content word with the statement,
+ * on the ground that over-firing costs only a referral. It was implemented and
+ * run, and the numbers refused it:
+ *
+ * | later message                              | vs the statement                    | shared | fraction |
+ * | ------------------------------------------ | ----------------------------------- | ------ | -------- |
+ * | "The production deployment is cancelled."  | "We will deploy production Friday." | `production` | **0.33** |
+ * | "I'll land the migration tomorrow."         | "The migration is reversible."      | `migration`  | **0.50** |
+ *
+ * The first row is the defect — a genuine replacement that must be referred. The
+ * second is an ordinary window from `acceptance.test.ts`: one person stating two
+ * independent facts about one subject, which must **not** be referred. **The
+ * benign pair scores higher than the defect.** No threshold separates them,
+ * because there is nothing lexical to separate; the whole acceptance matrix went
+ * `pending` when the clause was live, which is the auto-accept path dying rather
+ * than being made safe.
+ *
+ * That measurement is the argument for the disposition above, and it is a better
+ * one than the prose: the check that would close this class does not exist at
+ * this layer. Detecting an arbitrary natural-language contradiction needs a
+ * model, and #8's escalation tier is where a model belongs. This is a
+ * deterministic check, and it says exactly what it proves.
  */
 export function laterRevision(
   statement: string,

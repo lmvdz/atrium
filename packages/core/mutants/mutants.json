@@ -628,8 +628,8 @@
       "id": "normalize_keeps_invisibles",
       "why": "The other half: an invisible character spliced into a quote makes it a different string from the message it came out of, so a correct receipt fails for the wrong reason.",
       "file": "src/matching.ts",
-      "find": "  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
-      "replace": "  let folded = text.replace(/[’ʼ]/g, \"'\");",
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.replace(/[’ʼ]/g, \"'\");",
       "catches": ["matches a quote whose words a zero-width character was spliced into"]
     },
     {
@@ -656,12 +656,12 @@
       ]
     },
     {
-      "id": "normalize_folds_strikethrough",
-      "why": "Folds `~~struck through~~` away like emphasis. A strikethrough is a retraction, not a typeface, and folding it lets a withdrawn sentence bear its own assertion. r4's blind review.",
+      "id": "normalize_folds_emphasis",
+      "why": "Re-admits asterisk emphasis to the difference allowlist. It was there for three drafts and broke twice: `a*b*c` folds to `abc`, and `2*3*4` folds to `234` — which changes how many, in the one direction the entry's own justification promised it could not.",
       "file": "src/matching.ts",
-      "find": "const PAIRED_EMPHASIS = /(\\*{1,3})(?=\\S)([\\s\\S]*?\\S)\\1/g;",
-      "replace": "const PAIRED_EMPHASIS = /([*~]{1,3})(?=\\S)([\\s\\S]*?\\S)\\1/g;",
-      "catches": ["refuses a struck-through sentence bearing its own assertion"]
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.replace(/(\\*{1,3})(?=\\S)([\\s\\S]*?\\S)\\1/g, '$2').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "catches": ["does not fold an asterisk that is doing arithmetic or globbing"]
     },
     {
       "id": "quote_anchoring_disabled",
@@ -696,8 +696,8 @@
       "id": "typographic_apostrophe_unfolded",
       "why": "`won’t` stops being `won't`, so a faithful quotation is refused for its typography — an over-refusal, and the kind that gets 'fixed' later by weakening the check that matters.",
       "file": "src/matching.ts",
-      "find": "  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
-      "replace": "  let folded = text.replace(DELETABLE, '');",
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.replace(DELETABLE, '');",
       "catches": ["treats a typographic apostrophe as an apostrophe"]
     },
     {
@@ -774,8 +774,8 @@
       "id": "normalize_refolds_nfkc",
       "why": "Re-applies NFKC compatibility folding on the receipt path, so two distinct hostnames and two distinct identifiers compare equal.",
       "file": "src/matching.ts",
-      "find": "  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
-      "replace": "  let folded = text.normalize('NFKC').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.normalize('NFKC').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
       "catches": ["does not fold a fullwidth or ligature spelling onto its ASCII form"]
     },
     {
@@ -833,7 +833,7 @@
       "id": "bidi_controls_deleted",
       "why": "Folds every `\\p{Cf}` away again — the bidi overrides, the soft hyphen and the zero-width joiner with the genuinely invisible characters. `Bob will \\u202Eton\\u202C deploy production Friday.` renders as \"Bob will not deploy production Friday.\"; `re\\u00ADsign` renders as \"re-sign\"; and `\\u{1F469}\\u200D\\u{1F4BB}` is one glyph where `\\u{1F469}\\u{1F4BB}` is two.",
       "file": "src/matching.ts",
-      "find": "const DELETABLE = /[​⁠-⁤﻿\\p{Cc}]/gu;",
+      "find": "const DELETABLE = /[​⁠-⁤﻿]|(?!\\s)\\p{Cc}/gu;",
       "replace": "const DELETABLE = /[\\p{Cf}\\p{Cc}]/gu;",
       "catches": ["does not delete a bidi override, which decides what the reader sees"]
     },
@@ -884,6 +884,14 @@
       "find": "      return target.length === 0 || label_ === target ? label_ : `${label_} ${target}`;",
       "replace": "      return label_ + (target.length === 0 ? '' : '');",
       "catches": ["keeps a markdown link\"s destination, exactly as the receipt fold does"]
+    },
+    {
+      "id": "whitespace_controls_deleted",
+      "why": "Deletes the whitespace controls along with the invisible ones, so `Bob will deploy\\tproduction Friday.` normalizes to `deployproduction` and a quote of `Bob will deployproduction Friday.` matches it — the record minting a word its author never wrote. The whitespace rule already owns tab, newline and carriage return; the two clauses partition the controls rather than one excepting the other.",
+      "file": "src/matching.ts",
+      "find": "const DELETABLE = /[​⁠-⁤﻿]|(?!\\s)\\p{Cc}/gu;",
+      "replace": "const DELETABLE = /[\\u200B\\u2060-\\u2064\\uFEFF\\p{Cc}]/gu;",
+      "catches": ["does not fuse two words by deleting the tab between them"]
     }
   ]
 }

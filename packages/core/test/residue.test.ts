@@ -283,6 +283,29 @@ describe('r5 — normalization may not do semantic damage', () => {
     );
   });
 
+  it('does not fuse two words by deleting the tab between them', () => {
+    // codex's fourth pass, on this round's own repair. `\p{Cc}` contains tab,
+    // newline and carriage return; deleting them *before* the whitespace collapse
+    // fused the words either side, so `Bob will deploy\tproduction Friday.`
+    // normalized to `deployproduction` and a quote of that matched it.
+    expect(normalizeForReceipt('Bob will deploy\tproduction Friday.')).toBe(
+      'Bob will deploy production Friday.',
+    );
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: 'Bob will deployproduction Friday.',
+          statement: 'Bob will deployproduction Friday.',
+          proposer: { kind: 'model' },
+          attributedTo: BOB,
+        },
+        [{ id: 'msg_1', authorId: BOB, body: 'Bob will deploy\tproduction Friday.' }],
+      ),
+    ).not.toEqual([]);
+  });
+
   it('does not fold distinct identifiers onto each other', () => {
     // NFKC maps the fullwidth and compatibility forms onto ASCII, so two
     // different hostnames, two different identifiers, compare equal.
@@ -523,14 +546,52 @@ describe('r5 — speech-act fitness', () => {
     ).toEqual(['statement_is_not_an_assertion']);
   });
 
+  /**
+   * Every mark a review pass has actually caught this code on, **written out**.
+   *
+   * The fourth pass found the derived-probe class in this file — in the test
+   * about that very class. The loop below used to iterate `QUESTION_MARKS`, the
+   * inventory under test, so deleting `᥅` from the source deleted the case that
+   * would have failed. This list is maintained by hand, from Unicode, and it is
+   * the regression half; the assertion under it is the coverage half, and
+   * neither does the other's job.
+   */
+  const MARKS_FOUND_BY_REVIEW = [
+    '\u003F', // QUESTION MARK
+    '\u00BF', // INVERTED — a Spanish interrogative opens with one (pass 2)
+    '\u037E', // GREEK — decomposes to `;`, so folding first destroys it (pass 3)
+    '\u055E', // ARMENIAN
+    '\u061F', // ARABIC
+    '\u1367', // ETHIOPIC
+    '\u1945', // LIMBU (pass 3)
+    '\u203D', // INTERROBANG (pass 3)
+    '\u2047', // DOUBLE
+    '\u2048', // QUESTION EXCLAMATION
+    '\u2049', // EXCLAMATION QUESTION
+    '\u2E2E', // REVERSED
+    '\uA60F', // VAI
+    '\uA6F7', // BAMUM
+    '\uAA5D', // CHAM (pass 3)
+    '\uFE16', // VERTICAL PRESENTATION FORM
+    '\uFE56', // SMALL
+    '\uFF1F', // FULLWIDTH (pass 1)
+    '\u{11143}', // CHAKMA
+  ];
+
+  it('exercises every mark the source claims to know', () => {
+    // The coverage half: a mark added to `QUESTION_MARKS` without a regression
+    // case fails here, and the list above fails if one is quietly dropped.
+    for (const mark of QUESTION_MARKS) {
+      expect(MARKS_FOUND_BY_REVIEW.map((m) => m.normalize('NFKC'))).toContain(
+        mark.normalize('NFKC'),
+      );
+    }
+  });
+
   it('reads every spelling of a question mark, not only the ASCII one', () => {
-    // This round's own blind cross-lineage review. Dropping NFKC from the
-    // receipt fold was right — it made distinct hostnames compare equal — and it
-    // left this check reading one spelling of a mark that has several. `？`
-    // (U+FF1F) is a distinct token, and the claim auto-accepted.
-    // Driven from the exported inventory, so a mark added to the source without
-    // a case here is not possible, and one removed from it fails.
-    for (const mark of [...QUESTION_MARKS, '？', '﹖']) {
+    // Three review passes fed this list: `？` (U+FF1F) first, then `¿`, then the
+    // Limbu and Cham marks.
+    for (const mark of MARKS_FOUND_BY_REVIEW) {
       const body = `Would we deploy production Friday${mark}`;
       expect(
         kinds(
