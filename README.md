@@ -53,7 +53,12 @@ Three things enforce that rather than merely asking:
   host is a host on the internet — so `docker run atrium-server` with no
   environment at all fails at boot with a named error rather than reaching for
   a public secret. `pnpm dev` sets `NODE_ENV=development` itself; that is the
-  opt-in.
+  opt-in. **`NODE_ENV` is read from the process environment only.** A `.env`
+  found on disk may supply a value nobody set, but it may never say what
+  environment this process is in — a file ships in a repo and gets copied into
+  images, so if a file could turn the fallback back on, the strict default
+  would be decoration. `apps/server/test/entrypoint-env.test.ts` boots the real
+  entrypoint in a scratch directory with a planted `.env` to prove it.
 - Every value is trimmed before it is validated, so a secret pasted with the
   newline that came with it still authenticates, and a variable set to nothing
   but whitespace fails as empty instead of passing a length check.
@@ -96,10 +101,33 @@ A recorded proposal is always `proposed` — an interpreter cannot hand itself a
 `accepted` one, and the record is the only place a proposal's status lives, so
 acceptance cannot leave a stale copy behind. An acceptance that cites a proposal
 must cite one that exists, is still open, has not already been spent on another
-object, and matches the object's type. An acceptance that cites *no* proposal
-must come from a human actor: that is the answer-binding path, where a person
-writes a decision directly. A model has exactly one route to a fact — propose
-it, and have a human accept the proposal.
+object, and matches the object's type.
+
+### The actor floor
+
+[#4](https://github.com/lmvdz/atrium/issues/4) settled acceptance per type. Most
+of that matrix is policy (confidence thresholds, commitment attribution) and
+belongs to the θ engine in
+[#21](https://github.com/lmvdz/atrium/issues/21). Five rows of it are not
+policy — they are the trust boundary itself, and a boundary enforced only above
+the reducer is one a second writer or a replay can walk around. Those are
+enforced in `packages/core/src/authority.ts`, and the reducer refuses to fold an
+event that breaks them:
+
+| what | who |
+| --- | --- |
+| Accepting an object with **no proposal** cited | human only |
+| Accepting a **decision**, proposal or not | human only |
+| Any transition of a claim to `verification: 'verified'` | human only |
+| **Superseding an accepted decision** | human only |
+| **Corrections** — amend, retract, restore | human only |
+
+What stays open is as deliberate as what is closed: a model may accept its own
+**claim** and **open_question** proposals (that is #4's auto-accept path, and
+the epistemic field carries truth status separately), may supersede a claim or a
+question, and may reject a proposal — withdrawing a staged reading destroys
+nothing. Refusals are recorded in `state.issues` with the route that stays open,
+and every gate is tested in both directions.
 
 ### Consumed, or rejected
 
@@ -111,18 +139,36 @@ typed outcome:
   `state.issues` (a coerced proposal, an amendment to an object that does not
   exist, a relation that fails its type signature). It happened, in order; a
   replay of the log reproduces it exactly.
-- **rejected** — *not* consumed. The event sorts before `state.cursor` in the
-  canonical `(at, id)` order, or its id was already applied. Rejection leaves
-  nothing behind: no issue, no cursor movement, no `appliedEventIds` entry. The
+- **rejected** — *not* consumed, for one of two reasons. `out_of_order`: it does
+  not sort **strictly after** `state.cursor` in the canonical `(at, id)` order —
+  strictly, because one position holds one event, so anything landing on the
+  cursor is a redelivery or a forged id. `duplicate`: its id was consumed
+  already, and it arrived *ahead* of the cursor, which is the one case position
+  cannot see (a redelivery that re-minted its timestamp). Rejection leaves
+  nothing behind: no issue, no cursor movement, no `consumedEventIds` entry. The
   state handed back is the state handed in, the same object.
+
+Position is checked first. Both branches reject and neither touches the state,
+so the order cannot change what the state becomes — it decides which reason is
+reported, and position is the stronger fact: it holds on the log's terms alone,
+so the ordering guarantee never becomes a property of the id set.
+
+An id is spent by being **consumed**, not by succeeding. An event that failed
+its business checks still took its position, and letting it back in later would
+let a redelivery retry against a state that had moved on — the same id flipping
+failure into success once its missing object finally arrived.
 
 So consumption only ever moves forward, and the consumed sequence is in
 canonical order by construction. For any log `L` of consumed events, folding
 `L` one event at a time in arrival order and replaying `L` in one `reduce` call
-produce byte-identical states — `issues` and `appliedEventIds` included. That
-is the entire live≡replay claim, and it is checked property-style over
-generated logs with same-timestamp ties, two rooms, redeliveries and a mix of
-all three outcomes (`packages/core/test/replay.test.ts`).
+produce byte-identical states — `issues` and `consumedEventIds` included. That
+is the entire live≡replay claim, and it is checked property-style over generated
+logs (`packages/core/test/replay.test.ts`): two rooms with deliberate same-`at`
+cross-room ties, verbatim redeliveries, redeliveries that re-minted their
+timestamp, model actors reaching for every gate above, and both shuffled and
+near-in-order delivery. The replay side does not ask the reducer what it
+consumed — it reconstructs that from the input stream with an independent filter
+written in the test, so a defect shared by both paths cannot cancel out.
 
 The other half of the invariant is the ledger's, and it is recorded on
 [#22](https://github.com/lmvdz/atrium/issues/22): the durable log must contain
@@ -133,7 +179,7 @@ than being reconciled after the fact.
 
 `CoreState.watermarks` still records each room's last consumed position — that
 is what `core_events.room_seq` will map onto — but the gate is the global
-`cursor`, because `issues`, `corrections` and `appliedEventIds` are global
+`cursor`, because `issues`, `corrections` and `consumedEventIds` are global
 ordered lists and a per-room gate would let two rooms interleave them one way
 live and another way on replay.
 
