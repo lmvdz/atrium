@@ -1993,7 +1993,8 @@ const WHOLE_QUANT      = ["again", "ever", "never"];
 const PAST_QUANT       = ["prior", "preserved", "earlier", "before", "nobody has", "nobody had",
                           "nobody was", "no one has", "nothing other than", "nothing has",
                           "nothing had", "nothing was"];
-const CONTINUITY_QUANT = ["still", "already", "throughout", "unchanged", "no longer", "stays"];
+const CONTINUITY_QUANT = ["still", "already", "throughout", "unchanged", "no longer", "stays",
+                          "remains", "remain", "keeps", "kept"];
 
 /* a word, as a word: `"reopened".indexOf("open")` is 2 and that is how round
    10's chip checker cried wolf on every render between answering and
@@ -2544,7 +2545,7 @@ function clearSummary(r) {
   const commitments = r.objects.filter(o => o.kind === "commitment" && !needsYou(o));
   const overdue = commitments.filter(o => o.overdue).length;
   const owedOverdue = r.objects.filter(o => needsYou(o) && o.overdue).length;
-  const failures = r.objects.filter(o => o.verification === "failed").length;
+  const failures = r.objects.filter(o => { const h = recordOf(o, "verification"); return h[h.length - 1].value === "failed"; }).length;
 
   /* THE LEAD CONSULTS VERIFICATION, NOT JUST FAILURE AND LATENESS.
      Round 3 derived the glyph but still said "everything else is green" over
@@ -2553,10 +2554,16 @@ function clearSummary(r) {
      the lead may only say it when that is true of everything outside the pin.
      When it is not, the lead says what is: how much is unverified, how much is
      owed, and what is actually settled. */
+  /* AND THE TRAILER COUNTS OFF THE RECORD (round 11, raised by the grok
+     reviewer). These were counted off `o.verification`, which is only pinned to
+     the record by an invariant one function away; the histories ARE the record,
+     and a line that says "6 of 10 still unverified" above ten of them reads
+     them. */
+  const held = (o, f) => { const h = recordOf(o, f); return h[h.length - 1].value; };
   const rest = r.objects.filter(o => !owed.includes(o.id));
-  const unverified = rest.filter(isClaim).length;
-  const openQs = rest.filter(o => o.verification === "open").length;
-  const green = rest.filter(o => o.verification === "verified" || o.verification === "accepted").length;
+  const unverified = rest.filter(o => UNSETTLED.includes(held(o, "verification"))).length;
+  const openQs = rest.filter(o => held(o, "verification") === "open").length;
+  const green = rest.filter(o => held(o, "verification") === "verified" || held(o, "verification") === "accepted").length;
 
   /* the lead stays short because the counts it would repeat are already in the
      clauses beside it — which is also what keeps the whole trailer on one line
@@ -5700,18 +5707,27 @@ function reopen(objectId, reason) {
      It belongs to the entry's prose line, which narrates the whole transition.
      Round 10 had it in the `after`, where it was constrained to say something
      about the after value while talking about the before one. */
-  const keptClause = (v, s, c) => {
+  /* ONE VIEW DECIDES WHAT IS PRESERVED, AND IT IS THE FIELD THAT HOLDS IT.
+     Where the record keeps CONTENT for this kind — a question's answer, a
+     decision's statement — that is what a reopen preserves and that is what the
+     sentence reads. Where it does not, what is preserved is the state, named
+     out of the verification standing when the transition began. Reading both
+     and naming one is how `preservedName` came to turn an `unverified`
+     verification into the word "answer" — a noun belonging to another field —
+     in a sentence that never opened it (round 11 self-review). */
+  const keptView = wasContent || wasVr;
+  const keptShort = (s, k) => !s.ever("settled") ? "nothing had settled it"
+    : k.of === "verification" ? preservedName(k.value) + " kept"
+    : k.value != null ? k.of + " kept" : "no " + k.of + " on the record";
+  const keptClause = (s, k) => {
     const at = s.last("settled");
     if (!at) return "nothing had settled it";
-    const name = preservedName(v.value);
-    /* where what is preserved is CONTENT the record holds — an answer, a
-       proposal — the sentence is about that content, so it reads it. Where it
-       is a STATE, the settlement's own entry is who and when. Naming content
-       from a verification value while reading the content field and using none
-       of it is the decorative read this round found in its own fix. */
-    return c && c.value != null
-      ? "the " + name + " on the record" + (c.tm ? ", recorded at " + c.tm + "," : "") + " stays on it"
-      : "the " + name + (at.by ? " by " + at.by : "") + (at.tm ? " at " + at.tm : "") + " stays on the record";
+    return k.of === "verification"
+      ? "the " + preservedName(k.value) + (at.by ? " by " + at.by : "") + (at.tm ? " at " + at.tm : "") +
+        " stays on the record"
+      : k.value != null
+        ? "the " + k.of + " on the record" + (k.tm ? ", recorded at " + k.tm + "," : "") + " stays on it"
+        : "nothing is recorded as its " + k.of;
   };
   const nowLabel = say([nowVr, nowSr], (v, s) => {
     /* "pending again" is a claim that this record has stood pending BEFORE,
@@ -5735,8 +5751,7 @@ function reopen(objectId, reason) {
      two predicates, opposite claims about the same click. Both are minted from
      the views this transition read. */
   o.facts = [say([nowVr], () => "reopened by " + S.me + " " + t),
-             say([wasVr, wasSr], (v, s) => s.ever("settled") ? preservedName(v.value) + " kept"
-                                                             : "nothing had settled it"),
+             say([wasSr, keptView], keptShort),
              say([nowVr, nowSr], (v, s) => !owed
                ? enumText(v.value) + (v.before(v.value) ? " again" : "")
                : enumText(s.value) + (s.before(s.value) ? " again" : "") + (back === S.me ? "" : " · " + back + "'s"))]
@@ -5782,10 +5797,10 @@ function reopen(objectId, reason) {
        not the record. The change is the enum the object actually moved through,
        or — when the enum did not move — the settlement it lost. */
     change: vChange || sChange,
-    fact: say([nowVr, wasVr, wasSr, nowSr].concat(wasContent ? [wasContent] : []),
-      (v, wv, ws, ns, c) => `reopened by ${S.me} at ${t} · now ${enumText(v.value)}` +
+    fact: say([nowVr, wasSr, nowSr, keptView],
+      (v, ws, ns, k) => `reopened by ${S.me} at ${t} · now ${enumText(v.value)}` +
       (!sameValue(ws.value, ns.value) ? " and no longer settled" : "") +
-      " · " + keptClause(wv, ws, c) +
+      " · " + keptClause(ws, k) +
       (reason ? "" : " · no reason given, and none was invented")),
     msg: o.answerMsg || o.sourceMsg || (o.provenance[0] && o.provenance[0].msg) || null,
     room: o.answerMsg ? null : sourceRoomOf(o),
@@ -5823,8 +5838,7 @@ function reopen(objectId, reason) {
                   ` · reopened by ${S.me}` +
                   (owed && back !== S.me ? ` · back to ${back}, whose it is` : "") +
                   (reason ? " · reason recorded" : " · no reason given") + " · ",
-                  say([wasVr, wasSr], (wv, s) => s.ever("settled")
-                    ? preservedName(wv.value) + " kept" : "nothing had settled it")],
+                  say([wasSr, keptView], keptShort)],
                   o, vChange || sChange);
   S.ui.reopening = null;
   /* the reopen is normally driven from the receipt, and the receipt stays open —
@@ -5839,8 +5853,8 @@ function reopen(objectId, reason) {
      including, since round 4's D5, whose list it landed on when it is not yours */
   /* and "again" is a query, not a suffix, and "a"/"an" is decided by the word
      the record produced rather than typed in front of it (round 11 D4/minor) */
-  toast(say([wasVr, nowVr, wasSr], (wv, v, s) => {
-    const kept = s.ever("settled") ? preservedName(wv.value) + " kept on the record" : "nothing had settled it";
+  toast(say([nowVr, wasSr, keptView], (v, s, k) => {
+    const kept = keptShort(s, k) + (s.ever("settled") ? " on the record" : "");
     return needsYou(o)
       ? `reopened · back in Needs you as ${an(enumText(v.value))} ${o.kind} · ${kept}`
       : owed
