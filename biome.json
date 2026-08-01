@@ -46,7 +46,11 @@
         "noConsole": {
           "level": "error",
           "options": {
-            "allow": ["error", "warn", "info"]
+            "allow": [
+              "error",
+              "warn",
+              "info"
+            ]
           }
         }
       }
@@ -76,7 +80,11 @@
   },
   "overrides": [
     {
-      "includes": ["**/*.config.*", "**/scripts/**", "apps/server/src/**"],
+      "includes": [
+        "**/*.config.*",
+        "**/scripts/**",
+        "apps/server/src/**"
+      ],
       "linter": {
         "rules": {
           "suspicious": {
