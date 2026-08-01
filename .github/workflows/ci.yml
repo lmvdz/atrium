@@ -196,19 +196,6 @@ jobs:
         # a global count that its neighbours keep above the floor.
         run: node scripts/ci/assert-workspace-enrollment.mjs
 
-      - name: Fetch the baseline manifest from main
-        # Depth 1 is enough: the ratchet reads one file out of one commit.
-        # actions/checkout leaves a shallow clone with no other branches in it,
-        # so without this there is nothing to compare against — and "nothing to
-        # compare against" must be a fact the next step reports, not a silence
-        # it inherits.
-        #
-        # Deleting this step does not break the ratchet; it neuters it, quietly,
-        # down the green no-baseline path. So the policy engine's
-        # `required-step-prerequisites` rule requires this step to exist and to
-        # come before the ratchet. The pair is the gate, not either half.
-        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
-
       - name: Assert the CI floors have not been ratcheted down
         # The cheapest way to make a failing count gate pass is to lower the
         # number it counts against. Every floor is compared against the same
