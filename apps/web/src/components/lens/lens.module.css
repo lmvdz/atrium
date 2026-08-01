@@ -32,12 +32,16 @@
   flex-wrap: wrap;
 }
 
+/* The animation is NOT declared here. A CSS Module rewrites animation-names it
+   sees, including references to globally-declared keyframes, so `animation:
+   gl-pulse` in this file resolved to a name no keyframe had — the dot was
+   static and `getAnimations()` returned []. The motion comes from the global
+   `atr-pulse` class in globals.css, worn in the markup beside this one. */
 .live {
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--grn2);
-  animation: gl-pulse 1.6s infinite;
 }
 
 /* sub-counts that do not sum, reconciled in prose right under the counts */

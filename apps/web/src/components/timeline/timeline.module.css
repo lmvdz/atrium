@@ -24,10 +24,25 @@
   flex: none;
 }
 
-/* filtering DIMS; it never hides. A row you cannot see is a row you cannot
-   check, and the filter is a lens over the record, not an edit to it. */
-.feedFiltered .dimmed {
-  opacity: 0.3;
+/* FILTERING LIFTS WHAT MATCHES; it does not fade the rest, and it never hides
+   anything. "A row you cannot see is a row you cannot check" was the caption,
+   and `opacity: .3` made it false — measured, the row's text landed at
+   1.48–1.71:1 against its surface, so the frame's own claim was a lie.
+
+   The obvious fix, a milder fade, does not exist. Measured against the token
+   set, the weakest text a row can carry is --amb2 on --ambbg (a `needs you`
+   tag), which is 4.53:1 at FULL opacity — the measured floor of the whole
+   shell. Any opacity below 1 puts it under AA. There is no fade that is both
+   visible and legible, so the filter changes the surface instead: matching
+   rows are lifted onto --bg3 with the amber inset the pin uses, and every row
+   keeps 100% of its contrast.
+
+   The unmatched row gets no rule of its own on purpose: it loses the lift and
+   the hover affordances (below) and nothing else. Every character on it stays
+   at the contrast it had before the filter was applied. */
+.feedFiltered .matched {
+  background: var(--bg3);
+  box-shadow: inset 2px 0 0 var(--amb2);
 }
 
 /* --- the row ------------------------------------------------------------- */
@@ -35,15 +50,19 @@
    the glyph column always lands in the same place and the epistemic status of a
    whole screen is scannable in one vertical pass. */
 
+/* Gutter and padding are v6's: 12px between columns, 4px 24px around the row.
+   Round 1 flagged 8px / 2.5px 16px as a drift from the source the tokens came
+   from — and the wider gutter is what stops the 44px time column from crowding
+   the glyph, which is the column the whole grid exists to line up. */
 .mrow {
   display: grid;
   grid-template-columns: 44px 14px 76px 1fr;
-  column-gap: 8px;
-  padding: 2.5px 16px 2.5px 12px;
+  column-gap: 12px;
+  padding: 4px 24px 4px 16px;
   position: relative;
   transition:
     background 0.12s ease,
-    opacity 0.15s ease;
+    box-shadow 0.12s ease;
 }
 
 .mrow:hover {
@@ -84,10 +103,19 @@
   font-weight: 600;
 }
 
+/* 11.5px, the top of CONVENTIONS' 10–11.5px row band. It was 12px, which is
+   outside the band the density section states — rows are information, not
+   reading material, and the one size that is allowed to be bigger is the body
+   base of 12.5px on the shell. */
 .body {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--tx1);
   min-width: 0;
+}
+
+/* a page-authored answer: system voice in the body column, no actor beside it */
+.chosen {
+  display: inline;
 }
 
 /* a system row recedes: mono everywhere, one shade of muted, no actor accent */
@@ -121,13 +149,20 @@
 /* the row stays quiet until you point at it. Anything that OWES the user
    attention is never a hover affordance — that lives in the pin. */
 
+/* `pointer-events: none` while invisible. Round 1: this strip is absolutely
+   positioned with `opacity: 0` and covered the right half of every row, so
+   `elementFromPoint` at the centre of the always-visible tag button returned
+   the reply button — an invisible affordance was eating clicks meant for a
+   visible one. Keyboard focus still reveals it, because the buttons stay
+   focusable: only the POINTER is turned off, so `:focus-within` still fires. */
 .acts {
   position: absolute;
-  right: 12px;
+  right: 24px;
   top: -9px;
   display: flex;
   gap: 1px;
   opacity: 0;
+  pointer-events: none;
   background: var(--bg3);
   border: 1px solid var(--line2);
   border-radius: 4px;
@@ -139,6 +174,7 @@
 .mrow:hover .acts,
 .mrow:focus-within .acts {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .acts button {
@@ -157,10 +193,10 @@
   color: var(--tx0);
 }
 
-/* a dimmed row keeps its content and loses only its affordances: you can still
-   read it, you just cannot act on something the filter says you are not looking
-   at */
-.feedFiltered .dimmed .acts {
+/* an unmatched row keeps its content and loses only its affordances: you can
+   still read it — at full contrast — you just cannot act on something the
+   filter says you are not looking at */
+.feedFiltered .unmatched .acts {
   display: none;
 }
 
@@ -402,5 +438,11 @@
 @media (max-width: 1279px) {
   .mrow {
     grid-template-columns: 40px 14px 68px 1fr;
+    column-gap: 8px;
+    padding: 4px 16px 4px 12px;
+  }
+
+  .acts {
+    right: 16px;
   }
 }

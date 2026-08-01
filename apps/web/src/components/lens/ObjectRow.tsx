@@ -11,6 +11,7 @@
 import type { NoGlyph } from '../model/glyph';
 import { glyphFor } from '../model/glyph';
 import type { StateObject } from '../model/records';
+import { slot } from '../model/slot';
 import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
 import styles from './lens.module.css';
@@ -38,7 +39,7 @@ export function ObjectRow({ object, onOpenReceipt }: ObjectRowProps) {
       <Glyph className={styles.oitemGlyph} decorative={false} state={object.state} />
       <span>
         <span className={styles.oitemText}>
-          <ClaimText state={object.state}>{object.text}</ClaimText>
+          <ClaimText content={slot(object.text)} state={object.state} />
         </span>
         <span className={styles.oitemMeta}>
           {object.facts.map((fact, index) => (

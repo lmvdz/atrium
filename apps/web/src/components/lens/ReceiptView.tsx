@@ -24,6 +24,7 @@ import type { NoGlyph } from '../model/glyph';
 import { quotationRef } from '../model/quotation';
 import type { CorrectionEntry, ProvenanceEntry, ReceiptRecord } from '../model/records';
 import { stateForHappened } from '../model/records';
+import { slot } from '../model/slot';
 import { text } from '../model/text';
 import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
@@ -51,7 +52,7 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
         <div className={styles.rcTitle}>
           <Glyph className={styles.rcTitleGlyph} decorative={false} state={receipt.state} />
           <span className={styles.rcHeading}>
-            <ClaimText state={receipt.state}>{receipt.title}</ClaimText>
+            <ClaimText content={slot(receipt.title)} state={receipt.state} />
           </span>
         </div>
         <div className={styles.rcState}>
@@ -65,13 +66,18 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
       </div>
 
       <Section label="WHAT HAPPENED">
+        {/* A history line is a page-authored fact about an event, so its words
+            are a SystemStatement and it carries data-voice="system". `who` is
+            the actor of the EVENT, not an attribution for speech — nothing on
+            this line is quoted, which is precisely why a plain name is allowed
+            here and is not allowed on a provenance row. */}
         {receipt.happened.map((line) => {
           const state = stateForHappened(line.kind);
           return (
-            <div className={styles.happened} key={line.id}>
+            <div className={styles.happened} data-voice="system" key={line.id}>
               <Glyph className={styles.happenedGlyph} decorative={false} state={state} />
               <span className={styles.happenedText}>
-                <span className={styles.happenedWho}>{line.who}</span> {line.text}
+                <span className={styles.happenedWho}>{line.who}</span> {line.statement.text}
                 <span className={styles.happenedAt}>{line.at}</span>
               </span>
             </div>
@@ -152,9 +158,14 @@ function ProvenanceRow({
       onClick={onJump === undefined || jump === null ? undefined : () => onJump(jump.messageId)}
       type="button"
     >
+      {/* Who and when come OFF THE EXCERPT. There is no `who` prop to disagree
+          with the words: the quotation was minted from the message that holds
+          both, and this row can only render what that message said. */}
       <span className={styles.provHead}>
-        <span className={styles.provWho}>{entry.who}</span>
-        <span>{entry.at}</span>
+        <span className={styles.provWho} data-attribution={entry.excerpt.messageId}>
+          {entry.excerpt.actor}
+        </span>
+        <span>{entry.excerpt.at}</span>
         <span className={styles.provJump}>
           {jump === null
             ? 'typed here · no message carries it'
@@ -208,7 +219,8 @@ function CorrectionRow({
       )}
       {entry.reason === null ? null : (
         <div className={styles.corrReason}>
-          <Quoted by={entry.reason.by} quote={entry.reason.quotation} />
+          {/* No `by`: <Quoted> reads the actor off the quotation. */}
+          <Quoted quote={entry.reason} />
         </div>
       )}
     </div>

@@ -59,15 +59,18 @@ export function Composer({ roomName, binding, footNote, onCancelBinding, onSend 
         <div className={`${styles.ctxbar} ${styles.ctxbarReply}`} data-binding="replying">
           <span aria-hidden="true">↩</span>
           <b>REPLYING TO</b>
-          <span>
+          {/* The name and the words come off ONE quotation. Round 1: the banner
+              took `{actor, at, excerpt}`, so the name beside the excerpt was a
+              free string nothing checked. */}
+          <span data-attribution={binding.to.messageId}>
             {binding.to.actor} {binding.to.at}
           </span>
           <span
             className={styles.ctxbarIn}
-            data-quoted={quotationRef(binding.to.excerpt)}
-            title={binding.to.excerpt.text}
+            data-quoted={quotationRef(binding.to)}
+            title={binding.to.text}
           >
-            “{binding.to.excerpt.text}”
+            “{binding.to.text}”
           </span>
           <button
             aria-label="Cancel reply"

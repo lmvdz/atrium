@@ -32,6 +32,18 @@
  *   chips carry --tx1 on --grnbg with a --grnbd border — the hue rides the
  *   border, the contrast rides the text token.
  *
+ *   FOCUS RING — WCAG 1.4.11, non-text contrast, ≥3:1 against every adjacent
+ *   colour. The ring used to be --line3, which measures 1.63:1 light and
+ *   1.17:1 dark at its worst surface: it failed on all 70 focusable controls
+ *   per frame in both themes, and since nothing else in this shell reacts to
+ *   focus, the ring is the ONLY keyboard wayfinding there is. Note that this
+ *   comment block audited text in detail and never audited the ring — which is
+ *   how it survived a contrast pass. It is now --tx1, measured against all 19
+ *   surfaces the ring can land on: worst case 8.32:1 light (on --bg6) and
+ *   7.82:1 dark (on --grnav). The ring sits OUTSIDE the border box, so a
+ *   button's own fill is never adjacent to it; the offset gap shows the parent.
+ *   Asserted in test/token-contrast.test.ts and again in the rendered audit.
+ *
  *   TYPE FLOOR: nothing below 10px, ever.
  *   LABEL IDIOM: exactly one — 10px / .14em / uppercase / mono, declared once
  *   below in `.atr-lbl`. It is the only `letter-spacing` in the app.
@@ -75,7 +87,7 @@ button {
 }
 
 :focus-visible {
-  outline: 2px solid var(--line3);
+  outline: 2px solid var(--tx1);
   outline-offset: 1px;
   border-radius: 3px;
 }
@@ -89,16 +101,11 @@ button {
  * MOTION — three keyframes, per design/CONVENTIONS.md. Nothing else animates.
  * ======================================================================== */
 
-@keyframes gl-blink {
-  0%,
-  49% {
-    opacity: 1;
-  }
-  50%,
-  100% {
-    opacity: 0;
-  }
-}
+/* `gl-blink` is NOT declared here. CONVENTIONS lists three keyframes; this app
+   consumes two. Blink is for live/recording indicators and Atrium v1 has no
+   voice surface, so it goes where the call-era tokens went: documented as
+   returning in Phase 4 rather than sitting in the stylesheet unreferenced. A
+   keyframe nothing uses is a keyframe nobody notices has stopped working. */
 
 @keyframes gl-pulse {
   0%,
@@ -131,6 +138,17 @@ button {
 
 .atr-rise-s {
   animation: gl-rise 0.15s ease backwards;
+}
+
+/* IN-PROGRESS. This class is GLOBAL on purpose. Round 1: `.live` in
+   lens.module.css said `animation: gl-pulse 1.6s infinite`, and CSS Modules
+   rewrites animation-NAMES inside a module even when the keyframes are global —
+   so the computed name was `lens_gl-pulse__hash`, no such keyframe existed, and
+   `getAnimations()` on the live indicator returned []. The dot had been static
+   since it was written. An animation declared beside its keyframes cannot be
+   scoped away. */
+.atr-pulse {
+  animation: gl-pulse 1.6s infinite;
 }
 
 /* The blanket kill switch. Not per-component opt-in: any animation added
