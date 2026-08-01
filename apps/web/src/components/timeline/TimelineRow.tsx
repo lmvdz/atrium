@@ -18,6 +18,21 @@
  *     <SystemVoice>: mono, muted, third person, no quotation marks. This is the
  *     round-1 cardinal defect closed at the type level — the shipped gallery
  *     used to render this exact record as lars's own sentence.
+ *
+ * THE ATTRIBUTION IS RE-DERIVED HERE, NOT TRUSTED. Rounds 1, 2 and 3 all found
+ * the same defect at a different address: the guarantee was enforced at whatever
+ * chokepoint the last round had built, and the next round found a path that did
+ * not go through it. r1 put a free actor string beside the words; r2 moved it to
+ * the body slot; r3 put the check inside `messageEntry` and a caller wrote the
+ * `AuthoredMessageEntry` literal instead of calling it.
+ *
+ * `messageEntry` is now unreachable to write around (model/records.ts brands the
+ * entry), but a brand is a compile-time fact and a cast walks through it. This
+ * component is on the path EVERY rendered row takes, and it already holds both
+ * halves of the claim — `entry.attribution.text` is the record's words and
+ * `entry.body` is what is about to be painted — so it checks them against each
+ * other before printing a name over them. There is no call site that can skip
+ * this one, which is the property the previous three fixes did not have.
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
@@ -28,7 +43,7 @@ import type {
   MessageEntry,
   RowTag,
 } from '../model/records';
-import { isAuthored } from '../model/records';
+import { bodyDivergence, isAuthored } from '../model/records';
 import { slot } from '../model/slot';
 import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
@@ -113,6 +128,19 @@ function AuthoredRow({
   readonly actions: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
 }) {
+  /* THE CHECK A CALL SITE CANNOT SKIP. Both operands come off the entry this
+     component was handed, so it holds however the entry was built — factory,
+     literal, cast, `JSON.parse`, or a JavaScript caller with no types at all.
+     It throws rather than degrading: a row that renders a person's name over
+     words that are not on their record is the one failure this whole model
+     exists to prevent, and a silently corrected render is a corrected render
+     nobody finds out about. */
+  const diverged = bodyDivergence('TimelineRow', entry.body, entry.attribution.text, {
+    id: entry.attribution.messageId,
+    actor: entry.attribution.actor,
+  });
+  if (diverged !== null) throw new Error(diverged);
+
   return (
     <>
       <div

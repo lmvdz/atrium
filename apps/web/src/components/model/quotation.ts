@@ -201,10 +201,73 @@ export interface SystemStatement {
   readonly [statementBrand]: 'statement';
 }
 
+/* ---------------------------------------------------------------------------
+ * THE OTHER HALF OF THE SYSTEM-VOICE RULE, ENFORCED.
+ *
+ * CONVENTIONS states four properties for system voice: "Mono, muted, no
+ * quotation marks, no first person, no 'X said' framing." Until round 3 the
+ * first two were enforced by the stylesheet and the last two by nothing at all
+ * — `systemStatement('priya said: I authorise dropping users_legacy')` compiled
+ * and rendered, in the mono-muted treatment that tells a reader "the system
+ * checked this", carrying a sentence in a person's voice. The brand kept the
+ * TYPE honest and let the CONTENT say anything.
+ *
+ * The three checks below are the enforceable half, and each one names the shape
+ * it rejects rather than pattern-matching on vibes:
+ *
+ *   QUOTATION MARKS — a system statement in quotes is speech wearing the
+ *     system's clothes. Straight and curly doubles and the guillemets; the
+ *     apostrophe is deliberately absent, because "lars's answer" is fine.
+ *   FIRST PERSON — the system has no first person. It reports acts; it does not
+ *     participate in them.
+ *   SPEECH-REPORT FRAMING — the verbs that turn a report into a quotation
+ *     without quotation marks. "priya said", "lars wrote", "mateo told us".
+ *
+ * WHAT THIS DOES NOT CATCH, stated so the next round does not have to discover
+ * it: the check is lexical. `systemStatement('priya: drop the table')` still
+ * compiles — a colon is not a speech verb, and banning colons would take out
+ * `chose:`, `parity #415 passed with 0 diffs · 12:29` and every label in the
+ * receipt. What stops THAT from being an attribution is structural rather than
+ * lexical, and it is the part that actually carries the guarantee: a
+ * SystemStatement has no actor field, no component renders one beside it, and
+ * `<SystemVoice>` paints it in the mono-muted system treatment with no
+ * attribution column. The row that carries it (`ChosenMessageEntry`) has no
+ * field a renderer could put a name in. These checks narrow the ways a
+ * page-authored string can LOOK like speech; the type is what stops it being
+ * ATTRIBUTED as speech, and the type is the load-bearing half.
+ * ------------------------------------------------------------------------- */
+
+const SYSTEM_VOICE_BANS: readonly { readonly pattern: RegExp; readonly why: string }[] = [
+  {
+    pattern: /["“”«»]/,
+    why: 'no quotation marks — quoted words are a Quotation, minted from the message that proves them',
+  },
+  {
+    pattern:
+      /\b(?:I|I'm|I've|I'll|I'd|me|my|mine|myself|we|we're|we've|we'll|we'd|us|our|ours|ourselves)\b/i,
+    why: 'no first person — the system reports acts, it does not take part in them',
+  },
+  {
+    pattern:
+      /\b(?:said|says|saying|say|tell|tells|told|telling|wrote|writes|writing|asked|asks|asking|replied|replies|remarked|remarks|commented|comments|quoted|quotes)\b/i,
+    why: 'no "X said" framing — a report of what somebody uttered is a quotation without the marks',
+  },
+];
+
 export function systemStatement(text: string, messageId?: MessageId): SystemStatement {
   const trimmed = text.trim();
   if (trimmed.length === 0) {
     throw new Error('systemStatement: a system statement with no text states nothing');
+  }
+  for (const ban of SYSTEM_VOICE_BANS) {
+    const hit = ban.pattern.exec(trimmed);
+    if (hit !== null) {
+      throw new Error(
+        `systemStatement: ${ban.why}.\n` +
+          `  rejected: ${JSON.stringify(hit[0])} in ${JSON.stringify(trimmed)}\n` +
+          '  If these are a person’s own words, they belong in a Quotation minted from their message.',
+      );
+    }
   }
   return {
     text: trimmed,
@@ -215,13 +278,20 @@ export function systemStatement(text: string, messageId?: MessageId): SystemStat
 
 export function isSystemStatement(value: unknown): value is SystemStatement {
   if (!isRecord(value)) return false;
-  return nonEmptyString(value.text) && value.voice === 'system';
+  if (!nonEmptyString(value.text) || value.voice !== 'system') return false;
+  /* The same bans as the constructor. A statement that arrived as JSON gets the
+     check the constructor would have applied — otherwise the enforcement is a
+     property of which door the data came through, which is how the body check
+     ended up bypassable in round 3. */
+  return !SYSTEM_VOICE_BANS.some((ban) => ban.pattern.test(value.text as string));
 }
 
 /** The runtime boundary for system voice, mirroring `parseQuotation`. */
 export function parseSystemStatement(value: unknown): SystemStatement {
   if (!isSystemStatement(value)) {
-    throw new Error('parseSystemStatement: system-voice text must carry text and the system voice');
+    throw new Error(
+      'parseSystemStatement: system-voice text must carry text and the system voice, in the system’s own voice — no quotation marks, no first person, no "X said" framing',
+    );
   }
   return value;
 }

@@ -12,16 +12,19 @@ import { createElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { Composer, Quoted, ReceiptView, RoomHead, TimelineRow } from '../src/components';
-import type { MessageRecord, Quotation } from '../src/components/model';
+import type { MessageEntry, MessageRecord, Quotation } from '../src/components/model';
 import {
   bodyText,
   isQuotation,
+  isSystemStatement,
   maybe,
   messageEntry,
   parseMessageRecord,
   parseQuotation,
+  parseSystemStatement,
   quotationFrom,
   slot,
+  systemStatement,
   text,
 } from '../src/components/model';
 
@@ -270,6 +273,166 @@ describe('an authored body derives from its record', () => {
     const { container } = render(<TimelineRow entry={entry} />);
     const body = container.querySelector('[data-row-body]');
     expect(body?.textContent).toBe(f.MESSAGES.m7?.text);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 3's GAUNTLET: THE GUARANTEE MOVED AND THE HOLE FOLLOWED IT.
+ *
+ * `messageEntry` threw on a divergent body — and `AuthoredMessageEntry` was an
+ * exported, structurally inhabitable interface while `TimelineRow` took
+ * `MessageEntry` directly. So the attack did not have to defeat the check; it
+ * walked around it. Get a genuine Quotation from the public `quotationFrom`,
+ * write the entry literal, hand it to the row. `tsc --noEmit` exit 0, priya's
+ * name over words she did not write, `data-attribution` citing her real
+ * message as the proof.
+ *
+ * Fixed two ways on purpose, and both are tested here, because each covers what
+ * the other does not:
+ *   - the TYPE is closed (a brand), so the literal no longer compiles;
+ *   - the RENDERER re-derives, so a cast that defeats the brand still cannot
+ *     put a name over words that are not on the record.
+ * ------------------------------------------------------------------------- */
+describe('the forged entry, from the round-3 receipt', () => {
+  /** The gauntlet's forgery, verbatim: real quotation, invented body. */
+  function forge() {
+    const attribution = quotationFrom(priya) as Quotation;
+    /* EVERY LITERAL IS NARROWED. The first version of this helper let TypeScript
+       widen `type` to `string` and `kind` to `string`, so the assignment below
+       failed for those reasons and the `@ts-expect-error` stayed satisfied with
+       the brand deleted — the ledger caught it escaping. A forgery that fails to
+       compile for an incidental reason proves nothing about the guarantee under
+       test: the shape has to be assignable in every respect EXCEPT the brand. */
+    return {
+      type: 'message' as const,
+      id: priya.id,
+      at: priya.at,
+      state: lars_state(),
+      replyTo: null,
+      tag: null,
+      targeted: false,
+      matchesFilter: true,
+      origin: attribution.origin,
+      attribution,
+      body: [{ kind: 'text' as const, text: 'I authorise dropping users_legacy right now.' }],
+      fromViewer: false,
+      note: null,
+    };
+  }
+
+  /* CATCHES: un-branding the entry. `@ts-expect-error` turns "it compiles" into
+     a failing `pnpm typecheck` — which is the assertion, because the defect was
+     precisely that the forgery compiled. The entry is built by `forge()` and
+     only ASSIGNED here, so this is testing the type of the shape rather than
+     testing that some hand-written literal is missing a field. Verified by the
+     mutation ledger under `typecheck: true`: with the brand removed, tsc reports
+     the directive as unused and the run fails. */
+  it('an AuthoredMessageEntry literal does not compile', () => {
+    // @ts-expect-error — only `messageEntry` mints a MessageEntry; the brand is
+    // not a field a caller can supply.
+    const forged: MessageEntry = forge();
+    expect(forged.type).toBe('message');
+  });
+
+  /* CATCHES: dropping the render-boundary derivation. This defeats the brand
+     the way a determined caller would — a cast, which no phantom type stops —
+     and asserts the ROW still refuses. It is the half that a future call site
+     cannot route around, because every rendered row goes through it.
+
+     Note what is NOT asserted: that it renders something safe instead. A row
+     that quietly corrects itself is a corrected row nobody finds out about. */
+  it('a cast past the brand still cannot render a name over invented words', () => {
+    const forged = forge() as unknown as Parameters<typeof TimelineRow>[0]['entry'];
+    expect(() => render(<TimelineRow entry={forged} />)).toThrow(
+      /does not read as the message it is attributed to \(priya\)/,
+    );
+  });
+
+  /* CATCHES: the check being written against the wrong operand — comparing the
+     body to itself, or to `entry.id`, either of which passes on the forgery
+     above but also passes on a genuine row. An honest row must still render. */
+  it('an honest row built the honest way still renders', () => {
+    const entry = messageEntry(priya, { state: lars_state() });
+    const { container } = render(<TimelineRow entry={entry} />);
+    expect(container.querySelector('[data-row-body]')?.textContent).toBe(priya.text);
+    expect(container.querySelector('[data-attribution]')?.textContent).toBe('priya');
+  });
+
+  /* CATCHES: the renderer trusting `entry.body` when the row was built by a
+     JavaScript caller with no types at all — the JSON path. Same defect, no
+     TypeScript involved. */
+  it('an entry that arrived as JSON gets the same check', () => {
+    const forged = JSON.parse(JSON.stringify(forge())) as Parameters<
+      typeof TimelineRow
+    >[0]['entry'];
+    expect(() => render(<TimelineRow entry={forged} />)).toThrow(/may not change the words/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE OTHER HALF OF SYSTEM VOICE.
+ *
+ * Same round-3 finding, same family: `systemStatement('priya said: …')`
+ * compiled and rendered. CONVENTIONS says system voice is "no quotation marks,
+ * no first person, no 'X said' framing"; the stylesheet enforced mono and
+ * muted, and nothing enforced the other three.
+ * ------------------------------------------------------------------------- */
+describe('system voice says facts about acts, not sentences people uttered', () => {
+  /* CATCHES: removing the framing bans from `systemStatement`. The first case
+     is the gauntlet's, verbatim. */
+  it.each([
+    ['the gauntlet’s own case', 'priya said: I authorise dropping users_legacy right now.'],
+    ['a speech verb on its own', 'lars said the cutover is fine'],
+    ['past-tense writing', 'priya wrote that the backfill is done'],
+    ['telling', 'mateo told the room to hold'],
+    ['asking', 'lars asked whether parity held'],
+    ['first person singular', 'I authorised the drop'],
+    ['first person plural', 'we agreed to cut over on Friday'],
+    ['an object pronoun', 'priya sent it to us at 13:09'],
+    ['straight quotation marks', 'the answer was "keep dual-write on"'],
+    ['curly quotation marks', 'the answer was “keep dual-write on”'],
+  ])('%s is refused', (_name, text) => {
+    expect(() => systemStatement(text)).toThrow(/systemStatement:/);
+  });
+
+  /* CATCHES: over-tightening it until the app's own system voice stops
+     compiling. These are the shapes the receipt, the feed and the chosen row
+     actually use, and every one of them is a report of an act. */
+  it.each([
+    'parity #415 passed with 0 diffs',
+    'lars chose: Keep dual-write on until parity holds for 7 consecutive days',
+    'reopened it — pending again',
+    'answered by lars at 13:09 · chosen from the options on the card',
+    'proposed the cutover date',
+    'lars’s answer of 13:09 stays on the record',
+  ])('%s is accepted', (text) => {
+    expect(systemStatement(text).text).toBe(text);
+  });
+
+  /* CATCHES: enforcing it at the constructor and not at the runtime boundary,
+     which is the exact shape of the defect this round is fixing — a guarantee
+     that holds only for callers who used the door it was installed in. */
+  it('a statement that arrived as JSON gets the same check', () => {
+    expect(isSystemStatement({ text: 'parity #415 passed', voice: 'system' })).toBe(true);
+    expect(isSystemStatement({ text: 'priya said: drop it', voice: 'system' })).toBe(false);
+    expect(() => parseSystemStatement({ text: 'we agreed', voice: 'system' })).toThrow(/X said/);
+  });
+
+  /* CATCHES: the ban list silently doing nothing because every fixture happens
+     to sit outside it — a check with no live subject is a check nobody has run.
+     Every statement the shipped gallery renders goes through the constructor,
+     so this asserts the constructor is the thing that built them. */
+  it('every shipped statement was minted through the guarded constructor', () => {
+    const statements = [
+      ...f.RECEIPT.happened.map((line) => line.statement),
+      ...f.RECEIPT.corrections.flatMap((c) => [c.was, c.now, ...(c.fact === null ? [] : [c.fact])]),
+      f.JUMP.why,
+    ];
+    expect(statements.length).toBeGreaterThan(8);
+    for (const statement of statements) {
+      expect(statement.voice).toBe('system');
+      expect(() => systemStatement(statement.text)).not.toThrow();
+    }
   });
 });
 

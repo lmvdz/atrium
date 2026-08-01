@@ -89,6 +89,28 @@ export function bodyText(body: readonly BodySegment[]): string {
   return body.map(segmentText).join('');
 }
 
+/**
+ * The one description of "this body does not read as the message it is
+ * attributed to", so the factory and the renderer cannot drift into checking
+ * subtly different things or reporting the same defect two ways. Returns null
+ * when the body is an honest markup of the words.
+ */
+export function bodyDivergence(
+  from: string,
+  body: readonly BodySegment[],
+  text: string,
+  about: { readonly id: MessageId; readonly actor: string },
+): string | null {
+  const rendered = bodyText(body);
+  if (rendered === text) return null;
+  return (
+    `${from}: ${about.id}'s body does not read as the message it is attributed to (${about.actor}). ` +
+    'A body marks the record up; it may not change the words.\n' +
+    `  record: ${JSON.stringify(text)}\n` +
+    `  body:   ${JSON.stringify(rendered)}`
+  );
+}
+
 /* ---------------------------------------------------------------------------
  * THE MESSAGE ROW, DISCRIMINATED ON ORIGIN.
  *
@@ -123,9 +145,47 @@ export function bodyText(body: readonly BodySegment[]): string {
  * equal `record.text` exactly, and `messageEntry` throws when it does not. What
  * the body can change is how the words are marked up; what it cannot change is
  * the words.
+ *
+ * ROUND 3's GAUNTLET FOUND THE CHECK WAS AT A CHOKEPOINT THAT IS NOT THE ONLY
+ * PATH. `messageEntry` threw, and `AuthoredMessageEntry` was an exported,
+ * structurally inhabitable interface while `TimelineRow` took `MessageEntry`
+ * directly — so a caller got a genuine `Quotation` out of the public
+ * `quotationFrom`, wrote the entry literal, skipped the factory, and rendered
+ * priya's name over words she did not write, with `tsc --noEmit` at exit 0.
+ * That is the same finding as round 2's, one level up: the guarantee had moved
+ * and the hole had followed it. Adding a third check at a fourth chokepoint
+ * would have moved it again.
+ *
+ * SO THE TYPE IS CLOSED AND THE RENDERER RE-DERIVES. Two changes, and they do
+ * different jobs on purpose:
+ *
+ *   1. THE BRAND (below). `MessageEntryCommon` carries a `declare`d unique
+ *      symbol, so a TypeScript module cannot write a `MessageEntry` literal at
+ *      all — the only expression in the program whose type is `MessageEntry` is
+ *      a call to `messageEntry`. This matches the strength the `chosen` arm
+ *      already had from its shape. Same narrow claim as every other brand in
+ *      this codebase (see model/quotation.ts): it stops a TypeScript author, not
+ *      a cast, `Object.assign` or a JavaScript caller.
+ *
+ *   2. THE RENDER-BOUNDARY DERIVATION (timeline/TimelineRow.tsx). The brand is
+ *      a compile-time fact and the attack it does not stop is a cast. So the
+ *      renderer — which already holds `entry.attribution.text` and `entry.body`
+ *      — asserts `bodyText(entry.body) === entry.attribution.text` before it
+ *      prints a name over the words. That check is on the path every row takes,
+ *      so no future call site can route around it the way this one routed
+ *      around the factory. It is the check that makes the branding sufficient
+ *      rather than the check the branding replaces.
  * ------------------------------------------------------------------------- */
 
+declare const entryBrand: unique symbol;
+
 interface MessageEntryCommon {
+  /**
+   * Phantom. Present so `messageEntry` is the only way to obtain a value of
+   * this type from TypeScript — an entry literal does not compile, and neither
+   * does spreading one entry into another shape.
+   */
+  readonly [entryBrand]: 'message-entry';
   readonly type: 'message';
   readonly id: MessageId;
   readonly at: string;
@@ -218,7 +278,7 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
       /* Third person, on purpose: "lars chose: …" is a fact about an act. It is
          not "lars said", and it is not in his voice. */
       statement: chosenAct(record.actor, record.text, record.id),
-    };
+    } as ChosenMessageEntry;
   }
 
   /* THE BODY DERIVES FROM THE RECORD. Segments add markup; they do not add,
@@ -226,15 +286,11 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
      it is attributed to is synthesized speech under a real name — the round-1
      defect, relocated from the actor slot to the body slot. */
   if (input.body !== undefined) {
-    const rendered = bodyText(input.body);
-    if (rendered !== record.text) {
-      throw new Error(
-        `messageEntry: ${record.id}'s body does not read as the message it is attributed to (${attribution.actor}). ` +
-          'A body marks the record up; it may not change the words.\n' +
-          `  record: ${JSON.stringify(record.text)}\n` +
-          `  body:   ${JSON.stringify(rendered)}`,
-      );
-    }
+    const diverged = bodyDivergence('messageEntry', input.body, record.text, {
+      id: record.id,
+      actor: attribution.actor,
+    });
+    if (diverged !== null) throw new Error(diverged);
   }
 
   return {
@@ -244,7 +300,7 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
     body: input.body ?? [{ kind: 'text', text: record.text }],
     fromViewer: input.viewer !== undefined && record.actor === input.viewer,
     note: input.note ?? null,
-  };
+  } as AuthoredMessageEntry;
 }
 
 export interface RowTag {
