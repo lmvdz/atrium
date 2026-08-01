@@ -1,0 +1,35 @@
+## Accepted state for this room (compressed)
+
+These objects are already accepted. Do not re-propose them. If a message in the window
+contradicts, supersedes, answers, or provides evidence for one of them, say so via a relation
+whose `to` is the accepted object's id (`acc:*`). You may also propose a new object that
+supersedes an accepted one; mark the accepted one's replacement explicitly.
+
+Objective acc:obj1 (open) — "Decide what TypeScript's control flow analysis should assume
+about the side effects of an intervening function call."
+
+Decision acc:d1 (active), decided_by ahejlsberg — "TypeScript keeps the optimistic assumption
+that type guards are unaffected by intervening function calls; in aggregate the extra narrowing
+catches far more real bugs than it causes false errors."
+
+Decision acc:d2 (active), decided_by ahejlsberg — "The TypeScript compiler's own parser will
+read the current token through a `token()` function rather than a mutable `token` variable, so
+that narrowing is suppressed at those sites."
+
+OpenQuestion acc:q1 (open), asked_by RyanCavanaugh — "When a function is invoked, what should
+we assume its side effects are?"
+
+OpenQuestion acc:q2 (open), asked_by gvkhna — "Should TypeScript allow a `const` modifier on a
+function parameter?"
+
+Claim acc:c1 (disputed), claimant RyanCavanaugh — "A `pure` function modifier is impractical,
+because we would want it on the vast majority of functions and it does not handle functions
+that modify exactly one thing."
+
+Claim acc:c2 (unverified), claimant kitsonk — "An argument-by-argument mutability modifier
+would solve significantly more CFA use cases than an all-or-nothing `pure` modifier."
+
+Claim acc:c3 (unverified), claimant RyanCavanaugh — "Allowing `readonly` fields to retain their
+narrowing across intervening calls is technically unsound but rare enough in practice to be
+worth it."
+

@@ -1,0 +1,733 @@
+--- message_id: github:microsoft/TypeScript#9998 | author: RyanCavanaugh | timestamp: 2016-07-28T00:03:48.000Z ---
+Some rough notes from a conversation @ahejlsberg and I had earlier about trade-offs in the control flow analysis work based on running the real-world code (RWC) tests. For obvious reasons I'll be comparing what Flow does with similar examples to compare and contrast possible outcomes.
+
+The primary question is: When a function is invoked, what should we assume its side effects are?
+
+One option is to be _pessimistic_ and reset all narrowings, assuming that any function might mutate any object it could possibly get its hands on. Another option is to be _optimistic_ and assume the function doesn't modify any state. Both of these seem to be bad.
+
+This problem spans both locals (which might be subject to some "closed over or not" analysis) and object fields.
+#### Optimistic: Bad behavior on locals
+
+The TypeScript compiler has code like this:
+
+``` ts
+enum Token { Alpha, Beta, Gamma }
+let token = Token.Alpha;
+function nextToken() {
+    token = Token.Beta;
+}
+function maybeNextToken() {
+    if (... something ...) {
+        nextToken();
+    }
+}
+
+function doSomething() {
+    if (token !== Token.Alpha) {
+        maybeNextToken();
+    }
+    // is this possible?
+    if (token === Token.Alpha) {
+        // something happens
+    }
+}
+```
+
+Optimistically assuming `token` isn't modified by `maybeNextToken` incorrectly flags `token === Token.Alpha` as an impossibility. However, in other cases, this is a _good_ check to do! See later examples.
+#### Optimistic: Bad behavior on fields
+
+The RWC suite picked up a "bug" that looked like this:
+
+``` ts
+// Function somewhere else
+declare function tryDoSomething(x: string, result: { success: boolean; value: number; }): void;
+
+function myFunc(x: string) {
+    let result = { success: false, value: 0 };
+
+    tryDoSomething(x, result);
+    if (result.success === true) { // %%
+        return result.value;
+    }
+
+    tryDoSomething(x.trim(), result);
+    if (result.success === true) { // ??
+        return result.value;
+    }
+    return -1;
+}
+```
+
+The `??` line here is _not_ a bug in the user code, but we thought it was, because after the `%%` block runs, the only remaining value in `result.success`'s domain is `false`.
+#### Pessimistic: Bad behavior on locals
+
+We found actual bugs (several!) in partner code that looked like this:
+
+``` ts
+enum Kind { Good, Bad, Ugly }
+let kind: Kind = ...;
+function f() {
+    if (kind) {
+        log('Doing some work');
+        switch (kind) {
+            case Kind.Good:
+                // unreachable!
+        }
+    }
+}
+```
+
+Here, we detected the bug that `Kind.Good` (which has the falsy value `0`) is not in the domain of `kind` at the point of the `case` label. However, if we were fully pessimistic, we couldn't know that the global function `log` doesn't modify the global variable `kind`, thus incorrectly allowing this broken code.
+#### Pessimistic: Bad behavior on fields, example 1
+
+[A question on flowtype SO is a good example of this](http://stackoverflow.com/questions/38531182/weird-method-cannot-be-called-on-possibly-null-undefined-value)
+
+A smaller example that demonstrates the behavior:
+
+``` ts
+function fn(arg: { x: string | null }) {
+    if (arg.x !== null) {
+        alert('All is OK!');
+        // Flow: Not OK, arg.x could be null
+        console.log(arg.x.substr(3));
+    }
+}
+```
+
+The problem here is that, pessimistically, something like this might be happening:
+
+``` ts
+let a = { x: 'ok' };
+function alert() {
+    a.x = null;
+}
+fn(a);
+```
+#### Pessimistic: Bad behavior on fields, example 2
+
+The TS compiler has code that looks like this (simplified):
+
+``` ts
+function visitChildren(node: Node, visit: (node: Node) => void) {
+    switch(node.kind) {
+        case SyntaxKind.BinaryExpression:
+            visit(node.left);
+            visit(node.right); // Unsafe?
+            break;
+        case SyntaxKind.PropertyAccessExpression:
+            visit(node.expr);
+            visit(node.name); // Unsafe?
+            break;
+    }
+}
+```
+
+Here, we discriminated the `Node` union type by its `kind`. A pessimistic behavior would say that the second invocations are unsafe, because the call to `visit` may have mutated `node.kind` through a secondary reference and invalidated the discrimination.
+### Mitigating with (shallow) inlining / analysis
+
+Flow does some assignment analysis to improve the quality of these errors, but it's obviously short of a full inlining solution, which wouldn't be even remotely practical. Some examples of how to defeat the analysis:
+
+``` ts
+// Non-null assignment can still trigger null warnings
+function fn(x: string | null) {
+    function check1() {
+        x = 'still OK';
+    }
+
+    if (x !== null) {
+        check1();
+        // Flow: Error, x could be null
+        console.log(x.substr(0));
+    }
+}
+```
+
+``` ts
+// Inlining is only one level deep
+function fn(x: string | null) {
+    function check1() {
+        check2();
+    }
+    function check2() {
+        x = null;
+    }
+
+    if (x !== null) {
+        check1();
+        // Flow: No error
+        console.log(x.substr(0)); // crashes
+    }
+}
+```
+#### Mitigating with `const` parameters
+
+A low-hanging piece of fruit is to allow a `const` modifier on parameters. This would allow a much faster fix for code that looks like this:
+
+``` ts
+function fn(const x: string | number) {
+  if (typeof x === 'string') {
+    thisFunctionCannotMutateX();
+    x.substr(0); // ok
+  }
+}
+```
+#### Mitigating with `readonly` fields
+
+The `visitChildren` example above might be mitigated by saying that `readonly` fields retain their narrowing effects even in the presence of intervening function calls. This is technically unsound as you may have both a `readonly` and non-`readonly` alias to the same property, but in practice this is probably very rare.
+#### Mitigating with other options
+
+Random ideas that got thrown out (will add to this list) but are probably bad?
+- `pure` modifier on functions that says this function doesn't modify anything. This is a bit impractical as we'd realistically want this on the vast majority of all functions, and it doesn't really solve the problem since lots of functions only modify _one_ thing so you'd really want to say "`pure` except for `m`"
+- `volatile` property modifier that says this "this property will change without notice". We're not C++ and it's perhaps unclear where you'd apply this and where you wouldn't.
+
+--- message_id: github:microsoft/TypeScript#9998/c235772686 | author: zpdDG4gta8XKpMCd | timestamp: 2016-07-28T01:38:05.000Z ---
+> pure is a bit impractical
+
+with persistent data structures it makes perfect practical sense, amortized time/memory consumption for a typical application would be comparable, it take's some discipline and support from the language ( https://github.com/Microsoft/TypeScript/issues/6230, https://github.com/Microsoft/TypeScript/issues/2319,  https://github.com/Microsoft/TypeScript/issues/1213), but it's worth the trouble
+
+with `readonly` for immutables ans `pure` for functions it will be **blazing fast** compared to inlining, because modifiers only need to be checked once for each function/interface 
+
+please no more half measures based on assumptions for a couple of typical cases and endless exceptions that only worsen soundness
+
+--- message_id: github:microsoft/TypeScript#9998/c235963457 | author: ahejlsberg | timestamp: 2016-07-28T17:20:17.000Z ---
+Looking through the RWC tests, I see only one case where the additional narrowing performed by #9407 causes unwanted errors. However, there were scores of real bugs and inconsistencies being caught, such as checking for the same value twice, assuming that enum members with the value 0 pass truthiness checks, dead branches in `if` and `switch` statements, etc. In aggregate, I think our optimistic assumption that type guards are unaffected by intervening function calls is the best compromise.
+
+BTW, the compiler itself relies on side effecting changes to a `token` variable in the parser. For example:
+
+``` ts
+if (token === SyntaxKind.ExportKeyword) {
+    nextToken();
+    if (token === SyntaxKind.DefaultKeyword) {
+        // We have "export default"
+    }
+    ...
+}
+```
+
+This becomes an error with #9407 because the compiler continues to think `token` has the value `SyntaxKind.ExportKeyword` following the call to `nextToken` (and thus reports an error when `token` is compared to `SyntaxKind.DefaultKeyword`).
+
+We will instead be using a function to obtain the current token:
+
+``` ts
+if (token() === SyntaxKind.ExportKeyword) {
+    nextToken();
+    if (token() === SyntaxKind.DefaultKeyword) {
+        // We have "export default"
+    }
+    ...
+}
+```
+
+where the function is simply:
+
+``` ts
+function token(): SyntaxKind {
+    return currentToken;
+}
+```
+
+Since all modern JavaScript VMs inline such simple functions there is no performance penalty.
+
+I think this pattern of suppressing type narrowing by accessing mutable state using a function is a reasonable one.
+
+--- message_id: github:microsoft/TypeScript#9998/c236223346 | author: gvkhna | timestamp: 2016-07-29T16:12:33.000Z ---
+is there any possibility of a const on an argument?
+
+```
+function fn(const x: string | number)
+```
+
+In swift/objc they added the "in", "out", and "inout" meta attributes to arguments so you could see if they meant for a value to be modified. i feel like this could be useful for annotating whether a function will modify a variable it received or not. Not sure if I'm missing something.
+
+--- message_id: github:microsoft/TypeScript#9998/c236228862 | author: kitsonk | timestamp: 2016-07-29T16:33:49.000Z ---
+While `pure` is all the "rage" these days, I think many JavaScript developers don't understand what it means and could easily lead to surprises and or large scale frustration.  Because the inherit universal mutability of JavaScript I think `pure` would generally be shackles that would potentially go unused because of the over strictness of the concept... It just seems an "all or nothing" concept, when most of JavaScript is shades of grey.
+
+I think a argument by argument modifier makes the most sense.  Of course `const` and `readonly` only imply disallowing reassignment.  Personally, I don't find it confusing of expanding those to inform the flow control that property mutations are "unsafe" as that would be a design time only construct.
+
+Is there any benefit in considering a deeply immutable design time keyword to avoid any confusion between `const` and `readonly`?  Potentially even `immutable` (though that is jargoney).
+
+--- message_id: github:microsoft/TypeScript#9998/c236231589 | author: zpdDG4gta8XKpMCd | timestamp: 2016-07-29T16:45:06.000Z ---
+in my stubborn defense of `pure`:
+- it is easy to implement (at least in my naive view of it)
+- it is fast with almost no impact on current performance level (naive again)
+- it will do what it's been asked for
+- it will do it 100% correct no exceptions ever
+- it will cover 30% cases out of the box without having to learn anything: `[1, 2, 3].map(x => x + 1 /* <-- hi, i am pure function */)`
+- and it won't hurt to have it **in addition** to what will work best for the mainstream JavaScript audience 
+
+i really wish it was it was considered
+
+other options may work out too and should be considered, just not a big fan of half-baked solutions
+
+--- message_id: github:microsoft/TypeScript#9998/c236243708 | author: kitsonk | timestamp: 2016-07-29T17:35:39.000Z ---
+I understand your argument, although I think what you would cover with "obviously" pure functions are not ones that suffer from CFA challenges.  You example of `[1, 2, 3].map(x => x + 1)` does not suffer from CFA function boundary issues, and while it is logically pure, there is not benefit in denoting this at design time.
+
+I think your argument might have more merit if you could think of some examples where there are current CFA issues that would be solved by a pure notation that benefitted the developer.  My argument isn't against the concept of writing pure functions, it is more of the argument that an "all or nothing" solution likely won't be practical.
+
+One of the biggest current issues with CFA in my opinion is in Promise callbacks.  There are many situations where those might not be pure.  That is why I think an argument by argument mutability notation would solve significantly more use cases and do so in a more end-developer controllable way.
+
+--- message_id: github:microsoft/TypeScript#9998/c236272729 | author: zpdDG4gta8XKpMCd | timestamp: 2016-07-29T19:30:31.000Z ---
+although you are right that the example doesn't target CFA issues, the answer is rather evident:
+- if a callback meets all constraints that make it pure, then it is safe to say that all assertions that were made outside of it are still valid inside of it (including all CFA reasonings deduced before) because it _doesn't change anything_
+
+this is one merit of the pureness, among many others
+
+let me say it again, if a promise callback is pure, all reasoning that was done outside of it's scope or time is still valid inside of it
+
+you might wonder why i am so certain, let me explain, there is no notion of time in math that stands behind the idea of pureness, time doesn't exist there, it's absolutely static, everything existed forever and forever will and **cannot ever change** (because changes need time) to the point where a pure function can be thrown away and replaced with its result (what's called referential transparency) which for the any given arguments will always be the same (hence a question why not just use a hash-table instead to map arguments to results), so you don't really need a function in the first place, armed with such super static equivalence between results that were calculated vs hardcoded the only merit in using a function is to save some memory that otherwise would be taken by a huge static table mapping all possible arguments to all results, since math is absolute abstraction we only care when it comes to program it
+
+this is what a pure function is, this is why it will always work
+
+i agree that it's rather 'all or nothing', but is the price you have to pay for the peace of mind because in its strictness it solves the CFA problems and many others simply by giving them no place to exist
+
+--- message_id: github:microsoft/TypeScript#9998/c236277121 | author: zpdDG4gta8XKpMCd | timestamp: 2016-07-29T19:51:13.000Z ---
+think about it, a "pure" (aka persistent) data structure, say, a linked list, can be **deeply** copied just by... being assigned:
+
+```
+const one = toList();
+const absolutelyAnotherListThatWeCanDoWhateverWeWant = one;
+```
+
+how cool is that?
+
+in my humble opinion "pure" functions and data structures can easily cover 40% of typical everyday needs without even feeling restricted
+
+as for the rest 60% (since we don't appreciate any sort of extremes) we can use good old mutable impure JavaScript
+
+but mind those 40% percent of no problem ever! that's a darn bargain, just let it happen and enjoy it
+
+--- message_id: github:microsoft/TypeScript#9998/c236280798 | author: sledorze | timestamp: 2016-07-29T20:07:40.000Z ---
+totally agree with @aleksey-bykov arguments in favor of having "pure" introduced into the type checker.
+
+--- message_id: github:microsoft/TypeScript#9998/c236340156 | author: gvkhna | timestamp: 2016-07-30T04:08:55.000Z ---
+Just my .02, I think "pure" would be too abstract and too confusing to understand. 
+
+I'm actually in favor of apple style semantics, "in", "out", "inout"
+
+Also I think const could lead to confusion since they would be similar in usage but different concepts. 
+
+It might be easier for beginners to pick up and understand but the intent simply wouldn't be as clear.
+
+--- message_id: github:microsoft/TypeScript#9998/c236434092 | author: maiermic | timestamp: 2016-07-31T14:49:22.000Z ---
+@RyanCavanaugh The compiler should already be able to answer the question in the example of _Optimistic: Bad behavior on locals_ already with **yes**. If `doSomething` is called when `token` is `Token.Alpha`, the condition `token !== Token.Alpha` of the first `if` statement is false. Hence, the body is skipped and `nextToken` is never called. `token` is `Token.Alpha` still holds when the second `if` statement is reached. Ergo the answer is **yes**.
+
+We can make this question insteresting again by changing `doSomething` like this:
+
+``` ts
+function doSomething() {
+    if (token !== Token.Alpha) {
+        maybeNextToken();
+        // is this possible?
+        if (token === Token.Alpha) {
+        // something happens
+        }
+    }
+}
+```
+
+Now it is only possible if `maybeNextToken` changes `token` to `Token.Alpha`. If you are optimistic you would answer the question with **no**, since you assume that functions have no side effects like changing variables. However, if you change `token` in `nextToken` to `Token.Alpha` instead of `Token.Beta`
+
+``` ts
+function nextToken() {
+    token = Token.Alpha;
+}
+```
+
+it would be possible if and only if `... something ...` is true in `maybeNextToken`. If you are optimistic you would still answer the question with **no** even though the correct answer is **yes, maybe**.
+
+--- message_id: github:microsoft/TypeScript#9998/c236446974 | author: maiermic | timestamp: 2016-07-31T18:13:13.000Z ---
+# Infer constraints about functions
+
+**How about tracking variable changes of functions?**
+
+The basic idea is that we know a constraint before a function call and that we can reason about a constraint after a function call.
+
+**Note:** I write a new introduced term bold in the following when it is mentioned the first time. Jump back to this position to see the definition of this term.
+
+## `if` statements
+
+This idea is quite similar to [control flow base type analysis](https://github.com/Microsoft/TypeScript/wiki/What's-new-in-TypeScript#control-flow-based-type-analysis). So let's take a look at the `if` statement in the [example of control flow base type analysis](https://github.com/Microsoft/TypeScript/wiki/What's-new-in-TypeScript#example-4) first (before we discover constraints introduced by functions):
+
+``` ts
+function foo(x: string | number | boolean) {
+    if (typeof x === "string") {
+        x; // type of x is string here
+        x = 1;
+        x; // type of x is number here
+    }
+    x; // type of x is number | boolean here
+}
+```
+
+I rewrite the constraint annotations like this
+
+``` ts
+function foo(x: string | number | boolean) {
+    // x :: string | number | boolean
+    if (typeof x === "string") {
+        // x :: string
+        x = 1;
+        // x :: number
+    }
+    // x :: number | boolean
+}
+```
+
+As usual, a single colon like in `x: string | number | boolean` means variable `x` has type `string | number | boolean`.
+
+A **double colon** like in `x :: string | number | boolean` describes a **value-typed-binding**, which means that the current value of `x` is of type `string | number | boolean`. The type of the value may be any subtype of the type of the variable. You can for example conclude from the check `typeof x === "string"` is `true` that we have `x :: string` (the current value of `x` is a `string`).
+
+The constraints of a simple `if` statement can be described in more general as
+
+``` ts
+// cBefore
+if (condition) {
+    // c1
+    ...
+    // c2
+}
+// cAfter
+```
+
+Here constraint is abbreviated as **c** (`cBefore` stands for _constraint before_). I name our constraints in the example above like this:
+
+``` ts
+function foo(x: string | number | boolean) {
+  // cBefore := (x :: string | number | boolean)
+  if (typeof x === "string") {
+    // c1 := (x :: string)
+    x = 1;
+    // c2 := (x :: number)
+  }
+  // cAfter := (x :: number | boolean)
+}
+```
+
+I write `c := e` to assign a constraint expression `e` to the constraint called `c`.
+
+In the example, `x = 1;` is a side effect that causes a change on the constraint we have before. Before `x = 1;` we have `c1 := (x :: string)` and afterwards we have `c2 := (x :: number)`.
+
+I write `c with c'` for the constraint where all appearances of value-type-bindings `x :: T` of `c` are overridden with value-type-bindings `x :: T'` of `c'`. In this example `c1 with c2` is `(x :: string) with (x :: number)` which results in `(x :: number)`, since the old constraint value-type-binding `(x :: string)` in `c1` is overridden by `(x :: number)` of `t1`.
+
+I describe a side effect `s` as a **constraint transition** `c -> c'`. A constraint transition takes constraint `c` (that holds before side effect `s`) and gives you a new constraint `c'` (that holds after side effect `s`). Given a constraint transition `t: c -> e` where `e` is a constraint expression, I use function like notation `t(cp)` to express constraint `c'` that is equal to `e` where all appearances of `c` are replaced by `cp`.
+
+Using this notation, the example from above looks like this:
+
+``` ts
+// c1 := (x :: string)
+x = 1; // t1: c -> c with (x :: number)
+// c2 := t1(c1)
+```
+
+You can describe reasoning about constraints of a simple `if` statement in more general like this
+
+``` ts
+// cBefore
+if (condition) {
+    // c1 := cBefore & condition
+    ... // t1
+    // c2 := t1(c1)
+    //     = t1(cBefore & condition)
+}
+// cAfter := t1(cBefore & condition) | (cBefore & !condition)
+```
+
+I write `c & condition` to describe the case that `condition` is `true`. Otherwise, I write `c & !condition` to describe the case that `condition` is `false`. In both cases the constraint `c` had been given before the check. From the check of `condition` you can often reason about a new constraint `c'` that holds. If `condition` is `true` implies that `c'` holds, you can rewrite `c & condition` as `c with c'`. Similarly, if `condition` is `false` implies that `c'` holds, you can rewrite `c & !condition` as `c with c'`. If no constraint follows, you just write `c` instead.
+
+In the example, `condition` is `typeof x === "string"`. If `condition` is fulfilled the body is executed. Thereby, `c1` is `cBefore & condition`. From fulfilled `condition` you know `typeof x === "string"` holds. From that, you can infer the constraint transition `x :: string`. As a result, `cBefore & condition` equals `cBefore with (x :: string)`. Since `cBefore` is `x :: string | number | boolean` you get `(x :: string | number | boolean) with (x :: string)` that is reduced to `x :: string`.
+
+After the `if` statement you know that
+- either `condition` had been fulfilled and it's body has been executed that causes side effects described by `t1`
+  - which would result in `t1(cBefore & condition)` and can be reduced to `x :: string` (like described above)
+- or that `condition` had been unfulfilled
+  - which would result in `cBefore & !condition`
+    - where `!condition` is `!(typeof x === "string")` which is `typeof x !== "string"`
+    - so you can infer `(x :: string | number | boolean) with !(x :: string)` which can be reduced to `x :: number | boolean`
+
+From that you can conclude that `cAfter` is `t1(cBefore & condition) | (cBefore & !condition)` which is equal to `(x :: string) | (x :: number | boolean)` and can be reduced to `x :: number | boolean`.
+
+## Constraints introduced by functions
+
+Now we have warmed up, we take a look at constraints that are introduced by functions.
+
+### (User-Defined) Type Guards
+
+A [type guard](https://www.typescriptlang.org/docs/handbook/advanced-types.html#user-defined-type-guards) is a function whose return type is a _type predicate_:
+
+``` ts
+function isFish(pet: Fish | Bird): pet is Fish {
+    return (<Fish>pet).swim !== undefined;
+}
+```
+
+Those _type predicates_ are constraints that are introduced by a function (here `isFish`) and are already part of TypeScript:
+
+``` ts
+let pet: Fish | Bird
+
+if (isFish(pet)) {
+    pet.swim();
+}
+else {
+    pet.fly();
+}
+```
+
+Let's add constraints as comments:
+
+``` ts
+let pet: Fish | Bird
+// cBefore := (pet :: Fish | Bird)
+if (isFish(pet)) {
+    // c1 := cBefore & isFish(pet)
+    //     = (pet :: Fish | Bird) & (pet :: Fish)
+    //     = (pet :: Fish)
+    pet.swim();
+}
+else {
+    // c2 := cBefore & !isFish(pet)
+    //     = (pet :: Fish | Bird) & !(pet :: Fish)
+    //     = (pet :: Bird)
+    pet.fly();
+}
+```
+
+Before the `if` statement you know that `pet` is `Fish | Bird`. If `isFish(pet)` is fulfilled, the type predicate `pet is Fish` of `isFish` holds for the value of our local variable `pet`. That means that it adds a constraint `pet :: Fish` to `c1`. Thus, it's ok to call `pet.swim();`. In the else branch you know that the type predicate `pet is Fish` is unfulfilled and you can add `!(pet :: Fish)` to `c2`, which results in `pet :: Bird`.
+
+### Functions in general
+
+In a similar way to type predicates of type guards I introduce constraints that can be automatically inferred from expressions and statements. I will add constraints to the functions one after another in my modified example (see comment above) of the example _behavior on locals_ ([see first post](https://github.com/Microsoft/TypeScript/issues/9998#issue-167984634)) to answer the question `is this possible?` in the comment in the function `doSomething`:
+
+``` ts
+enum Token { Alpha, Beta, Gamma }
+let token = Token.Alpha;
+function nextToken() {
+    token = Token.Alpha;
+}
+function maybeNextToken() {
+    if (condition) {
+        nextToken();
+    }
+}
+
+function doSomething() {
+    if (token !== Token.Alpha) {
+        maybeNextToken();
+        // is this possible?
+        if (token === Token.Alpha) {
+          // something happens
+        }
+    }
+}
+```
+
+#### `nextToken`
+
+``` ts
+function nextToken() {
+    token = Token.Alpha;
+}
+```
+
+`nextToken` assigns `Token.Alpha` to the shared local variable `token`. Like the assignment `x = 1;` in the `if` statement example, `token = Token.Alpha` is a side effect that can be described as a constraint transition:
+
+``` ts
+function nextToken() {
+    // cBefore
+    token = Token.Alpha; // t1: c -> c with (token :: Token.Alpha)
+    // cAfter := t1(cBefore)
+    //         = cBefore with (token :: Token.Alpha)
+}
+```
+
+Here `cBefore` describes the constraints that we have before calling `nextToken` and `cAfter` describes the constraints that we have after calling `nextToken`. Like an assignment, a function can be described as a constraint transition. Since `nextToken` is doing just the same as the assignment `token = Token.Alpha;` it describes the same constraint transition as `t1`.
+
+#### `maybeNextToken`
+
+Let's have a look at the caller `maybeNextToken`:
+
+``` ts
+function maybeNextToken() {
+    if (condition) {
+        nextToken();
+    }
+}
+```
+
+First you add the constraint transitions (here `t1` for `nextToken`) and afterwards the constraints of the `if` statement:
+
+``` ts
+function maybeNextToken() {
+    // cBefore
+    if (condition) {
+        // cBefore & condition
+        nextToken(); // t1: c -> c with (token :: Token.Alpha)
+        // t1(cBefore & condition)
+    }
+    // cAfter := t1(cBefore & condition) | (cBefore & !condition)
+}
+```
+
+Since `condition` is not specified in the original example you don't know its result. I assume that it is an expression without any side effect. To relax this assumption even further I consider `condition` is a shared variable of type `boolean`. Thereby, you can derive `condition :: true` if `condition` is fulfilled and `condition :: false` otherwise. Thereof, `cAfter` is
+
+``` Ts
+((cBefore with (condition :: true)) with (token :: Token.Alpha)) | (cBefore with (condition :: false))
+```
+
+Despite that simplification `maybeNextToken` is described as the constraint transition `cBefore -> cAfter`.
+
+#### `doSomething`
+
+``` ts
+function doSomething() {
+    if (token !== Token.Alpha) {
+        maybeNextToken();
+        // is this possible?
+        if (token === Token.Alpha) {
+          // something happens
+        }
+    }
+}
+```
+
+Like in `maybeNextToken` you first add constraint transitions and afterwards the constraints of the `if` statement:
+
+``` ts
+function doSomething() {
+    // cBefore
+    if (token !== Token.Alpha) {
+        // c1
+        maybeNextToken(); // t1: c -> ((c with (condition :: true)) with (token :: Token.Alpha)) | (c with (condition :: false))
+        // c2
+        // is this possible?
+        if (token === Token.Alpha) {
+          // c3
+          // something happens
+          // c4
+        }
+        // c5
+    }
+    // cAfter
+}
+```
+
+Our goal is to answer the question if it is possible that `token === Token.Alpha` is fulfilled in the condition of the second `if` statement. This is only possible if `c2` contains a constraint `token :: T` where `T` is a type that contains `Token.Alpha`. Hence, you only look at `c1` and `c2`:
+- `c1` is `cBefore & token !== Token.Alpha`. Since `token` is not `Token.Alpha` it only can be `Token.Beta` or `Token.Gamma`. This results in `cBefore with (token :: Token.Beta | Token.Gamma)`.
+- `c2` is derived by replacing `c` in `t1` with `c1`:
+  
+  ``` ts
+  c2 := ((c with (condition :: true)) with (token :: Token.Alpha))
+        | (c with (condition :: false))
+      = (((cBefore with (token :: Token.Beta | Token.Gamma)) with (condition :: true)) with (token :: Token.Alpha))
+        | ((cBefore with (token :: Token.Beta | Token.Gamma)) with (condition :: false))
+  ```
+  
+  Since the type of the value of `token` in `cBefore` is overridden by `cBefore with (token :: ...)` operations, you can leave `cBefore` out:
+  
+  ``` ts
+      = (((token :: Token.Beta | Token.Gamma) with (condition :: true)) with (token :: Token.Alpha))
+        | ((token :: Token.Beta | Token.Gamma) with (condition :: false))
+  ```
+  
+  I'm only interested in `token` to answer the question. Hence, you can remove all `with` operations of other variables (here `condition`):
+  
+  ``` ts
+      = ((token :: Token.Beta | Token.Gamma) with (token :: Token.Alpha))
+        | (token :: Token.Beta | Token.Gamma)
+      = (token :: Token.Alpha)
+        | (token :: Token.Beta | Token.Gamma)
+      = token :: Token.Alpha | Token.Beta | Token.Gamma
+      = token :: Token
+  ```
+
+From `c2 = token :: Token` you conclude that the answer of the question is:
+Yes, `token` might be `Token.Alpha` in the condition of the second/inner `if` statement.
+
+--- message_id: github:microsoft/TypeScript#9998/c236508140 | author: yortus | timestamp: 2016-08-01T07:27:15.000Z ---
+@maiermic your post was pretty complex, so I may have misunderstood it, but it looks like you are describing what control flow anaylsis already does, plus extending it to 'look into' the functions being called within guarded blocks as well. If so, how is this different to the inlining approach mentioned by @RyanCavanaugh in the OP?
+
+--- message_id: github:microsoft/TypeScript#9998/c236696855 | author: maiermic | timestamp: 2016-08-01T20:26:15.000Z ---
+@yortus That's right, I describe what control flow analysis already does to introduce the notation I use afterwards to explain my idea. However, I'd like to clarify that I don't 'look into' a function every time it is called (if that wasn't clear so far). Instead I infer the constraint transition of a function when I look at it's definition. Therefore, I have to look into the function, but I only have to do this once, since I can carry the constraint transition in the type of the function. When I look at the function call, I can use the constraint transition that I inferred before to calculate the constraint that holds after the function call from the constraint that holds before the function call.
+
+**Mitigating with (shallow) inlining / analysis**
+
+I don't know how _(shallow) inlining/analysis_ works and @RyanCavanaugh doesn't explain it. Nevertheless, he shows two examples.
+
+**1. Example**
+
+``` ts
+// Non-null assignment can still trigger null warnings
+function fn(x: string | null) {
+    function check1() {
+        x = 'still OK';
+    }
+
+    if (x !== null) {
+        check1();
+        // Flow: Error, x could be null
+        console.log(x.substr(0));
+    }
+}
+```
+
+Flow claims that `x could be null` after the call of `check1`. Flow doesn't look into `check1`. Otherwise, it would know that `x` has type `string` and cann't be `null`.
+
+In my approach, the constraint transition of `check1` is inferred as `t: c -> (x :: string)`. Since we checked that `x !== null` is `true` before and the type of the variable `x` is `string | null` we have `x :: string` as constraint that holds before the call of `check1`. Hence, we pass `x :: string` to `t` to get the constraint that holds after the call of `check1`. `t(x :: string)` results in `x :: string`. As a consequence, `x` cann't be `null` in `console.log(x.substr(0));`.
+
+**Note:** You can even infer `x :: 'still OK'` in `check1` in that case. Thereby, you could even determine the type of the return value of `x.substr(0)` which is `'s'`. However, this would require further knowledge about the build-in method `substr`. I didn't cover such an approach in my previous post.
+
+**2. Example**
+
+``` ts
+// Inlining is only one level deep
+function fn(x: string | null) {
+    function check1() {
+        check2();
+    }
+    function check2() {
+        x = null;
+    }
+
+    if (x !== null) {
+        check1();
+        // Flow: No error
+        console.log(x.substr(0)); // crashes
+    }
+}
+```
+
+To come straight to the point, the constraint transition
+- of `check2` is `t2: c -> (x :: null)` and
+- of `check1` is `t1 = t2`
+
+Before the call of `check1` we have `x :: string`. Afterwards we have `t1(x :: string)`, which results in `x :: null`. Thus, my approach detects the error and flow doesn't.
+
+--- message_id: github:microsoft/TypeScript#9998/c236703818 | author: yahiko00 | timestamp: 2016-08-01T20:51:17.000Z ---
+Quite long to fully read and understand, but this seems very interesting. It makes me think of a kind of propositional logic solver like the Prolog language. Correct me if I'm wrong.
+Not sure it would be easy to implement such a thing, but, this could be an evolution target for the TypeScript's Type Inference and Control Flow analysis.
+
+--- message_id: github:microsoft/TypeScript#9998/c236763549 | author: yortus | timestamp: 2016-08-02T01:18:47.000Z ---
+@maiermic hmm yes interesting. I suppose two issues would be:
+
+a) performance. @RyanCavanaugh mentions a "full inlining solution [...] wouldn't be even remotely practical", but what about this deep constraint analysis?
+
+b) what about calls to third-party functions (e.g. calls into platform, frameworks, or node dependencies) where we have no function bodies to look into (only .d.ts declarations)?
+
+--- message_id: github:microsoft/TypeScript#9998/c236777325 | author: zpdDG4gta8XKpMCd | timestamp: 2016-08-02T02:38:44.000Z ---
+might be related https://github.com/Microsoft/TypeScript/issues/8545#issuecomment-218835533
+
+--- message_id: github:microsoft/TypeScript#9998/c237468045 | author: maiermic | timestamp: 2016-08-04T06:52:06.000Z ---
+@aleksey-bykov [#8545 (comment)](https://github.com/Microsoft/TypeScript/issues/8545#issuecomment-218835533) looks like a similar approach for manually annotating constraints, even though you only refer to a specific case (object initializers)
+
+--- message_id: github:microsoft/TypeScript#9998/c237472679 | author: maiermic | timestamp: 2016-08-04T07:17:43.000Z ---
+@yortus good questions
+
+> a) performance. @RyanCavanaugh mentions a "full inlining solution [...] wouldn't be even remotely practical", but what about this deep constraint analysis?
+
+@RyanCavanaugh May you please explain performace issues of a full inlining solution?
+
+Without thinking too much about it, I guess deep constraint analysis might be doable in linear or linearithmic time complexity. Gathered constraints are seralizable and can be cached so that you can speed up analysis time. Manuall constraint annotations can further improve analysis time.
+
+> b) what about calls to third-party functions (e.g. calls into platform, frameworks, or node dependencies) where we have no function bodies to look into (only .d.ts declarations)?
+
+If you don't know the code, you cann't do flow analysis. Without .d.ts declarations you couldn't even do any type analysis. You either include constraint annotaions in .d.ts files or you have to fall back to another approach. You might choose an optimistic approach if no constraint annotaions exist, since you can add constraint annotations to .d.ts if a function has a relevant side effect.

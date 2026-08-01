@@ -1,0 +1,370 @@
+--- message_id: github:microsoft/TypeScript#9998/c2094541944 | author: jordanbtucker | timestamp: 2024-05-05T01:41:22.000Z ---
+I just ran into a problem with this for the first time despite using TypeScript for years.
+
+Here's a simplified example to demonstrate. Essentially, my class has a property. That property can be changed by a method, but TypeScript doesn't think it can.
+
+```ts
+class Foo {
+  state: 'online' | 'offline' = 'online'
+
+  foo() {
+    if (this.state !== 'online') return
+    this.bar()
+    if (this.state === 'offline') return // This line gives an error because TypeScript thinks the value must be `'online'`.
+    console.log('still online')
+  }
+
+  bar() {
+    this.state = 'offline'
+  }
+}
+```
+
+https://www.typescriptlang.org/play/?ts=5.4.5#code/MYGwhgzhAEBiD29oG8BQ1oQC5iwUwC5oByeAOxAEsy9joAfE+AM2aproF4mLrbV00ZogAUAShSCMlZtBFYAFpQgA6bLjzQAhJ26leHCQCc8WAK5GyU6IuUqARmCPjrMubdXr80XXpZs+YmNTCzJoAHpw6AAVJRh2TQBzSgA3PBgwMLwjI3gjaHs8YDAzCE1ogE8ABzwAZWAjSiqsGyUyAGsYRU0UsBAzTQBbUpbC6AADfQTicZVrYHIIeBA8FRB4RJFibEoQEGhyabFBAF8BDEdnCTQMDA81HG8-VmnT1DOgA
+
+--- message_id: github:microsoft/TypeScript#9998/c2094548285 | author: dhlolo | timestamp: 2024-05-05T01:52:13.000Z ---
+> I just ran into a problem with this for the first time despite using TypeScript for years.
+> 
+> Here's a simplified example to demonstrate. Essentially, my class has a property. That property can be changed by a method, but TypeScript doesn't think it can.
+> 
+> ```ts
+> class Foo {
+>   state: 'online' | 'offline' = 'online'
+> 
+>   foo() {
+>     if (this.state !== 'online') return
+>     this.bar()
+>     if (this.state === 'offline') return // This line gives an error because TypeScript thinks the value must be `'online'`.
+>     console.log('still online')
+>   }
+> 
+>   bar() {
+>     this.state = 'offline'
+>   }
+> }
+> ```
+> 
+> https://www.typescriptlang.org/play/?ts=5.4.5#code/MYGwhgzhAEBiD29oG8BQ1oQC5iwUwC5oByeAOxAEsy9joAfE+AM2aproF4mLrbV00ZogAUAShSCMlZtBFYAFpQgA6bLjzQAhJ26leHCQCc8WAK5GyU6IuUqARmCPjrMubdXr80XXpZs+YgloE3NLa2ByCHgQPBUQeABzEWJsShAQaHJ2WjFBAF8BDEdnCTQMDA81HG8-VhziAtRCoA
+
+The error ocurs from L8 `if (this.state !== 'online') return`, after that line, type of this.state must be 'online'.
+
+--- message_id: github:microsoft/TypeScript#9998/c2094551807 | author: jordanbtucker | timestamp: 2024-05-05T02:03:00.000Z ---
+@dhlolo The error occurs on line 7.
+
+> This comparison appears to be unintentional because the types '"online"' and '"offline"' have no overlap.(2367)`
+
+Line 5 contains `if (this.state !== 'online') return`, not line 8.
+
+While TypeScript is correct that `this.state` must be `'online'` immediately after line 5, line 6 (`this.bar()`) changes that, so TypeScript *should not* be so confident that `this.state` is still `'online'` after line 6.
+
+Note that it would be a different story if `state` was a variable instead of a property, since `this.bar()` could not change it. However, it's a property of a class, which can be changed by methods in between checks.
+
+--- message_id: github:microsoft/TypeScript#9998/c2094565437 | author: dhlolo | timestamp: 2024-05-05T03:17:49.000Z ---
+> @dhlolo The error occurs on line 7.
+> 
+> > This comparison appears to be unintentional because the types '"online"' and '"offline"' have no overlap.(2367)`
+> 
+> Line 5 contains `if (this.state !== 'online') return`, not line 8.
+> 
+> While TypeScript is correct that `this.state` must be `'online'` immediately after line 5, line 6 (`this.bar()`) changes that, so TypeScript _should not_ be so confident that `this.state` is still `'online'` after line 6.
+> 
+> Note that it would be a different story of `state` was a variable instead of a property, since `this.bar()` could not change it. However, it's a property of a class, which can be changed by methods in between checks.
+
+It seems tsc will not detect effect of method ‘bar’ which is to change 'this.state'. It can only infer in some obvious shallow grammar. If you replace 'this.bar()' with `this.state = 'offline'`, the error disappear. By the way, you can use asserts to avoid the error:  https://www.typescriptlang.org/play/?ts=5.4.5#code/MYGwhgzhAEBiD29oG8BQ1oQC5iwUwC5oByeAOxAEsy9joAfE+AM2aproF4mLrbV00ZogAUAShSCMlZtBFYAFpQgA6bLjzQAhJ26leHCQCc8WAK5GyU6IuUqARmCPiA3NZlzbq9fmi69LGx8xBLQJuaW1sDkEPAgeCog8ADmIsTYlCAg0OTstGKCAL6Cjs5iRJAQeEZYMF7QyiiYOPhEpKx5dIWSGBheai2aAR3BbhjFxUA
+
+--- message_id: github:microsoft/TypeScript#9998/c2094567782 | author: jordanbtucker | timestamp: 2024-05-05T03:33:19.000Z ---
+@dhlolo The problem isn't that TypeScript doesn't detect that `bar()` changes `this.state`. I would never expect it to do that. The problem is that TypeScript assumes that `this.state` can't have been changed at all. This means that you are writing code with the false assumption that `this.state` must be `'online'` and potentially using it in places where `'offline'` would be invalid.
+
+```ts
+class Foo {
+  state: 'online' | 'offline' = 'online'
+
+  foo() {
+    if (this.state !== 'online') return
+    this.bar()
+    // @ts-ignore: TypeScript raises an error because it assumes `this.state` must be `'online'`.
+    if (this.state === 'offline') {
+      console.log('offline');
+    }
+
+    // qux only accepts `'online'` or `'not-online'`, but `this.state` could be `'offline'`.
+    // TypeScript doesn't raise an error because it assumes `this.state` must be `'online'`.
+    this.qux(this.state);
+  }
+
+  bar() {
+    this.state = 'offline'
+  }
+
+  qux(input: 'online' | 'not-online') {
+    if(input !== 'online' && input !== 'not-online') {
+      // This will throw because `input` is actually `'offline'`.
+      throw new Error(`Expected 'online' or 'not-online'. Got '${input}'`);
+    }
+  }
+}
+```
+
+--- message_id: github:microsoft/TypeScript#9998/c2094576921 | author: dhlolo | timestamp: 2024-05-05T04:24:56.000Z ---
+> @dhlolo The problem isn't that TypeScript doesn't detect that `bar()` changes `this.state`. I would never expect it to do that. The problem is that TypeScript assumes that `this.state` can't have been changed at all. This means that you are writing code with the false assumption that `this.state` must be `'online'` and potentially using it in places where `'offline'` would be invalid.
+> 
+> ```ts
+> class Foo {
+>   state: 'online' | 'offline' = 'online'
+> 
+>   foo() {
+>     if (this.state !== 'online') return
+>     this.bar()
+>     // @ts-ignore: TypeScript raises an error because it assumes `this.state` must be `'online'`.
+>     if (this.state === 'offline') {
+>       console.log('offline');
+>     }
+> 
+>     // qux only accepts `'online'` or `'not-online'`, but `this.state` could be `'offline'`.
+>     // TypeScript doesn't raise an error because it assumes `this.state` must be `'online'`.
+>     this.qux(this.state);
+>   }
+> 
+>   bar() {
+>     this.state = 'offline'
+>   }
+> 
+>   qux(input: 'online' | 'not-online') {
+>     if(input !== 'online' && input !== 'not-online') {
+>       // This will throw because `input` is actually `'offline'`.
+>       throw new Error(`Expected 'online' or 'not-online'. Got '${input}'`);
+>     }
+>   }
+> }
+> ```
+
+Honestly, you are right. It seems to be too optimistic in your case which class method may set class property. But other choices could be assuming that all method could change property(which seems to be too pessimistic), or analyse deeper(which may make things much more complicated).
+
+--- message_id: github:microsoft/TypeScript#9998/c2094880845 | author: jordanbtucker | timestamp: 2024-05-05T17:09:03.000Z ---
+@MartinJohns You seem to dislike this whole exchange. Care to chime in as to why?
+
+--- message_id: github:microsoft/TypeScript#9998/c2095332219 | author: MartinJohns | timestamp: 2024-05-06T07:12:50.000Z ---
+@jordanbtucker Because it's just a repetition of the comments before and the linked issues. Your case is literally the first example on this issue. To me it's spam. And by responding to your question I'm unfortunately doing the same, adding another comment that will make everyone subscribed get a notification, without any real content or change.
+
+--- message_id: github:microsoft/TypeScript#9998/c2095409660 | author: jordanbtucker | timestamp: 2024-05-06T08:05:32.000Z ---
+@MartinJohns I didn't see many, if any, examples in this discussion that specifically dealt with simple class properties and methods, so I thought I was adding to the conversation. Maybe I missed it, but it just seemed like it hadn't been discussed specifically.
+
+Is this isn't the right place to have discussions about code flow analysis, then maybe it should just be locked.
+
+--- message_id: github:microsoft/TypeScript#9998/c2096766082 | author: craigphicks | timestamp: 2024-05-06T19:35:15.000Z ---
+@jordanbtucker - I'm glad you brought up volatility in the context of class properties and methods, because ...
+
+It's not uncommon to see member functions named `XXXMutating` or `XXXNonMutating()` or similar, especially in a garbage collected language like JS.  That's because there may be multiple agents referencing the same object that depend upon that object not changing.  If an agent wants to mutate an object being referenced by other agents, then it should clone the object first.  In that scenario, it would be helpful to have member function typed as *"self mutatating"* or *"not self mutating"*, and have that enforced for the actions within the member functions.  Typing could help with always cloning when necessary, and never cloning when not necessary.
+
+If member functions could be so marked, and `bar` was marked as *"self mutating"* then it could be (with proper design) a simple O(1) operation to reset `this` to its widened state.  (Useful, even if it isn't the only reason for such marking.)
+
+--- message_id: github:microsoft/TypeScript#9998/c2099098760 | author: Arctomachine | timestamp: 2024-05-07T18:53:50.000Z ---
+I encountered this use case, I believe it belongs here.
+
+What happens: trying to make typeguard based on shape of children props. But type is not inferred correctly.
+Happens at 5.4.5, so it is not part of #57465 fix
+But same workaround can be applied (`x is type`)
+
+```ts
+type ChildItem = {id: number} | string
+
+type Item = {
+  children: ChildItem[] // can be objects or strings here
+}
+
+type NarrowedItem = {
+  children: {id: number}[] // only objects here
+}
+
+const allItems: Item[] = [] // initially accept with any children
+
+const filteredItems: NarrowedItem[] = allItems.filter(item => // and here only accept items
+  item.children.every(child => typeof child !== 'string') // if all its children are objects
+) // it should be correct in runtime, but typescript thinks it is not narrowed
+
+const filteredItemsWorkaround: NarrowedItem[] = allItems.filter((item): item is NarrowedItem => // same code, but with "item is NarrowedItem"
+  item.children.every(child => typeof child !== 'string')
+) // it works here
+```
+
+Error on line 13 (`filteredItems` declaration):
+```
+Type 'Item[]' is not assignable to type 'NarrowedItem[]'.
+  Type 'Item' is not assignable to type 'NarrowedItem'.
+    Types of property 'children' are incompatible.
+      Type 'ChildItem[]' is not assignable to type '{ id: number; }[]'.
+        Type 'ChildItem' is not assignable to type '{ id: number; }'.
+          Type 'string' is not assignable to type '{ id: number; }'.
+```
+
+Playground: https://www.typescriptlang.org/play/?#code/C4TwDgpgBAwgFgSwDYBMCSwIFsoF4oDeCKAXFAHYCuWARhAE4C+UAPlAM7D0LkDmAsACghoSFAzY8hIVCgBjRKnoRyZeMnSYsAbQC6UAPQH5AQ3JQ6UAPY0AVhDnB21+hy49ezuAwhDGQkXBoADkTenorAHcITUl8Ahl5RRRlVUJiMipaBkY9Q2MrciQQazsHJyhvZT8AwTlCzigTJCQJLHYyNrz8PKMoHgRgBGbiprk5CDBgKEjBuCbyEoUNVNr68kaAM2RMZVj2slDwqJiu-XwRtvYAOm2kXYAKQbiAPnyFlEqfayKSk3HJtNnu1EsDrsslCprhAAG4MEAPCGfXBvUQQKybJIaKAAQlw+AA5JxuHwCQBKd4ITEjfoVJGpJrKUr2RzsIQUvqDDhwKyUVAWaD1cLlfrmeiUchDLAQAA0Fko0zR7Dk3CmUGAiHIAGtnFyEM5yFZpuQwhFoig1g1pnddqctOwAOpWehasK88ikKBHM127DdJotK63HYMB5PLRksjA-rOb0nfZ4N59dgmaXyKwoWXy6azDVQABE0f1XtN8ba+dBWnByVS0Lh9ARSMT6qCGKx-LxhOJHnJ7MpOedOq+yiAA
+
+--- message_id: github:microsoft/TypeScript#9998/c2099566662 | author: craigphicks | timestamp: 2024-05-08T01:30:45.000Z ---
+@Arctomachine  - This works in 5.5 because of pull #57465.
+```
+declare const arr: (number|string)[];
+if (arr.every(x=> typeof x === "string")) {
+    arr; // string[]
+}
+```
+but not the negation
+```
+if (arr.every(x=> typeof x !== "string")) {
+    arr; // (string|number)[]
+}
+```
+Issue #15048 would cover that, and it's mentioned as a possible extension in #57465.
+
+--- message_id: github:microsoft/TypeScript#9998/c2243812870 | author: muglug | timestamp: 2024-07-22T21:04:36.000Z ---
+I work with Hack (also created at Facebook) which shares the same conventions as Flow, [invalidating all assertions](https://hakana.dev/#XQAAgAAsAQAAAAAAAAAxmwhIY_U8YQ1wDZqHqpnMicHOU4Vv-ts5zPRkxr4P6cRwBOK_Mw94j9_FNE9YP3qYv5Cm-LeFpdWPPzeUQoCHzQEvmV6TUF-Zu4zAL7ZTVAbUrl7czSpEEEEjNZj3lw3FsOakg_T0JgP_F8znKx6w8m4RtFTnMnR1wTRFw9gVRoxZHu_1w2p1LDwu57YLazTGUlf4s1mbbE5v91zsPsJUas7hiOm9UtfJ4e8TpGB8fPtbhRF4g0G2UAovz6wK7c26eYXSGyr5m861Cfo4UL0%3D) when calling impure functions.
+
+Hack & Flow's absolute approach is impractical for TypeScript, but you might want to introduce a config option for people with small projects to opt into stricter behaviour themselves.
+
+[I took the config approach](https://psalm.dev/docs/running_psalm/configuration/#rememberpropertyassignmentsaftercall) with Psalm (a SA tool for PHP). On a ~1MLOC legacy codebase that option was not enabled, but many smaller projects [have that option enabled](https://github.com/search?q=rememberPropertyAssignmentsAfterCall%3D%22true%22).
+
+--- message_id: github:microsoft/TypeScript#9998/c2477183202 | author: Rudxain | timestamp: 2024-11-14T18:54:47.000Z ---
+> Mitigating with `const` parameters
+
+There's a [TC39 proposal](https://github.com/Fishrock123/proposal-const-function-arguments), but it has been **Stage-0 for ~7 years**, and nobody seems to care :(
+
+There's also an [ESL rule](https://eslint.org/docs/latest/rules/no-param-reassign)
+
+--- message_id: github:microsoft/TypeScript#9998/c2486760248 | author: Mike-Bell | timestamp: 2024-11-19T21:10:39.000Z ---
+Here's a real world example (ask me how I know) where the promise case can bite you. The fix is simple if you're aware of this landmine, but it is easy to miss and get misled by TS trying to be "helpful".
+
+```TypeScript
+const MyComponent: FC = () => {
+   const canvasRef = useRef<HTMLCanvasElement>(null);
+   useEffect(() => {
+      void (async () => {
+         if (!canvasRef.current) {
+            return;
+         }
+
+         // this is correct - canvasRef.current is guaranteed to be non-null
+         canvasRef.current.getContext('2d')?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+
+         // any async func that can take a while
+         await new Promise(r => setTimeout(r, 5000));
+
+         // This might totally blow up - canvasRef.current can be null. But TS assures me it isn't.
+         canvasRef.current.getContext('2d')?.rect(0, 0, 10, 10);
+      })();
+   }, []);
+
+   return (
+      <canvas ref={canvasRef} />
+   );
+};
+```
+
+--- message_id: github:microsoft/TypeScript#9998/c2615127976 | author: nathan-chappell | timestamp: 2025-01-27T08:35:59.000Z ---
+Just got bit by this, and now I feel like I need to check my whole codebase.
+Not unrelated is the fact that there is some undocumented `@modifies` [jsdoc annotation](https://github.com/jsdoc/jsdoc/issues/1709), maybe a gradual way to bring this into typescript would be to allow "opt-in pessimism" with usage of this tag?  Then linters or options could be set to look for this tag (or lack of it).
+
+Yet another simple example:
+
+```javascript
+// @ts-check
+
+/** @type {{foo:'bar'}|null} */
+let x = null;
+
+// Here we could use /** @modifies {x} */ to let the compiler know that this function is *not* "pure"
+const f = async () => {
+    x = null;
+};
+
+async () => {
+    x = {foo: 'bar'}
+    await f();
+    console.log(x.foo) // bug report to follow
+};
+
+```
+
+--- message_id: github:microsoft/TypeScript#9998/c2688347822 | author: Danielku15 | timestamp: 2025-02-27T15:42:27.000Z ---
+Taking my problem from #61313 to here. I wonder if it could be feasable to support type **widening** in a scenario like this: 
+
+```ts
+function onError(handler: (e: Error) => void) {
+    handler(new Error());
+}
+
+let error:Error|null = null;
+
+onError(e => {
+    error = e;
+});
+
+if(error !== null) {
+    throw error;
+}
+```
+
+In after the `onError` call `error` is considered `null` instead of `Error|null` despite "potentially" being assigned. If I'd need to write a technical description for it I'd say:
+
+> When reaching a `ts.SyntaxKind.ArrowFunction` as child-node inside the `arguments` of a `ts.SyntaxKind.CallExpression`, the body of the arrow function should be treated in the same way like the body of a `ts.SyntaxKind.IfStatement` for type widening (not sure if narrowing need special treatment).
+
+Hence it could behave the same like:
+
+```ts
+function onError(handler: (e: Error) => void) {
+    handler(new Error());
+}
+
+let error:Error|null = null;
+
+if(Math.random() > 0.5) {
+    error = new Error();
+}
+
+if(error !== null) {
+    throw error;
+}
+```
+
+I do not expect any deep-analysis of other expressions (e.g. to crawl local functions or identifiers which might be holding functions).
+
+Thinking of typical usecases of event listeners (DOM events, RX.js, Angular signals etc.).
+
+--- message_id: github:microsoft/TypeScript#9998/c3096272043 | author: modjke | timestamp: 2025-07-21T11:22:46.000Z ---
+Maybe mentioned somewhere but in case of hardcoded values `as type` can be solution to please the compiler
+```typescript
+const values: string[] | null = null 
+
+console.log(values ? values.join(',') : 'nothing') // error at values.join 
+```
+Fix
+```typescript
+const values: string[] | null = null as string[] | null
+// also redundant type declaration can be dropped 
+// const values = null as string[] | null
+
+console.log(values ? values.join(',') : 'nothing') // all good
+```
+
+--- message_id: github:microsoft/TypeScript#9998/c4841586654 | author: Hideman42 | timestamp: 2026-06-30T08:53:26.000Z ---
+Hi, I got a simple issue like
+```ts
+let bool = false;
+arr.forEach(item => { /* ... */ bool ||= condition; });
+if (bool) // Unnecessary conditional, value is always falsy. typescript(no-unnecessary-condition)
+```
+I found several issues that are all closed as duplicate of this pit-fall issue. I think I understand that the topic seem a lot larger and complex that I can imagine.
+Today I have to disable some controls, add extra hacks and all these makes the code harder to understand and loose the benefits of using TS in the first hand.
+I kind of wondering if there is any plan to improve the developer experience on this subject? Is it something post TS7.0 or is something we wont be able to see for a while?
+
+--- message_id: github:microsoft/TypeScript#9998/c4842243690 | author: laug | timestamp: 2026-06-30T10:12:21.000Z ---
+@Hideman42 You can easily solve this by using `for...of` instead of `.forEach`:
+
+```js
+let bool = false;
+for (const item of arr) { /* ... */ bool ||= condition; }
+if (bool)
+```
+
+--- message_id: github:microsoft/TypeScript#9998/c4843549562 | author: Mike-Bell | timestamp: 2026-06-30T12:39:11.000Z ---
+> [@Hideman42](https://github.com/Hideman42) You can easily solve this by using `for...of` instead of `.forEach`:
+
+The way I usually solve this particular situation is just doing `let bool = false as boolean`. The `as boolean` seems to tell TS not to do its normal (incorrect) narrowing.

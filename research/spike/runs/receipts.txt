@@ -1,0 +1,66 @@
+===== luna-A-r1 =====
+workdir: /tmp/spike-run
+model: gpt-5.6-luna
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+session id: 019fbb37-c364-7731-823a-ba7bb732a21b
+rc=0 elapsed=59s
+tokens: 20,667
+
+===== luna-A-r2 =====
+workdir: /tmp/spike-run
+model: gpt-5.6-luna
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+session id: 019fbb37-c9ad-7622-a222-1279b4939b5e
+rc=0 elapsed=155s
+tokens: 26,232
+
+===== terra-A =====
+workdir: /tmp/spike-run
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+session id: 019fbb37-d882-76e2-ab7d-bdd7a492dd44
+rc=0 elapsed=38s
+tokens: 19,908
+
+===== luna-B-r1 =====
+workdir: /tmp/spike-run
+model: gpt-5.6-luna
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+session id: 019fbb37-d188-7e62-ac67-966c448be0a5
+rc=0 elapsed=106s
+tokens: 20,322
+
+===== terra-B =====
+workdir: /tmp/spike-run
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+session id: 019fbb37-e0bd-7ca1-ba3f-25f6190cdd8c
+rc=0 elapsed=31s
+tokens: 16,263
+
+===== luna-B-ctx =====
+workdir: /tmp/spike-run
+model: gpt-5.6-luna
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+session id: 019fbb39-288b-7f91-8536-3e00d0412678
+rc=0 elapsed=112s
+tokens: 21,003
+
