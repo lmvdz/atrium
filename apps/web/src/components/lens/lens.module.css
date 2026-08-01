@@ -299,10 +299,12 @@
   color: var(--tx1);
 }
 
-.happenedWho {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
-  font-size: 10.5px;
-  color: var(--tx2);
+/* The history line's words, in the system treatment. There is no `.happenedWho`
+   any more: a name column beside page-authored words is an attribution column,
+   and the actor of the event lives inside the sentence instead. */
+.happenedVoice {
+  font-size: 11.5px;
+  color: var(--tx1);
 }
 
 .happenedAt {
@@ -430,10 +432,15 @@
 
 /* SYSTEM voice: mono, muted, no quotation marks, no first person */
 .corrWas,
+.corrNow,
 .corrFact {
   font-family: 'IBM Plex Mono', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
+}
+
+.corrNow {
+  color: var(--tx1);
 }
 
 .corrFact {

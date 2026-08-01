@@ -130,7 +130,12 @@ function RoomRow({
       <span aria-hidden="true" className={styles.hash}>
         #
       </span>
-      <span className={styles.rrowName}>{room.name}</span>
+      {/* The button's own accessible name carries the room and its badge in
+          full — see `name` above — so a clipped chip has a route that does not
+          depend on hovering. */}
+      <span className={styles.rrowName} data-truncates="the button's accessible name">
+        {room.name}
+      </span>
       {room.owed > 0 ? (
         <span className={styles.owedPill} title={owedLabel ?? undefined}>
           <span aria-hidden="true">◆</span>
@@ -163,7 +168,12 @@ function HumanRow({ human }: { readonly human: HumanSummary }) {
         className={`${styles.pres} ${PRESENCE_CLASS[human.presence]}`}
         data-presence={human.presence}
       />
-      <span className={styles.hrowName}>{human.name}</span>
+      {/* A person's name, clipped in the roster. The route is the row's own
+          title, which a screen reader announces and which is the only other
+          place this page states the name in full. */}
+      <span className={styles.hrowName} data-truncates="the row's title" title={human.name}>
+        {human.name}
+      </span>
       <span className="atr-meta">{meta}</span>
     </div>
   );

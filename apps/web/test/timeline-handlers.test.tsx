@@ -13,7 +13,7 @@ import { cleanup, fireEvent, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
-import { Timeline } from '../src/components';
+import { CrossRoomJump, ReceiptView, Timeline } from '../src/components';
 import { renderWith } from './harness';
 
 afterEach(cleanup);
@@ -105,5 +105,84 @@ describe('the feed forwards what its children accept', () => {
     );
     expect(screen.getAllByRole('button', { name: 'pin it' }).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'reply' })).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 6, D3 — EVERY HANDLER TAKES THE RESOLVED ID.
+ *
+ * Round 5 fixed this at `TimelineRow` — the row action bus and the row tag — and
+ * nowhere else. The receipt's provenance row printed `entry.excerpt`, took its
+ * room from `entry.jump.room` and acted on `entry.jump.messageId`: three facts
+ * about one row from three sources, shipped rendering lars's words under
+ * `data-quoted=msg:mA@identity-service` and clicking through to priya's message.
+ * `CorrectionRow` was the same shape with an `?? ''` fallback that dispatched the
+ * empty string, and `CrossRoomJump` revealed a bare caller-supplied id.
+ *
+ * The enumeration behind this block: every handler in the library that receives
+ * a MESSAGE ID. There are five — the row action bus, the row tag, the receipt's
+ * provenance jump, the receipt's correction link, and the trace's reveal. The
+ * first two are asserted above; the other three are here.
+ * ------------------------------------------------------------------------- */
+describe('a handler is told what it acted on, by the register', () => {
+  /* CATCHES: the provenance row acting on a second source. There is no `jump`
+     field any more — what it prints, what it labels itself with and what it acts
+     on all come from the record the excerpt cites. */
+  it('the receipt’s provenance row jumps to the message it printed', () => {
+    const jumped: string[] = [];
+    const { container } = render(
+      <ReceiptView onJump={(id) => jumped.push(id)} receipt={f.RECEIPT} />,
+    );
+    const rows = [...container.querySelectorAll('[data-jumps-to]')];
+    expect(rows.length, 'the receipt renders no outbound links').toBeGreaterThan(0);
+    for (const row of rows) {
+      const target = row.getAttribute('data-jumps-to');
+      /* The row's own provenance token cites the same message it will act on. */
+      const quoted = row.querySelector('[data-quoted]')?.getAttribute('data-quoted');
+      if (quoted !== null && quoted !== undefined) {
+        expect(quoted.startsWith(`msg:${target}`), `${quoted} does not name ${target}`).toBe(true);
+      }
+      fireEvent.click(row);
+    }
+    expect(jumped).toEqual(rows.map((row) => row.getAttribute('data-jumps-to')));
+    expect(jumped.filter((id) => id === '')).toEqual([]);
+  });
+
+  /* CATCHES: the `?? ''` fallback coming back. A handler dispatching the empty
+     string is a handler that was never told what it acted on. */
+  it('the receipt’s correction link never dispatches an empty id', () => {
+    const jumped: string[] = [];
+    const { container } = render(
+      <ReceiptView onJump={(id) => jumped.push(id)} receipt={f.RECEIPT} />,
+    );
+    const links = [...container.querySelectorAll('[data-jumps-to]')].filter((el) =>
+      (el.textContent ?? '').includes('→'),
+    );
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) fireEvent.click(link);
+    expect(
+      jumped.every((id) => id.length > 0),
+      `an empty id was dispatched: ${jumped}`,
+    ).toBe(true);
+  });
+
+  /* CATCHES: the trace bar revealing a caller-supplied id. */
+  it('the cross-room trace reveals the message the register resolved', () => {
+    const revealed: string[] = [];
+    const { container } = render(
+      <CrossRoomJump jump={f.JUMP} onReveal={(id) => revealed.push(id)} />,
+    );
+    const button = container.querySelector('[data-jumps-to]');
+    expect(button?.getAttribute('data-jumps-to')).toBe('m10');
+    fireEvent.click(button as Element);
+    expect(revealed).toEqual(['m10']);
+  });
+
+  /* CATCHES: any of the three resolving against a register that does not hold
+     the message. A reference nothing vouched for does not become a click. */
+  it('a trace whose target this page has never seen does not render', () => {
+    expect(() => renderWith([f.MESSAGES.m2 as never], <CrossRoomJump jump={f.JUMP} />)).toThrow(
+      /is not a message on this page|minted from a different record/,
+    );
   });
 });

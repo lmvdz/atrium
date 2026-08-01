@@ -433,9 +433,9 @@ const LEDGER = [
   {
     name: 'the quotation carries an actor again and a spread can overwrite it',
     file: 'src/components/model/quotation.ts',
-    find: '  readonly messageId: MessageId;\n  readonly [quotationBrand]: ',
+    find: '  readonly mintedFrom: string;\n  readonly [citationBrand]: ',
     replace:
-      '  readonly messageId: MessageId;\n  readonly actor?: string;\n  readonly [quotationBrand]: ',
+      '  readonly mintedFrom: string;\n  readonly actor?: string;\n  readonly [citationBrand]: ',
     typecheck: true,
     test: 'tsc --noEmit',
   },
@@ -458,7 +458,7 @@ const LEDGER = [
   {
     name: 'parseQuotation hands the incoming object through instead of the citation',
     file: 'src/components/model/quotation.ts',
-    find: '  return { messageId: (value as { messageId: MessageId }).messageId } as Quotation;',
+    find: '  const record = ledger.recordFor(id) as MessageRecord;\n  return { messageId: id, mintedFrom: recordFingerprint(record) } as unknown as Quotation;',
     replace: '  return value as Quotation;',
     test: 'test/attribution.test.tsx',
   },
@@ -672,7 +672,7 @@ const LEDGER = [
   {
     name: 'the text sweep goes back to skipping ::before, ::after and ::placeholder',
     file: 'e2e/audit.ts',
-    find: "    for (const pseudo of ['::before', '::after']) {",
+    find: "    for (const which of ['::before', '::after']) {",
     replace: '    for (const pseudo of []) {',
     test: 'test/token-contrast.test.ts',
   },
@@ -697,9 +697,12 @@ const LEDGER = [
    * before it was pushed; each is reintroduced here by name.
    * ---------------------------------------------------------------------- */
   {
+    /* Round 6 moved this check off the row and onto the citation, so it holds at
+       all five resolution boundaries instead of at one. The mutation moved with
+       it: break `resolveCitation` and every boundary stops checking. */
     name: 'a row can be rendered against a different register than it was minted from',
-    file: 'src/components/timeline/TimelineRow.tsx',
-    find: '  if (entry.mintedFrom !== resolved) {',
+    file: 'src/components/model/quotation.ts',
+    find: '  if (citation.mintedFrom !== here) {',
     replace: '  if (false) {',
     test: 'test/attribution.test.tsx',
   },
@@ -718,10 +721,10 @@ const LEDGER = [
     test: 'test/quotation.test.tsx',
   },
   {
-    name: 'the receipt’s history line prints an unchecked statement beside a name',
+    name: 'the receipt’s history line prints an unchecked statement',
     file: 'src/components/lens/ReceiptView.tsx',
-    find: "                {statementText(line.statement, 'ReceiptView history line')}",
-    replace: '                {line.statement.text}',
+    find: '<SystemVoice className={styles.happenedVoice} inline statement={line.statement} />',
+    replace: '<span>{line.statement.text}</span>',
     test: 'test/record-integrity.test.tsx',
   },
   {
@@ -810,6 +813,253 @@ const LEDGER = [
     replace: "  statementText(statement, 'SystemVoice');",
     test: 'test/quotation.test.tsx',
   },
+
+  /* --- round 6 -------------------------------------------------------------
+   * The round-5 gauntlet's findings. Its closing sentence is the brief: "every
+   * lesson it learned was applied to that row and to no more than one neighbour
+   * of each kind." So the entries below are grouped by DEFECT CLASS, and each
+   * class has an entry per call site rather than an entry for the instance the
+   * receipt happened to name.
+   * ---------------------------------------------------------------------- */
+
+  /* D4 — the register checksum, at all five boundaries that resolve a citation.
+     Round 5 put it on `AuthoredMessageEntry`, which is one of them. Each entry
+     below breaks the check and asserts a DIFFERENT boundary notices. */
+  {
+    name: 'the checksum leaves `room` out, and two rooms hash the same',
+    file: 'src/components/model/quotation.ts',
+    find: ", record.room ?? '∅'",
+    replace: '',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a citation stops carrying the register it was minted from',
+    file: 'src/components/model/quotation.ts',
+    find: '  return { messageId: message.id, mintedFrom: recordFingerprint(message) } as unknown as Quotation;',
+    replace: "  return { messageId: message.id, mintedFrom: '' } as unknown as Quotation;",
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'nesting a second record register silently shadows the first',
+    file: 'src/components/model/ledger.tsx',
+    find: '  if (outer !== null && outer !== ledger) {',
+    replace: '  if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+
+  /* D3 — every handler takes the RESOLVED id. Three call sites, three entries. */
+  {
+    name: 'the receipt’s provenance row acts on a second source instead of the excerpt',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: '      onClick={onJump === undefined ? undefined : () => onJump(excerpt.messageId)}',
+    replace: "        onClick={onJump === undefined ? undefined : () => onJump('')}",
+    test: 'test/timeline-handlers.test.tsx',
+  },
+  {
+    name: 'the correction link dispatches an empty id again',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: '        onClick={onJump === undefined ? undefined : () => onJump(record.id)}',
+    replace: "        onClick={onJump === undefined ? undefined : () => onJump('')}",
+    test: 'test/timeline-handlers.test.tsx',
+  },
+  {
+    name: 'the cross-room trace reveals a caller-supplied id',
+    file: 'src/components/attention/CrossRoomJump.tsx',
+    find: "  const target = useCitedRecord(jump.targetMessage, 'CrossRoomJump target');",
+    replace: '  const target = jump.targetMessage as unknown as { id: string };',
+    test: 'test/timeline-handlers.test.tsx',
+  },
+
+  /* D15 — the chosen arm derives its id and its time, like the authored one. */
+  {
+    name: 'the chosen row prints the caller’s id and time again',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: '      data-message-id={record.id}\n      data-origin={record.origin}',
+    replace: '      data-message-id={entry.id}\n      data-origin={entry.origin}',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the chosen row stops resolving the message it is about',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: "  const record = useCitedRecord(entry.citation, 'TimelineRow chosen');",
+    replace:
+      '  const record = entry as unknown as { id: string; at: string; origin: string; room: null };',
+    test: 'test/attribution.test.tsx',
+  },
+
+  /* D5 — the render boundary for the OTHER page-authored string type. */
+  {
+    name: 'the open attention card prints an unchecked rationale',
+    file: 'src/components/attention/AttentionCard.tsx',
+    find: "{rationaleText(item.rationale, 'AttentionCard')}",
+    replace: '{item.rationale}',
+    test: 'test/attention.test.tsx',
+  },
+  {
+    name: 'the compressed row prints an unchecked rationale',
+    file: 'src/components/attention/AttentionCompact.tsx',
+    find: "  const why = rationaleText(item.rationale, 'AttentionCompact');",
+    replace: '  const why = item.rationale as string;',
+    test: 'test/attention.test.tsx',
+  },
+  {
+    name: 'rationaleText stops applying the check its constructor applies',
+    file: 'src/components/model/rationale.ts',
+    find: '  if (!isRationale(painted)) {',
+    replace: '  if (false) {',
+    test: 'test/attention.test.tsx',
+  },
+
+  /* D6 — the structural backstop. There is no field a renderer can put a name
+     in, on either of the two rows that had one. */
+  {
+    name: 'a receipt history line gets an actor field beside the words again',
+    file: 'src/components/model/records.ts',
+    find: 'export interface HappenedLine {\n  readonly id: string;\n  readonly kind: HappenedKind;\n',
+    replace:
+      'export interface HappenedLine {\n  readonly id: string;\n  readonly who: string;\n  readonly kind: HappenedKind;\n',
+    typecheck: true,
+    test: 'tsc --noEmit',
+  },
+  {
+    name: 'a correction gets an actor field beside the words again',
+    file: 'src/components/model/records.ts',
+    find: 'export interface CorrectionEntry {\n  readonly id: string;\n  readonly heading: string;\n',
+    replace:
+      'export interface CorrectionEntry {\n  readonly id: string;\n  readonly who: string;\n  readonly heading: string;\n',
+    typecheck: true,
+    test: 'tsc --noEmit',
+  },
+
+  /* D10 — the denylist sees the spelling the platform produces. */
+  {
+    name: 'a slot’s tag denylist goes back to being case-sensitive',
+    file: 'src/components/model/slot.ts',
+    find: 'ATTRIBUTED_TAGS.has(node.type.toLowerCase())',
+    replace: 'ATTRIBUTED_TAGS.has(node.type)',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a slot’s prop denylist goes back to being case-sensitive',
+    file: 'src/components/model/slot.ts',
+    find: '    if (ATTRIBUTED_PROPS_FOLDED.has(key.toLowerCase())) {',
+    replace: '    if (ATTRIBUTED_PROPS.includes(key)) {',
+    test: 'test/attribution.test.tsx',
+  },
+
+  /* D11 — the composition latch has every exit wired. */
+  {
+    name: 'the composition flag goes back to clearing only on compositionend',
+    file: 'src/components/frame/Composer.tsx',
+    find: '          onBlur={() => setComposing(false)}\n',
+    replace: '',
+    test: 'test/composer.test.tsx',
+  },
+  {
+    name: 'a change event can no longer end a stuck composition',
+    file: 'src/components/frame/Composer.tsx',
+    find: '            if (native.isComposing === false) setComposing(false);',
+    replace: '            void native;',
+    test: 'test/composer.test.tsx',
+  },
+
+  /* D12 — an id minted from a caller-supplied value is not unique. */
+  {
+    name: 'the hold control mints its aria ids from the caller’s action id again',
+    file: 'src/components/primitives/HoldToAct.tsx',
+    find: '  const meterId = `${uid}-hold-progress`;\n  const describeId = `${uid}-hold-describe`;',
+    replace:
+      '  const meterId = `${actionId}-hold-progress`;\n  const describeId = `${actionId}-hold-describe`;',
+    test: 'test/hold-to-act.test.tsx',
+  },
+
+  /* D2 — the instrument, before the thing it measures. */
+  {
+    name: 'the guard enumeration goes back to a regex that cannot cross a paren',
+    file: 'test/token-contrast.test.ts',
+    find: '    const guards = guardsIn(auditProgram()).filter((guard) => /alpha|opacity/i.test(guard));',
+    replace:
+      "    const guards = [...AUDIT_SOURCE.matchAll(/if\\s*\\([^)]*\\)\\s*continue/g)]\n      .map((match) => match[0].replace(/\\s+/g, ' '))\n      .filter((guard) => /alpha|opacity/i.test(guard));",
+    test: 'test/harness-integrity.test.ts',
+  },
+  {
+    name: 'the audit harness is written to skip what its rule covers, behind a call',
+    file: 'e2e/audit.ts',
+    find: '    const text = ownText(el);',
+    replace: '    if (effectiveOpacity(el) < 0.999) continue;\n    const text = ownText(el);',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the ring guard check goes back to a line scan',
+    file: 'test/token-contrast.test.ts',
+    find: '    const guards = returnsIn(measure).filter((guard) =>\n      /outlineStyle|outlineWidth/.test(guard.condition),\n    );',
+    replace:
+      "    const guards = measure\n      .split('\\n')\n      .map((line) => ({ condition: line.trim(), returns: line.trim() }))\n      .filter((line) => /outlineStyle|outlineWidth/.test(line.condition));",
+    test: 'test/harness-integrity.test.ts',
+  },
+
+  /* D8 / D9 / D14 — the browser-side harness. The check that these are wired is
+     a source assertion, because the evidence itself is a rendered pixel and this
+     ledger states its scope rather than pretending otherwise (see the header). */
+  {
+    name: 'the overflow sweep goes back to exempting anything under a clipping ancestor',
+    file: 'e2e/audit.ts',
+    find: '        return node.getBoundingClientRect().right <= limit + 0.5;',
+    replace: '        return true;',
+    test: 'test/harness-integrity.test.ts',
+  },
+  {
+    name: 'the hidden-overflow sweep goes back to two hard-coded frame selectors',
+    file: 'e2e/audit.ts',
+    find: "  for (const el of document.querySelectorAll('body *')) {\n    const style = getComputedStyle(el);\n    if (style.display === 'none' || style.visibility === 'hidden') continue;\n    if (style.overflowX === 'visible') continue;",
+    replace:
+      "  for (const el of document.querySelectorAll('[data-gallery-frame], [data-frame]')) {\n    const style = getComputedStyle(el);\n    if (style.display === 'none' || style.visibility === 'hidden') continue;",
+    test: 'test/harness-integrity.test.ts',
+  },
+  {
+    name: 'the pseudo sweep goes back to one number with no denominator',
+    file: 'e2e/gallery.spec.ts',
+    find: '          ).toBe(audit.placeholdersInDom);',
+    replace: '          ).toBeGreaterThanOrEqual(0);',
+    test: 'test/harness-integrity.test.ts',
+  },
+  {
+    name: 'the ring sweep’s skip assertion goes back to a tautology',
+    file: 'e2e/gallery.spec.ts',
+    find: '        [...skipped].filter((what) => what !== DEV_OVERLAY),',
+    replace: '        [...skipped],',
+    test: 'test/harness-integrity.test.ts',
+  },
+
+  /* D7 / D13 — the frame forwards every handler, and a clip names its route. */
+  {
+    name: 'the frame drops the rail’s room handler again',
+    file: 'app/gallery/RoomFrame.tsx',
+    find: '          onSelectRoom={on.onSelectRoom}\n',
+    replace: '',
+    test: 'test/frame-handlers.test.tsx',
+  },
+  {
+    name: 'the frame drops the lens’s objective and receipt handlers again',
+    file: 'app/gallery/RoomFrame.tsx',
+    find: '          onOpenReceipt={on.onOpenReceipt}\n          onToggleObjective={on.onToggleObjective}\n',
+    replace: '',
+    test: 'test/frame-handlers.test.tsx',
+  },
+  {
+    name: 'the trailer’s lead goes back to a sentence nothing can act on',
+    file: 'src/components/attention/Trailer.tsx',
+    find: '        <button\n          className={styles.trailerLead}',
+    replace: '        <span\n          className={styles.trailerLead}',
+    test: 'test/frame-handlers.test.tsx',
+  },
+  {
+    name: 'the compressed reason goes back to a clip with no route out',
+    file: 'src/components/attention/AttentionCompact.tsx',
+    find: '<span className={styles.acompWhyText} data-truncates="opens the full card">',
+    replace: '<span className={styles.acompWhyText}>',
+    test: 'test/truncation.test.tsx',
+  },
 ];
 
 if (process.argv.includes('--list')) {
@@ -817,26 +1067,79 @@ if (process.argv.includes('--list')) {
   process.exit(0);
 }
 
+/** Run a catcher. Returns true when it FAILED — which is what "caught" means. */
+function red(entry) {
+  const argv =
+    entry.typecheck === true ? ['exec', 'tsc', '--noEmit'] : ['exec', 'vitest', 'run', entry.test];
+  try {
+    execFileSync('pnpm', argv, { cwd: WEB, stdio: 'ignore' });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * THE BASELINE. WITHOUT IT THIS SCRIPT MEASURES NOTHING.
+ *
+ * Round 6, D1. This script decided "caught" purely from whether `execFileSync`
+ * threw, and it ran no baseline — so an entry whose catcher was ALREADY RED on
+ * the unmutated tree was credited whatever the mutation did. That was not
+ * hypothetical: `pnpm exec vitest run test/quotation.test.tsx` was exit 1 on a
+ * clean clone (a render throw escaping to React 19's global error handler), and
+ * the two entries naming that file — "system voice stops being checked at the
+ * render boundary" and "system voice is validated on the value and rendered from
+ * it again" — were counted among round 5's reported 101/101 without ever having
+ * been tested. A ledger that converts a red gate into evidence of coverage is
+ * worse than no ledger, because it is a number people quote.
+ *
+ * Every distinct catcher is now run ONCE, unmutated, before anything is edited.
+ * A red one disqualifies every entry that names it, loudly, as `UNCHECKED` — not
+ * as caught, and not silently skipped. The result is cached because 100+ entries
+ * name a handful of files and re-running each suite per entry would triple the
+ * runtime for no information.
+ * ------------------------------------------------------------------------- */
+const catchers = [...new Set(LEDGER.map((entry) => entry.test))];
+const baseline = new Map();
+console.info(`baseline: ${catchers.length} distinct catchers, unmutated\n`);
+for (const test of catchers) {
+  const entry = LEDGER.find((candidate) => candidate.test === test);
+  const isRed = red(entry);
+  baseline.set(test, isRed);
+  console.info(`${isRed ? 'RED     ' : 'green   '} ${test}`);
+}
+console.info('');
+
 let caught = 0;
 const escaped = [];
+const unchecked = [];
 
 for (const entry of LEDGER) {
+  if (baseline.get(entry.test) === true) {
+    unchecked.push(`${entry.name} — ${entry.test} is already failing unmutated`);
+    console.info(`UNCHECKED ${entry.name}`);
+    continue;
+  }
   const path = resolve(WEB, entry.file);
   const original = readFileSync(path, 'utf8');
   if (!original.includes(entry.find)) {
     escaped.push(`${entry.name} — the ledger's anchor is stale in ${entry.file}`);
+    console.info(`STALE    ${entry.name}`);
     continue;
   }
-  writeFileSync(path, original.replace(entry.find, entry.replace));
+  const mutated = original.replace(entry.find, entry.replace);
+  /* A `find`/`replace` pair that changes nothing is a mutation that was never
+     applied, and an unapplied mutation the catcher "survives" reports exactly
+     like a defect the catcher misses. */
+  if (mutated === original) {
+    escaped.push(`${entry.name} — the ledger's replacement is identical to the original`);
+    console.info(`INERT    ${entry.name}`);
+    continue;
+  }
+  writeFileSync(path, mutated);
   let failed = false;
   try {
-    const argv =
-      entry.typecheck === true
-        ? ['exec', 'tsc', '--noEmit']
-        : ['exec', 'vitest', 'run', entry.test];
-    execFileSync('pnpm', argv, { cwd: WEB, stdio: 'ignore' });
-  } catch {
-    failed = true;
+    failed = red(entry);
   } finally {
     writeFileSync(path, original);
   }
@@ -849,9 +1152,16 @@ for (const entry of LEDGER) {
   }
 }
 
-console.info(`\n${caught}/${LEDGER.length} mutations caught`);
+const attempted = LEDGER.length - unchecked.length;
+console.info(`\n${caught}/${attempted} mutations caught (${LEDGER.length} in the ledger)`);
+if (unchecked.length > 0) {
+  console.error(
+    `\nunchecked — the catcher is red before the mutation, so the entry proves nothing:`,
+  );
+  for (const line of unchecked) console.error(`  ${line}`);
+}
 if (escaped.length > 0) {
   console.error('\nnot caught:');
   for (const line of escaped) console.error(`  ${line}`);
-  process.exit(1);
 }
+if (escaped.length > 0 || unchecked.length > 0) process.exit(1);

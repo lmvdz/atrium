@@ -11,12 +11,20 @@ import { cleanup, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
-import { Composer, Quoted, ReceiptView, RoomHead, TimelineRow } from '../src/components';
+import {
+  AttributionLedger,
+  Composer,
+  Quoted,
+  ReceiptView,
+  RoomHead,
+  TimelineRow,
+} from '../src/components';
 import type { MessageEntry, MessageRecord, Quotation } from '../src/components/model';
 import {
   bodyText,
   chosenAct,
   chosenAnswer,
+  citationFrom,
   isQuotation,
   isRationale,
   isSystemStatement,
@@ -81,11 +89,36 @@ const RECORDS = [priya, lars, chosen];
  * ------------------------------------------------------------------------- */
 describe('a quotation cites a message; the attribution is looked up from it', () => {
   /* CATCHES: putting the actor, the words or the time back ON the quotation.
-     A citation with one field has nothing for a spread to overwrite. */
-  it('a quotation is a message id and nothing else', () => {
+     A citation carries no fact a reader sees, which is the property under test —
+     `mintedFrom` is a checksum of the record, never printed and never read for
+     its value, and asserting the EXACT key set is what stops a displayable field
+     being added beside it. */
+  it('a quotation carries a message id, a checksum, and nothing a reader sees', () => {
     const quotation = quotationFrom(priya) as Quotation;
     expect(quotation.messageId).toBe('m10');
-    expect(Object.keys(quotation)).toEqual(['messageId']);
+    expect(Object.keys(quotation).sort()).toEqual(['messageId', 'mintedFrom']);
+    /* The checksum is not a copy of any single visible fact: it is not the
+       actor, not the words, not the time, and it never reaches the DOM. */
+    for (const visible of [priya.actor, priya.text, priya.at]) {
+      expect(quotation.mintedFrom).not.toBe(visible);
+    }
+  });
+
+  /* CATCHES: the checksum omitting a field a reader can see. Round 5's version
+     hashed id, origin, at, actor and text — and NOT `room`, which is read at the
+     render boundary and printed into `data-quoted` as `msg:m10@identity-service`.
+     Two records differing only in room had identical fingerprints, so the one
+     check that says "these two registers are the same register" could not see a
+     difference the DOM was publishing. */
+  it('the checksum covers every field the render boundary can print, room included', () => {
+    const { room: _dropped, ...withoutRoom } = priya;
+    const here: MessageRecord = withoutRoom;
+    const elsewhere: MessageRecord = { ...withoutRoom, room: 'identity-service' };
+    expect(recordFingerprint(here)).not.toBe(recordFingerprint(elsewhere));
+    const row = messageEntry(elsewhere, { state: lars_state() });
+    expect(() => renderWith([here], <TimelineRow entry={row} />)).toThrow(
+      /minted from a different record/,
+    );
   });
 
   /* CATCHES: an `actor` field coming back onto `Quotation`, in any form.
@@ -129,7 +162,11 @@ describe('a quotation cites a message; the attribution is looked up from it', ()
     const real = quotationFrom(lars) as Quotation;
     const wire = JSON.parse(JSON.stringify({ ...real, actor: 'priya', text: 'invented' }));
     const parsed = parseQuotation(wire, ledger);
-    expect(Object.keys(parsed)).toEqual(['messageId']);
+    expect(Object.keys(parsed).sort()).toEqual(['messageId', 'mintedFrom']);
+    /* The checksum is RE-DERIVED from this ledger rather than read off the wire:
+       a fingerprint that arrived with the payload is the sender's claim about a
+       register the sender cannot see. */
+    expect(parsed.mintedFrom).toBe(recordFingerprint(lars));
     expect(resolveQuotation(ledger, parsed, 'test').actor).toBe('lars');
     // and a citation this ledger cannot resolve is refused outright
     expect(() => parseQuotation({ messageId: 'nope' }, ledger)).toThrow(/not a quotation/);
@@ -140,11 +177,27 @@ describe('a quotation cites a message; the attribution is looked up from it', ()
      citation nobody can check is not a weaker citation; it is not one. */
   it('a citation the ledger cannot resolve throws rather than degrading', () => {
     expect(() =>
-      resolveQuotation(messageLedger([priya]), { messageId: 'm21' } as Quotation, 'test'),
+      resolveQuotation(
+        messageLedger([priya]),
+        { messageId: 'm21' } as unknown as Quotation,
+        'test',
+      ),
     ).toThrow(/is not a message on this page/);
+    /* An HONEST citation of a page-authored record — minted through the public
+       door, checksum and all — so what this asserts is the origin check rather
+       than the register check that would otherwise fire first. */
+    const chosenCitation = citationFrom(chosen) as unknown as Quotation;
+    expect(() => resolveQuotation(messageLedger(RECORDS), chosenCitation, 'test')).toThrow(
+      /page-authored/,
+    );
+    /* And the register check, which is the one a hand-written literal trips. */
     expect(() =>
-      resolveQuotation(messageLedger(RECORDS), { messageId: 'm-chosen' } as Quotation, 'test'),
-    ).toThrow(/page-authored/);
+      resolveQuotation(
+        messageLedger(RECORDS),
+        { messageId: 'm10' } as unknown as Quotation,
+        'test',
+      ),
+    ).toThrow(/minted from a different record/);
   });
 
   /* CATCHES: a ledger that resolves last-write-wins. Two records under one id is
@@ -211,20 +264,38 @@ describe('a quotation cites a message; the attribution is looked up from it', ()
       actor: 'priya',
       text: 'I authorise the drop.',
     } as unknown as Quotation;
+    /* Round 6: this used to RENDER and print justin's words over the forged
+       name's place, which was the right outcome for the display path and left
+       the register question open — the banner was one of the four boundaries
+       whose citation nothing checked against the page's record. A citation with
+       no checksum is now refused outright, which is a stronger answer than
+       printing the right thing anyway. */
+    expect(() =>
+      renderWith(
+        f.RECORDS,
+        <Composer
+          binding={{ mode: 'replying', to: forged }}
+          footNote=""
+          roomName="users-migration"
+        />,
+      ),
+    ).toThrow(/minted from a different record/);
+    cleanup();
+    /* …and the honest citation still renders the record's own name and words, so
+       this is not a boundary that refuses everything. */
     const { container } = renderWith(
       f.RECORDS,
       <Composer
-        binding={{ mode: 'replying', to: forged }}
+        binding={{ mode: 'replying', to: f.REPLYING.mode === 'replying' ? f.REPLYING.to : never() }}
         footNote=""
         roomName="users-migration"
       />,
     );
     expect(container.querySelector('[data-attribution="m17"]')?.textContent).toContain('justin');
     expect(container.textContent).not.toContain('I authorise the drop.');
-    expect(container.textContent).not.toContain('priya');
   });
 
-  it('a tampered citation prints the record’s words in the receipt', () => {
+  it('a tampered citation is refused in the receipt', () => {
     const forged = {
       messageId: 'm10',
       actor: 'lars',
@@ -232,14 +303,23 @@ describe('a quotation cites a message; the attribution is looked up from it', ()
     } as unknown as Quotation;
     const receipt = {
       ...f.RECEIPT,
-      provenance: [{ id: 'p1', excerpt: forged, note: null, jump: null }],
+      provenance: [{ id: 'p1', excerpt: forged, note: null }],
       corrections: [],
     };
-    const { container } = renderWith(f.RECORDS, <ReceiptView receipt={receipt} />);
+    expect(() => renderWith(f.RECORDS, <ReceiptView receipt={receipt} />)).toThrow(
+      /minted from a different record/,
+    );
+    cleanup();
+    const honest = { ...f.RECEIPT, corrections: [] };
+    const { container } = renderWith(f.RECORDS, <ReceiptView receipt={honest} />);
     expect(container.querySelector('[data-attribution="m10"]')?.textContent).toBe('priya');
     expect(container.textContent).not.toContain('I authorise the drop.');
   });
 });
+
+function never(): never {
+  throw new Error('fixture: REPLYING is not a replying binding');
+}
 
 describe('the message row is discriminated on origin', () => {
   /* CATCHES the round-1 cardinal defect at its source: a constructor that
@@ -845,7 +925,7 @@ describe('the row and the register it renders against are the same register', ()
     const row = messageEntry(lars, { state: lars_state() });
     const impostor: MessageRecord = { ...lars, actor: 'priya' };
     expect(() => renderWith([impostor], <TimelineRow entry={row} />)).toThrow(
-      /built from a different record/,
+      /minted from a different record/,
     );
     // and the honest pairing still renders, so this is not a check that always fires
     const { container } = renderWith([lars], <TimelineRow entry={row} />);
@@ -867,7 +947,7 @@ describe('the row and the register it renders against are the same register', ()
        body derivation first, which is the older and more specific check. What
        must not happen is a render. */
     expect(() => renderWith([impostor], <TimelineRow entry={row} />)).toThrow(
-      /built from a different record|does not read as the message/,
+      /minted from a different record|does not read as the message/,
     );
   });
 
@@ -983,5 +1063,107 @@ describe('the side channels go through the same model as the row', () => {
       expect(isRationale(item.rationale), `${item.id}'s rationale is not system voice`).toBe(true);
     }
     expect(f.ATTENTION.length).toBeGreaterThan(3);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 6 — THE SWEEP. Each block below is a defect class, and each entry in it
+ * is a CALL SITE, because round 5's closing finding was that every lesson had
+ * been applied to one row and one neighbour of each kind.
+ * ------------------------------------------------------------------------- */
+
+describe('two registers in one tree', () => {
+  /* CATCHES: `<AttributionLedger>` nesting silently taking the inner one. React
+     context is designed to shadow, which is right for a theme and wrong for the
+     one value on the page whose whole job is being the single source of truth
+     about who wrote what — the outer rows and the inner rows would resolve the
+     same id against different records with nothing reporting it. */
+  it('nesting a second record register is refused rather than shadowing the first', () => {
+    const other: MessageRecord = { ...lars, actor: 'priya' };
+    expect(() =>
+      render(
+        <AttributionLedger messages={[lars]}>
+          <AttributionLedger messages={[other]}>
+            <span>anything</span>
+          </AttributionLedger>
+        </AttributionLedger>,
+      ),
+    ).toThrow(/already inside a record register/);
+  });
+
+  /* …and one ledger is still one ledger: the check is about a SECOND register,
+     not about being inside one at all. */
+  it('a single register renders', () => {
+    const quotation = quotationFrom(lars) as Quotation;
+    const { container } = renderWith([lars], <Quoted quote={quotation} />);
+    expect(container.querySelector('q')?.textContent).toBe(lars.text);
+  });
+});
+
+describe('the chosen arm derives its facts too', () => {
+  /* CATCHES: `ChosenRow` printing caller-supplied `entry.id` and `entry.at`.
+     Round 5 rebuilt the AUTHORED arm so both came off the record and left this
+     arm printing the copies — the one arm that cannot forge a NAME could still
+     forge WHICH MESSAGE the row cites, and that id went straight into
+     `onOpenTag`. A copy of a fact is a second source of truth for it, on both
+     arms. */
+  it('the rendered id and time of a page-authored row come off the record', () => {
+    const chosenRecord = f.MESSAGES['m-chosen'] as MessageRecord;
+    const row = messageEntry(chosenRecord, { state: lars_state() });
+    const relabelled = { ...row, id: 'm10', at: '09:04' } as MessageEntry;
+    const { container } = renderWith(f.RECORDS, <TimelineRow entry={relabelled} />);
+    const rendered = container.querySelector('[data-row="message"]');
+    expect(rendered?.getAttribute('data-message-id')).toBe('m-chosen');
+    expect(rendered?.getAttribute('data-origin')).toBe('chosen');
+    expect(container.textContent).toContain('13:09');
+    expect(container.textContent).not.toContain('09:04');
+  });
+
+  /* CATCHES: the chosen arm resolving nothing — a citation the register never
+     saw, or one whose record turns out to be somebody's own words. */
+  it('a chosen row whose citation the register cannot resolve does not render', () => {
+    const chosenRecord = f.MESSAGES['m-chosen'] as MessageRecord;
+    const row = messageEntry(chosenRecord, { state: lars_state() });
+    expect(() => renderWith([lars], <TimelineRow entry={row} />)).toThrow(
+      /is not a message on this page/,
+    );
+    cleanup();
+    /* And a chosen ROW over a typed RECORD is refused: the arms are not
+       interchangeable just because both carry a message id. */
+    const swapped = {
+      ...(row as unknown as Record<string, unknown>),
+      citation: citationFrom(lars),
+    } as unknown as MessageEntry;
+    expect(() => renderWith([lars], <TimelineRow entry={swapped} />)).toThrow(
+      /renders it as a page-authored answer/,
+    );
+  });
+});
+
+describe('the slot denylist sees the spelling the platform produces', () => {
+  /* CATCHES: `ATTRIBUTED_TAGS.has(node.type)` without folding. `createElement('Q',
+     …)` renders a `<q>`; HTML tag names are case-insensitive and the denylist
+     was not. */
+  it('an uppercase intrinsic tag is still an intrinsic tag', () => {
+    for (const tag of ['Q', 'BLOCKQUOTE', 'Cite']) {
+      expect(() => slot(createElement(tag, null, 'words priya never wrote'))).toThrow(
+        /may not carry attributed markup/,
+      );
+    }
+  });
+
+  /* CATCHES: the prop denylist matching only the exact spelling. HTML lowercases
+     attribute names, so `data-Quoted` reaches the DOM as `data-quoted` and is
+     found by `querySelector('[data-quoted]')` — the exact token round 5 added to
+     this list because "a provenance token a slot can mint is a provenance token
+     that proves nothing". */
+  it('a mixed-case provenance attribute is still a provenance attribute', () => {
+    for (const prop of ['data-Quoted', 'DATA-ATTRIBUTION', 'CITE']) {
+      expect(() => slot(createElement('span', { [prop]: 'msg:m10' }, 'words'))).toThrow(
+        /may not carry attributed markup/,
+      );
+    }
+    /* and the folding does not start rejecting ordinary props */
+    expect(() => slot(createElement('span', { 'data-quotient': '3' }, 'ok'))).not.toThrow();
   });
 });

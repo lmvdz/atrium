@@ -27,7 +27,7 @@ export function RoomHead({ room, surfaces }: RoomHeadProps) {
           </span>{' '}
           <span>{room.name}</span>
         </h2>
-        <div className={styles.topic} title={room.topic}>
+        <div className={styles.topic} data-truncates="the room head's title" title={room.topic}>
           {room.topic}
         </div>
         <div className={styles.faces}>

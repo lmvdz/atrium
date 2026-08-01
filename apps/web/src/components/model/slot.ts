@@ -39,7 +39,8 @@ export interface Slot {
   readonly [slotBrand]: 'slot';
 }
 
-/** Intrinsic elements that render as somebody's quoted words. */
+/** Intrinsic elements that render as somebody's quoted words. Lowercase — every
+    comparison against this set lowercases first, because `<Q>` is a `<q>`. */
 const ATTRIBUTED_TAGS: ReadonlySet<string> = new Set(['q', 'blockquote', 'cite']);
 
 /**
@@ -57,6 +58,11 @@ const ATTRIBUTED_PROPS: readonly string[] = [
   'cite',
   'dangerouslySetInnerHTML',
 ];
+
+/** The same list, folded, because the comparison folds. */
+const ATTRIBUTED_PROPS_FOLDED: ReadonlySet<string> = new Set(
+  ATTRIBUTED_PROPS.map((key) => key.toLowerCase()),
+);
 
 /** A tree this deep in a slot is a bug of its own; the cap keeps the walk O(1)-ish. */
 const MAX_NODES = 500;
@@ -91,14 +97,26 @@ function walk(node: ReactNode, budget: { left: number }): void {
 
   if (!isValidElement(node)) return;
 
-  if (typeof node.type === 'string' && ATTRIBUTED_TAGS.has(node.type)) {
+  /* NORMALISE BEFORE COMPARING. THE DENYLIST IS CASE-SENSITIVE AND THE DOM IS
+     NOT — found by the round-6 blind critic, and it defeated both halves at
+     once. `createElement('Q', …)` renders a `<q>`; HTML lowercases attribute
+     names, so `data-Quoted` and `data-Attribution` reach the DOM as
+     `data-quoted` and `data-attribution` and are found by
+     `querySelector('[data-quoted]')` — which is the exact token round 5 added
+     to this list because "a provenance token a slot can mint is a provenance
+     token that proves nothing". A denylist that does not see the spelling the
+     platform actually produces is a denylist of one spelling. */
+  if (typeof node.type === 'string' && ATTRIBUTED_TAGS.has(node.type.toLowerCase())) {
     reject(`a <${node.type}> element was passed through a slot`);
   }
 
   const props = node.props as Record<string, unknown> | null;
   if (props === null) return;
-  for (const key of ATTRIBUTED_PROPS) {
-    if (props[key] !== undefined) reject(`a slot element carries \`${key}\``);
+  for (const [key, value] of Object.entries(props)) {
+    if (value === undefined) continue;
+    if (ATTRIBUTED_PROPS_FOLDED.has(key.toLowerCase())) {
+      reject(`a slot element carries \`${key}\``);
+    }
   }
   walk(props.children as ReactNode, budget);
 }

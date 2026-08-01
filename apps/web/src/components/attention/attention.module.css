@@ -316,6 +316,18 @@
   color: var(--tx2);
   line-height: 1.3;
   min-width: 0;
+  /* It is a button now — the non-hover route to the reason it clamps. It has to
+     keep looking like the line it was, so it drops the button chrome and keeps
+     the focus ring the shell paints on every focusable control. The typography
+     is restated rather than inherited: `font: inherit` is a shorthand and would
+     silently overwrite the family and size set three lines up. */
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-weight: inherit;
 }
 
 /* the ellipsis lives on a real element: an anonymous flex item made from a bare
@@ -371,6 +383,21 @@
    checkable half of the sentence — the objective, commitment and failure counts
    — and leaves only the lead clause, which is the one part that is a summary
    rather than a fact. A fact you cannot read is not on the page. */
+
+/* The lead is a control: it says something is wrong outside the pin, so it has
+   to be able to show you. Chrome-free so the trailer still reads as one
+   sentence; underlined so it does not read as an inert clause. */
+.trailerLead {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--tx1);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--line3);
+}
 
 .trailer {
   margin-top: 5px;

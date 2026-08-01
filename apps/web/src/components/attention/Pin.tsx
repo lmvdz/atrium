@@ -64,6 +64,8 @@ export interface PinProps {
   readonly onJumpToSource?: (itemId: string) => void;
   /** the overflow control paged; `page` is 0-based and already normalised */
   readonly onPage?: (page: number, pageCount: number) => void;
+  /** the trailer's lead — show what is wrong OUTSIDE the pin */
+  readonly onShowRest?: () => void;
 }
 
 /**
@@ -105,6 +107,7 @@ export function Pin({
   onArm,
   onJumpToSource,
   onPage,
+  onShowRest,
 }: PinProps) {
   const [folded, setFolded] = useState(defaultFolded);
   /* A page counter, not a `showAll` flag. A boolean can only be set once, which
@@ -257,13 +260,13 @@ export function Pin({
                 <span className={styles.moreNext} data-pin-action="true">
                   {nextPageLabel(fold)} · page {fold.page + 1} of {fold.pageCount}
                 </span>
-                <span className={styles.moreHint}>
+                <span className={styles.moreHint} data-truncates="the button's accessible name">
                   the pin folds rather than pushing the composer off the screen
                 </span>
               </button>
             </div>
           )}
-          <Trailer lastCheck={lastCheck} summary={trailer} />
+          <Trailer lastCheck={lastCheck} onShowRest={onShowRest} summary={trailer} />
         </>
       )}
     </section>

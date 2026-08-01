@@ -58,6 +58,36 @@ import { surfaces } from './fixtures';
  * gallery's frames are stills and pass none of them; `/` passes all of them.
  */
 export interface RoomFrameHandlers {
+  /* THE THREE THIS RECORD DID NOT HAVE.
+
+     Round 6's blind critic clicked all 53 visible controls on `/` and found 17
+     inert: the four rail room chips, both objective disclosure triangles, and
+     all ten state-object rows. `Rail` declares `onSelectRoom`; `StateLens`
+     declares `onToggleObjective` and `onOpenReceipt`; `ObjectRow` declares
+     `onOpenReceipt`. This record declared none of the three, under a comment
+     reading "EVERY HANDLER THE LIBRARY EXPOSES IS FORWARDED".
+
+     Round 2 found the same shape and the fix was applied to the handlers round 2
+     named. A comment claiming exhaustiveness is not a count; `e2e/smoke.spec.ts`
+     now asserts the denominator — every visible control either changes something
+     or is named inert with a reason — so this record cannot fall behind the
+     library again without something going red. */
+  readonly onSelectRoom?: (roomId: string) => void;
+  readonly onToggleObjective?: (objectiveId: string) => void;
+  readonly onOpenReceipt?: (objectId: string) => void;
+  /** the receipt's own three seams, for the consumer that opens one */
+  readonly onCloseReceipt?: () => void;
+  readonly onReopen?: (receiptId: string) => void;
+  readonly onJumpToMessage?: (messageId: string) => void;
+  /* The trace bar's other two seams, found by the counting test above rather
+     than by a person reading the file: `CrossRoomJump` declares `onBack` and
+     `onDismiss`, this record declared neither, and the bar's "back to #room →"
+     and "✕" did nothing. Round 6's fix was applied to the three handlers the
+     receipt named; the enumeration found the two it did not. */
+  readonly onJumpBack?: () => void;
+  readonly onDismissJump?: () => void;
+  /** the trailer's lead: what is wrong outside the pin */
+  readonly onShowRest?: () => void;
   readonly onFocusSurface?: (surface: SurfaceId) => void;
   readonly onFilter?: (attentionClass: AttentionClass) => void;
   readonly onTogglePeek?: (entryId: string) => void;
@@ -144,6 +174,8 @@ function Frame(props: RoomFrameProps) {
           key="lens"
           objectives={props.objectives}
           objects={props.objects}
+          onOpenReceipt={on.onOpenReceipt}
+          onToggleObjective={on.onToggleObjective}
           receipt={props.receipt}
           roomName={props.room.name}
           updatedAt={props.updatedAt}
@@ -153,6 +185,7 @@ function Frame(props: RoomFrameProps) {
         <Rail
           key="rail"
           humans={props.humans}
+          onSelectRoom={on.onSelectRoom}
           rooms={props.rooms}
           viewer={props.viewer}
           viewerNote={props.viewerNote}
@@ -193,7 +226,16 @@ function Frame(props: RoomFrameProps) {
               />,
             )}
           />
-          {props.jump === undefined ? <div /> : <CrossRoomJump jump={props.jump} />}
+          {props.jump === undefined ? (
+            <div />
+          ) : (
+            <CrossRoomJump
+              jump={props.jump}
+              onBack={on.onJumpBack}
+              onDismiss={on.onDismissJump}
+              onReveal={on.onJumpToMessage}
+            />
+          )}
           <Pin
             items={props.attention}
             lastCheck={props.lastCheck}
@@ -203,6 +245,7 @@ function Frame(props: RoomFrameProps) {
             onJumpToSource={on.onJumpToSource}
             onOpen={on.onOpenAttention}
             onPage={on.onPagePin}
+            onShowRest={on.onShowRest}
             openId={props.openAttentionId}
             trailer={props.trailer}
             viewer={props.viewer.name}

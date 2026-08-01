@@ -63,9 +63,19 @@ export function Quoted({ quote, attributed = true, className }: QuotedProps) {
 export interface SystemVoiceProps {
   readonly statement: SystemStatement;
   readonly className?: string;
+  /**
+   * Render as a `<span>` rather than a `<div>`, for the places a statement sits
+   * inside a sentence (the receipt's history line, a correction's was → now).
+   *
+   * It is a flag on THIS component rather than a second component, on purpose:
+   * round 5's finding was that four components printed `statement.text` directly
+   * because putting a statement on screen was easy to do without going through
+   * the one checked path. A second inline component would be a second path.
+   */
+  readonly inline?: boolean;
 }
 
-export function SystemVoice({ statement, className }: SystemVoiceProps) {
+export function SystemVoice({ statement, className, inline = false }: SystemVoiceProps) {
   /* THE CHECK ON THE PATH EVERY SYSTEM-VOICE RENDER TAKES. The bans held at the
      constructor and at the JSON parser, and this component printed whatever it
      was handed — so a cast or a `JSON.parse` put a first-person sentence into
@@ -85,8 +95,9 @@ export function SystemVoice({ statement, className }: SystemVoiceProps) {
     statement.parts ?? [{ voice: 'system' as const, text: statement.text }]
   ).map((part) => ({ voice: part.voice, text: String(part.text) }));
   statementText({ ...statement, text: parts.map((p) => p.text).join(''), parts }, 'SystemVoice');
+  const Tag = inline ? 'span' : 'div';
   return (
-    <div className={[styles.system, className].filter(Boolean).join(' ')} data-voice="system">
+    <Tag className={[styles.system, className].filter(Boolean).join(' ')} data-voice="system">
       {parts.map((part, index) =>
         part.voice === 'verbatim' ? (
           // biome-ignore lint/suspicious/noArrayIndexKey: the parts of one statement are positional and never reordered
@@ -98,6 +109,6 @@ export function SystemVoice({ statement, className }: SystemVoiceProps) {
           <span key={index}>{part.text}</span>
         ),
       )}
-    </div>
+    </Tag>
   );
 }

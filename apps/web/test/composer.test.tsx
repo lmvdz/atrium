@@ -10,7 +10,7 @@
  * consumer to add one; this had neither.
  * ------------------------------------------------------------------------- */
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react';
 import { createRef } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
@@ -331,5 +331,87 @@ describe('nothing sends a half-composed buffer', () => {
     fireEvent.change(box(), { target: { value: 'nihongo' } });
     fireEvent.keyDown(box(), { key: 'Enter' });
     expect(sent).toEqual([]);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 6, D11 — A ONE-WAY FLAG GUARDING A WRITE IS A LATCH.
+ *
+ * `composing.current` was set on `compositionstart` and cleared on
+ * `compositionend` and NOWHERE ELSE, while `send()` returns early when it is
+ * true. One missed `compositionend` — a blur mid-candidate, an unmount, an IME
+ * that drops the event — bricked the product's primary write path silently: no
+ * error, no indicator, no recovery short of a reload. The guard was right; its
+ * exits were not enumerated.
+ * ------------------------------------------------------------------------- */
+describe('a composition that ends any way at all releases the send', () => {
+  function composerWith(onSend: (draft: string) => void) {
+    const view = render(
+      <Composer binding={FREE} footNote="" onSend={onSend} roomName="users-migration" />,
+    );
+    return { view, field: screen.getByRole('textbox') };
+  }
+
+  /* CATCHES: `onBlur` being dropped. Blurring mid-candidate is the commonest way
+     a real composition ends without a `compositionend` reaching React. */
+  it('blurring the field ends the composition', () => {
+    const sent: string[] = [];
+    const { field } = composerWith((draft) => sent.push(draft));
+    fireEvent.compositionStart(field);
+    fireEvent.change(field, { target: { value: 'nihongo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent, 'a half-composed buffer reached the record').toEqual([]);
+    fireEvent.blur(field);
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent, 'the composer stayed bricked after the composition ended').toEqual(['nihongo']);
+  });
+
+  /* CATCHES: the change-event exit being dropped. A change whose native event
+     says it is not part of a composition is the platform reporting the
+     composition is over, whatever `compositionend` did. */
+  it('a change event that says it is not composing ends the composition', () => {
+    const sent: string[] = [];
+    const { field } = composerWith((draft) => sent.push(draft));
+    fireEvent.compositionStart(field);
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent).toEqual([]);
+    /* The platform's own signal, on the event React hands the component: a
+       change whose `isComposing` is FALSE is the browser saying this keystroke
+       is not part of a composition. Built with `createEvent` and stamped, because
+       an `Event` constructor silently drops init keys it does not know — which is
+       itself the "a denylist of one spelling" shape, in a test helper. */
+    const ended = createEvent.change(field, { target: { value: '日本語' } });
+    Object.defineProperty(ended, 'isComposing', { value: false });
+    fireEvent(field, ended);
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent, 'the flag survived a change event that said the composition was over').toEqual([
+      '日本語',
+    ]);
+  });
+
+  /* CATCHES: the refusal being silent. A send that is declined because an input
+     method is mid-candidate is indistinguishable from a broken send, which is
+     how a stuck flag went from a bug to an unrecoverable one. */
+  it('the composer says it is refusing while it refuses', () => {
+    const { field } = composerWith(() => undefined);
+    expect(field.getAttribute('data-composing')).toBe('false');
+    fireEvent.compositionStart(field);
+    expect(field.getAttribute('data-composing')).toBe('true');
+    expect(screen.getByText(/choosing a candidate/)).toBeTruthy();
+    fireEvent.compositionEnd(field);
+    expect(field.getAttribute('data-composing')).toBe('false');
+  });
+
+  /* CATCHES: the Send button blurring the field on `mousedown`, which ends the
+     composition, which clears the flag — so by the time `click` fires the guard
+     has nothing to see. The round-6 critic reproduced exactly that with a real
+     CDP composition. */
+  it('pressing Send does not end the composition it is meant to be blocked by', () => {
+    const { field } = composerWith(() => undefined);
+    fireEvent.compositionStart(field);
+    const send = screen.getByRole('button', { name: 'Send' });
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    send.dispatchEvent(event);
+    expect(event.defaultPrevented, 'Send takes focus away from the composition').toBe(true);
   });
 });

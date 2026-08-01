@@ -12,7 +12,7 @@ import {
   resolveQuotation,
   systemStatement,
 } from '../src/components/model';
-import { renderWith } from './harness';
+import { renderRefusing, renderWith } from './harness';
 
 afterEach(cleanup);
 
@@ -71,9 +71,22 @@ describe('the quotation invariant', () => {
     );
     /* CATCHES: the ref going back to a carried room. A token built from a field
        that travelled beside the id can point at the wrong room; this one cannot,
-       because the room is read off the record the id names. */
-    const lying = { messageId: 'm21', room: 'identity-service' } as unknown as Quotation;
-    expect(quotationRef(resolveQuotation(ledger, lying, 'test'))).toBe('msg:m21');
+       because the room is read off the record the id names.
+
+       Two halves since round 6. A citation carrying a `room` alongside a VALID
+       checksum still resolves — and the token still names the record's room,
+       which is the original claim. A citation with NO valid checksum does not
+       resolve at all, because a reference nothing minted is a reference no
+       register vouched for. */
+    const lyingButMinted = {
+      ...(a as Quotation),
+      room: 'identity-service',
+    } as unknown as Quotation;
+    expect(quotationRef(resolveQuotation(ledger, lyingButMinted, 'test'))).toBe('msg:m21');
+    const unminted = { messageId: 'm21', room: 'identity-service' } as unknown as Quotation;
+    expect(() => resolveQuotation(ledger, unminted, 'test')).toThrow(
+      /minted from a different record/,
+    );
   });
 
   /* CATCHES: routing a chosen message down the quotation branch in attribute().
@@ -190,13 +203,22 @@ describe('system voice validates what it is about to paint', () => {
     /* Asserted on the DOM rather than on the throw. React 19 retries a render
        that threw, and the retry reads the getter again and gets the clean value
        — so "did it throw" is not the question. The question is whether the
-       sentence ever reached the screen. */
-    let container: HTMLElement | null = null;
-    try {
-      container = render(<SystemVoice statement={shifty} />).container;
-    } catch {
-      container = null;
-    }
-    expect(container?.textContent ?? '').not.toContain('I approve deleting users_legacy.');
+       sentence ever reached the screen.
+
+       AND THE REPORT IS CAUGHT RATHER THAN LET OUT (round 6, D1). The retry
+       SUCCEEDS, so React does not fail the render: it reports a recoverable
+       error, and the default handler is `reportError()`, which jsdom turns into
+       an uncaught exception. The test's own `try/catch` could not see it — there
+       was nothing to catch — so `pnpm test` printed `580 passed` and exited 1,
+       and `test/mutations.mjs` credited every entry naming this file without
+       running anything. `renderRefusing` owns the root so it can pass
+       `onRecoverableError`, and the reports come back as values, which lets this
+       assert the thing that used to be invisible: React reported the refusal. */
+    const { container, reported } = renderRefusing(<SystemVoice statement={shifty} />);
+    expect(container.textContent).not.toContain('I approve deleting users_legacy.');
+    expect(
+      reported.join('\n'),
+      'the render boundary let the sentence past without reporting anything',
+    ).toMatch(/not system voice|error during concurrent rendering/);
   });
 });

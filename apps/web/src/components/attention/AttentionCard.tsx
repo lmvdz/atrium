@@ -25,6 +25,8 @@
 
 import type { NoGlyph } from '../model/glyph';
 import { glyphFor } from '../model/glyph';
+import { useCitedRecord } from '../model/ledger';
+import { rationaleText } from '../model/rationale';
 import type { AttentionAction, AttentionItem } from '../model/records';
 import { slot } from '../model/slot';
 import { list } from '../model/text';
@@ -58,9 +60,6 @@ const EMPHASIS_CLASS: Readonly<Record<AttentionAction['emphasis'], string>> = {
 export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: AttentionCardProps) {
   const glyph = glyphFor(item.state);
   const facts = list(item.facts);
-  /* `text()` is the runtime boundary for Maybe: `undefined` reaching this from a
-     cast or a JS caller used to render "source in #undefined". */
-  const crossRoom = item.source === null ? null : (list([item.source.room]) ?? null);
 
   return (
     <article
@@ -83,43 +82,28 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
     >
       <Glyph className={styles.acardGlyph} decorative={false} state={item.state} />
       <div>
-        <div className={styles.acardTitle}>
+        <div className={styles.acardTitle} data-truncates="the object's receipt in Current state">
           <ClaimText content={slot(item.title)} state={item.state} />
         </div>
 
         <div className={styles.why}>
           <span className={`${styles.whyLabel} atr-lbl`}>WHY YOU</span>
-          <span data-voice="system">{item.rationale}</span>
+          {/* THE RENDER BOUNDARY FOR THE OTHER PAGE-AUTHORED STRING. Round 5
+              wrote `statementText()` for `SystemStatement` and applied it to
+              one of the two types that need it: `Rationale` was checked at its
+              constructor and at `isRationale`, and printed raw here, under the
+              mono-muted treatment that tells a reader the system checked this.
+              A guarantee held at the constructor and at the parser is still not
+              held at the renderer — the sentence CONVENTIONS already had. */}
+          <span data-voice="system">{rationaleText(item.rationale, 'AttentionCard')}</span>
         </div>
 
         <div className={styles.acardFoot}>
           <div className={styles.acardMeta}>
             {facts === null ? null : <span>{facts}</span>}
-            {crossRoom === null ? null : (
-              <>
-                <span aria-hidden="true">·</span>
-                <button
-                  className={styles.xroom}
-                  onClick={onJumpToSource === undefined ? undefined : () => onJumpToSource(item.id)}
-                  title={`the source of this item is in #${crossRoom}, not here`}
-                  type="button"
-                >
-                  source in #{crossRoom} →
-                </button>
-              </>
+            {item.source === null ? null : (
+              <SourceLink itemId={item.id} onJumpToSource={onJumpToSource} source={item.source} />
             )}
-            {crossRoom === null && item.source !== null ? (
-              <>
-                <span aria-hidden="true">·</span>
-                <button
-                  className={styles.link}
-                  onClick={onJumpToSource === undefined ? undefined : () => onJumpToSource(item.id)}
-                  type="button"
-                >
-                  jump to source →
-                </button>
-              </>
-            ) : null}
           </div>
 
           <div className={styles.acardActions}>
@@ -150,5 +134,45 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
         </div>
       </div>
     </article>
+  );
+}
+
+/**
+ * The way to the room this item came from.
+ *
+ * Its own component so the register lookup is an unconditional hook, and so the
+ * ROOM is read off the cited record rather than off a copy travelling beside the
+ * id. `AttentionItem.source` was a `SourceRef` -- `{messageId, room}` -- and the
+ * card printed the carried room while the handler acted on the item; two facts
+ * about one source with nothing obliging them to agree.
+ */
+function SourceLink({
+  itemId,
+  source,
+  onJumpToSource,
+}: {
+  readonly itemId: string;
+  readonly source: NonNullable<AttentionItem['source']>;
+  readonly onJumpToSource?: (itemId: string) => void;
+}) {
+  const record = useCitedRecord(source, 'AttentionCard source');
+  const room = record.room ?? null;
+  return (
+    <>
+      <span aria-hidden="true">·</span>
+      <button
+        className={room === null ? styles.link : styles.xroom}
+        data-source-room={room ?? 'here'}
+        onClick={onJumpToSource === undefined ? undefined : () => onJumpToSource(itemId)}
+        title={
+          room === null
+            ? 'the source of this item is a message in this room'
+            : `the source of this item is in #${room}, not here`
+        }
+        type="button"
+      >
+        {room === null ? 'jump to source →' : `source in #${room} →`}
+      </button>
+    </>
   );
 }

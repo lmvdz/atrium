@@ -333,6 +333,34 @@ test.describe('the pin bounds itself', () => {
       );
       expect(rows.length, `only ${rows.length} of 60 owed items were reachable`).toBe(60);
 
+      /* ---------------------------------------------------------------------
+       * AND THE PRICE OF REACHING THEM IS BOUNDED, AND STATED BEFORE IT IS PAID.
+       *
+       * Round 6: "an affordance whose label states a quantity must deliver that
+       * quantity" is satisfied by `show the next 1 · page 1 of 60` — sixty
+       * clicks to see sixty items, each click honestly delivering the one it
+       * promised. A REACHABILITY bound with no COST bound is a bound a control
+       * can satisfy while being useless, which is the same species as round 2's
+       * idempotent affordance one level of honesty up.
+       *
+       * Two halves, and the second is the one that was missing:
+       *   - the cost is a function of the room there is, not of the list: each
+       *     page carries as many rows as the measured budget allows, so pages ×
+       *     rows-per-page reaches the whole list without a page that carries
+       *     less than the pin can hold.
+       *   - the cost is STATED. `page N of M` is on the control before the first
+       *     click, so a reader knows the price of the whole list up front rather
+       *     than discovering it one click at a time.
+       * ------------------------------------------------------------------- */
+      const budget = Number(await page.locator('[data-pin-list]').getAttribute('data-pin-budget'));
+      expect(budget, 'the pin never measured a row budget').toBeGreaterThan(0);
+      expect(
+        pages,
+        `paging 60 owed items at a budget of ${budget} rows took ${pages} pages — a page that carries less than the pin can hold is a cost the room does not justify`,
+      ).toBeLessThanOrEqual(Math.ceil(60 / budget) + 1);
+      /* The price is on the control before the first click, not discovered. */
+      expect(first?.label, 'the control does not state the total cost').toMatch(/of\s*\d+/);
+
       // and the composer is still where it belongs, in the expanded state too
       const bottom = await page.evaluate(() => {
         const composer = document.querySelector('textarea')?.closest('div')?.parentElement;

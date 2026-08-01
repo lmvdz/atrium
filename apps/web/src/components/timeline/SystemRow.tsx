@@ -23,7 +23,9 @@ export function SystemRow({ entry }: SystemRowProps) {
     <div className={`${styles.mrow} atr-rise-s`} data-row="system">
       <div className={styles.time}>{entry.at}</div>
       <Glyph className={styles.glyphCell} state={entry.state} />
-      <div className={styles.actor}>system</div>
+      <div className={styles.actor} data-truncates="the word is the whole name">
+        system
+      </div>
       <div className={styles.systemBody} data-voice="system">
         {statementText(entry.statement, 'SystemRow')}
       </div>

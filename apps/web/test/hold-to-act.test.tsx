@@ -327,3 +327,59 @@ describe('the arming record reaches the consumer whole', () => {
     expect(button.getAttribute('data-hold-actor')).toBe('dana');
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * ROUND 6, D12 — AN ID MINTED FROM A CALLER-SUPPLIED VALUE IS NOT UNIQUE.
+ *
+ * `${actionId}-hold-progress` and `-hold-describe`, from a value that repeats:
+ * on /gallery the same five action ids render in five frames, so four of the
+ * five destructive hold controls had `aria-describedby` pointing at ANOTHER
+ * FRAME'S nodes and a screen-reader user heard a frozen meter belonging to a
+ * different button. `getElementById` returns the first match; duplicate ids do
+ * not error, they resolve somewhere else. The aria-snapshot test checked names,
+ * not descriptions, so nothing saw it.
+ * ------------------------------------------------------------------------- */
+describe('the hold control’s aria ids are unique on the page', () => {
+  /* CATCHES: the ids going back to the caller's `actionId`. Five instances with
+     the SAME actionId is the shipped case, not a contrived one. */
+  it('five holds with one action id mint five distinct describedby targets', () => {
+    const { container } = render(
+      <div>
+        {[0, 1, 2, 3, 4].map((n) => (
+          <HoldToAct actionId="authorise" actor="lars" describe="drop it" key={n} label="Drop" />
+        ))}
+      </div>,
+    );
+    const ids = [...container.querySelectorAll('[id]')].map((el) => el.id);
+    expect(ids.length, 'the control minted no ids at all').toBeGreaterThan(0);
+    expect(new Set(ids).size, `duplicate DOM ids: ${ids.join(', ')}`).toBe(ids.length);
+
+    /* AND EVERY BUTTON'S DESCRIPTION RESOLVES INSIDE ITS OWN CONTROL. Uniqueness
+       is necessary and not sufficient: what a screen reader announces is
+       whatever `getElementById` returns, so the assertion is about the LOOKUP. */
+    for (const button of container.querySelectorAll('button')) {
+      const described = (button.getAttribute('aria-describedby') ?? '').split(/\s+/);
+      expect(described.length).toBe(2);
+      for (const id of described) {
+        const target = container.querySelector(`[id="${id}"]`);
+        expect(target, `${id} names nothing`).not.toBeNull();
+        expect(
+          button.parentElement?.contains(target as Node) ||
+            button.nextElementSibling === target ||
+            button.nextElementSibling?.nextElementSibling === target,
+          `${id} resolves to a node belonging to a different control`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  /* CATCHES: the selector hook being dropped along with the id. `actionId` still
+     has to be findable on the DOM — it is what tests and consumers select by,
+     and an id was being abused for that job. */
+  it('the action id is still on the DOM, as data rather than as an id', () => {
+    const { container } = render(
+      <HoldToAct actionId="authorise" actor="lars" describe="drop it" label="Drop" />,
+    );
+    expect(container.querySelector('[data-hold-action="authorise"]')).not.toBeNull();
+  });
+});

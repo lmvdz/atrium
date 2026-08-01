@@ -31,6 +31,12 @@ export interface OverflowReport {
     readonly scrollWidth: number;
     readonly clientWidth: number;
   }[];
+  /** rendered elements whose geometry was evaluated — the sweep's denominator */
+  readonly overflowChecked: number;
+  /** of those, how many ran past the edge and were genuinely clipped inside it */
+  readonly overflowContained: number;
+  /** every box with a non-visible overflow-x, asked whether it hides scroll */
+  readonly clippersChecked: number;
 }
 
 /**
@@ -62,6 +68,16 @@ export interface AuditResult {
   readonly registrySize: number;
   /** ::before / ::after / ::placeholder strings measured — the category `ownText` used to skip */
   readonly pseudoChecked: number;
+  /** the same total, split by kind, so a zero category is visible as a zero */
+  readonly pseudo: {
+    readonly before: number;
+    readonly after: number;
+    readonly placeholder: number;
+  };
+  /** placeholders the sweep reached */
+  readonly placeholdersFound: number;
+  /** placeholders the DOM holds — the denominator `placeholdersFound` is judged against */
+  readonly placeholdersInDom: number;
   readonly lowestGraphic: number | null;
 }
 
@@ -189,7 +205,24 @@ export const AUDIT = `(() => {
   let lowestContrast = Infinity;
   let smallestFont = Infinity;
   let checked = 0;
-  let pseudoChecked = 0;
+  /* PSEUDO STRINGS, SPLIT BY KIND AND GIVEN A DENOMINATOR.
+
+     Round 6: \`pseudoChecked\` was one number with no floor asserted against it,
+     and it had never measured anything. ::before/::after strings were 0 on
+     every route in both themes (nothing in this app paints text into a
+     pseudo-element) and \`pseudoChecked\` was 1 on three of four routes — the
+     composer's placeholder — so breaking the placeholder lookup outright left
+     the whole harness green.
+
+     A count with no denominator cannot fail. The placeholder pass now reports
+     how many placeholders it FOUND as well as how many it measured, and
+     gallery.spec.ts asserts they agree and that the found count matches the DOM.
+     The ::before/::after counts stay reported-but-unasserted, and that is stated
+     rather than implied: they measure a category this app does not currently
+     use, so a floor on them would be a floor on nothing. What the harness owes
+     is to say the number is zero, which it now does per kind. */
+  const pseudo = { before: 0, after: 0, placeholder: 0 };
+  let placeholdersFound = 0;
 
   /* One measurement, used by the node pass and the pseudo pass alike, so the
      two cannot drift into applying different floors to the same kind of string. */
@@ -235,12 +268,14 @@ export const AUDIT = `(() => {
     const text = ownText(el);
     if (text && measureText(el, style, text, '')) checked += 1;
 
-    for (const pseudo of ['::before', '::after']) {
-      const pstyle = getComputedStyle(el, pseudo);
+    for (const which of ['::before', '::after']) {
+      const pstyle = getComputedStyle(el, which);
       if (pstyle.display === 'none' || pstyle.visibility === 'hidden') continue;
       const ptext = pseudoText(pstyle.content);
       if (!ptext) continue;
-      if (measureText(el, pstyle, ptext, ' ' + pseudo)) pseudoChecked += 1;
+      if (measureText(el, pstyle, ptext, ' ' + which)) {
+        pseudo[which === '::before' ? 'before' : 'after'] += 1;
+      }
     }
 
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
@@ -248,8 +283,9 @@ export const AUDIT = `(() => {
       /* A placeholder is only text on screen while the field is empty; a filled
          field is not hiding anything. */
       if (placeholder && !el.value) {
+        placeholdersFound += 1;
         const pstyle = getComputedStyle(el, '::placeholder');
-        if (measureText(el, pstyle, placeholder, ' ::placeholder')) pseudoChecked += 1;
+        if (measureText(el, pstyle, placeholder, ' ::placeholder')) pseudo.placeholder += 1;
       }
     }
   }
@@ -391,15 +427,29 @@ export const AUDIT = `(() => {
     if (found > 0) graphicKinds.push(graphic.what + ' \\u00d7' + found);
   }
 
-  /* An element whose layout box runs past the viewport is only overflow if
-     nothing between it and the root clips it. A room name that ellipsises
-     inside a fixed track still has a wide layout box — the track is doing its
-     job, and flagging it would train the check to be ignored. */
-  const clipped = (el) => {
+  /* AN ANCESTOR THAT CLIPS IS NOT AN ANCESTOR THAT ABSORBS.
+
+     Round 6, and this one exempted the whole app. \`clipped\` returned true for
+     any element with ANY ancestor whose \`overflow-x\` was not \`visible\` — and
+     \`.app\` is \`overflow: hidden\` while \`.gallery\` is \`overflow-x: hidden\`,
+     so EVERY element on both routes had such an ancestor. The sweep inspected
+     33 of 2542 elements on /gallery and 12 of 476 on /, and a 3000px-wide
+     element in a 1124px viewport passed all four overflow assertions. A guard
+     written to spare a room name ellipsising inside a fixed track spared the
+     page.
+
+     The question is not "does something clip", it is "does the clip HAPPEN
+     INSIDE THE VIEWPORT". An element is genuinely contained when the nearest
+     clipping ancestor's own right edge is within the limit — then the overflow
+     is the ancestor's problem and the ancestor is measured on its own account,
+     below. A clipper that itself runs past the edge contains nothing. */
+  const clipsWithin = (el, limit) => {
     let node = el.parentElement;
     while (node) {
-      const overflowX = getComputedStyle(node).overflowX;
-      if (overflowX !== 'visible') return true;
+      const style = getComputedStyle(node);
+      if (style.overflowX !== 'visible' || style.overflowY !== 'visible') {
+        return node.getBoundingClientRect().right <= limit + 0.5;
+      }
       node = node.parentElement;
     }
     return false;
@@ -407,24 +457,60 @@ export const AUDIT = `(() => {
 
   const widest = [];
   const limit = document.documentElement.clientWidth;
+  let overflowChecked = 0;
+  let overflowContained = 0;
   for (const el of document.querySelectorAll('body *')) {
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') continue;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0) continue;
-    if (rect.right > limit + 0.5 && !clipped(el)) {
-      widest.push({ selector: describe(el), right: Math.round(rect.right) });
+    overflowChecked += 1;
+    if (rect.right <= limit + 0.5) continue;
+    if (clipsWithin(el, limit)) {
+      overflowContained += 1;
+      continue;
     }
+    widest.push({ selector: describe(el), right: Math.round(rect.right) });
   }
 
-  /* And the frames themselves must not scroll sideways internally: a broken
-     track set shows up here even when the page as a whole looks fine. */
+  /* AND EVERY BOX THAT CLIPS IS ASKED WHETHER IT IS HIDING HORIZONTAL OVERFLOW.
+
+     This used to inspect \`[data-gallery-frame], [data-frame]\` — two selectors,
+     chosen when the frame was the only thing that could scroll. The element
+     that actually absorbs the feed's overflow is \`.feed\`, which is neither, so
+     the check ran against boxes that were never going to fail. Anything with a
+     non-visible overflow is a candidate hiding place; all of them are measured,
+     and how many were looked at is reported so a sweep that inspects two
+     elements says so. */
   const scrollingFrames = [];
-  for (const el of document.querySelectorAll('[data-gallery-frame], [data-frame]')) {
-    if (el.scrollWidth > el.clientWidth + 1) {
+  let clippersChecked = 0;
+  for (const el of document.querySelectorAll('body *')) {
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    if (style.overflowX === 'visible') continue;
+    const box = el.getBoundingClientRect();
+    if (box.width === 0) continue;
+    /* A BOX THAT ELLIPSISES ITS OWN TEXT IS NOT HIDING A LAYOUT PROBLEM.
+       \`scrollWidth > clientWidth\` is true of every truncating string in the
+       app, and truncation has its own rule with its own sweep (a clipped string
+       must name its route — e2e/smoke.spec.ts). What THIS check is for is a
+       CHILD BOX running past a clipping parent, which is a broken track set with
+       the evidence swallowed. */
+    if (style.textOverflow === 'ellipsis') continue;
+    if (style.webkitLineClamp !== 'none' && style.webkitLineClamp !== '') continue;
+    clippersChecked += 1;
+    let widestChild = null;
+    for (const child of el.children) {
+      const rect = child.getBoundingClientRect();
+      if (rect.width === 0) continue;
+      if (rect.right > box.right + 1 && (widestChild === null || rect.right > widestChild.right)) {
+        widestChild = { selector: describe(child), right: rect.right };
+      }
+    }
+    if (widestChild !== null) {
       scrollingFrames.push({
-        selector: describe(el),
-        scrollWidth: el.scrollWidth,
+        selector: describe(el) + ' « ' + widestChild.selector,
+        scrollWidth: Math.round(widestChild.right - box.left),
         clientWidth: el.clientWidth,
       });
     }
@@ -437,13 +523,23 @@ export const AUDIT = `(() => {
     graphicsChecked,
     graphicKinds,
     registrySize: GRAPHICS.length,
-    pseudoChecked,
+    pseudoChecked: pseudo.before + pseudo.after + pseudo.placeholder,
+    pseudo,
+    placeholdersFound,
+    placeholdersInDom: [...document.querySelectorAll('[placeholder]')].filter((el) => {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      return (el.getAttribute('placeholder') || '').trim().length > 0 && !el.value;
+    }).length,
     lowestGraphic: lowestGraphic === Infinity ? null : Math.round(lowestGraphic * 100) / 100,
     overflow: {
       documentScrollWidth: document.documentElement.scrollWidth,
       documentClientWidth: document.documentElement.clientWidth,
       widest: widest.slice(0, 8),
       scrollingFrames,
+      overflowChecked,
+      overflowContained,
+      clippersChecked,
     },
     elementsChecked: checked,
     smallestFont: smallestFont === Infinity ? null : Math.round(smallestFont * 100) / 100,

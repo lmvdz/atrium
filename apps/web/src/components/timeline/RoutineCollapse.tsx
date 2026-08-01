@@ -48,7 +48,10 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
       >
         {/* count · range · actors, on one line. Never a bare "N hidden": the
             fold has to say what it swallowed or nobody trusts it. */}
-        <span className={styles.routineSummary}>
+        <span
+          className={styles.routineSummary}
+          data-truncates="the strip's accessible name, and peeking opens the rows"
+        >
           <b>{count} routine</b>
           <span aria-hidden="true"> · </span>
           {entry.from} – {entry.to}

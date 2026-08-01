@@ -22,11 +22,16 @@
  * to the field beside it. A guard over a carried field is always one field
  * behind.
  *
- * SO A QUOTATION NO LONGER CARRIES ANYTHING. It is a CITATION:
+ * SO A QUOTATION CARRIES NO FACT A READER SEES. It is a CITATION:
  *
- *     interface Quotation { messageId }
+ *     interface Citation  { messageId, mintedFrom }
+ *     interface Quotation extends Citation {}
  *
- * There is no actor to forge, no text to forge, no timestamp to forge, because
+ * `mintedFrom` is a checksum, not a fact: never printed, never read for its
+ * value, and a mismatch throws rather than choosing a winner (round 6 moved it
+ * off `AuthoredMessageEntry`, where it protected one of five boundaries, onto
+ * the value, where it protects all of them). There is no actor to forge, no
+ * text to forge, no timestamp to forge, because
  * there are no such fields. `{...quotation, actor: 'priya'}` does not type-check
  * (`actor` is an excess property on an object literal), and if it is smuggled in
  * as JSON it is ignored, because nothing reads it. The name, the words and the
@@ -78,20 +83,43 @@ export interface MessageRecord {
   readonly room?: string;
 }
 
+declare const citationBrand: unique symbol;
 declare const quotationBrand: unique symbol;
+
+/**
+ * A REFERENCE TO A MESSAGE ON THE RECORD, of any origin.
+ *
+ * Two fields, and neither of them is a fact a reader sees. `messageId` says
+ * WHICH message; `mintedFrom` is a checksum of the record it was minted from,
+ * never printed and never read for its value — see `recordFingerprint`.
+ *
+ * ROUND 6: the checksum lived on `AuthoredMessageEntry` and therefore protected
+ * exactly one of the five render boundaries that resolve a citation. The other
+ * four — the reply line, the composer's reply banner, the receipt's provenance
+ * row and `<Quoted>` itself — took a bare id and resolved it against whatever
+ * ledger they happened to be under, so a citation minted from lars's record
+ * rendered priya's name inside a register that disagreed, at four addresses.
+ * A guarantee that lives on ONE ROW TYPE protects one row type; a guarantee that
+ * lives on THE VALUE protects everywhere the value goes.
+ */
+export interface Citation {
+  readonly messageId: MessageId;
+  /** a checksum of the record this citation was minted from — never rendered */
+  readonly mintedFrom: string;
+  readonly [citationBrand]: 'citation';
+}
 
 /**
  * A CITATION of a message whose words are that person's own.
  *
- * One field, on purpose. Round 4 forged an attribution by spreading a genuine
- * quotation and overwriting `actor`; the fields it overwrote no longer exist.
- * Everything a component needs in order to render one — the words, the name, the
- * time, the room — comes from `resolveQuotation`, which reads the record out of
- * the ledger the page was built from. The citation says WHICH message; the
- * record says what it contains; nothing in between gets an opinion.
+ * No carried facts, on purpose. Round 4 forged an attribution by spreading a
+ * genuine quotation and overwriting `actor`; the fields it overwrote no longer
+ * exist. Everything a component needs in order to render one — the words, the
+ * name, the time, the room — comes from `resolveQuotation`, which reads the
+ * record out of the ledger the page was built from. The citation says WHICH
+ * message; the record says what it contains; nothing in between gets an opinion.
  */
-export interface Quotation {
-  readonly messageId: MessageId;
+export interface Quotation extends Citation {
   readonly [quotationBrand]: 'quotation';
 }
 
@@ -130,7 +158,24 @@ export function quotationFrom(message: MessageRecord): Quotation | null {
   if (message.id.length === 0) return null;
   if (message.actor.trim().length === 0) return null;
   if (message.text.trim().length === 0) return null;
-  return { messageId: message.id } as Quotation;
+  return { messageId: message.id, mintedFrom: recordFingerprint(message) } as unknown as Quotation;
+}
+
+/**
+ * A reference to a message of ANY origin — including a page-authored one.
+ *
+ * The receipt links to the superseded chosen answer; a chosen feed row is about
+ * a chosen record; a cross-room trace points at the row it landed on. None of
+ * those is quotable and all of them are message references, and before round 6
+ * every one of them was a bare caller-supplied string that no register checked.
+ * `Citation` is the reference; `Quotation` is a reference that additionally
+ * proves the words are somebody's own.
+ */
+export function citationFrom(message: MessageRecord): Citation {
+  if (message.id.trim().length === 0) {
+    throw new Error('citationFrom: a message with no id cannot be cited');
+  }
+  return { messageId: message.id, mintedFrom: recordFingerprint(message) } as unknown as Citation;
 }
 
 /* -------------------------------------------------------------------------
@@ -190,7 +235,18 @@ export function messageLedger(records: Iterable<MessageRecord>): MessageLedger {
  * that two registers are the same register.
  */
 export function recordFingerprint(record: MessageRecord): string {
-  return [record.id, record.origin, record.at, record.actor, record.text]
+  /* EVERY FIELD A READER CAN SEE, which is the property CONVENTIONS states and
+     which the round-5 version did not have: `room` was left out, and `room` is
+     read at the render boundary and printed into `data-quoted` as
+     `msg:m10@identity-service`. Two records differing only in room hashed
+     identically, so the one check that says "these two registers are the same
+     register" could not see a difference the DOM was publishing. The register
+     that disagrees about the field you left out is the one that gets through.
+
+     `room` is optional, so it is encoded as a distinguishable absence rather
+     than as the empty string: `room: ''` is refused by `parseMessageRecord`, but
+     a cast is not, and `∅` is not a room name a record can hold. */
+  return [record.id, record.origin, record.at, record.actor, record.text, record.room ?? '∅']
     .map((part) => `${part.length}:${part}`)
     .join('|');
 }
@@ -205,14 +261,14 @@ export function recordFingerprint(record: MessageRecord): string {
  * `from` names the caller so a stack-free error still says which boundary
  * refused, exactly as `bodyDivergence` does for the words.
  */
-export function resolveQuotation(
+export function resolveCitation(
   ledger: MessageLedger,
-  quotation: Quotation,
+  citation: Citation,
   from: string,
-): Attribution {
-  const id = quotation.messageId;
+): MessageRecord {
+  const id = citation.messageId;
   if (typeof id !== 'string' || id.trim().length === 0) {
-    throw new Error(`${from}: a quotation with no message id cites nothing`);
+    throw new Error(`${from}: a citation with no message id cites nothing`);
   }
   const record = ledger.recordFor(id);
   if (record === null) {
@@ -221,6 +277,30 @@ export function resolveQuotation(
         '  A quotation is a citation; it is only worth what the cited record says.',
     );
   }
+  /* THE CITATION AND THE LEDGER ARE THE SAME REGISTER, OR THIS DOES NOT RESOLVE.
+     One check, on the path every one of the five render boundaries takes,
+     instead of one check on one row type. A mismatch means two registers
+     disagree about one message, which is exactly the state in which a name over
+     words is a coin flip. */
+  const here = recordFingerprint(record);
+  if (citation.mintedFrom !== here) {
+    throw new Error(
+      `${from}: this citation was minted from a different record than the one this page holds for ${id}.\n` +
+        '  A citation and the register it is resolved against have to be the same register; two records for one message id is not a near-miss.\n' +
+        `  minted from: ${String(citation.mintedFrom)}\n` +
+        `  on this page: ${here}`,
+    );
+  }
+  return record;
+}
+
+export function resolveQuotation(
+  ledger: MessageLedger,
+  quotation: Quotation,
+  from: string,
+): Attribution {
+  const record = resolveCitation(ledger, quotation, from);
+  const id = record.id;
   if (!isQuotableOrigin(record.origin)) {
     throw new Error(
       `${from}: ${id} is page-authored (origin ${record.origin}); it may be reported in system voice, never quoted as somebody's words`,
@@ -273,6 +353,34 @@ export function isQuotation(value: unknown, ledger: MessageLedger): value is Quo
   return nonEmptyString(record.actor) && nonEmptyString(record.text);
 }
 
+/** The same boundary for a reference of any origin. */
+export function isCitation(value: unknown, ledger: MessageLedger): value is Citation {
+  if (!isRecord(value)) return false;
+  if (!nonEmptyString(value.messageId)) return false;
+  return ledger.recordFor(value.messageId) !== null;
+}
+
+/**
+ * Take a `Citation` from untrusted data, or throw.
+ *
+ * The checksum is RE-DERIVED from this ledger's record rather than read off the
+ * payload: a fingerprint that arrived with the data is a claim by the sender
+ * about a register the sender cannot see. Everything that crossed a process
+ * boundary is, by definition, being adopted into THIS page's register, and the
+ * parse is where that adoption is checked (the id has to resolve here) and
+ * recorded (the checksum is this page's).
+ */
+export function parseCitation(value: unknown, ledger: MessageLedger): Citation {
+  if (!isCitation(value, ledger)) {
+    throw new Error(
+      'parseCitation: this is not a citation — a message reference has to name a message on this page’s record',
+    );
+  }
+  const id = (value as { messageId: MessageId }).messageId;
+  const record = ledger.recordFor(id) as MessageRecord;
+  return { messageId: id, mintedFrom: recordFingerprint(record) } as unknown as Citation;
+}
+
 /**
  * Take a `Quotation` from untrusted data, or throw. Use this — not a cast — on
  * anything that crossed a process, a file, or a `JSON.parse`.
@@ -287,7 +395,9 @@ export function parseQuotation(value: unknown, ledger: MessageLedger): Quotation
       'parseQuotation: this is not a quotation — quoted text must cite a message on the record, and that message must be one a person actually wrote',
     );
   }
-  return { messageId: (value as { messageId: MessageId }).messageId } as Quotation;
+  const id = (value as { messageId: MessageId }).messageId;
+  const record = ledger.recordFor(id) as MessageRecord;
+  return { messageId: id, mintedFrom: recordFingerprint(record) } as unknown as Quotation;
 }
 
 /** Same boundary, one step earlier: a message record from untrusted data. */

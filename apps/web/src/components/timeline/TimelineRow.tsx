@@ -41,9 +41,9 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
-import { useAttribution } from '../model/ledger';
+import { useAttribution, useCitedRecord } from '../model/ledger';
 import type { MessageId, Quotation } from '../model/quotation';
-import { quotationRef, recordFingerprint } from '../model/quotation';
+import { quotationRef } from '../model/quotation';
 import type {
   AuthoredMessageEntry,
   ChosenMessageEntry,
@@ -168,31 +168,14 @@ function AuthoredRow({
   });
   if (diverged !== null) throw new Error(diverged);
 
-  /* THE ROW AND THE LEDGER ARE THE SAME REGISTER, OR THIS DOES NOT RENDER.
-     Found by the blind cross-lineage review of round 5: the frame takes the rows
-     and the record register as independent props, so a caller could mint a row
-     from lars's record and render it inside a ledger whose `m14` says priya —
-     no cast, no forged field, and the body check passes because only the name
-     differs. The fingerprint is a checksum of the record the row was minted
-     from; it is never printed and never read for its value. A mismatch means
-     two registers disagree about one message, which is exactly the state in
-     which a name over words is a coin flip. */
-  const resolved = recordFingerprint({
-    id: attribution.messageId,
-    at: attribution.at,
-    actor: attribution.actor,
-    text: attribution.text,
-    origin: attribution.origin,
-    ...(attribution.room === null ? {} : { room: attribution.room }),
-  });
-  if (entry.mintedFrom !== resolved) {
-    throw new Error(
-      `TimelineRow: this row was built from a different record than the one this page holds for ${attribution.messageId}.\n` +
-        '  A row and the register it is rendered against have to be the same register; two records for one message id is not a near-miss.\n' +
-        `  minted from: ${entry.mintedFrom}\n` +
-        `  on this page: ${resolved}`,
-    );
-  }
+  /* THE ROW AND THE LEDGER ARE THE SAME REGISTER, OR THIS DOES NOT RENDER — and
+     that check now lives on the CITATION rather than on this row, so it holds at
+     all five boundaries that resolve one instead of at this one. `useAttribution`
+     recomputes the fingerprint from the record it is about to return and throws
+     on a mismatch; see `resolveCitation`. Round 5 put the checksum on
+     `AuthoredMessageEntry`, which protected the feed row and left the reply
+     line, the composer's banner, the receipt's provenance row and `<Quoted>`
+     resolving bare ids against whatever register they were under. */
 
   return (
     <div
@@ -214,6 +197,7 @@ function AuthoredRow({
           .filter(Boolean)
           .join(' ')}
         data-attribution={attribution.messageId}
+        data-truncates="the rail roster prints every name in full"
       >
         {attribution.actor}
       </div>
@@ -261,7 +245,10 @@ function AuthoredRow({
 function ReplyLine({ to }: { readonly to: Quotation }) {
   const reply = useAttribution(to, 'TimelineRow reply');
   return (
-    <span className={styles.reply}>
+    <span
+      className={styles.reply}
+      data-truncates={`the cited row, data-message-id=${reply.messageId}`}
+    >
       ↩ {reply.actor} {reply.at} · <span data-quoted={quotationRef(reply)}>{reply.text}</span>
     </span>
   );
@@ -280,22 +267,44 @@ function ChosenRow({
   readonly entry: ChosenMessageEntry;
   readonly onOpenTag?: (entryId: string) => void;
 }) {
+  /* THE CHOSEN ARM DERIVES ITS ID AND ITS TIME TOO.
+     Round 5 rebuilt the authored arm so that the id and the time came off the
+     record, and left this one printing `entry.id` and `entry.at` — the
+     caller-supplied copies. A `ChosenMessageEntry` has no name a renderer could
+     forge, which is why the arm exists; it still cited a message, and which
+     message it cited was a free string that no register checked, dispatched
+     straight into `onOpenTag`. A copy of a fact is a second source of truth for
+     it, on both arms.
+     A chosen record is NOT quotable, so this resolves as a citation rather than
+     as an attribution: the register proves the record exists and is the same one
+     this row was minted from, and refuses to hand back an `Attribution` for
+     page-authored words. */
+  const record = useCitedRecord(entry.citation, 'TimelineRow chosen');
+  if (record.origin !== 'chosen') {
+    throw new Error(
+      `TimelineRow chosen: ${record.id} is origin ${record.origin} on this page's record, but this row renders it as a page-authored answer.\n` +
+        '  A row that reports an act and a record that holds somebody’s words are not interchangeable.',
+    );
+  }
   return (
     <div
       className={rowClass(entry)}
       data-dimmed={entry.matchesFilter ? undefined : 'true'}
-      data-message-id={entry.id}
-      data-origin={entry.origin}
+      data-message-id={record.id}
+      data-origin={record.origin}
       data-row="message"
     >
-      <div className={styles.time}>{entry.at}</div>
+      <div className={styles.time}>{record.at}</div>
       <Glyph className={styles.glyphCell} decorative={false} state={entry.state} />
-      <div className={styles.actor} data-attribution="none" />
+      <div
+        className={styles.actor}
+        data-attribution="none"
+        data-truncates="there is no name here"
+      />
       <div className={styles.systemBody}>
         <SystemVoice className={styles.chosen} statement={entry.statement} />
-        {/* A chosen row cites no record — there is nothing to resolve against, and
-            nothing on it a name could be printed beside. */}
-        <RowTagButton entry={entry} messageId={entry.id} onOpenTag={onOpenTag} />
+        {/* The tag acts on the message the REGISTER says this row is about. */}
+        <RowTagButton entry={entry} messageId={record.id} onOpenTag={onOpenTag} />
       </div>
     </div>
   );

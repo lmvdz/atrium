@@ -13,6 +13,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 /** Walk up from the working directory until a marker file turns up, so paths
@@ -40,6 +41,102 @@ function code(source: string): string {
 }
 
 const AUDIT_SOURCE = code(readFileSync(find('apps/web/e2e/audit.ts'), 'utf8'));
+
+/* ---------------------------------------------------------------------------
+ * ENUMERATING A CONSTRUCT: PARSE IT, DO NOT GREP IT.
+ *
+ * Round 6, D2, and it is a THIRD failure mode for a source-grep beyond the two
+ * this file already records. The two known ones are "matched nothing" and
+ * "matched the wrong occurrence". This one is MATCHED A STRICT SUBSET OF THE
+ * SYNTAX: the guard enumeration read
+ *
+ *     /if\s*\([^)]*\)\s*continue/g
+ *
+ * and `[^)]*` cannot cross a `)`. Every guard whose CONDITION CONTAINS A CALL
+ * was therefore invisible to it — so inserting `if (effectiveOpacity(el) < 0.999)
+ * continue;` into the audit left 51 unit tests and 32 e2e contrast assertions
+ * green while a real 1.36:1 string went unreported, because the one legitimate
+ * guard elsewhere satisfied `guards.length > 0`. The ring-audit check twenty
+ * lines below had already learned this exact lesson in round 5 ("a `\([^)]*\)`
+ * condition match stops dead at that inner paren") and switched to a line scan.
+ * The lesson was applied to that check and to no other.
+ *
+ * A line scan is a parser substitute too. The instrument is now the TypeScript
+ * compiler's own parser: `if (…) continue` is an `IfStatement` whose `thenStatement`
+ * is (or wraps) a `ContinueStatement`, and the condition comes back as source
+ * text however it is spelled — a call, a nested paren, a ternary, a line break in
+ * the middle. `guardsIn` is exercised against a synthetic source carrying each
+ * of those spellings in `the enumerator sees every spelling of the construct`
+ * below, which is the corollary this round adds to CONVENTIONS: a source-grep
+ * that enumerates constructs must be able to see every spelling of the construct
+ * it enumerates.
+ * ------------------------------------------------------------------------- */
+function guardsIn(source: string): readonly string[] {
+  const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.Latest, true);
+  const out: string[] = [];
+  const isContinue = (node: ts.Statement | undefined): boolean => {
+    if (node === undefined) return false;
+    if (ts.isContinueStatement(node)) return true;
+    if (ts.isBlock(node)) return node.statements.length === 1 && isContinue(node.statements[0]);
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isIfStatement(node) &&
+      node.elseStatement === undefined &&
+      isContinue(node.thenStatement)
+    ) {
+      out.push(`if (${node.expression.getText(file).replace(/\s+/g, ' ')}) continue`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return out;
+}
+
+/**
+ * Every early `return` guarded by an `if`, as {condition, returns}.
+ *
+ * Same instrument as `guardsIn`, for the ring audit's shape — a guard there
+ * returns rather than continues, and what matters is WHAT it returns.
+ */
+function returnsIn(source: string): readonly { condition: string; returns: string }[] {
+  const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.Latest, true);
+  const out: { condition: string; returns: string }[] = [];
+  const returned = (node: ts.Statement | undefined): string | null => {
+    if (node === undefined) return null;
+    if (ts.isReturnStatement(node)) {
+      return node.expression === undefined
+        ? 'undefined'
+        : node.expression.getText(file).replace(/\s+/g, ' ');
+    }
+    if (ts.isBlock(node) && node.statements.length === 1) return returned(node.statements[0]);
+    return null;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIfStatement(node)) {
+      const value = returned(node.thenStatement);
+      if (value !== null) {
+        out.push({
+          condition: node.expression.getText(file).replace(/\s+/g, ' '),
+          returns: value,
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return out;
+}
+
+/** The audit is a template string evaluated in the page; parse what it contains. */
+function auditProgram(): string {
+  const body = AUDIT_SOURCE.match(/export const AUDIT = `([\s\S]*)`;\s*$/)?.[1];
+  if (body === undefined) throw new Error('e2e/audit.ts has no AUDIT program to parse');
+  /* `\`` and `\${` are escapes inside the template; the page sees them unescaped
+     and so must the parser. */
+  return body.replace(/\\`/g, '`').replace(/\\\$\{/g, '${');
+}
 
 /** Every CSS Module in the library, so a rule can be checked wherever it lives. */
 const MODULES: Readonly<Record<string, string>> = Object.fromEntries(
@@ -285,14 +382,46 @@ describe('a disabled control stays readable', () => {
      may skip an element that is not rendered at all (opacity 0); it may not
      skip one that is merely faded, because that is the case the rule covers.
      This is the same species as the prototype's sticky-footer whitelist. */
+  /* CATCHES the instrument, before the thing it measures.
+
+     The enumerator below decides which guards the rule applies to, so a
+     spelling it cannot see is a guard the rule does not cover — which is
+     precisely how `if (effectiveOpacity(el) < 0.999) continue;` shipped past a
+     check named "the audit harness does not exempt faded text". Every spelling
+     here is one a person would plausibly write, and the ones marked were
+     invisible to the regex this replaced. */
+  it('the enumerator sees every spelling of the construct it enumerates', () => {
+    const spellings = guardsIn(`
+      for (const el of xs) {
+        if (alpha === 0) continue;
+        if (effectiveOpacity(el) < 0.999) continue;          // a call in the condition
+        if ((alpha) < 0.5) continue;                          // a nested paren
+        if (alpha < (a ? 1 : 0)) continue;                    // a ternary with parens
+        if (
+          alpha
+          < 0.9
+        ) continue;                                           // spread over lines
+        if (alpha === 0) { continue; }                        // a braced body
+        if (alpha === 0) break;                               // NOT a continue
+        if (alpha === 0) continue; else alpha = 1;            // NOT an unconditional skip
+      }
+    `);
+    expect(spellings).toEqual([
+      'if (alpha === 0) continue',
+      'if (effectiveOpacity(el) < 0.999) continue',
+      'if ((alpha) < 0.5) continue',
+      'if (alpha < (a ? 1 : 0)) continue',
+      'if (alpha < 0.9) continue',
+      'if (alpha === 0) continue',
+    ]);
+  });
+
   it('the audit harness does not exempt faded text from the contrast rule', () => {
     /* Every `continue` in the audit's element loop, narrowed to the ones that
        consult opacity. There may be exactly one, and it may only skip an
        element that is not rendered at all. `< 0.999` — round 2's guard — fails
        here, and so does any other threshold somebody reaches for. */
-    const guards = [...AUDIT_SOURCE.matchAll(/if\s*\([^)]*\)\s*continue/g)]
-      .map((match) => match[0].replace(/\s+/g, ' '))
-      .filter((guard) => /alpha|opacity/i.test(guard));
+    const guards = guardsIn(auditProgram()).filter((guard) => /alpha|opacity/i.test(guard));
     /* EVERY such guard, not a fixed count of them. The round-3 version asserted
        the array equalled exactly one entry, which made it fail when round 4
        added a second loop with the identical legitimate guard — a test that
@@ -325,23 +454,25 @@ describe('a disabled control stays readable', () => {
     const ring = code(readFileSync(find('apps/web/e2e/gallery.spec.ts'), 'utf8'));
     const measure = ring.match(/const MEASURE = `([\s\S]*?)`;/)?.[1] ?? '';
     expect(measure, 'gallery.spec.ts has no ring MEASURE block').not.toBe('');
-    /* Line-wise rather than by regexing the whole condition: the guard reads
-       `parseFloat(style.outlineWidth) === 0`, and a `\([^)]*\)` condition match
-       stops dead at that inner paren — the first version of this check did
-       exactly that and passed against its own mutation, which is the same way
-       round 3's audit-harness grep matched a comment instead of the code. Every
-       line that consults the outline's presence must exist, and none of them may
-       return `null`: null means "no data", and no data is how a missing ring
-       reads as a passing one. */
-    const guards = measure
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => /outlineStyle|outlineWidth/.test(line));
+    /* PARSED, NOT SCANNED — the round-6 sweep of every source-grep in this repo
+       for the failure mode D2 named. This was a LINE scan, adopted in round 5
+       after the regex version was found to stop dead at the inner paren of
+       `parseFloat(style.outlineWidth) === 0`. A line scan is a parser substitute
+       with the same shape of hole one step further out: a guard wrapped across
+       two lines has no single line carrying both the condition and the `return`,
+       so the `return null` half becomes invisible exactly when the formatter
+       breaks the line. Every `if` in the MEASURE program whose condition
+       consults the outline's presence is enumerated from the AST, and none of
+       them may return `null`: null means "no data", and no data is how a missing
+       ring reads as a passing one. */
+    const guards = returnsIn(measure).filter((guard) =>
+      /outlineStyle|outlineWidth/.test(guard.condition),
+    );
     expect(guards.length, 'the ring audit no longer checks whether a ring exists').toBeGreaterThan(
       0,
     );
     expect(
-      guards.filter((line) => /return\s+null/.test(line)),
+      guards.filter((guard) => guard.returns === 'null').map((guard) => guard.condition),
       'the ring audit drops a control with no outline instead of failing it',
     ).toEqual([]);
     // and the ring-less case has somewhere to land, and something that fails on it

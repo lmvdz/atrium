@@ -33,8 +33,8 @@
  * already has a ref to, rather than mirroring the value into React state.
  * ------------------------------------------------------------------------- */
 
-import type { KeyboardEvent, Ref } from 'react';
-import { useCallback, useRef } from 'react';
+import type { ChangeEvent, KeyboardEvent, Ref } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAttribution } from '../model/ledger';
 import type { Quotation } from '../model/quotation';
 import { quotationRef } from '../model/quotation';
@@ -75,6 +75,29 @@ export function Composer({
      half-composed romaji on the record as `origin: 'typed'`. The invariant is
      about what reaches the record, not about which control reached it. */
   const composing = useRef(false);
+  /* THE FLAG IS OBSERVABLE, AND EVERY WAY OUT OF A COMPOSITION CLEARS IT.
+
+     Round 6: `composing.current` was set on `compositionstart` and cleared on
+     `compositionend` and NOWHERE ELSE. One missed `compositionend` — a blur
+     mid-candidate, an unmount, an IME that drops the event — left the flag stuck
+     true, and `send()` returns early when it is true. That is the primary write
+     path of the product bricked silently: no error, no indicator, and no
+     recovery short of a page reload. A one-way flag guarding a write is a latch,
+     and a latch needs every exit wired, not the happy one.
+
+     Four exits now: compositionend, blur, unmount, and a change event that says
+     the composition is over (`nativeEvent.isComposing === false`). The state is
+     mirrored to React state purely so it can be PAINTED — a control that is
+     refusing to send has to say it is refusing. */
+  const [composingNow, setComposingNow] = useState(false);
+  const setComposing = useCallback((value: boolean) => {
+    composing.current = value;
+    setComposingNow(value);
+  }, []);
+  /* Unmount is an exit. A ref that outlives its element does not, but the next
+     mount gets a fresh one — this is here so a component that is torn down
+     mid-composition cannot leave a pending timer or a stale flag behind. */
+  useEffect(() => () => setComposing(false), [setComposing]);
 
   /* The draft is the controlled value when there is one, and the live textarea
      otherwise. Reading the element is what keeps this component stateless while
@@ -144,8 +167,13 @@ export function Composer({
           <span className={styles.ctxbarPromise}>
             your next message resolves it — nothing is inferred
           </span>
+          {/* The scope is what gives way at a narrow frame; the PROMISE never
+              does. A clip owes the reader a route (CONVENTIONS), and the route
+              is the item's own card in Needs you, which is on the same screen
+              and states the label and the objective in full. */}
           <span
             className={styles.ctxbarIn}
+            data-truncates="the item's card in Needs you"
             title={`${binding.itemLabel} · in: ${binding.objective}`}
           >
             {binding.itemLabel} · in: {binding.objective}
@@ -187,13 +215,25 @@ export function Composer({
               ? `Answer ${binding.itemLabel} in your own words`
               : `Message #${roomName}`
           }
-          onChange={onChange === undefined ? undefined : (event) => onChange(event.target.value)}
-          onCompositionEnd={() => {
-            composing.current = false;
+          data-composing={composingNow ? 'true' : 'false'}
+          onBlur={() => setComposing(false)}
+          onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
+            /* A change whose native event says it is not part of a composition
+               is proof the composition is over, whatever `compositionend` did or
+               did not do. This is the exit that recovers from a dropped event
+               without waiting for a blur. */
+            const native = event.nativeEvent as Partial<InputEvent>;
+            /* `=== false`, not `!== true`. The platform saying "this input is not
+               part of a composition" is evidence; a change event that carries no
+               flag at all (a synthetic one, an older engine) is not, and treating
+               absence as evidence would clear the guard on exactly the platforms
+               whose composition events are least reliable. The guaranteed exits
+               are compositionend, blur and unmount; this one is the fast path. */
+            if (native.isComposing === false) setComposing(false);
+            onChange?.(event.target.value);
           }}
-          onCompositionStart={() => {
-            composing.current = true;
-          }}
+          onCompositionEnd={() => setComposing(false)}
+          onCompositionStart={() => setComposing(true)}
           onKeyDown={keyDown}
           placeholder={
             binding.mode === 'bound'
@@ -210,7 +250,20 @@ export function Composer({
               { value, readOnly: onChange === undefined })}
         />
         <div className={styles.cboxRight}>
-          <button className="atr-btn" onClick={send} type="button">
+          <button
+            className="atr-btn"
+            onClick={send}
+            /* KEEP THE COMPOSITION ALIVE ACROSS THE CLICK. Pressing a button
+               blurs the textarea, which ends the composition, which clears the
+               flag — so by the time `click` fires the guard has nothing to see
+               and the half-composed buffer goes on the record as `origin:
+               'typed'`. The round-6 critic reproduced exactly that on a real
+               CDP composition. Suppressing the default on `mousedown` leaves
+               focus (and the composition) where it was, so the guard is still
+               true when the send is attempted. */
+            onMouseDown={(event) => event.preventDefault()}
+            type="button"
+          >
             Send
           </button>
         </div>
@@ -218,8 +271,21 @@ export function Composer({
 
       <div className={styles.cfoot}>
         <span>
-          <span className={styles.key}>↵</span> send · <span className={styles.key}>⇧↵</span>{' '}
-          newline
+          {/* THE REFUSAL SAYS SO. A send that is being declined because an input
+              method is mid-candidate is indistinguishable, from the outside,
+              from a send that is broken — which is how a stuck flag went from a
+              bug to an unrecoverable one. */}
+          {composingNow ? (
+            <span data-composing-note="true">
+              choosing a candidate — <span className={styles.key}>↵</span> accepts it; the message
+              is not sent until the composition ends
+            </span>
+          ) : (
+            <>
+              <span className={styles.key}>↵</span> send · <span className={styles.key}>⇧↵</span>{' '}
+              newline
+            </>
+          )}
         </span>
         <span className={styles.cfootSpacer} />
         <span data-composer-note="true">{footNote}</span>
@@ -246,7 +312,18 @@ function ReplyBanner({ to, onCancel }: { readonly to: Quotation; readonly onCanc
       <span data-attribution={reply.messageId}>
         {reply.actor} {reply.at}
       </span>
-      <span className={styles.ctxbarIn} data-quoted={quotationRef(reply)} title={reply.text}>
+      {/* TRUNCATED QUOTED WORDS, WITH A ROUTE. Nothing in CONVENTIONS governed
+          this until round 6, and a quotation is the one string on the page where
+          a hover-only remainder is least defensible: the words are somebody's
+          own and the reader is being asked to answer them. The route is exact —
+          the cited row is in this feed, `data-message-id` names it, and
+          `data-quoted` already carries the citation. */}
+      <span
+        className={styles.ctxbarIn}
+        data-quoted={quotationRef(reply)}
+        data-truncates={`the cited row, data-message-id=${reply.messageId}`}
+        title={reply.text}
+      >
         “{reply.text}”
       </span>
       <button

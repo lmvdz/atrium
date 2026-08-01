@@ -27,10 +27,11 @@ import type {
   ComposerBinding,
   MessageEntry,
   MessageRecord,
+  ObjectiveRecord,
   SurfaceId,
   TimelineEntry,
 } from '../src/components';
-import { messageEntry } from '../src/components';
+import { messageEntry, ReceiptView, slot } from '../src/components';
 import * as f from './gallery/fixtures';
 import { RoomFrame } from './gallery/RoomFrame';
 
@@ -61,6 +62,15 @@ export function RoomSession() {
      control that says nothing — which is the failure this page exists to make
      impossible to ship again. */
   const [note, setNote] = useState('nothing is inferred from a message unless you bind it');
+  /* THE STATE BEHIND THE THREE HANDLERS THE FRAME NEVER FORWARDED. Round 6's
+     critic clicked all four rail room chips, both objective triangles and all
+     ten object rows and measured no change to `documentElement.className`, to
+     `body.innerHTML.length` or to `innerText`. The props existed on `Rail`,
+     `StateLens` and `ObjectRow` the whole time; what did not exist was a
+     consumer holding the state they change. */
+  const [room, setRoom] = useState(f.ROOM.name);
+  const [objectives, setObjectives] = useState<readonly ObjectiveRecord[]>(f.OBJECTIVES);
+  const [receiptId, setReceiptId] = useState<string | null>(null);
 
   const attention = useMemo(
     () => f.ATTENTION.filter((item) => !actedOn.includes(item.id)),
@@ -105,6 +115,26 @@ export function RoomSession() {
     [sent.length],
   );
 
+  const receipt =
+    receiptId === null
+      ? undefined
+      : slot(
+          <ReceiptView
+            key={receiptId}
+            onBack={() => {
+              setReceiptId(null);
+              setNote('back to current state · the receipt is a view, not a mode');
+            }}
+            onJump={(messageId: string) => {
+              setNote(`jump to ${messageId} · the id came off the record, not off the row`);
+            }}
+            onReopen={(id: string) => {
+              setNote(`reopened ${id} · corrections are events, not erasures`);
+            }}
+            receipt={f.receiptFor(receiptId)}
+          />,
+        );
+
   return (
     <RoomFrame
       attention={attention}
@@ -116,6 +146,37 @@ export function RoomSession() {
       focused={focused}
       humans={f.HUMANS}
       handlers={{
+        onSelectRoom: (roomId: string) => {
+          const chosen = f.ROOMS.find((candidate) => candidate.id === roomId);
+          setRoom(chosen?.name ?? f.ROOM.name);
+          setNote(
+            `switched to #${chosen?.name ?? roomId} · #25 owns the feed behind the switch; the frame follows it now`,
+          );
+        },
+        onToggleObjective: (objectiveId: string) => {
+          setObjectives((current) =>
+            current.map((objective) =>
+              objective.id === objectiveId ? { ...objective, open: !objective.open } : objective,
+            ),
+          );
+          const wasOpen = objectives.find((o) => o.id === objectiveId)?.open === true;
+          setNote(
+            `${wasOpen ? 'collapsed' : 'expanded'} ${objectiveId} · a collapsed objective hides objects, so it has to be openable`,
+          );
+        },
+        onOpenReceipt: (objectId: string) => {
+          setReceiptId(objectId);
+          setNote(`opened the receipt for ${objectId} · what happened, and what it rests on`);
+        },
+        onJumpToMessage: (messageId: string) => {
+          setNote(`revealed ${messageId} · the trace resolved it against this room's register`);
+        },
+        onShowRest: () => {
+          setFocused('current-state');
+          setNote(
+            'the rest of the room is in Current state — the trailer counts what sits outside your list',
+          );
+        },
         composerValue: draft,
         onComposerChange: setDraft,
         onSend: send,
@@ -182,10 +243,11 @@ export function RoomSession() {
       label="home"
       lastCheck="12:29"
       messages={records}
-      objectives={f.OBJECTIVES}
+      objectives={objectives}
       objects={f.OBJECTS}
       openAttentionId={openId}
-      room={f.ROOM}
+      receipt={receipt}
+      room={{ ...f.ROOM, name: room }}
       rooms={f.ROOMS}
       trailer={f.TRAILER}
       updatedAt="13:41"

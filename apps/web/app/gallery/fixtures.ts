@@ -17,6 +17,7 @@ import type {
   ComposerBinding,
   CorrectionEntry,
   CrossRoomJumpRecord,
+  HappenedKind,
   HumanSummary,
   Maybe,
   MessageEntry,
@@ -36,6 +37,8 @@ import type {
   TimelineEntry,
 } from '../../src/components/model';
 import {
+  citationFrom,
+  glyphFor,
   messageEntry,
   quotationFrom,
   rationale,
@@ -87,6 +90,21 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'lars',
     text: 'This was an actual call, not priya thinking out loud.',
     origin: 'typed',
+  },
+  /* A message that genuinely lives in another room. It has no row in this feed —
+     the register is not the feed — and it is what a cross-room source, a
+     cross-room provenance row and a `msg:…@identity-service` token are rendered
+     from. Before round 6 the cross-room label came from a `room` carried beside
+     the id on `SourceRef`/`ProvenanceEntry.jump`, and for `m10` it was simply
+     false: the receipt printed "in #identity-service" over a message this room
+     holds and whose record says so. */
+  'm-legal': {
+    id: 'm-legal',
+    at: '09:11',
+    actor: 'priya',
+    text: 'Does legal approve 90-day retention of users_legacy?',
+    origin: 'seeded',
+    room: 'identity-service',
   },
   m17: {
     id: 'm17',
@@ -174,6 +192,15 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
  * here does not degrade, it throws.
  */
 export const RECORDS: readonly MessageRecord[] = Object.values(MESSAGES);
+
+/* A reference to a message of any origin, checked against this register. `cite`
+   and `quote` are the two doors: `quote` additionally proves the words are the
+   person's own, and refuses a page-authored record. */
+function cite(id: string) {
+  const message = MESSAGES[id];
+  if (message === undefined) throw new Error(`fixture: no message ${id}`);
+  return citationFrom(message);
+}
 
 function quote(id: string) {
   const message = MESSAGES[id];
@@ -349,7 +376,7 @@ export const ATTENTION: readonly AttentionItem[] = [
       'no automated path may drop a table that still takes live reads, and legal has not answered on retention — only a maintainer can authorise it',
     ),
     facts: ['proposed by justin 12:44', 'destructive', 'blocks Q1'],
-    source: { messageId: 'm17', room: null },
+    source: cite('m17'),
     actions: [
       { id: 'authorise', label: 'Authorise the drop', emphasis: 'primary', statement: null },
       {
@@ -390,7 +417,7 @@ export const ATTENTION: readonly AttentionItem[] = [
       'it is a decision routed to you — decisions never auto-accept; the prior call was priya’s at 11:20 and it is still on the record below',
     ),
     facts: ['proposed by priya 11:02', 'confidence .71'],
-    source: { messageId: 'm10', room: 'identity-service' },
+    source: cite('m10'),
     actions: [
       {
         id: 'hold',
@@ -415,7 +442,7 @@ export const ATTENTION: readonly AttentionItem[] = [
       'you opened the question and legal answers to you — nobody else in this room can carry it, and it has been open 3h',
     ),
     facts: ['asked by priya 09:11', 'open 3h'],
-    source: { messageId: 'm2', room: null },
+    source: cite('m-legal'),
     actions: [
       { id: 'answer', label: 'Answer it', emphasis: 'primary', statement: null },
       { id: 'reassign', label: 'Ask priya instead', emphasis: 'ghost', statement: null },
@@ -661,14 +688,21 @@ const PROVENANCE: readonly ProvenanceEntry[] = [
   {
     id: 'p1',
     excerpt: quote('m10'),
-    note: 'the proposal, as she wrote it in #identity-service',
-    jump: { messageId: 'm10', room: 'identity-service' },
+    /* The note no longer names a room. The room is a fact about the record and
+       the row reads it from there — this note used to say #identity-service
+       while `m10`'s record says it is in this room, which is what "three facts
+       about one row from three sources" buys you. */
+    note: 'the proposal, as she wrote it',
   },
   {
     id: 'p2',
     excerpt: quote('m21'),
     note: 'typed into the bound composer — recorded as the answer, not interpreted from it',
-    jump: { messageId: 'm21', room: null },
+  },
+  {
+    id: 'p3',
+    excerpt: quote('m-legal'),
+    note: 'the open question this decision waits on',
   },
 ];
 
@@ -676,7 +710,6 @@ const CORRECTIONS: readonly CorrectionEntry[] = [
   {
     id: 'c1',
     heading: 'ANSWERED · PROPOSAL → DECISION',
-    who: 'lars',
     at: '13:09',
     was: systemStatement('Proposal: cut over Friday 1 Aug and drop the legacy tokens with it'),
     now: systemStatement(
@@ -686,13 +719,12 @@ const CORRECTIONS: readonly CorrectionEntry[] = [
     reason: null,
     link: {
       label: 'the proposal it replaced is still in the room →',
-      ref: { messageId: 'm10', room: 'identity-service' },
+      ref: cite('m10'),
     },
   },
   {
     id: 'c2',
     heading: 'REOPENED · PRIOR ANSWER KEPT',
-    who: 'lars',
     at: '13:14',
     was: systemStatement('Answer of 13:09'),
     now: systemStatement('pending again — the previous answer stays on the record'),
@@ -704,7 +736,7 @@ const CORRECTIONS: readonly CorrectionEntry[] = [
     reason: quote('m14'),
     link: {
       label: 'the superseded answer is still in the room →',
-      ref: { messageId: 'm-chosen', room: null },
+      ref: cite('m-chosen'),
     },
   },
 ];
@@ -726,39 +758,36 @@ export const RECEIPT: ReceiptRecord = {
     {
       id: 'h1',
       kind: 'claim',
-      who: 'priya',
       at: '11:02',
-      statement: systemStatement('proposed the cutover date'),
+      /* The actor is INSIDE the sentence. There is no `who` field to render in an
+         attribution column beside it — see `HappenedLine`. */
+      statement: systemStatement('priya proposed the cutover date'),
     },
     {
       id: 'h2',
       kind: 'verified',
-      who: 'the migration harness',
       at: '11:57',
-      statement: systemStatement('parity #415 passed with 0 diffs'),
+      statement: systemStatement('the migration harness ran parity #415 — 0 diffs'),
     },
     {
       id: 'h3',
       kind: 'accepted',
-      who: 'lars',
       at: '13:09',
       statement: systemStatement(
-        'answered it directly — the resolution was recorded from the answer, not interpreted from it',
+        'lars answered it directly — the resolution was recorded from the answer, not interpreted from it',
       ),
     },
     {
       id: 'h4',
       kind: 'failed',
-      who: 'the migration harness',
       at: '12:29',
-      statement: systemStatement('parity #418 returned 12 checksum diffs'),
+      statement: systemStatement('the migration harness ran parity #418 — 12 checksum diffs'),
     },
     {
       id: 'h5',
       kind: 'gate',
-      who: 'lars',
       at: '13:14',
-      statement: systemStatement('reopened it — pending again'),
+      statement: systemStatement('lars reopened it — pending again'),
     },
   ],
   provenance: PROVENANCE,
@@ -768,6 +797,60 @@ export const RECEIPT: ReceiptRecord = {
     'already reopened at 13:14 · the answer of 13:09 is still on the record and still linked below · corrections are events, not erasures',
 };
 
+/**
+ * THE RECEIPT FOR ANY OBJECT ON THIS PAGE.
+ *
+ * BRIEF concept 5: every rendered derived object gets an inspect affordance from
+ * day one. `ObjectRow` has had the affordance since round 1 and `/` had nothing
+ * to open, so all ten rows were buttons that did nothing — which is round 2's
+ * "a screen of controls that did nothing", surviving in the one place the fix
+ * was not applied.
+ *
+ * P1 has the hand-written receipt with real provenance and a real correction
+ * chain. Every other object gets one DERIVED FROM THE OBJECT: its own state, its
+ * own facts, restated in system voice. A derived receipt says less than a
+ * curated one and says nothing that is not on the object — which is the honest
+ * version of "every object is inspectable", as against a button that opens
+ * somebody else's record.
+ */
+export function receiptFor(objectId: string): ReceiptRecord {
+  if (objectId === RECEIPT.id) return RECEIPT;
+  const object = OBJECTS.find((candidate) => candidate.id === objectId);
+  if (object === undefined) throw new Error(`fixture: no state object ${objectId}`);
+  const kind: HappenedKind =
+    object.state.verification === 'failed'
+      ? 'failed'
+      : object.state.verification === 'verified'
+        ? 'verified'
+        : object.state.verification === 'accepted'
+          ? 'accepted'
+          : object.state.owedToViewer
+            ? 'gate'
+            : object.state.verification === 'open'
+              ? 'question'
+              : 'claim';
+  return {
+    id: object.id,
+    state: object.state,
+    title: object.text,
+    status: [object.kind.toUpperCase(), object.state.verification.replace('_', ' ')],
+    /* One line per fact the row already shows, each tagged with the object's own
+       epistemic kind. Nothing here is invented: the words are the words on the
+       object, in system voice, and there is no actor field to fill. */
+    happened: object.facts.map((fact, index) => ({
+      id: `${object.id}-h${index}`,
+      kind,
+      at: '—',
+      statement: systemStatement(fact),
+    })),
+    provenance: [],
+    corrections: [],
+    reopenable: glyphFor(object.state) !== '✓',
+    reopenNote:
+      'this receipt is derived from the object itself — it carries no excerpts, because nothing on this object cites a message',
+  };
+}
+
 /* --- cross-room jump ----------------------------------------------------- */
 
 export const JUMP: CrossRoomJumpRecord = {
@@ -775,7 +858,7 @@ export const JUMP: CrossRoomJumpRecord = {
   why: systemStatement(
     'you followed the source of ◆ P1 — #users-migration owes it to you, this room holds the message',
   ),
-  targetMessage: 'm10',
+  targetMessage: cite('m10'),
 };
 
 /* --- composer ------------------------------------------------------------ */

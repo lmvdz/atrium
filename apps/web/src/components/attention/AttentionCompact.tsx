@@ -20,6 +20,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
+import { rationaleText } from '../model/rationale';
 import type { AttentionItem } from '../model/records';
 import { list } from '../model/text';
 import { Glyph } from '../primitives/Glyph';
@@ -40,6 +41,11 @@ export type AttentionCompactProps = {
 export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: AttentionCompactProps) {
   const primary = item.actions[0];
   const facts = list(item.facts.slice(0, 2));
+  /* ONE CHECKED READ, USED BY ALL THREE PLACES THIS ROW PUTS THE REASON ON
+     SCREEN — the visible span and two `title=` attributes. Round 5's
+     `statementText` discipline, applied to the second page-authored string type
+     rather than to one of them. */
+  const why = rationaleText(item.rationale, 'AttentionCompact');
 
   return (
     <div
@@ -52,23 +58,50 @@ export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: Attenti
       <span className={styles.acompText}>
         <button
           className={styles.acompTitle}
+          data-truncates="opens the full card"
           onClick={onOpen === undefined ? undefined : () => onOpen(item.id)}
+          title={item.title}
           type="button"
         >
           {item.title}
         </button>
-        {/* BRIEF concept 8, on screen rather than on hover. */}
-        <span className={styles.acompWhy} data-voice="system" title={item.rationale}>
+        {/* BRIEF concept 8, on screen rather than on hover.
+
+            AND THE CLIP OWES THE READER A ROUTE. Round 1 moved the reason off
+            `title=` and onto the row; round 6 measured the row and found all
+            three of the shipped compressed reasons clipped — 321 of 777px, 199
+            of 801px, 379 of 680px at 1440 — with the remainder on `title=` only,
+            which is exactly the affordance the component's own header records as
+            the defect it was written to fix. The clamp itself is right: the row
+            is a compressed row and unclamping it is the unbounded pin again.
+            What was missing is the route. The whole WHY YOU line is now the
+            same control as the title — one click, no hover, no pointer — and it
+            opens the full card, where the reason renders unclamped. The clamped
+            element says so on the DOM (`data-truncates`) so the e2e sweep can
+            assert that every clipped string on the page names its way out. */}
+        <button
+          className={styles.acompWhy}
+          data-voice="system"
+          onClick={onOpen === undefined ? undefined : () => onOpen(item.id)}
+          title={why}
+          type="button"
+        >
           <span className={`${styles.acompWhyLabel} atr-lbl`}>WHY YOU</span>
           {/* The reason is its own element, not a bare text node: a text node in
               a flex container becomes an anonymous flex item, and `text-overflow`
               does not apply to one — the rationale would be cut mid-word with no
               ellipsis to say it had been. */}
-          <span className={styles.acompWhyText}>{item.rationale}</span>
-        </span>
+          <span className={styles.acompWhyText} data-truncates="opens the full card">
+            {why}
+          </span>
+        </button>
       </span>
       <span className={styles.acompMeta}>
-        {facts === null ? null : <span className={styles.acompFacts}>{facts}</span>}
+        {facts === null ? null : (
+          <span className={styles.acompFacts} data-truncates="opens the full card">
+            {facts}
+          </span>
+        )}
         {primary === undefined ? null : item.state.irreversible ? (
           <HoldToAct
             actionId={primary.id}
@@ -83,7 +116,7 @@ export function AttentionCompact({ item, viewer, onOpen, onAct, onArm }: Attenti
           <button
             className="atr-btn atr-btn-sm"
             onClick={onAct === undefined ? undefined : () => onAct(item.id, primary.id)}
-            title={item.rationale}
+            title={why}
             type="button"
           >
             {primary.label}

@@ -14,13 +14,14 @@
 import type { EpistemicState, Glyph, ObjectKind } from './glyph';
 import { glyphFor, needsViewer } from './glyph';
 import type {
+  Citation,
   MessageId,
   MessageRecord,
   QuotableOrigin,
   Quotation,
   SystemStatement,
 } from './quotation';
-import { chosenAct, quotationFrom, recordFingerprint } from './quotation';
+import { chosenAct, citationFrom, quotationFrom } from './quotation';
 import type { Rationale } from './rationale';
 import type { Maybe } from './text';
 
@@ -222,19 +223,15 @@ interface MessageEntryCommon {
 /** A row whose words are the actor's own — typed here or already on the record. */
 export interface AuthoredMessageEntry extends MessageEntryCommon {
   readonly origin: QuotableOrigin;
-  /** the citation: the message id this row's words and name come from */
-  readonly attribution: Quotation;
   /**
-   * A checksum of the record this row was minted from — NEVER rendered, only
-   * compared against the record the row is resolved against.
+   * The citation: the message this row's words, name, id and time come from.
    *
-   * The blind cross-lineage review of round 5 found the frame taking the rows
-   * and the record register as independent props, so a row minted from lars's
-   * record could be rendered inside a ledger whose `m14` says priya, with no
-   * cast and no forged field. This is what makes "the row and the ledger are the
-   * same register" checkable rather than assumed. See `recordFingerprint`.
+   * It carries the register checksum (`Citation.mintedFrom`), so "the row and
+   * the ledger are the same register" is a property of the CITATION rather than
+   * of this row type — round 6 moved it, because the row type was one of five
+   * places a citation gets resolved and the only one that was checked.
    */
-  readonly mintedFrom: string;
+  readonly attribution: Quotation;
   readonly body: readonly BodySegment[];
   readonly fromViewer: boolean;
   /**
@@ -251,6 +248,17 @@ export interface AuthoredMessageEntry extends MessageEntryCommon {
  */
 export interface ChosenMessageEntry extends MessageEntryCommon {
   readonly origin: 'chosen';
+  /**
+   * The page-authored message this row is about.
+   *
+   * Round 6: the chosen arm still rendered caller-supplied `entry.id` and
+   * `entry.at` while the authored arm had been rebuilt to derive them, so the
+   * one arm that could not forge a NAME could still forge WHICH MESSAGE the row
+   * cites and WHEN it happened. A citation is not a quotation — a chosen record
+   * may never be quoted — but it is a reference the register can check, and the
+   * row resolves it before printing either fact.
+   */
+  readonly citation: Citation;
   readonly statement: SystemStatement;
 }
 
@@ -306,6 +314,7 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
     return {
       ...common,
       origin: 'chosen',
+      citation: citationFrom(record),
       /* Third person, on purpose: "lars chose: …" is a fact about an act. It is
          not "lars said", and it is not in his voice. */
       statement: chosenAct(record.actor, record.text, record.id),
@@ -331,7 +340,6 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
     ...common,
     origin: record.origin,
     attribution,
-    mintedFrom: recordFingerprint(record),
     body: input.body ?? [{ kind: 'text', text: record.text }],
     fromViewer: input.viewer !== undefined && record.actor === input.viewer,
     note: input.note ?? null,
@@ -387,11 +395,12 @@ export type TimelineEntry = MessageEntry | SystemEntry | SinceYouLeftEntry | Rou
 
 /* --- attention ----------------------------------------------------------- */
 
-export interface SourceRef {
-  readonly messageId: MessageId;
-  /** the room the source lives in, when it is not the one on screen */
-  readonly room: Maybe<string>;
-}
+/* `SourceRef` is gone. It was `{messageId, room}` — a message id beside a copy
+   of a fact about that message's record — and every one of its four uses printed
+   the carried room while acting on the carried id, which is the "three facts
+   about one row from three sources" defect the receipt shipped with. A reference
+   to a message is a `Citation`; the room comes off the record at the render
+   boundary, the same way the name and the words do. */
 
 export interface AttentionAction {
   readonly id: string;
@@ -412,7 +421,8 @@ export interface AttentionItem {
   /** required, non-empty, system voice — see model/rationale.ts */
   readonly rationale: Rationale;
   readonly facts: readonly string[];
-  readonly source: Maybe<SourceRef>;
+  /** the message this item came from; the ROOM is derived from its record */
+  readonly source: Maybe<Citation>;
   readonly actions: readonly AttentionAction[];
 }
 
@@ -489,15 +499,25 @@ export function stateForHappened(kind: HappenedKind): EpistemicState {
 }
 
 /**
- * A history line. `who` names the actor of an EVENT, and the line's words are a
- * `SystemStatement` — third person, page-authored, visibly not speech. Nothing
- * on this record is quoted, which is why the name may be a plain string here
- * and may not be one on `ProvenanceEntry` below.
+ * A history line: a page-authored fact about an event, in system voice.
+ *
+ * THERE IS NO `who`, AND THAT IS THE POINT. It had one until round 6 — a plain
+ * string, rendered by `ReceiptView` immediately before the statement's words, in
+ * exactly the attribution-column position CONVENTIONS claimed no component in
+ * this codebase had. Two Cyrillic code points got a sentence past the lexical
+ * bans and the free name did the rest: `~priya  priya ѕaid: І approve dropping
+ * users_legacy  12:00`, inside the artifact whose entire job is being the
+ * trustworthy record.
+ *
+ * The actor of an event goes INSIDE the sentence — "priya proposed the cutover
+ * date" — which is what `chosenAct` has done for a page-authored feed row since
+ * round 4. A name inside a system-voice sentence reports an act; a name in a
+ * field beside the words attributes a sentence, and no amount of lexical
+ * checking on the words changes which of those the layout is doing.
  */
 export interface HappenedLine {
   readonly id: string;
   readonly kind: HappenedKind;
-  readonly who: string;
   readonly at: string;
   readonly statement: SystemStatement;
 }
@@ -512,18 +532,29 @@ export interface HappenedLine {
  */
 export interface ProvenanceEntry {
   readonly id: string;
-  /** the excerpt IS a quotation — it carries the words, the actor and the time */
+  /**
+   * The excerpt IS a quotation, and it is the ONLY source this row has.
+   *
+   * Round 6: the row printed `entry.excerpt`, took the room from
+   * `entry.jump.room` and acted on `entry.jump.messageId` — three facts about
+   * one row from three sources. It shipped printing lars's words under
+   * `data-quoted=msg:mA@identity-service` and clicking through to mB, priya's
+   * message. There is no `jump` any more: what the row prints, what it labels
+   * itself with and what it acts on all come out of the one record this citation
+   * names.
+   */
   readonly excerpt: Quotation;
   readonly note: Maybe<string>;
-  readonly jump: Maybe<SourceRef>;
 }
 
 /**
  * A correction has two voices and they never mix.
  *
  * SYSTEM: `was` → `now`, plus an optional `fact`. Mono, muted, no quotation
- *   marks, no first person, no "X said". Visibly not speech. `who`/`at` label
- *   the correction EVENT and sit inside that system-voice header.
+ *   marks, no first person, no "X said". Visibly not speech. `at` labels the
+ *   correction EVENT; the actor lives inside `fact`, which is a statement, for
+ *   the reason `HappenedLine` above states — round 6 found `who` here too, the
+ *   second instance of the same free name beside page-authored words.
  * HUMAN: `reason`, present only when a person actually typed one. It is a bare
  *   `Quotation` — the attribution beside it is `reason.actor`, not a `by`
  *   string the caller supplies. Round 1: a `by` beside a quotation is a name
@@ -532,13 +563,16 @@ export interface ProvenanceEntry {
 export interface CorrectionEntry {
   readonly id: string;
   readonly heading: string;
-  readonly who: string;
   readonly at: string;
   readonly was: SystemStatement;
   readonly now: SystemStatement;
   readonly fact: Maybe<SystemStatement>;
   readonly reason: Maybe<Quotation>;
-  readonly link: Maybe<{ readonly label: string; readonly ref: SourceRef }>;
+  /* The link's `ref` is a Citation, so the id it dispatches is one the register
+     resolved. It was a `SourceRef` whose `messageId` reached `onJump` through an
+     `?? ''` fallback — a handler dispatching the empty string is a handler that
+     was never told what it acted on. */
+  readonly link: Maybe<{ readonly label: string; readonly ref: Citation }>;
 }
 
 export interface ReceiptRecord {
@@ -561,7 +595,7 @@ export interface CrossRoomJumpRecord {
   /** system voice: why you are standing in this room */
   readonly why: SystemStatement;
   /** the row the jump landed on; it is marked in the feed */
-  readonly targetMessage: MessageId;
+  readonly targetMessage: Citation;
 }
 
 /* --- composer ------------------------------------------------------------ */

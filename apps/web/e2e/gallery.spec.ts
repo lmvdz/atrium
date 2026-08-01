@@ -31,6 +31,16 @@ const WIDTHS = [1124, 1280, 1340, 1440] as const;
 
 const THEMES = ['light', 'dark'] as const;
 
+/**
+ * The one thing the ring sweep is allowed to skip, named once.
+ *
+ * It is a constant so the assertion below can be written against the RESIDUE
+ * rather than against a literal spelling of the set's only member — round 6
+ * found both branches of `toEqual(skipped.size === 0 ? [] : [<that literal>])`
+ * were tautologies.
+ */
+const DEV_OVERLAY = 'nextjs-portal (next dev overlay)';
+
 test.describe('gallery', () => {
   test.skip(
     !browserAvailable(),
@@ -205,13 +215,49 @@ test.describe('gallery', () => {
           ).toBeGreaterThanOrEqual(3);
           expect(audit.graphicsChecked).toBeGreaterThan(10);
 
+          /* THE PSEUDO SWEEP HAS A DENOMINATOR NOW.
+
+             Round 6: `pseudoChecked` had no floor and had never measured
+             anything — 1 on three of four routes (the composer placeholder), 0
+             on the fourth, and breaking the placeholder lookup left the whole
+             harness green. A count nothing is asserted against is a count that
+             cannot fail. What the sweep OWES is every placeholder the DOM
+             holds; that is the number, and it is checked against the DOM
+             rather than against a constant somebody guessed. */
+          expect(
+            audit.placeholdersFound,
+            `the ::placeholder sweep reached ${audit.placeholdersFound} of the ${audit.placeholdersInDom} visible placeholders on this page`,
+          ).toBe(audit.placeholdersInDom);
+          expect(audit.pseudo.placeholder, 'a placeholder was found but not measured').toBe(
+            audit.placeholdersFound,
+          );
+          expect(audit.placeholdersInDom, 'this route renders no composer at all').toBeGreaterThan(
+            0,
+          );
+
+          /* THE OVERFLOW SWEEP HAS ONE TOO. `clipped()` exempted any element
+             with a non-visible-overflow ancestor, and `.app` is `overflow:
+             hidden` — so the audit inspected 33 of 2542 elements on /gallery
+             and 12 of 476 on /, and a 3000px-wide element in a 1124px viewport
+             passed all four overflow assertions. The sweep reports what it
+             looked at; the floor is proportional to what the contrast sweep
+             found, because both walk `body *`. */
+          expect(
+            audit.overflow.overflowChecked,
+            `the overflow sweep evaluated ${audit.overflow.overflowChecked} elements while the text sweep saw ${audit.elementsChecked}`,
+          ).toBeGreaterThanOrEqual(audit.elementsChecked);
+          expect(
+            audit.overflow.clippersChecked,
+            'no box with a non-visible overflow was inspected for hidden horizontal scroll',
+          ).toBeGreaterThan(0);
+
           // Reported so the numbers land in the run log, not just the assertions.
           console.info(
-            `${route.path} ${theme} @ ${width}: ${audit.elementsChecked} text elements · ${audit.pseudoChecked} pseudo-element strings · smallest font ${audit.smallestFont}px · lowest contrast ${audit.lowestContrast}:1 · graphics [${audit.graphicKinds.join(', ')}] lowest ${audit.lowestGraphic}:1 · scrollWidth ${audit.overflow.documentScrollWidth} / clientWidth ${audit.overflow.documentClientWidth}`,
+            `${route.path} ${theme} @ ${width}: ${audit.elementsChecked} text elements · pseudo before ${audit.pseudo.before} after ${audit.pseudo.after} placeholder ${audit.pseudo.placeholder}/${audit.placeholdersInDom} · smallest font ${audit.smallestFont}px · lowest contrast ${audit.lowestContrast}:1 · graphics [${audit.graphicKinds.join(', ')}] lowest ${audit.lowestGraphic}:1 · geometry ${audit.overflow.overflowChecked} evaluated, ${audit.overflow.overflowContained} contained, ${audit.overflow.clippersChecked} clippers · scrollWidth ${audit.overflow.documentScrollWidth} / clientWidth ${audit.overflow.documentClientWidth}`,
           );
 
           expect(audit.overflow.widest, 'unclipped elements past the right edge').toEqual([]);
-          expect(audit.overflow.scrollingFrames, 'a frame scrolls sideways').toEqual([]);
+          expect(audit.overflow.scrollingFrames, 'a box hides horizontal overflow').toEqual([]);
           expect(audit.overflow.documentScrollWidth).toBeLessThanOrEqual(
             audit.overflow.documentClientWidth,
           );
@@ -468,7 +514,7 @@ test.describe('gallery', () => {
         const one = (await page.evaluate(MEASURE)) as Ring | null;
         if (one === null) continue;
         if (one.devOverlay === true) {
-          skipped.add('nextjs-portal (next dev overlay)');
+          skipped.add(DEV_OVERLAY);
           continue;
         }
         if (one.already) {
@@ -485,10 +531,20 @@ test.describe('gallery', () => {
       console.info(
         `focus ring ${theme}: ${focusable} focusable controls in the DOM · ${measured.length} reached by Tab, to exhaustion · skipped [${[...skipped].join(', ')}]`,
       );
+      /* ROUND 6: BOTH BRANCHES OF THIS WERE TAUTOLOGIES.
+         It read `toEqual(skipped.size === 0 ? [] : ['nextjs-portal …'])`, and
+         that string is the only value ever added to the set — so the empty case
+         compared `[]` with `[]` and the non-empty case compared the set with a
+         literal spelling of its only possible member. Nothing about the
+         assertion could fail, which is the same shape as a coverage guard one
+         registered graphic can satisfy: the carve-out cannot widen because the
+         check cannot see it widen. What is asserted is the RESIDUE — anything
+         skipped that is not the dev overlay — so a second carve-out fails here
+         whatever it is called. */
       expect(
-        [...skipped],
+        [...skipped].filter((what) => what !== DEV_OVERLAY),
         'the ring sweep skipped something other than the dev server overlay',
-      ).toEqual(skipped.size === 0 ? [] : ['nextjs-portal (next dev overlay)']);
+      ).toEqual([]);
       expect(measured.length, 'tabbing focused nothing').toBeGreaterThan(40);
       /* THE ASSERTION THE OLD CAP MADE UNFALSIFIABLE. The rule is named "every
          control it lands on" and the loop stopped at a constant 90 while the

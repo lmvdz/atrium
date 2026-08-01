@@ -35,7 +35,7 @@
  *     cancels, exactly as the pointer does.
  * ------------------------------------------------------------------------- */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import styles from './primitives.module.css';
 
 /**
@@ -169,8 +169,24 @@ export function HoldToAct({
      descendant would go straight back into the name. The description also
      carries what the title says, so the hold contract reaches a screen reader
      that never sees a tooltip. */
-  const meterId = `${actionId}-hold-progress`;
-  const describeId = `${actionId}-hold-describe`;
+  /* THE ID IS MINTED FROM THE INSTANCE, NOT FROM THE CALLER'S STRING.
+
+     Round 6: these were `${actionId}-hold-progress` and `-hold-describe`, and
+     `actionId` is a caller-supplied value that repeats — on /gallery the same
+     five action ids render in five frames, so four of the five destructive hold
+     controls had `aria-describedby` pointing at another frame's nodes. A screen
+     reader user pressing one heard a frozen meter belonging to a different
+     button, on the one control in the product whose whole job is to be a safety
+     mechanism. `getElementById` returns the FIRST match; duplicate ids do not
+     error, they silently resolve somewhere else.
+
+     `useId` is React's per-instance identifier and is stable across hydration,
+     which is the property a server-rendered `id` needs. `actionId` is still on
+     the DOM as `data-hold-action`, which is what selectors want and what an id
+     was being abused for. */
+  const uid = useId();
+  const meterId = `${uid}-hold-progress`;
+  const describeId = `${uid}-hold-describe`;
   const contract = `${describe} — press and hold for ${(holdMs / 1000).toFixed(0)} seconds; the hold is the confirmation, and releasing early cancels it`;
 
   return (

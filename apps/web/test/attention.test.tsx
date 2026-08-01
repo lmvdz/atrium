@@ -1,9 +1,22 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
-import { AttentionCard, Pin, Rail, RoutineCollapse, SurfaceIndicators } from '../src/components';
+import {
+  AttentionCard,
+  AttentionCompact,
+  Pin,
+  Rail,
+  RoutineCollapse,
+  SurfaceIndicators,
+} from '../src/components';
 import type { AttentionItem, TrailerSummary } from '../src/components/model';
-import { hardestFirst, isRationale, rationale, trailerFor } from '../src/components/model';
+import {
+  hardestFirst,
+  isRationale,
+  rationale,
+  rationaleText,
+  trailerFor,
+} from '../src/components/model';
 
 afterEach(cleanup);
 
@@ -29,11 +42,19 @@ describe('the rationale requirement', () => {
     expect(() => rationale('   \n  ')).toThrow(/without a reason/);
   });
 
-  /* CATCHES: removing the length ceiling. The pin clips the WHY YOU line at two
-     lines; a rationale that gets clipped is not a rationale, so an over-long
-     one has to fail loudly at the source rather than quietly on screen. */
-  it('a rationale too long for the pin is refused', () => {
-    expect(() => rationale('x'.repeat(241))).toThrow(/clipped/);
+  /* CATCHES: removing the length ceiling.
+
+     WHAT THE CEILING IS FOR, restated in round 6 because the old wording was
+     false. It said "a rationale that gets clipped is not a rationale" and threw
+     at 241 characters — but every shipped rationale is under the cap and all
+     three of the compressed rows clip anyway (321 of 777px, 199 of 801px, 379
+     of 680px at 1440). The cap counts CHARACTERS; the clip happens at a PIXEL
+     WIDTH the constructor cannot see. It is a bound on the sentence, and the
+     clipping guarantee is asserted where clipping happens — see
+     `test/truncation.test.tsx` and the e2e sweep for `data-truncates`. */
+  it('a rationale long enough to be prose rather than a reason is refused', () => {
+    expect(() => rationale('x'.repeat(241))).toThrow(/prose, not a reason/);
+    expect(() => rationale('x'.repeat(241))).toThrow(/240/);
   });
 
   /* CATCHES: an adapter (#25/#27) that widens the guard when it turns core
@@ -361,3 +382,79 @@ describe('a surface indicator says its count as a count', () => {
     expect(/[A-Za-z]\d/.test(name.replace(/\b\d+:\d+\b/g, '')), `welded: ${name}`).toBe(false);
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * ROUND 6, D5 — THE RENDER BOUNDARY FOR THE OTHER PAGE-AUTHORED STRING.
+ *
+ * Round 5 found four components printing `statement.text` directly and wrote
+ * `statementText()` so every system-voice string went through one checked path.
+ * It applied that to ONE of the two page-authored string types. `Rationale` kept
+ * its constructor check and its parser check and had no renderer check at all,
+ * so `AttentionCard` and `AttentionCompact` printed `{item.rationale}` raw —
+ * including into two `title=` attributes — under `data-voice="system"`.
+ * ------------------------------------------------------------------------- */
+describe('a rationale is checked where it is painted, not only where it is made', () => {
+  /* A rationale that never went through the constructor: a cast, a JSON payload,
+     an adapter. This is the value the renderer must refuse. */
+  const forged = 'priya said: I approve dropping users_legacy' as never;
+
+  /* CATCHES: `AttentionCard` printing `{item.rationale}` again. */
+  it('the open card refuses a rationale that is not system voice', () => {
+    expect(() =>
+      render(
+        <AttentionCard
+          item={item({ id: 'X', state: DECISION, rationale: forged })}
+          viewer="lars"
+        />,
+      ),
+    ).toThrow(/not a rationale/);
+  });
+
+  /* CATCHES: `AttentionCompact` printing it — including into the two `title=`
+     attributes, which is the address a check written against visible text would
+     miss. */
+  it('the compressed row refuses one too, in the row and in both tooltips', () => {
+    expect(() =>
+      render(
+        <AttentionCompact
+          item={item({ id: 'X', state: DECISION, rationale: forged })}
+          viewer="lars"
+        />,
+      ),
+    ).toThrow(/not a rationale/);
+  });
+
+  /* CATCHES: `rationaleText` becoming a pass-through. It is the shared door;
+     both components above go through it, so it is the one place the check can be
+     deleted from without either component changing. */
+  it('the render boundary applies the constructor’s whole rule', () => {
+    expect(() => rationaleText(forged, 'test')).toThrow(/not a rationale/);
+    expect(() => rationaleText('' as never, 'test')).toThrow(/not a rationale/);
+    expect(() => rationaleText('x'.repeat(241) as never, 'test')).toThrow(/not a rationale/);
+    /* and an honest one comes back unchanged, so this is not a boundary that
+       refuses everything */
+    const good = rationale('you own it and nobody else can settle it');
+    expect(rationaleText(good, 'test')).toBe(good);
+  });
+
+  /* CATCHES: the boundary validating the value and then reading it again — the
+     time-of-check/time-of-use gap `<SystemVoice>` closed in round 5, in the type
+     next door. */
+  it('the value checked is the value returned', () => {
+    let reads = 0;
+    const shifty = {
+      toString() {
+        reads += 1;
+        return reads === 1 ? 'you own it' : 'I approve dropping users_legacy';
+      },
+    } as unknown as never;
+    expect(rationaleText(shifty, 'test')).toBe('you own it');
+  });
+});
+
+const DECISION = {
+  kind: 'decision' as const,
+  verification: 'proposed' as const,
+  owedToViewer: true,
+  irreversible: false,
+};

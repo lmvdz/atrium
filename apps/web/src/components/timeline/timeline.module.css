@@ -171,10 +171,32 @@
   z-index: 3;
 }
 
+/* THE STRIP'S CHROME NEVER TAKES A CLICK — ONLY ITS BUTTONS DO.
+
+   Round 1 turned pointer events OFF while the strip was invisible, because an
+   invisible affordance was eating clicks meant for a visible one. Round 6 found
+   the other half of the same defect: on hover the WHOLE STRIP became clickable,
+   and it is `position: absolute; top: -9px`, so its padding and background lie
+   across the row above — including that row's needs-you tag. Playwright could
+   not click `[data-row-tag="m17"]` at all: `.acts` intercepted every attempt.
+   CONVENTIONS is explicit that anything owing the user attention is not a hover
+   affordance, and a ✗ tag that cannot be clicked because a hover strip is lying
+   on top of it is that rule broken from the other side.
+
+   The strip's own box stays transparent to the pointer forever; only the three
+   buttons become clickable, and only while the row is hovered or focused. */
+.acts button {
+  pointer-events: none;
+}
+
+.mrow:hover .acts button,
+.mrow:focus-within .acts button {
+  pointer-events: auto;
+}
+
 .mrow:hover .acts,
 .mrow:focus-within .acts {
   opacity: 1;
-  pointer-events: auto;
 }
 
 .acts button {

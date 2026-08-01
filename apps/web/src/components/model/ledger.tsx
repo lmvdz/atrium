@@ -27,8 +27,8 @@
 
 import type { ReactNode } from 'react';
 import { createContext, useContext, useMemo } from 'react';
-import type { Attribution, MessageLedger, MessageRecord, Quotation } from './quotation';
-import { messageLedger, resolveQuotation } from './quotation';
+import type { Attribution, Citation, MessageLedger, MessageRecord, Quotation } from './quotation';
+import { messageLedger, resolveCitation, resolveQuotation } from './quotation';
 
 const LedgerContext = createContext<MessageLedger | null>(null);
 
@@ -47,6 +47,26 @@ function asLedger(messages: Iterable<MessageRecord> | MessageLedger): MessageLed
 
 export function AttributionLedger({ messages, children }: AttributionLedgerProps) {
   const ledger = useMemo(() => asLedger(messages), [messages]);
+  /* TWO REGISTERS IN ONE TREE IS NOT A CONFIGURATION, IT IS THE DEFECT.
+     Found by the round-5 blind critic: nesting `<AttributionLedger>` silently
+     took the inner one, so a subtree could resolve `m14` against a register the
+     rest of the page had never seen — and nothing anywhere reported that two
+     registers were live at once. React context is designed to shadow, which is
+     right for a theme and wrong for the one thing on this page whose whole job
+     is being the single source of truth about who wrote what.
+
+     The inner provider refuses rather than shadowing. A page that genuinely
+     needs a second record set builds ONE ledger out of both — `messageLedger`
+     already throws when two records claim one id, which is the check that makes
+     merging honest and shadowing dishonest. */
+  const outer = useContext(LedgerContext);
+  if (outer !== null && outer !== ledger) {
+    throw new Error(
+      'AttributionLedger: this subtree is already inside a record register, and nesting a second one shadows the first.\n' +
+        '  Two registers in one tree is the state in which a name over words is a coin flip: the outer rows and the inner rows resolve the same message id against different records, and nothing reports it.\n' +
+        '  Build one ledger from both record sets — `messageLedger` refuses two records claiming one id, which is the check nesting skips.',
+    );
+  }
   return <LedgerContext.Provider value={ledger}>{children}</LedgerContext.Provider>;
 }
 
@@ -73,4 +93,18 @@ export function useMessageLedger(from: string): MessageLedger {
 export function useAttribution(quotation: Quotation, from: string): Attribution {
   const ledger = useMessageLedger(from);
   return resolveQuotation(ledger, quotation, from);
+}
+
+/**
+ * THE SAME DERIVATION FOR A REFERENCE THAT IS NOT A QUOTATION.
+ *
+ * The receipt's link to a superseded page-authored answer, a chosen feed row,
+ * the cross-room trace's target: all of them name a message, none of them may
+ * be quoted, and before round 6 all of them were caller-supplied strings that
+ * reached a handler without ever meeting the register. The display path and the
+ * product path are two paths (CONVENTIONS); this is the product path's lookup.
+ */
+export function useCitedRecord(citation: Citation, from: string): MessageRecord {
+  const ledger = useMessageLedger(from);
+  return resolveCitation(ledger, citation, from);
 }

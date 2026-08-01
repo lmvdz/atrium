@@ -25,14 +25,33 @@ import styles from './attention.module.css';
 export type TrailerProps = {
   readonly summary: TrailerSummary;
   readonly lastCheck: string;
+  /**
+   * Show what the lead is about — the failures, the late commitments, the
+   * unverified claims that sit OUTSIDE the pin.
+   *
+   * Round 6's blind critic clicked "✗ 1 failure outside your list" and nothing
+   * happened, because it was a sentence in a `<div>`. A line that tells a person
+   * something is wrong somewhere they are not looking, and gives them no way to
+   * look, is the same defect class as `data-hold="2000"`: copy describing a
+   * capability the code does not have.
+   */
+  readonly onShowRest?: () => void;
 } & NoGlyph;
 
-export function Trailer({ summary, lastCheck }: TrailerProps) {
+export function Trailer({ summary, lastCheck, onShowRest }: TrailerProps) {
   return (
     <div className={styles.trailer} data-row="trailer" data-voice="system">
       <Glyph className={styles.trailerGlyph} decorative={false} state={summary.state} />
       <span>
-        {summary.lead} —{' '}
+        <button
+          className={styles.trailerLead}
+          data-trailer-lead="true"
+          onClick={onShowRest}
+          type="button"
+        >
+          {summary.lead}
+        </button>{' '}
+        —{' '}
         <b>
           {summary.objectivesClear}/{summary.objectivesTotal} objectives
         </b>{' '}

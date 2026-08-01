@@ -10,6 +10,7 @@
  * cannot be dressed as anybody's words.
  * ------------------------------------------------------------------------- */
 
+import { useCitedRecord } from '../model/ledger';
 import { statementText } from '../model/quotation';
 import type { CrossRoomJumpRecord } from '../model/records';
 import styles from '../timeline/timeline.module.css';
@@ -23,15 +24,26 @@ export interface CrossRoomJumpProps {
 }
 
 export function CrossRoomJump({ jump, onReveal, onBack, onDismiss }: CrossRoomJumpProps) {
+  /* The row this trace points at is resolved against the page's register before
+     the button can act on it. It was a bare `MessageId` — a caller-supplied
+     string dispatched straight into `onReveal`, in a bar whose entire purpose is
+     to say "this is the row you came for". */
+  const target = useCitedRecord(jump.targetMessage, 'CrossRoomJump target');
   return (
     <div className={styles.trace} data-row="cross-room-jump" data-voice="system">
       <span aria-hidden="true">↪</span>
       {/* The room names are in the sentence and in the back link; repeating
           them a third time is what pushed the reason itself off the end. */}
-      <span className={styles.traceText}>{statementText(jump.why, 'CrossRoomJump')}</span>
+      <span
+        className={styles.traceText}
+        data-truncates="the owed item this trace came from, in Needs you"
+      >
+        {statementText(jump.why, 'CrossRoomJump')}
+      </span>
       <button
         className={styles.traceBack}
-        onClick={onReveal === undefined ? undefined : () => onReveal(jump.targetMessage)}
+        data-jumps-to={target.id}
+        onClick={onReveal === undefined ? undefined : () => onReveal(target.id)}
         type="button"
       >
         the row →

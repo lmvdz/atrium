@@ -21,8 +21,8 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
-import { useAttribution } from '../model/ledger';
-import { quotationRef, statementText } from '../model/quotation';
+import { useAttribution, useCitedRecord } from '../model/ledger';
+import { quotationRef } from '../model/quotation';
 import type { CorrectionEntry, ProvenanceEntry, ReceiptRecord } from '../model/records';
 import { stateForHappened } from '../model/records';
 import { slot } from '../model/slot';
@@ -67,24 +67,30 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
       </div>
 
       <Section label="WHAT HAPPENED">
-        {/* A history line is a page-authored fact about an event, so its words
-            are a SystemStatement and it carries data-voice="system". `who` is
-            the actor of the EVENT, not an attribution for speech — nothing on
-            this line is quoted, which is precisely why a plain name is allowed
-            here and is not allowed on a provenance row. */}
-        {receipt.happened.map((line) => {
-          const state = stateForHappened(line.kind);
-          return (
-            <div className={styles.happened} data-voice="system" key={line.id}>
-              <Glyph className={styles.happenedGlyph} decorative={false} state={state} />
-              <span className={styles.happenedText}>
-                <span className={styles.happenedWho}>{line.who}</span>{' '}
-                {statementText(line.statement, 'ReceiptView history line')}
-                <span className={styles.happenedAt}>{line.at}</span>
-              </span>
-            </div>
-          );
-        })}
+        {/* THERE IS NO NAME COLUMN ON THIS LINE, AND THERE IS NO FIELD FOR ONE.
+            `HappenedLine` used to carry `who: string`, rendered immediately
+            before the statement — an attribution column beside page-authored
+            words, which is precisely the structure CONVENTIONS claimed no
+            component had. It printed `~priya  priya ѕaid: І approve dropping
+            users_legacy` for a round-6 critic, because the lexical bans fall to
+            two Cyrillic code points and the plain name did the rest.
+            The actor of the event belongs INSIDE the system-voice sentence, the
+            same way `chosenAct` puts it inside "lars chose: …": that is the
+            difference between reporting an act and attributing a sentence, and
+            it is the one shape that has no name slot to fill. */}
+        {receipt.happened.map((line) => (
+          <div className={styles.happened} key={line.id}>
+            <Glyph
+              className={styles.happenedGlyph}
+              decorative={false}
+              state={stateForHappened(line.kind)}
+            />
+            <span className={styles.happenedText}>
+              <SystemVoice className={styles.happenedVoice} inline statement={line.statement} />
+              <span className={styles.happenedAt}>{line.at}</span>
+            </span>
+          </div>
+        ))}
         <div className={styles.happenedLegend}>
           ✓ checked by something other than the claimant · ~ the claimant&rsquo;s own account · ?
           explicitly unverified · ◆ needs you · ✗ failed
@@ -153,18 +159,20 @@ function ProvenanceRow({
   readonly onJump?: (messageId: string) => void;
 }) {
   const note = text(entry.note);
-  const jump = entry.jump;
-  /* WHO, WHEN AND WHAT ARE LOOKED UP FROM THE CITED MESSAGE. There is no `who`
-     prop to disagree with the words, and since round 5 there is no `actor` on
-     the excerpt either — the excerpt is a message id, and this row can only
-     render what the record behind that id actually says. The receipt is the
-     artifact whose whole job is being the trustworthy record; it is the last
-     place a name should be a value somebody passed in. */
+  /* WHO, WHEN, WHAT, WHICH ROOM AND WHAT THE CLICK ACTS ON — ALL ONE SOURCE.
+     Round 6 found this row taking three of those from three places: it printed
+     `entry.excerpt`, labelled itself from `entry.jump.room` and dispatched
+     `entry.jump.messageId`. It shipped rendering lars's words under
+     `data-quoted=msg:mA@identity-service` and clicking through to mB, priya's
+     message — three facts about one row, none of them obliged to agree. The
+     `jump` field is gone; everything below comes out of the record the excerpt
+     cites. */
   const excerpt = useAttribution(entry.excerpt, 'ReceiptView provenance');
   return (
     <button
       className={styles.prov}
-      onClick={onJump === undefined || jump === null ? undefined : () => onJump(jump.messageId)}
+      data-jumps-to={excerpt.messageId}
+      onClick={onJump === undefined ? undefined : () => onJump(excerpt.messageId)}
       type="button"
     >
       <span className={styles.provHead}>
@@ -173,12 +181,21 @@ function ProvenanceRow({
         </span>
         <span>{excerpt.at}</span>
         <span className={styles.provJump}>
-          {jump === null
-            ? 'typed here · no message carries it'
-            : `jump to source${jump.room === null ? '' : ` in #${jump.room}`} →`}
+          {excerpt.room === null
+            ? 'jump to source, typed in this room →'
+            : `jump to source in #${excerpt.room} →`}
         </span>
       </span>
-      <span className={styles.provExcerpt} data-quoted={quotationRef(excerpt)}>
+      {/* QUOTED WORDS, TRUNCATED — the case CONVENTIONS did not govern until
+          round 6. The clamp opens to four lines on hover AND on `:focus-visible`,
+          so the route is reachable from the keyboard rather than only from a
+          pointer, and the cited message is on this page's register by
+          construction. */}
+      <span
+        className={styles.provExcerpt}
+        data-quoted={quotationRef(excerpt)}
+        data-truncates="focusing this row expands it; the cited record is on this page"
+      >
         “{excerpt.text}”
       </span>
       {note === null ? null : <span className={styles.provNote}>{note}</span>}
@@ -195,30 +212,18 @@ function CorrectionRow({
 }) {
   return (
     <div className={styles.corr}>
+      {/* No `who`, for the same reason the history line has none: a plain name
+          rendered beside page-authored words is an attribution column, whatever
+          the type of the words is. The actor of the correction is inside `fact`,
+          which is a SystemStatement. */}
       <div className={styles.corrHead}>
-        {entry.heading} · {entry.who} · {entry.at}
+        {entry.heading} · {entry.at}
       </div>
       <div className={styles.corrBody}>
-        <span className={styles.corrWas} data-voice="system">
-          {statementText(entry.was, 'ReceiptView correction')}
-        </span>{' '}
-        → now: {statementText(entry.now, 'ReceiptView correction')}
-        {entry.link === null ? null : (
-          <>
-            {' · '}
-            <button
-              className={styles.corrLink}
-              onClick={
-                onJump === undefined || entry.link === null
-                  ? undefined
-                  : () => onJump(entry.link?.ref.messageId ?? '')
-              }
-              type="button"
-            >
-              {entry.link.label}
-            </button>
-          </>
-        )}
+        <SystemVoice className={styles.corrWas} inline statement={entry.was} />
+        <span aria-hidden="true"> → now: </span>
+        <SystemVoice className={styles.corrNow} inline statement={entry.now} />
+        {entry.link === null ? <span /> : <CorrectionLink link={entry.link} onJump={onJump} />}
       </div>
       {entry.fact === null ? null : (
         <SystemVoice className={styles.corrFact} statement={entry.fact} />
@@ -230,5 +235,41 @@ function CorrectionRow({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Its own component so the register lookup is an UNCONDITIONAL hook on the path
+ * that renders it — the same reason `ReplyLine` is its own component.
+ *
+ * Round 6: this was `onJump(entry.link?.ref.messageId ?? '')`. The `??` was
+ * reachable — `entry.link` is narrowed outside the closure and re-read inside it
+ * — so the receipt's only outbound link could dispatch the empty string, and a
+ * handler dispatching `''` is a handler that was never told what it acted on.
+ * The link's target is now a `Citation`, resolved here, so what the button acts
+ * on is a message this page's register holds.
+ */
+function CorrectionLink({
+  link,
+  onJump,
+}: {
+  readonly link: NonNullable<CorrectionEntry['link']>;
+  readonly onJump?: (messageId: string) => void;
+}) {
+  const record = useCitedRecord(link.ref, 'ReceiptView correction link');
+  const room = record.room ?? null;
+  return (
+    <>
+      {' · '}
+      <button
+        className={styles.corrLink}
+        data-jumps-to={record.id}
+        onClick={onJump === undefined ? undefined : () => onJump(record.id)}
+        type="button"
+      >
+        {link.label}
+        {room === null ? '' : ` (in #${room})`}
+      </button>
+    </>
   );
 }
