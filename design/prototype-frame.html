@@ -1245,6 +1245,23 @@ function glyphOf(o) {
   return "·";
 }
 function isClaim(o) { return !!o && UNSETTLED.includes(o.verification); }
+/* "NOTHING OUTSIDE THE CLAIMANT HAS CHECKED THIS" — ONE PREDICATE, ONE PLACE
+   (round 13, D3). Two surfaces counted this over the same thirteen records and
+   disagreed on screen: the lens said `8 unverified`, the pin trailer said `~ 7
+   of 13 unverified`, with nothing owed so there was no scope difference to
+   explain it. Round 11 used UNSETTLED on both sides. Round 12 widened the lens
+   to include `open` — an open question is a thing nothing has checked, and that
+   is the right reading — and did not sweep the trailer, and in the same commit
+   deleted the scope clause that had been the only visible hint the two counts
+   were about different sets. Deleting an explanation is a reason to re-verify
+   the thing it explained, not a reason to stop looking at it.
+
+   The predicate is DERIVED, not listed: "checked" is the complement of the three
+   states that mean somebody other than the claimant looked (`accepted`,
+   `verified`) or looked and said no (`failed`). Adding a verification state adds
+   it to this count automatically, which an allowlist would not. */
+const CHECKED = ["accepted", "verified", "failed"];
+function isUnchecked(v) { return CHECKED.indexOf(v) < 0; }
 /* "is this waiting on me", decided from a verification VALUE rather than from
    the object, so an aggregate that counts it can count it out of the views it
    read (round 12). needsYou() is this question asked of where the field stands
@@ -2061,8 +2078,45 @@ function hasToken(text, token) {
    dash. Asking the question of a whole paragraph is how a checker starts crying
    wolf, which is the failure mode round 10's chip clause shipped and this
    file's own doctrine names. */
+/* AND `·` IS THE PAGE'S HOUSE STYLE, NOT A FULL STOP (round 13, D9). The
+   splitter treated `·` as a clause boundary, and `·` is this page's separator
+   INSIDE one statement: `superseded answer · replaced 09:17 · kept on the
+   record` is one sentence about one field, and splitting it put `answer` and
+   `kept` in different clauses so the pairing rule could not see them together.
+   Any sentence written in the page's own style was exempt from the rule by
+   construction — which is a hole the exact size of the page's prose.
+
+   So `·` is a SOFT boundary: each middot-separated fragment is offered to the
+   rule on its own, and the whole run is offered as well — BUT ONLY WHEN A
+   FRAGMENT CARRIES A QUANTIFIER AND NAMES NO FIELD OF ITS OWN. That condition
+   is the whole of it, and it is the difference between an instrument and a wolf.
+   A quantifier binds to the nearest field it can see. `superseded answer ·
+   replaced 09:17 · kept on the record` has "kept" in a fragment that names
+   nothing, so "kept" is about the fragment beside it and the run has to answer
+   as one. The receipt's state line — `no due date on record · something other
+   than the claimant checked it before` — has "before" sitting beside
+   `verification`'s own word in its own fragment, so it binds there, and joining
+   the run would pair a quantifier about the verification with the vocabulary of
+   `due`: exactly the cross-talk this split was written to prevent. Measured, not
+   argued: the first version of this fix widened every run unconditionally and
+   the sequence enumerator went from one violation class to nine, five of them
+   sentences that were telling the truth.
+
+   The hard boundaries — an em dash, a semicolon, a comma, a full stop — still
+   split unconditionally, which is what keeps round 10's wolf away: `reported
+   4.7% of sessions still on legacy tokens — unverified` is two statements and
+   stays two. */
+const ALL_QUANT = WHOLE_QUANT.concat(PAST_QUANT, CONTINUITY_QUANT);
+function hasQuant(t) { return ALL_QUANT.some(q => hasToken(t, q)); }
+function namesAField(t) { return Object.keys(RECORDED).some(f => (RECORDED[f].words || []).some(w => hasToken(t, w))); }
 function clausesOf(text) {
-  return String(text).split(/\s*[·—;]\s*|,\s+|\.\s+/).filter(s => s.trim());
+  const out = [];
+  String(text).split(/\s*[—;]\s*|,\s+|\.\s+/).filter(s => s.trim()).forEach(hard => {
+    const parts = hard.split(/\s*·\s*/).filter(s => s.trim());
+    parts.forEach(p => out.push(p));
+    if (parts.length > 1 && parts.some(p => hasQuant(p) && !namesAField(p))) out.push(hard);
+  });
+  return out;
 }
 /* AND THE RECORD'S OWN WORDS ARE NOT THE PAGE'S SENTENCE. X1's option reads
    "Opaque-token issuance stays open until the 14 Aug freeze" — record it and the
@@ -2223,6 +2277,7 @@ function seedFact(o, f) {
 let AMENDED_PENDING = null;
 function amend(o, field, value, meta) {
   const spec = RECORDED[field];
+  dropFieldUniverse();          // a value the record did not hold a moment ago may hold it now
   AMENDED_PENDING = o;
   if (!spec) { console.error("[atrium invariant] amend() called for a field this record does not keep:", field, o && o.id); return null; }
   const h = recordOf(o, field);
@@ -2369,6 +2424,25 @@ function fieldView(o, field, at) {
 function reads(o, fields) {
   return fields.map(f => (typeof f === "string" ? fieldView(o, f) : fieldView(o, f.of, f.at)));
 }
+/* EVERY VALUE THIS FIELD IS KNOWN TO TAKE, taken from the records rather than
+   from a list. The mutation below stubs a view with each of them, so a sentence
+   that partitions on the field — a count of the unchecked ones — is measured
+   against a value on the OTHER side of its own partition. There is nothing to
+   maintain: a state that reaches the record reaches this on the same tick. */
+/* memoised, and the memo is dropped by amend() and by render(): the records
+   cannot move inside a render tick, and building this per checked view of every
+   sentence on every paint was the whole of a 6x render cost. */
+let FIELD_UNIVERSE = null;
+function dropFieldUniverse() { FIELD_UNIVERSE = null; }
+function fieldValueUniverse(field) {
+  if (FIELD_UNIVERSE && FIELD_UNIVERSE[field]) return FIELD_UNIVERSE[field];
+  const out = [];
+  eachObject(o => ((o.recorded || {})[field] || []).forEach(e => {
+    if (!out.some(x => sameValue(x, e.value))) out.push(e.value);
+  }));
+  (FIELD_UNIVERSE || (FIELD_UNIVERSE = {}))[field] = out;
+  return out;
+}
 /* the query log of the say() currently minting. A phrase that asks the history
    a question does it through a view, and the view writes the question here. */
 let SAYING = null;
@@ -2438,15 +2512,33 @@ function say(views, phrase, owner) {
          leaves the two ends unequal, so the branch does not move and an honest
          read looks like decoration. The third stub is the other end's own
          value: it is the only mutation that makes a comparison flip. */
-      const alts = [{ value: "\u0001a value this record does not hold\u0001" }, { value: null }]
-        .concat(views.filter(x => x !== v && x.of === v.of).map(x => ({ value: x.value })));
-      const moved = alts
-        .some(alt => {
-          const stub = views.slice();
-          stub[j] = Object.create(v, { value: { value: alt.value, enumerable: true } });
-          const out = replay(stub);
-          return out !== null && out !== base;
-        });
+      /* AND THE STUBS HAVE TO BE ABLE TO FLIP A PREDICATE (round 13, found by
+         this round's own sequence enumerator, live on round 12 as committed and
+         308 times over at depth 2). `4 objects · 4 unverified · 2 awaiting you`
+         reads four verifications and counts the ones nothing has checked. Every
+         stub above — a value nothing holds, `null`, another view's value — is
+         ALSO a value nothing has checked, so the count came out the same however
+         the record was moved, and an honest aggregate looked like decoration. A
+         mutation that cannot cross the boundary a sentence is counting cannot
+         measure whether the sentence counted.
+         The extra stubs are the values this field actually HOLDS somewhere in
+         the record set — derived from the data, so a state recorded for the
+         first time next year joins the mutation on the day it appears and
+         nothing has to be listed. They are computed ONLY when the cheap stubs
+         have already failed to move the sentence — building the universe eagerly
+         would scan every record for every checked view of every sentence on
+         every render, which is a cost the sentences that pass should not pay. */
+      const tryAlt = value => {
+        const stub = views.slice();
+        stub[j] = Object.create(v, { value: { value: value, enumerable: true } });
+        const out = replay(stub);
+        return out !== null && out !== base;
+      };
+      const moved =
+        ["\u0001a value this record does not hold\u0001", null]
+          .concat(views.filter(x => x !== v && x.of === v.of).map(x => x.value))
+          .some(tryAlt) ||
+        fieldValueUniverse(v.of).filter(x => !sameValue(x, v.value)).some(tryAlt);
       if (!moved)
         console.error("[atrium invariant] a sentence declares that it read this record's " + v.of + " and would have " +
           "said exactly the same thing whatever it held — the read is decoration and the words beside it are a " +
@@ -2640,14 +2732,20 @@ function clearSummary(r) {
   const leadBox = say(restViews, function () {
     const vs = Array.prototype.slice.call(arguments);
     const fail = vs.filter(v => v.value === "failed").length;
-    const unver = vs.filter(v => UNSETTLED.includes(v.value)).length;
-    const opens = vs.filter(v => v.value === "open").length;
-    const g = fail ? "✗" : overdue ? "◆" : unver ? "~" : opens ? "?" : owed.length ? "◆" : "✓";
+    /* THE SAME PREDICATE THE LENS COUNTS WITH (round 13, D3) — see isUnchecked().
+       This counted UNSETTLED, which excludes `open`, so the two lines on one
+       screen said 7 and 8 about the same thirteen records. The separate `open
+       questions` branch below it went with the change: with `open` inside
+       `unver` it can never be reached, and an unreachable branch that reads like
+       a guarantee is exactly the dead work this file's own prune doctrine names.
+       The open question is not lost — it is what the branch above is counting,
+       and the pin's own lead says so in words. */
+    const unver = vs.filter(v => isUnchecked(v.value)).length;
+    const g = fail ? "✗" : overdue ? "◆" : unver ? "~" : owed.length ? "◆" : "✓";
     return [g,
       fail        ? `${fail} failure${fail === 1 ? "" : "s"} outside your list`
     : overdue     ? `${overdue} thing${overdue === 1 ? " is" : "s are"} late, none failed`
     : unver       ? `${unver} of ${vs.length} unverified`
-    : opens       ? `${opens} open question${opens === 1 ? "" : "s"}`
     : owed.length ? "the list above is all of it"
     :               "everything else is verified"];
   }, r.objects[0]);
@@ -3279,6 +3377,80 @@ function checkStatedBox(where, id, box) {
   checkQueries(where, id, box);
   checkQuantifiers(where, id, box);
   checkVocabulary(where, id, box);
+  checkCountedClaims(where, id, box);
+}
+
+/* ===========================================================================
+ * A NUMBER IS A CLAIM, AND IT IS RE-DERIVED FROM THE RECORDS THE SENTENCE SAYS
+ * IT READ (round 13, D3/D6)
+ *
+ * Two lines on one screen counted "unverified" over the same thirteen records
+ * and printed 8 and 7. Every rule this file had was about WHERE a sentence's
+ * words came from — minted, read, queried, not a literal — and both of these
+ * were minted from thirteen real reads. Nothing asked the only question that
+ * catches a disagreement between two honest counts: does the number equal the
+ * thing it says it is counting?
+ *
+ * So a count is checked the way a value is: recomputed, from the box's own claim
+ * owners, on every paint. The patterns are the page's own phrasings and the
+ * derivation is the page's own predicate, so this cannot become a second
+ * definition of "unverified" that drifts from the first — it calls it.
+ *
+ * WHAT IT DOES NOT COVER, SAID PLAINLY. A number in a sentence whose phrasing is
+ * not one of these patterns is not checked; the patterns are here, in one place,
+ * and a new counting phrase has to be added to be covered. That is a real gap
+ * and it is stated rather than discovered: the alternative — parsing every
+ * integer on the page — is an instrument that would invent defects.
+ * ======================================================================== */
+/* the room a record lives in — a denominator like "11 of 13 objects" is a claim
+   about this record's room, and the room is what knows how many it holds */
+function roomHolding(o) {
+  const k = Object.keys(S.rooms).filter(x => (S.rooms[x].objects || []).indexOf(o) >= 0)[0];
+  return k ? S.rooms[k] : null;
+}
+/* Ordered: the two-number phrasings come first and CONSUME their match, so
+   "8 of 13 unverified" is never also read as the one-number "8 unverified"
+   against the wrong denominator. */
+const COUNTED_CLAIMS = [
+  { re: /(\d+)\s+of\s+(\d+)\s+unverified/,
+    n: os => [os.filter(o => isUnchecked(o.verification)).length, os.length],
+    what: "records nothing outside the claimant has checked, of the records read" },
+  { re: /(\d+)\s+of\s+(\d+)\s+objects?(?![a-z])/,
+    n: os => [os.length, (roomHolding(os[0]) || { objects: [] }).objects.length],
+    what: "records read, of the records in the room" },
+  { re: /(\d+)\s+unverified/,
+    n: os => [os.filter(o => isUnchecked(o.verification)).length],
+    what: "records nothing outside the claimant has checked" },
+  { re: /(\d+)\s+objects?(?![a-z])/,
+    n: os => [os.length], what: "records read" },
+  { re: /(\d+)\s+awaiting you/,   n: os => [os.filter(needsYou).length], what: "records waiting on you" },
+  { re: /(\d+)\s+need(?:s)? you/, n: os => [os.filter(needsYou).length], what: "records waiting on you" },
+  /* the surface tabs put the label first and the number second — the same claim,
+     read in the other direction, and a pattern that only matched "3 need you"
+     would have left both of them unchecked (round 13, D6) */
+  { re: /needs? you\s*·\s*(\d+)/i,     n: os => [os.filter(needsYou).length], what: "records waiting on you" },
+  { re: /current state\s*·\s*(\d+)/i, n: os => [os.length], what: "records in this room" }
+];
+function checkCountedClaims(where, id, box) {
+  const owners = [];
+  (box.claims || []).concat(box.queries || []).forEach(c => {
+    const o = c.owner || box.owner;
+    if (o && owners.indexOf(o) < 0) owners.push(o);
+  });
+  if (owners.length < 2) return;      // a count over one record is not an aggregate
+  let rest = normText(quantText(box.said));
+  COUNTED_CLAIMS.forEach(p => {
+    const m = rest.match(p.re);
+    if (!m) return;
+    rest = rest.replace(m[0], " ");
+    p.n(owners).forEach((n, k) => {
+      if (Number(m[k + 1]) === n) return;
+      console.error("[atrium invariant] " + where + " prints a count that is not what it counts — the number was minted " +
+        "from these records and does not equal the answer those records give, so two honest counts of the same thing " +
+        "can disagree on one screen:", id, JSON.stringify(m[0]), "says", m[k + 1], "· " + owners.length +
+        " records give", n, "(" + p.what + ")");
+    });
+  });
 }
 
 /* AND A SENTENCE MAY NOT BORROW A FIELD'S WORD FROM A READ OF ANOTHER FIELD,
@@ -3781,10 +3953,21 @@ function checkRenderedRecordInvariant() {
          and it does not fire on a control's label, because an action name
          ("Mark signed off", "Answer in your own words") is never a value the
          record holds. */
+      /* AND A CONTROL MAY NAME THE VALUE IT IS ABOUT TO WRITE, IF IT PROVES IT
+         (round 13, D1). See declaredWrites(): the control declares the recorded
+         field, and the value is projected through the same ACTION_EFFECT entry
+         the reversibility audit uses. Nothing here is excused by being a button;
+         it is excused by carrying a proof, and checkWriteLabelInvariant() holds
+         the proof to the projection on every render. */
+      const proven = (() => {
+        const host = n.parentElement && n.parentElement.closest("[data-writes]");
+        return host ? provenWriteValues(host) : [];
+      })();
       objs.forEach(o => Object.keys(o.recorded || {}).forEach(fld =>
         (o.recorded[fld] || []).forEach(e => {
           const v = e.value;
           if (typeof v !== "string" || !v) return;
+          if (proven.some(w => sameValue(w, v))) return;
           /* ONE EXCEPTION, AND IT IS NAMED HERE RATHER THAN IN A FIELD LIST.
              `reading` records how a line was READ — D1's history is
              ["Claim","Decision"] — and "decision" is also the page's structural
@@ -3818,6 +4001,42 @@ function checkRenderedRecordInvariant() {
         });
       });
     }
+  });
+
+  /* 6b — AND A DECLARED SUBJECT IS CHECKED AGAINST WHAT WAS ACTUALLY READ
+     (round 13, D6). `data-agg` was checked for one thing only: does this room
+     hold these ids. Nothing compared the declaration against the records the
+     sentences inside it were minted from — so a host could declare thirteen and
+     paint a sentence read from ten, and the walk would hold the host's unminted
+     text to a subject its own sentences do not speak for. The declaration and
+     the mints have to be about the same records: every mint whose nearest
+     declared subject is this host reads inside the declared set, and the
+     declared set is covered by them. */
+  document.querySelectorAll("[data-agg]").forEach(host => {
+    const declared = aggObjects(host);
+    if (!declared.length) return;
+    const read = [];
+    host.querySelectorAll("[data-said], [data-said-parts]").forEach(el => {
+      if (el.closest("[data-obj], [data-agg]") !== host) return;      // a nested subject's own business
+      if (el.parentElement && el.parentElement.closest("[data-said], [data-said-parts]")) return;
+      const box = PAINTED[Number(el.dataset.said != null ? el.dataset.said : el.dataset.saidParts)];
+      if (!box) return;
+      (box.claims || []).concat(box.queries || []).forEach(c => {
+        const o = c.owner || box.owner;
+        if (o && read.indexOf(o) < 0) read.push(o);
+      });
+    });
+    if (!read.length) return;                    // a host of unminted text only; clause 6 owns it
+    const outside = read.filter(o => declared.indexOf(o) < 0);
+    if (outside.length)
+      console.error("[atrium invariant] an aggregate declares one subject and its own sentences were minted from " +
+        "another — the walk holds every unminted character in here to the declared set, so a sentence about a record " +
+        "outside it is checked against the wrong records:", host.dataset.agg, outside.map(o => o.id).join(","), host);
+    const unread = declared.filter(o => read.indexOf(o) < 0);
+    if (unread.length)
+      console.error("[atrium invariant] an aggregate declares records none of its sentences read — the declaration is " +
+        "wider than the claim, so it says this surface speaks for records it is silent about:",
+        host.dataset.agg, unread.map(o => o.id).join(","), host);
   });
 
   /* 4 — the vocabulary of the record never reaches the reader raw */
@@ -4143,7 +4362,7 @@ function checkLegibilityInvariant() {
  *
  * Round 10 claimed a surface list "taken from the object's own shape" and it
  * was written from memory. Round 11 replaced it with a walk and then wrote a
- * comment claiming the walk found `last check 09:07` in the pin trailer — which
+ * comment claiming the walk found a freshness timestamp in the pin trailer — which
  * `#pinTrailer` had no `data-obj` ancestor to be found by. Twice, the mechanism
  * was real and the claim about its reach was not.
  *
@@ -4155,15 +4374,30 @@ function checkLegibilityInvariant() {
  * it is the honest answer to "what is uncovered", computed on the live DOM
  * instead of recalled.
  *
- * WHAT IS IN IT, AND WHY IT IS NOT AN ERROR. Control labels: `Mark signed off`
- * uses `verification`'s vocabulary and asserts nothing about any record — it
- * names an ACTION, and the reversibility audit is the rule that governs it.
- * Section labels (`CURRENT STATE`), empty states (`no corrections — this object
- * has never been amended`), refusal sentences, and the row/message counters —
- * the rail badges, the surface tabs, the SINCE-YOU chips, the routine strip —
- * which count MESSAGES and ROWS. None of them speaks for a record, which is
- * exactly why none of them declares one. When one of them starts to, it will
- * appear in this list on the render it starts.
+ * WHAT IS IN IT: design/prototype-uncovered.txt, which is this function's own
+ * output, unioned over every state the sequence enumerator reaches, sorted and
+ * committed beside this file. Regenerate it with
+ *
+ *   node design/prototype-drive.mjs --uncovered design/prototype-uncovered.txt
+ *
+ * and the driver fails if the committed file and the live walk disagree.
+ *
+ * THIS COMMENT NAMES NO EXAMPLES, AND THAT IS THE FIX (round 13, D5). Round 10
+ * claimed a derived list and shipped a hand-written one. Round 11 built the
+ * derivation and cited an example the walk provably could not see. Round 12 —
+ * the round that wrote the rule that a comment is a claim and answers to the
+ * evidence rule — described five families of text as being in this list, and
+ * not one of them can ever appear: the first is a control label inside a
+ * declared subject, which this walker's own guard rejects two lines below, and
+ * the rest are bare integers with no recorded vocabulary to match. Three rounds
+ * running, the mechanism was real and the sentence about its reach was written
+ * from memory, and each round's apology was followed by the same mistake.
+ *
+ * An apology is not a mechanism. A claim about what a mechanism produces is
+ * GENERATED BY THE MECHANISM or it is not made — so the sentence that used to
+ * be here is a file, and the driver checks a backticked example in this block
+ * against the live walk on every run, which means this paragraph cannot quietly
+ * grow one back.
  * ======================================================================== */
 function uncoveredRecordWords() {
   const out = [];
@@ -4229,22 +4463,124 @@ window.__uncoveredRecordWords = uncoveredRecordWords;
    selector is where that control is rendered; the audit reads the DOM for the
    disclosure rather than believing this table. */
 const ACTION_ASKS_FIRST = { reopen: "#rcReopen", verify: "[data-verify]" };
-/* which tier-2 declarations this session has actually READ off a control, and
-   how many frames credited one without seeing it. A driver that never opens a
-   receipt should be able to tell that `reopen`'s tier was never verified — the
-   difference between "checked and true" and "not checked" is the difference the
-   whole round is about. */
+
+/* WHICH OBJECT A CONTROL ACTS ON. Factored out of checkActionSetInvariant,
+   because three separate rules now need the same answer and a second copy of
+   this resolution is a second thing to keep in step. */
+function controlObject(b) {
+  const find = x => obj(room(), x) || Object.keys(S.rooms).map(k => obj(S.rooms[k], x)).filter(Boolean)[0] || null;
+  /* the three prompts and the composer are not inside their object's container —
+     they are page furniture that has been POINTED at an object, and the state
+     says which one. Named explicitly rather than falling through to whatever
+     receipt happens to be open, which is how one open receipt came to certify a
+     friction tier for every object in the file (round 13, D7). */
+  if (b.id === "cinput" || b.id === "sendBtn") return S.ui.bound ? find(S.ui.bound) : null;
+  if (b.id === "vinput" || b.id === "vgo") return S.ui.verifying ? find(S.ui.verifying) : null;
+  if (b.id === "rinput" || b.id === "rgo") return S.ui.reopening ? find(S.ui.reopening) : null;
+  const host = b.closest("[data-obj], [data-lens-obj], [data-corr-obj], .rc-foot, .acard, .acomp, .mrow");
+  const id = b.dataset.obj || b.dataset.verify ||
+             (host && (host.dataset.obj || host.dataset.lensObj || host.dataset.corrObj));
+  return id ? find(id) : (S.ui.receiptId ? find(S.ui.receiptId) : null);
+}
+/* WHICH ACTION A CONTROL REACHES — the same map WRITE_CONTROLS declares below,
+   asked of one element. */
+function controlAction(b) {
+  if (b.dataset.fx) return b.dataset.fx;
+  if (b.hasAttribute("data-opt")) return "opt";
+  if (b.hasAttribute("data-verify")) return "verify";
+  if (b.hasAttribute("data-bind")) return "typed";
+  if (b.id === "rcReopen") return "reopen";
+  if (b.id === "sendBtn" || b.id === "cinput") return "typed";
+  if (b.id === "vgo" || b.id === "vinput") return "verify";
+  if (b.id === "rgo" || b.id === "rinput") return "reopen";
+  return null;
+}
+
+/* ===========================================================================
+ * A CONTROL MAY SAY A VALUE THE RECORD HOLDS — WHEN IT IS THE VALUE IT WRITES,
+ * AND IT PROVES IT (round 13, D1)
+ *
+ * `Ask justin instead` sits inside `data-obj="Q1"` and says `justin`. Hand a
+ * question to justin and take it back, and Q1's assignee history reads
+ * [null, "justin", null] — so the walk's value rule fires on the button, live,
+ * at depth 5. The comment beside that rule said it "does not fire on a control's
+ * label, because an action name is never a value the record holds"; a label that
+ * names a PERSON is exactly that, and the claim was written from memory.
+ *
+ * The wrong answer is an exemption for control labels: that hands every future
+ * literal a place to live, and a denylist of evasions is unbounded. The right
+ * answer is an allowlist of the compliant form. A control that names a value
+ * DECLARES which recorded field the value belongs to (`data-writes`), and the
+ * page proves the declaration by projecting the control's own action through
+ * ACTION_EFFECT: if clicking it really would write `assignee = justin`, then the
+ * label is not a claim about what the record holds, it is a statement of what
+ * this click does — and the proof comes out of the same table the reversibility
+ * audit projects, so a label and an audit cannot disagree.
+ *
+ * A declaration that does not resolve, names a field the action does not write,
+ * or names a value the label does not contain is an error. The escape has to
+ * carry its own proof or it is not an escape.
+ * ======================================================================== */
+function declaredWrites(b) {
+  const decl = String((b.dataset && b.dataset.writes) || "").split(",").map(s => s.trim()).filter(Boolean);
+  if (!decl.length) return null;
+  const o = controlObject(b), fx = controlAction(b);
+  const eff = (o && fx && ACTION_EFFECT[fx]) ? ACTION_EFFECT[fx](o) : null;
+  return { o: o, fx: fx, eff: eff,
+           fields: decl.map(f => ({ field: f, named: !!eff && (f in eff), value: eff ? eff[f] : undefined })) };
+}
+/* the values a control has PROVED it is about to write, for the walk */
+function provenWriteValues(b) {
+  const d = declaredWrites(b);
+  if (!d || !d.eff) return [];
+  return d.fields.filter(w => w.named).map(w => w.value);
+}
+function checkWriteLabelInvariant() {
+  if (!DEV) return;
+  document.querySelectorAll("[data-writes]").forEach(b => {
+    if (!shown(b)) return;
+    const d = declaredWrites(b);
+    if (!d.o || !d.fx || !d.eff)
+      return console.error("[atrium invariant] a control declares the value it writes and nothing on this page can say " +
+        "what it writes — the declaration names no action or no object, so it is an exemption rather than a proof:",
+        b.dataset.writes, b.textContent.trim());
+    d.fields.forEach(w => {
+      if (!w.named)
+        return console.error("[atrium invariant] a control declares that it writes a field its action's own effect table " +
+          "does not name — the label is claiming an effect nothing projects:", d.o.id, d.fx, w.field, b.textContent.trim());
+      const want = w.value == null ? "" : normText(String(w.value));
+      if (!want || normText(b.textContent).toLowerCase().indexOf(want.toLowerCase()) < 0)
+        console.error("[atrium invariant] a control declares that its label names the " + w.field + " it writes and the " +
+          "label does not contain that value — the declaration is the only thing letting this label say a value the " +
+          "record holds:", d.o.id, d.fx, w.field, JSON.stringify(want), b.textContent.trim());
+    });
+  });
+}
+
+/* which tier declarations this session has actually READ off a control, and
+   how many frames credited one without seeing it — KEYED BY OBJECT AND ACTION
+   (round 13, D7). It was keyed by action alone, and the tier-2 lookup was a
+   bare `document.querySelector("#rcReopen")`: one open receipt anywhere
+   certified "reopen asks first" for every reopenable object in every room,
+   including one whose reopen leaves the reader nothing at all. A tier is a
+   property of an action ON AN OBJECT and it is verified where it is exercised. */
 const TIER_VERIFIED = {}, TIER_UNVERIFIED = {};
 window.__frictionTiers = () => ({ verified: Object.keys(TIER_VERIFIED), unverifiedFrames: Object.assign({}, TIER_UNVERIFIED) });
+/* the control that carries a tier's proof FOR THIS OBJECT, not for whoever
+   happens to be on screen */
+function tierControl(o, sel) {
+  return Array.prototype.filter.call(document.querySelectorAll(sel), el => controlObject(el) === o)[0] || null;
+}
 function reversibilityAudit() {
   const out = [];
   eachObject(o => {
     offeredActions(o).forEach(id => {
+      const key = o.id + "|" + id;
       const after = offeredAfter(o, id);
       if (after == null) return out.push(`${o.id}: the page offers "${id}" and nothing declares what it writes`);
       /* tier 1 */
       const restorers = Object.keys(ACTION_RESTORES).filter(k => (ACTION_RESTORES[k] || []).indexOf(id) >= 0);
-      if (restorers.some(k => after.indexOf(k) >= 0)) return;
+      if (restorers.some(k => after.indexOf(k) >= 0)) return TIER_VERIFIED[key + "|1"] = true;
       /* tier 2, read off the control rather than off the table — and NOT
          fail-open when the control is off screen (round 12 self-review, raised
          by the codex reviewer). The first version returned success whenever the
@@ -4256,23 +4592,50 @@ function reversibilityAudit() {
          through __frictionTiers() rather than silently credited. */
       const sel = ACTION_ASKS_FIRST[id];
       if (sel) {
-        const el = document.querySelector(sel);
-        if (!el) { TIER_UNVERIFIED[id] = (TIER_UNVERIFIED[id] || 0) + 1; return; }
-        if (el.hasAttribute("aria-expanded")) { TIER_VERIFIED[id] = true; return; }
+        const el = tierControl(o, sel);
+        if (!el) { TIER_UNVERIFIED[key + "|2"] = (TIER_UNVERIFIED[key + "|2"] || 0) + 1; return; }
+        if (el.hasAttribute("aria-expanded")) { TIER_VERIFIED[key + "|2"] = true; return; }
         return out.push(`${o.id}: "${id}" is declared to ask before it writes and its control is not a disclosure — nothing on screen offers the reader a second click`);
       }
-      /* tier 3 */
-      const names = ACTION_NAMES_VALUE[id];
-      if (!names)
-        return out.push(`${o.id}: "${id}" is put back by nothing the page offers afterwards, asks nothing first, and names no value — one unconfirmed click with no way back from your seat`);
-      const want = normText(names(o));
-      const labels = Array.prototype.map.call(document.querySelectorAll(`[data-fx="${id}"]`), b => normText(b.textContent));
-      if (labels.length && !labels.some(t => t.indexOf(want) >= 0))
-        out.push(`${o.id}: "${id}" cannot be undone and its label does not name the value it writes (${want}): ${JSON.stringify(labels[0])}`);
+      /* tier 3 — READ OFF THE CONTROL, exactly like tier 2 (round 13, D1/D7).
+         It used to consult ACTION_NAMES_VALUE, a second hand-written table, and
+         then `if (labels.length && …)` — fail-open whenever the frame did not
+         paint the control, which is the same defect tier 2 had already been
+         fixed for one branch above. The control declares the field it writes
+         and checkWriteLabelInvariant() proves the label against the projection;
+         this asks only whether the proof is on screen for THIS object. */
+      const decl = Array.prototype.filter.call(document.querySelectorAll("[data-writes]"),
+        b => shown(b) && controlObject(b) === o && controlAction(b) === id);
+      if (!decl.length) {
+        /* nothing in this frame proves it, and nothing puts it back: that is
+           either an unrendered control or a genuine one-way door, and the two
+           are told apart by whether any frame ever verifies it */
+        TIER_UNVERIFIED[key + "|3"] = (TIER_UNVERIFIED[key + "|3"] || 0) + 1;
+        return;
+      }
+      TIER_VERIFIED[key + "|3"] = true;
     });
   });
   return out;
 }
+/* WHAT THE PAGE CAN PREDICT AND NEVER SAYS (round 13, D7). `offeredAfter(K0,
+   "reopen")` returns [] BEFORE you click: the page knows that reopening that
+   commitment leaves you with no control on it at all. Tier 2 credited the
+   action because reopen asks first, which is true and is not the whole answer.
+   This is the list of doors the page can see are one-way from your seat, and
+   the reopen prompt now says so on the one it is about. */
+function oneWayDoors() {
+  const out = [];
+  eachObject(o => offeredActions(o).forEach(id => {
+    const after = offeredAfter(o, id);
+    if (!after || after.length) return;
+    const restorers = Object.keys(ACTION_RESTORES).filter(k => (ACTION_RESTORES[k] || []).indexOf(id) >= 0);
+    if (restorers.length && restorers.some(k => (after || []).indexOf(k) >= 0)) return;
+    out.push(o.id + "|" + id);
+  }));
+  return out;
+}
+window.__oneWayDoors = oneWayDoors;
 /* AND THE AUDIT IS AN AUDIT OF THE CONTROLS THAT ARE THERE (round 12
    self-review). `offeredActions()` being "the same function the renders use" is
    a claim of exactly the kind this artifact has shipped false three times, so it
@@ -4285,33 +4648,47 @@ function reversibilityAudit() {
    `[data-fx]` alone, which is the same shape as the selector list round 10
    shipped and round 11 replaced). The map is from the control's own markup to
    the action id, so a new control has to name which action it is. */
+/* AND A KEY IS A CONTROL (round 13). Three write paths on this page are
+   keyboard-only twins of a button — Enter in `#cinput` calls send(), Enter in
+   `#vinput` calls doVerify(), Enter in `#rinput` calls reopen() — and the three
+   SUBMIT BUTTONS beside them (`#sendBtn`, `#vgo`, `#rgo`) were not in this list
+   either. Six controls that write, outside the set the friction rule and the
+   driver's denominator are built from, because both were assembled from
+   `data-*` attributes and these carry none. A control is anything a reader can
+   press that reaches a write, and a key is something a reader presses. */
 const WRITE_CONTROLS = [
   { sel: "[data-fx]",     id: b => b.dataset.fx },
   { sel: "[data-opt]",    id: () => "opt" },
   { sel: "[data-verify]", id: () => "verify" },
   { sel: "[data-bind]",   id: () => "typed" },
-  { sel: "#rcReopen",     id: () => "reopen" }
+  { sel: "#rcReopen",     id: () => "reopen" },
+  { sel: "#sendBtn",      id: () => "typed",  needsBound: true },
+  { sel: "#cinput",       id: () => "typed",  needsBound: true, key: "Enter" },
+  { sel: "#vgo",          id: () => "verify" },
+  { sel: "#vinput",       id: () => "verify", key: "Enter" },
+  { sel: "#rgo",          id: () => "reopen" },
+  { sel: "#rinput",       id: () => "reopen", key: "Enter" }
 ];
+window.__writeControls = () => WRITE_CONTROLS.map(w => ({ sel: w.sel, key: w.key || "pointer" }));
 function checkActionSetInvariant() {
   if (!DEV) return;
-  const r = room();
-  const find = id => obj(r, id) || Object.keys(S.rooms).map(k => obj(S.rooms[k], id)).filter(Boolean)[0];
   WRITE_CONTROLS.forEach(w => document.querySelectorAll(w.sel).forEach(b => {
-    const host = b.closest("[data-obj], [data-lens-obj], [data-corr-obj], .rc-foot, .acard, .acomp, .mrow");
-    const id = b.dataset.obj || b.dataset.verify ||
-               (host && (host.dataset.obj || host.dataset.lensObj || host.dataset.corrObj));
-    const o = id ? find(id) : (S.ui.receiptId ? find(S.ui.receiptId) : null);
+    /* the composer only reaches a write when it is BOUND to an object; unbound,
+       Enter sends a message and amends nothing */
+    if (w.needsBound && !S.ui.bound) return;
+    const o = controlObject(b);
     if (!o) return;                                  // a control whose subject this frame cannot name is clause 6's
     const fx = w.id(b);
     if (offeredActions(o).indexOf(fx) < 0)
       console.error("[atrium invariant] a control on screen reaches a write its object does not offer — the " +
         "reversibility audit reads the offered set, so a control outside it is a write the friction rule cannot see:",
-        o.id, fx, b.textContent.trim());
+        o.id, fx, b.textContent.trim() || b.id);
   }));
 }
 function checkReversibilityInvariant() {
   if (!DEV) return;
   checkActionSetInvariant();
+  checkWriteLabelInvariant();
   reversibilityAudit().forEach(m =>
     console.error("[atrium invariant] an action is irreversible in fact — " + m));
 }
@@ -4522,6 +4899,9 @@ function paintSaid(box, inner) { return `<span data-said="${PAINTED.push(box) - 
    the pieces. Both markers count as "this text was read out of the record" for
    the completeness walk, so neither is an exemption. */
 function paintParts(box) { return `data-said-parts="${PAINTED.push(box) - 1}"`; }
+/* the same declaration made on an element that already exists — the surface tabs
+   are markup, not innerHTML, and their listeners are wired once at load */
+function markParts(el, box) { if (el) el.setAttribute("data-said-parts", String(PAINTED.push(box) - 1)); }
 
 function voiced(v) {
   if (v == null) return "";
@@ -4582,9 +4962,21 @@ function renderRail() {
        Both counts are glyphed now and they are visually different: `◆` for what
        is owed, `·` for what is merely unread, in a quieter treatment. The two
        can never be confused for one another because they never look the same. */
+    /* AND THE OWED BADGE IS A SENTENCE ABOUT RECORDS (round 13, D6). `◆3` is
+       `attention(r).length` — `owedTo` AND a verification — counted over another
+       room's objects and painted with no declared subject and no mint, so no
+       instrument on the page could see it. The unread count beside it counts
+       MESSAGES and stays a literal, which is the difference the two glyphs are
+       there to make. */
+    const owedBadge = r.objects.length
+      ? say(r.objects.map(o => fieldView(o, "verification")), function () {
+          const vs = Array.prototype.slice.call(arguments);
+          return String(vs.filter(v => needsYouAt(v.owner, v.value)).length);
+        }, r.objects[0])
+      : null;
     b.innerHTML =
       `<span class="hash" aria-hidden="true">#</span><span class="nm">${esc(r.name)}</span>` +
-      (owed ? `<span class="pill"><span aria-hidden="true">◆</span>${owed}</span>`
+      (owed ? `<span class="pill"><span aria-hidden="true">◆</span>${voiced(owedBadge)}</span>`
             : unseen ? `<span class="ct"><span aria-hidden="true">·</span>${unseen} unread</span>` : "");
     b.title = `#${r.name} — ${owed} item${owed === 1 ? "" : "s"} needing you · ${unseen} message${unseen === 1 ? "" : "s"} you have not seen`;
     b.addEventListener("click", () => switchRoom(id));
@@ -4616,8 +5008,28 @@ function renderHead() {
   const items = attention(r);
   const owed = items.length;
   const rows = attentionRows(r).length;
-  $("surfNeedsN").textContent = String(owed);
-  $("surfStateN").textContent = String(r.objects.length);
+  /* THE SURFACE TABS ARE AGGREGATES (round 13, D6). `NEEDS YOU 3` is
+     `attention(r).length` — `owedTo` AND a verification read — and `CURRENT
+     STATE 13` counts the records this room holds. Both sat outside `data-obj`
+     and `data-agg`, so the walk could not see them, and the comment beside the
+     uncovered-set enumerator said of the surface tabs "None of them speaks for a
+     record", which was written from memory and is false of both. They are minted
+     from the reads they are counting, and the counts are re-derived by
+     checkCountedClaims(). */
+  const surfViews = r.objects.map(o => fieldView(o, "verification"));
+  const needsBox = say(surfViews, function () {
+    const vs = Array.prototype.slice.call(arguments);
+    return ["NEEDS YOU", String(vs.filter(v => needsYouAt(v.owner, v.value)).length)];
+  }, r.objects[0]);
+  const stateBox = say(surfViews, function () {
+    return ["CURRENT STATE", String(Array.prototype.slice.call(arguments).length)];
+  }, r.objects[0]);
+  $("surfNeeds").innerHTML =
+    `<span class="lbl" data-part="0">${esc(needsBox.said[0])}</span> <span class="n" id="surfNeedsN" data-part="1">${esc(needsBox.said[1])}</span>`;
+  markParts($("surfNeeds"), needsBox);
+  $("surfState").innerHTML =
+    `<span class="lbl" data-part="0">${esc(stateBox.said[0])}</span> <span class="n" id="surfStateN" data-part="1">${esc(stateBox.said[1])}</span>`;
+  markParts($("surfState"), stateBox);
   /* the badge counts ITEMS; the filter it turns on highlights ROWS. The
      accessible name says which is which rather than implying one number. */
   $("surfNeeds").title = owed
@@ -4718,7 +5130,10 @@ function renderPin() {
 }
 
 /* the trailer's glyph is the lead's glyph — the tone follows the sentence */
-const TRAILER_GLYPH_CLASS = { "✗": "bad", "◆": "warn", "?": "warn", "~": "claim", "✓": "" };
+/* `?` went with the open-questions branch (round 13, D3): the lead cannot
+   produce that glyph any more, and a style for a glyph nothing emits is the same
+   dead work as the branch it dressed. */
+const TRAILER_GLYPH_CLASS = { "✗": "bad", "◆": "warn", "~": "claim", "✓": "" };
 
 /* an owed item whose source message is not in this room says where it is and
    goes there. Round 2 counted it and highlighted nothing. */
@@ -4933,8 +5348,37 @@ const ACTION_EFFECT = {
   resched:  o => ({ verification: "self_reported", due: RESCHED_TO, owedTo: commitmentOwner(o) }),
   reassign: o => ({ owedTo: null, assignee: o.reassignTo }),
   takeback: o => ({ owedTo: S.me, assignee: (handedOnBy(o) || {}).from }),
-  reopen:   o => ({ verification: REOPEN_TO[o.kind], resolvedAt: null, owedTo: reopenOwner(o) })
+  /* AND A REOPEN SYNTHESISES AN OPTION (round 13, D8). `reopen()` gives a
+     decision that never carried options the one option that is not invented, and
+     `(o.options || []).length` is a term in offeredActions() — so reopening D1
+     really offers ["opt","typed"] while this table projected ["typed"], and
+     `offeredAfter(D1,"reopen")` was wrong about the page one click ahead of
+     itself. The synthesis is one function now, called by the write and by the
+     projection, so the two cannot say different things. */
+  reopen:   o => ({ verification: REOPEN_TO[o.kind], resolvedAt: null, owedTo: reopenOwner(o),
+                    options: reopenOptions(o) })
 };
+/* the options a reopen leaves on an object. Options that existed survive; a
+   decision that never carried any gets the one option that is not invented —
+   re-affirming the statement already on the record.
+
+   `agrees: true` IS NOT A DETAIL (round 6 D1). A re-affirmation is the proposal,
+   by construction: its statement is `o.text`, verbatim. Round 6 left the flag
+   off, `answerDecision`'s `!answer.agrees` read `!undefined` as a departure, and
+   the correction chain then asserted that two byte-identical sentences differed.
+   That is round 4's D7 arriving back through the fallback round 4 itself added —
+   which is why the relationship is now ASSERTED by
+   checkAnswerIdentityInvariant() instead of trusted to a literal. */
+function reopenOptions(o) {
+  if (o.kind !== "decision" || (o.options || []).length) return o.options || [];
+  /* "the PRIOR call" quantified over the statement history in a label nothing
+     read (round 13, D9 — found by the repaired splitter, on the run
+     `lars chose: Re-affirm the prior call · statement recorded verbatim`, where
+     "prior" and `statement`'s own word sat in different middot fragments of one
+     line). The option points at the value standing on the record, which is what
+     it re-affirms and what two point reads can support. */
+  return [{ label: "Re-affirm the statement of record", statement: o.text, synthesized: true, agrees: true }];
+}
 /* the object as it stood before a write, with its histories copied rather than
    shared — otherwise a projection that reads the assignee history (takeback)
    would read the entry the write just added */
@@ -4946,6 +5390,39 @@ function preSnapshot(o) {
 }
 let PENDING_ACTION = null;
 function beginAction(id, o) { if (DEV && o) PENDING_ACTION = { id: id, pre: preSnapshot(o), o: o }; }
+/* two projected values are the same when they say the same thing about the
+   offered set. Arrays of options compare by content — `sameValue` compares
+   objects by identity, and the table necessarily builds a fresh array. */
+function sameEffect(want, got) {
+  if (Array.isArray(want) || Array.isArray(got))
+    return Array.isArray(want) && Array.isArray(got) && JSON.stringify(want) === JSON.stringify(got);
+  return sameValue(want, got);
+}
+/* THE FIELDS A WRITE MOVED THAT CHANGE WHAT THE PAGE OFFERS, DERIVED FROM THE
+   WRITE (round 13, D8). The old check iterated `Object.keys(eff)` — the keys the
+   table already names — so a field the write moves and the table omits was
+   undetectable BY CONSTRUCTION, which is exactly the shape of a gate that passes
+   when the suite never ran. This asks the opposite question: take the object as
+   it stands AFTER the write, put ONE field back to what it held before, and see
+   whether the offered set moves. If it does, that field decides what the page
+   offers next, and the table has to name it. Probing forward from `pre` would
+   miss it (options alone changes nothing while `resolvedAt` is still set) —
+   the probe has to be backward, from the state the write actually produced. */
+function offerRelevantMoves(pre, post) {
+  const out = [];
+  const base = offeredActions(post).join(",");
+  const keys = {};
+  Object.keys(pre).forEach(k => { keys[k] = 1; });
+  Object.keys(post).forEach(k => { keys[k] = 1; });
+  Object.keys(keys).forEach(f => {
+    if (f === "recorded" || f === "history" || f === "corrections" || f === "facts") return;
+    if (sameEffect(pre[f], post[f])) return;
+    const probe = Object.assign(Object.create(Object.getPrototypeOf(post) || Object.prototype), post);
+    probe[f] = pre[f];
+    if (offeredActions(probe).join(",") !== base) out.push(f);
+  });
+  return out;
+}
 function checkActionEffectInvariant() {
   if (!DEV) return;
   const a = PENDING_ACTION;
@@ -4954,12 +5431,19 @@ function checkActionEffectInvariant() {
   const eff = ACTION_EFFECT[a.id](a.pre);
   Object.keys(eff).forEach(f => {
     const want = eff[f], got = a.o[f];
-    const ok = want === RESOLVED ? got != null : sameValue(want, got);
+    const ok = want === RESOLVED ? got != null : sameEffect(want, got);
     if (!ok)
       console.error("[atrium invariant] the action table says this write moves a field the write did not move — the " +
         "reversibility audit projects from this table, so a table that drifts from its write path is an audit of a " +
         "page that does not exist:", a.o.id, a.id, f, "projected", want === RESOLVED ? "(some timestamp)" : want,
         "· record holds", got);
+  });
+  offerRelevantMoves(a.pre, a.o).forEach(f => {
+    if (f in eff) return;
+    console.error("[atrium invariant] this write moved a field that decides what the page offers next and the action " +
+      "table does not name it — the table's key set was the only thing the old check iterated, so an omitted field " +
+      "was undetectable by construction and the projection was wrong one click ahead of the reader:",
+      a.o.id, a.id, f, "before", a.pre[f], "· after", a.o[f]);
   });
 }
 /* which action puts which back. Declared, so rule 2 is decidable rather than
@@ -4972,8 +5456,12 @@ const ACTION_RESTORES = {
      the control names the date it will write (rule 2) */
   resched:  []
 };
-/* the label an unrestorable action must contain — the value it will write */
-const ACTION_NAMES_VALUE = { resched: () => RESCHED_TO };
+/* `ACTION_NAMES_VALUE` — a second hand-written table naming the value each
+   unrestorable action writes — was REMOVED in round 13. It said `resched` writes
+   RESCHED_TO, which ACTION_EFFECT already says, and nothing held the two in
+   step. The control declares the FIELD (`data-writes="due"`) and the value comes
+   out of ACTION_EFFECT, so there is one table and the label is proved against
+   it by checkWriteLabelInvariant(). */
 
 /* DID YOU HAND THIS ON, AND CAN YOU TAKE IT BACK? The assignee history answers
    both: the last amendment is a reassign, and you are the person who made it. */
@@ -5055,7 +5543,7 @@ function pinActions(o, primaryOnly) {
        undo is the one thing the label tells you before you click it. */
     acts = off.indexOf("signed") >= 0
       ? [`<button class="btn sm" data-fx="signed">Mark signed off</button>`,
-         `<button class="btn ghost sm" data-fx="resched" title="No control puts a due date back — this writes ${esc(RESCHED_TO)}">Reschedule to ${esc(RESCHED_TO)}</button>`]
+         `<button class="btn ghost sm" data-fx="resched" data-writes="due" title="No control puts a due date back — this writes ${esc(RESCHED_TO)}">Reschedule to ${esc(RESCHED_TO)}</button>`]
       : [aboutButton(o, "sm")];
   } else if (o.kind === "question") {
     /* the one-click control is only offered when the card actually carries an
@@ -5068,9 +5556,25 @@ function pinActions(o, primaryOnly) {
         ? [`<button class="btn sm" data-bind="1">Answer in your own words →</button>`]
         : [aboutButton(o, "sm")];
     /* the page does not invent a name to hand a question to */
-    if (off.indexOf("reassign") >= 0) acts.push(`<button class="btn ghost sm" data-fx="reassign">Ask ${esc(o.reassignTo)} instead</button>`);
+    /* AND THE NAME IN THE LABEL IS THE ASSIGNEE THIS CLICK WRITES, DECLARED AND
+       PROVED (round 13, D1). Hand Q1 to justin and take it back and the assignee
+       history reads [null, "justin", null] — so this label states a value the
+       record holds, and the walk fires on it, live, once the card is a full card
+       rather than a compact row. `data-writes` is not an exemption: it is the
+       claim that clicking this writes `assignee = justin`, checked against
+       ACTION_EFFECT.reassign by checkWriteLabelInvariant(). */
+    if (off.indexOf("reassign") >= 0) acts.push(`<button class="btn ghost sm" data-fx="reassign" data-writes="assignee">Ask ${esc(o.reassignTo)} instead</button>`);
     else if (off.indexOf("takeback") >= 0) acts.push(takeBackButton(o, "ghost sm"));
-    else if (o.answerOption && canBind(o)) acts.push(`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`);
+    /* AND AN OFFERED ACTION GETS A CONTROL (round 13, found by this round's own
+       sequence enumerator on the artifact it was written to check). This was an
+       `else if`, so on the opening screen `typed` was in Q1's offered set and
+       `Ask justin instead` won the slot — the page offered an action and painted
+       nothing anywhere that reaches it, which is checkActionSetInvariant's rule
+       read in the other direction and is the same "an audit of a page that does
+       not exist". The composer is how you answer a question in your own words
+       and it does not compete with handing it on. */
+    if (off.indexOf("typed") >= 0 && acts.join("").indexOf("data-bind") < 0)
+      acts.push(`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`);
   } else {
     /* a claim moves by being checked, not by being typed at — and anything else
        that ends up owed still gets a way out */
@@ -5298,7 +5802,25 @@ function objectTag(r, m, o) {
       return `<button class="tag" ${rc}>` +
         voiced(stated(o, ["verification"], v => `records the answer · ${o.kind} ${enumText(v.value)} · no sign-off attached`)) +
         `${where}</button>`;
-    return `<button class="tag amber" ${rc}>superseded answer · replaced ${esc(fieldOr(m.supersededAt, "· time not recorded"))} · kept on the record${where}</button>`;
+    /* THE LAST LITERAL IN THIS FAMILY (round 13, D9). Five branches above this
+       one were minted in rounds 5, 8, 11 and 12; this one still read `superseded
+       answer · replaced 09:17 · kept on the record` — the field's own word and a
+       continuity quantifier, on a permanent feed row, with nothing reading
+       either. Every instrument walked past it: clausesOf() split it on `·` and
+       so never had "answer" and "kept" in the same clause to pair. Both ends of
+       the record are read here, and the clause that used to say "kept" says what
+       the two reads support. */
+    const sfield = m.supersededOf || (o.kind === "question" ? "answer" : "statement");
+    return `<button class="tag amber" ${rc}>` +
+      voiced(say([fieldView(o, sfield, m.supersededIndex), fieldView(o, sfield)], (was, now) =>
+        `superseded ${was.of} · replaced ${fieldOr(m.supersededAt, "· time not recorded")} · ` +
+        /* two point reads support "these two are the same value" and cannot
+           support "again", which is a question about the whole history — the
+           distinction this file has had to make in four separate places */
+        (sameValue(was.value, now.value)
+          ? `the ${was.of} of record is this one`
+          : `the ${was.of} of record is a different one now`), o)) +
+      `${where}</button>`;
   }
   /* A ◆ BADGE MEANS "THIS ROOM OWES YOU THIS" (round 4 minor). When the object
      lives in ANOTHER room, this room's Needs-you filter correctly does not count
@@ -5437,30 +5959,49 @@ function sylDivider(r, mode) {
   const label = mode === "absence" ? "SINCE YOU LEFT"
               : cursorPastAbsence ? "SINCE YOU MARKED THIS SEEN" : "SINCE YOU RETURNED";
 
-  const chips = ["need", "change", "discussion", "routine"].map(k => {
+  /* A CHIP THAT FILTERS NOTHING IS NOT A CONTROL (round 13, D10 — the prune
+     applied as a class rather than where it was noticed).
+     `SINCE YOU RETURNED · 0 NEED YOU · 0 CHANGES · 0 DISCUSSION · 0 ROUTINE`
+     appeared one column left of the pane round 12 pruned, on every screen after
+     your first write: four permanently-disabled zero chips — and the four
+     controls the driver reported as enumerated-but-never-driven, because there
+     is nothing to drive. Round 12's own doctrine names that shape and round 12
+     did not sweep it. A zero chip is not rendered at all now; when the whole row
+     is zero the group says what is in it in one clause instead of four zeros and
+     a disclaimer explaining them. */
+  const chips = ["need", "change", "discussion", "routine"].filter(k => c[k]).map(k => {
     const n = c[k], on = !!S.ui.feedFilter && S.ui.feedFilter.k === k && S.ui.feedFilter.scope === scope;
-    const title = n
-      ? `${n} message${n === 1 ? "" : "s"} in this group are ${k === "need" ? "linked to something that needs you — the pin counts the items, this counts the rows" : FILTER_LABEL[k].toLowerCase()}`
-      : `no ${FILTER_LABEL[k].toLowerCase()} messages in this group — nothing to filter to`;
-    return `<button class="cnt${k === "need" && n ? " need" : ""}" data-filter="${k}" data-scope="${scope}"` +
-           `${n ? "" : " disabled"} title="${esc(title)}" aria-pressed="${on}">${n} ${FILTER_LABEL[k]}</button>`;
+    const title = `${n} message${n === 1 ? "" : "s"} in this group are ${k === "need" ? "linked to something that needs you — the pin counts the items, this counts the rows" : FILTER_LABEL[k].toLowerCase()}`;
+    return `<button class="cnt${k === "need" ? " need" : ""}" data-filter="${k}" data-scope="${scope}"` +
+           ` title="${esc(title)}" aria-pressed="${on}">${n} ${FILTER_LABEL[k]}</button>`;
   }).join("");
 
   /* marking seen mutes this divider; it does not delete it. The window, the
      count and the four chips stay exactly where they were, and the mark is
      reversible from the same line that reports it. */
   const when = mode === "absence"
-    ? `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages · frozen at return</span>
-       <span aria-hidden="true">·</span>
-       <span>chips count rows · NEEDS YOU counts the items behind them</span>` + filterNote(scope) + `
+    /* and the clause that tells the two numbers apart is printed only while
+       there are two numbers to tell apart (round 13, D10 — same class) */
+    ? `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages · frozen at return</span>` +
+      (c.need ? `<span aria-hidden="true">·</span>
+       <span>chips count rows · NEEDS YOU counts the items behind them</span>` : "") + filterNote(scope) + `
        <span aria-hidden="true">·</span>` +
       (read
         ? `<span class="marked">marked seen ${esc(r.markedAt || "")} · the group stays here, muted</span>
            <span aria-hidden="true">·</span>
            <button class="mark" id="unmarkSeen">unmark</button>`
         : `<button class="mark" id="markSeen">mark this group seen</button>`)
-    : `<span>${c.total} ${read ? "message" + (c.total === 1 ? "" : "s") + " here, all read" : "unseen since " + esc(cursorPastAbsence ? "you marked this seen" : r.away.to)}</span>` +
-      (own ? `<span aria-hidden="true">·</span><span class="own">${own} row${own === 1 ? " here is yours" : "s here are yours"} — your own activity is never counted back to you as unseen</span>` : "") +
+    /* AND THE DISCLAIMER GOES WITH THE ZERO IT EXPLAINED (round 13, D10).
+       `0 unseen since 09:12 today · 5 rows here are yours — your own activity is
+       never counted back to you as unseen` is a zero, then two clauses
+       explaining the zero. With nothing unseen there is one fact worth printing
+       and it is what IS here. The rule that your own rows are never unseen has
+       not changed and is not being hidden: it is said where it is doing work —
+       on a group that has both — and the toast on send says it too. */
+    : (!c.total
+        ? `<span>${own ? `${own} row${own === 1 ? "" : "s"} here, ${own === 1 ? "yours" : "all yours"}` : "nothing here yet"}</span>`
+        : `<span>${c.total} ${read ? "message" + (c.total === 1 ? "" : "s") + " here, all read" : "unseen since " + esc(cursorPastAbsence ? "you marked this seen" : r.away.to)}</span>` +
+          (own ? `<span aria-hidden="true">·</span><span class="own">${own} row${own === 1 ? " here is yours" : "s here are yours"} — your own activity is never counted back to you as unseen</span>` : "")) +
       filterNote(scope) +
       (c.total
         ? read
@@ -5618,7 +6159,7 @@ function renderLens() {
        circling, and it subsumes the open question and the proposal without a
        reconciliation. A failure is a check that came back — it is not this
        count's business, and the pin's lead says it in its first branch. */
-    const unver = vs.filter(v => v.value !== "accepted" && v.value !== "verified" && v.value !== "failed").length;
+    const unver = vs.filter(v => isUnchecked(v.value)).length;
     /* AND "AWAITING YOU" IS COUNTED OUT OF THE SAME READS. `attention(r)` is
        `needsYou` over the objects, which is `owedTo` AND a verification — so
        counting it outside the phrase would put a number about thirteen
@@ -5644,20 +6185,42 @@ function renderLens() {
     head.dataset.objective = ob.id;          // survives the rebuild it triggers (D3)
     head.dataset.agg = mine.map(o => o.id).join(",");   // the records this header speaks for
     head.setAttribute("aria-expanded", String(!!ob.open));
-    /* the overlap lives in the accessible name, where it costs no screen and
-       answers the only question it was ever answering — the `.lensnote` that
-       used to print it above the whole pane is gone (round 12) */
-    head.title = `${mine.length} object${mine.length === 1 ? "" : "s"} sit under this objective` +
-      (owedHere ? `, ${owedHere} of which need you. An object can sit under more than one objective, so these counts overlap the other objectives and the pin.`
-                : ". Nothing here is waiting on you.");
-    /* AN OBJECTIVE HEADER IS AN AGGREGATE TOO (round 12, D3). `11 objects · 3
-       need you` counts a verification per object — `needsYou` is `owedTo` AND
-       not accepted AND not verified — so it is minted from a read of every one
-       of them, exactly like the pane summary above it. */
+    /* THE OVERLAP IS A PROPERTY OF THE OBJECTS, NOT OF WHAT YOU ARE OWED
+       (round 13, D4). Round 12 moved the caveat off the pane and into this
+       accessible name, and gated it on `owedHere` — so the objective whose
+       overlap is TOTAL (`Keep mobile clients on supported auth`, both of whose
+       objects also sit under the first objective) carried no overlap sentence at
+       all, because nothing under it was owed. The condition is whether an
+       overlap exists.
+
+       AND IT IS VISIBLE, NOT ONLY IN A TOOLTIP. The headers stack 11, 3 and 2
+       above a pane that says 13, and the arithmetic a reader does is addition.
+       `11 of 13 objects` gives every header the same denominator, so the counts
+       read as three overlapping slices of one room rather than three parts of a
+       sum — which is the information the deleted caveat was carrying, in the
+       place where the mistake is made rather than in prose apologising for it
+       afterwards. */
+    const overlapping = mine.filter(o => (o.objectives || []).length > 1).length;
+    head.title = `${mine.length} object${mine.length === 1 ? "" : "s"} of the ${r.objects.length} in this room sit under this objective` +
+      (owedHere ? `, ${owedHere} of which need you. ` : ". Nothing here is waiting on you. ") +
+      (overlapping
+        ? `${overlapping} of them also sit${overlapping === 1 ? "s" : ""} under another objective, so the objective counts overlap each other and the pin and do not add up to ${r.objects.length}.`
+        : "No object here sits under another objective.");
+    /* AN OBJECTIVE HEADER IS AN AGGREGATE TOO (round 12, D3). `11 of 13 objects
+       · 3 need you` counts a verification per object — `needsYou` is `owedTo`
+       AND not accepted AND not verified — so it is minted from a read of every
+       one of them, exactly like the pane summary above it. The denominator is
+       how many objects the room holds, which is not a record read and is not
+       claimed as one. */
+    const roomTotal = r.objects.length;
     const headCount = say(mine.map(o => fieldView(o, "verification")), function () {
       const vs = Array.prototype.slice.call(arguments);
       const owedN = vs.filter(v => needsYouAt(v.owner, v.value)).length;
-      return `${vs.length} object${vs.length === 1 ? "" : "s"} · ` + (owedN ? `${owedN} need you` : "all clear");
+      /* "all clear" read as a verdict on the objective — `Retire the legacy
+         identity path · 3 objects · all clear · BLOCKED` is a contradiction on
+         one line, and only the tooltip said the clearance was of YOU (round 13,
+         minor). It says whose clearance it is now. */
+      return `${vs.length} of ${roomTotal} objects · ` + (owedN ? `${owedN} need${owedN === 1 ? "s" : ""} you` : "none need you");
     }, mine[0]);
     head.innerHTML =
       `<span class="tw" aria-hidden="true">${ob.open ? "▾" : "▸"}</span>
@@ -6064,7 +6627,10 @@ function answerDecision(objectId, answer, provenanceNote) {
      is what makes the resolves/answer-bound tag identity-checked rather than
      state-checked: answer → reopen → answer leaves exactly one settled row. */
   const prior = o.answerMsg ? msg(r, o.answerMsg) : null;
-  if (prior) { prior.supersededAt = t; prior.supersededBy = m.id; }
+  /* and WHERE in the record this row's value stands, so the superseded-answer
+     tag can read it back rather than assert what became of it (round 13, D9) */
+  if (prior) { prior.supersededAt = t; prior.supersededBy = m.id;
+               prior.supersededOf = "statement"; prior.supersededIndex = recordOf(o, "statement").length - 1; }
 
   /* DEPARTURE IS OPTION IDENTITY, NOT STRING EQUALITY (round 4 D7). Choosing
      the option that IS the proposal is agreement even when its wording differs
@@ -6135,7 +6701,15 @@ function answerDecision(objectId, answer, provenanceNote) {
       return typed
         ? (moved
             ? "answered it directly — the resolution was recorded from the typed answer, not interpreted from it"
-            : "typed the sentence already on the record, word for word — it was recorded again and the statement itself was not amended")
+            /* "recorded AGAIN" is a claim about the whole statement history and
+               these are two point reads (round 13, found by this round's own
+               sequence enumerator at depth 4, live on r12 as committed: type an
+               answer, reopen, type the same answer, choose the option). What
+               these reads know is that the two ends are the same value. The
+               same word, in the same shape, that rounds 11 and 12 removed from
+               four other sentences — this one was four writes deep, so no
+               instrument had ever been there. */
+            : "typed the sentence already on the record, word for word — the statement of record is the same value it was, so the statement itself was not amended")
         : `chose the option ${answer.label} from the card — ` +
           (moved
             ? `the statement it carries was recorded verbatim, and none of it is worded by ${S.me}`
@@ -6331,7 +6905,8 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
      superseding row is stamped and `o.answerMsg` points straight at it. Same
      family as "was due undefined": a fallback painted over a fact. */
   const priorAns = o.answerMsg ? msg(r, o.answerMsg) : null;
-  if (priorAns) { priorAns.supersededAt = t; priorAns.supersededBy = m.id; }
+  if (priorAns) { priorAns.supersededAt = t; priorAns.supersededBy = m.id;
+                  priorAns.supersededOf = "answer"; priorAns.supersededIndex = aAt; }
   const ac = amend(o, "answer", statement, { tm: t, by: S.me, how: typed ? "typed answer" : "chosen from the card" });
   o.answerLabel = label; o.answerMsg = m.id;
   o.answerVoice = typed ? "human" : "page";
@@ -6348,7 +6923,6 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
   const rd = reads(o, [{ of: "answer", at: aAt }, "answer",
                        { of: "verification", at: vAt2 }, "verification"]);
   const wasA = rd[0], nowA = rd[1], wasV2 = rd[2], nowV2 = rd[3];
-  const aMoved = !sameValue(wasA.value, nowA.value);
   /* the answer is the human's characters only when the human typed them — the
      same rule the decision path applies to a statement (round 5 D4) */
   const ansFrag = v => (typed ? human(recordedLabel(v.value)) : recordedLabel(v.value));
@@ -6369,9 +6943,21 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
     was: say([wasA], a => a.value == null
       ? "Open question — nothing was on the record as its answer"
       : "Answer of record" + (a.tm ? " from " + a.tm : "") + ": " + a.value),
-    after: say([nowA], a => aMoved ? ansFrag(a)
-      /* same "again", same fix (round 12) */
-      : "re-recorded verbatim — nothing about the answer changed"),
+    /* THE COMPARISON IS MADE INSIDE THE PHRASE, AND THE BRANCH THAT SAYS
+       "NOTHING CHANGED" PRINTS WHAT DID NOT CHANGE (round 13, D2). This read
+       `aMoved ? … : "re-recorded verbatim — nothing about the answer changed"`,
+       with `aMoved` computed twenty lines up, OUTSIDE the phrase: the verbatim
+       branch names the answer and paints not one character of it, so the record
+       could hold anything and this sentence would not move. The decision path
+       170 lines above (answerDecision) makes exactly this comparison inside the
+       phrase and carries a comment explaining why — the same class, one
+       function apart, fixed on one side only, which is the neighbour-branch
+       pattern this file has now shipped four rounds running. A closed-over
+       boolean is not a read: it is a value that was a read once. */
+    after: say([nowA], a => !sameValue(a.value, wasA.value)
+      ? ansFrag(a)
+      : ["re-recorded verbatim — ", recordedLabel(a.value),
+         " is the answer that was already there, so the answer itself was not amended"]),
     change: ac || sc2,
     fact: say([wasA, nowA, nowV2], (wa, na, nv) =>
       (!sameValue(wa.value, na.value) ? `answered by ${S.me} at ${t} · ` : `re-recorded by ${S.me} at ${t} · the answer itself was not amended · `) +
@@ -6435,8 +7021,16 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
   /* "stays ~ with no sign-off" is a claim about the verification, and round 10
      minted it from two reads of the answer (round 11 D1's class) */
   toast(say([wasA, nowA, nowV2], (wa, na, nv) => !sameValue(wa.value, na.value)
+    /* AND IT CALLS THE FIELD BY ITS OWN NAME (round 13, D9 — found by the
+       repaired clause splitter on the very first click). A question's answer of
+       record lives in `answer`; `statement` is the object's own proposal, and
+       this toast said "the card's statement … it stays unverified" in one
+       middot run, pairing `statement`'s vocabulary with a continuity quantifier
+       in a sentence that never opened `statement`. The old splitter cut the run
+       at every middot, so the pair was never in one clause and no instrument on
+       the page could see it. The card's words are its WORDING here. */
     ? (typed ? `answered · your wording is the answer of record · it stays ${enumText(nv.value)} with no sign-off, and still blocks ${blocks}`
-             : `answered · the card's statement recorded verbatim in the system's voice · it stays ${enumText(nv.value)} with no sign-off, and still blocks ${blocks}`)
+             : `answered · the card's wording recorded verbatim in the system's voice · it stays ${enumText(nv.value)} with no sign-off, and still blocks ${blocks}`)
     : `re-recorded · it is the answer already on the record, so the answer itself was not amended · still blocks ${blocks}`), "warn");
 }
 
@@ -6524,23 +7118,12 @@ function reopen(objectId, reason) {
   const owed = !!back;
   o.owedTo = back;
   if (owed) o.priority = o.priority || (o.kind === "decision" ? 20 : 12);
-  if (o.kind === "decision" && (!o.options || !o.options.length)) {
-    /* NO DEAD ATTENTION ITEMS. Options that existed survive the reopen. A
-       decision that never carried options gets the one option that is not
-       invented — re-affirming the statement already on the record — plus the
-       bound composer, which pinActions() offers on every pending decision.
-
-       `agrees: true` IS NOT A DETAIL (round 6 D1). A re-affirmation is the
-       proposal, by construction: its statement is `o.text`, verbatim. Round 6
-       left the flag off, `answerDecision`'s `!answer.agrees` read `!undefined`
-       as a departure, and the correction chain then asserted that two
-       byte-identical sentences differed. That is round 4's D7 arriving back
-       through the fallback round 4 itself added — which is why the relationship
-       is now ASSERTED by checkAnswerIdentityInvariant() instead of trusted to
-       a literal, and why answerDecision derives "did it change" from the two
-       strings rather than from this flag alone. */
-    o.options = [{ label: "Re-affirm the prior call", statement: o.text, synthesized: true, agrees: true }];
-  }
+  /* NO DEAD ATTENTION ITEMS — and the synthesis is reopenOptions(), the same
+     function ACTION_EFFECT.reopen projects through, so the page's prediction of
+     what it will offer after this click is the code that does the offering
+     (round 13, D8). It used to be written out here and nowhere else, and
+     `offeredAfter(D1,"reopen")` was one option short of the truth. */
+  o.options = reopenOptions(o);
   if (o.kind === "commitment" && o.priorOverdue) o.overdue = o.priorOverdue;
 
   /* the label names the object's OWN kind. Round 4's table hard-coded
@@ -6611,9 +7194,14 @@ function reopen(objectId, reason) {
      verification into the word "answer" — a noun belonging to another field —
      in a sentence that never opened it (round 11 self-review). */
   const keptView = wasContent || wasVr;
+  /* AND IT SAYS WHERE IT IS KEPT (round 13, minor). On the K0 reopen row this
+     printed `verified → self-reported · … · verification kept` — an arrow saying
+     the verification moved and a clause, four middots later, that reads as
+     saying it did not. What is kept is the state it came FROM, in the chain,
+     which is a different sentence and now says so. */
   const keptShort = (s, k) => !s.ever("settled") ? "nothing had settled it"
-    : k.of === "verification" ? preservedName(k.value) + " kept"
-    : k.value != null ? k.of + " kept" : "no " + k.of + " on the record";
+    : k.of === "verification" ? "the " + preservedName(k.value) + " it came from is kept in the chain"
+    : k.value != null ? "the " + k.of + " it came from is kept in the chain" : "no " + k.of + " on the record";
   const keptClause = (s, k) => {
     const at = s.last("settled");
     if (!at) return "nothing had settled it";
@@ -6758,6 +7346,23 @@ function reopen(objectId, reason) {
   }), "warn");
 }
 
+/* WHAT THE PAGE KNOWS AND NEVER SAID (round 13, D7). `offeredAfter(K0,
+   "reopen")` returns [] before you click — the page can see, from the same
+   projection the reversibility audit runs on, that reopening that commitment
+   leaves you with no control on it at all, because verify is claim-only, sign-
+   off is owner-only, and reopen needs a settled state. The friction rule
+   credited the action under tier 2 ("it asks first"), which is true and is not
+   the whole answer; the reader was the only party in the room who did not know.
+   It is said here, in the prompt, out of the projection rather than out of a
+   sentence somebody wrote — and it names who it goes to, because it is not a
+   dead end for them. */
+function reopenConsequence(o) {
+  const after = offeredAfter(o, "reopen");
+  if (!after || after.length) return "";
+  const back = reopenOwner(o);
+  return ` <span class="warn">After this you will have no action left on it from your seat` +
+         (back && back !== S.me ? ` — it goes back to ${esc(back)}, whose it is.` : `.`) + `</span>`;
+}
 /* the optional reason prompt. Empty is fine and says so: a reason you did not
    give is not a reason the page may supply. */
 function reopenBox(o) {
@@ -6771,7 +7376,7 @@ function reopenBox(o) {
        <button class="btn sm" id="rgo">Reopen</button>
        <button class="btn ghost sm" id="rcancel">Cancel</button>
      </div>
-     <div class="hint">Leave it empty if you like. The correction chain records the state change either way, in the system's voice — nothing is ever written in yours.</div>`;
+     <div class="hint">Leave it empty if you like. The correction chain records the state change either way, in the system's voice — nothing is ever written in yours.${reopenConsequence(o)}</div>`;
   box.querySelector("#rgo").addEventListener("click", () => reopen(o.id, box.querySelector("#rinput").value.trim()));
   /* and this one back onto Reopen, which is where it came from (D3) */
   const closeReopen = () => { S.ui.reopening = null; focusOn("#rcReopen", "#rcBack"); render(); };
@@ -7175,7 +7780,10 @@ function applyEffect(objectId, fx) {
          than what the record now holds — "so it stays unverified" was a claim
          about the verification history written into a provenance string (round
          11). What the record holds is on the receipt's own state line, read. */
-      `one-click answer · the card's statement recorded verbatim · ${S.me} chose it, the page worded it · no model in the path · no sign-off is attached by this action`,
+      /* "wording", not "statement": a question's answer of record is `answer`,
+         and `statement` is a different field with a different history (round 13,
+         D9 — swept to the branch beside the one the splitter caught) */
+      `one-click answer · the card's wording recorded verbatim · ${S.me} chose it, the page worded it · no model in the path · no sign-off is attached by this action`,
       ans.label);
     return;
   } else if (fx === "reassign") {
@@ -7776,6 +8384,7 @@ function checkFocusInvariant() {
 function render() {
   /* captured before anything is torn down — see restoreFocus() */
   const hadFocus = focusKey(document.activeElement);
+  dropFieldUniverse();
   normalizeFilter();
   renderRail();
   renderHead();

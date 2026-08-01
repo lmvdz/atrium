@@ -163,6 +163,38 @@ Two things to preserve while pruning, both of which cost nothing on screen:
   problem as much as a count problem, and dropping four statistics without
   grouping the rest would have fixed half of it.
 
+**Sweep the prune as a class, not where it was noticed.** #10 r12 pruned the pane
+and left the identical shape one column to its left, on every screen after the
+reader's first write: `SINCE YOU RETURNED · 0 NEED YOU · 0 CHANGES · 0 DISCUSSION ·
+0 ROUTINE`, then `0 unseen since 09:12 today · 4 rows here are yours — your own
+activity is never counted back to you as unseen`. Four permanently-disabled zero
+chips — *the same four controls that round's own driver reported as enumerated but
+never driven, because there is nothing to drive* — and a two-clause disclaimer
+explaining the zeros. **A chip that filters nothing is not a control**, and a group
+with nothing unseen says what is in it in one clause instead of four zeros and an
+apology for them. When a round writes a doctrine, its first job is to run the
+doctrine over the whole page.
+
+**And when you delete an explanation, re-verify the thing it explained is still
+true.** r11 counted "unverified" with one predicate on both sides of the screen and
+printed the scope. r12 widened the lens predicate to include open questions — the
+right reading — and, in the same commit, deleted the scope clause. Neither change
+was wrong; together they left the lens saying `8 unverified` and the pin trailer
+saying `~ 7 of 13 unverified` over the same thirteen records with nothing owed, and
+the sentence that would have made a reader ask was gone. **One predicate, named
+once, called by every surface that counts it** — and a number in a minted sentence
+is re-derived from the records the sentence declares it read, on every paint, so
+two honest counts of the same thing cannot disagree on one screen.
+
+**A caveat is conditioned on the thing it is about.** r12 moved the objective-overlap
+explanation into the header's `title` and gated it on whether anything under that
+objective was owed — so the objective whose overlap is *total* carried no overlap
+sentence at all, because nothing under it needed you. Gate a caveat on whether the
+condition it describes exists. Better still, make the shape visible in the count
+itself: every objective header reads `N of 13 objects` now, one denominator, so the
+headers read as overlapping slices of one room rather than as parts of a sum, and
+the caveat has less work to do.
+
 ## Epistemic glyphs
 
 Every rendered fact carries exactly one glyph. The glyph is *derived from the
@@ -492,6 +524,92 @@ more of the same class, including a comment in that round's own pruning block
 that said the trailer keeps three facts while the code beside it painted two.
 That comment is corrected in place *and the correction says what it was*, because
 the alternative is a doctrine file that has never been wrong.
+
+## Enumeration has a depth, and the denominator is over states
+
+#10 r12 reported **"225 controls enumerated, 219 driven, 0 violations"** and shipped
+two live invariant violations at depth 5, on controls that *do not exist* until two
+prior writes have happened. Both numbers were true. Neither was a denominator.
+
+`Ask justin instead` is re-offered after a take-back and states a value the assignee
+history holds. Reaching it takes five deliberate clicks — clear P1, clear K2, hand Q1
+on, reopen Q1's card, take it back — and the first two are what turn Q1 from a compact
+pin row, which paints one button, into a full card, which paints two. **A control that
+does not exist cannot be enumerated, and a walk over one render enumerates renders, not
+states.** The same greedy walk enumerated 226 keys on one machine and 225 on another,
+because which keys it ever *saw* depended on which control it randomly clicked.
+
+**Enumerate write sequences over reachable states, to a stated depth, and report three
+numbers.**
+
+- **Controls enumerated** — the union over every state reached, not one render. Union
+  is monotone and does not depend on a seed.
+- **Controls driven.**
+- **States reached at depth N**, with N stated. These are three facts and they are not
+  interchangeable; one number that sounds like coverage is how the last two rounds
+  passed their own exam.
+
+Four things make it an enumeration rather than a longer walk:
+
+- **The alphabet is the page's own decision function**, not the DOM: `(object, action)`
+  out of `offeredActions()`, over every object in every room. A control the current
+  render does not paint is still in the alphabet.
+- **The harness brings the control into existence** before driving it — switch room,
+  force the pin card open, open the receipt — and then clicks the real element, so
+  every render invariant fires exactly as it would for a reader who navigated there.
+  An offered action with no reachable control anywhere is *reported*, not skipped;
+  that check found `typed` offered on Q1 with no control painted for it.
+- **A state is what the records hold.** Navigation is not part of the signature,
+  because the harness re-derives whatever frame it needs. That is what collapses the
+  space enough to walk it.
+- **A key is a control.** #10 r12 tagged `click`, `pointerdown` and `mousedown`, so the
+  Enter handlers on the composer, the verify prompt and the reopen prompt — three write
+  paths — were outside the 226-key denominator entirely.
+
+**Breadth that is not complete says so, loudly, per level.** The report prints how many
+states were left unexpanded at each depth and refuses to call a sampled level a covered
+one. A truncated frontier is a fact about the run, not a footnote.
+
+**And the enumeration states its own boundary, in the same breath as its numbers**,
+because a round whose subject is claims that outrun their mechanism does not get to
+make one about its own instrument:
+
+- the alphabet is **writes**; navigation, filters, folds, replies, mark-seen and the
+  unbound composer are driven by the DOM walks, not enumerated to a depth;
+- the state signature is the **records** — it does not distinguish two states that
+  differ only in a seen cursor or a message count;
+- the harness **navigates by assignment** (it sets the open card, the open receipt) and
+  then clicks a real control in that frame; the frame is one a reader can reach, but
+  the route to it is not itself driven.
+
+**And the instrument answers to the same evidence rule as the artifact.** #10 r13's
+first cut of the clause-splitter repair widened every middot run unconditionally; the
+sequence enumerator went from one violation class to nine, five of them sentences that
+were telling the truth. It was measured, narrowed, and measured again. *A wrong
+instrument invents defects, it does not merely miss them* — and the only way to know
+which you have is to run it against the previous round as committed and compare.
+
+## A claim about what a mechanism produces is generated by the mechanism
+
+Three rounds running, #10 shipped a real mechanism beside a false sentence about its
+reach. r10 claimed a derived surface list and shipped a hand-written one. r11 built the
+derivation and cited an example the walk provably could not see. r12 — the round that
+wrote *a comment is a claim and answers to the evidence rule* — described five families
+of text as being in its uncovered-set list, and **not one of them can ever appear**: the
+first is a control label inside a declared subject, which the walker's own guard rejects
+two lines below the comment, and the rest are bare integers with no recorded vocabulary
+to match.
+
+Each round apologised. **An apology is not a mechanism.**
+
+- **Print the actual output, commit it, and have the comment cite the file.** The page's
+  uncovered set is `design/prototype-uncovered.txt`, generated by the driver over every
+  state the enumeration reaches.
+- **The driver fails when the committed artifact and the live mechanism disagree.** A
+  generated file nobody regenerates is a remembered list with extra steps.
+- **The driver fails when the comment names an example the mechanism does not produce.**
+  Any hand-written "for example, this now catches X" is a claim awaiting falsification,
+  and here it has been falsified three times running.
 
 ## Focus goes somewhere usable after every interaction, not only after a write
 
