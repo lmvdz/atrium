@@ -13,11 +13,19 @@
  * ------------------------------------------------------------------------- */
 
 import type { Metadata } from 'next';
+import { notFound } from 'next/navigation';
 import * as f from '../../fixtures';
 import { RoomFrame } from '../../RoomFrame';
 
-/** 4 fits; 13 and 19 are the round-1 failure points; 34 is well past them. */
-export const PIN_LOADS = [4, 13, 19, 34] as const;
+/**
+ * 4 fits; 13 and 19 are the round-1 failure points; 34 is well past them; 60 is
+ * where round 2's gauntlet found the expanded pin stranding 50 owed items
+ * behind an affordance that could not reveal them.
+ */
+export const PIN_LOADS = [4, 13, 19, 34, 60] as const;
+
+/** The largest load this route will build. Past it the fixture is the joke. */
+const MAX_LOAD = 200;
 
 export function generateStaticParams() {
   return PIN_LOADS.map((n) => ({ n: String(n) }));
@@ -29,7 +37,13 @@ export const metadata: Metadata = {
 
 export default async function PinLoadPage({ params }: { params: Promise<{ n: string }> }) {
   const { n } = await params;
-  const count = Number.parseInt(n, 10);
+  /* `Number.parseInt` is happy to return NaN, and NaN walked all the way to the
+     screen as "NaN owed to you" — /gallery/pin/abc rendered a frame stating a
+     quantity that does not exist. A route parameter is untrusted input like any
+     other; this is model/quotation.ts's parse-or-throw boundary, one layer
+     out. */
+  const count = /^\d+$/.test(n) ? Number.parseInt(n, 10) : Number.NaN;
+  if (!Number.isInteger(count) || count < 0 || count > MAX_LOAD) notFound();
   const attention = f.manyOwed(count);
 
   return (

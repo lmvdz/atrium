@@ -64,7 +64,19 @@
    the two. Measured at 19 items: the list comes to 314px, and the e2e asserts
    the overflow button is inside the pin's visible box rather than merely in the
    DOM. The count bound is what does the work; this is what catches the count
-   bound being wrong. */
+   bound being wrong.
+
+   ROUND 2's GAUNTLET: this belt was clipping REAL CONTENT once the overflow
+   affordance was used. `showAll` raised the row budget from 4 to 9 while the
+   belt stayed at 340px, so the expanded pin held more than it could show —
+   `overflow: hidden` still scrolls programmatically, so tabbing into a row
+   below the clip scrolled the container and took three rows off the TOP with no
+   scrollbar and no way back. The budget no longer moves: the affordance pages a
+   fixed-size window instead of raising a cap, so the list holds the same rows
+   in every state and this belt is back to being a second line of defence
+   against a budget that is wrong rather than a clip over live content. The e2e
+   asserts `scrollHeight <= clientHeight` after expanding — a pin that has
+   become a hidden scroll container fails there. */
 .pinList {
   display: flex;
   flex-direction: column;
@@ -370,6 +382,15 @@
 .tallyGlyph {
   font-family: 'IBM Plex Mono', ui-monospace, monospace;
   padding-right: 2px;
+}
+
+/* WHAT THE NEXT CLICK DOES. `flex: none`, so it is never the thing that gives
+   way at a narrow width — the explanatory tail below is. --tx1 on --ambbg5
+   measures 10.33:1 light and 10.90:1 dark. */
+.moreNext {
+  flex: none;
+  color: var(--tx1);
+  font-weight: 600;
 }
 
 .moreHint {
