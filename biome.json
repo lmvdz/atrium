@@ -17,7 +17,7 @@
       "!**/test-results",
       "!packages/db/drizzle",
       "!pnpm-lock.yaml",
-      "!**/.claude"
+      "!.claude"
     ]
   },
   "formatter": {
@@ -46,11 +46,7 @@
         "noConsole": {
           "level": "error",
           "options": {
-            "allow": [
-              "error",
-              "warn",
-              "info"
-            ]
+            "allow": ["error", "warn", "info"]
           }
         }
       }
@@ -80,11 +76,7 @@
   },
   "overrides": [
     {
-      "includes": [
-        "**/*.config.*",
-        "**/scripts/**",
-        "apps/server/src/**"
-      ],
+      "includes": ["**/*.config.*", "**/scripts/**", "apps/server/src/**"],
       "linter": {
         "rules": {
           "suspicious": {
