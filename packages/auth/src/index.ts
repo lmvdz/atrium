@@ -13,6 +13,7 @@ export * from './mailer.js';
 export * from './mounted.js';
 export * from './org.js';
 export * from './origin.js';
+export * from './room-access.js';
 export * from './secret.js';
 export * from './session.js';
 export * from './throttle.js';

@@ -1,6 +1,10 @@
-import { createAtriumAuth, resolveAuthSecret, trustedProxyStrategy } from '@atrium/auth';
-import { createDatabase, memberships, rooms } from '@atrium/db';
-import { and, eq, isNull } from 'drizzle-orm';
+import {
+  createAtriumAuth,
+  loadRoomMembership as loadAuthorizedRoomMembership,
+  resolveAuthSecret,
+  trustedProxyStrategy,
+} from '@atrium/auth';
+import { createDatabase } from '@atrium/db';
 import { loadEnv } from './env.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
@@ -37,25 +41,20 @@ async function main(): Promise<void> {
   });
 
   /**
-   * Room membership, straight from the table the web app writes. An archived
-   * room has no live members, so archiving one closes it to commands without a
-   * second rule anywhere.
+   * Room membership. The query is `@atrium/auth`'s, not this file's.
+   *
+   * Round 5 wrote it out here: `memberships` joined to `rooms`, filtered to a
+   * live room. That read only the *derived* table, so a `memberships` row that
+   * outlived its `workspace_members` row — a revocation sweep that hit the 5s
+   * lock timeout, a crash between two hooks — was still full authority on this
+   * surface. `loadRoomMembership` joins `workspace_members` and caps the role at
+   * the workspace role, so this answer no longer depends on any cleanup having
+   * run. It lives in the package because the web app asks the same question and
+   * two copies of an authorization predicate is how one of them ends up wrong;
+   * `packages/auth/src/room-access.ts` has the whole argument.
    */
-  const loadRoomMembership: LoadRoomMembership = async (roomId, userId) => {
-    const [row] = await database.db
-      .select({ role: memberships.role })
-      .from(memberships)
-      .innerJoin(rooms, eq(memberships.roomId, rooms.id))
-      .where(
-        and(
-          eq(memberships.roomId, roomId),
-          eq(memberships.userId, userId),
-          isNull(rooms.archivedAt),
-        ),
-      )
-      .limit(1);
-    return row ?? null;
-  };
+  const loadRoomMembership: LoadRoomMembership = (roomId, userId) =>
+    loadAuthorizedRoomMembership(database.db, roomId, userId, logger);
 
   let ready = false;
   const realtime = createRealtimeServer({

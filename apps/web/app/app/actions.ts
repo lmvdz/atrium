@@ -124,11 +124,17 @@ export async function acceptInvitationAction(formData: FormData): Promise<never>
 /**
  * Removing somebody from a workspace.
  *
- * The write goes through Better Auth so its `beforeRemoveMember` hook runs, and
- * that hook is what actually ends the person's access: it deletes their room
- * memberships first, which is the only thing the realtime server consults. Round
- * 1 had no removal path at all, and the hooks behind it did not exist — a
- * removed member kept every room and every live socket.
+ * The write goes through Better Auth so its member hooks run: they sweep the
+ * person's room memberships and evict their sockets. Round 1 had no removal
+ * path at all, and the hooks behind it did not exist — a removed member kept
+ * every room and every live socket.
+ *
+ * What ends their *access*, though, is this call deleting the
+ * `workspace_members` row, because that is the row every room-authorization
+ * query joins (`packages/auth/src/room-access.ts`). Round 5's version of this
+ * comment said the room sweep was "the only thing the realtime server
+ * consults", which was true and was the problem: a sweep that failed left the
+ * access behind. The sweep is now tidying, not the boundary.
  *
  * `authorize()` runs here too. It is not redundant with the library-layer guard:
  * this one knows the *actor*, which the plugin's member hooks are not handed.

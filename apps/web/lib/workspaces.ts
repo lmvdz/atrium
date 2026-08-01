@@ -1,13 +1,7 @@
 import 'server-only';
-import {
-  memberships,
-  rooms,
-  users,
-  workspaceInvitations,
-  workspaceMembers,
-  workspaces,
-} from '@atrium/db';
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { type AuthorizedRoom, listAuthorizedRooms, loadAuthorizedRoom } from '@atrium/auth';
+import { users, workspaceInvitations, workspaceMembers, workspaces } from '@atrium/db';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { db } from './db';
 
 /**
@@ -66,26 +60,22 @@ export async function loadWorkspace(
   return row ?? null;
 }
 
-export interface RoomSummary {
-  id: string;
-  slug: string;
-  name: string;
-  role: string;
-}
+/**
+ * A room the caller may open, with the authority they hold in it.
+ *
+ * Both room reads are `@atrium/auth`'s, not this file's. Round 5 wrote them out
+ * here as `rooms` joined to `memberships` — the derived table on its own — so
+ * every revocation whose cleanup failed kept the room listed and openable. They
+ * now join `workspace_members` and cap the role at the workspace role, and they
+ * live next to the realtime server's copy of the same question because two
+ * copies of an authorization predicate is how one of them ends up wrong. The
+ * argument in full is at the top of `packages/auth/src/room-access.ts`.
+ */
+export type RoomSummary = AuthorizedRoom;
 
 /** Live rooms in a workspace that the caller is actually a member of. */
 export async function listRoomsFor(workspaceId: string, userId: string): Promise<RoomSummary[]> {
-  return db()
-    .select({
-      id: rooms.id,
-      slug: rooms.slug,
-      name: rooms.name,
-      role: memberships.role,
-    })
-    .from(rooms)
-    .innerJoin(memberships, and(eq(memberships.roomId, rooms.id), eq(memberships.userId, userId)))
-    .where(and(eq(rooms.workspaceId, workspaceId), isNull(rooms.archivedAt)))
-    .orderBy(asc(rooms.slug));
+  return listAuthorizedRooms(db(), workspaceId, userId);
 }
 
 export async function loadRoom(
@@ -93,20 +83,7 @@ export async function loadRoom(
   roomSlug: string,
   userId: string,
 ): Promise<RoomSummary | null> {
-  const [row] = await db()
-    .select({
-      id: rooms.id,
-      slug: rooms.slug,
-      name: rooms.name,
-      role: memberships.role,
-    })
-    .from(rooms)
-    .innerJoin(memberships, and(eq(memberships.roomId, rooms.id), eq(memberships.userId, userId)))
-    .where(
-      and(eq(rooms.workspaceId, workspaceId), eq(rooms.slug, roomSlug), isNull(rooms.archivedAt)),
-    )
-    .limit(1);
-  return row ?? null;
+  return loadAuthorizedRoom(db(), workspaceId, roomSlug, userId);
 }
 
 export interface MemberSummary {
