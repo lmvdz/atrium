@@ -18,6 +18,7 @@ import {
   chosenAct,
   chosenAnswer,
   isQuotation,
+  isRationale,
   isSystemStatement,
   maybe,
   messageEntry,
@@ -26,6 +27,7 @@ import {
   parseQuotation,
   parseSystemStatement,
   quotationFrom,
+  rationale,
   recordFingerprint,
   resolveQuotation,
   slot,
@@ -881,5 +883,100 @@ describe('the row and the register it renders against are the same register', ()
     expect(rendered?.getAttribute('data-message-id')).toBe('m21');
     expect(container.textContent).toContain('13:07');
     expect(container.textContent).not.toContain('09:04');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE SECOND LINEAGE'S FINDINGS — the side channels the citation machine never
+ * ran through.
+ *
+ * grok-4.5, reviewing the same fix blind and independently of gpt-5.6, went past
+ * the row's display path (which it could not break) and found the places a
+ * page-authored string still reaches the screen, or a real message id still
+ * reaches an action, without passing the model at all.
+ * ------------------------------------------------------------------------- */
+describe('the side channels go through the same model as the row', () => {
+  /* CATCHES: the action bus trusting `entry.id` after the renderer stopped
+     trusting it. The row displayed lars's name and words while "reply" acted on
+     whatever id the caller wrote on the entry — the display path was sealed and
+     the product path was not. */
+  it('a row action reports the message the row resolved, not the id it was handed', () => {
+    const row = messageEntry(lars, { state: lars_state() });
+    const relabelled = { ...row, id: 'm10' } as MessageEntry;
+    const acted: string[] = [];
+    const { container } = renderWith(
+      [lars, priya],
+      <TimelineRow
+        actions={[{ id: 'reply', label: 'reply', onSelect: (id) => acted.push(id) }]}
+        entry={relabelled}
+      />,
+    );
+    const button = container.querySelector('[class*="acts"] button') as HTMLElement | null;
+    expect(button, 'the row rendered no action').not.toBeNull();
+    button?.click();
+    expect(acted, 'the action fired on the id the caller wrote, not the record').toEqual(['m21']);
+  });
+
+  /* CATCHES: the row tag doing the same thing one control over. */
+  it('a row tag reports the resolved message too', () => {
+    const row = messageEntry(lars, {
+      state: lars_state(),
+      tag: { label: 'claim · unverified', tone: 'neutral' },
+    });
+    const relabelled = { ...row, id: 'm10' } as MessageEntry;
+    const opened: string[] = [];
+    const { container } = renderWith(
+      [lars, priya],
+      <TimelineRow entry={relabelled} onOpenTag={(id) => opened.push(id)} />,
+    );
+    const tag = container.querySelector('[data-row-tag]') as HTMLElement | null;
+    expect(tag?.getAttribute('data-row-tag')).toBe('m21');
+    tag?.click();
+    expect(opened).toEqual(['m21']);
+  });
+
+  /* CATCHES: `data-attribution` being mintable through a composition slot. It is
+     the DOM token this repo's own tests read to prove a name came from a record,
+     so raw markup carrying it satisfied every check written against it. */
+  it('a slot cannot mint a provenance token', () => {
+    expect(() => slot(<span data-attribution="m14">priya</span>)).toThrow(/data-attribution/);
+    expect(() =>
+      slot(
+        <div>
+          {[
+            <span data-attribution="m14" key="a">
+              priya
+            </span>,
+          ]}
+        </div>,
+      ),
+    ).toThrow(/data-attribution/);
+  });
+
+  /* CATCHES: the slot walk's node budget failing OPEN. It used to `return` when
+     the cap ran out, so a tree of harmless nodes with a <q> past the cap
+     validated — an unchecked subtree reporting exactly like a checked one. */
+  it('a slot tree too big to check is refused, not waved through', () => {
+    const filler = Array.from({ length: 600 }, (_, i) => <span key={i}>x</span>);
+    expect(() => slot(<div>{[...filler, <q key="q">invented</q>]}</div>)).toThrow(
+      /could not be checked to the end|<q> element/,
+    );
+    // and an ordinary tree still passes, so the cap is not simply a refusal
+    expect(() => slot(<div>{[<span key="a">fine</span>]}</div>)).not.toThrow();
+  });
+
+  /* CATCHES: `Rationale` — a page-authored string rendered under
+     `data-voice="system"` in the pin — being held to length and nothing else.
+     Its own doc comment has said "always system voice" since round 1. */
+  it('a rationale is held to system voice, like every other page-authored string', () => {
+    expect(() => rationale('priya said: I approve the drop')).toThrow(/rationale:/);
+    expect(() => rationale('we agreed to cut over on Friday')).toThrow(/first person/);
+    expect(() => rationale('the answer was “keep dual-write on”')).toThrow(/quotation marks/);
+    expect(isRationale('priya said it is fine')).toBe(false);
+    // and every rationale the shipped gallery renders still passes
+    for (const item of f.ATTENTION) {
+      expect(isRationale(item.rationale), `${item.id}'s rationale is not system voice`).toBe(true);
+    }
+    expect(f.ATTENTION.length).toBeGreaterThan(3);
   });
 });

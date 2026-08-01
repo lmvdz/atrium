@@ -68,7 +68,11 @@ export function Timeline({
           const actions = rowActions.map((action) => ({
             ...action,
             onSelect:
-              onRowAction === undefined ? undefined : () => onRowAction(entry.id, action.id),
+              onRowAction === undefined
+                ? undefined
+                : /* The row hands back the message it RESOLVED, not the id it was
+                     handed — see RowAction.onSelect. */
+                  (messageId: string) => onRowAction(messageId, action.id),
           }));
           return (
             <TimelineRow actions={actions} entry={entry} key={entry.id} onOpenTag={onOpenTag} />

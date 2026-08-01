@@ -72,11 +72,19 @@ export function SystemVoice({ statement, className }: SystemVoiceProps) {
      the mono-muted treatment that tells a reader the system checked this. Same
      shape as the attribution half: the constructor is a door, the renderer is
      the path. Found by the blind cross-lineage review of round 5. */
-  statementText(statement, 'SystemVoice');
-  /* A statement that arrived without parts (JSON, an older adapter) is rendered
+  /* SNAPSHOT FIRST, THEN CHECK, THEN RENDER THE SNAPSHOT. Validating the value
+     and then reading it again is a time-of-check/time-of-use gap: a getter or a
+     Proxy can return one string to the checker and another to the renderer.
+     Copying the spans into plain data first means the thing checked and the
+     thing painted are the same object. Raised by the round-5 blind review.
+
+     A statement that arrived without parts (JSON, an older adapter) is rendered
      as one system-voice span — the same conservative default `isSystemStatement`
      applies, rather than a second, laxer reading of the same value. */
-  const parts = statement.parts ?? [{ voice: 'system' as const, text: statement.text }];
+  const parts: readonly { voice: 'system' | 'verbatim'; text: string }[] = (
+    statement.parts ?? [{ voice: 'system' as const, text: statement.text }]
+  ).map((part) => ({ voice: part.voice, text: String(part.text) }));
+  statementText({ ...statement, text: parts.map((p) => p.text).join(''), parts }, 'SystemVoice');
   return (
     <div className={[styles.system, className].filter(Boolean).join(' ')} data-voice="system">
       {parts.map((part, index) =>

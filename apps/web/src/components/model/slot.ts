@@ -42,8 +42,21 @@ export interface Slot {
 /** Intrinsic elements that render as somebody's quoted words. */
 const ATTRIBUTED_TAGS: ReadonlySet<string> = new Set(['q', 'blockquote', 'cite']);
 
-/** Props that smuggle attribution past the tag check. */
-const ATTRIBUTED_PROPS: readonly string[] = ['data-quoted', 'cite', 'dangerouslySetInnerHTML'];
+/**
+ * Props that smuggle attribution past the tag check.
+ *
+ * `data-attribution` was missing until the round-5 blind review, and it is the
+ * DOM token this codebase's own tests read to prove a name came from a record —
+ * so raw markup carrying `data-attribution="m14"` beside a free name passed
+ * through a slot AND satisfied every check written against that attribute. A
+ * provenance token a slot can mint is a provenance token that proves nothing.
+ */
+const ATTRIBUTED_PROPS: readonly string[] = [
+  'data-quoted',
+  'data-attribution',
+  'cite',
+  'dangerouslySetInnerHTML',
+];
 
 /** A tree this deep in a slot is a bug of its own; the cap keeps the walk O(1)-ish. */
 const MAX_NODES = 500;
@@ -55,7 +68,17 @@ function reject(what: string): never {
 }
 
 function walk(node: ReactNode, budget: { left: number }): void {
-  if (budget.left <= 0) return;
+  /* FAIL CLOSED. This used to `return` when the budget ran out, so a tree of 501
+     harmless nodes with a <q> at the end walked past the cap and validated —
+     an unchecked subtree reported exactly like a checked one. A cap is a bound
+     on work, not a licence to stop checking: past it the answer is "I could not
+     check this", which is a refusal. Found by the round-5 blind review. */
+  if (budget.left <= 0) {
+    reject(
+      `a slot tree larger than ${MAX_NODES} nodes could not be checked to the end; ` +
+        'a subtree nothing walked is a subtree nothing validated',
+    );
+  }
   budget.left -= 1;
 
   if (node === null || node === undefined || typeof node === 'boolean') return;

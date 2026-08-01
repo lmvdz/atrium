@@ -42,7 +42,7 @@
 
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution } from '../model/ledger';
-import type { Quotation } from '../model/quotation';
+import type { MessageId, Quotation } from '../model/quotation';
 import { quotationRef, recordFingerprint } from '../model/quotation';
 import type {
   AuthoredMessageEntry,
@@ -62,7 +62,19 @@ import styles from './timeline.module.css';
 export interface RowAction {
   readonly id: string;
   readonly label: string;
-  readonly onSelect?: () => void;
+  /**
+   * Receives THE MESSAGE THIS ROW IS ABOUT, resolved — not the id the caller put
+   * on the entry.
+   *
+   * Found by the round-5 blind review, and it is the fifth address on the
+   * product path rather than the display path: the renderer stopped trusting
+   * `entry.id` for what it PRINTS and the action bus kept trusting it for what
+   * it DOES. A brand-preserving spread — `{...messageEntry(lars, …), id: 'm2'}`
+   * — left the row displaying lars's name and words while "reply" and "quote"
+   * acted on m2. A handler that is not told what it acted on cannot act
+   * correctly, which is the same seam lesson as round 2's `onSend(draft)`.
+   */
+  readonly onSelect?: (messageId: MessageId) => void;
 }
 
 export type TimelineRowProps = {
@@ -111,17 +123,20 @@ function rowClass(entry: MessageEntry): string {
 
 function RowTagButton({
   entry,
+  messageId,
   onOpenTag,
 }: {
   readonly entry: MessageEntry;
+  /** the resolved message this row is about — never `entry.id` on an authored row */
+  readonly messageId: MessageId;
   readonly onOpenTag?: (entryId: string) => void;
 }) {
   if (entry.tag === null) return null;
   return (
     <button
       className={[primitives.tag, TAG_CLASS[entry.tag.tone]].filter(Boolean).join(' ')}
-      data-row-tag={entry.id}
-      onClick={onOpenTag === undefined ? undefined : () => onOpenTag(entry.id)}
+      data-row-tag={messageId}
+      onClick={onOpenTag === undefined ? undefined : () => onOpenTag(messageId)}
       type="button"
     >
       {entry.tag.label}
@@ -212,14 +227,22 @@ function AuthoredRow({
         <span data-row-body={attribution.messageId}>
           <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
         </span>
-        <RowTagButton entry={entry} onOpenTag={onOpenTag} />
+        <RowTagButton entry={entry} messageId={attribution.messageId} onOpenTag={onOpenTag} />
         {entry.note === null ? null : (
           <SystemVoice className={styles.note} statement={entry.note} />
         )}
         {actions.length === 0 ? null : (
           <div className={styles.acts}>
             {actions.map((action) => (
-              <button key={action.id} onClick={action.onSelect} type="button">
+              <button
+                key={action.id}
+                onClick={
+                  action.onSelect === undefined
+                    ? undefined
+                    : () => action.onSelect?.(attribution.messageId)
+                }
+                type="button"
+              >
                 {action.label}
               </button>
             ))}
@@ -270,7 +293,9 @@ function ChosenRow({
       <div className={styles.actor} data-attribution="none" />
       <div className={styles.systemBody}>
         <SystemVoice className={styles.chosen} statement={entry.statement} />
-        <RowTagButton entry={entry} onOpenTag={onOpenTag} />
+        {/* A chosen row cites no record — there is nothing to resolve against, and
+            nothing on it a name could be printed beside. */}
+        <RowTagButton entry={entry} messageId={entry.id} onOpenTag={onOpenTag} />
       </div>
     </div>
   );

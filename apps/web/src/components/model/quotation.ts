@@ -415,7 +415,17 @@ interface Ban {
 }
 
 const QUOTATION_MARKS: Ban = {
-  pattern: /["“”«»]/,
+  /* The straight double, the curly doubles, the guillemets, the low-9 doubles
+     and the CJK corner brackets. The APOSTROPHE FAMILY is deliberately absent in
+     both directions — "lars's answer" and "lars’s answer" are ordinary English —
+     which is why the single curly quotes are not here either.
+
+     Stated limit, from the round-5 blind review: this is a list of code points,
+     so a homoglyph (a fullwidth quotation mark, a Cherokee letter shaped like
+     "I") is outside it. The lexical bans narrow how a page-authored string can
+     LOOK like speech; what stops it being ATTRIBUTED as speech is structural,
+     and that half does not care what alphabet the letters came from. */
+  pattern: /["“”«»„‟「」『』]/,
   why: 'no quotation marks — quoted words are a Quotation, minted from the message that proves them',
 };
 
@@ -606,6 +616,25 @@ export function statementText(statement: SystemStatement, from: string): string 
     );
   }
   return statement.text;
+}
+
+/**
+ * The system-voice bans, for the OTHER page-authored strings.
+ *
+ * Found by the round-5 blind review: `Rationale` is a branded non-empty string
+ * that `AttentionCard` renders under `data-voice="system"`, and its constructor
+ * checked length and nothing else — so `rationale('priya said: I approve the
+ * drop')` compiled and rendered in the mono-muted treatment that tells a reader
+ * the system checked this. That is the round-3 `systemStatement` finding in the
+ * type next door, which is what happens when doctrine is written for one
+ * page-authored string and applied to one page-authored string.
+ */
+export function systemVoiceDefect(text: string): string | null {
+  for (const ban of SYSTEM_VOICE_BANS) {
+    const hit = ban.pattern.exec(text);
+    if (hit !== null) return `${ban.why} (rejected ${JSON.stringify(hit[0])})`;
+  }
+  return null;
 }
 
 /** The runtime boundary for system voice, mirroring `parseQuotation`. */

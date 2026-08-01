@@ -68,6 +68,13 @@ export function Composer({
   onSend,
 }: ComposerProps) {
   const own = useRef<HTMLTextAreaElement | null>(null);
+  /* WHETHER AN IME IS MID-COMPOSITION, tracked on the element rather than read
+     off a key event — because the SEND BUTTON has no key event to read.
+     Found by the round-5 blind review: the Enter guard covered the keyboard and
+     left the button, so clicking Send while a candidate list was open still put
+     half-composed romaji on the record as `origin: 'typed'`. The invariant is
+     about what reaches the record, not about which control reached it. */
+  const composing = useRef(false);
 
   /* The draft is the controlled value when there is one, and the live textarea
      otherwise. Reading the element is what keeps this component stateless while
@@ -75,6 +82,9 @@ export function Composer({
   const draft = useCallback(() => value ?? own.current?.value ?? '', [value]);
 
   const send = useCallback(() => {
+    /* Refused from EVERY control, not just the one that had the key event. A
+       half-composed buffer is not words the person wrote. */
+    if (composing.current) return;
     const text = draft();
     if (text.trim().length === 0) return;
     onSend?.(text);
@@ -103,7 +113,7 @@ export function Composer({
          some IMEs on Safari) report instead; a check that only reads the modern
          one is a check that passes on the platforms most likely to fail. */
       const native = event.nativeEvent;
-      if (native.isComposing || native.keyCode === 229) return;
+      if (native.isComposing || native.keyCode === 229 || composing.current) return;
       if (event.key !== 'Enter' || event.shiftKey) return;
       /* "↵ send · ⇧↵ newline", which is what the foot says two lines down. */
       event.preventDefault();
@@ -178,6 +188,12 @@ export function Composer({
               : `Message #${roomName}`
           }
           onChange={onChange === undefined ? undefined : (event) => onChange(event.target.value)}
+          onCompositionEnd={() => {
+            composing.current = false;
+          }}
+          onCompositionStart={() => {
+            composing.current = true;
+          }}
           onKeyDown={keyDown}
           placeholder={
             binding.mode === 'bound'

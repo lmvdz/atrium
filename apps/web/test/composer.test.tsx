@@ -296,3 +296,40 @@ describe('the gallery frame forwards every composer seam', () => {
     expect(you.textContent).not.toBe('LV');
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * THE SEND BUTTON IS A SEND TOO.
+ *
+ * Round 5's IME guard read the key event, so it covered Enter and left the
+ * button — clicking Send while a candidate list was open still put
+ * half-composed romaji on the record as `origin: 'typed'`. Found by the
+ * round-5 blind review. The invariant is about what reaches the record, not
+ * about which control reached it.
+ * ------------------------------------------------------------------------- */
+describe('nothing sends a half-composed buffer', () => {
+  it('the Send button refuses while an IME is composing', () => {
+    const sent: string[] = [];
+    render(<Composer binding={FREE} footNote={FOOT} onSend={(d) => sent.push(d)} roomName="r" />);
+    fireEvent.compositionStart(box());
+    fireEvent.change(box(), { target: { value: 'にほんg' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent, 'clicking Send mid-composition sent the candidate buffer').toEqual([]);
+    // and after composition ends the same click sends
+    fireEvent.compositionEnd(box());
+    fireEvent.change(box(), { target: { value: '日本語' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent).toEqual(['日本語']);
+  });
+
+  /* CATCHES: the Enter guard being narrowed back to the key event alone. A
+     composition that started and has not ended is composing, whatever the
+     individual keystroke reports. */
+  it('Enter refuses while a composition is open, even without the event flag', () => {
+    const sent: string[] = [];
+    render(<Composer binding={FREE} footNote={FOOT} onSend={(d) => sent.push(d)} roomName="r" />);
+    fireEvent.compositionStart(box());
+    fireEvent.change(box(), { target: { value: 'nihongo' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(sent).toEqual([]);
+  });
+});

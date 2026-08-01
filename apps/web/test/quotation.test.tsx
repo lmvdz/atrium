@@ -153,3 +153,50 @@ describe('the quotation invariant', () => {
     ).toThrow(/not a message on this page/);
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * CHECK THE THING YOU ARE ABOUT TO PAINT, NOT THE THING YOU WERE HANDED.
+ *
+ * Raised by the round-5 blind review as a time-of-check/time-of-use gap: a
+ * statement whose `text` is a getter can answer the validator with one string
+ * and the renderer with another. <SystemVoice> copies the spans into plain data
+ * first and validates the COPY, so the value checked and the value painted are
+ * the same object.
+ * ------------------------------------------------------------------------- */
+describe('system voice validates what it is about to paint', () => {
+  /* CATCHES: validating the live value and rendering from a snapshot taken
+     before it — the two reads can disagree, and the one that reaches the screen
+     is the one nothing checked. */
+  it('a statement whose text changes between reads cannot slip a sentence past', () => {
+    let reads = 0;
+    const shifty = {
+      voice: 'system' as const,
+      get text() {
+        return 'reopened it — pending again';
+      },
+      get parts() {
+        reads += 1;
+        /* Dirty on the first read (the one the renderer takes), clean on every
+           read after it (the one a validator would take if it read again). */
+        return [
+          {
+            voice: 'system' as const,
+            text: reads === 1 ? 'I approve deleting users_legacy.' : 'reopened it — pending again',
+          },
+        ];
+      },
+    } as unknown as Parameters<typeof SystemVoice>[0]['statement'];
+
+    /* Asserted on the DOM rather than on the throw. React 19 retries a render
+       that threw, and the retry reads the getter again and gets the clean value
+       — so "did it throw" is not the question. The question is whether the
+       sentence ever reached the screen. */
+    let container: HTMLElement | null = null;
+    try {
+      container = render(<SystemVoice statement={shifty} />).container;
+    } catch {
+      container = null;
+    }
+    expect(container?.textContent ?? '').not.toContain('I approve deleting users_legacy.');
+  });
+});

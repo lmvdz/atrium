@@ -269,8 +269,9 @@ const LEDGER = [
   {
     name: 'row actions go back to a constant with no handler',
     file: 'src/components/timeline/Timeline.tsx',
-    find: '            onSelect:\n              onRowAction === undefined ? undefined : () => onRowAction(entry.id, action.id),',
-    replace: '            onSelect: undefined,',
+    find: '            onSelect:\n              onRowAction === undefined',
+    replace:
+      '            onSelect: undefined,\n            unusedSelect:\n              onRowAction === undefined',
     test: 'test/timeline-handlers.test.tsx',
   },
   {
@@ -548,15 +549,15 @@ const LEDGER = [
   {
     name: 'Enter sends the half-composed IME buffer as a typed message',
     file: 'src/components/frame/Composer.tsx',
-    find: '      if (native.isComposing || native.keyCode === 229) return;',
+    find: '      if (native.isComposing || native.keyCode === 229 || composing.current) return;',
     replace: '      void native;',
     test: 'test/composer.test.tsx',
   },
   {
     name: 'the IME check reads only the modern signal and misses keyCode 229',
     file: 'src/components/frame/Composer.tsx',
-    find: '      if (native.isComposing || native.keyCode === 229) return;',
-    replace: '      if (native.isComposing) return;',
+    find: '      if (native.isComposing || native.keyCode === 229 || composing.current) return;',
+    replace: '      if (native.isComposing || composing.current) return;',
     test: 'test/composer.test.tsx',
   },
 
@@ -712,8 +713,8 @@ const LEDGER = [
   {
     name: 'system voice stops being checked at the render boundary',
     file: 'src/components/primitives/Voice.tsx',
-    find: "  statementText(statement, 'SystemVoice');",
-    replace: '  void statement;',
+    find: "  statementText({ ...statement, text: parts.map((p) => p.text).join(''), parts }, 'SystemVoice');",
+    replace: '  void parts;',
     test: 'test/quotation.test.tsx',
   },
   {
@@ -743,6 +744,71 @@ const LEDGER = [
     find: '            <div className={styles.pinMore}>',
     replace: '            <div className={styles.pinList}>',
     test: 'test/pin-bound.test.tsx',
+  },
+
+  /* --- round 5, second lineage ---------------------------------------------
+   * grok-4.5 reviewed the same fix blind and independently of gpt-5.6. It could
+   * not break the row's display path; it went past it and found the side
+   * channels — the places a page-authored string still reaches the screen, or a
+   * real message id still reaches an action, without passing the model at all.
+   * The two lineages overlapped on nothing, which is the argument for running
+   * both.
+   * ---------------------------------------------------------------------- */
+  {
+    name: 'the row action bus goes back to trusting the caller’s entry id',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: '                    : () => action.onSelect?.(attribution.messageId)',
+    replace: '                    : () => action.onSelect?.(entry.id)',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the row tag goes back to the caller’s entry id',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: '        <RowTagButton entry={entry} messageId={attribution.messageId} onOpenTag={onOpenTag} />',
+    replace: '        <RowTagButton entry={entry} messageId={entry.id} onOpenTag={onOpenTag} />',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a slot can mint a provenance token again',
+    file: 'src/components/model/slot.ts',
+    find: "  'data-attribution',\n",
+    replace: '',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the slot walk’s node budget fails open again',
+    file: 'src/components/model/slot.ts',
+    find: '  if (budget.left <= 0) {\n    reject(',
+    replace: '  if (budget.left <= 0) {\n    return void (',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a rationale stops being held to the system voice it declares',
+    file: 'src/components/model/rationale.ts',
+    find: '  const defect = systemVoiceDefect(trimmed);',
+    replace: '  const defect = null as string | null;',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'isRationale stops applying the same check the constructor does',
+    file: 'src/components/model/rationale.ts',
+    find: '    systemVoiceDefect(value) === null',
+    replace: '    true',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the Send button sends a half-composed IME buffer',
+    file: 'src/components/frame/Composer.tsx',
+    find: '    if (composing.current) return;',
+    replace: '    void composing;',
+    test: 'test/composer.test.tsx',
+  },
+  {
+    name: 'system voice is validated on the value and rendered from it again',
+    file: 'src/components/primitives/Voice.tsx',
+    find: "  statementText({ ...statement, text: parts.map((p) => p.text).join(''), parts }, 'SystemVoice');",
+    replace: "  statementText(statement, 'SystemVoice');",
+    test: 'test/quotation.test.tsx',
   },
 ];
 
