@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { type AtriumSession, authorize, type MembershipLike } from '@atrium/auth';
+import { type AtriumSession, authorize, checkOrigin, type MembershipLike } from '@atrium/auth';
 import { type WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
 import type { Logger } from './logger.js';
-import type { AuthenticateUpgrade } from './ws-auth.js';
+import { type AuthenticateUpgrade, type RevalidateSession, toHeaders } from './ws-auth.js';
 
 /**
  * Realtime transport. Ordinary WebSockets, server-authoritative state — no
@@ -26,8 +26,12 @@ export const ClientFrame = z.discriminatedUnion('type', [
   z.object({ type: z.literal('echo'), payload: z.unknown() }),
   z.object({
     type: z.literal('command'),
-    /** Free text on purpose: `authorize` is what decides it is a real command. */
-    command: z.string().min(1),
+    /**
+     * Free text on purpose: `authorize` is what decides it is a real command.
+     * Bounded anyway — the longest command in the policy table is 28 characters,
+     * and an unbounded string here is an unbounded string in the denial log.
+     */
+    command: z.string().min(1).max(64),
     roomId: z.uuid(),
     /** Echoed back on the reply so a client can match request to response. */
     requestId: z.string().min(1).optional(),
@@ -76,6 +80,23 @@ export interface RealtimeOptions {
   /** The single seam that decides whether a socket may exist (ws-auth.ts). */
   authenticateUpgrade: AuthenticateUpgrade;
   loadRoomMembership: LoadRoomMembership;
+  /**
+   * Origins allowed to open a socket, and whether a client that sends no
+   * `Origin` at all may. See `@atrium/auth`'s `origin.ts` for why both matter.
+   */
+  allowedOrigins: readonly string[];
+  allowOriginless?: boolean;
+  /**
+   * Re-checks an open socket's session. Omitted, a socket is trusted for its
+   * whole life, which is what round 1 did and what this exists to stop.
+   */
+  revalidateSession?: RevalidateSession;
+  /**
+   * How long a re-validation result is reused before asking again. The window
+   * in which a revoked session still has authority is at most this long, so it
+   * is short; making it zero would put a session read in front of every frame.
+   */
+  revalidateTtlMs?: number;
 }
 
 export interface RealtimeServer {
@@ -93,10 +114,24 @@ interface Connection {
   alive: boolean;
   session: AtriumSession;
   rooms: Set<string>;
+  /**
+   * The headers the socket was opened with — the cookie among them. Kept so the
+   * session can be re-validated later against the same credential the client
+   * actually presented, rather than against the snapshot we took of its meaning.
+   */
+  headers: Headers;
+  /** When the cached re-validation result expires. */
+  validUntil: number;
 }
 
 export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   const { logger, heartbeatIntervalMs, authenticateUpgrade, loadRoomMembership } = options;
+  const originPolicy = {
+    allowed: options.allowedOrigins,
+    allowOriginless: options.allowOriginless ?? false,
+  };
+  const revalidateSession = options.revalidateSession ?? null;
+  const revalidateTtlMs = options.revalidateTtlMs ?? 5_000;
   const connections = new Map<WebSocket, Connection>();
   /** roomId → the sockets currently joined to it. */
   const roster = new Map<string, Set<WebSocket>>();
@@ -132,6 +167,28 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       return;
     }
 
+    /**
+     * Origin before session, deliberately.
+     *
+     * A WebSocket handshake ignores the same-origin policy and still carries
+     * cookies, so a page on any other site can open one and be authenticated as
+     * whoever is signed in. Checking the session first would mean the *valid*
+     * session is exactly what makes the hijack work. This is the check Better
+     * Auth makes on its own endpoints via `trustedOrigins`; the socket makes it
+     * against the same list.
+     */
+    const origin = request.headers.origin;
+    const verdict = checkOrigin(Array.isArray(origin) ? origin[0] : origin, originPolicy);
+    if (verdict !== 'allowed') {
+      logger.warn('ws upgrade rejected: origin', {
+        verdict,
+        origin: Array.isArray(origin) ? origin[0] : origin,
+        remote: request.socket.remoteAddress,
+      });
+      reject(socket, 403, 'Forbidden');
+      return;
+    }
+
     const session = await authenticateUpgrade(request);
     if (!session) {
       logger.warn('ws upgrade rejected', { remote: request.socket.remoteAddress });
@@ -159,6 +216,8 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       alive: true,
       session,
       rooms: new Set(),
+      headers: toHeaders(request),
+      validUntil: Date.now() + revalidateTtlMs,
     };
     connections.set(socket, connection);
     logger.info('ws connected', {
@@ -252,6 +311,10 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   ): Promise<void> {
     const { command, roomId, requestId } = frame;
 
+    // Is this still a session? A socket that was authenticated an hour ago is
+    // not evidence about now.
+    if (!(await stillAuthenticated(socket, connection))) return;
+
     let membership: MembershipLike | null;
     try {
       membership = await loadRoomMembership(roomId, connection.session.userId);
@@ -317,18 +380,84 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         return;
       }
       default: {
-        // Authorized, but its handler lands with #22. Say so rather than
-        // pretending the command succeeded.
-        send(socket, {
-          type: 'command_error',
+        /**
+         * Authorized, but its handler lands with #22.
+         *
+         * The wire answer is deliberately the same one an unknown command gets.
+         * `commandPolicy` is deliberately ahead of the handlers, so a distinct
+         * `not_implemented` reason would let anybody with a socket separate
+         * "command exists, not built" from "command does not exist" and read
+         * the roadmap out of the reason codes. The server logs which it really
+         * was; the client learns only that it cannot do it.
+         */
+        logger.info('command authorized but unimplemented', {
+          connectionId: connection.id,
           command,
           roomId,
-          ...(requestId ? { requestId } : {}),
-          reason: 'not_implemented',
-          message: `"${command}" is authorized but has no handler yet`,
         });
+        send(socket, unknownCommand(command, roomId, requestId));
       }
     }
+  }
+
+  /** The one shape a client sees for "no", whatever the real reason was. */
+  function unknownCommand(command: string, roomId: string, requestId?: string): ServerFrame {
+    return {
+      type: 'command_error',
+      command,
+      roomId,
+      ...(requestId ? { requestId } : {}),
+      reason: 'unknown_command',
+      message: `unknown command "${command}"`,
+    };
+  }
+
+  /**
+   * Re-validate the socket's session, at most once per `revalidateTtlMs`.
+   *
+   * The cache is what makes this affordable: a chatty client would otherwise
+   * put a session read in front of every frame. The cost of the cache is a
+   * window — at most one TTL — in which a just-revoked session still acts. That
+   * is the trade, stated: bounded and short, rather than unbounded and silent,
+   * which is what having no re-validation at all amounted to.
+   *
+   * Room membership needs no equivalent: `loadRoomMembership` already runs per
+   * command against the table the removal hook deletes from, so losing a
+   * membership takes effect on the very next frame.
+   */
+  async function stillAuthenticated(socket: WebSocket, connection: Connection): Promise<boolean> {
+    if (!revalidateSession) return true;
+    if (Date.now() < connection.validUntil) return true;
+
+    let session: AtriumSession | null;
+    try {
+      session = await revalidateSession(connection.headers);
+    } catch (error) {
+      // Failing to *learn* whether the session is still good is not a reason to
+      // hang up on somebody mid-sentence; it is a reason to refuse this command
+      // and ask again next time.
+      logger.error('session revalidation failed', {
+        connectionId: connection.id,
+        error: (error as Error).message,
+      });
+      send(socket, { type: 'error', message: 'could not check your session just now — try again' });
+      return false;
+    }
+
+    if (!session || session.sessionId !== connection.session.sessionId) {
+      logger.info('closing socket: session no longer valid', {
+        connectionId: connection.id,
+        userId: connection.session.userId,
+      });
+      // 1008 is "policy violation", which is what an expired mandate is. The
+      // close handler clears the roster, so presence drops with the socket.
+      socket.close(1008, 'session ended');
+      return false;
+    }
+
+    connection.session = session;
+    connection.validUntil = Date.now() + revalidateTtlMs;
+    return true;
   }
 
   function joinRoom(socket: WebSocket, connection: Connection, roomId: string): void {

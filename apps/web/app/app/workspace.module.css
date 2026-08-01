@@ -103,6 +103,13 @@
   overflow-wrap: anywhere;
 }
 
+.rowActions {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
 .empty {
   margin: 0;
   font-size: var(--fs-row);
@@ -163,6 +170,22 @@
 
 .button:hover {
   background: var(--grn2);
+}
+
+.secondaryButton {
+  padding: 1px var(--sp-3);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  background: var(--bg4);
+  color: var(--tx2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  cursor: pointer;
+}
+
+.secondaryButton:hover {
+  border-color: var(--line3, var(--line2));
+  color: var(--tx0);
 }
 
 .link {

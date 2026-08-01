@@ -37,11 +37,11 @@ const otherRoomId = '44444444-4444-4444-8444-444444444444';
 
 const logger = createLogger('error');
 
+/** The one origin these tests are allowed to arrive from. */
+const appOrigin = 'http://localhost:3000';
+
 /** cookie value → session. Anything else is anonymous. */
-const sessions = new Map<string, AtriumSession>([
-  ['ada', ada],
-  ['grace', grace],
-]);
+let sessions: Map<string, AtriumSession>;
 
 /** (roomId, userId) → role. Absent means "not a member". */
 let memberships: Map<string, string>;
@@ -53,19 +53,18 @@ function membershipKey(room: string, user: string): string {
 let server: ReturnType<typeof createRealtimeServer>;
 let port: number;
 
-beforeEach(async () => {
-  memberships = new Map([
-    [membershipKey(roomId, ada.userId), 'member'],
-    [membershipKey(roomId, grace.userId), 'admin'],
-  ]);
-
-  server = createRealtimeServer({
+/** The wiring every test starts from; individual tests override a piece. */
+function startServer(
+  overrides: Partial<Parameters<typeof createRealtimeServer>[0]> = {},
+): ReturnType<typeof createRealtimeServer> {
+  return createRealtimeServer({
     host: '127.0.0.1',
     // 0 asks the OS for a free port, so parallel test files never collide.
     port: 0,
     heartbeatIntervalMs: 60_000,
     logger,
     isReady: () => true,
+    allowedOrigins: [appOrigin],
     authenticateUpgrade: async (request: IncomingMessage) => {
       const who = request.headers.cookie?.replace('who=', '') ?? '';
       return sessions.get(who) ?? null;
@@ -74,12 +73,29 @@ beforeEach(async () => {
       const role = memberships.get(membershipKey(room, user));
       return role ? { role } : null;
     },
+    ...overrides,
   });
+}
 
+async function listen(next: ReturnType<typeof createRealtimeServer>): Promise<void> {
+  server = next;
   await server.listen();
   const address = server.httpServer.address();
   if (address === null || typeof address === 'string') throw new Error('no port');
   port = address.port;
+}
+
+beforeEach(async () => {
+  sessions = new Map([
+    ['ada', ada],
+    ['grace', grace],
+  ]);
+  memberships = new Map([
+    [membershipKey(roomId, ada.userId), 'member'],
+    [membershipKey(roomId, grace.userId), 'admin'],
+  ]);
+
+  await listen(startServer());
 });
 
 afterEach(async () => {
@@ -94,9 +110,15 @@ afterEach(async () => {
  */
 const inbox = new WeakMap<WebSocket, ServerFrame[]>();
 
-function connect(who: string): Promise<WebSocket> {
+function connect(who: string, origin: string | null = appOrigin): Promise<WebSocket> {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
-    headers: who ? { cookie: `who=${who}` } : {},
+    headers: {
+      ...(who ? { cookie: `who=${who}` } : {}),
+      // A `ws` client sends no Origin unless told to. Browsers always do, and
+      // the server refuses the ones that do not, so the tests speak like a
+      // browser rather than turning the check off.
+      ...(origin ? { origin } : {}),
+    },
   });
   const frames: ServerFrame[] = [];
   inbox.set(socket, frames);
@@ -148,7 +170,7 @@ describe('the upgrade', () => {
 
   it('refuses any path other than /ws', async () => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/admin`, {
-      headers: { cookie: 'who=ada' },
+      headers: { cookie: 'who=ada', origin: appOrigin },
     });
     await expect(
       new Promise((resolve, reject) => {
@@ -166,6 +188,36 @@ describe('the upgrade', () => {
     const welcome = await nextFrame(socket, 'welcome');
     expect(welcome.user).toEqual({ id: ada.userId, displayName: 'ada' });
     socket.close();
+  });
+});
+
+/**
+ * A WebSocket handshake is exempt from the same-origin policy and still carries
+ * cookies. Without an Origin check, any page a signed-in person visits can open
+ * an authenticated socket as them — the valid session is what makes it work.
+ */
+describe('the origin check', () => {
+  it('refuses a socket opened from somebody else’s page', async () => {
+    await expect(connect('ada', 'https://evil.test')).rejects.toThrow(/403/);
+  });
+
+  it('refuses a client that sends no origin at all', async () => {
+    // Otherwise the check is optional: anything that can omit a header escapes it.
+    await expect(connect('ada', null)).rejects.toThrow(/403/);
+  });
+
+  it('lets a deployment opt in to origin-less clients explicitly', async () => {
+    await server.close();
+    await listen(startServer({ allowOriginless: true }));
+    const socket = await connect('ada', null);
+    await nextFrame(socket, 'welcome');
+    socket.close();
+  });
+
+  it('checks the origin before the session, so a valid cookie does not help', async () => {
+    // The hijack uses a *real* session; refusing on origin first is the point.
+    await expect(connect('ada', 'https://evil.test')).rejects.toThrow(/403/);
+    await expect(connect('', 'https://evil.test')).rejects.toThrow(/403/);
   });
 });
 
@@ -211,31 +263,40 @@ describe('commands', () => {
     socket.close();
   });
 
-  it('answers an authorized-but-unimplemented command honestly', async () => {
+  it('does not let its denial reasons enumerate the command catalog', async () => {
+    // `message.send` is in `commandPolicy` and has no handler yet. A distinct
+    // `not_implemented` reason would let anybody with a socket tell "exists,
+    // unbuilt" from "does not exist" and read the roadmap off the wire.
     const socket = await connect('grace');
     send(socket, { type: 'command', command: 'message.send', roomId });
-    const error = await nextFrame(socket, 'command_error');
-    expect(error.reason).toBe('not_implemented');
+    const authorizedButUnbuilt = await nextFrame(socket, 'command_error');
+
+    send(socket, { type: 'command', command: 'message.sendx', roomId });
+    const genuinelyUnknown = await nextFrame(socket, 'command_error');
+
+    expect(authorizedButUnbuilt.reason).toBe('unknown_command');
+    expect(authorizedButUnbuilt.reason).toBe(genuinelyUnknown.reason);
+    socket.close();
+  });
+
+  it('refuses a command string long enough to be a payload', async () => {
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'x'.repeat(5000), roomId });
+    const error = await nextFrame(socket, 'error');
+    expect(error.message).toMatch(/unknown frame type/);
     socket.close();
   });
 
   it('refuses, without claiming anything about membership, when the lookup throws', async () => {
     await server.close();
-    server = createRealtimeServer({
-      host: '127.0.0.1',
-      port: 0,
-      heartbeatIntervalMs: 60_000,
-      logger,
-      isReady: () => true,
-      authenticateUpgrade: async () => ada,
-      loadRoomMembership: async () => {
-        throw new Error('database is on fire');
-      },
-    });
-    await server.listen();
-    const address = server.httpServer.address();
-    if (address === null || typeof address === 'string') throw new Error('no port');
-    port = address.port;
+    await listen(
+      startServer({
+        authenticateUpgrade: async () => ada,
+        loadRoomMembership: async () => {
+          throw new Error('database is on fire');
+        },
+      }),
+    );
 
     const socket = await connect('ada');
     send(socket, { type: 'command', command: 'room.join', roomId });
@@ -251,6 +312,134 @@ describe('commands', () => {
     socket.send('{nope');
     const error = await nextFrame(socket, 'error');
     expect(error.message).toMatch(/not valid JSON/);
+    socket.close();
+  });
+});
+
+/**
+ * Revocation, over a real socket.
+ *
+ * Round 1 authenticated once at the handshake and never again, so a socket
+ * outlived whatever authority opened it: signing out, having a session revoked,
+ * or being removed from the workspace changed nothing until the client happened
+ * to reconnect. These are the tests that fail against that code.
+ */
+describe('revocation reaches a live connection', () => {
+  it('refuses the next command after the caller loses their membership', async () => {
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(socket, 'joined');
+
+    // What `beforeRemoveMember` does to the database, mid-connection.
+    memberships.delete(membershipKey(roomId, ada.userId));
+
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    const error = await nextFrame(socket, 'command_error');
+    expect(error.reason).toBe('not_a_member');
+    socket.close();
+  });
+
+  it('demotes a live connection when the role behind it is demoted', async () => {
+    const socket = await connect('grace');
+    send(socket, { type: 'command', command: 'room.archive', roomId });
+    // grace is an admin, so this is authorized (and unimplemented).
+    expect((await nextFrame(socket, 'command_error')).reason).toBe('unknown_command');
+
+    memberships.set(membershipKey(roomId, grace.userId), 'member');
+
+    send(socket, { type: 'command', command: 'room.archive', roomId });
+    expect((await nextFrame(socket, 'command_error')).reason).toBe('insufficient_role');
+    socket.close();
+  });
+
+  it('closes the socket once its session is gone', async () => {
+    await server.close();
+    await listen(
+      startServer({
+        // Zero TTL: every command re-validates. Production trades a short cache
+        // for the read; the behaviour under test is the same either way.
+        revalidateTtlMs: 0,
+        revalidateSession: async (headers: Headers) => {
+          const who = headers.get('cookie')?.replace('who=', '') ?? '';
+          return sessions.get(who) ?? null;
+        },
+      }),
+    );
+
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(socket, 'joined');
+    expect(server.presence(roomId)).toHaveLength(1);
+
+    // Signed out elsewhere, or the session revoked by an admin.
+    sessions.delete('ada');
+
+    const closed = new Promise<number>((resolve) => socket.once('close', resolve));
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    expect(await closed).toBe(1008);
+    await vi.waitFor(() => {
+      expect(server.presence(roomId)).toHaveLength(0);
+    });
+  });
+
+  it('reuses a validation for at most one TTL, and no longer', async () => {
+    let valid = true;
+    await server.close();
+    await listen(
+      startServer({
+        revalidateTtlMs: 40,
+        revalidateSession: async () => (valid ? ada : null),
+      }),
+    );
+
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(socket, 'joined');
+
+    valid = false;
+    // Inside the window the cached answer still stands — that is the trade, and
+    // it is bounded rather than forever.
+    send(socket, { type: 'command', command: 'room.presence', roomId });
+    await nextFrame(socket, 'presence');
+
+    const closed = new Promise<number>((resolve) => socket.once('close', resolve));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    send(socket, { type: 'command', command: 'room.presence', roomId });
+    expect(await closed).toBe(1008);
+  });
+
+  it('closes a socket whose session was replaced by a different one', async () => {
+    await server.close();
+    await listen(
+      startServer({
+        revalidateTtlMs: 0,
+        revalidateSession: async () => ({ ...ada, sessionId: 'a-different-session' }),
+      }),
+    );
+
+    const socket = await connect('ada');
+    const closed = new Promise<number>((resolve) => socket.once('close', resolve));
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    expect(await closed).toBe(1008);
+  });
+
+  it('refuses the command but keeps the socket when revalidation itself fails', async () => {
+    await server.close();
+    await listen(
+      startServer({
+        revalidateTtlMs: 0,
+        revalidateSession: async () => {
+          throw new Error('database is on fire');
+        },
+      }),
+    );
+
+    const socket = await connect('ada');
+    send(socket, { type: 'command', command: 'room.join', roomId });
+    const error = await nextFrame(socket, 'error');
+    expect(error.message).toMatch(/could not check your session/);
+    // Not knowing is not a reason to hang up on somebody mid-sentence.
+    expect(socket.readyState).toBe(socket.OPEN);
     socket.close();
   });
 });

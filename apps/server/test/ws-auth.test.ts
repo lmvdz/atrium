@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { AtriumAuth } from '@atrium/auth';
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../src/logger.js';
-import { createUpgradeAuthenticator, toHeaders } from '../src/ws-auth.js';
+import { createSessionResolver, createUpgradeAuthenticator, toHeaders } from '../src/ws-auth.js';
 
 /**
  * `authenticateUpgrade` is the only thing standing between a stranger and a
@@ -74,6 +74,47 @@ describe('authenticateUpgrade', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(await authenticate(request({ cookie: 'atrium.session_token=abc' }))).toBeNull();
     expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+});
+
+/**
+ * The same rules, applied to a socket that is already open. A connection is not
+ * a permanent grant, and the check that let it exist has to be the check that
+ * lets it continue — one function, used twice.
+ */
+describe('createSessionResolver', () => {
+  it('returns the session for a still-valid cookie', async () => {
+    const resolve = createSessionResolver({ auth: fakeAuth(() => verifiedUser), logger });
+    const session = await resolve(new Headers({ cookie: 'atrium.session_token=abc' }));
+    expect(session).toMatchObject({ sessionId: 'sess-1', userId: 'user-1' });
+  });
+
+  it('returns null once the session is gone', async () => {
+    const resolve = createSessionResolver({ auth: fakeAuth(() => null), logger });
+    expect(await resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).toBeNull();
+  });
+
+  it('returns null when the address stops being verified', async () => {
+    const resolve = createSessionResolver({
+      auth: fakeAuth(() => ({
+        session: { id: 's', userId: 'u' },
+        user: { email: 'e@x.test', name: 'e', emailVerified: false },
+      })),
+      logger,
+    });
+    expect(await resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).toBeNull();
+  });
+
+  it('treats a thrown lookup as unknown, not as still-valid', async () => {
+    const resolve = createSessionResolver({
+      auth: fakeAuth(() => {
+        throw new Error('database is on fire');
+      }),
+      logger,
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).toBeNull();
     error.mockRestore();
   });
 });

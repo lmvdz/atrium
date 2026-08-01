@@ -110,6 +110,8 @@ export async function loadRoom(
 }
 
 export interface MemberSummary {
+  /** `workspace_members.id` — what Better Auth's member endpoints are keyed by. */
+  memberId: string;
   userId: string;
   displayName: string;
   email: string;
@@ -119,6 +121,7 @@ export interface MemberSummary {
 export async function listMembers(workspaceId: string): Promise<MemberSummary[]> {
   return db()
     .select({
+      memberId: workspaceMembers.id,
       userId: users.id,
       displayName: users.displayName,
       email: users.email,

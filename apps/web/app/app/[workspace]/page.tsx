@@ -4,16 +4,17 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireSession } from '@/lib/session';
 import { listMembers, listPendingInvitations, listRoomsFor, loadWorkspace } from '@/lib/workspaces';
-import { inviteMemberAction } from '../actions';
+import { inviteMemberAction, removeMemberAction, updateMemberRoleAction } from '../actions';
 import styles from '../workspace.module.css';
 
 export const metadata: Metadata = { title: 'Workspace · Atrium' };
 export const dynamic = 'force-dynamic';
 
 const errors: Record<string, string> = {
-  not_allowed: 'Only admins can invite people to this workspace.',
+  not_allowed: 'You are not allowed to do that in this workspace.',
   invalid_email: 'That does not look like an email address.',
   invite_failed: 'Could not send that invitation. Try again.',
+  member_failed: 'Could not change that membership. A workspace always keeps its owner.',
 };
 
 export default async function WorkspacePage({
@@ -21,11 +22,16 @@ export default async function WorkspacePage({
   searchParams,
 }: {
   params: Promise<{ workspace: string }>;
-  searchParams: Promise<{ error?: string; invited?: string }>;
+  searchParams: Promise<{
+    error?: string;
+    invited?: string;
+    removed?: string;
+    rolechanged?: string;
+  }>;
 }) {
   const { workspace: slug } = await params;
   const session = await requireSession(`/app/${slug}`);
-  const { error, invited } = await searchParams;
+  const { error, invited, removed, rolechanged } = await searchParams;
 
   const workspace = await loadWorkspace(slug, session.userId);
   // Not a member reads as "no such workspace". Confirming that a workspace
@@ -39,10 +45,16 @@ export default async function WorkspacePage({
   ]);
 
   const mayInvite = authorize('workspace.invite', workspace, { scope: 'workspace' }).allowed;
+  const mayManageMembers = authorize('workspace.member.remove', workspace, {
+    scope: 'workspace',
+  }).allowed;
 
   return (
     <main className={styles.page}>
-      <div className={styles.heading}>
+      {/* The id is on the page because members already have it in every form
+          they submit; exposing it here is what lets the end-to-end suite aim a
+          raw API call at this workspace and prove the call is refused. */}
+      <div className={styles.heading} data-testid="workspace" data-workspace-id={workspace.id}>
         <h1 className={styles.title} data-testid="workspace-name">
           {workspace.name}
         </h1>
@@ -59,6 +71,16 @@ export default async function WorkspacePage({
       {invited ? (
         <p className={styles.notice} role="status" data-testid="invite-sent">
           Invitation sent to {invited}. In development the link is in the server console.
+        </p>
+      ) : null}
+      {removed ? (
+        <p className={styles.notice} role="status" data-testid="member-removed">
+          Removed. They lose the workspace’s rooms immediately, open connections included.
+        </p>
+      ) : null}
+      {rolechanged ? (
+        <p className={styles.notice} role="status" data-testid="member-role-changed">
+          Role updated. Room permissions follow it.
         </p>
       ) : null}
 
@@ -87,12 +109,46 @@ export default async function WorkspacePage({
         </h2>
         <ul className={styles.list} data-testid="member-list">
           {members.map((member) => (
-            <li className={styles.row} key={member.userId}>
+            <li className={styles.row} data-member-id={member.memberId} key={member.userId}>
               <span className={styles.rowMain}>
                 <span className={styles.rowName}>{member.displayName}</span>
                 <span className={styles.rowMeta}>{member.email}</span>
               </span>
               <span className={styles.roleTag}>{member.role}</span>
+              {/* Managing yourself out of your own workspace is a separate
+                  conversation (ownership transfer); the row simply has no
+                  controls rather than offering ones that would be refused. */}
+              {mayManageMembers && member.userId !== session.userId ? (
+                <span className={styles.rowActions}>
+                  <form action={updateMemberRoleAction}>
+                    <input type="hidden" name="workspaceSlug" value={workspace.slug} />
+                    <input type="hidden" name="memberId" value={member.memberId} />
+                    <input
+                      type="hidden"
+                      name="role"
+                      value={member.role === 'admin' ? 'member' : 'admin'}
+                    />
+                    <button
+                      className={styles.secondaryButton}
+                      data-testid={`member-role-${member.email}`}
+                      type="submit"
+                    >
+                      Make {member.role === 'admin' ? 'member' : 'admin'}
+                    </button>
+                  </form>
+                  <form action={removeMemberAction}>
+                    <input type="hidden" name="workspaceSlug" value={workspace.slug} />
+                    <input type="hidden" name="memberId" value={member.memberId} />
+                    <button
+                      className={styles.secondaryButton}
+                      data-testid={`member-remove-${member.email}`}
+                      type="submit"
+                    >
+                      Remove
+                    </button>
+                  </form>
+                </span>
+              ) : null}
             </li>
           ))}
         </ul>

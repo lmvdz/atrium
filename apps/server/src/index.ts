@@ -4,7 +4,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { loadEnv } from './env.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
-import { createUpgradeAuthenticator } from './ws-auth.js';
+import { createSessionResolver, createUpgradeAuthenticator } from './ws-auth.js';
 import { createRealtimeServer, type LoadRoomMembership } from './ws-server.js';
 
 /**
@@ -27,6 +27,10 @@ async function main(): Promise<void> {
     db: database.db,
     baseURL: env.APP_URL,
     secret: resolveAuthSecret(process.env),
+    // The web app's origin, passed explicitly in both processes so neither ends
+    // up with a laxer notion of "us" than the other.
+    trustedOrigins: [env.APP_URL],
+    logger,
   });
 
   /**
@@ -59,6 +63,14 @@ async function main(): Promise<void> {
     isReady: () => ready,
     authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }),
     loadRoomMembership,
+    // A WebSocket handshake is not same-origin-protected and carries cookies,
+    // so the browser's `Origin` is checked against the same origin Better Auth
+    // trusts on the HTTP side.
+    allowedOrigins: [env.APP_URL],
+    allowOriginless: env.WS_ALLOW_ORIGINLESS,
+    // And a socket does not get to outlive the session that opened it.
+    revalidateSession: createSessionResolver({ auth, logger }),
+    revalidateTtlMs: env.WS_REVALIDATE_TTL_MS,
   });
 
   await realtime.listen();

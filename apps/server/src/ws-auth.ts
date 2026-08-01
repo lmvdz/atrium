@@ -20,21 +20,53 @@ import type { Logger } from './logger.js';
 
 export type AuthenticateUpgrade = (request: IncomingMessage) => Promise<AtriumSession | null>;
 
+/**
+ * Re-asks "is this still a session?" for an already-open socket.
+ *
+ * A WebSocket is authenticated once, at the handshake, and then lives for as
+ * long as the client keeps it open — hours. Round 1 stopped there, so signing
+ * out, having a session revoked, or having an account disabled did nothing to a
+ * socket that was already up. The connection kept the session object it was
+ * born with and every command was judged against a snapshot.
+ *
+ * `null` means the session is gone and the socket should be closed.
+ */
+export type RevalidateSession = (headers: Headers) => Promise<AtriumSession | null>;
+
 export interface UpgradeAuthOptions {
   auth: AtriumAuth;
   logger: Logger;
 }
 
 export function createUpgradeAuthenticator(options: UpgradeAuthOptions): AuthenticateUpgrade {
-  const { auth, logger } = options;
+  const { logger } = options;
+  const resolve = createSessionResolver(options);
 
   return async function authenticateUpgrade(request) {
+    const session = await resolve(toHeaders(request));
+    if (!session) {
+      logger.warn('ws upgrade rejected: no valid session');
+      return null;
+    }
+    return session;
+  };
+}
+
+/**
+ * The one place a session is turned into an `AtriumSession`, used both at the
+ * handshake and on every re-validation, so a socket can never outlive the rules
+ * that let it exist. Every failure mode ends in `null`.
+ */
+export function createSessionResolver(options: UpgradeAuthOptions): RevalidateSession {
+  const { auth, logger } = options;
+
+  return async function resolveSession(headers) {
     let session: AtriumSession | null;
     try {
-      session = await getAtriumSession(auth, toHeaders(request));
+      session = await getAtriumSession(auth, headers);
     } catch (error) {
       // A database blip must read as "not authenticated", never as "sure, come in".
-      logger.error('ws upgrade auth failed', { error: (error as Error).message });
+      logger.error('ws session lookup failed', { error: (error as Error).message });
       return null;
     }
 
@@ -42,9 +74,11 @@ export function createUpgradeAuthenticator(options: UpgradeAuthOptions): Authent
 
     // Better Auth already refuses to mint a session for an unverified address
     // (`requireEmailVerification`). Re-checking costs nothing and means the ws
-    // surface does not silently inherit a future relaxation of that setting.
+    // surface does not silently inherit a future relaxation of that setting —
+    // and because this runs on re-validation too, an address that *becomes*
+    // unverified takes its live sockets with it.
     if (!session.emailVerified) {
-      logger.warn('ws upgrade rejected: email not verified', { userId: session.userId });
+      logger.warn('ws session rejected: email not verified', { userId: session.userId });
       return null;
     }
 
