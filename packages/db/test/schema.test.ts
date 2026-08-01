@@ -1,8 +1,11 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AcceptedObjectType, AttentionClass, ProposalStatus, RelationKind } from '@atrium/core';
-import { getTableConfig } from 'drizzle-orm/pg-core';
+import { is } from 'drizzle-orm';
+import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
+import * as authSchemaModule from '../src/auth-schema.js';
+import * as schemaModule from '../src/schema.js';
 import {
   acceptedObjects,
   acceptedObjectType,
@@ -22,10 +25,31 @@ import {
 
 const migrationsDir = join(import.meta.dirname, '..', 'drizzle');
 
+function migrationFiles(): string[] {
+  return readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+}
+
 function migrationSql(): string {
-  const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
+  const files = migrationFiles();
   expect(files.length).toBeGreaterThan(0);
   return files.map((f) => readFileSync(join(migrationsDir, f), 'utf8')).join('\n');
+}
+
+/**
+ * Every SQL table name the Drizzle schema declares, both modules.
+ *
+ * The modules export enums, types and helpers alongside the tables, so the
+ * exports are widened to `unknown` and narrowed by drizzle's own `is` — a type
+ * predicate cannot be written against the precise union of every table's
+ * literal name, and pretending otherwise would only move the cast somewhere
+ * less obvious.
+ */
+function declaredTableNames(): string[] {
+  const exported: unknown[] = [...Object.values(schemaModule), ...Object.values(authSchemaModule)];
+  const tables = exported.filter((value): value is PgTable => is(value, PgTable));
+  return [...new Set(tables.map((table) => getTableConfig(table).name))].sort();
 }
 
 describe('schema ↔ core parity', () => {
@@ -108,24 +132,45 @@ describe('table shape', () => {
 });
 
 describe('generated migration', () => {
-  it('exists and creates every table', () => {
+  /**
+   * Derived from the schema, not hand-copied.
+   *
+   * A list of table names written out here is a list that goes stale the first
+   * time somebody adds a table and forgets this file — and a migration test
+   * that has gone stale is worse than none, because it is green. Enumerating
+   * the Drizzle tables and demanding each one appear means "you added a table
+   * and did not regenerate" is a red test rather than a runtime surprise.
+   */
+  it('creates every table the schema declares', () => {
     const sql = migrationSql();
-    for (const table of [
-      'users',
-      'rooms',
-      'memberships',
-      'messages',
-      'interpretations',
-      'proposals',
-      'accepted_objects',
-      'relations',
-      'attention_items',
-      'corrections',
-      'proposal_sources',
-      'object_sources',
-    ]) {
-      expect(sql).toContain(`CREATE TABLE "${table}"`);
+    const declared = declaredTableNames();
+    expect(declared.length).toBeGreaterThan(15);
+    for (const table of declared) {
+      expect(sql, `no CREATE TABLE for "${table}" — run \`pnpm db:generate\``).toContain(
+        `CREATE TABLE "${table}"`,
+      );
     }
+  });
+
+  /**
+   * Nothing has ever shipped, so there is nothing to migrate *from*. Round 1
+   * left `0001` adding `rooms.workspace_id NOT NULL` with no backfill, which is
+   * a migration that cannot run against any database with rows in it — and the
+   * fix for a schema no deployment has seen is not an expand/backfill dance,
+   * it is one initial migration that is simply correct.
+   *
+   * This assertion is what stops that squash quietly un-squashing.
+   */
+  it('is a single initial migration, because nothing has shipped yet', () => {
+    const files = migrationFiles();
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^0000_/);
+  });
+
+  it('creates rooms.workspace_id as part of the table, not as a bare ALTER', () => {
+    const sql = migrationSql();
+    expect(sql).not.toContain('ALTER TABLE "rooms" ADD COLUMN "workspace_id"');
+    expect(sql).toMatch(/CREATE TABLE "rooms"[\s\S]*?"workspace_id" uuid NOT NULL/);
   });
 
   it('emits the interpretation idempotency constraint and the relation checks', () => {

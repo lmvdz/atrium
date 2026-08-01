@@ -161,8 +161,17 @@ describe('generated migration', () => {
     }
   });
 
-  it('adds the columns better auth needs on the existing users table', () => {
-    expect(sql).toContain('ALTER TABLE "users" ADD COLUMN "email_verified"');
-    expect(sql).toContain('ALTER TABLE "users" ADD COLUMN "updated_at"');
+  /**
+   * The columns Better Auth needs on `users` are now part of creating the
+   * table, not bolted on by a second migration. Nothing has ever shipped, so
+   * the squash into one initial migration is free — and it removes the
+   * `rooms.workspace_id NOT NULL` step that could not have run against any
+   * database that already had rooms.
+   */
+  it('declares better auth’s user columns in the initial CREATE TABLE', () => {
+    expect(sql).not.toContain('ALTER TABLE "users" ADD COLUMN');
+    const create = /CREATE TABLE "users" \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? '';
+    expect(create).toContain('"email_verified"');
+    expect(create).toContain('"updated_at"');
   });
 });
