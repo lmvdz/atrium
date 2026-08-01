@@ -87,14 +87,41 @@ describe('proposal schema', () => {
     payload: { statement: 'do it' },
     confidence: 0.5,
     proposer: { kind: 'model', model: 'test-model' },
+    provenance: ['msg_1'],
     createdAt: at(1),
   };
 
   it('parses a model proposal and defaults it to `proposed`', () => {
     const parsed = Proposal.parse(valid);
     expect(parsed.status).toBe('proposed');
-    expect(parsed.provenance).toEqual([]);
+    expect(parsed.provenance).toEqual(['msg_1']);
+    expect(parsed.quote).toBeNull();
     expect(parsed.interpretationId).toBeNull();
+  });
+
+  it('refuses a model proposal that cites no message — schema, not comment', () => {
+    // Routed out of #19's gauntlet round 1: `provenance` carried the rule
+    // "never empty for model proposals" as a doc comment and nothing else. A
+    // model proposal with no receipt is an assertion, and the acceptance
+    // boundary exists to refuse assertions.
+    const result = Proposal.safeParse({ ...valid, provenance: [] });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.path).toEqual(['provenance']);
+    expect(result.error?.issues[0]?.message).toContain('at least one source message');
+  });
+
+  it('lets a human proposer cite nothing — the person is the receipt', () => {
+    const parsed = Proposal.parse({
+      ...valid,
+      proposer: { kind: 'human', userId: ALICE },
+      provenance: [],
+    });
+    expect(parsed.provenance).toEqual([]);
+  });
+
+  it('carries an optional verbatim quote, for provenance checking', () => {
+    const parsed = Proposal.parse({ ...valid, quote: 'we should ship it behind a flag' });
+    expect(parsed.quote).toBe('we should ship it behind a flag');
   });
 
   it('constrains confidence to 0..1', () => {

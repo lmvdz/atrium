@@ -1,8 +1,17 @@
 import type { z } from 'zod';
-import { humanOnlyRefusal, isHuman } from './authority.js';
+import {
+  actorMatchesProposer,
+  confidenceFloorRefusal,
+  humanOnlyRefusal,
+  isHuman,
+  MODEL_ACCEPTANCE_FLOOR,
+  proposalBindingRefusal,
+} from './authority.js';
+import { ATTRIBUTION_FIELD, retypeCarryOver } from './corrections.js';
 import type { CoreEvent } from './events.js';
 import {
-  type AcceptedObject,
+  AcceptedObject,
+  type AcceptedObjectType,
   ClaimPayload,
   CommitmentPayload,
   DecisionPayload,
@@ -232,6 +241,7 @@ function resolveRoomId(state: CoreState, event: CoreEvent): string | null {
     case 'proposal_recorded':
       return event.proposal.roomId;
     case 'proposal_rejected':
+    case 'proposal_superseded':
       return state.proposals[event.proposalId]?.proposal.roomId ?? null;
     case 'object_accepted':
       return event.object.roomId;
@@ -339,6 +349,8 @@ function dispatch(state: CoreState, event: CoreEvent): boolean {
       return applyProposalRecorded(state, event);
     case 'proposal_rejected':
       return applyProposalRejected(state, event);
+    case 'proposal_superseded':
+      return applyProposalSuperseded(state, event);
     case 'object_accepted':
       return applyObjectAccepted(state, event);
     case 'object_corrected':
@@ -383,6 +395,8 @@ function applyProposalRecorded(state: CoreState, event: EventOf<'proposal_record
     status: 'proposed',
     acceptedObjectId: null,
     rejectedReason: null,
+    supersededByProposalId: null,
+    supersededReason: null,
   };
   return true;
 }
@@ -393,6 +407,32 @@ function applyProposalRejected(state: CoreState, event: EventOf<'proposal_reject
     fail(state, event.id, `unknown proposal "${event.proposalId}"`);
     return false;
   }
+
+  // Actor binding, before status — authority is a property of the event, status
+  // is a property of what it points at, and an interpreter with no business
+  // touching this proposal should be told that rather than sent to check
+  // whether it is still open.
+  //
+  // r4 left `proposal_rejected` open to any actor on the grounds that
+  // withdrawing a staged reading destroys nothing. That is true of a model
+  // withdrawing *its own* reading. It is not true of one interpreter retiring
+  // another's — or a human's — before anyone has seen it, which is a silent
+  // delete with no correction chain, performed by the one kind of actor that may
+  // not correct anything.
+  if (!actorMatchesProposer(event.actor, record.proposal.proposer)) {
+    fail(
+      state,
+      event.id,
+      proposalBindingRefusal(
+        'rejection_binding',
+        event.actor,
+        record.proposal.proposer,
+        event.proposalId,
+      ),
+    );
+    return false;
+  }
+
   if (record.status === 'accepted') {
     fail(state, event.id, `proposal "${event.proposalId}" was already accepted`);
     return false;
@@ -401,8 +441,72 @@ function applyProposalRejected(state: CoreState, event: EventOf<'proposal_reject
     fail(state, event.id, `proposal "${event.proposalId}" was already rejected`);
     return false;
   }
+  if (record.status === 'superseded') {
+    fail(state, event.id, `proposal "${event.proposalId}" was already superseded`);
+    return false;
+  }
   record.status = 'rejected';
   record.rejectedReason = event.reason;
+  return true;
+}
+
+/**
+ * A newer reading retires an older one. See `ProposalSuperseded` for why this is
+ * not a rejection: nobody judged it, so telling the room a person declined it
+ * would be a lie about who did what.
+ */
+function applyProposalSuperseded(state: CoreState, event: EventOf<'proposal_superseded'>): boolean {
+  const record = state.proposals[event.proposalId];
+  if (!record) {
+    fail(state, event.id, `unknown proposal "${event.proposalId}"`);
+    return false;
+  }
+  if (!actorMatchesProposer(event.actor, record.proposal.proposer)) {
+    fail(
+      state,
+      event.id,
+      proposalBindingRefusal(
+        'supersession_binding',
+        event.actor,
+        record.proposal.proposer,
+        event.proposalId,
+      ),
+    );
+    return false;
+  }
+  if (record.status !== 'proposed') {
+    fail(state, event.id, `proposal "${event.proposalId}" was already ${record.status}`);
+    return false;
+  }
+
+  const byId = event.supersededByProposalId;
+  if (byId !== null) {
+    if (byId === event.proposalId) {
+      fail(state, event.id, `proposal "${event.proposalId}" cannot supersede itself`);
+      return false;
+    }
+    const replacement = state.proposals[byId];
+    if (!replacement) {
+      fail(
+        state,
+        event.id,
+        `proposal "${event.proposalId}" is superseded by unknown proposal "${byId}"`,
+      );
+      return false;
+    }
+    if (replacement.proposal.roomId !== record.proposal.roomId) {
+      fail(
+        state,
+        event.id,
+        `proposal "${byId}" is in room "${replacement.proposal.roomId}", not "${record.proposal.roomId}" — a re-reading cannot cross rooms`,
+      );
+      return false;
+    }
+  }
+
+  record.status = 'superseded';
+  record.supersededByProposalId = byId;
+  record.supersededReason = event.reason;
   return true;
 }
 
@@ -476,6 +580,28 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
       );
       return false;
     }
+    if (proposal.status === 'superseded') {
+      fail(
+        state,
+        event.id,
+        `proposal "${proposalId}" was already superseded by "${proposal.supersededByProposalId ?? 'a newer reading'}" — accept the reading that replaced it`,
+      );
+      return false;
+    }
+
+    // A non-human actor may only accept what it itself staged. Two interpreters
+    // run against one room by construction (#7's two tiers), and without this
+    // the cheap tier can land the expensive tier's staged readings — or a
+    // person's, which is a machine minting a human's judgement.
+    if (!actorMatchesProposer(actor, proposal.proposal.proposer)) {
+      fail(
+        state,
+        event.id,
+        proposalBindingRefusal('acceptance_binding', actor, proposal.proposal.proposer, proposalId),
+      );
+      return false;
+    }
+
     if (proposal.proposal.type !== object.type) {
       fail(
         state,
@@ -492,15 +618,82 @@ function applyObjectAccepted(state: CoreState, event: EventOf<'object_accepted'>
       );
       return false;
     }
+
+    // ── The confidence floor (routed out of #19's gauntlet) ──
+    //
+    // The gates above close the *types* a model may not mint. This closes the
+    // rest of the write surface: without it, a model may accept its own claim,
+    // question, commitment or objective proposal at any confidence at all,
+    // including 0. θ was policy in the layer that mints events, and a policy in
+    // the minting layer holds exactly as long as that layer is the only writer.
+    //
+    // Note what this is not: it is not the product's θ_auto. `acceptance.ts`
+    // holds those and they are higher. This is the line below which an
+    // acceptance is malformed rather than debatable, and `AcceptanceConfig`
+    // refuses to be configured beneath it, so the two can never invert.
+    if (!isHuman(actor)) {
+      const floor = MODEL_ACCEPTANCE_FLOOR[object.type];
+      if (proposal.proposal.confidence < floor) {
+        fail(
+          state,
+          event.id,
+          confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),
+        );
+        return false;
+      }
+    }
+  }
+
+  // An `objectiveId` that points at nothing is the same defect as a `proposalId`
+  // that points at nothing, and is refused for the same reason: it is provenance
+  // the UI renders, and an unverifiable one is worse than none. The object files
+  // itself under a heading the room cannot open, which reads as "this belongs to
+  // something" while belonging to nothing.
+  //
+  // Refused rather than recorded-and-applied, because `reduce` sorts: in a
+  // replay the objective would already be there if it ever existed, so a dangling
+  // pointer is not a race, it is wrong. The acceptance can be re-minted with a
+  // corrected pointer; a fact filed under a ghost cannot be un-filed.
+  const objectiveId = object.objectiveId;
+  if (objectiveId !== null) {
+    const objective = state.objects[objectiveId];
+    if (!objective) {
+      fail(
+        state,
+        event.id,
+        `object "${object.id}" belongs to objective "${objectiveId}", which does not exist`,
+      );
+      return false;
+    }
+    if (objective.object.type !== 'objective') {
+      fail(
+        state,
+        event.id,
+        `object "${object.id}" belongs to "${objectiveId}", which is a ${objective.object.type}, not an objective`,
+      );
+      return false;
+    }
+    if (objective.object.roomId !== object.roomId) {
+      fail(
+        state,
+        event.id,
+        `object "${object.id}" is in room "${object.roomId}" but its objective "${objectiveId}" is in room "${objective.object.roomId}"`,
+      );
+      return false;
+    }
   }
 
   const record: ObjectRecord = {
     object,
     acceptedAt: event.at,
     updatedAt: event.at,
+    // `~` vs `✓` is derived from this and nothing else — see `epistemic.ts`.
+    acceptedBy: actor,
+    humanTouchedAt: isHuman(actor) ? event.at : null,
     revision: 0,
     retractedAt: null,
     supersededById: null,
+    reopenedFromAnswers: [],
   };
   state.objects[object.id] = record;
 
@@ -531,9 +724,8 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
   // depend on that never happening.
   if (!isHuman(event.actor)) {
     const verifying =
-      record.object.type === 'claim' &&
-      event.action === 'amend' &&
-      event.patch.verification === 'verified';
+      event.patch.verification === 'verified' &&
+      (record.object.type === 'claim' || event.toType === 'claim');
     fail(
       state,
       event.id,
@@ -551,19 +743,8 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
       fail(state, event.id, `object "${event.objectId}" is already retracted`);
       return false;
     }
-    state.corrections.push({
-      eventId: event.id,
-      objectId: record.object.id,
-      action: 'retract',
-      before: { retracted: false },
-      after: { retracted: true },
-      actor: event.actor,
-      note: event.note,
-      at: event.at,
-    });
+    commitCorrection(state, event, record, { retracted: false }, { retracted: true });
     record.retractedAt = event.at;
-    record.updatedAt = event.at;
-    record.revision += 1;
     return true;
   }
 
@@ -572,32 +753,77 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
       fail(state, event.id, `object "${event.objectId}" is not retracted`);
       return false;
     }
-    state.corrections.push({
-      eventId: event.id,
-      objectId: record.object.id,
-      action: 'restore',
-      before: { retracted: true },
-      after: { retracted: false },
-      actor: event.actor,
-      note: event.note,
-      at: event.at,
-    });
+    commitCorrection(state, event, record, { retracted: true }, { retracted: false });
     record.retractedAt = null;
-    record.updatedAt = event.at;
-    record.revision += 1;
     return true;
   }
 
-  // A retracted object is withdrawn, not editable. Amending one would quietly
+  // A retracted object is withdrawn, not editable. Editing one would quietly
   // resurrect content the room already took back; restore it first, in the open.
   if (record.retractedAt !== null) {
-    fail(state, event.id, `object "${event.objectId}" is retracted — restore it before amending`);
+    fail(
+      state,
+      event.id,
+      `object "${event.objectId}" is retracted — restore it before ${event.action === 'amend' ? 'amending' : `applying "${event.action}"`}`,
+    );
+    return false;
+  }
+
+  if (event.action === 'retype') return applyRetype(state, event, record);
+  if (event.action === 'reopen') return applyReopen(state, event, record);
+
+  const attributionField = ATTRIBUTION_FIELD[record.object.type];
+  const touchesAttribution =
+    attributionField !== null && Object.hasOwn(event.patch, attributionField);
+
+  if (event.action === 'reattribute') {
+    if (attributionField === null) {
+      fail(
+        state,
+        event.id,
+        `a ${record.object.type} has no attribution field — nothing to reattribute; use "amend"`,
+      );
+      return false;
+    }
+    const keys = Object.keys(event.patch);
+    if (keys.length === 0) {
+      fail(
+        state,
+        event.id,
+        `"reattribute" on object "${event.objectId}" changed nothing — it must set "${attributionField}"`,
+      );
+      return false;
+    }
+    const strays = keys.filter((key) => key !== attributionField);
+    if (strays.length > 0) {
+      fail(
+        state,
+        event.id,
+        `"reattribute" on object "${event.objectId}" may only change "${attributionField}", not ${strays.map((key) => `"${key}"`).join(', ')} — use "amend" for those`,
+      );
+      return false;
+    }
+  } else if (touchesAttribution) {
+    // The verb split, enforced. Moving an obligation off a named person is the
+    // most consequential edit in the product (#4), and an `amend` that quietly
+    // does it turns "who took this off me" into a substring search over patches.
+    fail(
+      state,
+      event.id,
+      `"amend" on object "${event.objectId}" may not change "${attributionField}" — moving a ${record.object.type} onto or off a person is a "reattribute", so the correction log can be read by verb`,
+    );
     return false;
   }
 
   const patched = applyPayloadPatch(record.object, event.patch);
   if (!patched.ok) {
-    fail(state, event.id, `invalid amendment to "${event.objectId}": ${patched.error}`);
+    fail(
+      state,
+      event.id,
+      event.action === 'amend'
+        ? `invalid amendment to "${event.objectId}": ${patched.error}`
+        : `invalid ${event.action} of "${event.objectId}": ${patched.error}`,
+    );
     return false;
   }
 
@@ -608,20 +834,187 @@ function applyObjectCorrected(state: CoreState, event: EventOf<'object_corrected
     return true;
   }
 
+  commitCorrection(state, event, record, patched.before, patched.after);
+  record.object = { ...patched.object, updatedAt: event.at };
+  return true;
+}
+
+/**
+ * #5's canonical fix: "that was only a suggestion" turns a Decision into a
+ * Claim, provenance intact.
+ *
+ * The envelope — id, room, objective, provenance, createdAt — is carried
+ * verbatim, because retyping is a statement about how the sentence was *read*,
+ * not about where it came from. The text carries across under the new type's own
+ * key (a decision's `statement` becomes a question's `question`), and anything
+ * the new type needs that the old one never had must come from the patch. The
+ * whole result is re-validated as an `AcceptedObject`, so a retype that would
+ * produce an invalid object is refused rather than half-applied — the same rule
+ * amendments already follow.
+ */
+function applyRetype(
+  state: CoreState,
+  event: EventOf<'object_corrected'>,
+  record: ObjectRecord,
+): boolean {
+  const toType = event.toType;
+  if (toType === null) {
+    fail(
+      state,
+      event.id,
+      `"retype" on object "${event.objectId}" did not say what to retype it to — set "toType"`,
+    );
+    return false;
+  }
+  const from = record.object;
+  if (toType === from.type) {
+    fail(
+      state,
+      event.id,
+      `object "${event.objectId}" is already a ${toType} — a retype to the same type is not a correction; use "amend"`,
+    );
+    return false;
+  }
+
+  const payload = { ...retypeCarryOver(from, toType), ...event.patch };
+  const parsed = AcceptedObject.safeParse({
+    id: from.id,
+    roomId: from.roomId,
+    objectiveId: from.objectiveId,
+    provenance: from.provenance,
+    type: toType,
+    payload,
+    createdAt: from.createdAt,
+    updatedAt: event.at,
+  });
+  if (!parsed.success) {
+    fail(
+      state,
+      event.id,
+      `cannot retype "${event.objectId}" from ${from.type} to ${toType}: ${parsed.error.issues
+        .map(describeIssue)
+        .join('; ')}`,
+    );
+    return false;
+  }
+
+  commitCorrection(
+    state,
+    event,
+    record,
+    { type: from.type, payload: from.payload },
+    { type: toType, payload: parsed.data.payload },
+  );
+  record.object = parsed.data;
+  return true;
+}
+
+/**
+ * #5's `reopen`: "answered/accepted returns to pending, prior answer preserved
+ * on record" — the v6 affordance.
+ *
+ * The `answers` edges are not removed; the relation log is append-only and
+ * removing them would erase the fact that the room once thought this was
+ * settled. What changes is the question's status, and the edges that had settled
+ * it are copied onto `reopenedFromAnswers` so the UI can say *what* the room had
+ * concluded before somebody reopened it. Without that list, an answered-then-
+ * reopened question is indistinguishable from one that was never answered, and
+ * the reopen has erased exactly the thing it promised to preserve.
+ */
+function applyReopen(
+  state: CoreState,
+  event: EventOf<'object_corrected'>,
+  record: ObjectRecord,
+): boolean {
+  const { object } = record;
+
+  if (object.type === 'open_question') {
+    if (object.payload.status !== 'answered') {
+      fail(state, event.id, `open question "${event.objectId}" is already open`);
+      return false;
+    }
+    const answers = state.relations
+      .filter((relation) => relation.kind === 'answers' && relation.fromObjectId === object.id)
+      .map((relation) => relation.id);
+    commitCorrection(
+      state,
+      event,
+      record,
+      { status: 'answered', answeredBy: answers },
+      { status: 'open', priorAnswers: answers },
+    );
+    record.object = {
+      ...object,
+      payload: { ...object.payload, status: 'open' },
+      updatedAt: event.at,
+    };
+    for (const id of answers) {
+      if (!record.reopenedFromAnswers.includes(id)) record.reopenedFromAnswers.push(id);
+    }
+    return true;
+  }
+
+  if (object.type === 'commitment') {
+    if (object.payload.status === 'open') {
+      fail(state, event.id, `commitment "${event.objectId}" is already open`);
+      return false;
+    }
+    commitCorrection(state, event, record, { status: object.payload.status }, { status: 'open' });
+    record.object = {
+      ...object,
+      payload: { ...object.payload, status: 'open' },
+      updatedAt: event.at,
+    };
+    return true;
+  }
+
+  // A decision's supersession lives in the relation graph, not in a status
+  // field a correction can flip: reopening one would leave `supersededById`
+  // pointing at the object that replaced it while both claimed to be current.
+  // Retract the superseding decision instead — in the open, with a chain.
+  fail(
+    state,
+    event.id,
+    `a ${object.type} cannot be reopened — only an answered question or a closed commitment can; a superseded decision is reopened by retracting the decision that replaced it`,
+  );
+  return false;
+}
+
+/**
+ * Write one correction to the log and move the record's bookkeeping with it.
+ *
+ * Every verb goes through here, so `revision`, `updatedAt` and `humanTouchedAt`
+ * cannot drift apart per-verb — which they did the last time each branch kept
+ * its own copy of these three lines.
+ */
+function commitCorrection(
+  state: CoreState,
+  event: EventOf<'object_corrected'>,
+  record: ObjectRecord,
+  before: unknown,
+  after: unknown,
+): void {
   state.corrections.push({
     eventId: event.id,
     objectId: record.object.id,
-    action: 'amend',
-    before: patched.before,
-    after: patched.after,
+    // The type as it reads *now*, before a retype changes it — see
+    // `CorrectionRecord.objectType`.
+    objectType: record.object.type as AcceptedObjectType,
+    action: event.action,
+    before,
+    after,
     actor: event.actor,
+    provenance: event.provenance,
     note: event.note,
     at: event.at,
   });
-  record.object = { ...patched.object, updatedAt: event.at };
   record.updatedAt = event.at;
   record.revision += 1;
-  return true;
+  // Corrections are human-only, so reaching here means a person has now taken
+  // responsibility for this object: `~` becomes `✓`.
+  if (record.humanTouchedAt === null && isHuman(event.actor)) {
+    record.humanTouchedAt = event.at;
+  }
 }
 
 function applyRelationAdded(state: CoreState, event: EventOf<'relation_added'>): boolean {

@@ -33,6 +33,8 @@ function proposalEvent(
     roomId?: string;
     status?: 'proposed' | 'accepted' | 'rejected' | 'superseded';
     type?: 'decision' | 'claim';
+    confidence?: number;
+    proposer?: { kind: 'model'; model: string } | { kind: 'human'; userId: string };
   } = {},
 ): CoreEvent {
   const minute = overrides.at ?? at(1);
@@ -49,8 +51,8 @@ function proposalEvent(
         (overrides.type ?? 'decision') === 'claim'
           ? { statement: 'the build is green', claimant: ALICE }
           : { statement: 'Adopt the watermark contract' },
-      confidence: 0.9,
-      proposer: { kind: 'model', model: 'test-model' },
+      confidence: overrides.confidence ?? 0.9,
+      proposer: overrides.proposer ?? { kind: 'model', model: 'test-model' },
       provenance: ['msg_9'],
       createdAt: minute,
       ...(overrides.status ? { status: overrides.status } : {}),
@@ -642,10 +644,11 @@ describe('the actor floor — gate 5: every correction verb is human-only', () =
     expect(state.objects.obj_decision_2?.retractedAt).toBeNull();
   });
 
-  it('leaves proposal_rejected open to a model — withdrawing a reading is not a correction', () => {
+  it('leaves proposal_rejected open to a model — withdrawing its OWN reading is not a correction', () => {
     // Deliberate, and recorded in `authority.ts`: a rejected proposal stays in
     // state, visible; nothing accepted is touched. An interpreter retiring its
-    // own low-confidence reading is a path #4 wants open.
+    // own low-confidence reading is a path #4 wants open. #21 narrows it to
+    // "its own" — see the binding gates below.
     const state = reduce([
       proposalEvent(),
       event({
@@ -659,6 +662,346 @@ describe('the actor floor — gate 5: every correction verb is human-only', () =
     ]);
     expect(state.issues).toEqual([]);
     expect(state.proposals.prop_x?.status).toBe('rejected');
+  });
+});
+
+describe('the actor floor — gate 6: a machine may only act on its own proposals', () => {
+  /**
+   * Routed out of #19's gauntlet. r4 left `proposal_rejected` open to any actor
+   * because "withdrawing a staged reading destroys nothing". True of a model
+   * withdrawing its own reading; false of one interpreter retiring another's —
+   * or a human's — before anyone has seen it, which is a silent delete with no
+   * correction chain, by the one kind of actor that may not correct anything.
+   *
+   * Two interpreters against one room is the design (#7's two tiers), not an
+   * attack, so this fires in ordinary operation and not only under adversary.
+   */
+  const other = () => model('other-model');
+
+  it('refuses a second model accepting the first model’s proposal', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim' }),
+      acceptEvent({ type: 'claim', actor: other() }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+    expect(state.issues[0]?.reason).toContain('may only accept its own reading');
+    expect(state.issues[0]?.reason).toContain('minting their judgement');
+  });
+
+  it('refuses a model accepting a human’s proposal', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim', proposer: { kind: 'human', userId: BOB } }),
+      acceptEvent({ type: 'claim', actor: model() }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues[0]?.reason).toContain('may only accept its own reading');
+    expect(state.issues[0]?.reason).toContain(`user "${BOB}"`);
+  });
+
+  it('refuses a system actor, which can never own a proposal', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim' }),
+      acceptEvent({ type: 'claim', actor: { kind: 'system' } }),
+    ]);
+    expect(state.issues[0]?.reason).toContain('the system actor');
+  });
+
+  it('lets a human accept anybody’s proposal — that is the product', () => {
+    const state = reduce([proposalEvent({ type: 'claim' }), acceptEvent({ type: 'claim' })]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+  });
+
+  it('refuses a second model rejecting or superseding another’s reading', () => {
+    const rejected = reduce([
+      proposalEvent({ type: 'claim' }),
+      event({
+        id: 'ev_rej',
+        at: at(3),
+        actor: other(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+        reason: 'not convinced',
+      }),
+    ]);
+    expect(rejected.proposals.prop_x?.status).toBe('proposed');
+    expect(rejected.issues[0]?.reason).toContain('may only withdraw its own reading');
+
+    const superseded = reduce([
+      proposalEvent({ type: 'claim' }),
+      event({
+        id: 'ev_sup',
+        at: at(3),
+        actor: other(),
+        type: 'proposal_superseded',
+        proposalId: 'prop_x',
+        reason: 're-read',
+      }),
+    ]);
+    expect(superseded.proposals.prop_x?.status).toBe('proposed');
+    expect(superseded.issues[0]?.reason).toContain('may only retire its own reading');
+  });
+
+  it('refuses a model rejecting a human’s proposal, but lets a human reject a model’s', () => {
+    const modelRejectingHuman = reduce([
+      proposalEvent({ type: 'claim', proposer: { kind: 'human', userId: BOB } }),
+      event({
+        id: 'ev_r',
+        at: at(3),
+        actor: model(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+      }),
+    ]);
+    expect(modelRejectingHuman.issues[0]?.reason).toContain('only a human may reject another');
+
+    const humanRejectingModel = reduce([
+      proposalEvent({ type: 'claim' }),
+      event({
+        id: 'ev_r',
+        at: at(3),
+        actor: human(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+      }),
+    ]);
+    expect(humanRejectingModel.issues).toEqual([]);
+  });
+});
+
+describe('the actor floor — gate 7: a machine may not accept below the confidence floor', () => {
+  /**
+   * Also routed out of #19's gauntlet, and it closes the last of the open write
+   * surface. The type gates above close what a model may mint; without this one
+   * a model may mint a claim, question, commitment or objective at *any*
+   * confidence, including zero, because θ lived entirely in the layer that mints
+   * the events — a policy that holds only while that layer is the only writer.
+   */
+  it('refuses a model accepting its own near-zero-confidence claim', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim', confidence: 0.01 }),
+      acceptEvent({ type: 'claim', actor: model() }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+    expect(state.issues[0]?.reason).toContain('below the floor');
+    expect(state.issues[0]?.reason).toContain('propose it and let a human accept');
+  });
+
+  it('lets the same acceptance through once it clears the floor', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim', confidence: 0.5 }),
+      acceptEvent({ type: 'claim', actor: model() }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+  });
+
+  it('does not gate a human on confidence — the floor is about machines', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim', confidence: 0 }),
+      acceptEvent({ type: 'claim', actor: human() }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+  });
+
+  it('is a floor, not the engine’s θ — the two are different numbers', () => {
+    // A claim at 0.55 clears the reducer's floor (0.5) and does *not* clear the
+    // engine's θ_auto (0.7). The reducer folds it; the engine would never have
+    // emitted it. That gap is deliberate: the floor bounds the write surface,
+    // the engine decides policy, and the reducer stays a function of the log.
+    const state = reduce([
+      proposalEvent({ type: 'claim', confidence: 0.55 }),
+      acceptEvent({ type: 'claim', actor: model() }),
+    ]);
+    expect(state.issues).toEqual([]);
+  });
+});
+
+describe('objectiveId — a fact filed under a heading the room cannot open', () => {
+  const filed = (objectiveId: string | null, id = 'ev_filed') =>
+    event({
+      id,
+      at: at(9),
+      actor: human(),
+      type: 'object_accepted',
+      object: {
+        id: 'obj_filed',
+        roomId: ROOM,
+        objectiveId,
+        type: 'claim',
+        payload: { statement: 'belongs to something', claimant: BOB },
+        createdAt: at(9),
+        updatedAt: at(9),
+      },
+    } as Parameters<typeof event>[0]);
+
+  const objective = (id: string, roomId = ROOM) =>
+    event({
+      id: `ev_${id}`,
+      at: at(8),
+      actor: human(),
+      type: 'object_accepted',
+      object: {
+        id,
+        roomId,
+        type: 'objective',
+        payload: { title: 'Ship it' },
+        createdAt: at(8),
+        updatedAt: at(8),
+      },
+    } as Parameters<typeof event>[0]);
+
+  it('refuses an object whose objective does not exist', () => {
+    const state = reduce([...sampleLog(), filed('obj_no_such')]);
+    expect(state.objects.obj_filed).toBeUndefined();
+    expect(state.issues).toEqual([
+      {
+        eventId: 'ev_filed',
+        reason: 'object "obj_filed" belongs to objective "obj_no_such", which does not exist',
+      },
+    ]);
+  });
+
+  it('refuses an objectiveId pointing at something that is not an objective', () => {
+    const state = reduce([...sampleLog(), filed('obj_decision_1')]);
+    expect(state.issues[0]?.reason).toContain('which is a decision, not an objective');
+  });
+
+  it('refuses an objective in another room', () => {
+    const state = reduce([...sampleLog(), objective('obj_far', OTHER_ROOM), filed('obj_far')]);
+    expect(state.issues[0]?.reason).toContain('its objective "obj_far" is in room "room_2"');
+  });
+
+  it('accepts an object filed under a real objective in its own room', () => {
+    const state = reduce([...sampleLog(), objective('obj_objective_1'), filed('obj_objective_1')]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_filed?.object.objectiveId).toBe('obj_objective_1');
+  });
+
+  it('accepts an object filed under nothing', () => {
+    const state = reduce([...sampleLog(), filed(null)]);
+    expect(state.issues).toEqual([]);
+  });
+});
+
+describe('proposal supersession — wiring the status that used to be dead', () => {
+  /**
+   * #19's gauntlet: "proposal status `superseded` is currently dead enum — wire
+   * or remove". Wired, because it is the only honest label for a reading that
+   * was replaced by a re-read rather than judged: collapsing it into `rejected`
+   * tells the room a person declined something no person ever saw.
+   */
+  const supersede = (overrides: { id?: string; at?: string; by?: string | null } = {}) =>
+    event({
+      id: overrides.id ?? 'ev_sup',
+      at: overrides.at ?? at(3),
+      actor: model(),
+      type: 'proposal_superseded',
+      proposalId: 'prop_x',
+      supersededByProposalId: overrides.by ?? null,
+      reason: 're-read at interpretation_version 2',
+    } as Parameters<typeof event>[0]);
+
+  it('retires a proposal without pretending anybody judged it', () => {
+    const state = reduce([proposalEvent({ type: 'claim' }), supersede()]);
+    expect(state.issues).toEqual([]);
+    const record = state.proposals.prop_x;
+    expect(record?.status).toBe('superseded');
+    expect(record?.rejectedReason).toBeNull();
+    expect(record?.supersededReason).toBe('re-read at interpretation_version 2');
+    expect(record?.acceptedObjectId).toBeNull();
+  });
+
+  it('records which newer reading replaced it', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim' }),
+      proposalEvent({ id: 'ev_p2', proposalId: 'prop_new', at: at(2), type: 'claim' }),
+      supersede({ at: at(4), by: 'prop_new' }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.proposals.prop_x?.supersededByProposalId).toBe('prop_new');
+  });
+
+  it('refuses a replacement that does not exist, or lives in another room', () => {
+    const ghost = reduce([proposalEvent({ type: 'claim' }), supersede({ by: 'prop_ghost' })]);
+    expect(ghost.issues[0]?.reason).toContain('superseded by unknown proposal');
+    expect(ghost.proposals.prop_x?.status).toBe('proposed');
+
+    const crossRoom = reduce([
+      proposalEvent({ type: 'claim' }),
+      proposalEvent({
+        id: 'ev_p2',
+        proposalId: 'prop_far',
+        at: at(2),
+        roomId: OTHER_ROOM,
+        type: 'claim',
+      }),
+      supersede({ at: at(4), by: 'prop_far' }),
+    ]);
+    expect(crossRoom.issues[0]?.reason).toContain('a re-reading cannot cross rooms');
+  });
+
+  it('refuses a proposal superseding itself', () => {
+    const state = reduce([proposalEvent({ type: 'claim' }), supersede({ by: 'prop_x' })]);
+    expect(state.issues[0]?.reason).toContain('cannot supersede itself');
+  });
+
+  it('refuses superseding a proposal that is already settled, whichever way', () => {
+    for (const [label, settle] of [
+      ['accepted', [proposalEvent({ type: 'claim' }), acceptEvent({ type: 'claim', at: at(2) })]],
+      [
+        'rejected',
+        [
+          proposalEvent({ type: 'claim' }),
+          event({
+            id: 'ev_rej',
+            at: at(2),
+            actor: human(),
+            type: 'proposal_rejected',
+            proposalId: 'prop_x',
+          }),
+        ],
+      ],
+    ] as const) {
+      const state = reduce([...settle, supersede({ at: at(4) })]);
+      expect(state.issues.at(-1)?.reason).toContain(`was already ${label}`);
+    }
+  });
+
+  it('refuses accepting a superseded proposal, and says what to accept instead', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim' }),
+      proposalEvent({ id: 'ev_p2', proposalId: 'prop_new', at: at(2), type: 'claim' }),
+      supersede({ at: at(3), by: 'prop_new' }),
+      acceptEvent({ type: 'claim', at: at(4) }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain('was already superseded by "prop_new"');
+    expect(state.issues.at(-1)?.reason).toContain('accept the reading that replaced it');
+  });
+
+  it('refuses rejecting a superseded proposal', () => {
+    const state = reduce([
+      proposalEvent({ type: 'claim' }),
+      supersede({ at: at(2) }),
+      event({
+        id: 'ev_rej',
+        at: at(3),
+        actor: human(),
+        type: 'proposal_rejected',
+        proposalId: 'prop_x',
+      }),
+    ]);
+    expect(state.issues.at(-1)?.reason).toContain('was already superseded');
+  });
+
+  it('records an issue for an unknown proposal rather than throwing', () => {
+    const state = reduce([supersede({ at: at(1) })]);
+    expect(state.issues).toEqual([{ eventId: 'ev_sup', reason: 'unknown proposal "prop_x"' }]);
+    expect(state.consumedEventIds).toEqual(['ev_sup']);
   });
 });
 

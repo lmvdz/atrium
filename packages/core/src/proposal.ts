@@ -29,15 +29,29 @@ const proposalBase = z.object({
   /** Model self-reported confidence, 0..1. Acceptance rules read this. */
   confidence: z.number().min(0).max(1),
   proposer: Proposer,
-  /** Source messages this reading was drawn from. Never empty for model proposals. */
+  /**
+   * Source messages this reading was drawn from. **Enforced non-empty for model
+   * proposers** by the refinement below — see `Proposal`.
+   */
   provenance: z.array(Id).default([]),
+  /**
+   * The span of a cited message this reading rests on, verbatim. Optional
+   * because a human staging a proposal is not quoting anything, but when a model
+   * supplies one it is checkable, and `validateProposalProvenance` checks it:
+   * the quote must appear in a cited message *after* GitHub reply-blockquotes
+   * are stripped. The interpretation spike's worst error — a claim attributed to
+   * the wrong person at 0.98 confidence — was a quote that only existed inside
+   * somebody else's reply-blockquote, and nothing but this field makes that
+   * detectable without a model.
+   */
+  quote: z.string().nullable().default(null),
   interpretationId: Id.nullable().default(null),
   status: ProposalStatus.default('proposed'),
   createdAt: Timestamp,
 });
 
 /** The payload is validated against the same schema the accepted object will use. */
-export const Proposal = z.discriminatedUnion('type', [
+const ProposalShape = z.discriminatedUnion('type', [
   proposalBase.extend({ type: z.literal('decision'), payload: DecisionPayload }),
   proposalBase.extend({ type: z.literal('commitment'), payload: CommitmentPayload }),
   proposalBase.extend({ type: z.literal('open_question'), payload: OpenQuestionPayload }),
@@ -45,8 +59,34 @@ export const Proposal = z.discriminatedUnion('type', [
   proposalBase.extend({ type: z.literal('objective'), payload: ObjectivePayload }),
 ]);
 
+/**
+ * The proposal, with the one rule that could not be expressed field-by-field.
+ *
+ * **A model proposal must cite at least one message.** This was a comment on
+ * `provenance` and nothing else — routed out of #19's gauntlet, because a
+ * comment is not a constraint. Provenance is the receipt: it is what the UI
+ * shows under a `~`, what `validateProposalProvenance` checks a quote against,
+ * and what a person clicks to decide whether the reading is right. A model
+ * proposal with no receipt is an assertion, which is the one thing the
+ * acceptance boundary exists to refuse. A *human* proposer may cite nothing —
+ * a person staging their own reading is the receipt.
+ */
+export const Proposal = ProposalShape.superRefine((proposal, ctx) => {
+  if (proposal.proposer.kind === 'model' && proposal.provenance.length === 0) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['provenance'],
+      message:
+        'a model proposal must cite at least one source message — a reading with no receipt cannot be checked, and an unbacked `~` is an assertion',
+    });
+  }
+});
+
 export type Proposal = z.infer<typeof Proposal>;
 export type ProposalInput = z.input<typeof Proposal>;
+
+/** The union without the cross-field rule, for callers that need `.options`. */
+export const ProposalVariants = ProposalShape;
 
 /** `Omit` that distributes over a union, so the `type` discriminator survives. */
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;

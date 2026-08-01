@@ -6,9 +6,13 @@
  * purity is load-bearing: it is what makes interpretation replayable and
  * testable in isolation (issue #11).
  */
+export * from './acceptance.js';
 export * from './attention.js';
 export * from './authority.js';
 export * from './common.js';
+export * from './corrections.js';
+export * from './epistemic.js';
+export * from './escalation.js';
 export * from './events.js';
 export * from './objects.js';
 export * from './ports.js';

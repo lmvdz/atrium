@@ -134,6 +134,12 @@ const payloadFor = (type: 'decision' | 'claim', text: string, verified = false) 
 
 const HUMAN = { kind: 'human', userId: ALICE } as const;
 const MODEL = { kind: 'model', model: 'test-model' } as const;
+/**
+ * A second interpreter. #7 runs two tiers against one room by construction, so
+ * "another model reaching for this model's proposals" is the ordinary case, not
+ * an adversarial one, and the corpus has to contain it.
+ */
+const OTHER_MODEL = { kind: 'model', model: 'other-model' } as const;
 
 /**
  * A delivery stream: what a server's socket actually hands the reducer, warts
@@ -166,6 +172,8 @@ function generateLog(seed: number, size: number): CoreEvent[] {
 
     if (roll < 0.24) {
       // A proposal. One in four arrives pre-blessed: coerced, with an issue.
+      // Confidence is drawn from both sides of the acceptance floor, so a model
+      // acceptance in the corpus is sometimes one the floor must refuse.
       const proposalId = `prop_${index}`;
       const preBlessed = rng() < 0.25;
       events.push(
@@ -179,7 +187,7 @@ function generateLog(seed: number, size: number): CoreEvent[] {
             roomId,
             type,
             payload: payloadFor(type, `proposed ${index}`),
-            confidence: 0.7,
+            confidence: rng() < 0.3 ? 0.2 : 0.8,
             proposer: MODEL,
             provenance: [`msg_${index}`],
             createdAt: at,
@@ -188,6 +196,36 @@ function generateLog(seed: number, size: number): CoreEvent[] {
         }),
       );
       proposals.push({ id: proposalId, roomId, type });
+      continue;
+    }
+
+    if (roll < 0.3 && proposals.length > 0) {
+      // A proposal retired or withdrawn by an actor drawn independently of who
+      // staged it — so the corpus contains both the interpreter tidying up after
+      // itself and a second interpreter reaching for somebody else's readings.
+      const target = pick(rng, proposals);
+      const actor = pick(rng, [MODEL, OTHER_MODEL, HUMAN, { kind: 'system' } as const]);
+      const superseding = rng() < 0.5;
+      events.push(
+        parse({
+          id,
+          at,
+          actor,
+          ...(superseding
+            ? {
+                type: 'proposal_superseded',
+                proposalId: target.id,
+                supersededByProposalId:
+                  proposals.length > 1 && rng() < 0.6 ? pick(rng, proposals).id : null,
+                reason: `re-read ${index}`,
+              }
+            : {
+                type: 'proposal_rejected',
+                proposalId: target.id,
+                reason: `withdrawn ${index}`,
+              }),
+        }),
+      );
       continue;
     }
 
@@ -202,7 +240,8 @@ function generateLog(seed: number, size: number): CoreEvent[] {
       const objectId = `obj_${index}`;
       const objectType = staged && rng() < 0.8 ? staged.type : type;
       const objectRoom = staged && rng() < 0.85 ? staged.roomId : roomId;
-      const actor = rng() < 0.45 ? MODEL : HUMAN;
+      const actorRoll = rng();
+      const actor = actorRoll < 0.3 ? MODEL : actorRoll < 0.45 ? OTHER_MODEL : HUMAN;
       const verified = objectType === 'claim' && rng() < 0.3;
       events.push(
         parse({
@@ -229,11 +268,30 @@ function generateLog(seed: number, size: number): CoreEvent[] {
     }
 
     if (roll < 0.76) {
-      // A correction, half of them to objects that may not exist, a third of
-      // them from a model — which may never correct anything.
+      // A correction, a quarter of them to objects that may not exist, a third
+      // of them from a model — which may never correct anything. All six verbs,
+      // most of them aimed at objects they do not apply to, so the per-verb
+      // applicability checks are exercised as hard as the authority one.
       const target = objects.length > 0 && rng() < 0.75 ? pick(rng, objects) : undefined;
-      const action = pick(rng, ['amend', 'retract', 'restore'] as const);
+      const action = pick(rng, [
+        'amend',
+        'retract',
+        'restore',
+        'retype',
+        'reattribute',
+        'reopen',
+      ] as const);
       const actor = rng() < 0.35 ? MODEL : HUMAN;
+      const patch = (): Record<string, unknown> => {
+        if (action === 'amend') {
+          return rng() < 0.3 ? { verification: 'verified' } : { statement: `amended ${index}` };
+        }
+        if (action === 'reattribute') {
+          return rng() < 0.5 ? { claimant: BOB } : { decidedBy: ALICE };
+        }
+        if (action === 'retype') return rng() < 0.5 ? { claimant: BOB } : {};
+        return {};
+      };
       events.push(
         parse({
           id,
@@ -242,12 +300,11 @@ function generateLog(seed: number, size: number): CoreEvent[] {
           type: 'object_corrected',
           objectId: target ? target.id : `obj_ghost_${index}`,
           action,
-          ...(action === 'amend'
-            ? {
-                patch:
-                  rng() < 0.3 ? { verification: 'verified' } : { statement: `amended ${index}` },
-              }
+          ...(action === 'retype'
+            ? { toType: pick(rng, ['decision', 'claim', 'open_question'] as const) }
             : {}),
+          patch: patch(),
+          provenance: { messageIds: [`msg_${index}`], proposalId: null },
           note: `note ${index}`,
         }),
       );
@@ -348,7 +405,7 @@ function gateProbes(seed: number): CoreEvent[] {
     index: number,
     type: 'decision' | 'claim',
     payload: Record<string, unknown>,
-    actor: typeof HUMAN | typeof MODEL,
+    actor: typeof HUMAN | typeof MODEL | typeof OTHER_MODEL,
     proposalId: string | null,
   ) =>
     parse({
@@ -431,6 +488,90 @@ function gateProbes(seed: number): CoreEvent[] {
       objectId: `pobj_${seed}_10`,
       action: 'amend',
       patch: { statement: `${tag} quietly reworded` },
+    }),
+
+    // ── #21's additions to the floor ──────────────────────────────────────
+    //
+    // A low-confidence claim proposal, staged by MODEL, that both new
+    // acceptance gates are aimed at in turn.
+    parse({
+      id: `${tag}_18`,
+      at: stamp(18),
+      actor: MODEL,
+      type: 'proposal_recorded',
+      proposal: {
+        id: `pprop_low_${seed}`,
+        roomId: room,
+        type: 'claim',
+        payload: { statement: `${tag} unsure`, claimant: BOB },
+        confidence: 0.05,
+        proposer: MODEL,
+        provenance: [`msg_${tag}`],
+        createdAt: stamp(18),
+      },
+    }),
+    // Gate: a model may not accept a reading it does not stand behind.
+    object(19, 'claim', { statement: `${tag} unsure`, claimant: BOB }, MODEL, `pprop_low_${seed}`),
+    // A well-founded proposal, staged by MODEL…
+    parse({
+      id: `${tag}_20`,
+      at: stamp(20),
+      actor: MODEL,
+      type: 'proposal_recorded',
+      proposal: {
+        id: `pprop_own_${seed}`,
+        roomId: room,
+        type: 'claim',
+        payload: { statement: `${tag} confident`, claimant: BOB },
+        confidence: 0.95,
+        proposer: MODEL,
+        provenance: [`msg_${tag}`],
+        createdAt: stamp(20),
+      },
+    }),
+    // Gate: …that a *different* model tries to accept.
+    object(
+      21,
+      'claim',
+      { statement: `${tag} confident`, claimant: BOB },
+      OTHER_MODEL,
+      `pprop_own_${seed}`,
+    ),
+    // Gate: …and tries to reject.
+    parse({
+      id: `${tag}_22`,
+      at: stamp(22),
+      actor: OTHER_MODEL,
+      type: 'proposal_rejected',
+      proposalId: `pprop_own_${seed}`,
+      reason: `${tag} not mine to withdraw`,
+    }),
+    // Gate: …and tries to supersede.
+    parse({
+      id: `${tag}_23`,
+      at: stamp(23),
+      actor: OTHER_MODEL,
+      type: 'proposal_superseded',
+      proposalId: `pprop_own_${seed}`,
+      supersededByProposalId: null,
+      reason: `${tag} not mine to retire`,
+    }),
+    // Gate: an object filed under an objective that does not exist.
+    parse({
+      id: `${tag}_24`,
+      at: stamp(24),
+      actor: HUMAN,
+      type: 'object_accepted',
+      object: {
+        id: `pobj_${seed}_24`,
+        roomId: room,
+        objectiveId: `obj_no_such_objective_${seed}`,
+        type: 'claim',
+        payload: { statement: `${tag} orphan`, claimant: BOB },
+        provenance: { messageIds: [`msg_${tag}`], proposalId: null },
+        createdAt: stamp(24),
+        updatedAt: stamp(24),
+      },
     }),
   ];
 }
@@ -569,13 +710,25 @@ function arrivalStream(seed: number, delivery: Delivery = 'shuffled'): CoreEvent
   return withRemintedRedeliveries(withRedeliveries(disordered, seed), seed * 3 + 2);
 }
 
-/** Refusal texts the corpus must keep producing, one per human-only gate. */
+/**
+ * Refusal texts the corpus must keep producing, one per gate — the five the
+ * scaffold's actor floor holds, and the five #21 added on top of it.
+ *
+ * The assertion below fails if any of them stops firing, which is the point: a
+ * corpus that drifts until a gate is never reached is a corpus that stopped
+ * testing it, and nothing else would say so.
+ */
 const GATE_MARKERS = {
   direct_acceptance: 'only a human may accept an object directly',
   decision_acceptance: 'never auto-accepts',
   claim_verification: 'would become a verified claim',
   decision_supersession: 'retires an accepted decision',
   correction: 'corrections (amend, retract, restore)',
+  acceptance_binding: 'may only accept its own reading',
+  rejection_binding: 'may only withdraw its own reading',
+  supersession_binding: 'may only retire its own reading',
+  confidence_floor: 'below the floor',
+  dangling_objective: 'which does not exist',
 } as const;
 
 describe('live≡replay — generated logs, an independent oracle, adversarial redeliveries', () => {

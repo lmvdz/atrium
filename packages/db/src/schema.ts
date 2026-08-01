@@ -85,7 +85,22 @@ export const attentionClass = pgEnum('attention_class', [
 
 export const attentionStatus = pgEnum('attention_status', ['pending', 'resolved', 'dismissed']);
 
-export const correctionAction = pgEnum('correction_action', ['amend', 'retract', 'restore']);
+/**
+ * Mirrors `@atrium/core`'s `CorrectionAction`, and the parity assert at the foot
+ * of this file makes the mirror mandatory. #21 added the three verbs #5's
+ * resolution named and the scaffold had not built yet: `retype` (the canonical
+ * fix — a decision that was only a suggestion becomes a claim), `reattribute`
+ * (owner change, kept separate from `amend` so the log is readable by verb), and
+ * `reopen` (an answered question returns to open, prior answer preserved).
+ */
+export const correctionAction = pgEnum('correction_action', [
+  'amend',
+  'retract',
+  'restore',
+  'retype',
+  'reattribute',
+  'reopen',
+]);
 
 export const interpretationStatus = pgEnum('interpretation_status', [
   'pending',
