@@ -7,8 +7,12 @@
  * The mutation ledger for #26, rounds 6 to 9, re-runnable.
  *
  *   node scripts/mutation-ledger.mjs --list
- *   node scripts/mutation-ledger.mjs <name>      apply one mutation
- *   node scripts/mutation-ledger.mjs --restore   put every touched file back
+ *   node scripts/mutation-ledger.mjs <name>          apply one mutation
+ *   node scripts/mutation-ledger.mjs --against <ref> <path…>
+ *                                                    swap in a previous round's
+ *                                                    files to re-measure it
+ *   node scripts/mutation-ledger.mjs --restore       put everything back
+ *   node scripts/mutation-ledger.mjs --verify        every mutation still applies
  *
  * `--restore` restores from a snapshot this script takes, not from git — see
  * {@link SNAPSHOT}. It is safe to run on a dirty tree, and one mutation must be
@@ -48,6 +52,7 @@
  *    saying so is part of the discipline: "no rebuild needed" is a claim about
  *    how a suite loads its subject, and it was checked.
  */
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -83,8 +88,8 @@ const TOUCHED = [
  */
 const SNAPSHOT = 'node_modules/.cache/atrium-mutation-ledger';
 
-/** Copy every touched file that exists, so `--restore` has something honest. */
-function snapshot() {
+/** Copy the given files aside, so `--restore` has something honest. */
+function snapshotPaths(files) {
   if (existsSync(SNAPSHOT)) {
     throw new Error(
       `a mutation is already applied (${SNAPSHOT} exists).\n` +
@@ -93,10 +98,15 @@ function snapshot() {
     );
   }
   mkdirSync(SNAPSHOT, { recursive: true });
-  for (const file of TOUCHED) {
+  for (const file of files) {
     if (!existsSync(file)) continue;
     writeFileSync(join(SNAPSHOT, file.split('/').join('%')), readFileSync(file));
   }
+}
+
+/** Everything any mutation can reach. */
+function snapshot() {
+  snapshotPaths(TOUCHED);
 }
 
 function restore() {
@@ -141,7 +151,7 @@ const mutations = {
 
   'drop-ceiling': [
     'the join stays, only the role ceiling goes — isolates the demotion half',
-    'room-access.spec.ts 1 of 7, and packages/auth/test/room-access.test.ts 4 of 48',
+    'room-access.spec.ts 1 of 7, and packages/auth/test/room-access.test.ts 4 of 54',
     () =>
       edit('packages/auth/src/room-access.ts', [
         [
@@ -153,7 +163,7 @@ const mutations = {
 
   'drop-report': [
     "round 5's swallow: log the message, tell nobody",
-    'packages/auth/test/org.test.ts — 14 of 51 (round 7 recorded 3 of 40; the reporter now has eleven more tests around it)',
+    'packages/auth/test/org.test.ts — 14 of 52 (round 7 recorded 3 of 40; the reporter now has eleven more tests around it)',
     () =>
       edit('packages/auth/src/org.ts', [
         [
@@ -190,7 +200,7 @@ const mutations = {
 
   'drop-await': [
     "round 6's un-awaited reporter — the live crash path",
-    'packages/auth/test/org.test.ts — 8 of 51, including the unhandled-rejection watch (round 7: 4 of 45)',
+    'packages/auth/test/org.test.ts — 8 of 52, including the unhandled-rejection watch (round 7: 4 of 45)',
     () =>
       edit('packages/auth/src/org.ts', [
         [
@@ -202,9 +212,9 @@ const mutations = {
 
   'unguard-logger': [
     "round 6's unprotected `logger.error` — a throwing log transport fails a committed removal",
-    'packages/auth/test/org.test.ts — 2 of 51',
+    'packages/auth/test/org.test.ts — 2 of 52, and packages/auth/test/errors.test.ts — 2 of 14. Round 9 moved the guard from `org.ts` into `errors.ts`, so this now covers both packages at once; it threw "mutation target not found" until it was repointed, which is the ledger doing its job.',
     () =>
-      edit('packages/auth/src/org.ts', [
+      edit('packages/auth/src/errors.ts', [
         [
           '    try {\n      logger.error(message, fields());\n    } catch {\n      // Intentionally empty; see above.\n    }',
           '    logger.error(message, fields());',
@@ -214,7 +224,7 @@ const mutations = {
 
   'boundary-names-only': [
     'the import boundary stops looking at whole-module references (namespace, dynamic, require, `export *`)',
-    'packages/auth/test/room-access.test.ts — 5 of 48',
+    'packages/auth/test/room-access.test.ts — 5 of 54',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
@@ -226,7 +236,7 @@ const mutations = {
 
   'boundary-no-helpers': [
     'rule 2 goes: a module may hold the table and export a wrapper around it',
-    'packages/auth/test/room-access.test.ts — 3 of 48, including the empty-allowlist premise',
+    'packages/auth/test/room-access.test.ts — 3 of 54, including the empty-allowlist premise',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         ['        if (touches) before.all = true;', '        void touches;'],
@@ -235,7 +245,7 @@ const mutations = {
 
   'boundary-no-access': [
     'the whole access half goes — the table reached off a handle stops being seen at all',
-    'packages/auth/test/room-access.test.ts — 8 of 48',
+    "packages/auth/test/room-access.test.ts — 12 of 54. **The round-8 receipt recorded 8 of 48 and that was wrong**: measured on r8's own tree (`--against fix/auth-r8`) this fails 11 of 48. 8 is `r7-access-analysis`'s number, one row up — a transcription slip in the very table whose header says a table copied forward is a defect with an extra step.",
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
@@ -247,7 +257,7 @@ const mutations = {
 
   'regex-boundary': [
     "round 6's regex, in effect: named imports of a literal specifier and nothing else",
-    'packages/auth/test/room-access.test.ts — 20 of 48; of the 24 evasion fixtures, 6 still fire — the named-import shapes the regex was written for',
+    'packages/auth/test/room-access.test.ts — 21 of 54; of the evasion fixtures, 6 still fire — the named-import shapes the regex was written for',
     () => {
       mutations['boundary-names-only'][2]();
       mutations['boundary-no-helpers'][2]();
@@ -265,7 +275,7 @@ const mutations = {
 
   'normalize-outside-guard': [
     "round 7's hole one line upstream of its own guard: `String(error)` at the call site",
-    'packages/auth/test/org.test.ts — 2 of 51',
+    'packages/auth/test/org.test.ts — 2 of 52',
     () =>
       edit('packages/auth/src/org.ts', [
         [
@@ -277,7 +287,7 @@ const mutations = {
 
   'drop-report-deadline': [
     "round 7's unbounded await on the reporter — a pager that never answers hangs a committed removal",
-    'packages/auth/test/org.test.ts — 2 of 51 (one of them by never finishing)',
+    'packages/auth/test/org.test.ts — 2 of 52 (one of them by never finishing)',
     () =>
       edit('packages/auth/src/org.ts', [
         [
@@ -293,7 +303,7 @@ const mutations = {
 
   'r7-access-analysis': [
     "round 7's access check in effect: receiver-blind, property and literal string index only",
-    'packages/auth/test/room-access.test.ts — 8 of 48. The measurement behind the round-8 receipt: 6 of the 9 new evasion fixtures walk past round 7, and 2 of the 4 receiver controls go red on legitimate code',
+    'packages/auth/test/room-access.test.ts — 13 of 54 (8 of 48 in round 8; the five new limit fixtures are receiver controls too, and a receiver-blind check reports every one of them)',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
@@ -315,7 +325,7 @@ const mutations = {
 
   'boundary-no-destructuring': [
     'the destructuring half goes — `const { memberships: rows } = db().query` becomes invisible again',
-    'packages/auth/test/room-access.test.ts — 4 of 48',
+    'packages/auth/test/room-access.test.ts — 4 of 54',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
@@ -327,7 +337,7 @@ const mutations = {
 
   'boundary-literal-keys-only': [
     'the unresolvable-key half goes — `db().query[someVar]` reads as fine again',
-    'packages/auth/test/room-access.test.ts — 2 of 48',
+    'packages/auth/test/room-access.test.ts — 2 of 54',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         ["          record(node, 'computed-key');", '          void 0;'],
@@ -336,7 +346,7 @@ const mutations = {
 
   'boundary-blind-receiver': [
     'the receiver question goes — every `anything.memberships` under apps/ fires again',
-    'packages/auth/test/room-access.test.ts — 4 of 48: three receiver controls plus the real-repo access assertion, which then names 23 legitimate computed accesses under apps/ (`order[level]`, `errors[error]`, `holder[key]`…). That list is the argument for asking about the receiver.',
+    'packages/auth/test/room-access.test.ts — 9 of 54 (4 of 48 in round 8): three receiver controls, the real-repo access assertion — which then names 23 legitimate computed accesses under apps/ (`order[level]`, `errors[error]`, `holder[key]`…) — and the five round-9 limit fixtures, every one of which a receiver-blind check reports. That list is the argument for asking about the receiver.',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
@@ -574,10 +584,100 @@ const mutations = {
   ],
 };
 
-const [name] = process.argv.slice(2);
+/**
+ * Put a previous round's files in the tree, safely, so its numbers can be
+ * re-measured — and put yours back afterwards.
+ *
+ *   node scripts/mutation-ledger.mjs --against fix/auth-r8 <path…>
+ *   node scripts/mutation-ledger.mjs --restore
+ *
+ * **This exists because the obvious way to do it destroys your work, and it did
+ * — three times in this ticket now.** Round 7 recorded `--restore` being
+ * `git checkout --` as a known limit; round 8 lost an uncommitted fix to it and
+ * replaced it with a snapshot; and round 9 then hand-rolled
+ * `git checkout origin/fix/auth-r8 -- <paths>` at the terminal to re-measure the
+ * boundary numbers, which overwrote the round-9 work in those same files. A
+ * hazard that recurs once the tool is fixed was never a tool problem: the tool
+ * had no *safe way to do the thing people actually want*, so they reached past
+ * it. This is that way.
+ *
+ * Snapshots first, so `--restore` brings the working tree back whatever state it
+ * was in — staged, unstaged, or clean.
+ */
+function against(ref, paths) {
+  if (paths.length === 0) {
+    throw new Error('usage: --against <ref> <path…>  (paths, so the blast radius is stated)');
+  }
+  snapshotPaths(paths);
+  const { status, stderr } = spawnSync('git', ['checkout', ref, '--', ...paths], {
+    encoding: 'utf8',
+  });
+  if (status !== 0) {
+    restore();
+    throw new Error(`git checkout ${ref} failed:\n${stderr}`);
+  }
+  console.info(
+    `${paths.length} path(s) now at ${ref}; your versions are snapshotted.\n` +
+      'Rebuild anything the suite consumes, measure, then `--restore`.',
+  );
+}
+
+/**
+ * Apply and restore every mutation in turn, reporting the ones whose target no
+ * longer exists. Exits non-zero if any does.
+ *
+ * A mutation is a string match against source. When the source moves — round 9
+ * lifted the log guard out of `org.ts` into `errors.ts` — the match stops
+ * finding anything, and the failure mode depends entirely on whether whoever
+ * ran it was watching: `edit` throws, but a `> /dev/null 2>&1` in a shell loop
+ * turns that into a suite that passes and a row that reads "0 caught". That is
+ * the fail-open class this whole ticket has been about, inside the instrument
+ * built to detect it. Round 9 hit it once, exactly that way.
+ *
+ * So the ledger checks itself. Run this before trusting any row.
+ */
+function verify() {
+  const stale = [];
+  for (const [key, entry] of Object.entries(mutations)) {
+    try {
+      snapshot();
+      entry[2]();
+      console.info(`ok       ${key}`);
+    } catch (error) {
+      stale.push(key);
+      console.error(`STALE    ${key}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      restoreQuietly();
+    }
+  }
+  if (stale.length > 0) {
+    console.error(
+      `\n${stale.length} mutation(s) no longer match their target. A mutation that ` +
+        'cannot apply measures nothing; repoint it or delete it.',
+    );
+    process.exit(1);
+  }
+  console.info(`\nall ${Object.keys(mutations).length} mutations apply and restore cleanly`);
+}
+
+function restoreQuietly() {
+  if (!existsSync(SNAPSHOT)) return;
+  for (const entry of readdirSync(SNAPSHOT)) {
+    writeFileSync(entry.split('%').join('/'), readFileSync(join(SNAPSHOT, entry)));
+  }
+  rmSync(SNAPSHOT, { recursive: true, force: true });
+}
+
+const [name, ...rest] = process.argv.slice(2);
 
 if (name === '--restore') {
   restore();
+} else if (name === '--verify') {
+  verify();
+} else if (name === '--against') {
+  const [ref, ...paths] = rest;
+  if (!ref) throw new Error('usage: --against <ref> <path…>');
+  against(ref, paths);
 } else if (name === '--list' || name === undefined) {
   for (const [key, [what, suite]] of Object.entries(mutations)) {
     console.info(`${key.padEnd(24)} ${what}\n${' '.repeat(25)}-> ${suite}`);

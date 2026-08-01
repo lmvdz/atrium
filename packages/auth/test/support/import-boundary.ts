@@ -1,6 +1,53 @@
 /**
  * An import-boundary checker that resolves what a module actually pulls in.
  *
+ * ## Two halves, two different guarantees — read this before quoting either
+ *
+ * This file answers two questions, and round 9 exists because rounds 7 and 8
+ * described them as one thing.
+ *
+ *  1. **The import half is an invariant.** "No file under a forbidden root can
+ *     reach the forbidden binding by importing it" — through any specifier
+ *     shape, any re-export chain, any wrapper in any package, resolved to a
+ *     fixpoint over the whole module graph. Nothing about it is best-effort;
+ *     where it cannot resolve something it *reports* rather than shrugging.
+ *
+ *  2. **The access half is a best-effort check, not an invariant.** It catches
+ *     the table reached off a database handle — `db.query.memberships` and the
+ *     shapes around it — which no import rule can observe. It finds the handle
+ *     *syntactically*, and there are shapes it cannot follow. A clean run means
+ *     "none of the shapes this check knows about are present". It does not mean
+ *     "the table is not reached off a handle in this tree".
+ *
+ * The round-8 receipt said the access half traced a handle "through
+ * assignments". It traces through variable *initializers*, annotated
+ * parameters, binding elements and function declarations — which is less, and
+ * the header below already admitted as much three paragraphs down, so the file
+ * contradicted its own summary. **Five shapes walk past it**, each with a
+ * fixture in `room-access.test.ts` under "the access half does not see these,
+ * and says so":
+ *
+ *  - a handle held in a **class field** (`this.db.query.memberships`);
+ *  - a handle held in an **object property** (`holder.db…`), however built;
+ *  - a handle **assigned after its declaration** (`let d; d = createDatabase()`);
+ *  - a handle in a **container** — an array element, a `Map` value;
+ *  - a handle arriving as an **un-annotated parameter**, including a callback's.
+ *
+ * Those fixtures assert that nothing is reported, so they go red the moment a
+ * future round closes one — which forces this header to be corrected in the
+ * same commit rather than quietly becoming false. They are also receiver
+ * controls: `boundary-blind-receiver` and `r7-access-analysis` each fail five
+ * more tests because of them, since a receiver-blind check reports every one.
+ *
+ * **Why narrowed rather than closed.** Three of the five are closable with more
+ * syntax; two need a type checker. Closing three would leave this paragraph
+ * saying "best-effort" anyway, in exchange for a much larger analysis with more
+ * surface to be wrong on — and eight rounds of this ticket have been spent on
+ * guarantees that outran their evidence, which is a worse defect than a narrow
+ * guarantee stated accurately. What makes the narrow version worth keeping is
+ * the control beside those fixtures: every gap is about *finding* the handle,
+ * and none is the check failing on one it has found.
+ *
  * ## Why this is not a grep
  *
  * Round 6 asserted "no file under `apps/` imports `memberships` from
@@ -105,19 +152,18 @@
  *    asked only of handles.
  *
  * A handle is tracked from where it enters a file — an import of the declaring
- * package, or of a module that exposes one — through assignments, `await`, casts,
- * calls, member access and destructuring. A module exposes a handle when it
- * re-exports one, when it exports a binding derived from one, or when it exports
- * a function annotated as returning one (`apps/web/lib/db.ts`'s
- * `export function db(): Database`, which is how both apps actually get theirs).
+ * package, or of a module that exposes one — through variable *initializers*,
+ * `await`, casts, calls, member access and destructuring, plus annotated
+ * parameters. A module exposes a handle when it re-exports one, when it exports
+ * a binding derived from one, or when it exports a function annotated as
+ * returning one (`apps/web/lib/db.ts`'s `export function db(): Database`, which
+ * is how both apps actually get theirs).
  *
- * **The limit this trades for, stated.** A handle that reaches a file as an
- * un-annotated parameter, or inside a container, is not followed — the analysis
- * is syntactic, and following a value through an arbitrary function signature
- * needs a type checker. What it does follow is every route by which a handle
- * *arrives* in a module, which is the same question the import half answers about
- * the table itself. Annotating the parameter (`db: Database`) puts it back in
- * scope, and that is how this repository writes them.
+ * Read "initializers", not "assignments", and see the top of this file for the
+ * five shapes that walk past that list. Round 8's receipt said "assignments" and
+ * the round-8 delta was right to call it: `let d; d = createDatabase()` is an
+ * assignment and is not followed. The wording is the defect being corrected here
+ * — the analysis is what it always was.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve as resolvePath, sep } from 'node:path';

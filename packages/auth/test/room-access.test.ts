@@ -123,7 +123,24 @@ describe('effectiveRoomRole', () => {
 });
 
 /**
- * Structural invariant: the apps cannot reach the room-membership table.
+ * The apps cannot *import* the room-membership table, and are checked for
+ * reaching it off a handle. Two guarantees, and only the first is an invariant.
+ *
+ * Round 9 splits that sentence because rounds 7 and 8 ran the two halves
+ * together and the round-8 delta caught the claim outrunning the analysis. Read
+ * `test/support/import-boundary.ts`'s header first; the short version:
+ *
+ *  - **Import half — an invariant.** No file under `apps/` can reach the
+ *    binding through any specifier shape, re-export chain or laundering
+ *    wrapper. Resolved to a fixpoint; where it cannot resolve, it reports.
+ *  - **Access half — a best-effort check.** It finds `db.query.memberships` and
+ *    the shapes around it by tracking the handle syntactically, and five shapes
+ *    walk past it. Each has a fixture in "the access half does not see these,
+ *    and says so", asserting the miss, so closing one makes those tests fail and
+ *    forces the wording to be updated with the code.
+ *
+ * A clean access run means "none of the shapes this check knows about are
+ * present" — not "the table is not reached off a handle in this tree".
  *
  * Rounds 2–5 fixed five propagation paths and the class stayed open because the
  * authorization *read* was written out in the two apps. The read now lives in
@@ -816,6 +833,167 @@ describe('room membership is not reachable outside @atrium/auth', () => {
             '}\n',
         });
         expect(accessesOf(rule)).toEqual([]);
+      });
+    });
+
+    /**
+     * **The access half is a best-effort check. These are the shapes it does not
+     * see, asserted rather than described.**
+     *
+     * The round-8 delta named five escapes past `computeBinding`, and it was
+     * right about all five — measured here, one fixture each. Round 9's decision
+     * was to *narrow the claim* rather than chase them, and this block is what
+     * makes that decision honest instead of a paragraph:
+     *
+     *  - **A limitation with a test is a limitation somebody measured.** Round 6
+     *    accepted a 15-second presence window as a sentence and round 7 wrote
+     *    the sentence down; the round-7 delta then showed the window was not a
+     *    ceiling at all. The lesson kept from that was that an accepted limit is
+     *    a claim, and claims get measured. These are that, for a guarantee
+     *    instead of a duration.
+     *  - **They fail loudly if a future round closes one.** A fixture asserting
+     *    "nothing is reported" goes red the moment the analysis improves, which
+     *    forces the header and the ticket to be updated in the same commit. The
+     *    alternative is a "known limits" list that quietly stops being true —
+     *    the exact anti-staleness failure `RETRO.md` exists to prevent.
+     *  - **They double as receiver controls.** A receiver-blind check reports
+     *    every one of them, which is why `boundary-blind-receiver` and
+     *    `r7-access-analysis` each fail five more tests than they did in round 8.
+     *
+     * Why narrow rather than close: three of these (class field, object
+     * property, container) are closable syntactically and two (unannotated
+     * parameter, a handle through an arbitrary signature) need a type checker.
+     * Closing three of five would leave the header saying "best-effort" anyway,
+     * for 150 lines of new analysis and a wider surface to be wrong on. **The
+     * import half is unaffected and remains an invariant** — it follows every
+     * acquisition route for the table itself, to a fixpoint. Two different
+     * guarantees, and this round stops stating them as one.
+     */
+    describe('the access half does not see these, and says so', () => {
+      it('does not see a handle held in a class field', () => {
+        /**
+         * `computeBinding` handles imported names, variable declarations,
+         * parameters, binding elements and function declarations. A
+         * `PropertyDeclaration` is none of those, so `this.db` is not a handle
+         * and `this.db.query.memberships` is not reported.
+         *
+         * Reachable in this repository? No file does it today, and nothing stops
+         * one. That is what "best-effort" means and why it is written down.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export class Rooms {\n' +
+            '  private readonly db = createDatabase();\n' +
+            '  load() {\n' +
+            '    return this.db.query.memberships;\n' +
+            '  }\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('does not see a handle held in an object property', () => {
+        // `isHandle` on an object literal answers no, so `holder.db` is not a
+        // handle however the object was built.
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'const holder = { db: createDatabase() };\n' +
+            'export const t = holder.db.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('does not see a handle assigned after its declaration', () => {
+        /**
+         * `computeBinding` reads a `VariableDeclaration`'s *initializer*. A
+         * declaration with no initializer, assigned later, has nothing to read —
+         * which is why the header's old wording ("traced through assignments")
+         * claimed more than the code did. It traces through initializers.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'let handle: ReturnType<typeof createDatabase> | undefined;\n' +
+            'export function load() {\n' +
+            '  handle = createDatabase();\n' +
+            '  return handle.query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('does not see a handle stored in an array or a Map', () => {
+        // A container is a value the analysis would have to model. `pool[0]`
+        // resolves to `pool`, whose initializer is an array literal, which is
+        // not a handle.
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'const pool = [createDatabase()];\n' +
+            'export const first = pool[0].query.memberships;\n' +
+            "const byName = new Map([['primary', createDatabase()]]);\n" +
+            "export const named = byName.get('primary').query.memberships;\n",
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('does not see a handle arriving as an unannotated callback parameter', () => {
+        /**
+         * The one that genuinely needs a type checker. `withDatabase(cb)` passes
+         * a handle to `cb`, and `cb`'s parameter has no annotation — so there is
+         * nothing syntactic to go on, and guessing would reintroduce exactly the
+         * receiver-blind noise round 8 removed.
+         *
+         * Annotating it (`(db: Database) => …`) puts it back in scope, which is
+         * how this repository writes them and is why the gap has not bitten.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'function withDatabase(run: (db: ReturnType<typeof createDatabase>) => unknown) {\n' +
+            '  return run(createDatabase());\n' +
+            '}\n' +
+            'export const t = withDatabase((db) => db.query.memberships);\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('still sees the same read when the parameter is annotated', () => {
+        /**
+         * The control for the whole block, and the reason "best-effort" is not
+         * "broken". Every gap above is about *finding* the handle; none of them
+         * is the check failing on a handle it has found. Take the previous
+         * fixture and write the annotation this repository always writes, and it
+         * fires.
+         *
+         * Catches: any change that makes the annotated-parameter path stop
+         * resolving, which would turn the five fixtures above from documented
+         * limits into a checker that reports nothing at all.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'packages/db/src/client.ts':
+            "import * as schema from './schema.js';\n" +
+            'export interface Database {\n' +
+            '  query: typeof schema;\n' +
+            '}\n' +
+            'export function createDatabase(): Database {\n' +
+            '  return { query: schema };\n' +
+            '}\n',
+          'apps/web/lib/rooms.ts':
+            "import type { Database } from '@atrium/db';\n" +
+            'export function load(db: Database) {\n' +
+            '  return db.query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
       });
     });
 
