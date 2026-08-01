@@ -27,6 +27,7 @@ const FOOT = '↵ send · ⇧↵ newline';
 
 /** The gallery's own base frame, so the demo under test is the demo that ships. */
 const FRAME: RoomFrameProps = {
+  messages: f.RECORDS,
   room: f.ROOM,
   rooms: f.ROOMS,
   humans: f.HUMANS,
@@ -187,6 +188,57 @@ describe('the composer keeps the promise its footer prints', () => {
     render(<Composer binding={FREE} footNote={FOOT} roomName="r" textareaRef={ref} />);
     expect(ref.current).not.toBeNull();
     expect(ref.current?.tagName).toBe('TEXTAREA');
+  });
+
+  /* ---------------------------------------------------------------------
+   * ENTER WHILE AN IME IS COMPOSING IS NOT A SEND.
+   *
+   * Round 4's gauntlet: `Composer.tsx` never checked `isComposing`, so a CJK
+   * user pressing Enter to ACCEPT A CANDIDATE sent the half-composed romaji as
+   * a real message — `origin: 'typed'`, quotable, attributed, permanently on
+   * their record as words they did not write. It is the no-synthesized-speech
+   * invariant reached from the input end. Every CJK user's first keystroke
+   * sequence.
+   * ------------------------------------------------------------------- */
+  it('Enter does not send while an IME is composing', () => {
+    const sent: string[] = [];
+    render(<Composer binding={FREE} footNote={FOOT} onSend={(d) => sent.push(d)} roomName="r" />);
+    fireEvent.change(box(), { target: { value: 'にほんg' } });
+    fireEvent.keyDown(box(), { key: 'Enter', isComposing: true });
+    expect(sent, 'accepting an IME candidate sent a half-composed message').toEqual([]);
+    // and the same key AFTER composition ends does send, so this is not a mute
+    fireEvent.compositionEnd(box());
+    fireEvent.change(box(), { target: { value: '日本語' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(sent).toEqual(['日本語']);
+  });
+
+  /* CATCHES: reading only `isComposing`. Browsers that predate it — and some
+     IMEs on Safari — report keyCode 229 and leave `isComposing` false, so a
+     check that reads one signal passes on exactly the platforms most likely to
+     fail. */
+  it('the legacy keyCode 229 composition signal is honoured too', () => {
+    const sent: string[] = [];
+    render(<Composer binding={FREE} footNote={FOOT} onSend={(d) => sent.push(d)} roomName="r" />);
+    fireEvent.change(box(), { target: { value: 'nihongo' } });
+    fireEvent.keyDown(box(), { key: 'Enter', keyCode: 229 });
+    expect(sent).toEqual([]);
+  });
+
+  /* CATCHES: the IME guard being placed before the consumer's handler, which
+     would take the key away from a consumer that wants every keystroke. */
+  it('a consumer still sees the composing keystroke', () => {
+    const keys: string[] = [];
+    render(
+      <Composer
+        binding={FREE}
+        footNote={FOOT}
+        onKeyDown={(event) => keys.push(event.key)}
+        roomName="r"
+      />,
+    );
+    fireEvent.keyDown(box(), { key: 'Enter', isComposing: true });
+    expect(keys).toEqual(['Enter']);
   });
 
   /* CATCHES: the copy and the behaviour drifting apart in the other direction —

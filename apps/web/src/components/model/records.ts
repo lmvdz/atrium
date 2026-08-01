@@ -169,21 +169,41 @@ export function bodyDivergence(
  *
  *   2. THE RENDER-BOUNDARY DERIVATION (timeline/TimelineRow.tsx). The brand is
  *      a compile-time fact and the attack it does not stop is a cast. So the
- *      renderer — which already holds `entry.attribution.text` and `entry.body`
- *      — asserts `bodyText(entry.body) === entry.attribution.text` before it
- *      prints a name over the words. That check is on the path every row takes,
- *      so no future call site can route around it the way this one routed
- *      around the factory. It is the check that makes the branding sufficient
- *      rather than the check the branding replaces.
+ *      renderer asserts the body against the record before it prints a name over
+ *      the words. That check is on the path every row takes, so no future call
+ *      site can route around it the way this one routed around the factory.
+ *
+ * ROUND 4's GAUNTLET FOUND THE FREE STRING INSIDE THE BRANDED VALUE. The row was
+ * closed and the quotation on it was not: `{...quotationFrom(msg)!, actor:'priya'}`
+ * compiled, kept the brand, and rendered priya's name over lars's sentence with
+ * `data-attribution="m14"` — because the render check re-derived THE WORDS and
+ * only `actor` had moved. The previous version of the comment below claimed the
+ * brand stopped this ("neither does spreading one entry into another shape").
+ * IT DOES NOT, and the claim is now written the other way round, because a doc
+ * comment that overstates a guarantee is how the next reader stops looking:
+ *
+ *   TypeScript carries `unique symbol` keys through an object spread. `{...entry}`
+ *   is still branded; `{...quotation, actor: 'priya'}` was still a `Quotation`.
+ *   What the brand actually stops is a BARE LITERAL — a shape written from
+ *   nothing — because there the phantom key is missing. Excess-property checking
+ *   stops explicitly-written keys the target type does not declare. Neither of
+ *   those is a spread that only overwrites fields the type already has.
+ *
+ * SO THE FIELDS ARE GONE. A `Quotation` is now a message id and nothing else,
+ * and `TimelineRow` looks the actor, the words and the time up from that id in
+ * the page's record ledger. There is no field to overwrite; if there were,
+ * nothing downstream would read it. That is the difference between guarding the
+ * field that moved last time and removing the place it moves to.
  * ------------------------------------------------------------------------- */
 
 declare const entryBrand: unique symbol;
 
 interface MessageEntryCommon {
   /**
-   * Phantom. Present so `messageEntry` is the only way to obtain a value of
-   * this type from TypeScript — an entry literal does not compile, and neither
-   * does spreading one entry into another shape.
+   * Phantom. Present so `messageEntry` is the only way to write a `MessageEntry`
+   * LITERAL: the key is not one a caller can name. It does not survive as a
+   * guarantee against a cast, `Object.assign`, JSON, or a spread of an existing
+   * entry — see the round-4 note above, where exactly that was mistaken for one.
    */
   readonly [entryBrand]: 'message-entry';
   readonly type: 'message';
@@ -284,18 +304,21 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
   /* THE BODY DERIVES FROM THE RECORD. Segments add markup; they do not add,
      remove or reword anything. A body that reads differently from the message
      it is attributed to is synthesized speech under a real name — the round-1
-     defect, relocated from the actor slot to the body slot. */
+     defect, relocated from the actor slot to the body slot.
+
+     Both operands come off `record`, not off the quotation: the quotation is a
+     citation now and has nothing to compare against. */
   if (input.body !== undefined) {
     const diverged = bodyDivergence('messageEntry', input.body, record.text, {
       id: record.id,
-      actor: attribution.actor,
+      actor: record.actor,
     });
     if (diverged !== null) throw new Error(diverged);
   }
 
   return {
     ...common,
-    origin: attribution.origin,
+    origin: record.origin,
     attribution,
     body: input.body ?? [{ kind: 'text', text: record.text }],
     fromViewer: input.viewer !== undefined && record.actor === input.viewer,
@@ -647,6 +670,54 @@ export const PIN_COMPACT_BUDGET = 4;
 /** The window advances by exactly what it shows: one page is one budget. */
 export const PIN_PAGE = PIN_COMPACT_BUDGET;
 
+/* ---------------------------------------------------------------------------
+ * ROUND 4's GAUNTLET: THE BUDGET WAS A CONSTANT AND SO WAS THE BELT.
+ *
+ * `.pinList`'s `max-height: 340px` did not shrink against `.app`'s
+ * `height: 100vh`. At 1124x500 the pin held its full height out of a 500px
+ * frame: the feed collapsed to 22px and the composer's bottom edge sat at 511 in
+ * a 500px viewport with `scrollHeight === clientHeight` — round 1's exact
+ * signature, at a short viewport instead of a long list. Every harness viewport
+ * hard-coded 900, so the one dimension the bound was written against was the one
+ * dimension nothing ever varied.
+ *
+ * Making the belt relative (`min(340px, 34vh)`) keeps the composer on screen and
+ * on its own turns the pin back into what round 2 shipped: a box holding more
+ * than it can show. So the COUNT bound moves with the pixel bound. The numbers
+ * below are the rendered geometry, measured in Chromium at 1124px, and the
+ * arithmetic is the same arithmetic the stylesheet does:
+ *
+ *   available = min(340, 0.34 × viewport)      ← attention.module.css, .pinList
+ *   needed(b) = card + gap + overflow + b × (row + gap)
+ *
+ * They are two numbers that must agree, and what makes them agree is not this
+ * comment: e2e/pin-bound.spec.ts asserts `scrollHeight <= clientHeight` at five
+ * viewport heights, so a card that grows a line fails the suite rather than
+ * silently clipping a row off the bottom of the pin.
+ * ------------------------------------------------------------------------- */
+export const PIN_GEOMETRY = {
+  /** the open card */
+  card: 74,
+  /** one compressed row */
+  row: 39,
+  /** flex gap between them */
+  gap: 4,
+  /** the "N more owed" control, which must never be the thing that gets clipped */
+  overflow: 46,
+  /** `.pinList`'s max-height, both halves of it */
+  beltMax: 340,
+  beltShare: 0.34,
+} as const;
+
+/** How many compressed rows fit beside the open card in a viewport this tall. */
+export function pinBudgetFor(viewportHeight: number): number {
+  const g = PIN_GEOMETRY;
+  const available = Math.min(g.beltMax, viewportHeight * g.beltShare);
+  const fixed = g.card + g.gap + g.overflow;
+  const rows = Math.floor((available - fixed) / (g.row + g.gap));
+  return Math.max(0, Math.min(PIN_COMPACT_BUDGET, rows));
+}
+
 export interface PinFold {
   /** the one item shown as a full card — always the hardest */
   readonly open: Maybe<AttentionItem>;
@@ -680,11 +751,63 @@ export interface FoldOptions {
    * cannot page off the end into an empty pin.
    */
   readonly page?: number;
+  /**
+   * How many compressed rows there is ROOM for. Defaults to the full budget;
+   * `pinBudgetFor` derives it from the viewport. It is not a caller preference —
+   * `Pin` measures it — and it is clamped, so a caller cannot raise it past the
+   * belt the way round 2's `showAll` did.
+   */
+  readonly budget?: number;
 }
 
 export function foldPin(items: readonly AttentionItem[], options: FoldOptions = {}): PinFold {
   const owed = hardestFirst(items.filter((item) => needsViewer(item.state)));
   const clean = hardestFirst(items.filter((item) => !needsViewer(item.state)));
+  const budget = Math.max(
+    0,
+    Math.min(PIN_COMPACT_BUDGET, Math.trunc(options.budget ?? PIN_COMPACT_BUDGET)),
+  );
+  const normalise = (count: number) => {
+    const requested = Math.trunc(options.page ?? 0);
+    return ((requested % count) + count) % count;
+  };
+
+  if (budget === 0) {
+    /* NO ROOM FOR A SINGLE COMPRESSED ROW — a short viewport, where the belt
+       leaves space for the open card and the overflow line and nothing else.
+
+       The page then advances THE CARD rather than a row window. Round 2's rule
+       was "the open card is the hardest and does not move with the page", and
+       the reason was that paging past the worst thing in the room should not be
+       possible. At this height the alternative is not "the hardest stays open",
+       it is "everything except the hardest is unreachable" — which is round 2's
+       actual defect, a control that promises N and delivers nothing. Page 0 is
+       always the hardest, so the worst thing is still what the pin opens with. */
+    const base = Math.max(
+      0,
+      owed.findIndex((item) => item.id === options.openId),
+    );
+    const pageCount = Math.max(1, owed.length);
+    const page = normalise(pageCount);
+    const index = (base + page) % pageCount;
+    const open = owed[index] ?? null;
+    const nextIndex = (index + 1) % pageCount;
+    const next = owed[nextIndex];
+    const overflow = owed.filter((_, i) => i !== index);
+    return {
+      open,
+      compact: [],
+      overflow,
+      nextPage: next === undefined || owed.length < 2 ? [] : [next],
+      wraps: pageCount > 1 && (page + 1) % pageCount === 0,
+      page,
+      pageCount,
+      clean,
+      owedTotal: owed.length,
+      overflowCounts: glyphCounts(overflow),
+      cleanCounts: glyphCounts(clean),
+    };
+  }
 
   /* The open card is the hardest owed item and does not move with the page:
      paging past the worst thing in the room is not something this surface
@@ -692,21 +815,20 @@ export function foldPin(items: readonly AttentionItem[], options: FoldOptions = 
   const open = owed.find((item) => item.id === options.openId) ?? owed[0] ?? null;
   const rest = owed.filter((item) => item.id !== open?.id);
 
-  const pageCount = Math.max(1, Math.ceil(rest.length / PIN_PAGE));
-  const requested = Math.trunc(options.page ?? 0);
-  const page = ((requested % pageCount) + pageCount) % pageCount;
-  const start = page * PIN_PAGE;
-  const compact = rest.slice(start, start + PIN_PAGE);
-  const overflow = rest.filter((_, index) => index < start || index >= start + PIN_PAGE);
+  const pageCount = Math.max(1, Math.ceil(rest.length / budget));
+  const page = normalise(pageCount);
+  const start = page * budget;
+  const compact = rest.slice(start, start + budget);
+  const overflow = rest.filter((_, index) => index < start || index >= start + budget);
 
   const nextIndex = (page + 1) % pageCount;
-  const nextStart = nextIndex * PIN_PAGE;
+  const nextStart = nextIndex * budget;
 
   return {
     open,
     compact,
     overflow,
-    nextPage: rest.slice(nextStart, nextStart + PIN_PAGE),
+    nextPage: rest.slice(nextStart, nextStart + budget),
     wraps: pageCount > 1 && nextIndex === 0,
     page,
     pageCount,

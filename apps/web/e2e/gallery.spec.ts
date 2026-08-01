@@ -158,50 +158,97 @@ test.describe('gallery', () => {
     ).not.toContainText('everything else is verified');
   });
 
+  /* ---------------------------------------------------------------------
+   * THE AUDIT RUNS EVERYWHERE THE APP RENDERS, NOT ONLY ON /gallery.
+   *
+   * Round 4's gauntlet: `AUDIT` ran on one route. `/` drives the same frame
+   * through a live consumer (different binding, a real draft, rows the session
+   * appended) and `/gallery/pin/[n]` renders it under load — and neither had
+   * ever been swept. "The gallery covers it" is a claim about six stills, not
+   * about the app.
+   * ------------------------------------------------------------------- */
+  const ROUTES = [
+    { path: '/gallery', ready: '[data-gallery-frame]' },
+    { path: '/', ready: '[data-region="needs-you"]' },
+    { path: '/gallery/pin/34', ready: '[data-region="needs-you"]' },
+    { path: '/gallery/pin/60', ready: '[data-region="needs-you"]' },
+  ] as const;
+
   for (const theme of THEMES) {
     for (const width of WIDTHS) {
-      test(`no horizontal overflow, no type below 10px, AA contrast — ${theme} @ ${width}`, async ({
-        page,
-      }) => {
-        await page.setViewportSize({ width, height: 900 });
-        await page.goto(`/gallery?theme=${theme}`);
-        // Audit the gallery, not a dev server still compiling it.
-        await expect(page.locator('[data-gallery-frame]')).toHaveCount(FRAMES.length);
-        await expect(page.locator('[data-row="trailer"]').first()).toBeVisible();
-        await page.waitForLoadState('networkidle');
+      for (const route of ROUTES) {
+        test(`no horizontal overflow, no type below 10px, AA contrast — ${route.path} · ${theme} @ ${width}`, async ({
+          page,
+        }) => {
+          await page.setViewportSize({ width, height: 900 });
+          await page.goto(`${route.path}?theme=${theme}`);
+          // Audit the page, not a dev server still compiling it.
+          await expect(page.locator(route.ready).first()).toBeVisible();
+          await page.waitForLoadState('networkidle');
 
-        const audit = (await page.evaluate(AUDIT)) as AuditResult;
-        expect(audit.elementsChecked, 'the audit found almost nothing to check').toBeGreaterThan(
-          500,
-        );
+          const audit = (await page.evaluate(AUDIT)) as AuditResult;
+          expect(audit.elementsChecked, 'the audit found almost nothing to check').toBeGreaterThan(
+            /* /gallery stacks six frames; a single frame carries roughly a
+               sixth of that, and the floor has to be per-route or it is a floor
+               only one route can clear. */
+            route.path === '/gallery' ? 500 : 120,
+          );
 
-        /* The claim underline is the meaningful non-text graphic this audit
-           had no category for until round 4; a run that measures none of them
-           is a run whose zero failures mean nothing. */
-        expect(
-          audit.graphicsChecked,
-          'the non-text-graphic sweep found no graphics to measure',
-        ).toBeGreaterThan(10);
+          /* THE COVERAGE GUARD COUNTS REGISTRY ENTRIES, NOT INSTANCES.
+             Round 4's read `graphicsChecked > 10`, which the claim underline's
+             own fifty instances satisfied on their own — so a registry of ONE
+             passed a check named for the breadth of the sweep. Distinct kinds
+             is the number that cannot be met by one registered graphic. */
+          expect(
+            audit.graphicKinds.length,
+            `the non-text-graphic sweep found ${audit.graphicKinds.length} of ${audit.registrySize} registered kinds: ${audit.graphicKinds.join(', ')}`,
+          ).toBeGreaterThanOrEqual(3);
+          expect(audit.graphicsChecked).toBeGreaterThan(10);
 
-        // Reported so the numbers land in the run log, not just the assertions.
-        console.info(
-          `${theme} @ ${width}: ${audit.elementsChecked} text elements · smallest font ${audit.smallestFont}px · lowest contrast ${audit.lowestContrast}:1 · ${audit.graphicsChecked} non-text graphics · lowest ${audit.lowestGraphic}:1 · scrollWidth ${audit.overflow.documentScrollWidth} / clientWidth ${audit.overflow.documentClientWidth}`,
-        );
+          // Reported so the numbers land in the run log, not just the assertions.
+          console.info(
+            `${route.path} ${theme} @ ${width}: ${audit.elementsChecked} text elements · ${audit.pseudoChecked} pseudo-element strings · smallest font ${audit.smallestFont}px · lowest contrast ${audit.lowestContrast}:1 · graphics [${audit.graphicKinds.join(', ')}] lowest ${audit.lowestGraphic}:1 · scrollWidth ${audit.overflow.documentScrollWidth} / clientWidth ${audit.overflow.documentClientWidth}`,
+          );
 
-        expect(audit.overflow.widest, 'unclipped elements past the right edge').toEqual([]);
-        expect(audit.overflow.scrollingFrames, 'a frame scrolls sideways').toEqual([]);
-        expect(audit.overflow.documentScrollWidth).toBeLessThanOrEqual(
-          audit.overflow.documentClientWidth,
-        );
-        expect(audit.fontFailures, 'text below the 10px floor').toEqual([]);
-        expect(audit.contrastFailures, 'text below AA').toEqual([]);
-        expect(
-          audit.graphicFailures,
-          'a meaningful non-text graphic below WCAG 1.4.11’s 3:1',
-        ).toEqual([]);
-      });
+          expect(audit.overflow.widest, 'unclipped elements past the right edge').toEqual([]);
+          expect(audit.overflow.scrollingFrames, 'a frame scrolls sideways').toEqual([]);
+          expect(audit.overflow.documentScrollWidth).toBeLessThanOrEqual(
+            audit.overflow.documentClientWidth,
+          );
+          expect(audit.fontFailures, 'text below the 10px floor').toEqual([]);
+          expect(audit.contrastFailures, 'text below AA').toEqual([]);
+          expect(
+            audit.graphicFailures,
+            'a meaningful non-text graphic below WCAG 1.4.11’s 3:1',
+          ).toEqual([]);
+        });
+      }
     }
   }
+
+  /* Every registry entry has to be findable SOMEWHERE, or the registry is a list
+     of selectors nobody has checked still match. The per-route assertion above
+     asks for four, because no single route renders all six; this one asks for
+     all six across the routes together. */
+  test('every registered non-text graphic is on screen somewhere and measured', async ({
+    page,
+  }) => {
+    const seen = new Set<string>();
+    let registrySize = 0;
+    for (const route of ROUTES) {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`${route.path}?theme=light`);
+      await expect(page.locator(route.ready).first()).toBeVisible();
+      const audit = (await page.evaluate(AUDIT)) as AuditResult;
+      registrySize = audit.registrySize;
+      for (const kind of audit.graphicKinds) seen.add(kind.replace(/ ×\d+$/, ''));
+    }
+    console.info(`non-text graphics: ${seen.size}/${registrySize} registered kinds rendered`);
+    expect(
+      seen.size,
+      `registered graphics never found on any route: the registry has ${registrySize} entries and ${seen.size} of them rendered (${[...seen].join(', ')})`,
+    ).toBe(registrySize);
+  });
 
   test('reduced motion is honoured globally, not per component', async ({ browser }) => {
     const context = await browser.newContext({ reducedMotion: 'reduce' });
@@ -209,24 +256,73 @@ test.describe('gallery', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/gallery?theme=light');
 
-    const animated = await page.evaluate(() =>
-      [...document.querySelectorAll('body *')]
-        .map((el) => {
-          const style = getComputedStyle(el);
-          return {
-            animation: style.animationName,
-            transition: style.transitionProperty,
-            className: typeof el.className === 'string' ? el.className : '',
-          };
-        })
-        .filter((s) => s.animation !== 'none' || s.transition !== 'all')
-        .filter((s) => s.animation !== 'none')
-        .slice(0, 5),
+    /* ROUND 4's GAUNTLET: THE SECOND CLAUSE SUBSUMED THE FIRST.
+       The filter read `.filter(a !== 'none' || t !== 'all').filter(a !== 'none')`
+       — and the second predicate is strictly narrower than the first, so the
+       transition half of the first was dead code and TRANSITIONS WERE NEVER
+       CHECKED. The kill switch in globals.css names both; this was measuring
+       one. Two lists now, reported separately, because a transition surviving
+       the switch and an animation surviving it are different defects and one
+       filter that silently drops one of them is how the blind spot was born. */
+    const motion = await page.evaluate(() => {
+      const animations: string[] = [];
+      const transitions: string[] = [];
+      for (const el of document.querySelectorAll('body *')) {
+        const style = getComputedStyle(el);
+        const where = `${el.tagName.toLowerCase()}${typeof el.className === 'string' && el.className ? `.${el.className.trim().split(/\s+/)[0]}` : ''}`;
+        if (style.animationName !== 'none') {
+          animations.push(`${where} animation-name ${style.animationName}`);
+        }
+        /* A duration, not a property name: `transition-property: all` with a 0s
+           duration is not a transition, and a property list with a real duration
+           is one whatever it names. */
+        const longest = style.transitionDuration
+          .split(',')
+          .map((d) => Number.parseFloat(d) * (d.includes('ms') ? 0.001 : 1))
+          .reduce((a, b) => Math.max(a, b), 0);
+        if (longest > 0) {
+          transitions.push(
+            `${where} transition ${style.transitionProperty} ${style.transitionDuration}`,
+          );
+        }
+      }
+      return { animations, transitions, elements: document.querySelectorAll('body *').length };
+    });
+    console.info(
+      `reduced motion: ${motion.elements} elements · ${motion.animations.length} animating · ${motion.transitions.length} transitioning`,
     );
-    expect(animated, 'an animation survived prefers-reduced-motion').toEqual([]);
+    expect(motion.animations.slice(0, 5), 'an animation survived prefers-reduced-motion').toEqual(
+      [],
+    );
+    expect(motion.transitions.slice(0, 5), 'a transition survived prefers-reduced-motion').toEqual(
+      [],
+    );
 
     // and the elements that WOULD animate are still there, still visible
     await expect(page.locator('.atr-rise-s').first()).toBeVisible();
+    await context.close();
+  });
+
+  /* The other half of the same statement, and the reason the check above cannot
+     pass vacuously: without the preference there ARE transitions to suppress. */
+  test('transitions exist when they are not suppressed', async ({ browser }) => {
+    const context = await browser.newContext({ reducedMotion: 'no-preference' });
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/gallery?theme=light');
+    const transitioning = await page.evaluate(
+      () =>
+        [...document.querySelectorAll('body *')].filter((el) =>
+          getComputedStyle(el)
+            .transitionDuration.split(',')
+            .some((d) => Number.parseFloat(d) > 0),
+        ).length,
+    );
+    console.info(`without the preference: ${transitioning} elements carry a live transition`);
+    expect(
+      transitioning,
+      'nothing transitions at all, so the reduced-motion check has no subject',
+    ).toBeGreaterThan(0);
     await context.close();
   });
 
@@ -282,10 +378,23 @@ test.describe('gallery', () => {
         /* Nothing is focused. Absence, not exemption — the same distinction
            audit.ts draws between opacity 0 and a fade. */
         if (el === null || el === document.body) return null;
+        /* Identity, not label. Two frames hold two identical "Send" buttons, so
+           a label-keyed visit set would call the second one a repeat and stop
+           measuring it — the sweep would report a smaller universe than the page
+           has and look thorough doing it. A mark on the element is exact. */
+        const already = el.hasAttribute('data-ring-swept');
+        el.setAttribute('data-ring-swept', '1');
+        /* NOT AN EXEMPTION — NOT THIS APP'S CONTROL. <nextjs-portal> is the dev
+           server's own error/devtools overlay, injected by next dev and absent
+           from the production build. It is named by tag rather than by "skip
+           things with no ring", and it is REPORTED rather than dropped, so the
+           carve-out cannot quietly widen: the assertion below fails if anything
+           other than this one element ends up in the skipped list. */
+        if (el.tagName === 'NEXTJS-PORTAL') return { devOverlay: true, already };
         const style = getComputedStyle(el);
         const label = (el.getAttribute('aria-label') || el.textContent || el.tagName).trim().slice(0, 28);
         const where = el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/)[0] : '');
-        const none = { ratio: null, colour: style.outlineColor, surface: 'n/a', label, where };
+        const none = { ratio: null, colour: style.outlineColor, surface: 'n/a', label, where, already };
         if (style.outlineStyle === 'none' || parseFloat(style.outlineWidth) === 0) return none;
         const parse = (value) => {
           const m = value.match(/rgba?\\(([^)]+)\\)/);
@@ -318,6 +427,7 @@ test.describe('gallery', () => {
           surface: 'rgb(' + Math.round(behind.r) + ', ' + Math.round(behind.g) + ', ' + Math.round(behind.b) + ')',
           label,
           where,
+          already,
         };
       })()`;
 
@@ -327,15 +437,97 @@ test.describe('gallery', () => {
         surface: string;
         label: string;
         where: string;
+        already: boolean;
+        devOverlay?: true;
       };
+
+      /* ROUND 4's GAUNTLET: THE RULE SAID "EVERY" AND THE LOOP SAID 90.
+         The page has 335 focusable controls and the sweep pressed Tab ninety
+         times — a cap chosen when the page was smaller, never revisited, and
+         invisible because 90 measurements look like a thorough sweep. The three
+         frames past the cap were simply never keyboard-focused by anything.
+
+         It now runs to EXHAUSTION: tab until the focused element repeats, which
+         is what "went all the way round the cycle" means, and then assert the
+         set that was measured covers every control the DOM says is focusable.
+         The cap that remains is a runaway guard an order of magnitude past the
+         real count, and tripping it FAILS rather than quietly truncating. */
+      const FOCUSABLE =
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+      const focusable = await page.evaluate(
+        (selector) => document.querySelectorAll(selector).length,
+        FOCUSABLE,
+      );
+
       const measured: Ring[] = [];
-      for (let i = 0; i < 90; i += 1) {
+      const skipped = new Set<string>();
+      let repeats = 0;
+      const CEILING = focusable * 3 + 60;
+      for (let i = 0; i < CEILING; i += 1) {
         await page.keyboard.press('Tab');
         const one = (await page.evaluate(MEASURE)) as Ring | null;
-        if (one !== null) measured.push(one);
+        if (one === null) continue;
+        if (one.devOverlay === true) {
+          skipped.add('nextjs-portal (next dev overlay)');
+          continue;
+        }
+        if (one.already) {
+          /* The cycle has closed. Keep going for one more lap's worth of
+             repeats before stopping, so a control that only appears later in the
+             order is not missed by stopping at the first wrap. */
+          repeats += 1;
+          if (repeats > focusable) break;
+          continue;
+        }
+        measured.push(one);
       }
 
+      console.info(
+        `focus ring ${theme}: ${focusable} focusable controls in the DOM · ${measured.length} reached by Tab, to exhaustion · skipped [${[...skipped].join(', ')}]`,
+      );
+      expect(
+        [...skipped],
+        'the ring sweep skipped something other than the dev server overlay',
+      ).toEqual(skipped.size === 0 ? [] : ['nextjs-portal (next dev overlay)']);
       expect(measured.length, 'tabbing focused nothing').toBeGreaterThan(40);
+      /* THE ASSERTION THE OLD CAP MADE UNFALSIFIABLE. The rule is named "every
+         control it lands on" and the loop stopped at a constant 90 while the
+         page held 335 — so three of the six frames were never keyboard-focused
+         by anything. The sweep runs until the tab order repeats, and what is
+         asserted is not a COUNT but the NAMES of the controls the sweep never
+         reached: a count can be satisfied by reaching different ones, and a
+         count is what let the old cap look thorough. */
+      const missed = await page.evaluate((selector) => {
+        const out = { rendered: [] as string[], notRendered: 0 };
+        for (const el of document.querySelectorAll(selector)) {
+          if (el.hasAttribute('data-ring-swept')) continue;
+          /* A control with no layout box cannot receive focus, so it is outside
+             the UNIVERSE of this rule rather than exempt from it — the filtered
+             feed's row-action strips are `display: none` on unmatched rows. The
+             two are counted separately and the count is printed, so "outside the
+             universe" cannot quietly grow into "skipped". */
+          const style = getComputedStyle(el);
+          if (
+            el.getClientRects().length === 0 ||
+            style.visibility === 'hidden' ||
+            el.tagName === 'NEXTJS-PORTAL'
+          ) {
+            out.notRendered += 1;
+            continue;
+          }
+          out.rendered.push(
+            `${el.tagName.toLowerCase()} "${(el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 32)}"`,
+          );
+        }
+        return out;
+      }, FOCUSABLE);
+      console.info(
+        `focus ring ${theme}: ${missed.notRendered} focusable elements have no layout box (display:none) and cannot be focused`,
+      );
+      expect(
+        missed.rendered,
+        `rendered controls the keyboard never reached — ${measured.length} of ${focusable} matched elements were swept`,
+      ).toEqual([]);
       const ringless = measured.filter((m) => m.ratio === null);
       const rings = measured.filter((m): m is Ring & { ratio: number } => m.ratio !== null);
       const worst = rings.reduce((a, b) => (a.ratio < b.ratio ? a : b));
@@ -519,32 +711,65 @@ test.describe('gallery', () => {
           colour: string;
           enabledColour: string;
         }[] = [];
-        for (const button of document.querySelectorAll('.surf, [disabled]')) {
-          if (!(button as HTMLButtonElement).disabled) continue;
-          const label = button.querySelector('span') ?? button;
-          const style = getComputedStyle(label);
-          const fg = parse(style.color);
-          if (fg === null) continue;
-          const bg = behind(label);
-          const alpha = fade(label);
-          const ink = {
-            r: fg.r * alpha + bg.r * (1 - alpha),
-            g: fg.g * alpha + bg.g * (1 - alpha),
-            b: fg.b * alpha + bg.b * (1 - alpha),
-          };
-          const sibling = [...(button.parentElement?.children ?? [])].find(
-            (el) => el !== button && !(el as HTMLButtonElement).disabled,
+        /* ROUND 4's GAUNTLET, TWO EXCLUSIONS IN FOUR LINES.
+
+           `.disabled === true` is a property only form controls have, so every
+           `aria-disabled` control — the way a non-button is made inactive — was
+           invisible to a check named "a disabled control is legible". And
+           `querySelector('span')` read THE FIRST span: the surface chip has two,
+           a label and a count chip, and the count chip is the one an earlier
+           round had shipped at 2.43:1 with nobody measuring it. Reading the
+           first of two is the same defect as capping the tab sweep at 90 —
+           a subset that looks like the set.
+
+           Both gone: any control that is disabled by EITHER mechanism, and every
+           text-bearing span inside it, one row per span. */
+        const inactive = (el: Element) =>
+          (el as HTMLButtonElement).disabled === true ||
+          el.getAttribute('aria-disabled') === 'true';
+        for (const button of document.querySelectorAll(
+          'button, [disabled], [aria-disabled="true"]',
+        )) {
+          if (!inactive(button)) continue;
+          const spans = [...button.querySelectorAll('span')].filter(
+            (el) => (el.textContent ?? '').trim().length > 0,
           );
-          const enabled = sibling?.querySelector('span');
-          out.push({
-            label: (label.textContent ?? '').trim().slice(0, 24),
-            ratio: Math.round(ratio(ink, bg) * 100) / 100,
-            fontSize: Number.parseFloat(style.fontSize),
-            opacity: Math.round(alpha * 1000) / 1000,
-            colour: style.color,
-            enabledColour:
-              enabled === undefined || enabled === null ? '' : getComputedStyle(enabled).color,
-          });
+          const labels: Element[] = spans.length > 0 ? spans : [button];
+          const sibling = [...(button.parentElement?.children ?? [])].find(
+            (el) => el !== button && !inactive(el),
+          );
+          for (const label of labels) {
+            const style = getComputedStyle(label);
+            const fg = parse(style.color);
+            if (fg === null) continue;
+            const bg = behind(label);
+            const alpha = fade(label);
+            const ink = {
+              r: fg.r * alpha + bg.r * (1 - alpha),
+              g: fg.g * alpha + bg.g * (1 - alpha),
+              b: fg.b * alpha + bg.b * (1 - alpha),
+            };
+            /* The enabled counterpart is matched by POSITION inside its own
+               control, so a two-span chip compares its label with a label and
+               its count with a count rather than both with the label. */
+            const index = labels.indexOf(label);
+            const enabledSpans = [...(sibling?.querySelectorAll('span') ?? [])].filter(
+              (el) => (el.textContent ?? '').trim().length > 0,
+            );
+            /* "Reads as inactive" is a claim about the CONTROL, so only its
+               leading label is compared with the enabled control's. Every span
+               is still measured for legibility — which is the half the old
+               `querySelector('span')` was skipping. */
+            const enabled = index === 0 ? enabledSpans[0] : undefined;
+            out.push({
+              label: (label.textContent ?? '').trim().slice(0, 24),
+              ratio: Math.round(ratio(ink, bg) * 100) / 100,
+              fontSize: Number.parseFloat(style.fontSize),
+              opacity: Math.round(alpha * 1000) / 1000,
+              colour: style.color,
+              enabledColour: enabled === undefined ? '' : getComputedStyle(enabled).color,
+            });
+          }
         }
         return out;
       });

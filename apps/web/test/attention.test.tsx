@@ -306,6 +306,40 @@ describe('a surface indicator says its count as a count', () => {
     expect(names.some((n) => / — \d+ (owed to you|unseen)$/.test(n))).toBe(true);
   });
 
+  /* CATCHES: presence going back to a coloured dot and nothing else.
+     Round 4's gauntlet: the dot is `aria-hidden` with a `title` — which no
+     screen reader announces — and `here`/`idle`/`away` differ only by
+     fill-versus-ring and hue, so one fixture row carried no text equivalent at
+     all. The state is words on the row now, for every human, and the dot is the
+     glanceable shorthand for something that is also written down. */
+  it('every human row says its presence in words, not only in a dot', () => {
+    const { container } = render(
+      <Rail
+        humans={f.HUMANS}
+        rooms={f.ROOMS}
+        viewer={f.VIEWER}
+        viewerNote="here"
+        workspaceName="atrium"
+        workspaceSub="4 rooms"
+      />,
+    );
+    const dots = [...container.querySelectorAll('[data-presence]')];
+    expect(dots.length, 'the rail rendered no presence dots').toBe(f.HUMANS.length);
+    for (const dot of dots) {
+      const state = dot.getAttribute('data-presence') ?? '';
+      const row = dot.parentElement;
+      expect(
+        (row?.textContent ?? '').includes(state),
+        `a ${state} row says it only with a dot`,
+      ).toBe(true);
+    }
+    /* and the words are not just the note that happened to be there: the row
+       with no note says its presence too. */
+    const noNote = f.HUMANS.find((h) => h.note === null);
+    expect(noNote, 'no fixture human is without a note').toBeDefined();
+    expect(container.textContent).toContain(noNote?.name);
+  });
+
   /* CATCHES: the routine strip's parts running together. Its visible separators
      are `aria-hidden` `·` spans, so removing the explicit name leaves the ONLY
      whitespace inside a hidden element and the computed name reads

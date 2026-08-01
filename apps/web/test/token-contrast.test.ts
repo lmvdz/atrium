@@ -558,3 +558,195 @@ describe('the filter cannot fade a row under AA', () => {
     expect(light * 0.95).toBeLessThan(4.5);
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * ROUND 5 — THE NON-TEXT GRAPHICS REGISTRY, AND THE HARNESS EXCLUSIONS.
+ *
+ * Round 4's gauntlet found the graphics registry holding ONE entry while the
+ * guard counting graphics was satisfied by that entry's own fifty instances —
+ * so "50 graphics, zero failures" meant nothing, and an independent sweep
+ * immediately turned up the AWAY presence ring at 1.93:1 / 1.84:1 and the
+ * composer's ANSWERING border at 1.76:1 / 2.70:1.
+ *
+ * It also listed five harness exclusions that were clean when run without them.
+ * "Clean when somebody else ran it" is not a property of this repo; every one of
+ * them is removed here, and these are the checks that keep them removed.
+ * ------------------------------------------------------------------------- */
+
+const GALLERY_SPEC = code(readFileSync(find('apps/web/e2e/gallery.spec.ts'), 'utf8'));
+
+describe('every non-text graphic that carries information is registered and clears 3:1', () => {
+  /* CATCHES: the registry shrinking back towards one entry. Six graphics carry
+     state in this app; the list is in e2e/audit.ts with the reason for each and
+     the reason for every exclusion. A registry of one is a sweep of nothing. */
+  it('the registry holds every graphic the app renders state with', () => {
+    const registry = AUDIT_SOURCE.match(/const GRAPHICS = \[([\s\S]*?)\n {2}\];/)?.[1] ?? '';
+    expect(registry, 'e2e/audit.ts has no GRAPHICS registry').not.toBe('');
+    for (const selector of [
+      '[data-claim="true"]',
+      '[data-presence="here"]',
+      '[data-presence="idle"], [data-presence="away"]',
+      '[data-composer-box="bound"], [data-composer-box="replying"]',
+      '[data-card-state="gate"], [data-card-state="destructive"]',
+      '[data-surface-count][data-surface-empty="true"]',
+    ]) {
+      expect(registry, `the graphics registry dropped ${selector}`).toContain(selector);
+    }
+  });
+
+  /* CATCHES: the coverage guard going back to counting INSTANCES. `> 10` was
+     met by the claim underline alone, which is what let a registry of one look
+     like a thorough sweep. Distinct registry kinds is the number that cannot be
+     satisfied by a single registered graphic. */
+  it('the coverage guard counts registry kinds, not instances', () => {
+    /* The ASSERTION's first argument, not a mention anywhere in the file. The
+       first version of this grep matched `audit.graphicKinds.length` inside the
+       console.info template beside it, so swapping the assertion back to
+       `audit.graphicsChecked` left it passing — a source grep whose failure mode
+       is matching the wrong occurrence is the same species as one whose failure
+       mode is matching nothing. */
+    expect(GALLERY_SPEC).toMatch(/expect\(\s*audit\.graphicKinds\.length,/);
+    expect(GALLERY_SPEC).toMatch(/registered kinds rendered/);
+    /* and there is a check that every registered kind rendered somewhere: a
+       selector that matches nothing reports exactly like one that passes. */
+    expect(GALLERY_SPEC).toMatch(/toBe\(registrySize\)/);
+  });
+
+  /* CATCHES: a graphic being measured against the friendlier of its two
+     adjacent colours — or, for a FILL, against itself. The first version of the
+     round-5 sweep did the second: eighteen `here` dots reported 1.00:1 because
+     `backdrop(el)` composites the element's own background in. A measurement
+     that cannot fail in one direction cannot pass in the other either. */
+  it('a graphic is measured against the worse of its adjacent colours', () => {
+    expect(AUDIT_SOURCE).toMatch(/backdrop\(el\.parentElement\)/);
+    expect(AUDIT_SOURCE).toMatch(/side === 'backgroundColor'/);
+  });
+
+  /* CATCHES the two tokens the gauntlet measured, from the tokens themselves.
+     `--line3` on the rail was the THIRD place that token survived as a
+     meaningful graphic; `--ambbd` and `--filebd` were the binding cues. */
+  it.each(THEMES)('the presence ring clears 3:1 on the rail — %s', (name, theme) => {
+    const ring = (MODULES.frame as string).match(
+      /\n\.presAway\s*\{[^}]*border:\s*[\d.]+px solid var\(--([\w-]+)\)/,
+    );
+    expect(ring?.[1], 'frame.module.css states no away ring').toBeDefined();
+    const rail = (MODULES.frame as string).match(
+      /\n\.rail\s*\{[^}]*background:\s*var\(--([\w-]+)\)/,
+    );
+    const ratio = contrast(
+      theme[ring?.[1] as string] as string,
+      theme[rail?.[1] as string] as string,
+    );
+    console.info(`presence ring ${name}: --${ring?.[1]} on --${rail?.[1]} = ${ratio.toFixed(2)}:1`);
+    expect(ratio).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each(THEMES)(
+    'the binding border clears 3:1 on the composer’s surfaces — %s',
+    (name, theme) => {
+      for (const state of ['cboxBound', 'cboxReplying'] as const) {
+        const rule = (MODULES.frame as string).match(
+          new RegExp(`\\n\\.${state}\\s*\\{[^}]*border-color:\\s*var\\(--([\\w-]+)\\)`),
+        );
+        expect(rule?.[1], `frame.module.css states no border for .${state}`).toBeDefined();
+        /* --bg1 is what the composer sits on and --bg3 is what the box is
+           filled with: a border has two adjacent colours and clears both. */
+        for (const surface of ['bg1', 'bg3'] as const) {
+          const ratio = contrast(theme[rule?.[1] as string] as string, theme[surface] as string);
+          console.info(`${state} ${name}: --${rule?.[1]} on --${surface} = ${ratio.toFixed(2)}:1`);
+          expect(ratio).toBeGreaterThanOrEqual(3);
+        }
+      }
+    },
+  );
+
+  it.each(THEMES)(
+    'the attention card’s state border clears 3:1 on both sides — %s',
+    (name, theme) => {
+      for (const [state, fill] of [
+        ['acardGate', 'ambbg5'],
+        ['acardDestructive', 'redbg'],
+      ] as const) {
+        const rule = (MODULES.attention as string).match(
+          new RegExp(`\\n\\.${state}\\s*\\{[^}]*border-color:\\s*var\\(--([\\w-]+)\\)`),
+        );
+        expect(rule?.[1], `attention.module.css states no border for .${state}`).toBeDefined();
+        for (const surface of [fill, 'bg3'] as const) {
+          const ratio = contrast(theme[rule?.[1] as string] as string, theme[surface] as string);
+          console.info(`${state} ${name}: --${rule?.[1]} on --${surface} = ${ratio.toFixed(2)}:1`);
+          expect(ratio).toBeGreaterThanOrEqual(3);
+        }
+      }
+    },
+  );
+});
+
+describe('the harness runs its own checks without their exclusions', () => {
+  /* CATCHES: the focus sweep going back to a constant cap. The rule says
+     "every control it lands on"; the loop said 90 while the page held 337, so
+     three of the six frames were never keyboard-focused by anything. */
+  it('the ring sweep runs to exhaustion, not to a constant', () => {
+    expect(GALLERY_SPEC, 'the ring sweep is capped at a literal 90 again').not.toMatch(/i < 90;/);
+    expect(GALLERY_SPEC).toMatch(/data-ring-swept/);
+    expect(GALLERY_SPEC).toMatch(/rendered controls the keyboard never reached/);
+  });
+
+  /* CATCHES: the reduced-motion filter's second clause subsuming the first
+     again. `.filter(a !== 'none' || t !== 'all').filter(a !== 'none')` made the
+     transition half dead code, so TRANSITIONS WERE NEVER CHECKED — and the
+     check that proves the check has a subject (transitions exist without the
+     preference) is asserted here too, because a suppression test with nothing
+     to suppress passes for free. */
+  it('reduced motion checks transitions as well as animations', () => {
+    /* The measurement itself, not the word appearing somewhere. The companion
+       test two blocks down also mentions `transitionDuration`, so a bare grep
+       for the identifier passed with the reduced-motion measurement gutted. */
+    expect(GALLERY_SPEC).toMatch(/const longest = style\.transitionDuration/);
+    expect(GALLERY_SPEC).toMatch(/transitions\.push\(/);
+    expect(GALLERY_SPEC).toMatch(/a transition survived prefers-reduced-motion/);
+    expect(GALLERY_SPEC).toMatch(/transitions exist when they are not suppressed/);
+  });
+
+  /* CATCHES: the disabled sweep going back to `.disabled === true` (which makes
+     every `aria-disabled` control invisible to it) and to reading only the
+     first of a control's spans (which is how the count chip shipped at 2.43:1
+     with nobody measuring it). */
+  it('the disabled sweep sees aria-disabled and every span', () => {
+    expect(GALLERY_SPEC).toMatch(/aria-disabled/);
+    expect(GALLERY_SPEC).toMatch(/button\.querySelectorAll\('span'\)/);
+    expect(GALLERY_SPEC, 'the disabled sweep reads only the first span again').not.toMatch(
+      /button\.querySelector\('span'\)/,
+    );
+  });
+
+  /* CATCHES: `AUDIT` going back to running on /gallery alone. `/` drives the
+     same frame through a live consumer and the pin routes render it under load;
+     "the gallery covers it" is a claim about six stills. */
+  it('the rendered audit runs on every route the app serves', () => {
+    const routes = GALLERY_SPEC.match(/const ROUTES = \[([\s\S]*?)\] as const;/)?.[1] ?? '';
+    expect(routes, 'gallery.spec.ts has no ROUTES list').not.toBe('');
+    for (const path of ["'/gallery'", "'/'", "'/gallery/pin/34'", "'/gallery/pin/60'"]) {
+      expect(routes, `the audit stopped running on ${path}`).toContain(path);
+    }
+  });
+
+  /* CATCHES: `ownText` going back to child text nodes only. A ::before, an
+     ::after and a ::placeholder are rendered strings that no node walk can see,
+     so three categories of text were outside the contrast and 10px floors. */
+  it('the text sweep reads generated content and placeholders', () => {
+    expect(AUDIT_SOURCE).toMatch(/'::before', '::after'/);
+    expect(AUDIT_SOURCE).toMatch(/::placeholder/);
+    expect(AUDIT_SOURCE).toMatch(/pseudoChecked/);
+  });
+
+  /* CATCHES: the viewport height going back to a hard-coded 900 everywhere.
+     `.pinList`'s belt is the thing being tested and the viewport is what it is
+     tested against; one number, never varied, is not a test of a bound. */
+  it('the pin harness sweeps viewport heights, not just widths', () => {
+    const spec = code(readFileSync(find('apps/web/e2e/pin-bound.spec.ts'), 'utf8'));
+    const heights = spec.match(/const HEIGHTS = \[([^\]]*)\]/)?.[1] ?? '';
+    expect(heights, 'pin-bound.spec.ts has no HEIGHTS sweep').not.toBe('');
+    expect(heights).toContain('420');
+    expect(Number(heights.split(',')[0])).toBeLessThanOrEqual(420);
+  });
+});

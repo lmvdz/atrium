@@ -9,9 +9,9 @@
  * TWO ARMS, NOT ONE ROW WITH A FLAG. The entry is discriminated on origin
  * (model/records.ts), and the arms render through different components:
  *
- *   authored — the actor cell holds `entry.attribution.actor`, read off the
- *     quotation minted from the same message as the words. There is no free
- *     actor string on this row, so the name and the sentence cannot be from
+ *   authored — the actor cell holds the actor of the RECORD the row cites,
+ *     looked up here from `entry.attribution.messageId`. There is no actor
+ *     string on this row at all, so the name and the sentence cannot be from
  *     different people.
  *   chosen — no actor cell at all, because a `ChosenMessageEntry` has no actor
  *     field for one. The whole row is a `SystemStatement` rendered through
@@ -19,23 +19,30 @@
  *     round-1 cardinal defect closed at the type level — the shipped gallery
  *     used to render this exact record as lars's own sentence.
  *
- * THE ATTRIBUTION IS RE-DERIVED HERE, NOT TRUSTED. Rounds 1, 2 and 3 all found
- * the same defect at a different address: the guarantee was enforced at whatever
+ * THE ATTRIBUTION IS LOOKED UP HERE, NOT TRUSTED. Rounds 1–4 all found the same
+ * defect at a different address: the guarantee was enforced at whatever
  * chokepoint the last round had built, and the next round found a path that did
  * not go through it. r1 put a free actor string beside the words; r2 moved it to
  * the body slot; r3 put the check inside `messageEntry` and a caller wrote the
- * `AuthoredMessageEntry` literal instead of calling it.
+ * `AuthoredMessageEntry` literal instead of calling it; r4 spread a genuine
+ * quotation and overwrote `actor` inside it, which kept the brand and passed the
+ * body check because only the NAME had moved.
  *
- * `messageEntry` is now unreachable to write around (model/records.ts brands the
- * entry), but a brand is a compile-time fact and a cast walks through it. This
- * component is on the path EVERY rendered row takes, and it already holds both
- * halves of the claim — `entry.attribution.text` is the record's words and
- * `entry.body` is what is about to be painted — so it checks them against each
- * other before printing a name over them. There is no call site that can skip
- * this one, which is the property the previous three fixes did not have.
+ * So the name is no longer something this component can be handed. `entry.
+ * attribution` is a message id; the actor, the words and the time are read out
+ * of the page's record ledger by that id (`useAttribution`, model/ledger.tsx).
+ * The body is then checked against THE RECORD's words rather than against a
+ * string that travelled beside them. Both halves of what gets printed now come
+ * from the same row of the same register, which is what "derived" has to mean if
+ * it is going to survive a fifth round.
+ *
+ * It throws rather than degrading, and it throws when there is no ledger at all:
+ * a row that quietly renders an empty actor cell is a row nobody finds out about.
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
+import { useAttribution } from '../model/ledger';
+import type { Quotation } from '../model/quotation';
 import { quotationRef } from '../model/quotation';
 import type {
   AuthoredMessageEntry,
@@ -128,16 +135,18 @@ function AuthoredRow({
   readonly actions: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
 }) {
-  /* THE CHECK A CALL SITE CANNOT SKIP. Both operands come off the entry this
-     component was handed, so it holds however the entry was built — factory,
-     literal, cast, `JSON.parse`, or a JavaScript caller with no types at all.
+  /* THE LOOKUP A CALL SITE CANNOT SKIP. The name is not read off the entry; it
+     is read out of the record register by the id the entry cites, so it holds
+     however the entry was built — factory, literal, cast, `JSON.parse`, a
+     spread that overwrote a field, or a JavaScript caller with no types at all.
      It throws rather than degrading: a row that renders a person's name over
      words that are not on their record is the one failure this whole model
      exists to prevent, and a silently corrected render is a corrected render
      nobody finds out about. */
-  const diverged = bodyDivergence('TimelineRow', entry.body, entry.attribution.text, {
-    id: entry.attribution.messageId,
-    actor: entry.attribution.actor,
+  const attribution = useAttribution(entry.attribution, 'TimelineRow');
+  const diverged = bodyDivergence('TimelineRow', entry.body, attribution.text, {
+    id: attribution.messageId,
+    actor: attribution.actor,
   });
   if (diverged !== null) throw new Error(diverged);
 
@@ -147,23 +156,18 @@ function AuthoredRow({
         className={[styles.actor, entry.fromViewer ? styles.actorMe : null]
           .filter(Boolean)
           .join(' ')}
-        data-attribution={entry.attribution.messageId}
+        data-attribution={attribution.messageId}
       >
-        {entry.attribution.actor}
+        {attribution.actor}
       </div>
       <div className={styles.body}>
-        {entry.replyTo === null ? null : (
-          <span className={styles.reply}>
-            ↩ {entry.replyTo.actor} {entry.replyTo.at} ·{' '}
-            <span data-quoted={quotationRef(entry.replyTo)}>{entry.replyTo.text}</span>
-          </span>
-        )}
+        {entry.replyTo === null ? null : <ReplyLine to={entry.replyTo} />}
         {/* The words, and nothing else in the body column — tagged with the
             message they must read as, so a browser can check the rendered row
             against the record rather than against the model that built it.
             `messageEntry` proves `bodyText(body) === record.text`; this is what
             proves the renderer did not then print something else. */}
-        <span data-row-body={entry.attribution.messageId}>
+        <span data-row-body={attribution.messageId}>
           <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
         </span>
         <RowTagButton entry={entry} onOpenTag={onOpenTag} />
@@ -181,6 +185,20 @@ function AuthoredRow({
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * The quoted line above a reply. Its own component so the lookup is an
+ * unconditional hook on the path that renders it — and so the reply banner gets
+ * the same derivation the row itself does rather than a shorter version of it.
+ */
+function ReplyLine({ to }: { readonly to: Quotation }) {
+  const reply = useAttribution(to, 'TimelineRow reply');
+  return (
+    <span className={styles.reply}>
+      ↩ {reply.actor} {reply.at} · <span data-quoted={quotationRef(reply)}>{reply.text}</span>
+    </span>
   );
 }
 

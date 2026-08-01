@@ -73,6 +73,12 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
         .filter(Boolean)
         .join(' ')}
       data-attention-id={item.id}
+      /* The card's border and inset stripe are a non-text graphic carrying gate
+         vs destructive; named here so the rendered audit's registry can measure
+         them without depending on a CSS-module hash. */
+      data-card-state={
+        glyph === '■' ? 'destructive' : glyph === '◆' || glyph === '?' ? 'gate' : 'plain'
+      }
       data-irreversible={item.state.irreversible ? 'true' : 'false'}
     >
       <Glyph className={styles.acardGlyph} decorative={false} state={item.state} />

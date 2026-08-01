@@ -1,10 +1,18 @@
-import { cleanup, render } from '@testing-library/react';
+import type { RenderResult } from '@testing-library/react';
+import { cleanup } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { ReceiptView, Timeline, TimelineRow } from '../src/components';
 import { list, text } from '../src/components/model';
+import { renderWith } from './harness';
 
 afterEach(cleanup);
+
+/* Same register the fixtures were built from: the DOM checks below are checks
+   against the RECORD, which is only meaningful if the render resolved against
+   it rather than against whatever the props carried. */
+const render = (ui: ReactElement): RenderResult => renderWith(f.RECORDS, ui);
 
 /**
  * Walk every text node and prove that a quotation mark only ever appears inside

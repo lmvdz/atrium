@@ -19,6 +19,7 @@ interface GalleryFrame {
 }
 
 const base = {
+  messages: f.RECORDS,
   room: f.ROOM,
   rooms: f.ROOMS,
   humans: f.HUMANS,

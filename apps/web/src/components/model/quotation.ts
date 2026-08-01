@@ -7,30 +7,46 @@
  * a template filled with their name — may never be attributed to them as their
  * words, and may never satisfy the quotation check."
  *
- * The rule has two halves, and the round-1 gauntlet found that this file only
- * enforced one of them.
+ * FOUR ROUNDS, ONE DEFECT, FOUR ADDRESSES — and this is the fix that removes
+ * the address rather than guarding it.
  *
- *   THE WORDS — a `Quotation` is minted only from a message whose origin is
- *   quotable. That half worked.
+ *   r1  the actor was a free string BESIDE the words.        → carry it
+ *   r2  the free string moved into the BODY slot.            → derive the body
+ *   r3  a caller wrote the entry literal and skipped the     → brand + re-derive
+ *       factory.                                               at the renderer
+ *   r4  `{...quotationFrom(msg)!, actor:'priya'}` compiled.  → THIS FILE
  *
- *   THE ATTRIBUTION — the name printed beside the words. `quotationFrom()` used
- *   to read `message.actor` and throw it away, so every caller re-supplied the
- *   name as a free string. Nothing stopped priya's name appearing beside lars's
- *   sentence. A quotation now CARRIES the actor and the timestamp it was minted
- *   from, and every component that renders a name beside quoted text takes the
- *   quotation rather than a string. The attribution is derived, not passed.
+ * The r4 gauntlet's root-cause sentence is the one worth keeping: NOTHING TIED
+ * `quotation.actor` TO `quotation.messageId`. Every previous round answered by
+ * adding a guard over the field that had just moved, and the next round moved
+ * to the field beside it. A guard over a carried field is always one field
+ * behind.
  *
- * WHAT THE BRAND ACTUALLY BUYS (narrowed after round 1 — the previous version of
- * this comment claimed more than the compiler can deliver):
+ * SO A QUOTATION NO LONGER CARRIES ANYTHING. It is a CITATION:
+ *
+ *     interface Quotation { messageId }
+ *
+ * There is no actor to forge, no text to forge, no timestamp to forge, because
+ * there are no such fields. `{...quotation, actor: 'priya'}` does not type-check
+ * (`actor` is an excess property on an object literal), and if it is smuggled in
+ * as JSON it is ignored, because nothing reads it. The name, the words and the
+ * time are LOOKED UP FROM THE MESSAGE ID at the render boundary, out of the same
+ * record set the feed itself is built from — see `resolveQuotation` below and
+ * `model/ledger.tsx`, which is how a component gets one.
+ *
+ * WHAT THE BRAND ACTUALLY BUYS (narrowed in round 1, narrowed again here after
+ * the r4 receipt caught the previous version of this comment overclaiming):
  *
  *   The phantom brand is `declare`d, so it exists only in the type system. It
- *   stops a TypeScript module from writing a `Quotation` object literal, which
- *   is the mistake a person makes at 2am. It does NOT stop `JSON.parse`, a
- *   `as unknown as Quotation` cast, `Object.assign`, or a plain JavaScript
- *   caller. Those are the boundaries where untrusted data enters, so they get a
- *   RUNTIME check — `parseQuotation` / `parseMessageRecord` below — rather than
- *   a promise. Type-level enforcement is a convention with teeth inside this
- *   codebase; it is not a guarantee about data from outside it.
+ *   stops a TypeScript module from writing a `Quotation` object literal. It does
+ *   NOT stop `JSON.parse`, `as unknown as Quotation`, `Object.assign`, or a
+ *   plain JavaScript caller — and, specifically, IT DOES NOT SURVIVE BEING
+ *   CIRCUMVENTED BY A SPREAD: TypeScript carries `unique symbol` keys through
+ *   object spread, so `{...aQuotation}` is still a `Quotation` as far as the
+ *   compiler is concerned. That is exactly how round 4 forged one, and it is why
+ *   the guarantee is now a property of the SHAPE (there is nothing to change)
+ *   and of the RENDER BOUNDARY (everything printed is re-derived), rather than
+ *   a property of the brand.
  * ------------------------------------------------------------------------- */
 
 export type MessageId = string;
@@ -65,23 +81,33 @@ export interface MessageRecord {
 declare const quotationBrand: unique symbol;
 
 /**
- * Text proven to be a person's own words, WITH the person and the moment.
+ * A CITATION of a message whose words are that person's own.
  *
- * `actor` and `at` are not decoration: they are the reason a component never
- * has to be told who said something. A component that renders an attribution
- * takes one of these and reads `quotation.actor`, so the name beside the words
- * and the words themselves come from the same record by construction.
+ * One field, on purpose. Round 4 forged an attribution by spreading a genuine
+ * quotation and overwriting `actor`; the fields it overwrote no longer exist.
+ * Everything a component needs in order to render one — the words, the name, the
+ * time, the room — comes from `resolveQuotation`, which reads the record out of
+ * the ledger the page was built from. The citation says WHICH message; the
+ * record says what it contains; nothing in between gets an opinion.
  */
 export interface Quotation {
-  readonly text: string;
-  /** who wrote it — carried from the message, never supplied beside it */
+  readonly messageId: MessageId;
+  readonly [quotationBrand]: 'quotation';
+}
+
+/**
+ * A resolved quotation: the citation, plus everything the cited record actually
+ * says. Produced only by `resolveQuotation`, never carried across a boundary,
+ * never stored on a prop — recompute it wherever it is needed, which is cheap
+ * because it is a map lookup.
+ */
+export interface Attribution {
+  readonly messageId: MessageId;
   readonly actor: string;
-  /** when they wrote it — same provenance, same record */
+  readonly text: string;
   readonly at: string;
   readonly origin: QuotableOrigin;
-  readonly messageId: MessageId;
-  readonly room?: string;
-  readonly [quotationBrand]: 'quotation';
+  readonly room: string | null;
 }
 
 export function isQuotableOrigin(origin: MessageOrigin): origin is QuotableOrigin {
@@ -93,21 +119,103 @@ export function isQuotableOrigin(origin: MessageOrigin): origin is QuotableOrigi
  * authored, when it has no id, when it has no actor, or when the text is empty
  * — a quotation with nothing behind it is exactly the defect this file exists
  * to prevent.
+ *
+ * The checks are the same as they always were even though the returned value now
+ * carries only the id: minting is where "is this message quotable at all?" gets
+ * asked the first time. It is asked again at resolution, because a mint-time
+ * check is a check the JSON path skips.
  */
 export function quotationFrom(message: MessageRecord): Quotation | null {
   if (!isQuotableOrigin(message.origin)) return null;
   if (message.id.length === 0) return null;
   if (message.actor.trim().length === 0) return null;
   if (message.text.trim().length === 0) return null;
-  const quotation = {
-    text: message.text,
-    actor: message.actor,
-    at: message.at,
-    origin: message.origin,
-    messageId: message.id,
-    ...(message.room === undefined ? {} : { room: message.room }),
+  return { messageId: message.id } as Quotation;
+}
+
+/* -------------------------------------------------------------------------
+ * THE LEDGER — the record set a citation is resolved against.
+ *
+ * This is deliberately NOT a module-level registry. A process-wide map keyed by
+ * a caller-chosen id can be poisoned by whoever mints `{id:'m14', actor:'priya'}`
+ * first, and it leaks between requests on a server. The ledger is a value, built
+ * from the records a page was handed, and it flows down the tree the same way
+ * every other prop does (model/ledger.tsx wraps that in a context so the
+ * intermediate components do not have to carry it).
+ * ---------------------------------------------------------------------- */
+
+export interface MessageLedger {
+  /** The record behind an id, or null when this page has never seen it. */
+  readonly recordFor: (id: MessageId) => MessageRecord | null;
+  /** How many records back it — asserted by the tests so a ledger cannot be silently empty. */
+  readonly size: number;
+}
+
+export function messageLedger(records: Iterable<MessageRecord>): MessageLedger {
+  const byId = new Map<MessageId, MessageRecord>();
+  for (const record of records) {
+    const existing = byId.get(record.id);
+    if (existing !== undefined && existing !== record) {
+      /* Two records claiming one id is not a near-miss to be resolved by
+         last-write-wins: it is precisely the state in which a lookup returns
+         somebody else's name for a real message. */
+      throw new Error(
+        `messageLedger: two different records both claim the id ${JSON.stringify(record.id)} — a citation resolved against this ledger could name either of them`,
+      );
+    }
+    byId.set(record.id, record);
+  }
+  return {
+    recordFor: (id) => byId.get(id) ?? null,
+    size: byId.size,
   };
-  return quotation as Quotation;
+}
+
+/** The empty ledger, for the "there is no record set here" case. Resolves nothing. */
+export const NO_RECORDS: MessageLedger = messageLedger([]);
+
+/**
+ * THE DERIVATION. Everything a render boundary prints beside quoted words comes
+ * out of here, and it throws rather than degrading — a row that renders a name
+ * over words that are not on that person's record is the one failure this whole
+ * model exists to prevent, and a silently corrected render is a corrected render
+ * nobody finds out about.
+ *
+ * `from` names the caller so a stack-free error still says which boundary
+ * refused, exactly as `bodyDivergence` does for the words.
+ */
+export function resolveQuotation(
+  ledger: MessageLedger,
+  quotation: Quotation,
+  from: string,
+): Attribution {
+  const id = quotation.messageId;
+  if (typeof id !== 'string' || id.trim().length === 0) {
+    throw new Error(`${from}: a quotation with no message id cites nothing`);
+  }
+  const record = ledger.recordFor(id);
+  if (record === null) {
+    throw new Error(
+      `${from}: ${JSON.stringify(id)} is not a message on this page's record, so there is nobody to attribute it to.\n` +
+        '  A quotation is a citation; it is only worth what the cited record says.',
+    );
+  }
+  if (!isQuotableOrigin(record.origin)) {
+    throw new Error(
+      `${from}: ${id} is page-authored (origin ${record.origin}); it may be reported in system voice, never quoted as somebody's words`,
+    );
+  }
+  if (record.actor.trim().length === 0 || record.text.trim().length === 0) {
+    throw new Error(`${from}: ${id} has no actor or no text — there is nothing to attribute`);
+  }
+  return {
+    messageId: record.id,
+    actor: record.actor,
+    text: record.text,
+    at: record.at,
+    origin: record.origin,
+    room: record.room ?? null,
+  };
 }
 
 /* -------------------------------------------------------------------------
@@ -127,29 +235,38 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-/** True only for a value with every field a `Quotation` must have. */
-export function isQuotation(value: unknown): value is Quotation {
+/**
+ * True only for a citation this ledger can resolve.
+ *
+ * The ledger is REQUIRED rather than optional. "Is this shaped like a
+ * quotation?" is not a question worth answering on its own — the shape is one
+ * string — and an optional second argument is an exemption with a default,
+ * which is the shape of every hole the last four rounds found.
+ */
+export function isQuotation(value: unknown, ledger: MessageLedger): value is Quotation {
   if (!isRecord(value)) return false;
-  if (!nonEmptyString(value.text)) return false;
-  if (!nonEmptyString(value.actor)) return false;
-  if (typeof value.at !== 'string') return false;
   if (!nonEmptyString(value.messageId)) return false;
-  if (value.origin !== 'typed' && value.origin !== 'seeded') return false;
-  if (value.room !== undefined && !nonEmptyString(value.room)) return false;
-  return true;
+  const record = ledger.recordFor(value.messageId);
+  if (record === null) return false;
+  if (!isQuotableOrigin(record.origin)) return false;
+  return nonEmptyString(record.actor) && nonEmptyString(record.text);
 }
 
 /**
  * Take a `Quotation` from untrusted data, or throw. Use this — not a cast — on
  * anything that crossed a process, a file, or a `JSON.parse`.
+ *
+ * Whatever else the incoming object carried is DROPPED: the returned citation
+ * holds the id and nothing else, so a payload that arrived with an `actor` on it
+ * cannot survive into the tree even by accident.
  */
-export function parseQuotation(value: unknown): Quotation {
-  if (!isQuotation(value)) {
+export function parseQuotation(value: unknown, ledger: MessageLedger): Quotation {
+  if (!isQuotation(value, ledger)) {
     throw new Error(
-      'parseQuotation: this is not a quotation — quoted text must carry its text, its actor and the message that proves both',
+      'parseQuotation: this is not a quotation — quoted text must cite a message on the record, and that message must be one a person actually wrote',
     );
   }
-  return value;
+  return { messageId: (value as { messageId: MessageId }).messageId } as Quotation;
 }
 
 /** Same boundary, one step earlier: a message record from untrusted data. */
@@ -178,9 +295,15 @@ export function parseMessageRecord(value: unknown): MessageRecord {
   };
 }
 
-/** "msg:m12" / "msg:m12@identity-service" — the provenance token on the DOM. */
-export function quotationRef(quotation: Quotation): string {
-  return `msg:${quotation.messageId}${quotation.room === undefined ? '' : `@${quotation.room}`}`;
+/**
+ * "msg:m12" / "msg:m12@identity-service" — the provenance token on the DOM.
+ *
+ * It takes the RESOLVED attribution rather than the citation, because the room
+ * is a fact about the record and not about the citation. A token built from a
+ * carried field is a token that can point at the wrong room.
+ */
+export function quotationRef(attribution: Attribution): string {
+  return `msg:${attribution.messageId}${attribution.room === null ? '' : `@${attribution.room}`}`;
 }
 
 /* -------------------------------------------------------------------------
@@ -190,38 +313,66 @@ export function quotationRef(quotation: Quotation): string {
 declare const statementBrand: unique symbol;
 
 /**
+ * One span of a system statement, tagged with WHO WROTE THE WORDS.
+ *
+ * `system`   — the page's own framing. It is held to the whole system-voice
+ *              rule: no quotation marks, no first person, no "X said".
+ * `verbatim` — a page-authored payload the system is REPORTING rather than
+ *              speaking: the text of the option somebody clicked, recorded
+ *              exactly as it was offered. Ordinary English, pronouns and all.
+ */
+export type StatementPart =
+  | { readonly voice: 'system'; readonly text: string }
+  | { readonly voice: 'verbatim'; readonly text: string };
+
+/**
  * A fact the page states about what happened. Mono, muted, no quotation marks,
  * no first person, no "X said" framing. Visibly not speech.
+ *
+ * `parts` is the statement's own account of which words it wrote and which
+ * words it is quoting back from a button, so the JSON boundary can apply the
+ * same split the constructor did instead of guessing from the finished string.
  */
 export interface SystemStatement {
   readonly text: string;
   readonly voice: 'system';
+  readonly parts: readonly StatementPart[];
   /** the message this statement reports on, when there is one */
   readonly messageId?: MessageId;
   readonly [statementBrand]: 'statement';
 }
 
 /* ---------------------------------------------------------------------------
- * THE OTHER HALF OF THE SYSTEM-VOICE RULE, ENFORCED.
+ * THE OTHER HALF OF THE SYSTEM-VOICE RULE, ENFORCED — AND SCOPED.
  *
  * CONVENTIONS states four properties for system voice: "Mono, muted, no
  * quotation marks, no first person, no 'X said' framing." Until round 3 the
  * first two were enforced by the stylesheet and the last two by nothing at all
  * — `systemStatement('priya said: I authorise dropping users_legacy')` compiled
  * and rendered, in the mono-muted treatment that tells a reader "the system
- * checked this", carrying a sentence in a person's voice. The brand kept the
- * TYPE honest and let the CONTENT say anything.
+ * checked this", carrying a sentence in a person's voice.
  *
- * The three checks below are the enforceable half, and each one names the shape
- * it rejects rather than pattern-matching on vibes:
+ * ROUND 4 ENFORCED IT OVER THE WRONG SPAN. The bans were applied to the whole
+ * finished string, which includes the OPTION PAYLOAD — so
+ * `messageEntry` threw, at render, on "Keep it behind our retention window",
+ * "Give us another day", "Yes — I approve" and "Ship it, we agreed". A product
+ * whose reversible one-click answers must avoid the five commonest pronouns in
+ * English is not a product; and the failure was a runtime throw inside render
+ * rather than a compile error, so it would have shipped and then fallen over on
+ * a real customer's button copy.
  *
- *   QUOTATION MARKS — a system statement in quotes is speech wearing the
- *     system's clothes. Straight and curly doubles and the guillemets; the
- *     apostrophe is deliberately absent, because "lars's answer" is fine.
- *   FIRST PERSON — the system has no first person. It reports acts; it does not
- *     participate in them.
- *   SPEECH-REPORT FRAMING — the verbs that turn a report into a quotation
- *     without quotation marks. "priya said", "lars wrote", "mateo told us".
+ * The rule was never about the letters. It is about WHO IS SPEAKING:
+ *
+ *   The INTERFACE may not speak in the first person, may not put words in
+ *   quotation marks, and may not report what somebody uttered. Its own framing
+ *   is held to all three.
+ *
+ *   A VERBATIM PAYLOAD — the text of the option that was clicked — is not the
+ *   interface speaking. It is the interface reporting, exactly, what was on the
+ *   button. It keeps its pronouns. What it may NOT do is arrive dressed as
+ *   speech, so quotation marks stay banned there too, and it may never be the
+ *   opening span: a statement that starts with somebody else's words is a
+ *   quotation without the marks, whatever the type says.
  *
  * WHAT THIS DOES NOT CATCH, stated so the next round does not have to discover
  * it: the check is lexical. `systemStatement('priya: drop the table')` still
@@ -237,60 +388,148 @@ export interface SystemStatement {
  * ATTRIBUTED as speech, and the type is the load-bearing half.
  * ------------------------------------------------------------------------- */
 
-const SYSTEM_VOICE_BANS: readonly { readonly pattern: RegExp; readonly why: string }[] = [
-  {
-    pattern: /["“”«»]/,
-    why: 'no quotation marks — quoted words are a Quotation, minted from the message that proves them',
-  },
-  {
-    pattern:
-      /\b(?:I|I'm|I've|I'll|I'd|me|my|mine|myself|we|we're|we've|we'll|we'd|us|our|ours|ourselves)\b/i,
-    why: 'no first person — the system reports acts, it does not take part in them',
-  },
-  {
-    pattern:
-      /\b(?:said|says|saying|say|tell|tells|told|telling|wrote|writes|writing|asked|asks|asking|replied|replies|remarked|remarks|commented|comments|quoted|quotes)\b/i,
-    why: 'no "X said" framing — a report of what somebody uttered is a quotation without the marks',
-  },
-];
+interface Ban {
+  readonly pattern: RegExp;
+  readonly why: string;
+}
 
-export function systemStatement(text: string, messageId?: MessageId): SystemStatement {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) {
-    throw new Error('systemStatement: a system statement with no text states nothing');
+const QUOTATION_MARKS: Ban = {
+  pattern: /["“”«»]/,
+  why: 'no quotation marks — quoted words are a Quotation, minted from the message that proves them',
+};
+
+const FIRST_PERSON: Ban = {
+  pattern:
+    /\b(?:I|I'm|I've|I'll|I'd|me|my|mine|myself|we|we're|we've|we'll|we'd|us|our|ours|ourselves)\b/i,
+  why: 'no first person — the system reports acts, it does not take part in them',
+};
+
+const SPEECH_REPORT: Ban = {
+  pattern:
+    /\b(?:said|says|saying|say|tell|tells|told|telling|wrote|writes|writing|asked|asks|asking|replied|replies|remarked|remarks|commented|comments|quoted|quotes)\b/i,
+  why: 'no "X said" framing — a report of what somebody uttered is a quotation without the marks',
+};
+
+/** What the INTERFACE writes is held to the whole rule. */
+const SYSTEM_VOICE_BANS: readonly Ban[] = [QUOTATION_MARKS, FIRST_PERSON, SPEECH_REPORT];
+
+/**
+ * What the interface REPORTS keeps its pronouns and its speech verbs — it is
+ * somebody's button copy, recorded as offered — but it may not wear quotation
+ * marks, because that is the one thing that makes page-authored text look like
+ * a person's utterance rather than a recorded choice.
+ */
+const VERBATIM_BANS: readonly Ban[] = [QUOTATION_MARKS];
+
+const BANS_FOR: Readonly<Record<StatementPart['voice'], readonly Ban[]>> = {
+  system: SYSTEM_VOICE_BANS,
+  verbatim: VERBATIM_BANS,
+};
+
+/** The single description of "this is not the system's voice", shared by the constructor and the boundary. */
+function statementDefect(parts: readonly StatementPart[]): string | null {
+  if (parts.length === 0) return 'a system statement with no parts states nothing';
+  const first = parts[0];
+  if (first === undefined || first.voice !== 'system' || first.text.trim().length === 0) {
+    return (
+      'a system statement must OPEN in the system’s own voice.\n' +
+      '  A statement whose first words are a recorded payload is a quotation without the marks — ' +
+      'the framing is what says these words are being reported rather than spoken.'
+    );
   }
-  for (const ban of SYSTEM_VOICE_BANS) {
-    const hit = ban.pattern.exec(trimmed);
-    if (hit !== null) {
-      throw new Error(
-        `systemStatement: ${ban.why}.\n` +
-          `  rejected: ${JSON.stringify(hit[0])} in ${JSON.stringify(trimmed)}\n` +
-          '  If these are a person’s own words, they belong in a Quotation minted from their message.',
-      );
+  if (
+    parts
+      .map((part) => part.text)
+      .join('')
+      .trim().length === 0
+  ) {
+    return 'a system statement with no text states nothing';
+  }
+  for (const part of parts) {
+    if (part.voice !== 'system' && part.voice !== 'verbatim') {
+      return `a statement part must be system or verbatim, not ${JSON.stringify(String((part as StatementPart).voice))}`;
+    }
+    for (const ban of BANS_FOR[part.voice]) {
+      const hit = ban.pattern.exec(part.text);
+      if (hit !== null) {
+        return (
+          `${ban.why}.\n` +
+          `  rejected: ${JSON.stringify(hit[0])} in the ${part.voice} span ${JSON.stringify(part.text)}\n` +
+          '  If these are a person’s own words, they belong in a Quotation minted from their message.'
+        );
+      }
     }
   }
+  return null;
+}
+
+/**
+ * Build a statement out of spans, each tagged with who wrote it. This is the
+ * general constructor; `systemStatement` and `chosenAnswer` are the two shapes
+ * the app actually uses.
+ */
+export function composeStatement(
+  parts: readonly StatementPart[],
+  messageId?: MessageId,
+): SystemStatement {
+  const trimmed = parts.map((part, index) => ({
+    voice: part.voice,
+    /* Only the outer edges are trimmed: a space between the framing and the
+       payload is what keeps "lars chose:" from welding onto the option. */
+    text:
+      index === 0
+        ? part.text.trimStart()
+        : index === parts.length - 1
+          ? part.text.trimEnd()
+          : part.text,
+  })) as StatementPart[];
+  const defect = statementDefect(trimmed);
+  if (defect !== null) throw new Error(`systemStatement: ${defect}`);
+  /* `as unknown as` because the phantom key cannot be written — which is the
+     point of it. This is the one place in the program allowed to mint one. */
   return {
-    text: trimmed,
+    text: trimmed.map((part) => part.text).join(''),
     voice: 'system',
+    parts: trimmed,
     ...(messageId === undefined ? {} : { messageId }),
-  } as SystemStatement;
+  } as unknown as SystemStatement;
+}
+
+/** A statement the system wrote in full — every word of it is the interface speaking. */
+export function systemStatement(text: string, messageId?: MessageId): SystemStatement {
+  if (text.trim().length === 0) {
+    throw new Error('systemStatement: a system statement with no text states nothing');
+  }
+  return composeStatement([{ voice: 'system', text: text.trim() }], messageId);
 }
 
 export function isSystemStatement(value: unknown): value is SystemStatement {
   if (!isRecord(value)) return false;
   if (!nonEmptyString(value.text) || value.voice !== 'system') return false;
+  /* A statement that arrived without its parts is treated as ALL SYSTEM VOICE,
+     which is the strictest reading — the default direction is never the lenient
+     one. An arrival that wants the payload exemption has to declare where the
+     payload is, and then the text has to agree with the parts. */
+  const parts = Array.isArray(value.parts)
+    ? (value.parts as readonly StatementPart[])
+    : [{ voice: 'system' as const, text: value.text }];
+  for (const part of parts) {
+    if (!isRecord(part) || typeof part.text !== 'string') return false;
+    if (part.voice !== 'system' && part.voice !== 'verbatim') return false;
+  }
+  if (parts.map((part) => part.text).join('') !== value.text) return false;
   /* The same bans as the constructor. A statement that arrived as JSON gets the
      check the constructor would have applied — otherwise the enforcement is a
      property of which door the data came through, which is how the body check
      ended up bypassable in round 3. */
-  return !SYSTEM_VOICE_BANS.some((ban) => ban.pattern.test(value.text as string));
+  return statementDefect(parts) === null;
 }
 
 /** The runtime boundary for system voice, mirroring `parseQuotation`. */
 export function parseSystemStatement(value: unknown): SystemStatement {
   if (!isSystemStatement(value)) {
     throw new Error(
-      'parseSystemStatement: system-voice text must carry text and the system voice, in the system’s own voice — no quotation marks, no first person, no "X said" framing',
+      'parseSystemStatement: system-voice text must carry text and the system voice, in the system’s own voice — no quotation marks, no first person, no "X said" framing, and a recorded payload has to say that it is one',
     );
   }
   return value;
@@ -299,16 +538,24 @@ export function parseSystemStatement(value: unknown): SystemStatement {
 /**
  * The page-authored answer. A person clicked an option; the option's statement
  * goes on the record verbatim, in system voice, as an act rather than a
- * sentence they wrote. This is the shape the round-4 gauntlet finding requires:
- * "chosen answers render in system voice (`chose: <option>`), never in
- * quotation marks."
+ * sentence they wrote.
+ *
+ * `chose: ` is the system's framing and is held to the whole rule; the option
+ * is a verbatim payload and keeps whatever ordinary English it was written in.
+ * Round 4 held the option to the framing's rule and threw on "Yes — I approve".
  */
 export function chosenAnswer(option: string, messageId?: MessageId): SystemStatement {
   const trimmed = option.trim();
   if (trimmed.length === 0) {
     throw new Error('chosenAnswer: an answer with no option text is not an answer');
   }
-  return systemStatement(`chose: ${trimmed}`, messageId);
+  return composeStatement(
+    [
+      { voice: 'system', text: 'chose: ' },
+      { voice: 'verbatim', text: trimmed },
+    ],
+    messageId,
+  );
 }
 
 /**
@@ -323,7 +570,17 @@ export function chosenAct(actor: string, option: string, messageId?: MessageId):
   if (who.length === 0) {
     throw new Error('chosenAct: an act with nobody behind it is not on the record');
   }
-  return systemStatement(`${who} ${chosenAnswer(option).text}`, messageId);
+  const trimmed = option.trim();
+  if (trimmed.length === 0) {
+    throw new Error('chosenAnswer: an answer with no option text is not an answer');
+  }
+  return composeStatement(
+    [
+      { voice: 'system', text: `${who} chose: ` },
+      { voice: 'verbatim', text: trimmed },
+    ],
+    messageId,
+  );
 }
 
 /**

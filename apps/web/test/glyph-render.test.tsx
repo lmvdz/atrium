@@ -1,10 +1,26 @@
-import { cleanup, render } from '@testing-library/react';
+import type { RenderResult } from '@testing-library/react';
+import { cleanup } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ClaimText, Glyph, ObjectRow, TimelineRow } from '../src/components';
-import type { EpistemicState, MessageEntry } from '../src/components/model';
+import type { EpistemicState, MessageEntry, MessageRecord } from '../src/components/model';
 import { messageEntry as buildEntry, slot } from '../src/components/model';
+import { renderWith } from './harness';
 
 afterEach(cleanup);
+
+const RECORD: MessageRecord = {
+  id: 'm1',
+  at: '11:02',
+  actor: 'priya',
+  text: 'Cut over Friday.',
+  origin: 'seeded',
+};
+
+/* Every render in this file goes through the record ledger, because since round
+   5 a row looks its actor up rather than carrying it — a row rendered without
+   one throws, which test/attribution.test.tsx asserts directly. */
+const render = (ui: ReactElement): RenderResult => renderWith([RECORD], ui);
 
 const PROPOSED_GATE: EpistemicState = {
   kind: 'decision',
@@ -21,10 +37,7 @@ const VERIFIED: EpistemicState = {
 };
 
 function messageEntry(state: EpistemicState): MessageEntry {
-  return buildEntry(
-    { id: 'm1', at: '11:02', actor: 'priya', text: 'Cut over Friday.', origin: 'seeded' },
-    { state },
-  );
+  return buildEntry(RECORD, { state });
 }
 
 describe('the glyph cannot be handed in', () => {

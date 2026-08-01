@@ -97,7 +97,7 @@ test.describe('shell', () => {
     const owedBefore = await page.locator('[data-region="needs-you"] [data-attention-id]').count();
     await page
       .locator('[data-region="needs-you"] button')
-      .filter({ hasText: 'Keep it behind the retention window' })
+      .filter({ hasText: 'Keep it behind our retention window' })
       .first()
       .click();
     await expect(note).toContainText('it leaves the pin because it no longer needs you');

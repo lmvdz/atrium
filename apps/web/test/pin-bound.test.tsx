@@ -17,6 +17,7 @@ import {
   foldPin,
   PIN_COMPACT_BUDGET,
   PIN_PAGE,
+  pinBudgetFor,
   rationale,
   trailerFor,
 } from '../src/components/model';
@@ -243,5 +244,92 @@ describe('the affordance out of the fold is not decorative', () => {
       expect(rows + fold.overflow.length).toBe(n);
       expect(fold.overflowCounts.reduce((sum, c) => sum + c.n, 0)).toBe(fold.overflow.length);
     }
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 5 — THE BOUND AGAINST THE VIEWPORT, NOT AGAINST A CONSTANT.
+ *
+ * Round 4's gauntlet: `.pinList`'s `max-height: 340px` does not shrink against
+ * `.app`'s `height: 100vh`, so at 1124x500 the composer's bottom edge sat at 511
+ * in a 500px viewport with `scrollHeight === clientHeight` — round 1's exact
+ * signature, at a short viewport instead of a long list. Every harness viewport
+ * in the e2e hard-coded 900.
+ *
+ * Making the belt relative fixes the composer and, on its own, turns the pin
+ * back into a box holding more than it can show. So the COUNT bound moves with
+ * the pixel bound: `pinBudgetFor` does the same arithmetic the stylesheet does,
+ * and `foldPin` takes it.
+ * ------------------------------------------------------------------------- */
+describe('the pin’s row budget shrinks with the viewport', () => {
+  /* CATCHES: the ladder going back to a constant, or losing its clamp. The
+     numbers are the rendered geometry measured in Chromium; the e2e asserts the
+     stylesheet agrees with them at the same five heights. */
+  it.each([
+    [900, 4],
+    [768, 3],
+    [640, 2],
+    [500, 1],
+    [420, 0],
+  ])('a %ipx viewport has room for %i compressed rows', (height, rows) => {
+    expect(pinBudgetFor(height)).toBe(rows);
+  });
+
+  it('the ladder is clamped at both ends', () => {
+    expect(pinBudgetFor(4000)).toBe(PIN_COMPACT_BUDGET);
+    expect(pinBudgetFor(120)).toBe(0);
+    expect(pinBudgetFor(0)).toBe(0);
+  });
+
+  /* CATCHES: `foldPin` ignoring the budget — the fix that keeps the composer on
+     screen while leaving the pin holding rows it cannot draw. */
+  it.each([0, 1, 2, 3, 4])('the fold never renders more than %i compressed rows', (budget) => {
+    const items = f.manyOwed(34);
+    for (let page = 0; page < 20; page += 1) {
+      expect(foldPin(items, { budget, page }).compact.length).toBeLessThanOrEqual(budget);
+    }
+  });
+
+  /* CATCHES the way this fix could reintroduce round 2's inert affordance. With
+     no room for a compressed row the overflow control would promise "the next 0"
+     and deliver nothing — a live-looking button that has already done everything
+     it will ever do. At budget 0 the page advances THE CARD instead, so every
+     owed item is still reachable in a bounded number of clicks. */
+  it('the way past the fold survives a viewport with no room for a row', () => {
+    const items = f.manyOwed(34);
+    const seen = new Set<string>();
+    let page = 0;
+    for (let click = 0; click < 34; click += 1) {
+      const fold = foldPin(items, { budget: 0, page });
+      expect(fold.compact).toEqual([]);
+      expect(fold.nextPage.length, 'the overflow control promises nothing').toBe(1);
+      expect(fold.open, 'the pin renders no card at all').not.toBeNull();
+      if (fold.open !== null) seen.add(fold.open.id);
+      page += 1;
+    }
+    expect(seen.size, 'paging a one-card pin does not reach every owed item').toBe(34);
+    // and page 0 is still the hardest thing in the room
+    expect(foldPin(items, { budget: 0, page: 0 }).open?.id).toBe(foldPin(items).open?.id);
+  });
+
+  /* CATCHES: the rendered pin not consulting the measurement at all. jsdom
+     reports a viewport, so the component's own effect has a real number to
+     react to — and the row count on screen has to follow it. */
+  it.each([
+    [900, 4],
+    [500, 1],
+  ])('the rendered pin draws %ipx worth of rows (%i)', (height, rows) => {
+    const original = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: height });
+    const { container, unmount } = render(
+      <Pin items={f.manyOwed(34)} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    const drawn = container.querySelectorAll('[data-pin-list] [data-attention-id]').length;
+    expect(drawn, `a ${height}px viewport drew ${drawn} rows`).toBe(rows + 1);
+    expect(container.querySelector('[data-pin-list]')?.getAttribute('data-pin-measured')).toBe(
+      'true',
+    );
+    unmount();
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: original });
   });
 });

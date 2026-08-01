@@ -19,6 +19,7 @@ import { Fragment } from 'react';
 import type { Arming } from '../../src/components';
 import {
   AppFrame,
+  AttributionLedger,
   Composer,
   CrossRoomJump,
   initials,
@@ -39,6 +40,7 @@ import type {
   ComposerBinding,
   CrossRoomJumpRecord,
   HumanSummary,
+  MessageRecord,
   ObjectiveRecord,
   RoomHeadRecord,
   RoomSummary,
@@ -85,6 +87,14 @@ export interface RoomFrameHandlers {
 }
 
 export interface RoomFrameProps {
+  /**
+   * The record register this frame's citations resolve against — the same
+   * messages the feed was built from. Required, and required to be complete: a
+   * quotation whose message is not in here does not render, it throws. That is
+   * the whole point of round 5's fix, so an optional prop with an empty default
+   * would be the exemption that undoes it.
+   */
+  readonly messages: readonly MessageRecord[];
   readonly room: RoomHeadRecord;
   readonly rooms: readonly RoomSummary[];
   readonly humans: readonly HumanSummary[];
@@ -109,7 +119,21 @@ export interface RoomFrameProps {
   readonly handlers?: RoomFrameHandlers;
 }
 
+/**
+ * Every frame renders inside its own attribution ledger. There is no path from
+ * a `RoomFrame` to a rendered quotation that does not go through it, which is
+ * what makes "the actor is looked up, never carried" a property of the frame
+ * rather than of whoever remembered to wire it.
+ */
 export function RoomFrame(props: RoomFrameProps) {
+  return (
+    <AttributionLedger messages={props.messages}>
+      <Frame {...props} />
+    </AttributionLedger>
+  );
+}
+
+function Frame(props: RoomFrameProps) {
   const on = props.handlers ?? {};
   return (
     <AppFrame

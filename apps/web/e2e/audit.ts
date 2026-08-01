@@ -57,6 +57,11 @@ export interface AuditResult {
   readonly smallestFont: number | null;
   readonly lowestContrast: number | null;
   readonly graphicsChecked: number;
+  /** which registry entries were found here, "<name> ×<n>" — the coverage number */
+  readonly graphicKinds: readonly string[];
+  readonly registrySize: number;
+  /** ::before / ::after / ::placeholder strings measured — the category `ownText` used to skip */
+  readonly pseudoChecked: number;
   readonly lowestGraphic: number | null;
 }
 
@@ -157,30 +162,47 @@ export const AUDIT = `(() => {
     return out.trim();
   };
 
+  /* GENERATED CONTENT AND PLACEHOLDERS ARE TEXT TOO.
+
+     \`ownText\` walks child NODES, and a ::before / ::after / ::placeholder is
+     not a node — so three whole categories of rendered string were outside the
+     contrast and type-floor sweeps. Nothing in this app currently paints text
+     into a pseudo-element, and that is precisely the argument that keeps a blind
+     spot: "clean today" is not "checked". The pseudo pass below measures the
+     same two things against the same two floors, and reports how many strings it
+     found so a run that measures none of them is visible as such rather than
+     passing quietly.
+
+     ::placeholder is measured on the element itself (it is the input's own text,
+     at the input's own font size); ::before/::after take their own computed
+     font-size and colour. \`content\` comes back quoted, and 'none'/'normal'
+     mean there is nothing there. */
+  const pseudoText = (value) => {
+    if (!value || value === 'none' || value === 'normal') return '';
+    const m = value.match(/^"((?:[^"\\\\]|\\\\.)*)"$/);
+    if (!m) return '';
+    return m[1].replace(/\\\\"/g, '"').trim();
+  };
+
   const contrastFailures = [];
   const fontFailures = [];
   let lowestContrast = Infinity;
   let smallestFont = Infinity;
   let checked = 0;
+  let pseudoChecked = 0;
 
-  for (const el of document.querySelectorAll('body *')) {
-    const style = getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden') continue;
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) continue;
-    const text = ownText(el);
-    if (!text) continue;
+  /* One measurement, used by the node pass and the pseudo pass alike, so the
+     two cannot drift into applying different floors to the same kind of string. */
+  const measureText = (el, style, text, what) => {
     const alpha = effectiveOpacity(el);
-    if (alpha === 0) continue;
-
+    if (alpha === 0) return false;
     const fontSize = parseFloat(style.fontSize);
     smallestFont = Math.min(smallestFont, fontSize);
     if (fontSize < 10) {
-      fontFailures.push({ fontSize, text: text.slice(0, 60), selector: describe(el) });
+      fontFailures.push({ fontSize, text: text.slice(0, 60), selector: describe(el) + what });
     }
-
     const parsed = parseColor(style.color);
-    if (!parsed) continue;
+    if (!parsed) return false;
     /* The fade the element is wearing, applied to the ink. This is the whole
        point: a token that clears AA at full strength does not clear it at 55%,
        and the harness has to say so rather than look away. */
@@ -188,7 +210,6 @@ export const AUDIT = `(() => {
     const bg = backdrop(el);
     const ratio = contrast(over(fg, bg), bg);
     lowestContrast = Math.min(lowestContrast, ratio);
-    checked += 1;
     const weight = parseInt(style.fontWeight, 10) || 400;
     const large = fontSize >= 24 || (fontSize >= 18.66 && weight >= 700);
     const required = large ? 3 : 4.5;
@@ -199,8 +220,37 @@ export const AUDIT = `(() => {
         background: 'rgb(' + Math.round(bg.r) + ', ' + Math.round(bg.g) + ', ' + Math.round(bg.b) + ')',
         fontSize,
         text: text.slice(0, 60),
-        selector: describe(el),
+        selector: describe(el) + what,
       });
+    }
+    return true;
+  };
+
+  for (const el of document.querySelectorAll('body *')) {
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+
+    const text = ownText(el);
+    if (text && measureText(el, style, text, '')) checked += 1;
+
+    for (const pseudo of ['::before', '::after']) {
+      const pstyle = getComputedStyle(el, pseudo);
+      if (pstyle.display === 'none' || pstyle.visibility === 'hidden') continue;
+      const ptext = pseudoText(pstyle.content);
+      if (!ptext) continue;
+      if (measureText(el, pstyle, ptext, ' ' + pseudo)) pseudoChecked += 1;
+    }
+
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      const placeholder = (el.getAttribute('placeholder') || '').trim();
+      /* A placeholder is only text on screen while the field is empty; a filled
+         field is not hiding anything. */
+      if (placeholder && !el.value) {
+        const pstyle = getComputedStyle(el, '::placeholder');
+        if (measureText(el, pstyle, placeholder, ' ::placeholder')) pseudoChecked += 1;
+      }
     }
   }
 
@@ -225,15 +275,73 @@ export const AUDIT = `(() => {
      The registry is explicit rather than a walk over every border in the app: a
      hairline divider is genuinely decorative and flagging it would train the
      check to be ignored. Anything ADDED to it has to be a graphic that carries
-     information, and anything that carries information has to be in it. */
+     information, and anything that carries information has to be in it.
+
+     ROUND 4's GAUNTLET: THE REGISTRY HAD ONE ENTRY AND THE GUARD COUNTED THAT
+     ENTRY'S INSTANCES. \`graphicsChecked > 10\` was satisfied by the claim
+     underline's own fifty, so a registry of one measured "50 graphics, zero
+     failures" and an independent sweep immediately found the AWAY presence ring
+     at 1.93:1 / 1.84:1 — --line3 again, the third place that token survived —
+     and the composer's ANSWERING border at 1.76:1 / 2.70:1, the cue CONVENTIONS
+     devotes a section to protecting. A coverage guard that one registered
+     graphic can satisfy is not a coverage guard; gallery.spec.ts now counts
+     DISTINCT registry entries seen, and this list is what it counts against.
+
+     Six entries, each a graphic whose colour is carrying a fact:
+       - the claim underline: "somebody said it" vs "the system checked it",
+         rendered without a ~ for gate-proposals.
+       - the presence dot, twice (a fill for \`here\`, a ring for idle/away):
+         three states that differ by shape and hue.
+       - the composer's binding border: which item your next message resolves.
+       - the attention card's state border and its inset stripe: gate vs
+         destructive vs neither, on the card whose whole job is friction.
+       - the disabled count chip's border, which goes dashed to say the surface
+         it counts has nothing on it.
+     What is deliberately NOT here, with the reason, so the next reader is
+     arguing with a decision rather than an oversight: hairline dividers and
+     group rules (\`.groupRule\`, \`.railSec\`) separate, they do not state; the
+     row-tag border frames a label that always says the same thing in words in
+     the same box; the focus ring has its own dedicated measurement in
+     gallery.spec.ts against the same 3:1 floor. */
   const GRAPHICS = [
     { what: 'claim underline', selector: '[data-claim="true"]', side: 'borderBottomColor' },
+    { what: 'presence dot (here)', selector: '[data-presence="here"]', side: 'backgroundColor' },
+    {
+      what: 'presence ring (idle/away)',
+      selector: '[data-presence="idle"], [data-presence="away"]',
+      side: 'borderTopColor',
+    },
+    {
+      what: 'composer binding border',
+      selector: '[data-composer-box="bound"], [data-composer-box="replying"]',
+      side: 'borderTopColor',
+    },
+    {
+      what: 'attention card state border',
+      selector: '[data-card-state="gate"], [data-card-state="destructive"]',
+      side: 'borderTopColor',
+    },
+    {
+      /* Selected by data attribute, not by class: every class in this app is a
+         CSS-module hash, so a .surf[disabled] selector matched NOTHING and the
+         entry reported clean by never running. A registry selector that matches
+         nothing looks exactly like a registry entry that passes — the same
+         failure shape as a source-grep that matches nothing, which is why
+         gallery.spec.ts asserts every registered kind was FOUND. */
+      what: 'disabled count chip border',
+      selector: '[data-surface-count][data-surface-empty="true"]',
+      side: 'borderTopColor',
+    },
   ];
 
   const graphicFailures = [];
   let graphicsChecked = 0;
   let lowestGraphic = Infinity;
+  /* WHICH registry entries were actually found on this page, not just how many
+     elements matched — the number a coverage guard has to be written against. */
+  const graphicKinds = [];
   for (const graphic of GRAPHICS) {
+    let found = 0;
     for (const el of document.querySelectorAll(graphic.selector)) {
       const style = getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') continue;
@@ -244,9 +352,30 @@ export const AUDIT = `(() => {
       const parsed = parseColor(style[graphic.side]);
       if (!parsed) continue;
       const ink = { r: parsed.r, g: parsed.g, b: parsed.b, a: parsed.a * alpha };
-      const bg = backdrop(el);
+      /* ADJACENT COLOURS, PLURAL — and the first version of this got it wrong in
+         a way that turned the check green.
+
+         \`backdrop(el)\` composites the element's OWN background in, so a graphic
+         that IS a background (the filled \`here\` presence dot) was measured
+         against itself: eighteen dots reported 1.00:1, which is not a failure
+         report, it is a measurement that cannot fail in the other direction
+         either. And a BORDER has two adjacent colours — the fill it encloses and
+         the surface it sits on — of which the previous version measured one.
+         1.4.11 is about what is adjacent, so both are measured and the WORSE one
+         is the ratio. Measuring the friendlier side is how --ambbd survived on
+         the attention card. */
+      const outside = backdrop(el.parentElement);
+      const inside = backdrop(el);
+      const against =
+        graphic.side === 'backgroundColor'
+          ? [outside]
+          : contrast(over(ink, inside), inside) < contrast(over(ink, outside), outside)
+            ? [inside]
+            : [outside];
+      const bg = against[0];
       const ratio = contrast(over(ink, bg), bg);
       graphicsChecked += 1;
+      found += 1;
       lowestGraphic = Math.min(lowestGraphic, ratio);
       if (ratio + 0.005 < 3) {
         graphicFailures.push({
@@ -259,6 +388,7 @@ export const AUDIT = `(() => {
         });
       }
     }
+    if (found > 0) graphicKinds.push(graphic.what + ' \\u00d7' + found);
   }
 
   /* An element whose layout box runs past the viewport is only overflow if
@@ -305,6 +435,9 @@ export const AUDIT = `(() => {
     fontFailures,
     graphicFailures,
     graphicsChecked,
+    graphicKinds,
+    registrySize: GRAPHICS.length,
+    pseudoChecked,
     lowestGraphic: lowestGraphic === Infinity ? null : Math.round(lowestGraphic * 100) / 100,
     overflow: {
       documentScrollWidth: document.documentElement.scrollWidth,

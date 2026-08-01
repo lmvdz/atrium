@@ -58,6 +58,7 @@ export default async function PinLoadPage({ params }: { params: Promise<{ n: str
         focused="needs-you"
         humans={f.HUMANS}
         label={`pin-load-${count}`}
+        messages={f.RECORDS}
         lastCheck="12:29"
         objectives={f.OBJECTIVES}
         objects={f.OBJECTS}

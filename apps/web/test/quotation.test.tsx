@@ -6,10 +6,13 @@ import {
   attribute,
   chosenAnswer,
   isQuotableOrigin,
+  messageLedger,
   quotationFrom,
   quotationRef,
+  resolveQuotation,
   systemStatement,
 } from '../src/components/model';
+import { renderWith } from './harness';
 
 afterEach(cleanup);
 
@@ -56,13 +59,21 @@ describe('the quotation invariant', () => {
     expect(quotationFrom({ ...typed, id: '' })).toBeNull();
   });
 
-  it('typed and seeded messages are quotable, and carry their provenance', () => {
+  it('typed and seeded messages are quotable, and the ref names the room the RECORD is in', () => {
+    const ledger = messageLedger([typed, seeded, chosen]);
     const a = quotationFrom(typed);
     const b = quotationFrom(seeded);
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
-    expect(quotationRef(a as Quotation)).toBe('msg:m21');
-    expect(quotationRef(b as Quotation)).toBe('msg:m10@identity-service');
+    expect(quotationRef(resolveQuotation(ledger, a as Quotation, 'test'))).toBe('msg:m21');
+    expect(quotationRef(resolveQuotation(ledger, b as Quotation, 'test'))).toBe(
+      'msg:m10@identity-service',
+    );
+    /* CATCHES: the ref going back to a carried room. A token built from a field
+       that travelled beside the id can point at the wrong room; this one cannot,
+       because the room is read off the record the id names. */
+    const lying = { messageId: 'm21', room: 'identity-service' } as unknown as Quotation;
+    expect(quotationRef(resolveQuotation(ledger, lying, 'test'))).toBe('msg:m21');
   });
 
   /* CATCHES: routing a chosen message down the quotation branch in attribute().
@@ -98,7 +109,7 @@ describe('the quotation invariant', () => {
      to the message that proves them. */
   it('a quotation renders in <q>, attributed, with its provenance on the DOM', () => {
     const quotation = quotationFrom(typed) as Quotation;
-    const { container } = render(<Quoted quote={quotation} />);
+    const { container } = renderWith([typed, seeded], <Quoted quote={quotation} />);
     const q = container.querySelector('q');
     expect(q).not.toBeNull();
     expect(q?.getAttribute('data-quoted')).toBe('msg:m21');
@@ -120,11 +131,20 @@ describe('the quotation invariant', () => {
     // are different types precisely so they cannot be handed to each other.
     render(<SystemVoice statement={quotation} />);
     cleanup();
-    // @ts-expect-error — a page-authored statement can never reach <Quoted>.
-    render(<Quoted quote={systemStatement('chose: something')} />);
+    /* "the runtime also refuses" is not a figure of speech: with a statement in
+       the quote slot the record lookup has no id to look up, and with a literal
+       in it the id names no message on this page. Both throw, and asserting THAT
+       is stronger than asserting the type — a type error is invisible to a
+       JavaScript caller and these two are not. */
+    expect(() =>
+      // @ts-expect-error — a page-authored statement can never reach <Quoted>.
+      renderWith([typed], <Quoted quote={systemStatement('chose: something')} />),
+    ).toThrow(/no message id/);
     cleanup();
-    // @ts-expect-error — and neither can a hand-written object literal: the
-    // Quotation brand is a module-private symbol nobody else can name.
-    render(<Quoted quote={{ text: 'x', origin: 'typed', messageId: 'm1' }} />);
+    expect(() =>
+      // @ts-expect-error — and neither can a hand-written object literal: the
+      // Quotation brand is a module-private symbol nobody else can name.
+      renderWith([typed], <Quoted quote={{ messageId: 'm1' }} />),
+    ).toThrow(/not a message on this page/);
   });
 });

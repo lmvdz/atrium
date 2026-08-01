@@ -30,6 +30,19 @@ const LOADS = [4, 13, 19, 34, 60] as const;
 const WIDTHS = [1124, 1240, 1340, 1440] as const;
 const THEMES = ['light', 'dark'] as const;
 
+/* ROUND 4's GAUNTLET: EVERY VIEWPORT IN THIS FILE HARD-CODED 900.
+   `.pinList`'s belt was a constant 340px while `.app` is `height: 100vh`, so at
+   1124x500 the pin kept its full height out of a 500px frame, the feed collapsed
+   to 22px, and the composer's bottom edge sat at 511 in a 500px viewport with
+   `scrollHeight === clientHeight` — round 1's exact signature, unreachable by
+   any means the user has. The one dimension the bound was written against was
+   the one dimension the harness never varied.
+
+   420 is the floor this app claims: a laptop with browser chrome and a dock, or
+   a half-height window. It is asserted rather than assumed, and 500 is in the
+   list because it is the number the gauntlet reproduced at. */
+const HEIGHTS = [420, 500, 640, 768, 900] as const;
+
 /** Every element inside the pin's list that a person is meant to be able to hit. */
 const REACHABLE = '[data-pin-list] [data-attention-id], [data-pin-list] [data-pin-overflow]';
 
@@ -46,6 +59,14 @@ test.describe('the pin bounds itself', () => {
           await page.setViewportSize({ width, height: 900 });
           await page.goto(`/gallery/pin/${n}?theme=${theme}`);
           await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
+          /* The pin's row budget is measured from the viewport after hydration.
+             Reading the geometry before it has been measured reports the
+             server's guess and passes for the wrong reason — the same species as
+             round 4's computed style read mid-transition. */
+          await expect(page.locator('[data-pin-list]')).toHaveAttribute(
+            'data-pin-measured',
+            'true',
+          );
 
           const measured = await page.evaluate(() => {
             const composer = document.querySelector('textarea')?.closest('div')?.parentElement;
@@ -119,6 +140,84 @@ test.describe('the pin bounds itself', () => {
         }
       });
     }
+  }
+
+  /* -------------------------------------------------------------------------
+   * THE SAME BOUND, AGAINST THE VIEWPORT'S HEIGHT.
+   *
+   * The sweep above varies the load and the width; this one varies the height,
+   * which is the axis the belt is actually competing with. Both the composer and
+   * the feed are asserted, at the heaviest load, in both themes — because a pin
+   * that keeps the composer on screen by eating the entire conversation has
+   * moved the failure rather than fixed it.
+   * ---------------------------------------------------------------------- */
+  for (const theme of THEMES) {
+    test(`the composer stays in frame at every viewport height — ${theme}`, async ({ page }) => {
+      for (const height of HEIGHTS) {
+        for (const n of [4, 34] as const) {
+          await page.setViewportSize({ width: 1124, height });
+          await page.goto(`/gallery/pin/${n}?theme=${theme}`);
+          await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
+          /* The pin's row budget is measured from the viewport after hydration.
+             Reading the geometry before it has been measured reports the
+             server's guess and passes for the wrong reason — the same species as
+             round 4's computed style read mid-transition. */
+          await expect(page.locator('[data-pin-list]')).toHaveAttribute(
+            'data-pin-measured',
+            'true',
+          );
+
+          const measured = await page.evaluate(() => {
+            const composer = document.querySelector('textarea')?.closest('div')?.parentElement;
+            const feed = document.querySelector('[data-region="conversation"]');
+            const pin = document.querySelector('[data-region="needs-you"]');
+            const list = document.querySelector('[data-pin-list]');
+            const more = document.querySelector('[data-pin-overflow]');
+            const box = (el: Element | null | undefined) =>
+              el === null || el === undefined ? null : el.getBoundingClientRect();
+            return {
+              composer: box(composer),
+              feed: box(feed),
+              pin: box(pin),
+              list: box(list),
+              more: box(more),
+              viewport: window.innerHeight,
+              scrollTop: list?.scrollTop ?? 0,
+              hidden: (list?.scrollHeight ?? 0) - (list?.clientHeight ?? 0),
+            };
+          });
+
+          console.info(
+            `${theme} @ 1124x${height} · ${n} owed: pin ${Math.round(measured.pin?.height ?? 0)}px · feed ${Math.round(measured.feed?.height ?? 0)}px · composer bottom ${Math.round(measured.composer?.bottom ?? 0)} / ${measured.viewport}`,
+          );
+
+          expect(
+            measured.composer?.bottom ?? Number.POSITIVE_INFINITY,
+            `at ${height}px tall with ${n} owed the composer's bottom edge is ${measured.composer?.bottom} in a ${measured.viewport}px viewport`,
+          ).toBeLessThanOrEqual(measured.viewport + 1);
+          expect(measured.composer?.top ?? -1).toBeGreaterThanOrEqual(0);
+
+          /* The feed keeps a floor proportional to the frame rather than an
+             absolute one: at 420px a 80px feed is a fifth of the screen, which
+             is the same share 80px is not at 900. */
+          expect(
+            measured.feed?.height ?? 0,
+            `the pin ate the conversation at ${height}px`,
+          ).toBeGreaterThan(Math.min(80, height * 0.12));
+
+          /* And the pin still shows what it says it shows: the belt shrinking
+             must not turn it back into the hidden scroll container round 2 shipped. */
+          expect(measured.scrollTop, 'the pin scrolled its own content out of view').toBe(0);
+          expect(measured.hidden, 'the pin holds more than it can show').toBeLessThanOrEqual(1);
+          if (measured.more !== null) {
+            expect(
+              measured.more.bottom,
+              `the pin clips its own "N more owed" line at ${height}px`,
+            ).toBeLessThanOrEqual((measured.list?.bottom ?? 0) + 1);
+          }
+        }
+      }
+    });
   }
 
   /* -------------------------------------------------------------------------

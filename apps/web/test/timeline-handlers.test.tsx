@@ -8,12 +8,19 @@
  * working reply button had no prop to pass.
  * ------------------------------------------------------------------------- */
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import type { RenderResult } from '@testing-library/react';
+import { cleanup, fireEvent, screen } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { Timeline } from '../src/components';
+import { renderWith } from './harness';
 
 afterEach(cleanup);
+
+/* The feed resolves every row's actor against the record register it was built
+   from; a row rendered outside one throws rather than degrading. */
+const render = (ui: ReactElement): RenderResult => renderWith(f.RECORDS, ui);
 
 const ENTRIES = f.timeline({ seen: false, filter: null, routineOpen: false });
 const SEEN_ENTRIES = f.timeline({ seen: true, filter: null, routineOpen: false });

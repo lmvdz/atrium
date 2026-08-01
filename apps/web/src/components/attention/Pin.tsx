@@ -35,10 +35,10 @@
  * NOT owed to this person never do — they compress to a derived glyph count.
  * ------------------------------------------------------------------------- */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { needsViewer } from '../model/glyph';
 import type { AttentionItem, GlyphCount, PinFold, TrailerSummary } from '../model/records';
-import { foldPin, hardestGlyph } from '../model/records';
+import { foldPin, hardestGlyph, PIN_COMPACT_BUDGET, pinBudgetFor } from '../model/records';
 import { plural } from '../model/text';
 import type { Arming } from '../primitives/HoldToAct';
 import { AttentionCard } from './AttentionCard';
@@ -110,7 +110,28 @@ export function Pin({
   /* A page counter, not a `showAll` flag. A boolean can only be set once, which
      is exactly how round 2's affordance became inert after one click. */
   const [page, setPage] = useState(0);
-  const fold = foldPin(items, { openId, page });
+  /* HOW MANY ROWS THERE IS ROOM FOR, MEASURED — not a prop, not a constant.
+     `.pinList`'s belt is `min(340px, 34vh)`, so at a short viewport the box
+     shrinks; without this the pin would hold more than it can show, which is
+     exactly the hidden-scroll-container state round 2 shipped. The ladder is
+     `pinBudgetFor` (model/records.ts) and the agreement between it and the
+     stylesheet is asserted in e2e/pin-bound.spec.ts at five heights.
+
+     The server renders the full budget and the effect corrects it, because
+     there is no viewport on the server and guessing one would be a number
+     nothing measured. */
+  const [budget, setBudget] = useState(PIN_COMPACT_BUDGET);
+  const [measured, setMeasured] = useState(false);
+  useEffect(() => {
+    const measure = () => {
+      setBudget(pinBudgetFor(window.innerHeight));
+      setMeasured(true);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
+  const fold = foldPin(items, { openId, page, budget });
   /* The head glyph is the hardest glyph among the items the pin is holding —
      derived through the same `glyphFor` as every other glyph in the app. A
      hand-written ◆ over a pin holding a ✗ is a claim dressed as a fact, one
@@ -148,7 +169,18 @@ export function Pin({
 
       {folded ? null : (
         <>
-          <div className={styles.pinList} data-pin-list="true">
+          <div
+            className={styles.pinList}
+            data-pin-budget={String(budget)}
+            /* The server cannot see a viewport, so it renders the full budget and
+               this flips once the effect has measured. The e2e waits for it
+               rather than racing hydration — a geometry assertion taken before
+               the geometry is settled is a check that passes for the wrong
+               reason, which is the same species as reading a computed style
+               mid-transition (round 4). */
+            data-pin-measured={measured ? 'true' : 'false'}
+            data-pin-list="true"
+          >
             {fold.open === null ? (
               <p className={`${styles.empty} atr-lbl`}>
                 NOTHING NEEDS YOU IN THIS ROOM — THAT IS A RESULT, NOT AN ABSENCE

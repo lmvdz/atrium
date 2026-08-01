@@ -67,6 +67,13 @@ export function RoomSession() {
     [actedOn],
   );
 
+  /* Every message this session has produced, ON THE SAME REGISTER as the
+     fixtures. A sent row cites `local-3`; if `local-3` is not in the ledger the
+     row does not render, so the consumer holding the draft is also the consumer
+     holding the record — which is the shape #25 and #27 will have too. Round 5:
+     the actor beside a message is looked up here, never carried on the row. */
+  const [records, setRecords] = useState<readonly MessageRecord[]>(f.RECORDS);
+
   const entries: readonly TimelineEntry[] = useMemo(
     () => [...f.timeline({ seen, filter, routineOpen }), ...sent],
     [seen, filter, routineOpen, sent],
@@ -86,6 +93,7 @@ export function RoomSession() {
         text: text.trim(),
         origin: 'typed',
       };
+      setRecords((current) => [...current, record]);
       setSent((current) => [
         ...current,
         messageEntry(record, { state: TALK, viewer: f.VIEWER.name }),
@@ -173,6 +181,7 @@ export function RoomSession() {
       }}
       label="home"
       lastCheck="12:29"
+      messages={records}
       objectives={f.OBJECTIVES}
       objects={f.OBJECTS}
       openAttentionId={openId}

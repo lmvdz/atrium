@@ -42,11 +42,16 @@ const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  */
 const LEDGER = [
   {
-    name: 'a quotation stops carrying the actor it was minted from',
+    /* Round 5 rewrote this entry rather than deleting it. The old anchor was
+       `actor: message.actor` — a field that no longer exists, because carrying
+       the actor beside the id is the defect four rounds kept relocating. The
+       guarantee at the mint is now "only a message a person actually wrote
+       becomes quotable at all", so that is what gets broken here. */
+    name: 'the mint stops checking that the message is somebody’s own words',
     file: 'src/components/model/quotation.ts',
-    find: '    actor: message.actor,\n',
-    replace: '',
-    test: 'test/attribution.test.tsx',
+    find: '  if (!isQuotableOrigin(message.origin)) return null;',
+    replace: '  void message;',
+    test: 'test/quotation.test.tsx',
   },
   {
     name: 'the message constructor ignores origin and builds one row shape',
@@ -109,15 +114,15 @@ const LEDGER = [
   {
     name: 'the pin stops bounding its rows',
     file: 'src/components/model/records.ts',
-    find: '  const compact = rest.slice(start, start + PIN_PAGE);',
+    find: '  const compact = rest.slice(start, start + budget);',
     replace: '  const compact = rest.slice(start);',
     test: 'test/pin-bound.test.tsx',
   },
   {
     name: 'the way out of the fold goes idempotent again',
     file: 'src/components/model/records.ts',
-    find: '  const page = ((requested % pageCount) + pageCount) % pageCount;',
-    replace: '  const page = Math.min(requested, 1);',
+    find: '    return ((requested % count) + count) % count;',
+    replace: '    return Math.min(requested, 1);',
     test: 'test/pin-bound.test.tsx',
   },
   {
@@ -308,29 +313,29 @@ const LEDGER = [
   {
     name: 'the render-boundary check compares the body against itself',
     file: 'src/components/timeline/TimelineRow.tsx',
-    find: 'entry.body, entry.attribution.text, {',
+    find: "bodyDivergence('TimelineRow', entry.body, attribution.text, {",
     replace:
-      "entry.body, entry.body.map((s) => (s.kind === 'mention' ? `@${s.text}` : s.text)).join(''), {",
+      "bodyDivergence('TimelineRow', entry.body, entry.body.map((s) => (s.kind === 'mention' ? `@${s.text}` : s.text)).join(''), {",
     test: 'test/attribution.test.tsx',
   },
   {
     name: 'system voice stops rejecting "X said" framing',
     file: 'src/components/model/quotation.ts',
-    find: '    pattern:\n      /\\b(?:said|says|saying|say|tell|tells|told|telling|wrote|writes|writing|asked|asks|asking|replied|replies|remarked|remarks|commented|comments|quoted|quotes)\\b/i,',
-    replace: '    pattern: /^(?!)/,',
+    find: 'const SPEECH_REPORT: Ban = {\n  pattern:\n',
+    replace: 'const SPEECH_REPORT: Ban = {\n  pattern: /^(?!)/ ??\n',
     test: 'test/attribution.test.tsx',
   },
   {
     name: 'system voice stops rejecting the first person',
     file: 'src/components/model/quotation.ts',
-    find: "    pattern:\n      /\\b(?:I|I'm|I've|I'll|I'd|me|my|mine|myself|we|we're|we've|we'll|we'd|us|our|ours|ourselves)\\b/i,",
-    replace: '    pattern: /^(?!)/,',
+    find: 'const FIRST_PERSON: Ban = {\n  pattern:\n',
+    replace: 'const FIRST_PERSON: Ban = {\n  pattern: /^(?!)/ ??\n',
     test: 'test/attribution.test.tsx',
   },
   {
     name: 'the system-voice bans hold at the constructor but not at the JSON boundary',
     file: 'src/components/model/quotation.ts',
-    find: '  return !SYSTEM_VOICE_BANS.some((ban) => ban.pattern.test(value.text as string));',
+    find: '  return statementDefect(parts) === null;',
     replace: '  return true;',
     test: 'test/attribution.test.tsx',
   },
@@ -344,7 +349,7 @@ const LEDGER = [
   {
     name: 'focusing the composer replaces the amber binding border with grey',
     file: 'src/components/frame/frame.module.css',
-    find: '.cbox.cboxBound:focus-within {\n  border-color: var(--ambbd);\n}',
+    find: '.cbox.cboxBound:focus-within {\n  border-color: var(--amb2);\n}',
     replace: '',
     test: 'test/token-contrast.test.ts',
   },
@@ -412,6 +417,277 @@ const LEDGER = [
     find: '          initials={initials(props.viewer.name)}',
     replace: '          initials="LV"',
     test: 'test/composer.test.tsx',
+  },
+
+  /* --- round 5 -------------------------------------------------------------
+   * The round-4 gauntlet's findings, each reintroduced by name.
+   *
+   * The first block is the cardinal defect at its FOURTH address. Round 4's
+   * ledger entry for it asserted only that "a forged literal compiles", which is
+   * why 51/51 validated a claim the code did not hold: the forgery that shipped
+   * was a SPREAD, and a spread carries `unique symbol` keys through. Every route
+   * the receipt demonstrated is an entry here — the spread, the JSON parse, and
+   * each render boundary that prints a name.
+   * ---------------------------------------------------------------------- */
+  {
+    name: 'the quotation carries an actor again and a spread can overwrite it',
+    file: 'src/components/model/quotation.ts',
+    find: '  readonly messageId: MessageId;\n  readonly [quotationBrand]: ',
+    replace:
+      '  readonly messageId: MessageId;\n  readonly actor?: string;\n  readonly [quotationBrand]: ',
+    typecheck: true,
+    test: 'tsc --noEmit',
+  },
+  {
+    name: 'the derivation reads the carried actor instead of the cited record',
+    file: 'src/components/model/quotation.ts',
+    find: '    actor: record.actor,\n    text: record.text,',
+    replace:
+      '    actor: (quotation as unknown as { actor?: string }).actor ?? record.actor,\n    text: record.text,',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'parseQuotation goes back to validating shape and never provenance',
+    file: 'src/components/model/quotation.ts',
+    find: '  const record = ledger.recordFor(value.messageId);\n  if (record === null) return false;',
+    replace:
+      '  const record = ledger.recordFor(value.messageId);\n  if (record === null) return true;',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'parseQuotation hands the incoming object through instead of the citation',
+    file: 'src/components/model/quotation.ts',
+    find: '  return { messageId: (value as { messageId: MessageId }).messageId } as Quotation;',
+    replace: '  return value as Quotation;',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the ledger lets two records claim one message id',
+    file: 'src/components/model/quotation.ts',
+    find: '    if (existing !== undefined && existing !== record) {',
+    replace: '    if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the timeline row stops looking the actor up from the message id',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: "  const attribution = useAttribution(entry.attribution, 'TimelineRow');",
+    replace:
+      '  const attribution = entry.attribution as unknown as { messageId: string; actor: string; text: string };',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the reply banner stops looking the actor up from the message id',
+    file: 'src/components/frame/Composer.tsx',
+    find: "  const reply = useAttribution(to, 'Composer reply banner');",
+    replace:
+      '  const reply = to as unknown as { messageId: string; actor: string; at: string; text: string; room: string | null };',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the receipt excerpt stops looking the actor up from the message id',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: "  const excerpt = useAttribution(entry.excerpt, 'ReceiptView provenance');",
+    replace:
+      '  const excerpt = entry.excerpt as unknown as { messageId: string; actor: string; at: string; text: string; room: string | null };',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a render boundary with no record ledger degrades instead of refusing',
+    file: 'src/components/model/ledger.tsx',
+    find: '  if (ledger === null) {\n    throw new Error(',
+    replace: '  if (false) {\n    throw new Error(',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the provenance token goes back to a carried room',
+    file: 'src/components/model/quotation.ts',
+    find: '    room: record.room ?? null,',
+    replace: '    room: (quotation as unknown as { room?: string }).room ?? record.room ?? null,',
+    test: 'test/quotation.test.tsx',
+  },
+
+  /* The first-person ban, re-scoped to the system's framing. */
+  {
+    name: 'the first-person ban goes back to covering the option payload',
+    file: 'src/components/model/quotation.ts',
+    find: '  verbatim: VERBATIM_BANS,',
+    replace: '  verbatim: SYSTEM_VOICE_BANS,',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the payload exemption swallows the system’s own framing',
+    file: 'src/components/model/quotation.ts',
+    find: '  system: SYSTEM_VOICE_BANS,',
+    replace: '  system: VERBATIM_BANS,',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a statement may open with somebody else’s words again',
+    file: 'src/components/model/quotation.ts',
+    find: "  if (first === undefined || first.voice !== 'system' || first.text.trim().length === 0) {",
+    replace: '  if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the JSON boundary stops checking the parts add up to the text',
+    file: 'src/components/model/quotation.ts',
+    find: "  if (parts.map((part) => part.text).join('') !== value.text) return false;",
+    replace: '  void 0;',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a statement arriving without parts gets the payload exemption by default',
+    file: 'src/components/model/quotation.ts',
+    find: "    : [{ voice: 'system' as const, text: value.text }];",
+    replace: "    : [{ voice: 'verbatim' as const, text: value.text }];",
+    test: 'test/attribution.test.tsx',
+  },
+
+  /* IME. */
+  {
+    name: 'Enter sends the half-composed IME buffer as a typed message',
+    file: 'src/components/frame/Composer.tsx',
+    find: '      if (native.isComposing || native.keyCode === 229) return;',
+    replace: '      void native;',
+    test: 'test/composer.test.tsx',
+  },
+  {
+    name: 'the IME check reads only the modern signal and misses keyCode 229',
+    file: 'src/components/frame/Composer.tsx',
+    find: '      if (native.isComposing || native.keyCode === 229) return;',
+    replace: '      if (native.isComposing) return;',
+    test: 'test/composer.test.tsx',
+  },
+
+  /* The bound against the viewport. */
+  {
+    name: 'the pin’s belt goes back to a constant that cannot shrink',
+    file: 'src/components/model/records.ts',
+    find: '  beltShare: 0.34,',
+    replace: '  beltShare: 1,',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the fold ignores the room there is and renders the full budget',
+    file: 'src/components/model/records.ts',
+    find: '  const compact = rest.slice(start, start + budget);',
+    replace: '  const compact = rest.slice(start, start + PIN_COMPACT_BUDGET);',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the rendered pin stops measuring the viewport it has to fit',
+    file: 'src/components/attention/Pin.tsx',
+    find: '  const fold = foldPin(items, { openId, page, budget });',
+    replace: '  const fold = foldPin(items, { openId, page });',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the overflow control goes inert where there is no room for a row',
+    file: 'src/components/model/records.ts',
+    find: '      nextPage: next === undefined || owed.length < 2 ? [] : [next],',
+    replace: '      nextPage: [],',
+    test: 'test/pin-bound.test.tsx',
+  },
+
+  /* The graphics registry, and the harness exclusions. */
+  {
+    name: 'the graphics registry goes back to one entry',
+    file: 'e2e/audit.ts',
+    find: "    { what: 'presence dot (here)', selector: '[data-presence=\"here\"]', side: 'backgroundColor' },",
+    replace: '',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the coverage guard goes back to counting one graphic’s instances',
+    file: 'e2e/gallery.spec.ts',
+    find: '            audit.graphicKinds.length,',
+    replace: '            audit.graphicsChecked,',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'a filled graphic is measured against its own fill and reports 1:1',
+    file: 'e2e/audit.ts',
+    find: '      const outside = backdrop(el.parentElement);',
+    replace: '      const outside = backdrop(el);',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the presence ring goes back to the token below the 1.4.11 floor',
+    file: 'src/components/frame/frame.module.css',
+    find: '.presAway {\n  background: transparent;\n  border: 1.5px solid var(--tx2);\n}',
+    replace: '.presAway {\n  background: transparent;\n  border: 1.5px solid var(--line3);\n}',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the ANSWERING border goes back to --ambbd at 1.76:1',
+    file: 'src/components/frame/frame.module.css',
+    find: '.cboxBound {\n  border-color: var(--amb2);',
+    replace: '.cboxBound {\n  border-color: var(--ambbd);',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the REPLYING border goes back to --filebd at 1.46:1',
+    file: 'src/components/frame/frame.module.css',
+    find: '.cboxReplying {\n  border-color: var(--blu2);',
+    replace: '.cboxReplying {\n  border-color: var(--filebd);',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the destructive card’s border goes back under the 1.4.11 floor',
+    file: 'src/components/attention/attention.module.css',
+    find: '.acardDestructive {\n  background: var(--redbg);\n  border-color: var(--red2);',
+    replace: '.acardDestructive {\n  background: var(--redbg);\n  border-color: var(--redbd);',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the focus sweep goes back to a constant cap of 90 controls',
+    file: 'e2e/gallery.spec.ts',
+    find: '      for (let i = 0; i < CEILING; i += 1) {',
+    replace: '      for (let i = 0; i < 90; i += 1) {',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the reduced-motion check goes back to never testing transitions',
+    file: 'e2e/gallery.spec.ts',
+    find: '        const longest = style.transitionDuration',
+    replace: '        const longest = (0 as unknown as string)',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the disabled sweep goes back to reading only the first span',
+    file: 'e2e/gallery.spec.ts',
+    find: "          const spans = [...button.querySelectorAll('span')].filter(",
+    replace: "          const spans = [button.querySelector('span')].filter(",
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the rendered audit goes back to running only on /gallery',
+    file: 'e2e/gallery.spec.ts',
+    find: "    { path: '/', ready: '[data-region=\"needs-you\"]' },",
+    replace: '',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the text sweep goes back to skipping ::before, ::after and ::placeholder',
+    file: 'e2e/audit.ts',
+    find: "    for (const pseudo of ['::before', '::after']) {",
+    replace: '    for (const pseudo of []) {',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'the pin harness goes back to one hard-coded viewport height',
+    file: 'e2e/pin-bound.spec.ts',
+    find: 'const HEIGHTS = [420, 500, 640, 768, 900] as const;',
+    replace: 'const HEIGHTS = [900] as const;',
+    test: 'test/token-contrast.test.ts',
+  },
+  {
+    name: 'presence stops being said in words and goes back to a dot alone',
+    file: 'src/components/frame/Rail.tsx',
+    find: '      <span className="atr-meta">{meta}</span>',
+    replace: '      {note === null ? null : <span className="atr-meta">{note}</span>}',
+    test: 'test/attention.test.tsx',
   },
 ];
 

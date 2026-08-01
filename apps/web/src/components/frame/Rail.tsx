@@ -31,8 +31,14 @@ const PRESENCE_CLASS = {
   away: styles.presAway,
 } as const;
 
+/* PRESENCE IN WORDS, NOT ONLY IN A DOT.
+   Round 4's gauntlet: the dot was `aria-hidden` with a `title`, which no screen
+   reader announces, and `here`/`idle`/`away` differed only by fill-versus-ring
+   and hue — one fixture row carried no text equivalent at all. The state is now
+   the first thing on the row's meta line, visibly, for every human; the dot is
+   the glanceable shorthand for a fact that is also written down. */
 const PRESENCE_LABEL = {
-  here: 'here now',
+  here: 'here',
   idle: 'idle',
   away: 'away',
 } as const;
@@ -141,15 +147,24 @@ function RoomRow({
 
 function HumanRow({ human }: { readonly human: HumanSummary }) {
   const note = text(human.note);
+  /* The presence word leads the meta line, and the free-text note follows it.
+     Composed here rather than left to two adjacent elements, for the same reason
+     every other name on this rail is: adjacent spans announce welded. */
+  const meta =
+    note === null ? PRESENCE_LABEL[human.presence] : `${PRESENCE_LABEL[human.presence]} · ${note}`;
   return (
     <div className={[styles.hrow, human.isViewer ? styles.hrowMe : null].filter(Boolean).join(' ')}>
+      {/* Decorative NOW: the row says the same thing in words one element over.
+          `data-presence` is what the rendered non-text-graphic audit measures it
+          by — a graphic that carries information has to be in the registry, and
+          the registry needs a selector that is not a CSS-module hash. */}
       <span
         aria-hidden="true"
         className={`${styles.pres} ${PRESENCE_CLASS[human.presence]}`}
-        title={PRESENCE_LABEL[human.presence]}
+        data-presence={human.presence}
       />
       <span className={styles.hrowName}>{human.name}</span>
-      {note === null ? null : <span className="atr-meta">{note}</span>}
+      <span className="atr-meta">{meta}</span>
     </div>
   );
 }

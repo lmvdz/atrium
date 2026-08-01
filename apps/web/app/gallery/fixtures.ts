@@ -132,7 +132,48 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     // be rendered is in system voice, as "chose: …".
     origin: 'chosen',
   },
+  /* ORDINARY ENGLISH IN A ONE-CLICK ANSWER. Round 4 applied the system-voice
+     first-person ban to the OPTION PAYLOAD, so all four of these threw at
+     render — "our", "us", "I" and "we" are four of the five commonest pronouns
+     in the language, and a product whose buttons cannot contain them is not a
+     product. They are fixtures rather than test-only strings on purpose: the
+     round-4 ban had no live subject, which is why nothing caught it. */
+  'm-retention': {
+    id: 'm-retention',
+    at: '13:11',
+    actor: 'lars',
+    text: 'Keep it behind our retention window',
+    origin: 'chosen',
+  },
+  'm-day': {
+    id: 'm-day',
+    at: '13:12',
+    actor: 'priya',
+    text: 'Give us another day',
+    origin: 'chosen',
+  },
+  'm-approve': {
+    id: 'm-approve',
+    at: '13:13',
+    actor: 'justin',
+    text: 'Yes — I approve',
+    origin: 'chosen',
+  },
+  'm-agreed': {
+    id: 'm-agreed',
+    at: '13:15',
+    actor: 'dana',
+    text: 'Ship it, we agreed',
+    origin: 'chosen',
+  },
 };
+
+/**
+ * The register as a list, for `<AttributionLedger>`. Every citation any frame
+ * renders resolves against exactly this — a quotation for a message that is not
+ * here does not degrade, it throws.
+ */
+export const RECORDS: readonly MessageRecord[] = Object.values(MESSAGES);
 
 function quote(id: string) {
   const message = MESSAGES[id];
@@ -313,9 +354,11 @@ export const ATTENTION: readonly AttentionItem[] = [
       { id: 'authorise', label: 'Authorise the drop', emphasis: 'primary', statement: null },
       {
         id: 'defer',
-        label: 'Keep it behind the retention window',
+        label: 'Keep it behind our retention window',
         emphasis: 'secondary',
-        statement: 'Keep users_legacy until the retention window closes',
+        /* Ordinary English with a pronoun in it, on the shipped card. Round 4's
+           ban would have thrown the moment this answer was recorded. */
+        statement: 'Keep it behind our retention window',
       },
       { id: 'bind', label: 'Answer in your own words →', emphasis: 'ghost', statement: null },
     ],
@@ -354,6 +397,12 @@ export const ATTENTION: readonly AttentionItem[] = [
         label: 'Hold until 418 is explained',
         emphasis: 'primary',
         statement: 'Hold the cutover until parity check 418 is explained',
+      },
+      {
+        id: 'day',
+        label: 'Give us another day',
+        emphasis: 'ghost',
+        statement: 'Give us another day',
       },
       { id: 'bind', label: 'Answer in your own words →', emphasis: 'ghost', statement: null },
     ],
@@ -590,6 +639,16 @@ export const QUIET_TIMELINE: readonly TimelineEntry[] = [
     tag: { label: 'verified · the migration harness', tone: 'verified' },
   }),
   message('q2', { state: TALK }),
+  /* THE FOUR ANSWERS ROUND 4 THREW ON, RENDERED. Each is a `chosen` record, so
+     each becomes "<who> chose: <the option, verbatim>" in system voice with an
+     empty actor column — the framing is the system's and is held to the whole
+     rule; the option is a recorded payload and keeps its pronouns. A ban with no
+     live subject is a ban nobody has run, which is exactly how the round-4
+     version shipped believing its fixtures proved something. */
+  message('m-retention', { state: ACCEPTED }),
+  message('m-day', { state: ACCEPTED }),
+  message('m-approve', { state: ACCEPTED }),
+  message('m-agreed', { state: ACCEPTED }),
 ];
 
 export const FRESH_TIMELINE: readonly TimelineEntry[] = [...BEFORE, ...AFTER.slice(0, 2)];

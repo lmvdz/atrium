@@ -211,7 +211,21 @@
   padding: 3.5px 12px 3.5px 13px;
 }
 
-/* presence uses BLUE (= human), never green: green is reserved for "verified" */
+/* presence uses BLUE (= human), never green: green is reserved for "verified"
+
+   ROUND 4's GAUNTLET: the AWAY ring was --line3 at 1.93:1 light / 1.84:1 dark —
+   the THIRD place that token survived as a meaningful non-text graphic after
+   being rejected for the focus ring and for the claim underline. It survived
+   because the graphics registry in e2e/audit.ts had exactly one entry and the
+   guard counting graphics was satisfied by that entry's own instances.
+
+   A presence dot is a non-text graphic under WCAG 1.4.11 whatever else is on
+   the row: `here`, `idle` and `away` differ only by fill-versus-ring and hue.
+   --tx2 measures 6.26:1 light / 7.49:1 dark on --bg2, the rail's surface. And
+   the dot is no longer the only carrier at all — Rail.tsx puts the state in
+   words on the row, because a shape distinguished by hue is not something every
+   reader can distinguish and a `title` on an `aria-hidden` element is not
+   something any screen reader announces. */
 .pres {
   width: 7px;
   height: 7px;
@@ -230,7 +244,7 @@
 
 .presAway {
   background: transparent;
-  border: 1.5px solid var(--line3);
+  border: 1.5px solid var(--tx2);
 }
 
 .hrowName {
@@ -459,8 +473,13 @@
    timeline.module.css, which is disabled for the same reason. This chip was the
    OTHER thing the audit's opacity exemption was hiding — at .55 it measured
    2.43:1 and no receipt in two rounds had ever named it. */
+/* Dashed AND legible. The dash is the shape that says "nothing to focus"; a
+   --line hairline carrying it measured 1.32:1 light / 1.19:1 dark, so the shape
+   was there and the perceiving of it was not. --tx2 is 6.39:1 / 7.30:1 on
+   --bg7. In the registry, and measured. */
 .surf[disabled] .surfCount {
   border-style: dashed;
+  border-color: var(--tx2);
 }
 
 /* --- composer ------------------------------------------------------------ */
@@ -472,12 +491,30 @@
 }
 
 /* BRIEF concept 4: the binding banner. Your next message resolves the named
-   item and nothing is inferred from it. */
+   item and nothing is inferred from it.
+
+   THE BINDING BORDER IS A MEANINGFUL NON-TEXT GRAPHIC, AND IT WAS BELOW 3:1.
+
+   Round 4's gauntlet measured --ambbd at 1.76:1 light / 2.70:1 dark and
+   --filebd at 1.46:1 / 1.89:1 — the amber ANSWERING outline and the blue
+   REPLYING one. Rounds 3 and 4 both wrote about this border as the load-bearing
+   cue ("a state cue is not decoration for the resting state"), fixed which rule
+   won the cascade, and never measured what it was painted in.
+
+   The "there is a banner above it that says ANSWERING in words" argument is the
+   redundancy exemption this codebase has already rejected once, for the claim
+   underline: the banner scrolls, truncates and lives in a different box, while
+   the border is what ties the state to the FIELD. Both borders move to the
+   foreground token of their own hue — --amb2 at 4.84:1 light / 11.09:1 dark and
+   --blu2 at 6.59:1 / 11.78:1 on --bg1, and clear on --ambbg / --replybg / --bg3
+   too, which are the other surfaces they touch. Same hue, same 1px, same
+   meaning; a step up the ramp, which is the move the de-emphasis section already
+   prescribes for everything else. */
 .ctxbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid var(--ambbd);
+  border: 1px solid var(--amb2);
   border-bottom: 0;
   border-radius: 5px 5px 0 0;
   background: var(--ambbg);
@@ -488,7 +525,7 @@
 }
 
 .ctxbarReply {
-  border-color: var(--filebd);
+  border-color: var(--blu2);
   background: var(--replybg);
   color: var(--blu2);
 }
@@ -531,12 +568,12 @@
 }
 
 .cboxBound {
-  border-color: var(--ambbd);
+  border-color: var(--amb2);
   border-radius: 0 0 5px 5px;
 }
 
 .cboxReplying {
-  border-color: var(--filebd);
+  border-color: var(--blu2);
   border-radius: 0 0 5px 5px;
 }
 
@@ -555,11 +592,11 @@
    for the resting state, and a hover/focus rule may not out-rank the state the
    surface is IN. */
 .cbox.cboxBound:focus-within {
-  border-color: var(--ambbd);
+  border-color: var(--amb2);
 }
 
 .cbox.cboxReplying:focus-within {
-  border-color: var(--filebd);
+  border-color: var(--blu2);
 }
 
 .cbox textarea {

@@ -21,6 +21,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
+import { useAttribution } from '../model/ledger';
 import { quotationRef } from '../model/quotation';
 import type { CorrectionEntry, ProvenanceEntry, ReceiptRecord } from '../model/records';
 import { stateForHappened } from '../model/records';
@@ -152,28 +153,32 @@ function ProvenanceRow({
 }) {
   const note = text(entry.note);
   const jump = entry.jump;
+  /* WHO, WHEN AND WHAT ARE LOOKED UP FROM THE CITED MESSAGE. There is no `who`
+     prop to disagree with the words, and since round 5 there is no `actor` on
+     the excerpt either — the excerpt is a message id, and this row can only
+     render what the record behind that id actually says. The receipt is the
+     artifact whose whole job is being the trustworthy record; it is the last
+     place a name should be a value somebody passed in. */
+  const excerpt = useAttribution(entry.excerpt, 'ReceiptView provenance');
   return (
     <button
       className={styles.prov}
       onClick={onJump === undefined || jump === null ? undefined : () => onJump(jump.messageId)}
       type="button"
     >
-      {/* Who and when come OFF THE EXCERPT. There is no `who` prop to disagree
-          with the words: the quotation was minted from the message that holds
-          both, and this row can only render what that message said. */}
       <span className={styles.provHead}>
-        <span className={styles.provWho} data-attribution={entry.excerpt.messageId}>
-          {entry.excerpt.actor}
+        <span className={styles.provWho} data-attribution={excerpt.messageId}>
+          {excerpt.actor}
         </span>
-        <span>{entry.excerpt.at}</span>
+        <span>{excerpt.at}</span>
         <span className={styles.provJump}>
           {jump === null
             ? 'typed here · no message carries it'
             : `jump to source${jump.room === null ? '' : ` in #${jump.room}`} →`}
         </span>
       </span>
-      <span className={styles.provExcerpt} data-quoted={quotationRef(entry.excerpt)}>
-        “{entry.excerpt.text}”
+      <span className={styles.provExcerpt} data-quoted={quotationRef(excerpt)}>
+        “{excerpt.text}”
       </span>
       {note === null ? null : <span className={styles.provNote}>{note}</span>}
     </button>

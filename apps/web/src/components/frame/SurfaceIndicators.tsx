@@ -58,7 +58,19 @@ export function SurfaceIndicators({ surfaces, focused, onFocus }: SurfaceIndicat
           >
             <span className={`${styles.surfLabel} atr-lbl`}>{surface.label}</span>
             {surface.count === null ? null : (
-              <span className={styles.surfCount}>{surface.count}</span>
+              /* The chip's border goes dashed to say the surface it counts has
+                 nothing on it, which makes it a non-text graphic carrying state.
+                 Named by data attribute so the rendered audit's registry can
+                 select it — a CSS-module class cannot be selected from outside
+                 the module, and a registry selector that matches nothing reports
+                 exactly like one that passes. */
+              <span
+                className={styles.surfCount}
+                data-surface-count={String(surface.count)}
+                data-surface-empty={empty ? 'true' : 'false'}
+              >
+                {surface.count}
+              </span>
             )}
           </button>
         );

@@ -227,7 +227,7 @@ Enforcement: any quotation-context element must carry provenance proving its tex
 
 Two structural rules follow, and they are what the enforcement now rests on:
 
-- **A quotation carries the actor and the moment it was minted from.** Any component that renders a name beside quoted text takes the quotation, not a string. There is no `by` prop anywhere.
+- **A quotation is a CITATION, and the attribution is looked up from it.** Any component that renders a name beside quoted text takes the quotation, not a string. There is no `by` prop anywhere. From #39 r5 the quotation does not carry the name either — see "the field that moves" below.
 - **The message-rendering path is discriminated on origin, and the arms have different fields.** The human-authored arm has an attribution and a body; the page-authored arm has neither, only a system-voice statement. A page-authored answer cannot reach a human-attributed row because the row shape that would render it does not exist.
 
 **What the branded types actually buy.** `Quotation`, `SystemStatement`, `MessageEntry`, `Rationale` and `Slot` all carry phantom brands keyed by module-private `unique symbol`s. Those are `declare`-only: they exist in the type system and nowhere else. They stop a TypeScript author from writing the literal, which is the mistake a person makes at 2am. **They are not a guarantee about data from outside the compiler** — `JSON.parse`, a cast, `Object.assign` and any JavaScript caller all walk straight through. Describe them as a convention with teeth, never as a proof. Where untrusted data enters, use the runtime parsers (`parseQuotation`, `parseMessageRecord`, `parseSystemStatement`, `isRationale`, `maybe`) rather than a brand and a hope.
@@ -244,6 +244,31 @@ The question to ask of any guard: **what is the last place this value passes bef
 **System voice's other three properties are enforced, and the enforcement's limit is stated.** "Mono, muted, no quotation marks, no first person, no 'X said' framing" — the stylesheet enforced the first two and nothing enforced the rest, so `systemStatement('priya said: I authorise dropping users_legacy')` compiled and rendered in the treatment that tells a reader the system checked this. `systemStatement` and `isSystemStatement` now reject quotation marks, first-person pronouns, and speech-report verbs, at the constructor **and** at the JSON boundary — a guarantee that holds only for callers who used the door it was installed in is the defect above, one file over.
 
 What that does not catch, stated so the next round does not have to rediscover it: the check is lexical, and `systemStatement('priya: drop the table')` still compiles — banning colons would take out `chose:` and every label in the receipt. **The lexical bans narrow how a page-authored string can LOOK like speech; what stops it being ATTRIBUTED as speech is structural, and the structure is the load-bearing half**: a `SystemStatement` has no actor field, `<SystemVoice>` renders no attribution column, and the row that carries one (`ChosenMessageEntry`) has no field a renderer could put a name in.
+
+
+**The field that moves: stop guarding it and delete it.** Found in the #39 round-4 gauntlet, and it is the fourth address of one defect. r1 put a free actor string beside the words; r2 moved it into the body slot; r3 put the check inside the factory and a caller wrote the entry literal; r4 spread a genuine quotation and overwrote `actor` inside it — `{...quotationFrom(msg)!, actor: 'priya'}` compiles, keeps the phantom brand, and renders priya's name over lars's sentence with `data-attribution` citing his real message. The render-boundary check passed because it re-derived *the words* and only the name had moved. `parseQuotation` accepted the same shape from JSON, because it validated shape and never provenance.
+
+Every round's fix was a guard over the field the previous round had moved. **A guard over a carried field is always one field behind.** The root cause is one sentence: *nothing tied `quotation.actor` to `quotation.messageId`.*
+
+So the rule is now:
+
+- **A quotation is a message id and nothing else.** No actor, no text, no timestamp, no room. There is no field for a spread to overwrite, and if a JSON payload arrives with one it is dropped rather than read — `parseQuotation` returns the citation, not the object it was handed.
+- **Everything printed beside quoted words is looked up from the record at the render boundary**, out of the same register the feed itself was built from (`<AttributionLedger>` / `useAttribution`). The name, the words, the time and the room all come from one row of one register, so they cannot disagree.
+- **A citation that cannot be resolved does not render.** No ledger, an unknown id, or a page-authored message: it throws. A row that quietly renders an empty actor cell is a row nobody finds out about, and an audit may not exempt the case its rule covers — neither may a renderer.
+- **The record register is a value, not a process-wide map.** A module-level registry keyed by a caller-chosen id can be poisoned by whoever mints `{id:'m14', actor:'priya'}` first, and it leaks between requests on a server. The ledger is built from the records a page was handed and flows down that page's tree; two records claiming one id is a throw, not a last-write-wins.
+
+**A phantom brand does not survive a spread, and the doc comment that said it did was wrong for a whole round.** TypeScript carries `unique symbol` keys through object spread, so `{...branded}` is still branded. What a brand actually stops is a BARE LITERAL (the phantom key is missing) and what excess-property checking stops is an explicitly-written key the target type does not declare. Neither of those is a spread that overwrites a field the type already has. Write the limit down as the limit; a doc comment that overstates a guarantee is how the next reader stops looking.
+
+**The first-person ban is scoped to the system's framing, not to the payload it reports.** Found in the #39 round-4 gauntlet: the bans were applied to the whole finished string, which includes the option payload, so `messageEntry` threw *at render* on "Keep it behind our retention window", "Give us another day", "Yes — I approve" and "Ship it, we agreed". Every reversible one-click answer in the product had to avoid the five commonest pronouns in English, and the failure was a runtime throw inside render rather than a compile error. The fixtures happened to dodge it, which is why nothing caught it.
+
+The rule was never about the letters; it is about **who is speaking**. A `SystemStatement` is a sequence of spans, each tagged with who wrote it:
+
+- **`system`** — the interface's own framing (`chose: `, `lars chose: `). Held to the whole rule: no quotation marks, no first person, no "X said".
+- **`verbatim`** — a page-authored payload the interface is *reporting*, recorded exactly as it was offered. It keeps its pronouns. It may not wear quotation marks, because that is the one thing that makes recorded text look like an utterance, and it may never be the opening span: a statement that begins with somebody else's words is a quotation without the marks, whatever its type says.
+
+The JSON boundary applies the same split, and a statement arriving **without** its parts is read as all-system — the conservative reading, never the lenient one — and its parts must add up to its text.
+
+**IME composition is not typed input.** Enter while an IME is composing accepts a candidate; it does not send. Without the check (`event.nativeEvent.isComposing`, and `keyCode === 229` for the platforms that predate it) the composer sends half-composed romaji as `origin: 'typed'` — quotable, attributed, permanently on somebody's record as words they did not write. This is the no-synthesized-speech invariant reached from the input end rather than the render end, and it is every CJK user's first keystroke sequence. Found in #39 round 4.
 
 ## Measured contrast exceptions
 
@@ -330,10 +355,42 @@ Corollary for harnesses, which is the half that let this ship: **an audit may no
 
 The binding measurement is the **light** theme: `--amb2` on `--ambbg` is 4.53:1 there and 9.65:1 in dark, and one stylesheet serves both, so a fade has to clear AA in the worse of them. Dark-theme headroom is not licence (#39 r3 — the dark number had never actually been measured; see RETRO on the parametrised test that ran the same case twice).
 
+
+## The harness may not exclude what its rule includes
+
+The corollary in *De-emphasis must stay readable* — "an audit may not exempt the case its rule covers" — has now been broken five more ways, all found in the #39 round-4 gauntlet, all of which happened to be **clean when run without the exclusion**. That is exactly why they are worth writing down: a blind spot that is clean today is a blind spot, and "somebody else ran it once" is not a property of a repo.
+
+- **A rule that says "every" may not stop at a constant.** The focus-ring sweep pressed Tab ninety times against a page holding 337 focusable controls — a cap chosen when the page was smaller and never revisited, invisible because ninety measurements look thorough. Run to exhaustion (mark each element as it is focused, stop when the tab order repeats) and assert **which** controls were never reached, by name, rather than how many were. A count can be satisfied by reaching different ones.
+- **A filter whose second clause subsumes its first is a filter with dead code in it.** `.filter(a !== 'none' || t !== 'all').filter(a !== 'none')` meant transitions were never tested under `prefers-reduced-motion`. Measure the two things separately and report them separately, and pair a suppression check with a check that there is something to suppress — a kill switch tested against a page with no motion passes for free.
+- **A DOM property is not the definition of a state.** `.disabled === true` exists only on form controls, so every `aria-disabled` control was invisible to a sweep named "a disabled control is legible". And reading `querySelector('span')` reads the *first* of a control's spans, which is how a count chip shipped at 2.43:1 with nobody measuring it. Measure every text-bearing part; compare "reads as inactive" at the control.
+- **A route is not the app.** An audit that runs on the gallery is a claim about six stills. Run it on every route the product serves, including the one driven by a live consumer and the ones under load.
+- **A node walk cannot see generated content.** `::before`, `::after` and `::placeholder` are rendered strings that no `childNodes` traversal reaches, so three whole categories of text sat outside the contrast and type-size floors. Measure them, and report how many were found, so a run that measures none of them says so.
+- **A bound must be swept along the axis it bounds.** `.pinList`'s belt was a constant `340px` competing with a `100vh` frame, and every viewport in the harness hard-coded height 900 — so the one dimension the bound was written against was the one dimension nothing varied. Sweep it, down to the shortest viewport the product claims.
+
+Two more general shapes, both of which passed against their own mutation before being tightened:
+
+- **A coverage guard must not be satisfiable by one subject.** `graphicsChecked > 10` was met by a single registered graphic's own fifty instances, so a registry of one reported a thorough sweep. Count **distinct kinds**, and separately assert that every registered kind was actually found somewhere — a selector that matches nothing reports exactly like one that passes.
+- **A source-grep assertion fails by matching the wrong occurrence, not only by matching nothing.** Two checks here grepped for an identifier that also appeared in a `console.info` beside the assertion, and passed with the assertion gutted. Anchor on the construct (`expect(\n audit.graphicKinds.length,`), not on the word.
+
+## Non-text graphics are registered, and the registry is measured
+
+Anything whose **colour or shape carries state or identity** is a non-text graphic under WCAG 1.4.11 and belongs in `e2e/audit.ts`'s registry: the claim underline, the presence dot, the composer's binding border, the attention card's state border, the disabled count chip's dashed border. Things that **separate, frame or decorate** — hairline dividers, group rules, avatar rings, a border around a label that already says the same thing in the same box — do not, and flagging them trains the check to be ignored. Write the reason for each exclusion next to the registry, so the next reader argues with a decision rather than with an oversight.
+
+Two measurement rules, both learned the hard way in #39 r5:
+
+- **A graphic has more than one adjacent colour.** A border is adjacent to the fill it encloses *and* to the surface it sits on; measure both and take the worse. Measuring the friendlier side is how `--ambbd` survived on the attention card through four rounds of contrast passes.
+- **A fill is not measured against itself.** Compositing the element's own background into the backdrop makes a filled dot report 1.00:1 — a number that cannot fail in one direction and therefore cannot pass in the other. Composite a fill against its parent.
+
+Found in #39 round 4: the registry held one entry, its coverage guard counted that entry's instances, and an independent sweep immediately turned up the AWAY presence ring at 1.93:1 light / 1.84:1 dark (`--line3` again, the third place that token survived) and the composer's ANSWERING border at 1.76:1 / 2.70:1.
+
+**A graphic distinguished by hue and shape needs a text equivalent.** The presence dot was `aria-hidden` with a `title` — which no screen reader announces — and `here`/`idle`/`away` differed only by fill-versus-ring and hue. The state is words on the row now; the dot is the glanceable shorthand for something that is also written down.
+
 ## The pin pages; it never scrolls
 
 BRIEF concept 3, verbatim: "owed attention never hides… the pin folds rather than scrolls." Both halves bind, and #39 broke them in turn — r1 by not bounding the pin at all (the composer left the viewport at 19 owed items, unreachable), r2 by bounding it and then shipping an idempotent way out of the bound (`showAll` raised the row budget once, stranding 50 of 60 owed items behind a live-looking "50 more owed").
 
-The settled shape: **a fixed row budget in every state, and an affordance that advances a window through the owed items.** The budget never moves, so the pixel bound that keeps the composer on screen is measured once and holds everywhere; the control's label is rendered from the page it is about to show, so it cannot promise more than one click delivers; and the last page wraps back to the hardest rather than becoming inert. A scrolling pin is the unbounded pin with a scrollbar. A cap that rises when you ask for more is a bound with an exception, and the exception is where the owed items go to disappear.
+**And the budget moves with the room there is, not with a constant.** Found in #39 round 4: `.pinList`'s belt was `max-height: 340px` while the frame is `height: 100vh`, so at 1124x500 the pin kept its full height out of a 500px frame, the feed collapsed to 22px, and the composer's bottom edge sat at 511 in a 500px viewport with `scrollHeight === clientHeight` — round 1's exact signature, at a short viewport instead of a long list. Making the belt relative on its own turns the pin back into the round-2 defect (a box holding more than it can show), so the COUNT bound is derived from the same arithmetic the belt does, the component measures the viewport rather than being told, and where there is no room for even one compressed row the page advances the CARD so the way out of the fold never goes inert. Two numbers that must agree, with an e2e assertion at five viewport heights that says they do.
+
+The settled shape: **a row budget derived from the space in every state, and an affordance that advances a window through the owed items.** The budget never moves, so the pixel bound that keeps the composer on screen is measured once and holds everywhere; the control's label is rendered from the page it is about to show, so it cannot promise more than one click delivers; and the last page wraps back to the hardest rather than becoming inert. A scrolling pin is the unbounded pin with a scrollbar. A cap that rises when you ask for more is a bound with an exception, and the exception is where the owed items go to disappear.
 
 Generally: **an affordance whose label states a quantity must deliver that quantity when used.** This is the same defect class as r1's `data-hold="2000"` — a control whose copy described behaviour the code did not implement. Assert it by clicking through every page and counting distinct items reached, not by checking that the affordance exists.

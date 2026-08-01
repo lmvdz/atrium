@@ -15,18 +15,24 @@ import { Composer, Quoted, ReceiptView, RoomHead, TimelineRow } from '../src/com
 import type { MessageEntry, MessageRecord, Quotation } from '../src/components/model';
 import {
   bodyText,
+  chosenAct,
+  chosenAnswer,
+  composeStatement,
   isQuotation,
   isSystemStatement,
   maybe,
   messageEntry,
+  messageLedger,
   parseMessageRecord,
   parseQuotation,
   parseSystemStatement,
   quotationFrom,
+  resolveQuotation,
   slot,
   systemStatement,
   text,
 } from '../src/components/model';
+import { renderBare, renderWith } from './harness';
 
 afterEach(cleanup);
 
@@ -55,36 +61,123 @@ const chosen: MessageRecord = {
   origin: 'chosen',
 };
 
-describe('a quotation carries the actor it was minted from', () => {
-  /* CATCHES: dropping `actor`/`at` from `quotationFrom` — which is exactly what
-     the pre-fix version did. Without them every component that renders a name
-     beside quoted text has to be handed one, and a handed-in name is a name
-     nothing checks. */
-  it('the actor and the time come off the message, not beside it', () => {
+const RECORDS = [priya, lars, chosen];
+
+/* ---------------------------------------------------------------------------
+ * ROUND 4's GAUNTLET: THE FREE STRING WAS INSIDE THE BRANDED VALUE.
+ *
+ * `{...quotationFrom(larsMessage)!, actor: 'priya'}` compiled — TypeScript
+ * carries `unique symbol` keys through an object spread, so the phantom brand
+ * survived — and rendered priya's name over lars's sentence with
+ * `data-attribution="m14"`. The render-boundary check passed because it
+ * re-derived THE WORDS and only `actor` had moved. `parseQuotation` accepted the
+ * same shape from JSON, because it validated shape and never provenance.
+ *
+ * The fix is not a fifth guard over `actor`. The fields are gone: a Quotation is
+ * a message id, and everything printed beside quoted words is looked up from the
+ * page's records at the render boundary.
+ * ------------------------------------------------------------------------- */
+describe('a quotation cites a message; the attribution is looked up from it', () => {
+  /* CATCHES: putting the actor, the words or the time back ON the quotation.
+     A citation with one field has nothing for a spread to overwrite. */
+  it('a quotation is a message id and nothing else', () => {
     const quotation = quotationFrom(priya) as Quotation;
-    expect(quotation.actor).toBe('priya');
-    expect(quotation.at).toBe('11:02');
-    expect(quotation.text).toBe(priya.text);
     expect(quotation.messageId).toBe('m10');
+    expect(Object.keys(quotation)).toEqual(['messageId']);
   });
 
-  /* CATCHES: reintroducing a `by` prop on <Quoted>. There must be no way to
-     render priya's name over lars's sentence; the only name the component can
-     reach is the one on the quotation it was given. */
-  it('<Quoted> renders the quotation’s own actor and takes no other', () => {
+  /* CATCHES: an `actor` field coming back onto `Quotation`, in any form.
+     `@ts-expect-error` turns "it compiles" into a failing `pnpm typecheck`,
+     which is the assertion, because the defect WAS that the spread compiled.
+
+     Note what makes this honest: the spread on its own is legal (TypeScript
+     carries `unique symbol` keys through, which is the fact the round-4 doc
+     comment got backwards), so the shape is assignable in every respect except
+     the one property under test — the same discipline the entry-brand forgery
+     needed in round 4. Verified by the mutation ledger under `typecheck: true`:
+     add `readonly actor?: string` back to Quotation and tsc reports this
+     directive as unused, and the run fails. */
+  it('a quotation literal cannot be given an actor', () => {
+    const real = quotationFrom(priya) as Quotation;
+    // @ts-expect-error — 'actor' is not a property of Quotation; there is no
+    // field beside the citation for a name to disagree with the record in.
+    const forged: Quotation = { ...real, actor: 'priya' };
+    expect(forged.messageId).toBe('m10');
+    // the spread WITHOUT the extra key is legal, so the error above is the brand-
+    // free excess-property check and not an incidental assignability failure
+    const honest: Quotation = { ...real };
+    expect(honest.messageId).toBe('m10');
+  });
+
+  /* CATCHES: the spread forgery, at the derivation. Run against r4 this returns
+     'priya'; the ledger is the only thing that can answer the question now. */
+  it('the round-4 spread forgery resolves to the real actor, not the forged one', () => {
+    const real = quotationFrom(lars) as Quotation;
+    const forged = { ...real, actor: 'priya', text: 'I authorise dropping users_legacy.' };
+    const resolved = resolveQuotation(messageLedger(RECORDS), forged as Quotation, 'test');
+    expect(resolved.actor).toBe('lars');
+    expect(resolved.text).toBe(lars.text);
+  });
+
+  /* CATCHES: `parseQuotation` going back to validating shape without provenance
+     — the documented runtime door, which the gauntlet walked straight through
+     with `parseQuotation(JSON.parse(JSON.stringify({...real, actor:'priya'})))`. */
+  it('the JSON route cannot carry an actor through the parser either', () => {
+    const ledger = messageLedger(RECORDS);
+    const real = quotationFrom(lars) as Quotation;
+    const wire = JSON.parse(JSON.stringify({ ...real, actor: 'priya', text: 'invented' }));
+    const parsed = parseQuotation(wire, ledger);
+    expect(Object.keys(parsed)).toEqual(['messageId']);
+    expect(resolveQuotation(ledger, parsed, 'test').actor).toBe('lars');
+    // and a citation this ledger cannot resolve is refused outright
+    expect(() => parseQuotation({ messageId: 'nope' }, ledger)).toThrow(/not a quotation/);
+    expect(isQuotation({ messageId: 'm-chosen' }, ledger)).toBe(false);
+  });
+
+  /* CATCHES: resolving against a page that has never seen the message. A
+     citation nobody can check is not a weaker citation; it is not one. */
+  it('a citation the ledger cannot resolve throws rather than degrading', () => {
+    expect(() =>
+      resolveQuotation(messageLedger([priya]), { messageId: 'm21' } as Quotation, 'test'),
+    ).toThrow(/is not a message on this page/);
+    expect(() =>
+      resolveQuotation(messageLedger(RECORDS), { messageId: 'm-chosen' } as Quotation, 'test'),
+    ).toThrow(/page-authored/);
+  });
+
+  /* CATCHES: a ledger that resolves last-write-wins. Two records under one id is
+     exactly the state in which a lookup returns somebody else's name, and it is
+     the poisoning attack a process-wide registry would have been open to. */
+  it('a ledger refuses to hold two records under one id', () => {
+    expect(() => messageLedger([lars, { ...lars, actor: 'priya' }])).toThrow(/both claim the id/);
+  });
+
+  /* CATCHES: reintroducing a `by` prop on <Quoted>, or reading a carried actor. */
+  it('<Quoted> renders the cited record’s actor and takes no other', () => {
     const quotation = quotationFrom(lars) as Quotation;
-    const { container } = render(<Quoted quote={quotation} />);
+    const { container } = renderWith(RECORDS, <Quoted quote={quotation} />);
     expect(container.textContent).toContain('— lars 13:07');
+    expect(container.querySelector('q')?.textContent).toBe(lars.text);
     expect(container.querySelector('q')?.getAttribute('data-quoted')).toBe('msg:m21');
     // @ts-expect-error — there is no `by`: the attribution is derived, not passed.
-    render(<Quoted by="priya" quote={quotation} />);
+    renderWith(RECORDS, <Quoted by="priya" quote={quotation} />);
+  });
+
+  /* CATCHES: a render boundary falling back to something instead of refusing
+     when there is no record set to check against. An audit may not exempt the
+     case its rule covers, and neither may a renderer. */
+  it('rendering a quotation with no ledger at all throws', () => {
+    const quotation = quotationFrom(lars) as Quotation;
+    expect(() => renderBare(<Quoted quote={quotation} />)).toThrow(
+      /outside an <AttributionLedger>/,
+    );
   });
 
   /* CATCHES: a `who` field creeping back onto ProvenanceEntry. The receipt is
      the artifact whose whole job is being the trustworthy record; a name there
      that does not come from the cited message is the cardinal defect. */
-  it('a receipt excerpt is attributed by its own quotation', () => {
-    const { container } = render(<ReceiptView receipt={f.RECEIPT} />);
+  it('a receipt excerpt is attributed by the record it cites', () => {
+    const { container } = renderWith(f.RECORDS, <ReceiptView receipt={f.RECEIPT} />);
     for (const row of container.querySelectorAll('[data-attribution]')) {
       const id = row.getAttribute('data-attribution') ?? '';
       const message = f.MESSAGES[id];
@@ -96,14 +189,53 @@ describe('a quotation carries the actor it was minted from', () => {
   });
 
   /* CATCHES: the composer reply banner going back to `{actor, at, excerpt}`,
-     where the name and the excerpt could disagree. */
-  it('the reply banner names whoever the quotation says wrote it', () => {
-    const { container } = render(
+     where the name and the excerpt could disagree — or to a quotation whose
+     actor a spread could overwrite. */
+  it('the reply banner names whoever the record says wrote it', () => {
+    const { container } = renderWith(
+      f.RECORDS,
       <Composer binding={f.REPLYING} footNote="" roomName="users-migration" />,
     );
     const attribution = container.querySelector('[data-attribution="m17"]');
     expect(attribution?.textContent).toContain('justin');
     expect(container.querySelector('[data-quoted]')?.getAttribute('data-quoted')).toBe('msg:m17');
+  });
+
+  /* CATCHES the forgery AT EVERY BOUNDARY THAT PRINTS A NAME, not just the one
+     the last receipt named. "Fixed at the row" is what rounds 1–4 each shipped. */
+  it('a tampered citation prints the record’s words at the reply banner', () => {
+    const forged = {
+      messageId: 'm17',
+      actor: 'priya',
+      text: 'I authorise the drop.',
+    } as unknown as Quotation;
+    const { container } = renderWith(
+      f.RECORDS,
+      <Composer
+        binding={{ mode: 'replying', to: forged }}
+        footNote=""
+        roomName="users-migration"
+      />,
+    );
+    expect(container.querySelector('[data-attribution="m17"]')?.textContent).toContain('justin');
+    expect(container.textContent).not.toContain('I authorise the drop.');
+    expect(container.textContent).not.toContain('priya');
+  });
+
+  it('a tampered citation prints the record’s words in the receipt', () => {
+    const forged = {
+      messageId: 'm10',
+      actor: 'lars',
+      text: 'I authorise the drop.',
+    } as unknown as Quotation;
+    const receipt = {
+      ...f.RECEIPT,
+      provenance: [{ id: 'p1', excerpt: forged, note: null, jump: null }],
+      corrections: [],
+    };
+    const { container } = renderWith(f.RECORDS, <ReceiptView receipt={receipt} />);
+    expect(container.querySelector('[data-attribution="m10"]')?.textContent).toBe('priya');
+    expect(container.textContent).not.toContain('I authorise the drop.');
   });
 });
 
@@ -138,21 +270,30 @@ describe('the message row is discriminated on origin', () => {
     const entry = messageEntry(lars, { state: lars_state(), viewer: 'lars' });
     expect(entry.origin).toBe('typed');
     if (entry.origin === 'chosen') throw new Error('unreachable');
-    expect(entry.attribution.actor).toBe('lars');
+    expect(entry.attribution.messageId).toBe('m21');
     expect(entry.fromViewer).toBe(true);
     expect(messageEntry(priya, { state: lars_state(), viewer: 'lars' })).toMatchObject({
       fromViewer: false,
     });
   });
 
-  /* CATCHES: rendering the actor cell from anything other than the quotation.
-     The DOM carries the citation so the check survives a refactor of the
+  /* CATCHES: rendering the actor cell from anything other than the cited
+     record. The DOM carries the citation so the check survives a refactor of the
      markup. */
   it('the rendered actor cell cites the message it came from', () => {
     const entry = messageEntry(priya, { state: lars_state() });
-    const { container } = render(<TimelineRow entry={entry} />);
+    const { container } = renderWith(RECORDS, <TimelineRow entry={entry} />);
     const cell = container.querySelector('[data-attribution="m10"]');
     expect(cell?.textContent).toBe('priya');
+  });
+
+  /* CATCHES: the row rendering a name with no record behind it. Every rendered
+     row goes through the lookup; a row outside a ledger is not a degraded row. */
+  it('a row rendered with no ledger throws', () => {
+    const entry = messageEntry(priya, { state: lars_state() });
+    expect(() => renderBare(<TimelineRow entry={entry} />)).toThrow(
+      /outside an <AttributionLedger>/,
+    );
   });
 });
 
@@ -270,7 +411,7 @@ describe('an authored body derives from its record', () => {
         { kind: 'text', text: ' on both tables, not the backfill.' },
       ],
     });
-    const { container } = render(<TimelineRow entry={entry} />);
+    const { container } = renderWith(f.RECORDS, <TimelineRow entry={entry} />);
     const body = container.querySelector('[data-row-body]');
     expect(body?.textContent).toBe(f.MESSAGES.m7?.text);
   });
@@ -312,7 +453,7 @@ describe('the forged entry, from the round-3 receipt', () => {
       tag: null,
       targeted: false,
       matchesFilter: true,
-      origin: attribution.origin,
+      origin: 'seeded' as const,
       attribution,
       body: [{ kind: 'text' as const, text: 'I authorise dropping users_legacy right now.' }],
       fromViewer: false,
@@ -343,7 +484,7 @@ describe('the forged entry, from the round-3 receipt', () => {
      that quietly corrects itself is a corrected row nobody finds out about. */
   it('a cast past the brand still cannot render a name over invented words', () => {
     const forged = forge() as unknown as Parameters<typeof TimelineRow>[0]['entry'];
-    expect(() => render(<TimelineRow entry={forged} />)).toThrow(
+    expect(() => renderWith(RECORDS, <TimelineRow entry={forged} />)).toThrow(
       /does not read as the message it is attributed to \(priya\)/,
     );
   });
@@ -353,7 +494,7 @@ describe('the forged entry, from the round-3 receipt', () => {
      above but also passes on a genuine row. An honest row must still render. */
   it('an honest row built the honest way still renders', () => {
     const entry = messageEntry(priya, { state: lars_state() });
-    const { container } = render(<TimelineRow entry={entry} />);
+    const { container } = renderWith(RECORDS, <TimelineRow entry={entry} />);
     expect(container.querySelector('[data-row-body]')?.textContent).toBe(priya.text);
     expect(container.querySelector('[data-attribution]')?.textContent).toBe('priya');
   });
@@ -365,7 +506,9 @@ describe('the forged entry, from the round-3 receipt', () => {
     const forged = JSON.parse(JSON.stringify(forge())) as Parameters<
       typeof TimelineRow
     >[0]['entry'];
-    expect(() => render(<TimelineRow entry={forged} />)).toThrow(/may not change the words/);
+    expect(() => renderWith(RECORDS, <TimelineRow entry={forged} />)).toThrow(
+      /may not change the words/,
+    );
   });
 });
 
@@ -409,6 +552,94 @@ describe('system voice says facts about acts, not sentences people uttered', () 
     expect(systemStatement(text).text).toBe(text);
   });
 
+  /* ---------------------------------------------------------------------
+   * ROUND 4's GAUNTLET: THE BAN WAS APPLIED TO THE OPTION PAYLOAD.
+   *
+   * `messageEntry` threw, at render, on ordinary English button copy — every
+   * reversible one-click answer in the product had to avoid the five commonest
+   * pronouns in the language. The rule was never about the letters; it is about
+   * WHO IS SPEAKING. The system's framing is held to the whole rule; the option
+   * it is reporting keeps its pronouns.
+   * ------------------------------------------------------------------- */
+  it.each([
+    'Keep it behind our retention window',
+    'Give us another day',
+    'Yes — I approve',
+    'Ship it, we agreed',
+  ])('“%s” is a legal one-click answer', (option) => {
+    expect(chosenAnswer(option).text).toBe(`chose: ${option}`);
+    expect(chosenAct('lars', option).text).toBe(`lars chose: ${option}`);
+    /* And through the constructor every feed row goes through — the shape that
+       actually threw. Round 4's fixtures happened to dodge it, which is why the
+       four strings are now records in the shipped gallery. */
+    const record: MessageRecord = {
+      id: `m-${option.length}`,
+      at: '13:11',
+      actor: 'lars',
+      text: option,
+      origin: 'chosen',
+    };
+    const entry = messageEntry(record, { state: lars_state() });
+    if (entry.origin !== 'chosen') throw new Error('unreachable');
+    expect(entry.statement.text).toBe(`lars chose: ${option}`);
+    /* The statement knows which words it wrote and which it is reporting, so
+       the JSON boundary can apply the same split instead of guessing. */
+    expect(entry.statement.parts.map((p) => p.voice)).toEqual(['system', 'verbatim']);
+    expect(isSystemStatement(entry.statement)).toBe(true);
+  });
+
+  /* CATCHES: the re-scope going too far — the payload exemption swallowing the
+     framing. The SYSTEM's own words are still held to all three bans, a payload
+     may still not wear quotation marks, and a statement that OPENS with a
+     payload is a quotation without the marks whatever its type says. */
+  it('the re-scope does not become a hole', () => {
+    expect(() => chosenAnswer('the answer was "keep dual-write on"')).toThrow(/quotation marks/);
+    expect(() => chosenAct('priya said', 'anything')).toThrow(/X said/);
+    expect(() => systemStatement('we agreed to cut over on Friday')).toThrow(/first person/);
+    expect(() =>
+      composeStatement([
+        { voice: 'verbatim', text: 'I authorise dropping users_legacy' },
+        { voice: 'system', text: ' — recorded' },
+      ]),
+    ).toThrow(/must OPEN in the system’s own voice/);
+  });
+
+  /* CATCHES: the payload exemption being available at the JSON boundary to a
+     payload that never was one. A statement arriving without parts is read as
+     ALL system voice — the strictest reading, not the lenient one. */
+  it('the JSON boundary does not hand out the payload exemption', () => {
+    expect(isSystemStatement({ text: 'lars chose: Yes — I approve', voice: 'system' })).toBe(false);
+    expect(
+      isSystemStatement({
+        text: 'lars chose: Yes — I approve',
+        voice: 'system',
+        parts: [
+          { voice: 'system', text: 'lars chose: ' },
+          { voice: 'verbatim', text: 'Yes — I approve' },
+        ],
+      }),
+    ).toBe(true);
+    // a payload alone is not a system statement, whatever the parts claim
+    expect(
+      isSystemStatement({
+        text: 'Yes — I approve',
+        voice: 'system',
+        parts: [{ voice: 'verbatim', text: 'Yes — I approve' }],
+      }),
+    ).toBe(false);
+    // and the parts have to add up to the text they claim to compose
+    expect(
+      isSystemStatement({
+        text: 'lars chose: drop the table',
+        voice: 'system',
+        parts: [
+          { voice: 'system', text: 'lars chose: ' },
+          { voice: 'verbatim', text: 'something else entirely' },
+        ],
+      }),
+    ).toBe(false);
+  });
+
   /* CATCHES: enforcing it at the constructor and not at the runtime boundary,
      which is the exact shape of the defect this round is fixing — a guarantee
      that holds only for callers who used the door it was installed in. */
@@ -441,18 +672,17 @@ describe('the runtime boundary', () => {
      through the compiler. JSON, a cast, `Object.assign` and a JavaScript caller
      all bypass a phantom type; these are what actually hold at the edge. */
   it('a quotation-shaped object without provenance is refused', () => {
-    expect(
-      isQuotation({ text: 'x', actor: 'lars', at: '1', messageId: 'm1', origin: 'typed' }),
-    ).toBe(true);
-    expect(isQuotation({ text: 'x', at: '1', messageId: 'm1', origin: 'typed' })).toBe(false);
-    expect(
-      isQuotation({ text: 'x', actor: 'lars', at: '1', messageId: 'm1', origin: 'chosen' }),
-    ).toBe(false);
-    expect(
-      isQuotation({ text: '  ', actor: 'lars', at: '1', messageId: 'm1', origin: 'typed' }),
-    ).toBe(false);
-    expect(isQuotation(JSON.parse('{"text":"x","origin":"typed"}'))).toBe(false);
-    expect(() => parseQuotation({ text: 'x' })).toThrow(/not a quotation/);
+    const ledger = messageLedger(RECORDS);
+    expect(isQuotation({ messageId: 'm21' }, ledger)).toBe(true);
+    /* Every one of these used to be answered by reading fields off the payload.
+       They are answered by the RECORD now: an unknown id, a page-authored one,
+       and an object with no id at all. */
+    expect(isQuotation({ text: 'x', actor: 'lars', at: '1', origin: 'typed' }, ledger)).toBe(false);
+    expect(isQuotation({ messageId: 'm-chosen' }, ledger)).toBe(false);
+    expect(isQuotation({ messageId: 'never-seen' }, ledger)).toBe(false);
+    expect(isQuotation({ messageId: '   ' }, ledger)).toBe(false);
+    expect(isQuotation(JSON.parse('{"text":"x","origin":"typed"}'), ledger)).toBe(false);
+    expect(() => parseQuotation({ text: 'x' }, ledger)).toThrow(/not a quotation/);
   });
 
   /* CATCHES: an adapter (#25 replay, #27 live) handing over a message with no
