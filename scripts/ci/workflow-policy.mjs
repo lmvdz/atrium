@@ -20,8 +20,30 @@
  * the policy, its self-test, the reporters and the floors all execute from the
  * revision under test, so an author who can edit this file can edit what it
  * checks. The rules below make that expensive and loud, not impossible.
- * Adversarial closure is the governance trigger in the README — required-check
- * rulesets, pull requests, and code-owner review — not anything in this file.
+ *
+ * Being exact about the four things a green run here does not claim, because
+ * "not against a malicious author" is true and too vague to act on:
+ *
+ *   1. **Not semantics.** The rules pin invocation *shape*. Replacing an assert
+ *      script's body with `process.exit(0)` satisfies all of them. And shape is
+ *      not reachability: `false && git fetch …` is a real command in command
+ *      position, and nothing here evaluates the guard.
+ *   2. **Not executable provenance.** Recognition is by command *word*.
+ *      `no-command-shadowing` bans the obvious redefinitions; a list of
+ *      spellings is not a proof that `git` is git.
+ *   3. **Not self-reference-proof.** This file, its self-test, and the README
+ *      readback that keeps the prose counts honest all come from the revision
+ *      under test — the readback compares a number against prose the same
+ *      commit wrote.
+ *   4. **Not complete about mutation purity.** A mutation must fire its own
+ *      rule and declare any other rule it trips. An *extra* violation of the
+ *      same rule goes unnoticed, and an `also` entry's reason is prose.
+ *
+ * All four are owned by the governance trigger in the README — required-check
+ * rulesets, pull requests, and code-owner review, before a second contributor
+ * gets write access or this repository goes public. They are recorded here
+ * rather than chased, because a check that runs from the revision it judges
+ * cannot close any of them at any level of effort.
  *
  * KNOWN GAP, STATED RATHER THAN CHASED: composite-action bodies are not
  * expanded. A step written `uses: ./.github/actions/run-gates` has its real
@@ -41,6 +63,14 @@
 
 import { readFileSync } from 'node:fs';
 import { isAlias, isCollection, parseDocument, visit } from 'yaml';
+import {
+  basename,
+  completedCommands,
+  firstOperand,
+  LAUNCHER_NAMES,
+  PACKAGE_MANAGER_NAMES,
+  parseScript,
+} from './shell-command.mjs';
 
 /** A pinned action reference: `owner/repo@<40 hex>`, optionally `owner/repo/path@sha`. */
 const PINNED_USES = /^[^@\s]+@([0-9a-f]{40})$/;
@@ -101,61 +131,138 @@ export const RULES = [
   'required-job-steps',
   'required-step-prerequisites',
   'no-remote-reusable-workflow',
+  'no-command-shadowing',
 ];
 
 /**
- * Command position: the start of a line in a `run:` script, optionally behind a
- * package-manager `… exec ` prefix, because half of these run through
- * `pnpm --filter X exec …`.
+ * Command recognition: a parse, not a pattern.
  *
- * ── WHY EVERY MATCHER GOES THROUGH THIS (round 5) ───────────────────────────
- * Round 4 gave *required steps* this treatment and left *prerequisites* on plain
- * substring tests, and the round-4 gauntlet found what that costs. The pair that
- * named the whole rule — `assert-floor-ratchet.mjs` needs the `git fetch` of
- * `origin/main` — was satisfied by
+ * ── WHY THIS IS A PARSER (round 6) ──────────────────────────────────────────
+ * Round 4 matched required steps and prerequisites by substring, so
+ * `echo 'git fetch … refs/heads/main'` satisfied the pair that named the rule
+ * while `origin/main` never arrived and the ratchet took its no-baseline exit-0
+ * path — policy green *and* runtime green over a fetch that never happened.
+ * Round 5 replaced that with a line-start regular expression carrying an
+ * optional package-manager prefix:
  *
- *     run: echo 'git fetch --no-tags --depth=1 origin +refs/heads/main:…'
+ *     (?:^|\n)[^\S\n]*(?:(?:pnpm|npm|npx|yarn|bunx?)[^\n]*?\bexec\s+)?
  *
- * The policy went green because the text was there; the ratchet went green
- * because `origin/main` was not, so it took its no-baseline exit-0 path. Policy
- * green *and* runtime green, over a fetch that never happened: the exact
- * fail-open the rule was written to close, reproduced by the rule itself. A
- * substring test cannot tell a command from a sentence about a command, and a
- * prerequisite is a claim about something *running*.
+ * and the round-5 gauntlet took nine words to defeat it. `[^\n]*?` between the
+ * manager and `exec` is arbitrary text, so
  *
- * So there is now one notion of "this ran" in this file, and every step test and
- * every prerequisite test is built from it. The prefix is restricted to real
- * package-manager `exec` forms rather than any `\S…exec`, so `echo pnpm exec …`
- * cannot creep back in through the prefix either.
+ *     pnpm --version && echo exec node scripts/ci/assert-floor-ratchet.mjs
  *
- * That is deliberately a claim about *invocation shape* and nothing more: see
- * the SCOPE note above and the one in ci.yml. It stops
- * `echo node scripts/ci/assert-tables.mjs` and `echo 'git fetch …'` from
- * satisfying a rule; it cannot stop the script's own contents being replaced
- * with `process.exit(0)`, and nothing in a workflow can.
+ * matched: the regex ate through `echo exec ` and matched the tail. Every
+ * protected step and every prerequisite fell to that one-line rewrite. The same
+ * expression was wrong in the other direction as well — it rejected
+ * `(git fetch …)`, `true && git fetch …`, `VAR=x git fetch …`, `sudo …`,
+ * `timeout 30 …`, `command git …`, `xargs … git …` and any backslash
+ * continuation, while *accepting* `git fetch … &`, which does not establish that
+ * the fetch finished before the step that needs it.
+ *
+ * A guard that is wrong in both directions is worse than the one it replaced, so
+ * round 6 does not write a third regex. `shell-command.mjs` tokenizes the script
+ * — quoting, escapes, comments, expansions, redirections, here-documents,
+ * operators, subshells — and yields simple commands with the word in command
+ * position first. A matcher is then a predicate over `argv`, and `echo exec node
+ * x` is an `echo` with two arguments no matter how it is spaced. See that file
+ * for the four boundaries this deliberately does not cross.
+ *
+ * That is still a claim about *invocation shape* and nothing more: see the SCOPE
+ * note above and the one in ci.yml. It stops `echo node scripts/ci/assert-x.mjs`
+ * and `pnpm … echo exec node …` from satisfying a rule; it cannot stop the
+ * script's own contents being replaced with `process.exit(0)`, and nothing in a
+ * workflow can.
  */
-const COMMAND_POSITION = String.raw`(?:^|\n)[^\S\n]*(?:(?:pnpm|npm|npx|yarn|bunx?)[^\n]*?\bexec\s+)?`;
 
-/** A command actually being run, rather than named. `pattern` is regex source. */
-function runs(pattern) {
-  return new RegExp(COMMAND_POSITION + pattern);
+/** Every matcher built below, so the shadowing rule can derive what it protects. */
+const MATCHERS = [];
+
+class CommandMatcher {
+  constructor(describes, names, match) {
+    this.describes = describes;
+    this.names = names;
+    this.match = match;
+  }
+
+  /** True when some simple command in `script` runs this, and completes. */
+  test(script) {
+    return completedCommands(script).some((command) => this.match(command));
+  }
+
+  /** Violation messages print this, so a red build says what shape was wanted. */
+  toString() {
+    return this.describes;
+  }
+}
+
+/**
+ * @param {string} describes what a human should read in a violation message
+ * @param {string[]} names the command words this recognition depends on
+ * @param {(command: object) => boolean} match predicate over one simple command
+ */
+function command(describes, names, match) {
+  const matcher = new CommandMatcher(describes, names, match);
+  MATCHERS.push(matcher);
+  return matcher;
 }
 
 /** A script in `scripts/ci/` being *invoked*, not merely mentioned. */
 function invokes(script) {
-  return runs(String.raw`node\s+(?:\.\.\/)*scripts\/ci\/${script}\b`);
+  const path = new RegExp(String.raw`^(?:\.\.\/)*scripts\/ci\/${script}$`);
+  return command(`\`node …/scripts/ci/${script.replace(/\\/g, '')}\``, ['node'], ({ argv }) => {
+    if (argv[0] !== 'node') return false;
+    const operand = firstOperand(argv);
+    return operand !== undefined && path.test(operand);
+  });
+}
+
+/** A package.json script run through the workspace's package manager. */
+function packageScript(name) {
+  return command(`\`pnpm ${name}\``, [...PACKAGE_MANAGER_NAMES], ({ raw, argv }) => {
+    return PACKAGE_MANAGER_NAMES.includes(raw[0]) && argv[0] === name;
+  });
+}
+
+/** A binary and its subcommand, however the package manager reaches it. */
+function binary(name, ...subcommand) {
+  const shown = [name, ...subcommand].join(' ');
+  return command(`\`${shown}\``, [name], ({ argv }) => {
+    if (basename(argv[0]) !== name) return false;
+    return subcommand.every((word, index) => argv[index + 1] === word);
+  });
 }
 
 /**
  * A run-scoped variable being *exported to the rest of the job*.
  *
- * `echo "VITEST_RUN_START=$(date +%s%3N)"` prints a line; only the `>>
- * "$GITHUB_ENV"` half makes the later gate able to read it. Round 4 matched
+ * `echo "VITEST_RUN_START=$(date +%s%3N)"` prints a line; only the redirection
+ * into `$GITHUB_ENV` makes the later gate able to read it. Round 4 matched
  * `/\bVITEST_RUN_START=/`, which a comment about the timestamp satisfies as
- * happily as the assignment does — the same defect as the fetch, one step over.
+ * happily as the assignment does. Round 5 required the redirection but wrote the
+ * target as `\$\{?GITHUB_ENV\b`, which `>> "$GITHUB_ENV.bak"` satisfies — a word
+ * boundary sits between `V` and `.`, so a file nobody reads passed as the job
+ * environment. The target is now compared as a whole word: exactly
+ * `$GITHUB_ENV` or `${GITHUB_ENV}`, and the `$` must be live rather than
+ * single-quoted, because `>> '$GITHUB_ENV'` writes a file with a funny name and
+ * exports nothing at all.
  */
+// biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion, quoted verbatim
+const JOB_ENV_FILE = new Set(['$GITHUB_ENV', '${GITHUB_ENV}']);
+
 function exportsToJobEnv(name) {
-  return runs(String.raw`(?:echo|printf)\s+"?${name}=[^\n]*>>\s*"?\$\{?GITHUB_ENV\b`);
+  return command(
+    `\`echo ${name}=… >> "$GITHUB_ENV"\``,
+    ['echo', 'printf'],
+    ({ argv, redirections }) => {
+      if (argv[0] !== 'echo' && argv[0] !== 'printf') return false;
+      if (!(argv[1] ?? '').startsWith(`${name}=`)) return false;
+      return redirections.some(
+        ({ op, target }) =>
+          (op === '>>' || op === '>') && target.expandable && JOB_ENV_FILE.has(target.value),
+      );
+    },
+  );
 }
 
 /**
@@ -208,20 +315,29 @@ function exportsToJobEnv(name) {
  * the schema assertion. One matcher per command means the two rules can never
  * drift into disagreeing about what "the migrations ran" means.
  */
-const RUNS_ACTIONLINT = runs(String.raw`"?\S*actionlint"?\s+-{1,2}color\b`);
-const RUNS_LINT = runs(String.raw`pnpm\s+(?:run\s+)?lint\b`);
-const RUNS_TYPECHECK = runs(String.raw`pnpm\s+(?:run\s+)?typecheck\b`);
-const RUNS_BUILD = runs(String.raw`pnpm\s+(?:run\s+)?build\b`);
+const RUNS_ACTIONLINT = command('`actionlint -color`', ['actionlint'], ({ argv }) => {
+  return (
+    basename(argv[0]) === 'actionlint' &&
+    argv.slice(1).some((word) => word === '-color' || word === '--color')
+  );
+});
+const RUNS_LINT = packageScript('lint');
+const RUNS_TYPECHECK = packageScript('typecheck');
+const RUNS_BUILD = packageScript('build');
 const WAITS_FOR_POSTGRES = invokes('wait-for-postgres\\.mjs');
-const RUNS_MIGRATIONS = runs(String.raw`drizzle-kit\s+migrate\b`);
-const RUNS_VITEST = runs(String.raw`pnpm\s+vitest\s+run\b`);
-const INSTALLS_CHROMIUM = runs(String.raw`playwright\s+install\b`);
+const RUNS_MIGRATIONS = binary('drizzle-kit', 'migrate');
+const RUNS_VITEST = binary('vitest', 'run');
+const INSTALLS_CHROMIUM = binary('playwright', 'install');
 const ASSERTS_CHROMIUM = invokes('assert-chromium\\.mjs');
-const RUNS_PLAYWRIGHT = runs(String.raw`playwright\s+test\b`);
+const RUNS_PLAYWRIGHT = binary('playwright', 'test');
 
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
-  test: runs(String.raw`git\s+fetch\b[^\n]*\brefs\/heads\/main\b`),
+  test: command('`git fetch … refs/heads/main`', ['git'], ({ argv }) => {
+    if (basename(argv[0]) !== 'git') return false;
+    if (firstOperand(argv) !== 'fetch') return false;
+    return argv.slice(1).some((word) => word.includes('refs/heads/main'));
+  }),
   because:
     'without it the shallow clone actions/checkout leaves has no `origin/main`, so the ratchet finds no baseline, reports that politely, and exits 0 — a floor lowered in the same pull request would sail through the very gate that exists to catch it',
 };
@@ -408,6 +524,104 @@ export const PREREQUISITE_PAIRS = Object.entries(REQUIRED_STEPS).flatMap(([jobId
   ),
 );
 
+/**
+ * The command words every rule above depends on meaning what they say.
+ *
+ * Derived from the matchers themselves — plus the launchers and package managers
+ * `shell-command.mjs` unwraps, since shadowing `timeout` or `pnpm` defeats
+ * recognition just as thoroughly as shadowing `git`. A matcher added without a
+ * thought for this list still protects its own command word.
+ */
+export const PROTECTED_COMMANDS = [
+  ...new Set([
+    ...MATCHERS.flatMap((matcher) => matcher.names),
+    ...LAUNCHER_NAMES,
+    ...PACKAGE_MANAGER_NAMES,
+  ]),
+].sort();
+
+/** Ways to make a command word mean something other than the command. */
+const SHADOWING_BUILTINS = new Set(['alias', 'export', 'declare', 'typeset', 'readonly', 'local']);
+
+/**
+ * Obvious redefinitions of a protected command word.
+ *
+ * ── WHAT THIS DOES AND DOES NOT PROVE ───────────────────────────────────────
+ * Every rule in this file recognises a command by its *word*. `git fetch …` in
+ * command position is a genuine invocation of whatever `git` resolves to, and a
+ * shell function or a PATH entry can make that anything:
+ *
+ *     git() { :; }                        # the fetch runs, and does nothing
+ *     export PATH="$PWD/fake:$PATH"       # so does this
+ *
+ * Both are banned here, along with `alias git=…`, `hash -p`, and writes to
+ * `$GITHUB_PATH` (which prepends to PATH for every later step in the job).
+ * That is a list of spellings, and a list of spellings is not a proof. Executable
+ * *provenance* — that the `git` this step runs is the git the runner image
+ * shipped — cannot be established by reading the workflow, because anything that
+ * would check it also runs from the revision under test. It is owned by the
+ * governance trigger in the README, and this rule exists to make the obvious
+ * forms loud rather than to claim the class is closed.
+ */
+function checkCommandShadowing(script, where, add, path) {
+  const { commands, functions } = parseScript(script);
+  const protectedWord = (name) => PROTECTED_COMMANDS.includes(basename(name));
+
+  for (const name of functions) {
+    if (protectedWord(name)) {
+      add(
+        'no-command-shadowing',
+        `${path}: the script at ${where} defines a shell function \`${name}()\`, which is one of the command words this policy recognises. Every presence rule here reads a command by its name, so redefining that name turns a gate that is present, named and invoked into a gate that does nothing.`,
+      );
+    }
+  }
+
+  for (const { raw, argv, assignments, redirections } of commands) {
+    for (const { name } of assignments) {
+      if (name === 'PATH') {
+        add(
+          'no-command-shadowing',
+          `${path}: the script at ${where} assigns \`PATH\`. Prepending a directory to PATH decides which binary every command word in this file resolves to, which is the same bypass as redefining the command outright.`,
+        );
+      }
+    }
+    if (SHADOWING_BUILTINS.has(raw[0])) {
+      for (const word of raw.slice(1)) {
+        if (word.startsWith('PATH=') || word === 'PATH') {
+          add(
+            'no-command-shadowing',
+            `${path}: the script at ${where} runs \`${raw[0]} PATH=…\`. Prepending a directory to PATH decides which binary every command word in this file resolves to.`,
+          );
+        }
+        if (raw[0] === 'alias' && protectedWord(word.split('=')[0])) {
+          add(
+            'no-command-shadowing',
+            `${path}: the script at ${where} aliases \`${word.split('=')[0]}\`, which is one of the command words this policy recognises.`,
+          );
+        }
+      }
+    }
+    if (argv[0] === 'hash' && raw.includes('-p')) {
+      add(
+        'no-command-shadowing',
+        `${path}: the script at ${where} runs \`hash -p\`, which points a command word at a path of its own choosing.`,
+      );
+    }
+    // `echo "$PWD/fake" >> "$GITHUB_PATH"` prepends to PATH for every later step
+    // in the job — the same shadowing, spelled as a file write.
+    if (
+      redirections.some(
+        ({ target }) => target.expandable && /^\$\{?GITHUB_PATH\}?$/.test(target.value),
+      )
+    ) {
+      add(
+        'no-command-shadowing',
+        `${path}: the script at ${where} writes to \`$GITHUB_PATH\`, which prepends a directory to PATH for every later step in the job. Invoke the binary by its full path instead.`,
+      );
+    }
+  }
+}
+
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -527,6 +741,7 @@ export function checkWorkflow(source, path = '<workflow>') {
           `${path}: attacker-controllable \`github.event\` context interpolated into the script at ${where}. Pass it through \`env:\` instead.`,
         );
       }
+      checkCommandShadowing(value, where, add, path);
     }
   }
 

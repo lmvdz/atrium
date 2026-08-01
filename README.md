@@ -341,7 +341,11 @@ zero tests exits 0 just like one that passed 315:
   means rooted at a binding actually *derived* from the runner, per name: a
   module that imports `vitest` for its own assertions and also exports domain
   code does not turn that domain code's `.fails` property into an annotation.
-  17 spellings and 6 lookalikes are fixtures in `gate-selftest.mjs`.
+  That holds through a namespace too: `import * as helpers from './lib'` taints
+  the members of `helpers` that are runner-derived and no others, so
+  `helpers.knownBroken.fails` is an annotation and `helpers.validate().fails` is
+  a count of failures in a domain object. 18 spellings and 7 lookalikes are
+  fixtures in `gate-selftest.mjs`.
 - **The source scan is an independent witness, not a complete one**, and the
   difference is load-bearing. It cannot see an annotation behind a bare or
   aliased import specifier, a computed key it would have to constant-fold
@@ -370,16 +374,33 @@ zero tests exits 0 just like one that passed 315:
   Every number in this section is now read back out of the code by the
   self-tests, prose included, because deriving a count at the point it is
   printed does nothing for the copy of it sitting in a README.
-- **A prerequisite must be *invoked*, not mentioned.** Round 4 matched
-  prerequisites by substring, so `run: echo 'git fetch … refs/heads/main'`
-  satisfied the pair while `origin/main` never existed and the ratchet took its
-  no-baseline exit-0 path — policy green and run green over a fetch that never
-  happened, which is the fail-open the rule was added to close, reproduced by
-  the rule. Every step test and every prerequisite test now goes through one
-  matcher that recognises a command at the start of a line (optionally behind a
-  package-manager `exec`) and nowhere else. Seven "gutted but matching"
-  mutations — each step's script quoted into an `echo` of itself — are in the
-  self-test.
+- **A protected step must be *invoked*, not mentioned — and recognition is a
+  parse, not a pattern.** Round 4 matched by substring, so
+  `run: echo 'git fetch … refs/heads/main'` satisfied the pair while
+  `origin/main` never existed and the ratchet took its no-baseline exit-0 path.
+  Round 5 replaced that with a line-start regular expression, and nine words
+  defeated it: `pnpm --version && echo exec node scripts/ci/assert-floor-ratchet.mjs`
+  matched, because arbitrary text was allowed between a package manager and a
+  later `exec`. The same expression was wrong in the other direction too — it
+  rejected `(git fetch …)`, `true && git fetch …`, `VAR=x git fetch …`, `sudo`,
+  `timeout 30`, `command git`, `xargs`, and any line long enough to wrap over a
+  backslash, while accepting `git fetch … &`, which never establishes that the
+  fetch finished. So `scripts/ci/shell-command.mjs` tokenizes the script —
+  quoting, comments, expansions, redirections, here-documents, operators,
+  subshells — and yields simple commands; a rule is a predicate over the words
+  of one command, and `echo exec node x` is an `echo` with two arguments however
+  it is spaced. Both polarities are fixtures: the evasions are mutations that
+  must go red, and 9 legitimate rewrites of the same step must leave the whole
+  file clean, because a guard that is wrong in that direction is one somebody
+  deletes.
+- **Recognising a command word is not proving what runs.** `git` means "the word
+  `git` in command position", and a shell function, an alias, `hash -p`, a PATH
+  assignment or a write to `$GITHUB_PATH` can all make that word mean something
+  else. `no-command-shadowing` bans those spellings — derived from the command
+  words the rules actually depend on, launchers and package managers included —
+  and that is a list, not a proof. Executable *provenance* cannot be established
+  by reading the workflow, because anything checking it also runs from the
+  revision under test. It belongs to the governance trigger below.
 - The two Vitest reports must describe the same run — every status, the file
   count, and the identity of every individual test, not just the total. Matching
   totals prove little; a gutted reporter cannot invent 315 test names that agree
@@ -390,7 +411,7 @@ zero tests exits 0 just like one that passed 315:
 - Reports are deleted immediately before each runner starts and rejected unless
   their mtime post-dates that moment, so a leftover file cannot stand in for a
   run.
-- `scripts/ci/workflow-policy.mjs` enforces 22 house rules over the parsed
+- `scripts/ci/workflow-policy.mjs` enforces 23 house rules over the parsed
   workflow: no `continue-on-error`, no job conditions, no step conditions beyond
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
   action pinned to a commit SHA, no reusable workflows (a job body that is not in
@@ -398,16 +419,16 @@ zero tests exits 0 just like one that passed 315:
   job, and — self-referentially — `verify` and `e2e` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 58
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 72
   mutated copies of the real workflow and additionally asserts that every one of
-  the 22 declared rules has a mutation proving it fires — coverage derived from
+  the 23 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
   went unexercised through round 2. Each mutation must also name *what* it broke
   (a message pattern, or the exact step→prerequisite edge) and must trip nothing
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 67 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 70 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.
@@ -424,6 +445,28 @@ public — whichever comes first — turn on a ruleset for `main` that requires 
 `gate` check, requires a pull request, and requires review from code owners.**
 Until then, a workflow edit is validated by the very revision that proposes it,
 which is a trust boundary a solo repo can hold and a shared one cannot.
+
+Four things this harness deliberately does **not** guarantee, all of them owned
+by that trigger rather than by anything automated:
+
+1. **Semantics.** Every rule pins the *shape* of a gate — named, invoked as a
+   command, in the right job, after its setup. Replacing an assert script's body
+   with `process.exit(0)` satisfies all of them, and reachability is not
+   execution: `false && git fetch …` is a genuine invocation nothing here
+   evaluates.
+2. **Executable provenance.** Commands are recognised by their word.
+   `no-command-shadowing` bans the obvious redefinitions of one; a list of
+   spellings is not a proof that `git` is git.
+3. **Freedom from self-reference.** The policy engine, both self-tests, and the
+   README readback that keeps these numbers honest all run from the revision
+   under test. A hostile revision edits the checker and the checked in one
+   commit, and the readback compares a count against prose that commit wrote.
+4. **Complete mutation purity.** Each mutation must fire its own rule and
+   declare any other rule it trips. A second violation of the *same* rule is
+   invisible, and an `also` entry's justification is prose, not a check.
+
+They are written down because a boundary with a sentence on it can be argued
+about; a boundary that nobody wrote down is one somebody walks over.
 
 ## Notes for the next change
 

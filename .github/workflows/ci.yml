@@ -19,19 +19,41 @@ name: CI
 # │ checks it. The presence and ratchet rules make that expensive and loud —  │
 # │ they do not make it impossible.                                          │
 # │                                                                          │
-# │ Where exactly that line falls: the presence rules pin the *invocation     │
-# │ shape* of each gate — that the script is named, invoked as a command, in  │
-# │ the right job, after the steps it depends on. They say nothing about what │
-# │ the script then does. `echo node scripts/ci/assert-x.mjs` no longer       │
-# │ satisfies them, but replacing assert-x.mjs's body with `process.exit(0)`  │
-# │ satisfies every rule in this file and always will, because the rule and   │
-# │ the script are read from the same commit. That is malicious editing, not  │
-# │ drift, and it is owned by the governance trigger below — not by anything  │
-# │ automated here. Do not read a green policy run as a claim about semantics.│
+# │ WHERE EXACTLY THAT LINE FALLS. The presence rules pin the *invocation     │
+# │ shape* of each gate — that the script is named, run as a command rather   │
+# │ than mentioned, in the right job, after the steps it depends on and not   │
+# │ backgrounded. Recognition is a parse (scripts/ci/shell-command.mjs), so   │
+# │ `echo node scripts/ci/assert-x.mjs` and                                   │
+# │ `pnpm --version && echo exec node scripts/ci/assert-x.mjs` both read as   │
+# │ absent, and `(git fetch …)`, `sudo …`, `timeout 30 …` and a wrapped line  │
+# │ all read as present. That is the whole claim. Four things it is NOT:      │
 # │                                                                          │
-# │ Adversarial closure is governance, not YAML: required-check rulesets,     │
-# │ pull requests, and code-owner review. The condition for turning those on  │
-# │ is written down in the README under "Governance trigger (recorded)".     │
+# │  1. NOT semantics. Replacing assert-x.mjs's body with `process.exit(0)`   │
+# │     satisfies every rule here and always will, because the rule and the   │
+# │     script are read out of the same commit. Nor is reachability           │
+# │     execution: `false && git fetch …` is a genuine invocation in command  │
+# │     position, and this file cannot tell you whether that branch is taken. │
+# │  2. NOT executable provenance. Every rule recognises a command by its     │
+# │     *word*. `no-command-shadowing` bans the obvious ways to make a word   │
+# │     mean something else — a shell function, an alias, `hash -p`, a PATH   │
+# │     assignment, a write to $GITHUB_PATH — and a list of spellings is not  │
+# │     a proof that `git` is git.                                            │
+# │  3. NOT self-reference-proof. The policy engine, its self-test, the       │
+# │     README readback that keeps the prose numbers honest, the reporters    │
+# │     and the floors all execute from the revision under test. A hostile    │
+# │     revision edits the checker and the checked together, and the readback │
+# │     compares a number against prose that came from the same commit.       │
+# │  4. NOT complete about mutation purity. Every mutation must fire its own  │
+# │     rule and declare any other rule it trips; an *extra* violation of the │
+# │     same rule is not detected, and an `also` entry's reason is prose.     │
+# │                                                                          │
+# │ All four are owned by the governance trigger, deliberately and on the     │
+# │ record: required-check rulesets, pull requests, and code-owner review,    │
+# │ before a second contributor gets write access or this repository goes     │
+# │ public — whichever comes first. See "Governance trigger (recorded)" in    │
+# │ the README. They are not chased in YAML, because a check that runs from   │
+# │ the revision it judges cannot close them at any level of effort. Do not   │
+# │ read a green policy run as a claim about any of the four.                 │
 # └───────────────────────────────────────────────────────────────────────────┘
 #
 # ┌───────────────────────────────────────────────────────────────────────────┐
@@ -60,14 +82,17 @@ name: CI
 #     commit here
 #   - `verify` and `e2e` must still *contain* the steps that do the checking —
 #     the policy step, both self-tests, and every assert script by name
+#   - no shell function, alias, `hash -p`, PATH assignment or `$GITHUB_PATH`
+#     write that redefines a command word the rules above depend on
 #   - and where a check only means something because of an earlier step, the
 #     policy enforces the *pair*: the prerequisite must be in the same job, run
-#     first, and be a command rather than a mention of one.
+#     first, be a command rather than a mention of one, and not be backgrounded.
 #     `assert-floor-ratchet.mjs` without the `git fetch` below it is the case
 #     that named the rule — it still runs, finds no baseline, and exits 0. A
-#     gate whose setup was deleted does not fail; it drifts. And a setup quoted
-#     into an `echo` of itself is the same drift wearing the original text, so
-#     prerequisites are matched at command position, exactly like the scripts.
+#     gate whose setup was deleted does not fail; it drifts. A setup quoted into
+#     an `echo` of itself is the same drift wearing the original text, and
+#     `git fetch … &` is the same drift with a race in it, so both halves of
+#     every pair are recognised by parsing the script into simple commands.
 # A new job that forgets any of that fails policy at the edit, not six months
 # later in production.
 

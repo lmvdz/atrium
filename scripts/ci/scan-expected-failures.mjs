@@ -200,13 +200,35 @@ export function collectTestFiles(root = process.cwd()) {
   return [...new Set(found)].sort();
 }
 
-/** The root identifier of a member/call chain: `test.each(rows).fails` → `test`. */
-function rootIdentifier(node) {
+/**
+ * The identifier a member/call chain is rooted at, and the first property taken
+ * off it: `helpers.validate().fails` → `{root: 'helpers', member: 'validate'}`.
+ *
+ * Round 5 kept only the root, which is enough while a binding is either a runner
+ * or not. It is not enough for a namespace: `import * as helpers from './lib'`
+ * binds one name to a whole module, and whether `helpers.something.fails` is an
+ * annotation depends on which `something`. That is the round-5 gauntlet's second
+ * major — the per-binding narrowing regressed to per-module the moment the
+ * binding was a namespace object — so the first member travels with the root.
+ */
+function chainFromRoot(node) {
+  const members = [];
   let current = node;
   for (;;) {
+    if (ts.isPropertyAccessExpression(current)) {
+      members.push(propertyName(current.name));
+      current = current.expression;
+      continue;
+    }
+    if (ts.isElementAccessExpression(current)) {
+      const argument = current.argumentExpression;
+      members.push(
+        argument !== undefined && ts.isStringLiteralLike(argument) ? argument.text : undefined,
+      );
+      current = current.expression;
+      continue;
+    }
     if (
-      ts.isPropertyAccessExpression(current) ||
-      ts.isElementAccessExpression(current) ||
       ts.isCallExpression(current) ||
       ts.isNonNullExpression(current) ||
       ts.isParenthesizedExpression(current) ||
@@ -221,7 +243,8 @@ function rootIdentifier(node) {
     }
     break;
   }
-  return ts.isIdentifier(current) ? current.text : undefined;
+  if (!ts.isIdentifier(current)) return {};
+  return { root: current.text, member: members.at(-1) };
 }
 
 function propertyName(name) {
@@ -237,11 +260,52 @@ function forEachNode(node, visitor) {
   });
 }
 
-/** In a runner-export set, "every name", for `export * from 'vitest'`. */
+/** In a runner-export map, "every name", for `export * from 'vitest'`. */
 const ANY_EXPORT = '*';
 
-function exportsRunnerBinding(exported, name) {
-  return exported !== undefined && (exported.has(ANY_EXPORT) || exported.has(name));
+/**
+ * What a name can be, once the graph has been walked.
+ *
+ * `RUNNER` — this binding *is* a test runner, so `x.fails` on it is an
+ * annotation. A `Set` — this binding is a namespace object, and only the members
+ * in the set are runners. `undefined` — neither, so `.fails` on it is somebody's
+ * domain property and none of this file's business.
+ */
+const RUNNER = Symbol('runner-binding');
+
+function exportedKind(exports, name) {
+  if (exports === undefined) return undefined;
+  if (exports.has(name)) return exports.get(name);
+  return exports.has(ANY_EXPORT) ? RUNNER : undefined;
+}
+
+/** The member names a namespace import of this module would expose. */
+function namespaceMembers(exports) {
+  return new Set(exports.keys());
+}
+
+/**
+ * What one expression evaluates to, as far as this pass can tell.
+ *
+ * `it.fails` → RUNNER. `helpers` where `helpers` is a namespace → its member
+ * set. `helpers.knownBroken` → RUNNER when `knownBroken` is one of the members;
+ * `helpers.validate()` → undefined when it is not. Passing the *whole* `.fails`
+ * access in is deliberate: for `helpers.fails` the member taken off the
+ * namespace is `fails` itself, and that is exactly the name that has to be
+ * runner-derived for the access to mean anything.
+ */
+function classify(node, scope) {
+  const { root, member } = chainFromRoot(node);
+  if (root === undefined) return undefined;
+  if (scope.roots.has(root)) return RUNNER;
+  const members = scope.namespaces.get(root);
+  if (members === undefined) return undefined;
+  if (member === undefined) return members; // the namespace object itself
+  return members.has(ANY_EXPORT) || members.has(member) ? RUNNER : undefined;
+}
+
+function rootedAtRunner(node, scope) {
+  return classify(node, scope) === RUNNER;
 }
 
 function hasExportModifier(node) {
@@ -392,41 +456,54 @@ function readModuleShape(sourceFile) {
  *
  * Then closed over local aliasing (`const t = test`) to a fixpoint, so a chain
  * of aliases is followed rather than only its first hop.
+ *
+ * ── ROUND 6: AND NAMESPACES ARE NOT ONE BINDING ─────────────────────────────
+ * Round 5 narrowed the taint per name and then handed it all back for a
+ * namespace import: `import * as helpers from './lib'` added `helpers` to the
+ * root set outright when *anything* behind it was runner-derived, so a module
+ * exporting one test helper beside ordinary code turned every `helpers.x.fails`
+ * into a finding. That is the same false red as round 4's, one syntax over, and
+ * it was undetected because the existing namespace fixture imported a module
+ * whose exports were *all* runners. A namespace binds to its member set now, and
+ * the member actually taken off it decides.
  */
-function runnerRootNames(sourceFile, shape, runnerExportsOf) {
-  const names = new Set(RUNNER_GLOBALS);
+function runnerScope(sourceFile, shape, runnerExportsOf) {
+  const scope = { roots: new Set(RUNNER_GLOBALS), namespaces: new Map() };
+  const bind = (local, kind) => {
+    if (kind === RUNNER) scope.roots.add(local);
+    else if (kind instanceof Set) scope.namespaces.set(local, kind);
+  };
 
   for (const { specifier, names: bound } of shape.imports) {
     const fromRunner = isRunnerModule(specifier);
     const exported = fromRunner ? undefined : runnerExportsOf(specifier);
     for (const { imported, local } of bound) {
       if (fromRunner) {
-        names.add(local);
+        // Everything `vitest` exports is a runner, so a namespace import of it
+        // is a namespace whose every member counts.
+        bind(local, imported === ANY_EXPORT ? new Set([ANY_EXPORT]) : RUNNER);
         continue;
       }
       if (exported === undefined) continue;
-      // `import * as helpers from './helpers'` — `helpers.it.fails` roots at
-      // `helpers`, so the namespace counts if anything behind it does.
       if (imported === ANY_EXPORT) {
-        if (exported.size > 0) names.add(local);
+        if (exported.size > 0) bind(local, namespaceMembers(exported));
         continue;
       }
-      if (exportsRunnerBinding(exported, imported)) names.add(local);
+      bind(local, exportedKind(exported, imported));
     }
   }
 
   for (let pass = 0; pass < 8; pass += 1) {
-    const before = names.size;
+    const before = scope.roots.size + scope.namespaces.size;
     forEachNode(sourceFile, (node) => {
       if (!ts.isVariableDeclaration(node) || node.initializer === undefined) return;
       if (!ts.isIdentifier(node.name)) return;
-      const root = rootIdentifier(node.initializer);
-      if (root !== undefined && names.has(root)) names.add(node.name.text);
+      bind(node.name.text, classify(node.initializer, scope));
     });
-    if (names.size === before) break;
+    if (scope.roots.size + scope.namespaces.size === before) break;
   }
 
-  return names;
+  return scope;
 }
 
 /**
@@ -439,15 +516,18 @@ function runnerRootNames(sourceFile, shape, runnerExportsOf) {
  * it is a function that calls one, and the annotation it carries is found in the
  * file that defines it, where `it` is in scope and in the root set.
  */
-function runnerExportNames(shape, roots, runnerExportsOf) {
-  const exported = new Set();
+function runnerExportMap(shape, scope, runnerExportsOf) {
+  const exported = new Map();
+  const put = (name, kind) => {
+    if (kind !== undefined) exported.set(name, kind);
+  };
 
   for (const { name, initializer } of shape.exportedBindings) {
-    const root = rootIdentifier(initializer);
-    if (root !== undefined && roots.has(root)) exported.add(name);
+    put(name, classify(initializer, scope));
   }
   for (const { local, exported: as } of shape.localAliases) {
-    if (roots.has(local)) exported.add(as);
+    if (scope.roots.has(local)) put(as, RUNNER);
+    else if (scope.namespaces.has(local)) put(as, scope.namespaces.get(local));
   }
   for (const entry of shape.reexports) {
     const fromRunner = isRunnerModule(entry.specifier);
@@ -455,16 +535,19 @@ function runnerExportNames(shape, roots, runnerExportsOf) {
     if (!fromRunner && target === undefined) continue;
     if (entry.all === true) {
       // `export * from 'vitest'` re-exports names this pass cannot enumerate.
-      if (fromRunner) exported.add(ANY_EXPORT);
-      else for (const name of target) exported.add(name);
+      if (fromRunner) put(ANY_EXPORT, RUNNER);
+      else for (const [name, kind] of target) put(name, kind);
       continue;
     }
     if (entry.namespace !== undefined) {
-      if (fromRunner || target.size > 0) exported.add(entry.namespace);
+      // `export * as ns from './x'` hands on a namespace object, so it hands on
+      // the member set with it rather than a single bit.
+      if (fromRunner) put(entry.namespace, new Set([ANY_EXPORT]));
+      else if (target.size > 0) put(entry.namespace, namespaceMembers(target));
       continue;
     }
     for (const { imported, exported: as } of entry.names) {
-      if (fromRunner || exportsRunnerBinding(target, imported)) exported.add(as);
+      put(as, fromRunner ? RUNNER : exportedKind(target, imported));
     }
   }
 
@@ -472,11 +555,10 @@ function runnerExportNames(shape, roots, runnerExportsOf) {
 }
 
 /** True when `node` sits anywhere inside a call whose callee roots at a runner. */
-function insideRunnerCall(node, roots) {
+function insideRunnerCall(node, scope) {
   for (let current = node.parent; current !== undefined; current = current.parent) {
     if (!ts.isCallExpression(current)) continue;
-    const root = rootIdentifier(current.expression);
-    if (root !== undefined && roots.has(root)) return true;
+    if (rootedAtRunner(current.expression, scope)) return true;
   }
   return false;
 }
@@ -486,9 +568,9 @@ function insideRunnerCall(node, roots) {
  *
  * @param {ts.SourceFile} sourceFile
  * @param {string} file path, for messages
- * @param {Set<string>} roots names that may denote a test runner here
+ * @param {{roots: Set<string>, namespaces: Map<string, Set<string>>}} scope
  */
-export function findAnnotations(sourceFile, file, roots) {
+export function findAnnotations(sourceFile, file, scope) {
   const lines = sourceFile.getFullText().split('\n');
   const findings = [];
 
@@ -502,8 +584,7 @@ export function findAnnotations(sourceFile, file, roots) {
     // and any of those spread over as many lines as the author likes — the AST
     // does not care where the newlines went.
     if (ts.isPropertyAccessExpression(node) && node.name.text === 'fails') {
-      const root = rootIdentifier(node.expression);
-      if (root !== undefined && roots.has(root)) {
+      if (rootedAtRunner(node, scope)) {
         // Reported at the `fails` token, not at the start of the chain: when the
         // chain is spread over three lines, the line that matters is the one
         // carrying the annotation, not the one carrying `it`.
@@ -515,8 +596,7 @@ export function findAnnotations(sourceFile, file, roots) {
     if (ts.isElementAccessExpression(node)) {
       const argument = node.argumentExpression;
       if (argument !== undefined && ts.isStringLiteralLike(argument) && argument.text === 'fails') {
-        const root = rootIdentifier(node.expression);
-        if (root !== undefined && roots.has(root)) record(node, "['fails']");
+        if (rootedAtRunner(node, scope)) record(node, "['fails']");
       }
       return;
     }
@@ -524,8 +604,7 @@ export function findAnnotations(sourceFile, file, roots) {
     // annotation a name of its own before it is ever called.
     if (ts.isVariableDeclaration(node) && node.initializer !== undefined) {
       if (!ts.isObjectBindingPattern(node.name)) return;
-      const root = rootIdentifier(node.initializer);
-      if (root === undefined || !roots.has(root)) return;
+      if (!rootedAtRunner(node.initializer, scope)) return;
       for (const element of node.name.elements) {
         const source_ = propertyName(element.propertyName ?? element.name);
         if (source_ === 'fails') record(element, 'destructured `fails`');
@@ -540,13 +619,13 @@ export function findAnnotations(sourceFile, file, roots) {
     if (ts.isPropertyAssignment(node) && propertyName(node.name) === 'fails') {
       const explicitlyTrue = node.initializer.kind === ts.SyntaxKind.TrueKeyword;
       const explicitlyFalse = node.initializer.kind === ts.SyntaxKind.FalseKeyword;
-      if (!explicitlyFalse && (explicitlyTrue || insideRunnerCall(node, roots))) {
+      if (!explicitlyFalse && (explicitlyTrue || insideRunnerCall(node, scope))) {
         record(node, '{ fails: … }');
       }
       return;
     }
     if (ts.isShorthandPropertyAssignment(node) && node.name.text === 'fails') {
-      if (insideRunnerCall(node, roots) || roots.has('fails')) record(node, '{ fails }');
+      if (insideRunnerCall(node, scope) || scope.roots.has('fails')) record(node, '{ fails }');
     }
   });
 
@@ -660,7 +739,7 @@ export function scanForExpectedFailures(entryFiles, read = defaultRead) {
   // propagates now is a set of names per module, grown to a fixpoint: the sets
   // only ever gain members, so the loop terminates, and the bound is generous
   // rather than load-bearing.
-  const runnerExports = new Map([...modules.keys()].map((file) => [file, new Set()]));
+  const runnerExports = new Map([...modules.keys()].map((file) => [file, new Map()]));
   const lookup = (file) => (specifier) => {
     const target = modules.get(file).edges.get(specifier);
     return target === undefined ? undefined : runnerExports.get(target);
@@ -670,12 +749,26 @@ export function scanForExpectedFailures(entryFiles, read = defaultRead) {
     let grew = false;
     for (const [file, { sourceFile, shape }] of modules) {
       const runnerExportsOf = lookup(file);
-      const roots = runnerRootNames(sourceFile, shape, runnerExportsOf);
+      const scope = runnerScope(sourceFile, shape, runnerExportsOf);
       const current = runnerExports.get(file);
-      for (const name of runnerExportNames(shape, roots, runnerExportsOf)) {
-        if (!current.has(name)) {
-          current.add(name);
+      for (const [name, kind] of runnerExportMap(shape, scope, runnerExportsOf)) {
+        // Monotone by construction, which is what makes the loop terminate:
+        // absent → a namespace or a runner, a namespace → a runner, and a
+        // namespace's member set only ever gains names.
+        const existing = current.get(name);
+        if (existing === undefined) {
+          current.set(name, kind instanceof Set ? new Set(kind) : kind);
           grew = true;
+        } else if (existing !== RUNNER && kind === RUNNER) {
+          current.set(name, RUNNER);
+          grew = true;
+        } else if (existing instanceof Set && kind instanceof Set) {
+          for (const member of kind) {
+            if (!existing.has(member)) {
+              existing.add(member);
+              grew = true;
+            }
+          }
         }
       }
     }
@@ -685,8 +778,9 @@ export function scanForExpectedFailures(entryFiles, read = defaultRead) {
   // --- pass 2: find annotations, now that roots can be decided --------------
   const findings = [];
   for (const [file, { sourceFile, shape }] of modules) {
-    const roots = runnerRootNames(sourceFile, shape, lookup(file));
-    findings.push(...findAnnotations(sourceFile, file, roots));
+    findings.push(
+      ...findAnnotations(sourceFile, file, runnerScope(sourceFile, shape, lookup(file))),
+    );
   }
 
   return { findings, scanned: [...modules.keys()], unparsable };

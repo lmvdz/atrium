@@ -147,6 +147,82 @@ function decoyStep(source, name) {
   return rows.join('\n');
 }
 
+/** The real baseline fetch, and the ways of writing it this file rewrites it into. */
+const FETCH_RUN =
+  '        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main\n';
+const FETCH = 'git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main';
+
+/** A `run: |` block at the fetch step's indentation. */
+function runBlock(lines) {
+  return `        run: |\n${lines.map((line) => `          ${line}`).join('\n')}\n`;
+}
+
+/** Replaces the baseline fetch step's script, leaving the step itself intact. */
+function rewriteFetch(source, lines) {
+  return replaceOnce(source, FETCH_RUN, runBlock(lines));
+}
+
+/**
+ * Legitimate ways to write the baseline fetch that the policy must NOT reject.
+ *
+ * ── THE OTHER HALF OF THE ROUND-5 FINDING ───────────────────────────────────
+ * Round 5's matcher recognised a command only at the start of a line, so every
+ * form below read as "the fetch is missing" — verified directly against the
+ * round-5 engine, which reports `required-step-prerequisites` on all eight. None
+ * of them is exotic and none of them is an evasion: they are a subshell, a
+ * conditional list, a one-shot environment variable, three ordinary launchers,
+ * `xargs`, and a line long enough to wrap.
+ *
+ * A guard that is wrong in both directions is worse than the regex it replaced,
+ * because a false red is fixed by deleting the rule. So these are fixtures with
+ * the opposite polarity to everything else in this file: the mutated workflow
+ * must come back *completely clean*, not merely free of one rule.
+ */
+const ACCEPTED_FORMS = {
+  'the fetch inside a subshell': [`(${FETCH})`],
+  'the fetch after a `&&` list': [`true && ${FETCH}`],
+  'the fetch behind a one-shot environment variable': [`GIT_TERMINAL_PROMPT=0 ${FETCH}`],
+  'the fetch behind sudo': [`sudo ${FETCH}`],
+  'the fetch behind a timeout': [`timeout 30 ${FETCH}`],
+  'the fetch behind `command`, which bypasses functions and aliases': [`command ${FETCH}`],
+  'the fetch driven by xargs': [`echo main | xargs -I{} ${FETCH}`],
+  'the fetch wrapped over a backslash continuation': [
+    'git fetch --no-tags \\',
+    '  --depth=1 origin +refs/heads/main:refs/remotes/origin/main',
+  ],
+  'the fetch as the body of a shell function that is then called': [
+    'fetch_baseline() {',
+    `  ${FETCH}`,
+    '}',
+    'fetch_baseline',
+  ],
+};
+
+/**
+ * Ways of writing something that *contains* the fetch without running it.
+ *
+ * Every one of these must break the ratchet's pair and nothing else. The first
+ * is the round-5 gauntlet's blocking finding applied to a prerequisite: the
+ * round-5 matcher allowed arbitrary text between a package manager and a later
+ * `exec`, so `echo exec` in the middle satisfied it. Verified against the
+ * round-5 engine: clean, on every one of these except the `echo` decoy it
+ * already caught.
+ */
+const REJECTED_FORMS = {
+  'the fetch behind a fake `exec`, the round-5 bypass': [`pnpm --version && echo exec ${FETCH}`],
+  'the fetch backgrounded, so nothing waits for it': [`${FETCH} &`],
+  'the fetch backgrounded inside a subshell': [`(${FETCH}) &`],
+  'the fetch quoted into an echo': [`echo '${FETCH}'`],
+  'the fetch in a here-document, which is data and not script': [
+    "cat <<'EOF' > /dev/null",
+    FETCH,
+    'EOF',
+  ],
+  'the fetch commented out': ['true', `# ${FETCH}`],
+  'a word between the package manager and its exec': [`pnpm install exec ${FETCH}`],
+  'the fetch looked up rather than run': [`command -v ${FETCH}`],
+};
+
 /**
  * The nine declared (step → prerequisite) edges, by hand here and cross-checked
  * against `PREREQUISITE_PAIRS` in `main()`. Naming them makes a prerequisite
@@ -678,6 +754,63 @@ const MUTATIONS = [
     pair: PAIRS.e2eSuiteNeedsChromium,
     also: ['required-job-steps'],
   },
+
+  // ---- the round-5 gauntlet's four, round 6 ------------------------------
+  // The first one is this round's acceptance case, and it is deliberately the
+  // *required step* rather than a prerequisite: round 5's matcher allowed
+  // arbitrary text between a package manager and a later `exec`, so nine words
+  // turned every protected step in this file into a mention of itself. Verified
+  // against the round-5 engine directly: clean.
+  {
+    name: 'the ratchet rewritten as a fake `exec` — the round-5 blocking bypass',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: node scripts/ci/assert-floor-ratchet.mjs\n',
+        '        run: pnpm --version && echo exec node scripts/ci/assert-floor-ratchet.mjs\n',
+      ),
+    message: /never runs the floor-ratchet assertion/,
+  },
+  {
+    name: 'a shell function shadowing `git`, so the fetch runs and does nothing',
+    rule: 'no-command-shadowing',
+    mutate: (s) => rewriteFetch(s, ['git() { :; }', FETCH]),
+    message: /defines a shell function `git\(\)`/,
+  },
+  {
+    name: 'a directory prepended to PATH, which decides what every command word means',
+    rule: 'no-command-shadowing',
+    mutate: (s) => rewriteFetch(s, ['export PATH="$PWD/.fake-bin:$PATH"', FETCH]),
+    message: /runs `export PATH=…`/,
+  },
+  {
+    name: 'the same shadowing spelled as a write to $GITHUB_PATH, which outlives the step',
+    rule: 'no-command-shadowing',
+    mutate: (s) => rewriteFetch(s, ['echo "$PWD/.fake-bin" >> "$GITHUB_PATH"', FETCH]),
+    message: /writes to `\$GITHUB_PATH`/,
+  },
+  {
+    name: 'the run-start timestamp appended to a lookalike file instead of the job environment',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => replaceOnce(s, '>> "$GITHUB_ENV"', '>> "$GITHUB_ENV.bak"'),
+    pair: PAIRS.suiteNeedsReset,
+  },
+  {
+    name: 'the same, single-quoted, so it writes a file literally called $GITHUB_ENV',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => replaceOnce(s, '>> "$GITHUB_ENV"', ">> '$GITHUB_ENV'"),
+    pair: PAIRS.suiteNeedsReset,
+  },
+
+  // Every entry in REJECTED_FORMS, as a mutation of the baseline fetch step.
+  // The step stays present and named; only the shape of what it runs changes.
+  ...Object.entries(REJECTED_FORMS).map(([name, lines]) => ({
+    name: `a fetch step that only contains a fetch: ${name}`,
+    rule: 'required-step-prerequisites',
+    mutate: (s) => rewriteFetch(s, lines),
+    pair: PAIRS.ratchetNeedsFetch,
+  })),
 ];
 
 function main() {
@@ -779,6 +912,27 @@ function main() {
     }
   }
 
+  // 3. And the other polarity. A recognition rule is a claim about two sets, and
+  //    round 5 got the second one wrong: every form below is a legitimate way to
+  //    write the baseline fetch, and its line-start matcher called all of them
+  //    missing. These must leave the workflow *entirely* clean — not "clean of
+  //    the rule we were thinking about", because a false red anywhere in this
+  //    file is a reason to delete a rule.
+  for (const [name, lines] of Object.entries(ACCEPTED_FORMS)) {
+    let violations;
+    try {
+      violations = checkWorkflowFile(rewriteFetch(pristine, lines), `${WORKFLOW}#accepted`);
+    } catch (error) {
+      failures.push(`accepted form "${name}" could not be applied: ${error.message}`);
+      continue;
+    }
+    if (violations.length > 0) {
+      failures.push(
+        `the legitimate form "${name}" was rejected: ${violations.map((v) => `[${v.rule}] ${v.message}`).join(' | ')}. A guard that is wrong in this direction is worse than the one it replaced — a false red is fixed by deleting the rule.`,
+      );
+    }
+  }
+
   failures.push(...checkReadmeClaims());
 
   if (failures.length > 0) {
@@ -786,7 +940,7 @@ function main() {
     return 1;
   }
   console.info(
-    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected by the rule it targets and by nothing else undeclared; all ${RULES.length} declared rules exercised, and all ${PREREQUISITE_PAIRS.length} declared step→prerequisite pairs broken by name; the real file clean.`,
+    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected by the rule it targets and by nothing else undeclared; all ${RULES.length} declared rules exercised, and all ${PREREQUISITE_PAIRS.length} declared step→prerequisite pairs broken by name; ${Object.keys(ACCEPTED_FORMS).length} legitimate rewrites of the same step accepted; the real file clean.`,
   );
   return 0;
 }
@@ -827,6 +981,11 @@ function checkReadmeClaims() {
       what: 'step→prerequisite pairs',
       pattern: phrase('(\\d+) pairs across \\d+ steps'),
       actual: PREREQUISITE_PAIRS.length,
+    },
+    {
+      what: 'legitimate rewrites that must stay clean',
+      pattern: phrase('(\\d+) legitimate rewrites'),
+      actual: Object.keys(ACCEPTED_FORMS).length,
     },
   ];
   const failures = [];

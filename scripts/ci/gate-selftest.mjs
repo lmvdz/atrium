@@ -301,6 +301,15 @@ const HELPER_FORMS = {
       "import { it as sanity } from './helpers';\nsanity.fails('through a star re-export', () => {});\n",
     'helpers.ts': "export * from 'vitest';\n",
   },
+  // Round 6: the member-level namespace taint must not cost a catch. The module
+  // behind this namespace exports one runner and one piece of domain code, and
+  // the annotation is written on the runner member in the test file.
+  'a runner reached through a namespace whose module also exports domain code': {
+    'x.test.ts':
+      "import * as helpers from './helpers';\nhelpers.runner.fails('through a mixed namespace', () => {});\n",
+    'helpers.ts':
+      "import { it } from 'vitest';\nexport const runner = it;\nexport const validate = () => ({ fails: 0 });\n",
+  },
 };
 
 /**
@@ -322,6 +331,28 @@ const HELPER_FORMS = {
 const CO_LOCATED = {
   'x.test.ts':
     "import { it, expect } from 'vitest';\nimport { knownBroken, validate } from './lib';\nit('counts failures', () => { expect(validate().fails).toBe(0); });\nknownBroken('and this one really is broken', () => {});\n",
+  'lib.ts':
+    "import { it } from 'vitest';\nexport const knownBroken = it.fails;\nexport const validate = () => ({ fails: 0 });\n",
+};
+
+/**
+ * The same module, imported as a namespace — the round-5 gauntlet's second major.
+ *
+ * Round 5 narrowed the taint to individual names and then handed it all back for
+ * `import * as helpers`, because a namespace was still one binding: if anything
+ * behind it was runner-derived, the whole namespace joined the root set and
+ * `helpers.validate().fails` was a finding again. The existing namespace fixture
+ * could not catch that — it imports `vitest` itself, where every member really is
+ * a runner — so the regression sat behind a green test.
+ *
+ * Verified against the round-5 scanner directly: two findings, `lib.ts:2` and
+ * `x.test.ts:3`. Like CO_LOCATED this needs its own case rather than a table
+ * row, because both versions report *an* annotation and only the identity of the
+ * findings tells them apart.
+ */
+const MIXED_NAMESPACE = {
+  'x.test.ts':
+    "import { it, expect } from 'vitest';\nimport * as helpers from './lib';\nit('counts failures', () => { expect(helpers.validate().fails).toBe(0); });\nhelpers.knownBroken('and this one really is broken', () => {});\n",
   'lib.ts':
     "import { it } from 'vitest';\nexport const knownBroken = it.fails;\nexport const validate = () => ({ fails: 0 });\n",
 };
@@ -385,6 +416,16 @@ const NOT_ANNOTATIONS = {
       "import { it, expect } from 'vitest';\nimport { validate } from './lib';\nit('counts failures', () => { expect(validate().fails).toBe(0); });\n",
     'lib.ts':
       "import { expect } from 'vitest';\nexport const validate = () => ({ fails: 0 });\nexport const check = (value) => expect(value).toBeTruthy();\n",
+  },
+  // Round 6, the round-5 gauntlet's second major as a table row: a namespace
+  // import of a module with mixed exports, where nothing in it is an annotation
+  // at all. Round 5 tainted the namespace wholesale, so the domain member's
+  // `.fails` was a finding; nothing here is one.
+  'a domain member taken off a namespace whose module also exports the runner': {
+    'x.test.ts':
+      "import { it, expect } from 'vitest';\nimport * as helpers from './lib';\nit('counts failures', () => { expect(helpers.validate().fails).toBe(0); });\n",
+    'lib.ts':
+      "import { it } from 'vitest';\nexport const runner = it;\nexport const validate = () => ({ fails: 0 });\n",
   },
   // Regression guard: the import walk must not hand the parser a stylesheet and
   // then call the resulting syntax errors a blind spot. Measured against the
@@ -642,6 +683,19 @@ const CASES = [
       if (found.join(', ') === 'lib.ts:2') return [];
       return [
         `the scanner reported ${found.join(', ') || '(nothing)'}; the only annotation in this fixture is lib.ts:2. \`validate().fails\` is a domain object exported beside a runner helper, and a witness that calls that an expected failure is a witness somebody turns off.`,
+      ];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'the same module reached as a namespace: the member decides, not the namespace',
+    run: () => {
+      const found = scanFixture(MIXED_NAMESPACE)
+        .findings.map((finding) => `${finding.file}:${finding.line}`)
+        .sort();
+      if (found.join(', ') === 'lib.ts:2') return [];
+      return [
+        `the scanner reported ${found.join(', ') || '(nothing)'}; the only annotation in this fixture is lib.ts:2. \`helpers.validate().fails\` takes a domain member off a namespace, and round 5 reported it because a namespace import tainted every member at once — the per-binding narrowing undone by one syntax.`,
       ];
     },
     expect: 'clean',
