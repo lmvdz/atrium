@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "Enrollment manifest for the CI test gates. Every workspace that pnpm-workspace.yaml",
+    "resolves must appear here — either with a floor under `vitest.workspaces`, or with a",
+    "written reason under `vitest.exempt`. A workspace that exists on disk and is missing",
+    "from both fails the gate, so adding a package without adding tests is a red build",
+    "rather than a global count that silently absorbs the gap.",
+    "Floors are per project, not global: a package that stops contributing tests entirely",
+    "cannot hide behind its neighbours' counts. Raising a floor is a normal part of adding",
+    "tests; lowering one is a decision that shows up in review."
+  ],
+  "vitest": {
+    "workspaces": {
+      "apps/server": {
+        "project": "server",
+        "minTests": 10
+      },
+      "packages/core": {
+        "project": "core",
+        "minTests": 60
+      },
+      "packages/db": {
+        "project": "db",
+        "minTests": 10
+      }
+    },
+    "exempt": {
+      "apps/web": "Browser surface. Its suite is the Playwright project below; the Vitest workspace stays browser-free on purpose, so apps/web contributes zero unit tests by design."
+    },
+    "minTotalTests": 80
+  },
+  "playwright": {
+    "projects": {
+      "chromium": {
+        "minTests": 2
+      }
+    },
+    "minTotalTests": 2
+  }
+}
