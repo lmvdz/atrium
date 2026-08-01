@@ -9,6 +9,7 @@ import {
 } from '@atrium/db/schema';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { LEDGER_ADVISORY_LOCK_KEY } from '../../apps/server/src/ledger.js';
 import { violatesConstraint } from '../support/constraints.js';
 import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
 
@@ -40,15 +41,26 @@ afterAll(async () => {
   await handle?.close();
 });
 
-function ledgerRow(roomId: string, roomSeq: number, overrides: { id?: string } = {}) {
+/**
+ * One event, as the append procedure takes it.
+ *
+ * Note what is *not* here: `room_seq`. It is minted inside
+ * `atrium_append_core_event` under the ledger lock and cannot be supplied by a
+ * caller — which is the r2 change these tests exist to hold. Everything else a
+ * bypassing writer might have got wrong is still expressible, so the checks
+ * below are reachable through the only path that exists.
+ */
+function ledgerRow(
+  roomId: string,
+  overrides: { id?: string; at?: string; occurredAt?: string; actor?: unknown } = {},
+) {
   const id = overrides.id ?? randomUUID();
-  const at = new Date().toISOString();
+  const at = overrides.at ?? new Date().toISOString();
   return {
     roomId,
-    roomSeq,
     id,
-    type: 'message_posted' as const,
-    actor: { kind: 'system' as const },
+    type: 'message_posted',
+    actor: overrides.actor ?? { kind: 'system' },
     payload: {
       id,
       at,
@@ -61,15 +73,44 @@ function ledgerRow(roomId: string, roomSeq: number, overrides: { id?: string } =
       clientMessageId: null,
       attachments: [],
     } as Record<string, unknown>,
-    occurredAt: at,
+    occurredAt: overrides.occurredAt ?? at,
   };
+}
+
+type LedgerRow = ReturnType<typeof ledgerRow>;
+
+/**
+ * Append the way production appends: through the procedure, with the advisory
+ * lock, on a real transaction.
+ *
+ * There is no test-only insert path and there must never be one — a suite that
+ * writes to `core_events` through a door the server does not use proves things
+ * about a door nobody walks through. Round 1's tests inserted directly, which
+ * is exactly the bypass the r1 gauntlet flagged as *possible*; that they could
+ * do it was the demonstration.
+ */
+async function append(row: LedgerRow) {
+  return handle.db.transaction(async (tx) => {
+    const result = await tx.execute<{ seq: string; room_seq: string }>(sql`
+      SELECT "seq", "room_seq" FROM atrium_append_core_event(
+        ${row.roomId}::uuid,
+        ${row.id}::text,
+        ${row.type}::event_type,
+        ${JSON.stringify(row.actor)}::jsonb,
+        ${JSON.stringify(row.payload)}::jsonb,
+        ${row.occurredAt}::timestamptz
+      )
+    `);
+    const minted = result[0];
+    return { seq: Number(minted?.seq), roomSeq: Number(minted?.room_seq) };
+  });
 }
 
 describe('core_events — the append invariant, enforced by Postgres', () => {
   it('assigns a global seq and a per-room room_seq independently', async () => {
-    await handle.db.insert(coreEvents).values(ledgerRow(roomA, 1));
-    await handle.db.insert(coreEvents).values(ledgerRow(roomB, 1));
-    await handle.db.insert(coreEvents).values(ledgerRow(roomA, 2));
+    await append(ledgerRow(roomA));
+    await append(ledgerRow(roomB));
+    await append(ledgerRow(roomA));
 
     const rows = await handle.db
       .select({ seq: coreEvents.seq, roomSeq: coreEvents.roomSeq, roomId: coreEvents.roomId })
@@ -83,60 +124,195 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
     expect(rows.map((r) => r.roomId)).toEqual([roomA, roomB, roomA]);
   });
 
-  it('refuses two events at the same (room_id, room_seq)', async () => {
-    await handle.db.insert(coreEvents).values(ledgerRow(roomA, 1));
-    await violatesConstraint('core_events_room_seq_key', () =>
-      handle.db.insert(coreEvents).values(ledgerRow(roomA, 1)),
-    );
-  });
-
-  it('allows the same room_seq in different rooms', async () => {
-    await handle.db.insert(coreEvents).values(ledgerRow(roomA, 1));
-    await expect(handle.db.insert(coreEvents).values(ledgerRow(roomB, 1))).resolves.toBeDefined();
+  it('mints room_seq itself, so no caller can choose or repeat one', async () => {
+    expect((await append(ledgerRow(roomA))).roomSeq).toBe(1);
+    expect((await append(ledgerRow(roomA))).roomSeq).toBe(2);
+    // A second room starts again at 1, and the two never interfere.
+    expect((await append(ledgerRow(roomB))).roomSeq).toBe(1);
   });
 
   it('refuses a repeated event id anywhere in the ledger', async () => {
     const id = randomUUID();
-    await handle.db.insert(coreEvents).values(ledgerRow(roomA, 1, { id }));
-    await violatesConstraint('core_events_id_key', () =>
-      handle.db.insert(coreEvents).values(ledgerRow(roomB, 1, { id })),
-    );
-  });
-
-  it('refuses room_seq 0 — the client protocol is 1-based', async () => {
-    await violatesConstraint('core_events_room_seq_positive', () =>
-      handle.db.insert(coreEvents).values(ledgerRow(roomA, 0)),
-    );
+    await append(ledgerRow(roomA, { id }));
+    await violatesConstraint('core_events_id_key', () => append(ledgerRow(roomB, { id })));
   });
 
   it('refuses a payload whose id disagrees with the lifted column', async () => {
-    const row = ledgerRow(roomA, 1);
+    const row = ledgerRow(roomA);
     row.payload.id = randomUUID();
-    await violatesConstraint('core_events_payload_id_matches', () =>
-      handle.db.insert(coreEvents).values(row),
-    );
+    await violatesConstraint('core_events_payload_id_matches', () => append(row));
   });
 
   it('refuses a payload whose type disagrees with the lifted column', async () => {
-    const row = ledgerRow(roomA, 1);
+    const row = ledgerRow(roomA);
     row.payload.type = 'object_accepted';
-    await violatesConstraint('core_events_payload_type_matches', () =>
-      handle.db.insert(coreEvents).values(row),
-    );
+    await violatesConstraint('core_events_payload_type_matches', () => append(row));
   });
 
   it('refuses a payload with no canonical timestamp', async () => {
-    const row = ledgerRow(roomA, 1);
+    const row = ledgerRow(roomA);
     delete row.payload.at;
-    await violatesConstraint('core_events_payload_has_at', () =>
-      handle.db.insert(coreEvents).values(row),
-    );
+    await violatesConstraint('core_events_payload_has_at', () => append(row));
+  });
+
+  /**
+   * r1, major 2. Round 1 checked that `payload.at` and `payload.actor` were
+   * *present*. Presence is not the property that matters: what matters is that
+   * the durable order (`occurred_at`) and the order a replay re-sorts into
+   * (`payload.at`) are the same order, and that the lifted actor is the actor
+   * inside the event. A row that disagreed would occupy one position live and
+   * a different one on replay, which is the divergence the whole design exists
+   * to exclude — and it would look completely ordinary in the table.
+   */
+  it('refuses a payload whose `at` disagrees with occurred_at', async () => {
+    const row = ledgerRow(roomA, {
+      at: '2026-07-31T12:00:09.000Z',
+      occurredAt: '2026-07-31T12:00:03.000Z',
+    });
+    await violatesConstraint('core_events_payload_at_matches', () => append(row));
+  });
+
+  it('refuses an `at` with no timezone designator', async () => {
+    // Without one, `::timestamptz` means different instants in different
+    // sessions — so the equality above would be a check that could pass in one
+    // connection and fail in another.
+    const row = ledgerRow(roomA, { at: '2026-07-31T12:00:03', occurredAt: '2026-07-31T12:00:03Z' });
+    await violatesConstraint('core_events_payload_at_has_offset', () => append(row));
+  });
+
+  it('refuses a lifted actor that disagrees with the payload', async () => {
+    const row = ledgerRow(roomA, { actor: { kind: 'human', userId: 'somebody-else' } });
+    await violatesConstraint('core_events_payload_actor_matches', () => append(row));
   });
 
   it('refuses an event in a room that does not exist', async () => {
     await violatesConstraint('core_events_room_id_rooms_id_fk', () =>
-      handle.db.insert(coreEvents).values(ledgerRow(randomUUID(), 1)),
+      append(ledgerRow(randomUUID())),
     );
+  });
+});
+
+/**
+ * The r1 blocking major: the advisory lock was **cooperative**. Any writer with
+ * the app's database role could INSERT straight into `core_events`, skipping
+ * canonical minting, the reducer and gap-free assignment.
+ *
+ * These run as the compose Postgres image's `POSTGRES_USER`, which owns every
+ * table and is a superuser — the hardest case, and the one a `REVOKE` cannot
+ * touch. Every refusal below is therefore the trigger's, which is the point:
+ * enforcement that does not depend on the writer being unprivileged, or
+ * well-behaved, or ours.
+ */
+describe('core_events — the append path is structural, not cooperative', () => {
+  it('refuses a direct INSERT, even from the table owner', async () => {
+    const row = ledgerRow(roomA);
+    await violatesConstraint('core_events_append_through_procedure', () =>
+      handle.db.insert(coreEvents).values({
+        roomId: row.roomId,
+        roomSeq: 1,
+        id: row.id,
+        type: 'message_posted',
+        actor: { kind: 'system' },
+        payload: row.payload,
+        occurredAt: row.occurredAt,
+      }),
+    );
+    const [{ count } = { count: 0 }] = await handle.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(coreEvents);
+    expect(Number(count)).toBe(0);
+  });
+
+  /**
+   * The honest limit of the call-stack check, tested rather than only admitted.
+   *
+   * A role with CREATE privilege can define a function with the same *name* — an
+   * overload, in the same schema, so the stack frame reads unqualified — and
+   * satisfy `position('function atrium_append_core_event(' in PG_CONTEXT)`.
+   * That is why the guard also asserts the ledger lock, and why the second
+   * check is not decoration: a spoofed frame that did not take the lock is
+   * still refused, by the lock.
+   *
+   * Anyone able to do this can also drop the trigger, so the guard is aimed at
+   * the accidental bypass — the migration, the fix-up script, the well-meant
+   * backfill — and not at a DBA determined to lie to the log. Stating that is
+   * cheap; demonstrating exactly where the line falls is not.
+   */
+  it('refuses a spoofed call frame that does not hold the ledger lock', async () => {
+    await handle.db.execute(
+      sql.raw(`
+        CREATE OR REPLACE FUNCTION atrium_append_core_event(p jsonb) RETURNS void
+        LANGUAGE plpgsql AS $spoof$
+        BEGIN
+          INSERT INTO core_events (room_id, room_seq, id, type, actor, payload, occurred_at)
+          VALUES ((p->>'roomId')::uuid, 1, p->>'id', 'message_posted',
+                  p->'actor', p->'payload', (p->>'at')::timestamptz);
+        END $spoof$;
+      `),
+    );
+    try {
+      const row = ledgerRow(roomA);
+      await violatesConstraint('core_events_append_lock_held', () =>
+        handle.db.execute(
+          sql`SELECT atrium_append_core_event(${JSON.stringify({
+            roomId: row.roomId,
+            id: row.id,
+            at: row.occurredAt,
+            actor: { kind: 'system' },
+            payload: row.payload,
+          })}::jsonb)`,
+        ),
+      );
+    } finally {
+      await handle.db.execute(sql.raw('DROP FUNCTION atrium_append_core_event(jsonb)'));
+    }
+  });
+
+  it('refuses to rewrite a ledger row after the fact', async () => {
+    await append(ledgerRow(roomA));
+    await violatesConstraint('core_events_append_only', () =>
+      handle.db.execute(sql`UPDATE core_events SET "actor" = '{"kind":"system"}'::jsonb`),
+    );
+  });
+
+  it('uses the same advisory lock key the server does', async () => {
+    // A lock key that drifts is the worst kind of bug in this design: both
+    // sides take *a* lock, neither contends with the other, and appends from
+    // two processes interleave while every test that only ever runs one process
+    // stays green. (This assertion is not hypothetical — it caught exactly that
+    // typo in the migration during r2.)
+    const rows = await handle.db.execute<{ src: string }>(
+      sql`SELECT prosrc AS src FROM pg_proc
+          WHERE proname = 'atrium_append_core_event'
+            AND pronamespace = 'public'::regnamespace
+            AND pronargs = 6`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.src).toContain(String(LEDGER_ADVISORY_LOCK_KEY));
+  });
+
+  /**
+   * The claim in `schema.ts` and `ledger.ts`, made checkable: the *global* seq
+   * gaps on a rolled-back append and the *per-room* one does not. Only the
+   * per-room sequence is ever advertised as gap-free, and this is why the
+   * distinction is worth stating rather than glossing (r1 polish).
+   */
+  it('gaps the global seq on a rollback, and does not gap room_seq', async () => {
+    await append(ledgerRow(roomA));
+    // A doomed append: the payload id disagrees with the lifted one, so the
+    // check constraint aborts the transaction *after* the sequence handed out
+    // its next value.
+    const doomed = ledgerRow(roomA);
+    doomed.payload.id = randomUUID();
+    await expect(append(doomed)).rejects.toThrow();
+    await append(ledgerRow(roomA));
+
+    const rows = await handle.db
+      .select({ seq: coreEvents.seq, roomSeq: coreEvents.roomSeq })
+      .from(coreEvents)
+      .orderBy(coreEvents.seq);
+    expect(rows.map((r) => Number(r.seq))).toEqual([1, 3]);
+    expect(rows.map((r) => Number(r.roomSeq))).toEqual([1, 2]);
   });
 });
 
@@ -205,7 +381,8 @@ describe('composite (room_id, id) foreign keys — rooms are the isolation bound
       handle.db.insert(attentionItems).values({
         roomId: seeded.roomId,
         userId: seeded.people.carol as string,
-        objectId: foreign,
+        subjectKind: 'object',
+        subjectId: foreign,
         class: 'owned_commitment',
         rationale: 'you own this',
       }),
@@ -301,17 +478,138 @@ describe('composite (room_id, id) foreign keys — rooms are the isolation bound
   });
 });
 
+/**
+ * The polymorphic subject, routed from #21 and owned by this ticket.
+ *
+ * `needs_decision` points at a PROPOSAL — a decision never auto-accepts, so at
+ * the moment somebody has to rule on one there is no accepted object yet. What
+ * makes this worth a test rather than a column comment is the part that is easy
+ * to lose: going polymorphic must not cost the room-scoping. Both edges are
+ * still composite, and the discriminator cannot disagree with the target it
+ * selects, because the FK-bearing columns are generated from it.
+ */
+describe('attention_items — a polymorphic subject that is still room-scoped', () => {
+  async function proposal(roomId: string) {
+    const id = randomUUID();
+    await handle.db.insert(proposals).values({
+      id,
+      roomId,
+      type: 'decision',
+      payload: { statement: 'ship it', decidedBy: null, status: 'active' },
+      confidence: 0.9,
+      proposerKind: 'model',
+      proposerModel: 'test',
+    });
+    return id;
+  }
+
+  async function acceptedObject(roomId: string) {
+    const id = randomUUID();
+    await handle.db.insert(acceptedObjects).values({
+      id,
+      roomId,
+      type: 'decision',
+      payload: { statement: 'ship it', decidedBy: null, status: 'active' },
+    });
+    return id;
+  }
+
+  it('stores a needs_decision item against a proposal — the case that was impossible', async () => {
+    const seeded = await seedRoom(handle, ['frank'], { slug: 'room-f' });
+    const subjectId = await proposal(seeded.roomId);
+    await expect(
+      handle.db.insert(attentionItems).values({
+        roomId: seeded.roomId,
+        userId: seeded.people.frank as string,
+        subjectKind: 'proposal',
+        subjectId,
+        class: 'needs_decision',
+        rationale: 'you asked for this call',
+      }),
+    ).resolves.toBeDefined();
+
+    const [row] = await handle.db
+      .select({
+        kind: attentionItems.subjectKind,
+        subject: attentionItems.subjectId,
+        asObject: attentionItems.subjectObjectId,
+        asProposal: attentionItems.subjectProposalId,
+      })
+      .from(attentionItems);
+    // Exactly one target column is populated, and it is the one the
+    // discriminator names — by construction, not by a check somebody maintains.
+    expect(row).toMatchObject({ kind: 'proposal', subject: subjectId, asObject: null });
+    expect(row?.asProposal).toBe(subjectId);
+  });
+
+  it('refuses a proposal subject from another room', async () => {
+    const seeded = await seedRoom(handle, ['gail'], { slug: 'room-g' });
+    const foreign = await proposal(roomB);
+    await violatesConstraint('attention_items_proposal_same_room_fk', () =>
+      handle.db.insert(attentionItems).values({
+        roomId: seeded.roomId,
+        userId: seeded.people.gail as string,
+        subjectKind: 'proposal',
+        subjectId: foreign,
+        class: 'needs_decision',
+        rationale: 'cross-room',
+      }),
+    );
+  });
+
+  it('refuses a subject whose kind does not match where it actually lives', async () => {
+    const seeded = await seedRoom(handle, ['hank'], { slug: 'room-h' });
+    const proposalId = await proposal(seeded.roomId);
+    // Same room, real id — but declared as an object, so the object edge is the
+    // one that has to resolve, and it does not.
+    await violatesConstraint('attention_items_object_same_room_fk', () =>
+      handle.db.insert(attentionItems).values({
+        roomId: seeded.roomId,
+        userId: seeded.people.hank as string,
+        subjectKind: 'object',
+        subjectId: proposalId,
+        class: 'needs_decision',
+        rationale: 'mislabelled',
+      }),
+    );
+  });
+
+  it('lets one person hold an item on a proposal and on the object it became', async () => {
+    const seeded = await seedRoom(handle, ['iris'], { slug: 'room-i' });
+    const userId = seeded.people.iris as string;
+    const proposalId = await proposal(seeded.roomId);
+    const objectId = await acceptedObject(seeded.roomId);
+    const item = (subjectKind: 'object' | 'proposal', subjectId: string) => ({
+      roomId: seeded.roomId,
+      userId,
+      subjectKind,
+      subjectId,
+      class: 'needs_decision' as const,
+      rationale: 'both',
+    });
+    await handle.db.insert(attentionItems).values(item('proposal', proposalId));
+    // The kind is part of the uniqueness key: these are different subjects, and
+    // collapsing them would drop one of two legitimate items.
+    await expect(
+      handle.db.insert(attentionItems).values(item('object', objectId)),
+    ).resolves.toBeDefined();
+    // The same subject twice is still one item.
+    await violatesConstraint('attention_items_user_subject_class_key', () =>
+      handle.db.insert(attentionItems).values(item('proposal', proposalId)),
+    );
+  });
+});
+
 describe('memberships.seen_seq', () => {
   it('is a bigint, so a read cursor cannot overflow before the log it points into', async () => {
-    const seeded = await seedRoom(handle, ['dana'], { slug: 'room-d' });
-    const big = 5_000_000_000; // past int4, comfortably inside int8
-    await handle.db.execute(
-      sql.raw(`UPDATE memberships SET seen_seq = ${big} WHERE room_id = '${seeded.roomId}'`),
+    // The column's width, checked without tripping the head bound below: a
+    // cursor past the room's head is refused on principle, so the bigint claim
+    // is read off the catalog rather than by writing an impossible value.
+    const rows = await handle.db.execute<{ data_type: string }>(
+      sql`SELECT data_type FROM information_schema.columns
+          WHERE table_name = 'memberships' AND column_name = 'seen_seq'`,
     );
-    const rows = await handle.db.execute<{ seen_seq: string }>(
-      sql.raw(`SELECT seen_seq FROM memberships WHERE room_id = '${seeded.roomId}'`),
-    );
-    expect(Number(rows[0]?.seen_seq)).toBe(big);
+    expect(rows[0]?.data_type).toBe('bigint');
   });
 
   it('refuses a negative cursor', async () => {
@@ -321,6 +619,29 @@ describe('memberships.seen_seq', () => {
         sql.raw(`UPDATE memberships SET seen_seq = -1 WHERE room_id = '${seeded.roomId}'`),
       ),
     );
+  });
+
+  /**
+   * r1, major 5. A cursor past the room's head claims to have read history that
+   * does not exist: the client trusting it asks `since(room, n)` for a gap that
+   * will never arrive, and its "since you left" divider sits in the future
+   * permanently. The command layer refuses it too; this is the half that also
+   * binds a writer that is not the command layer.
+   */
+  it('refuses a cursor past the room’s head, and allows one at it', async () => {
+    const seeded = await seedRoom(handle, ['dana'], { slug: 'room-d' });
+    const set = (value: number) =>
+      handle.db.execute(
+        sql.raw(`UPDATE memberships SET seen_seq = ${value} WHERE room_id = '${seeded.roomId}'`),
+      );
+
+    // An empty room has a head of 0, so anything above it is already too far.
+    await violatesConstraint('memberships_seen_seq_within_room_head', () => set(1));
+
+    await append(ledgerRow(seeded.roomId));
+    await append(ledgerRow(seeded.roomId));
+    await expect(set(2)).resolves.toBeDefined();
+    await violatesConstraint('memberships_seen_seq_within_room_head', () => set(3));
   });
 });
 

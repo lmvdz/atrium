@@ -382,7 +382,8 @@ describe('resolve_attention', () => {
       id: attentionId,
       roomId: room.roomId,
       userId: room.people.alice as string,
-      objectId,
+      subjectKind: 'object',
+      subjectId: objectId,
       class: 'owned_commitment',
       rationale: 'you own this commitment',
     });

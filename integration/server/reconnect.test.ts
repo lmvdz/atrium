@@ -2,7 +2,10 @@ import type { DatabaseHandle } from '@atrium/db';
 import { coreEvents } from '@atrium/db/schema';
 import { count, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { WebSocket } from 'ws';
+import { createRealtimeClient, type RealtimeClient } from '../../apps/web/src/lib/realtime.js';
 import {
+  nodeSocketFactory,
   openDatabase,
   resetDatabase,
   type SeededRoom,
@@ -36,6 +39,8 @@ let handle: DatabaseHandle;
 let server: TestServer;
 let room: SeededRoom;
 const open: TestClient[] = [];
+/** Production clients, closed with the same care as the raw sockets. */
+const clients: RealtimeClient[] = [];
 
 async function connect(userId: string): Promise<TestClient> {
   const client = await TestClient.connect(server.url, userId);
@@ -51,6 +56,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const client of clients.splice(0)) client.close();
   await Promise.all(open.splice(0).map((client) => client.close()));
   await server?.close();
 });
@@ -65,74 +71,103 @@ async function ledgerHistory(roomId: string): Promise<string> {
   return JSON.stringify(entries.map((entry) => ({ roomSeq: entry.roomSeq, event: entry.event })));
 }
 
-describe('kill mid-burst, reconnect with since()', () => {
-  it('recovers a byte-identical history through a dropped socket', async () => {
-    const alice = await connect(room.people.alice as string);
-    let bob = await connect(room.people.bob as string);
-    await alice.subscribe(room.roomId);
-    await bob.subscribe(room.roomId);
+describe('kill mid-burst, reconnect through the production client', () => {
+  /**
+   * #22's acceptance test, and the r1 gauntlet's major 6.
+   *
+   * Round 1 asserted the right *claim* against the wrong subject. It drove the
+   * harness: subscribe, kill, reconnect, one `since`, and then the test itself
+   * stitched `[...beforeKill, ...catchup.entries]` back together and compared
+   * that to the ledger. Which is right by construction — the test wrote the
+   * recovery. The client's own interleaving of live delivery and catch-up, the
+   * thing that actually runs in a browser, was never exercised, and neither was
+   * the race, because the burst had finished before the reconnect began.
+   *
+   * So: `createRealtimeClient` from `apps/web/src/lib/realtime.ts`, over a real
+   * socket, killed while *three writers are appending concurrently*, left to
+   * reconnect on its own backoff and close its own gap. The assertion is on the
+   * client's `events` array — what a UI would render — against the ledger, as
+   * canonical JSON.
+   */
+  it('recovers a byte-identical history through a socket killed during concurrent appends', async () => {
+    const writers = await Promise.all([
+      connect(room.people.alice as string),
+      connect(room.people.carol as string),
+    ]);
+    for (const writer of writers) await writer.subscribe(room.roomId);
 
-    // Post the first slice, wait for B to actually have it, then cut the wire.
-    for (let i = 0; i < KILL_AFTER; i += 1) {
-      const ack = await alice.command({
-        name: 'send_message',
-        roomId: room.roomId,
-        body: `burst ${i}`,
-        clientMessageId: `a-${i}`,
-        replyToId: null,
-        attachments: [],
-      });
-      expect(ack.type).toBe('ack');
-    }
-    await until(
-      () => bob.events(room.roomId).length === KILL_AFTER,
-      15_000,
-      'B to receive the pre-kill slice',
+    const sockets: WebSocket[] = [];
+    const errors: string[] = [];
+    const bob = createRealtimeClient({
+      userId: room.people.bob as string,
+      url: server.url,
+      // Tight, so the test is not mostly waiting. The behaviour under test is
+      // the catch-up loop, not the backoff curve.
+      reconnect: { initialDelayMs: 10, maxDelayMs: 40, factor: 1 },
+      socketFactory: nodeSocketFactory({ onSocket: (socket) => sockets.push(socket) }),
+      onError: (message) => errors.push(message),
+    });
+    clients.push(bob);
+    await bob.connect();
+    bob.join(room.roomId);
+    await until(() => bob.room(room.roomId).subscribed, 15_000, 'the client to subscribe');
+
+    // Two writers, interleaved, not awaited: the socket has to die while
+    // appends are genuinely in flight, which is the condition r1's test could
+    // not produce and therefore never tested under.
+    const burst = Promise.all(
+      writers.flatMap((writer, w) =>
+        Array.from({ length: BURST / 2 }, (_, i) =>
+          writer.command({
+            name: 'send_message',
+            roomId: room.roomId,
+            body: `w${w}-${i}`,
+            clientMessageId: `w${w}-${i}`,
+            replyToId: null,
+            attachments: [],
+          }),
+        ),
+      ),
     );
 
-    const beforeKill = bob.events(room.roomId);
-    const lastSeenBySeq = beforeKill.at(-1)?.roomSeq ?? 0;
-    expect(lastSeenBySeq).toBe(KILL_AFTER);
+    // Cut the wire mid-stream: a hard terminate, no close frame, no goodbye.
+    await until(
+      () => bob.lastSeq(room.roomId) >= KILL_AFTER,
+      15_000,
+      'the client to receive the pre-kill slice',
+    );
+    const killedAt = bob.lastSeq(room.roomId);
+    expect(killedAt).toBeGreaterThanOrEqual(KILL_AFTER);
+    sockets.at(-1)?.terminate();
 
-    // A hard terminate, not a close: no close frame, no goodbye, exactly what a
-    // lost network gives you.
-    bob.kill();
+    const acks = await burst;
+    expect(acks.every((ack) => ack.type === 'ack')).toBe(true);
 
-    for (let i = KILL_AFTER; i < BURST; i += 1) {
-      const ack = await alice.command({
-        name: 'send_message',
-        roomId: room.roomId,
-        body: `burst ${i}`,
-        clientMessageId: `a-${i}`,
-        replyToId: null,
-        attachments: [],
-      });
-      expect(ack.type).toBe('ack');
-    }
+    // Nobody tells it to catch up. It reconnects on its own and loops until its
+    // cursor reaches the head it was told about.
+    const head = await server.ledger.head(room.roomId);
+    expect(head).toBe(BURST);
+    await until(
+      () => bob.lastSeq(room.roomId) === head,
+      20_000,
+      `the client to reach head ${head} on its own`,
+    );
 
-    // B comes back on a fresh socket and asks for the gap.
-    bob = await connect(room.people.bob as string);
-    const subscribed = await bob.subscribe(room.roomId);
-    expect(subscribed.head).toBe(BURST);
-
-    const catchup = await bob.since(room.roomId, lastSeenBySeq);
-    expect(catchup.more).toBe(false);
-    expect(catchup.to).toBe(BURST);
-    expect(catchup.entries).toHaveLength(BURST - KILL_AFTER);
-
-    const recovered = [...beforeKill, ...catchup.entries];
+    const recovered = bob.room(room.roomId).events;
     expect(
       JSON.stringify(recovered.map((entry) => ({ roomSeq: entry.roomSeq, event: entry.event }))),
     ).toBe(await ledgerHistory(room.roomId));
 
-    // And the same history A itself saw live, with nothing duplicated across
-    // the seam: the gap starts exactly one past where B stopped.
+    // Gap-free and duplicate-free across the seam, which is the half a
+    // count-based assertion would miss: the recovery must start exactly one
+    // past where the socket died, and repeat nothing.
     expect(recovered.map((entry) => entry.roomSeq)).toEqual(
       Array.from({ length: BURST }, (_, i) => i + 1),
     );
-    expect(alice.events(room.roomId).map((entry) => entry.roomSeq)).toEqual(
-      recovered.map((entry) => entry.roomSeq),
-    );
+    expect(errors).toEqual([]);
+    // It really did lose the wire and come back — otherwise this test is a
+    // long-winded way of asserting that live delivery works.
+    expect(sockets.length).toBeGreaterThan(1);
   });
 
   it('returns nothing when a client is already caught up', async () => {

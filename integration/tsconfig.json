@@ -2,6 +2,13 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
+    // DOM alongside ES2023 because the acceptance test drives the *production*
+    // client from `apps/web/src/lib`, which resolves its socket URL from
+    // `window.location`. The suite runs in Node and passes an explicit url, so
+    // that branch never executes — but the file still has to typecheck, and
+    // stubbing it away would mean the test no longer drives the real client,
+    // which is the whole point of it (#22 gauntlet r1, major 6).
+    "lib": ["ES2023", "DOM"],
     "types": ["node", "vitest/globals"],
     "module": "ESNext",
     "moduleResolution": "Bundler",

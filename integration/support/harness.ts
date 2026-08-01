@@ -5,6 +5,7 @@ import { memberships, rooms, users } from '@atrium/db/schema';
 import { sql } from 'drizzle-orm';
 import { WebSocket } from 'ws';
 import { type Command, createCommandService } from '../../apps/server/src/commands.js';
+import { createEventBus, type EventBus } from '../../apps/server/src/event-bus.js';
 import { createLedger, type Ledger } from '../../apps/server/src/ledger.js';
 import { createLogger } from '../../apps/server/src/logger.js';
 import type { ClientFrame, ServerFrame } from '../../apps/server/src/protocol.js';
@@ -13,6 +14,7 @@ import {
   createStubSessionAuthenticator,
 } from '../../apps/server/src/session.js';
 import { createRealtimeServer, type RealtimeServer } from '../../apps/server/src/ws-server.js';
+import type { SocketLike } from '../../apps/web/src/lib/realtime.js';
 import { databaseUrl } from './env.js';
 
 /**
@@ -99,13 +101,34 @@ export interface TestServer {
   realtime: RealtimeServer;
   ledger: Ledger;
   url: string;
+  /** Present when this server was started with cross-instance fan-out. */
+  bus?: EventBus;
   close: () => Promise<void>;
 }
 
+export interface TestServerOptions {
+  /**
+   * Wire the Postgres LISTEN/NOTIFY bus, as `index.ts` always does.
+   *
+   * Off by default so the tests that are about one instance stay about one
+   * instance. `startSecondInstance` turns it on for both, which is the only way
+   * to ask the question it exists to ask.
+   */
+  bus?: boolean;
+  /** Names the instance in logs and in the origin filter. */
+  instanceId?: string;
+}
+
 /** A realtime server on an ephemeral port, wired exactly as `index.ts` wires it. */
-export async function startTestServer(handle: DatabaseHandle): Promise<TestServer> {
+export async function startTestServer(
+  handle: DatabaseHandle,
+  options: TestServerOptions = {},
+): Promise<TestServer> {
   const logger = createLogger('error');
-  const ledger = createLedger({ db: handle.db, logger });
+  const bus = options.bus
+    ? createEventBus({ sql: handle.sql, logger, instanceId: options.instanceId })
+    : undefined;
+  const ledger = createLedger({ db: handle.db, logger, bus });
   await ledger.hydrate();
   const commands = createCommandService({
     db: handle.db,
@@ -120,6 +143,7 @@ export async function startTestServer(handle: DatabaseHandle): Promise<TestServe
     isReady: () => true,
     commands,
     ledger,
+    bus,
     session: createStubSessionAuthenticator(),
   });
   await realtime.listen();
@@ -127,8 +151,76 @@ export async function startTestServer(handle: DatabaseHandle): Promise<TestServe
   return {
     realtime,
     ledger,
+    bus,
     url: `ws://127.0.0.1:${address.port}/ws`,
     close: () => realtime.close(),
+  };
+}
+
+/**
+ * A second server process, in the way that matters: its own connection pool,
+ * its own in-memory `CoreState`, its own hub, its own listener.
+ *
+ * Sharing one `DatabaseHandle` would be the tempting shortcut and would prove
+ * nothing — the point of the question is that instance B's commits reach
+ * instance A's subscribers *through the database*, and a shared pool is not
+ * that. Each instance gets a real handle, which the caller must close.
+ */
+export async function startSecondInstance(
+  url = databaseUrl(),
+): Promise<{ handle: DatabaseHandle; server: TestServer; close: () => Promise<void> }> {
+  const handle = createDatabase({ url, max: 10 });
+  const server = await startTestServer(handle, {
+    bus: true,
+    instanceId: `instance-${randomUUID()}`,
+  });
+  return {
+    handle,
+    server,
+    close: async () => {
+      await server.close();
+      await handle.close();
+    },
+  };
+}
+
+/**
+ * The production client (`apps/web/src/lib/realtime.ts`), over a real socket.
+ *
+ * This is the thing r1's acceptance test did not do. It drove the *harness*
+ * through a reconnect — subscribe, kill, reconnect, one `since`, stitch the two
+ * halves together in the test — and so it could not exercise the interleaving
+ * of live delivery and catch-up that the recovery path actually consists of.
+ * Whatever the test stitched together was right by construction; the client
+ * was never asked.
+ *
+ * The adapter below is the whole bridge: `ws` speaks events, the client expects
+ * `onopen`/`onmessage`/`onclose` handles. Nothing about the client's behaviour
+ * is mocked, stubbed or reimplemented here.
+ */
+export function nodeSocketFactory(options: { onSocket?: (socket: WebSocket) => void } = {}) {
+  return (url: string): SocketLike => {
+    const socket = new WebSocket(url);
+    const adapter: SocketLike = {
+      get readyState() {
+        return socket.readyState;
+      },
+      send: (data: string) => socket.send(data),
+      close: (code?: number, reason?: string) => socket.close(code, reason),
+      onopen: null,
+      onclose: null,
+      onerror: null,
+      onmessage: null,
+    };
+    socket.on('open', () => adapter.onopen?.({}));
+    socket.on('message', (raw) => adapter.onmessage?.({ data: raw.toString() }));
+    socket.on('close', (code) => adapter.onclose?.({ code }));
+    // Swallowed rather than thrown: a `terminate()`d socket emits ECONNRESET on
+    // some platforms and nothing on others, and an unhandled 'error' on a `ws`
+    // socket takes the whole process down.
+    socket.on('error', () => adapter.onerror?.({}));
+    options.onSocket?.(socket);
+    return adapter;
   };
 }
 
@@ -142,6 +234,8 @@ export async function startTestServer(handle: DatabaseHandle): Promise<TestServe
  */
 export class TestClient {
   readonly frames: ServerFrame[] = [];
+  /** The identity this socket connected as — the stub authenticator's `?user=`. */
+  userId = '';
   private socket: WebSocket;
   private nextCommandId = 0;
   private waiters: Array<{
@@ -166,6 +260,7 @@ export class TestClient {
   static async connect(url: string, userId: string): Promise<TestClient> {
     const socket = new WebSocket(url, { headers: { 'x-atrium-user': userId } });
     const client = new TestClient(socket);
+    client.userId = userId;
     await new Promise<void>((resolve, reject) => {
       socket.once('open', () => resolve());
       socket.once('error', reject);
@@ -178,8 +273,21 @@ export class TestClient {
     this.socket.send(JSON.stringify(frame));
   }
 
-  waitFor(match: (frame: ServerFrame) => boolean, timeoutMs = 15_000): Promise<ServerFrame> {
-    const seen = this.frames.find(match);
+  /**
+   * Wait for a frame.
+   *
+   * `fromIndex` is not a convenience: without it, a second request with the
+   * same parameters matches the *first* request's reply, still sitting in the
+   * log. A test that asks for the same gap twice would then assert twice about
+   * one answer and never see the second — which is exactly the shape of test
+   * that reports green through a regression.
+   */
+  waitFor(
+    match: (frame: ServerFrame) => boolean,
+    timeoutMs = 15_000,
+    fromIndex = 0,
+  ): Promise<ServerFrame> {
+    const seen = this.frames.slice(fromIndex).find(match);
     if (seen) return Promise.resolve(seen);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -222,10 +330,22 @@ export class TestClient {
     return this.command(command);
   }
 
-  async since(roomId: string, roomSeq: number): Promise<Extract<ServerFrame, { type: 'catchup' }>> {
-    this.send({ type: 'since', roomId, roomSeq });
+  /** Ask for a gap, and wait for the reply *this* call produced. */
+  async since(
+    roomId: string,
+    roomSeq: number,
+    limit?: number,
+  ): Promise<Extract<ServerFrame, { type: 'catchup' }>> {
+    const mark = this.frames.length;
+    this.send(
+      limit === undefined
+        ? { type: 'since', roomId, roomSeq }
+        : { type: 'since', roomId, roomSeq, limit },
+    );
     return (await this.waitFor(
       (f) => f.type === 'catchup' && f.roomId === roomId && f.from === roomSeq,
+      15_000,
+      mark,
     )) as Extract<ServerFrame, { type: 'catchup' }>;
   }
 
