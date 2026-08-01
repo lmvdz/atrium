@@ -17,7 +17,8 @@
       "!**/test-results",
       "!packages/db/drizzle",
       "!pnpm-lock.yaml",
-      "!.claude"
+      "!.claude",
+      "!design/*.html"
     ]
   },
   "formatter": {
