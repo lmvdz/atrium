@@ -1006,17 +1006,10 @@ if (coverage.length > 0) {
  */
 const recorder = PIPELINE.find((stage) => stage.kind === 'record');
 if (recorder) {
-  const recorded = attempt(() =>
-    execFileSync('node', [recorder.script], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        ATRIUM_COMPOSE_PROJECT: project,
-        ATRIUM_COMPOSE_FILES: baseFiles.join(':'),
-        ATRIUM_IMAGE_MANIFEST: manifestFile,
-      },
-    }),
-  );
+  // The workflow's own command again, not a reconstruction of it — the same
+  // rule the stages follow. (It ran as `node <a name from a regex>` until this
+  // round, and that name is exactly what round 2's gauntlet was about.)
+  const recorded = runValidatedCommand(recorder, baseFiles, process.env);
   if (!recorded.ok) {
     console.error(
       `::error::deploy-mutation-ledger: could not record what this tree built — the images have to exist before the ledger runs. ${lastLines(recorded.output, 3)}`,
