@@ -618,5 +618,6 @@ Twenty-five windows is the number to watch — and scoring them settles only hal
 of it. Precision and recall say whether the machine reads a conversation
 correctly. They say nothing about whether the list it produces gets anyone back
 up to speed faster than scrolling would, which is the actual claim and still has
-no test behind it. #24 is necessary and not sufficient; it now also records what
-the other half would need: a task, a measurement, a baseline, and a population.
+no test behind it. #24 is necessary and not sufficient; its thread now also
+records what the other half would need — a task, a measurement, a baseline, and
+a population — though its acceptance test does not yet ask for them.
