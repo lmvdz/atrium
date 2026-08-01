@@ -5,8 +5,10 @@ import {
   commandScope,
   isCommand,
   isRole,
+  mayGrantRole,
   parseRole,
   type Role,
+  roleRank,
   roles,
 } from '../src/authz.js';
 
@@ -129,13 +131,69 @@ describe('parseRole', () => {
     expect(parseRole(' member ')).toBe('member');
   });
 
-  it('ignores roles it does not know rather than failing the whole value', () => {
-    expect(parseRole('billing,admin')).toBe('admin');
+  it('rejects the whole value when any component is unrecognised', () => {
+    // Round 1 of this ticket blessed exactly this input as `admin` — and had a
+    // test saying so. It is the wrong reading: `"billing,admin"` was written by
+    // something whose role vocabulary is not ours, and "the part I recognise"
+    // is a guess about the part I do not.
+    expect(parseRole('billing,admin')).toBeNull();
+    expect(parseRole('admin,suspended')).toBeNull();
+    expect(parseRole('owner,')).toBeNull();
+    expect(parseRole('admin,,owner')).toBeNull();
   });
 
   it('returns null when nothing in the value is a known role', () => {
     expect(parseRole('billing,auditor')).toBeNull();
     expect(parseRole('')).toBeNull();
+  });
+
+  it('refuses anything that is not a string', () => {
+    expect(parseRole(null as unknown as string)).toBeNull();
+    expect(parseRole(undefined as unknown as string)).toBeNull();
+    expect(parseRole(['admin'] as unknown as string)).toBeNull();
+  });
+});
+
+describe('authorize — strictness reaches the decision', () => {
+  it('denies a membership whose role carries an unknown component', () => {
+    // The gauntlet's point: `authorize` and the room-grant hook were reading
+    // the same string in opposite directions. Both now refuse it.
+    expect(authorize('room.join', { role: 'billing,admin' })).toMatchObject({
+      reason: 'unknown_role',
+    });
+    expect(authorize('workspace.invite', { role: 'admin,superuser' })).toMatchObject({
+      reason: 'unknown_role',
+    });
+  });
+});
+
+describe('mayGrantRole', () => {
+  it('lets a role hand out itself and everything below it', () => {
+    expect(mayGrantRole('owner', 'owner')).toBe(true);
+    expect(mayGrantRole('owner', 'admin')).toBe(true);
+    expect(mayGrantRole('admin', 'member')).toBe(true);
+    expect(mayGrantRole('admin', 'admin')).toBe(true);
+  });
+
+  it('refuses to hand out authority the actor does not hold', () => {
+    // The escalation both critics found: an admin inviting an owner.
+    expect(mayGrantRole('admin', 'owner')).toBe(false);
+    expect(mayGrantRole('member', 'admin')).toBe(false);
+    expect(mayGrantRole('member', 'owner')).toBe(false);
+  });
+
+  it('refuses when either side is unreadable', () => {
+    expect(mayGrantRole('', 'member')).toBe(false);
+    expect(mayGrantRole('owner', 'superuser')).toBe(false);
+    expect(mayGrantRole('billing,owner', 'member')).toBe(false);
+    expect(mayGrantRole('owner', 'billing,member')).toBe(false);
+  });
+});
+
+describe('roleRank', () => {
+  it('orders the three roles', () => {
+    expect(roleRank('owner')).toBeGreaterThan(roleRank('admin'));
+    expect(roleRank('admin')).toBeGreaterThan(roleRank('member'));
   });
 });
 

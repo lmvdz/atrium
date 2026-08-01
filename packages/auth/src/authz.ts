@@ -163,16 +163,49 @@ export function commandScope(command: Command): Scope {
 }
 
 /**
- * Better Auth stores multiple roles as `"admin,member"`. Take the strongest one
- * we recognise and ignore the rest; return null if we recognise none, so an
- * unfamiliar role can never be mistaken for a familiar one.
+ * Better Auth stores multiple roles as `"admin,member"`, so the stored value is
+ * a list and has to be parsed rather than compared.
+ *
+ * **Strict**: every component must be a role we know. `"billing,admin"` is not
+ * "an admin who also does billing" — it is a value written by something whose
+ * role vocabulary is not ours, and the only safe reading of a role we do not
+ * understand is that we do not understand the role. Round 1 of this ticket's
+ * gauntlet shipped a lenient version that took the strongest *recognised*
+ * component and discarded the rest; a plugin, a migration or an operator that
+ * ever writes `"suspended,admin"` would then have been read as plain `admin`.
+ *
+ * Returns the strongest role in the list, or null if the list is empty or
+ * contains anything unrecognised.
  */
 export function parseRole(raw: string): Role | null {
+  if (typeof raw !== 'string') return null;
+  const parts = raw.split(',').map((part) => part.trim());
+  if (parts.length === 0) return null;
+
   let best: Role | null = null;
-  for (const part of raw.split(',')) {
-    const candidate = part.trim();
-    if (!isRole(candidate)) continue;
+  for (const candidate of parts) {
+    // An unknown component poisons the whole value, deliberately.
+    if (!isRole(candidate)) return null;
     if (best === null || rank[candidate] > rank[best]) best = candidate;
   }
   return best;
+}
+
+/** Ranking, exposed so callers can compare two roles without re-deriving it. */
+export function roleRank(role: Role): number {
+  return rank[role];
+}
+
+/**
+ * Is `actor` allowed to hand out `requested`?
+ *
+ * Nobody may grant authority they do not themselves hold: an admin inviting an
+ * `owner` is privilege escalation with an extra step. Both sides are parsed
+ * strictly, so an unreadable role on either end is a denial.
+ */
+export function mayGrantRole(actorRole: string, requestedRole: string): boolean {
+  const actor = parseRole(actorRole);
+  const requested = parseRole(requestedRole);
+  if (!actor || !requested) return false;
+  return rank[actor] >= rank[requested];
 }
