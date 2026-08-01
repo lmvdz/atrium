@@ -173,7 +173,7 @@ const mutations = {
 
   'boundary-no-helpers': [
     'rule 2 goes: a module may hold the table and export a wrapper around it',
-    'packages/auth/test/room-access.test.ts — 4 of 35, including the empty-allowlist premise',
+    'packages/auth/test/room-access.test.ts — 3 of 35, including the empty-allowlist premise',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         ['        if (touches) before.all = true;', '        void touches;'],
@@ -182,7 +182,7 @@ const mutations = {
 
   'boundary-no-access': [
     'the property-access half goes — `db.query.memberships` off a handle stops being seen',
-    'packages/auth/test/room-access.test.ts — 3 of 35',
+    'packages/auth/test/room-access.test.ts — 2 of 35',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
@@ -194,7 +194,7 @@ const mutations = {
 
   'regex-boundary': [
     "round 6's regex, in effect: named imports of a literal specifier and nothing else",
-    'packages/auth/test/room-access.test.ts — 10 of 35; the 12 evasion fixtures drop to 2 caught',
+    'packages/auth/test/room-access.test.ts — 11 of 35; of the 12 evasion fixtures, 2 still fire',
     () => {
       mutations['boundary-names-only'][2]();
       mutations['boundary-no-helpers'][2]();
