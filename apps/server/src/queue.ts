@@ -1,3 +1,4 @@
+import { describeUnknown, guardedErrorLog } from '@atrium/auth';
 import { PgBoss } from 'pg-boss';
 import type { Logger } from './logger.js';
 
@@ -54,8 +55,11 @@ export async function startQueue({
     schema: 'pgboss',
   });
 
-  boss.on('error', (error: Error) => {
-    logger.error('pg-boss error', { error: error.message });
+  boss.on('error', (error: unknown) => {
+    // An EventEmitter `error` listener that throws is an uncaught exception, and
+    // the value here comes from pg-boss and the driver beneath it. Both halves
+    // guarded; see `@atrium/auth`'s `errors.ts`.
+    guardedErrorLog(logger)('pg-boss error', () => ({ error: describeUnknown(error) }));
   });
 
   await boss.start();

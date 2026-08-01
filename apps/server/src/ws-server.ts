@@ -5,6 +5,8 @@ import {
   type AtriumSession,
   authorize,
   checkOrigin,
+  describeUnknown,
+  guardedErrorLog,
   type MembershipLike,
   rawPathname,
 } from '@atrium/auth';
@@ -305,6 +307,28 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     options.sweepLookupTimeoutMs ?? Math.max(1, Math.ceil(sweepIntervalMs / 3));
 
   /**
+   * Every log in this file that mentions a value some other process rejected
+   * with goes through here, and the rule that goes with it is one sentence:
+   *
+   * > **Bookkeeping a guarantee depends on happens before the value is
+   * > described** — the failure counter, the `checkedEveryRoom` flag, the
+   * > back-off, the latch — and the description itself is total.
+   *
+   * The round-8 delta is why. `(error as Error).message` read while building
+   * these fields is a property read on a value the *peer's dependency* chose;
+   * `get message() { throw }` threw there, before `recordSweepFailure` ran, so
+   * the sweep's whole failure accounting reset every interval and a removed,
+   * silent socket kept receiving presence with no bound at all. The guarantee
+   * this file advertises was defeated by its own logging.
+   *
+   * `guardedErrorLog` closes the other half: the fields are built inside the
+   * guard, so a logger or serializer that throws cannot abandon a sweep pass
+   * either. Both halves live in `@atrium/auth`'s `errors.ts`, once, because this
+   * was the second appearance of the class in two rounds.
+   */
+  const logSafely = guardedErrorLog(logger);
+
+  /**
    * The one thing this server refuses to start without.
    *
    * A realtime server that cannot re-ask "is this still a session?" is a server
@@ -347,8 +371,27 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   // it with a real HTTP status instead of closing an already-open socket.
   const wss = new WebSocketServer({ noServer: true });
 
+  /**
+   * Both `void`ed calls in this file get a terminal handler, for the reason the
+   * sweep's does: an unhandled rejection is a process exit here by design, so a
+   * fire-and-forget async call is a path from "one value was hostile" to "the
+   * server restarted". Neither `handleUpgrade` nor `handleFrame` has a throwing
+   * path left after this round; these make that structural instead of argued.
+   *
+   * The upgrade arm also *answers*. An unhandled rejection out of
+   * `authenticateUpgrade` used to leave the TCP socket neither upgraded nor
+   * rejected — open, attached to nothing, until the peer gave up. Refusing with
+   * a 500 is both louder and fail-closed.
+   */
   httpServer.on('upgrade', (request, socket, head) => {
-    void handleUpgrade(request, socket, head);
+    handleUpgrade(request, socket, head).catch((error: unknown) => {
+      logSafely('ws upgrade failed unexpectedly', () => ({ error: describeUnknown(error) }));
+      try {
+        reject(socket, 500, 'Internal Server Error');
+      } catch {
+        // The socket is already gone. Nothing left to say to it.
+      }
+    });
   });
 
   async function handleUpgrade(
@@ -444,7 +487,14 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     });
 
     socket.on('message', (raw) => {
-      void handleFrame(socket, raw.toString());
+      // See the note on the `upgrade` listener. A frame that somehow throws must
+      // cost that frame, not the process.
+      handleFrame(socket, raw.toString()).catch((error: unknown) => {
+        logSafely('frame handling failed unexpectedly', () => ({
+          connectionId: connection.id,
+          error: describeUnknown(error),
+        }));
+      });
     });
 
     socket.on('close', (code) => {
@@ -454,8 +504,14 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       for (const roomId of left) broadcastPresence(roomId);
     });
 
-    socket.on('error', (error: Error) => {
-      logger.error('ws socket error', { connectionId: connection.id, error: error.message });
+    socket.on('error', (error: unknown) => {
+      // Typed `Error` by `ws`, which is a claim about `ws`, not about the value
+      // — and a throw from an EventEmitter listener is an uncaught exception,
+      // not a caught one. Described totally for the same reason as the sweep.
+      logSafely('ws socket error', () => ({
+        connectionId: connection.id,
+        error: describeUnknown(error),
+      }));
     });
   });
 
@@ -540,12 +596,17 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     try {
       membership = await loadRoomMembership(roomId, connection.session.userId);
     } catch (error) {
-      logger.error('membership lookup failed', {
+      // The refusal below is the guarantee — "could not learn" is answered, not
+      // dropped — and `(error as Error).message` could take it away. A throwing
+      // getter propagated out of `handleFrame`, which is called fire-and-forget
+      // from the `message` listener, so the client waited forever for a reply
+      // that had become an unhandled rejection and a process exit.
+      logSafely('membership lookup failed', () => ({
         connectionId: connection.id,
         command,
         roomId,
-        error: (error as Error).message,
-      });
+        error: describeUnknown(error),
+      }));
       // Failing to *learn* whether someone is a member is not permission to act.
       // It is also not a denial: telling the caller "you are not a member" when
       // the truth is "the database did not answer" sends them to argue with an
@@ -695,11 +756,15 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       // Failing to *learn* whether the session is still good is not a reason to
       // hang up on somebody mid-sentence; it is a reason to refuse this command
       // and ask again after a short back-off.
-      logger.error('session revalidation failed', {
-        connectionId: connection.id,
-        error: (error as Error).message,
-      });
+      //
+      // The back-off is armed before the error is described: it is the negative
+      // cache, and losing it to a throwing `message` getter means every frame in
+      // a burst re-asks a session store that is already failing.
       connection.retryAfter = Date.now() + revalidateBackoffMs;
+      logSafely('session revalidation failed', () => ({
+        connectionId: connection.id,
+        error: describeUnknown(error),
+      }));
       send(socket, { type: 'error', message: 'could not check your session just now — try again' });
       return false;
     }
@@ -872,13 +937,25 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
             'session revalidation',
           );
         } catch (error) {
-          logger.error('session revalidation failed during sweep', {
+          /**
+           * Bookkeeping first, and not as a stylistic preference.
+           *
+           * Round 8 logged here before touching a counter, reading
+           * `(error as Error).message` to do it. A session store rejecting with
+           * `{ get message() { throw } }` threw on that line — inside the loop,
+           * outside every counter — so `retryAfter` was never armed, the failure
+           * was never recorded, and the whole pass was abandoned to the outer
+           * catch. The next interval started over and did exactly the same
+           * thing, forever. See the note on `logSafely`.
+           */
+          const at = Date.now();
+          connection.retryAfter = at + revalidateBackoffMs;
+          recordSweepFailure(connection, at);
+          logSafely('session revalidation failed during sweep', () => ({
             connectionId: connection.id,
-            error: (error as Error).message,
-          });
-          connection.retryAfter = Date.now() + revalidateBackoffMs;
-          recordSweepFailure(connection, Date.now());
-          evictIfUnverifiableTooLong(socket, connection, Date.now());
+            error: describeUnknown(error),
+          }));
+          evictIfUnverifiableTooLong(socket, connection, at);
           continue;
         }
         if (!session || session.sessionId !== connection.session.sessionId) {
@@ -908,12 +985,25 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
             'membership lookup',
           );
         } catch (error) {
-          logger.error('membership sweep failed', {
+          /**
+           * The site the round-8 delta named, and the one with the worst
+           * consequence: `checkedEveryRoom` is the only thing standing between
+           * "the lookup failed" and `clearSweepFailures` at the bottom of this
+           * loop. Round 8 set it *after* formatting the error, so a rejection
+           * carrying a throwing `message` getter left the flag true — except it
+           * never got that far, because the throw abandoned the pass entirely
+           * and every later interval repeated with `sweepFailures === 0`.
+           *
+           * The flag moves first. `describeUnknown` reads no property of the
+           * value, and `logSafely` cannot throw out of the logger either, so
+           * neither half can cost this connection its accounting again.
+           */
+          checkedEveryRoom = false;
+          logSafely('membership sweep failed', () => ({
             connectionId: connection.id,
             roomId,
-            error: (error as Error).message,
-          });
-          checkedEveryRoom = false;
+            error: describeUnknown(error),
+          }));
           continue;
         }
         // `room.join` is the least a socket needs to be in a room at all, so it
@@ -1145,12 +1235,37 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       });
     }, sweepIntervalMs);
     release.unref();
+
+    /** The latch, and only the latch. Nothing here reads anything. */
+    const releaseLatch = (): void => {
+      clearTimeout(release);
+      sweeping = false;
+    };
+
+    /**
+     * Three layers, because "this handler cannot throw" is an argument and the
+     * latch is what a wrong argument costs.
+     *
+     * Round 8 wrote this as `.catch(e => log((e as Error).message)).finally(…)`.
+     * A rejection value with a throwing `message` getter made the *handler*
+     * throw, which turns the chain into a rejected promise — `void`ed, so an
+     * unhandled rejection, which `apps/server/src/index.ts` exits the process
+     * on by design. A hostile value reaching one lookup became a server restart.
+     *
+     *  1. `releaseLatch` runs before anything is described, on both arms.
+     *  2. The description is total (`describeUnknown`) and the log is guarded
+     *     (`logSafely`), so the handler has no throwing path today.
+     *  3. The terminal `.catch` makes that *structural* rather than argued: the
+     *     chain cannot reject whatever a later edit does to the handlers above
+     *     it, and it still releases the latch on the way past instead of
+     *     swallowing silently.
+     */
     void sweepConnections(deadline)
-      .catch((error: unknown) => {
-        logger.error('sweep failed', { error: (error as Error).message });
+      .then(releaseLatch, (error: unknown) => {
+        releaseLatch();
+        logSafely('sweep failed', () => ({ error: describeUnknown(error) }));
       })
-      .finally(() => {
-        clearTimeout(release);
+      .catch(() => {
         sweeping = false;
       });
   }, sweepIntervalMs);

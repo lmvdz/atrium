@@ -204,6 +204,55 @@ function countServerFrames(): { seen: () => number } {
   return { seen: () => seen };
 }
 
+/**
+ * A rejection value that punishes anyone who reads it.
+ *
+ * This is the round-8-delta shape, and the reason it is a *getter* rather than
+ * an exotic prototype matters: `(error as Error).message` looks like a field
+ * access and is arbitrary code. Round 8 hardened `packages/auth`'s cleanup
+ * reporter against `Object.create(null)` and a throwing `Symbol.toPrimitive`,
+ * and the realtime sweep two files away still read `.message` straight off the
+ * value while building its log fields — before it had incremented anything.
+ *
+ * Real, not contrived: a driver that wraps a protocol error in a lazily-decoded
+ * object, an ORM that reconstructs `message` from a response it has not read
+ * yet, a Proxy in a test double. `stack` is a trap too, because a logger that
+ * survives `message` usually reaches for `stack` next.
+ */
+function unreadableRejection(): unknown {
+  return {
+    get message(): string {
+      throw new Error('reading this rejection is itself a failure');
+    },
+    get stack(): string {
+      throw new Error('and so is reading its stack');
+    },
+  };
+}
+
+/**
+ * Watch for unhandled rejections while `run` is in flight.
+ *
+ * `apps/server/src/index.ts` calls `process.exit(1)` on one, by design — so in
+ * production an unhandled rejection is not a log line, it is a restart. A test
+ * that only checked "the socket eventually closed" would miss that entirely.
+ */
+async function withUnhandledRejectionWatch(run: () => Promise<void>): Promise<unknown[]> {
+  const seen: unknown[] = [];
+  const listen = (reason: unknown) => seen.push(reason);
+  process.on('unhandledRejection', listen);
+  try {
+    await run();
+    // Node decides a rejection is unhandled at a microtask checkpoint on a later
+    // turn than the one that created it, so this is a real timer rather than an
+    // `await Promise.resolve()` that would run too early to see anything.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    process.off('unhandledRejection', listen);
+  }
+  return seen;
+}
+
 /** A promise somebody else settles. */
 function deferred<T>(): {
   promise: Promise<T>;
@@ -514,11 +563,21 @@ describe('revocation reaches a live connection', () => {
   });
 
   it('reuses a validation for at most one TTL, and no longer', async () => {
+    /**
+     * The TTL is 120ms and the ceiling below is two of those plus an allowance,
+     * not the 2s this carried through round 8. **"At most one TTL" is a bound**,
+     * and a ceiling fifty times the value under test would have passed against a
+     * TTL of a second and a half — proving the cache expires eventually, which
+     * is not what the name of this test claims. Swept in round 9 along with the
+     * two the delta named; the rule is that slack is small next to the number
+     * being measured.
+     */
+    const revalidateTtlMs = 120;
     let valid = true;
     await server.close();
     await listen(
       startServer({
-        revalidateTtlMs: 40,
+        revalidateTtlMs,
         revalidateSession: async () => (valid ? ada : null),
       }),
     );
@@ -548,7 +607,7 @@ describe('revocation reaches a live connection', () => {
         send(socket, { type: 'command', command: 'room.presence', roomId });
         expect(closedWith).toBe(1008);
       },
-      { timeout: 2_000, interval: 10 },
+      { timeout: revalidateTtlMs * 2 + 120, interval: 10 },
     );
   });
 
@@ -786,13 +845,20 @@ describe('negative verdicts are cached too', () => {
   });
 
   it('asks again once the back-off has passed', async () => {
+    /**
+     * Same round-9 sweep as the TTL test: the back-off is the number under test,
+     * so the ceiling is two of it plus an allowance rather than a flat 2s. At
+     * 30ms against 2s this passed against a back-off two orders of magnitude
+     * wider than the one configured.
+     */
+    const revalidateBackoffMs = 120;
     let failing = true;
     const revalidateSession = vi.fn(async () => {
       if (failing) throw new Error('database is on fire');
       return ada;
     });
     await server.close();
-    await listen(startServer({ revalidateTtlMs: 0, revalidateBackoffMs: 30, revalidateSession }));
+    await listen(startServer({ revalidateTtlMs: 0, revalidateBackoffMs, revalidateSession }));
 
     const socket = await connect('ada');
     send(socket, { type: 'command', command: 'room.join', roomId });
@@ -806,7 +872,7 @@ describe('negative verdicts are cached too', () => {
         send(socket, { type: 'command', command: 'room.join', roomId });
         await nextFrame(socket, 'joined', 25);
       },
-      { timeout: 2_000, interval: 20 },
+      { timeout: revalidateBackoffMs * 2 + 120, interval: 20 },
     );
     socket.close();
   });
@@ -1131,9 +1197,19 @@ describe('revocation reaches a subscription, not only a command', () => {
      * and never moves; against r8 it keeps climbing, because the latch has a
      * deadline of its own and the pass resumes where the last one stopped.
      *
-     * Catches: reverting the `sweeping` latch to one cleared only in `finally`.
+     * **The interval and the wait were both wrong until round 9.** 25ms against
+     * a 4s ceiling is 160 intervals of slack: it proved sweeps *happen*, which
+     * was never the question, rather than that they happen at the interval. It
+     * is the same fault round 8 corrected in the two window tests above and did
+     * not carry across the file — so `widen-sweep-window` was green here while
+     * being the mutation that exists to catch exactly this. The interval is now
+     * large enough that a fixed scheduling allowance is small beside it, and the
+     * ceiling is four intervals of work plus that allowance.
+     *
+     * Catches: reverting the `sweeping` latch to one cleared only in `finally`,
+     * and `widen-sweep-window` — the sweep still runs, four times less often.
      */
-    const sweepIntervalMs = 25;
+    const sweepIntervalMs = 100;
     let wedged = false;
     let graceLookups = 0;
     const hung: (() => void)[] = [];
@@ -1167,13 +1243,15 @@ describe('revocation reaches a subscription, not only a command', () => {
     wedged = true;
     const before = graceLookups;
 
-    // Four further sweeps' worth of the metronome answering. Under r7's latch
-    // this never arrives, whatever the timeout is set to.
+    // Four further sweeps' worth of the metronome answering, inside four
+    // intervals plus a scheduling allowance. Under r7's latch this never
+    // arrives, whatever the timeout is set to; under a sweep running four times
+    // less often it does not arrive in time either, which is the point.
     await vi.waitFor(
       () => {
         expect(graceLookups).toBeGreaterThanOrEqual(before + 4);
       },
-      { timeout: 4_000 },
+      { timeout: sweepIntervalMs * 4 + 120, interval: 10 },
     );
 
     expect(stuck.readyState).toBe(stuck.OPEN);
@@ -1492,6 +1570,385 @@ describe('revocation reaches a subscription, not only a command', () => {
     const closed = new Promise<number>((resolve) => socket.once('close', resolve));
     expect(await closed).toBe(1008);
     expect(server.presence(roomId)).toHaveLength(0);
+  });
+});
+
+/**
+ * The round-8 delta's blocking finding, at each site, plus the shape that made
+ * it possible in the first place.
+ *
+ * Round 8 gave the sweep a two-sided guarantee — one interval when the lookup
+ * answers, `sweepFailureLimit` sweeps or `sweepUnverifiedMs` when it does not —
+ * and then defeated it with its own logging. `(error as Error).message` built
+ * into the log fields *before* `recordSweepFailure` meant a rejection carrying a
+ * throwing `message` getter threw inside the loop, before any counter moved. The
+ * pass was abandoned, the latch released, and the next interval started over
+ * with `sweepFailures === 0` — so a removed, silent socket kept receiving
+ * presence for as long as the dependency kept rejecting that way. Which is
+ * indefinitely. There is no third case in the advertised guarantee, and this was
+ * one.
+ *
+ * Every test below therefore asserts the *bound*, not the eviction: a socket
+ * that closes eventually is also what the broken version would do if anything
+ * else happened to close it. The window is measured, and the slack is small next
+ * to the interval, per the lesson round 8 learned the hard way one item over.
+ */
+describe('a rejection value nobody can read cannot suspend the sweep', () => {
+  it('still evicts within the failure bound when the membership lookup rejects unreadably', async () => {
+    /**
+     * `ws-server.ts:910` in round 8 — the site the delta named, and the one with
+     * the worst consequence, because `checkedEveryRoom` is the only thing
+     * between "the lookup failed" and `clearSweepFailures` at the foot of the
+     * loop.
+     *
+     * **Verified against `fix/auth-r8`: this test times out.** The throw comes
+     * from the log fields, so the flag is never cleared, `recordSweepFailure` is
+     * never reached, the pass unwinds to the outer handler, and every later
+     * interval repeats the same abort with the counter still at zero. The socket
+     * is never closed and the assertion below waits forever.
+     *
+     * Catches: moving the `logSafely(...)` call back above
+     * `checkedEveryRoom = false`, and reverting `describeUnknown(error)` to
+     * `(error as Error).message`. Either alone reproduces the escape — see the
+     * `sweep-log-before-counting` and `sweep-reads-error-message` entries in
+     * `scripts/mutation-ledger.mjs`.
+     */
+    const sweepIntervalMs = 100;
+    const sweepFailureLimit = 3;
+    let wedged = false;
+
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs,
+        sweepFailureLimit,
+        sweepUnverifiedMs: 300_000,
+        loadRoomMembership: async (room, user) => {
+          if (wedged && user === ada.userId) throw unreadableRejection();
+          const role = memberships.get(membershipKey(room, user));
+          return role ? { role } : null;
+        },
+      }),
+    );
+
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+
+    const closed = new Promise<number>((resolve) => removed.once('close', resolve));
+    const wedgedAt = Date.now();
+    wedged = true;
+
+    const unhandled = await withUnhandledRejectionWatch(async () => {
+      expect(await closed).toBe(1008);
+    });
+
+    /**
+     * The counter advanced, and this is the assertion that says so. Closing
+     * within `sweepFailureLimit` sweeps is only possible if each pass recorded a
+     * failure against this connection; a version that logs first and counts
+     * never — which is round 8 — cannot satisfy an upper bound at all.
+     */
+    const window = Date.now() - wedgedAt;
+    expect(window).toBeLessThan(sweepIntervalMs * (sweepFailureLimit + 1) + 120);
+    expect(server.presence(roomId)).toHaveLength(0);
+
+    // And the same value did not take the process down on its way past. Round 8
+    // rethrew it out of `sweepConnections` into a `.catch` that read `.message`
+    // too, so the chain rejected and `index.ts` would have exited.
+    expect(unhandled).toEqual([]);
+  });
+
+  it('still evicts within the failure bound when session revalidation rejects unreadably', async () => {
+    /**
+     * `ws-server.ts:874` in round 8, the sibling site. Same defect, reached
+     * through the session store rather than the membership read — and it costs
+     * one thing more, because the back-off (`connection.retryAfter`) was armed
+     * *after* the format too. Losing it means the sweep re-asks a store that is
+     * already failing, every interval, with no negative caching at all.
+     *
+     * **Verified against `fix/auth-r8`: this test times out**, for the same
+     * reason as the one above.
+     *
+     * `revalidateBackoffMs` is 0 so that each sweep genuinely re-asks and the
+     * bound under test is the *failure count* rather than the back-off; with a
+     * long back-off the sweep takes the `now < retryAfter` branch, which is a
+     * different (also tested) path.
+     *
+     * Catches: reverting the ordering in the session `catch` of
+     * `sweepConnections`, or its `describeUnknown`.
+     */
+    const sweepIntervalMs = 100;
+    const sweepFailureLimit = 3;
+    let wedged = false;
+
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs,
+        sweepFailureLimit,
+        sweepUnverifiedMs: 300_000,
+        revalidateTtlMs: 0,
+        revalidateBackoffMs: 0,
+        revalidateSession: async (headers: Headers) => {
+          const who = headers.get('cookie')?.replace('who=', '') ?? '';
+          if (wedged && who === 'ada') throw unreadableRejection();
+          return sessions.get(who) ?? null;
+        },
+      }),
+    );
+
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+
+    const closed = new Promise<number>((resolve) => removed.once('close', resolve));
+    const wedgedAt = Date.now();
+    wedged = true;
+
+    const unhandled = await withUnhandledRejectionWatch(async () => {
+      expect(await closed).toBe(1008);
+    });
+
+    const window = Date.now() - wedgedAt;
+    expect(window).toBeLessThan(sweepIntervalMs * (sweepFailureLimit + 1) + 120);
+    expect(unhandled).toEqual([]);
+  });
+
+  it('keeps sweeping when something inside a pass throws an unreadable value', async () => {
+    /**
+     * The outer catch, which round 9 made structurally unable to reject.
+     *
+     * The two tests above close the sites. This one closes the *shape*: whatever
+     * escapes `sweepConnections` — today only a logger throwing from `revoke`,
+     * tomorrow whatever a future edit adds — must not turn into a rejected
+     * promise, because the call is `void`ed and `index.ts` exits the process on
+     * an unhandled rejection by design. Round 8's handler read
+     * `(error as Error).message` off the escaping value, so a hostile value
+     * reaching one lookup was a server restart.
+     *
+     * `logger.info` is the lever because `revoke` calls it outside every `try`,
+     * which makes it the one honest way to get an arbitrary throw out of a pass
+     * without editing the source under test. It throws once and then behaves, so
+     * the assertion is about recovery rather than about a permanently broken
+     * logger.
+     *
+     * **Against `fix/auth-r8` this test fails on the `unhandled` assertion**: the
+     * escaping value is unreadable, so the `.catch` handler throws, the chain
+     * rejects, and Node reports it.
+     *
+     * Catches: deleting the terminal `.catch` from the sweep chain, moving
+     * `releaseLatch()` back below the description, or restoring
+     * `(error as Error).message` in the outer handler.
+     */
+    const sweepIntervalMs = 100;
+    let throwOnNextRevoke = true;
+    let graceLookups = 0;
+
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs,
+        sweepFailureLimit: 1_000,
+        sweepUnverifiedMs: 300_000,
+        logger: {
+          ...logger,
+          info: (message: string, fields?: Record<string, unknown>) => {
+            if (message === 'revoking socket' && throwOnNextRevoke) {
+              throwOnNextRevoke = false;
+              throw unreadableRejection();
+            }
+            logger.info(message, fields);
+          },
+        },
+        loadRoomMembership: async (room, user) => {
+          if (user === grace.userId) graceLookups += 1;
+          const role = memberships.get(membershipKey(room, user));
+          return role ? { role } : null;
+        },
+      }),
+    );
+
+    const doomed = await connect('ada');
+    send(doomed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(doomed, 'joined');
+    const metronome = await connect('grace');
+    send(metronome, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(metronome, 'joined');
+
+    const unhandled = await withUnhandledRejectionWatch(async () => {
+      // The revocation the sweep is about to attempt is the one whose logging
+      // throws, so the pass unwinds from inside `revoke`.
+      memberships.delete(membershipKey(roomId, ada.userId));
+
+      const before = graceLookups;
+      /**
+       * Two further sweeps' worth of the metronome answering, which is the
+       * latch releasing and the interval still firing. The slack is one interval
+       * — small next to what it measures, so this is an inequality about the
+       * sweep and not about the scheduler.
+       */
+      await vi.waitFor(
+        () => {
+          expect(graceLookups).toBeGreaterThanOrEqual(before + 2);
+        },
+        { timeout: sweepIntervalMs * 3 + 120, interval: 10 },
+      );
+    });
+
+    expect(unhandled).toEqual([]);
+    doomed.close();
+    metronome.close();
+  });
+
+  it('still evicts within the failure bound when the logger itself throws', async () => {
+    /**
+     * The other half of the guard, and it exists because a mutation found it
+     * unmeasured.
+     *
+     * `describeUnknown` makes the *value* safe to describe. It does nothing
+     * about the logger: a transport with a closed socket, or a serializer that
+     * chokes on what it is handed, throws from inside `logger.error` — and in
+     * round 8 that throw escaped the membership `catch`, unwound the whole
+     * connection loop past the `recordSweepFailure` at the bottom of it, and
+     * left the counter at zero exactly as the unreadable rejection did.
+     *
+     * `packages/auth` already had this covered on its own path
+     * (`unguard-logger`, 2 of its suite). This is the same property on the
+     * realtime path, which round 8 did not carry across.
+     *
+     * **Found by mutation, not by reading**: `sweep-unguarded-log` — the
+     * describer kept, `guardedErrorLog` removed — was green against the suite as
+     * first written. A guard nothing fails without is a guard nobody has
+     * checked, so it gets this test rather than a sentence.
+     *
+     * Catches: `sweep-unguarded-log` in `scripts/mutation-ledger.mjs`.
+     */
+    const sweepIntervalMs = 100;
+    const sweepFailureLimit = 3;
+    let wedged = false;
+
+    await server.close();
+    await listen(
+      startServer({
+        sweepIntervalMs,
+        sweepFailureLimit,
+        sweepUnverifiedMs: 300_000,
+        logger: {
+          ...logger,
+          error: (message: string) => {
+            if (message === 'membership sweep failed') throw new Error('log transport is gone');
+          },
+        },
+        loadRoomMembership: async (room, user) => {
+          if (wedged && user === ada.userId) throw new Error('database is on fire');
+          const role = memberships.get(membershipKey(room, user));
+          return role ? { role } : null;
+        },
+      }),
+    );
+
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+
+    const closed = new Promise<number>((resolve) => removed.once('close', resolve));
+    const wedgedAt = Date.now();
+    wedged = true;
+
+    const unhandled = await withUnhandledRejectionWatch(async () => {
+      expect(await closed).toBe(1008);
+    });
+
+    const window = Date.now() - wedgedAt;
+    expect(window).toBeLessThan(sweepIntervalMs * (sweepFailureLimit + 1) + 120);
+    expect(unhandled).toEqual([]);
+  });
+
+  it('answers a command whose membership lookup rejects unreadably', async () => {
+    /**
+     * The command path, `ws-server.ts:547` in round 8. No counter here — the
+     * guarantee is the *reply*: "could not learn whether you are a member" is
+     * answered rather than dropped, because telling somebody they are not a
+     * member when the truth is that the database did not answer sends them to
+     * argue with an admin about permissions they already have.
+     *
+     * Reading `.message` first threw out of `handleCommand`, out of
+     * `handleFrame`, and — since the `message` listener called it
+     * fire-and-forget — into an unhandled rejection. The client waited forever
+     * for a reply that had become a process exit.
+     *
+     * **Against `fix/auth-r8` this test times out** waiting for the
+     * `command_error` frame, and reports an unhandled rejection.
+     *
+     * Catches: restoring `(error as Error).message` in `handleCommand`'s catch,
+     * and removing the terminal `.catch` on the `handleFrame` call.
+     */
+    await server.close();
+    await listen(
+      startServer({
+        loadRoomMembership: async () => {
+          throw unreadableRejection();
+        },
+      }),
+    );
+
+    const socket = await connect('ada');
+    const unhandled = await withUnhandledRejectionWatch(async () => {
+      send(socket, { type: 'command', command: 'room.join', roomId });
+      const refusal = await nextFrame(socket, 'command_error');
+      expect(refusal.reason).toBe('unavailable');
+    });
+
+    expect(unhandled).toEqual([]);
+    socket.close();
+  });
+
+  it('answers a command whose session revalidation rejects unreadably, and arms the back-off', async () => {
+    /**
+     * `ws-server.ts:700` in round 8. Two things are downstream of the format
+     * here and both matter: the refusal frame, and `connection.retryAfter` —
+     * the negative cache. Losing the back-off means every frame in a burst
+     * re-asks a session store that is already failing, which is the exact
+     * hammering round 3 introduced the back-off to stop.
+     *
+     * The second assertion is what makes this more than a copy of the test
+     * above: five frames, one lookup. A version that formats before arming the
+     * back-off does five lookups — if it survives the first at all.
+     *
+     * **Against `fix/auth-r8` this test times out** on the first refusal frame.
+     *
+     * Catches: moving the `retryAfter` assignment back below the log in
+     * `stillAuthenticated`, and restoring `(error as Error).message` there.
+     */
+    let lookups = 0;
+    await server.close();
+    await listen(
+      startServer({
+        revalidateTtlMs: 0,
+        revalidateBackoffMs: 10_000,
+        // Long enough that the idle sweep cannot be the thing that arms it.
+        sweepIntervalMs: 60_000,
+        revalidateSession: async () => {
+          lookups += 1;
+          throw unreadableRejection();
+        },
+      }),
+    );
+
+    const socket = await connect('ada');
+    const unhandled = await withUnhandledRejectionWatch(async () => {
+      for (let i = 0; i < 5; i += 1) {
+        send(socket, { type: 'command', command: 'room.join', roomId });
+      }
+      await nextFrame(socket, 'error');
+    });
+
+    expect(unhandled).toEqual([]);
+    // One lookup for five frames: the back-off was armed before anything read
+    // the rejection, so the remaining four were refused from the cached verdict.
+    expect(lookups).toBe(1);
+    socket.close();
   });
 });
 

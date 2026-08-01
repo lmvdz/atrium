@@ -54,9 +54,11 @@ import { join } from 'node:path';
 const TOUCHED = [
   'packages/auth/src/room-access.ts',
   'packages/auth/src/org.ts',
+  'packages/auth/src/errors.ts',
   'packages/auth/test/support/import-boundary.ts',
   'packages/auth/test/room-access.test.ts',
   'apps/server/src/ws-server.ts',
+  'apps/server/src/ws-auth.ts',
   'docker-compose.dev.yml',
   'docker-compose.yml',
   'deploy/Caddyfile.dev',
@@ -368,6 +370,140 @@ const mutations = {
         [
           '  }, sweepIntervalMs);\n  sweep.unref();',
           '  }, sweepIntervalMs * 4);\n  sweep.unref();',
+        ],
+      ]),
+  ],
+
+  // ── round 9 ────────────────────────────────────────────────────────────────
+  //
+  // Three independent things went wrong at each site in round 8, and each entry
+  // below restores exactly one of them, because "the fix works" is not the same
+  // claim as "each half of the fix is load-bearing".
+  //
+  // Measured, and the first draft of this ledger got it wrong: a mutation that
+  // restored `(error as Error).message` *inside* the `logSafely` thunk left
+  // every suite green, because building the fields is inside the guard. That is
+  // a real property of the fix and not a defect in the test — but it means the
+  // faithful reproduction of round 8 is the **unguarded** `logger.error`, which
+  // is what these use. Written down because it took a failed mutation to learn,
+  // and the same trap is waiting for the next person who mutates this file.
+
+  'sweep-log-before-counting': [
+    'round 8 exactly: an unguarded `logger.error` reading `.message`, above the counter',
+    'apps/server/test/ws-server.test.ts — the two sweep-bound tests, by timing out',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          "          const at = Date.now();\n          connection.retryAfter = at + revalidateBackoffMs;\n          recordSweepFailure(connection, at);\n          logSafely('session revalidation failed during sweep', () => ({\n            connectionId: connection.id,\n            error: describeUnknown(error),\n          }));",
+          "          const at = Date.now();\n          logger.error('session revalidation failed during sweep', {\n            connectionId: connection.id,\n            error: (error as Error).message,\n          });\n          connection.retryAfter = at + revalidateBackoffMs;\n          recordSweepFailure(connection, at);",
+        ],
+        [
+          "          checkedEveryRoom = false;\n          logSafely('membership sweep failed', () => ({\n            connectionId: connection.id,\n            roomId,\n            error: describeUnknown(error),\n          }));",
+          "          logger.error('membership sweep failed', {\n            connectionId: connection.id,\n            roomId,\n            error: (error as Error).message,\n          });\n          checkedEveryRoom = false;",
+        ],
+      ]),
+  ],
+
+  'sweep-counts-then-reads': [
+    "round 9's ordering kept, its guard and its describer removed — does counting first save it on its own?",
+    'apps/server/test/ws-server.test.ts — measured, not predicted; see the round-9 receipt',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          "          logSafely('membership sweep failed', () => ({\n            connectionId: connection.id,\n            roomId,\n            error: describeUnknown(error),\n          }));",
+          "          logger.error('membership sweep failed', {\n            connectionId: connection.id,\n            roomId,\n            error: (error as Error).message,\n          });",
+        ],
+      ]),
+  ],
+
+  'sweep-unguarded-log': [
+    'the describer stays, the guard goes — a logger that throws while serializing still abandons a pass',
+    'apps/server/test/ws-server.test.ts — the outer-catch test',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          '  const logSafely = guardedErrorLog(logger);',
+          '  const logSafely = (message: string, fields: () => Record<string, unknown>): void => {\n    logger.error(message, fields());\n  };',
+        ],
+      ]),
+  ],
+
+  'sweep-catch-can-reject': [
+    "round 8's outer handler: `(error as Error).message` in a `.catch`, with no terminal handler after it",
+    'apps/server/test/ws-server.test.ts — the outer-catch test, on its unhandled-rejection assertion',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          "    void sweepConnections(deadline)\n      .then(releaseLatch, (error: unknown) => {\n        releaseLatch();\n        logSafely('sweep failed', () => ({ error: describeUnknown(error) }));\n      })\n      .catch(() => {\n        sweeping = false;\n      });",
+          "    void sweepConnections(deadline)\n      .catch((error: unknown) => {\n        logger.error('sweep failed', { error: (error as Error).message });\n      })\n      .finally(releaseLatch);",
+        ],
+      ]),
+  ],
+
+  'command-reads-error-message': [
+    "round 8's command path: the membership lookup's rejection described before the refusal is sent",
+    'apps/server/test/ws-server.test.ts — the command-path test, by timing out with an unhandled rejection',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          "      logSafely('membership lookup failed', () => ({\n        connectionId: connection.id,\n        command,\n        roomId,\n        error: describeUnknown(error),\n      }));",
+          "      logger.error('membership lookup failed', {\n        connectionId: connection.id,\n        command,\n        roomId,\n        error: (error as Error).message,\n      });",
+        ],
+        [
+          '      handleFrame(socket, raw.toString()).catch((error: unknown) => {',
+          '      void handleFrame(socket, raw.toString());\n      const unusedFrameCatch = (): void => {\n        Promise.resolve().catch((error: unknown) => {',
+        ],
+        [
+          '          error: describeUnknown(error),\n        }));\n      });\n    });',
+          '          error: describeUnknown(error),\n        }));\n        });\n      };\n      void unusedFrameCatch;\n    });',
+        ],
+      ]),
+  ],
+
+  'backoff-after-reading': [
+    "round 8's command path: the back-off armed *after* the session rejection is described",
+    'apps/server/test/ws-server.test.ts — the session-command test, on both the refusal frame and the one-lookup assertion',
+    () =>
+      edit('apps/server/src/ws-server.ts', [
+        [
+          "      connection.retryAfter = Date.now() + revalidateBackoffMs;\n      logSafely('session revalidation failed', () => ({\n        connectionId: connection.id,\n        error: describeUnknown(error),\n      }));",
+          "      logger.error('session revalidation failed', {\n        connectionId: connection.id,\n        error: (error as Error).message,\n      });\n      connection.retryAfter = Date.now() + revalidateBackoffMs;",
+        ],
+      ]),
+  ],
+
+  'resolver-reads-error-message': [
+    "round 8's session resolver: the driver's rejection described on the line above `return null`",
+    'apps/server/test/ws-auth.test.ts — the unreadable-rejection test, which then rejects instead of returning null',
+    () =>
+      edit('apps/server/src/ws-auth.ts', [
+        [
+          "      logSafely('ws session lookup failed', () => ({ error: describeUnknown(error) }));",
+          "      logger.error('ws session lookup failed', { error: (error as Error).message });",
+        ],
+      ]),
+  ],
+
+  'invitation-reads-error-message': [
+    "round 8's invitation compensation: the port's rejection described before the deliberate `APIError`",
+    'packages/auth/test/org.test.ts — the unreadable-compensation test, which then rejects with a TypeError',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          "          logSafely('failed to void an over-privileged invitation', () => ({\n            invitationId: data.invitation.id,\n            error: describeUnknown(error),\n          }));",
+          "          logger.error('failed to void an over-privileged invitation', {\n            invitationId: data.invitation.id,\n            error: (error as Error).message,\n          });",
+        ],
+      ]),
+  ],
+
+  'undescribable-describer': [
+    'the shared describer stops being total — `(value as Error).message ?? String(value)`, which is what every call site did before round 9',
+    'packages/auth — 12 (9 in errors.test.ts, 3 in org.test.ts). **`apps/server` stays green, and that is the finding**: the realtime sites survive a non-total describer because the counter moves first and the log is guarded. Measured, not assumed — three layers, and each one is separately mutable (see `sweep-log-before-counting`, `sweep-counts-then-reads`, `sweep-unguarded-log`). Requires `pnpm --filter @atrium/auth build` to reach `apps/server` at all.',
+    () =>
+      edit('packages/auth/src/errors.ts', [
+        [
+          "export function describeUnknown(value: unknown): string {\n  try {\n    if (value instanceof Error) return value.message;\n  } catch {\n    // A hostile prototype chain or a throwing `message` getter. Fall through to\n    // the string conversion, which is guarded in its turn.\n  }\n  try {\n    return String(value);\n  } catch {\n    // `Object.create(null)`, a throwing `Symbol.toPrimitive`, a Proxy.\n  }\n  return '<a rejection value that cannot be converted to a string>';\n}",
+          'export function describeUnknown(value: unknown): string {\n  const message = (value as { message?: unknown }).message;\n  return typeof message === "string" ? message : String(value);\n}',
         ],
       ]),
   ],

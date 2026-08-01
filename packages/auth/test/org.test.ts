@@ -591,10 +591,25 @@ describe('revocation hooks', () => {
          * measurement rather than a claim: it fails if the hook waited longer
          * than the deadline it was given.
          */
+        /**
+         * **The deadline is 150ms and the ceiling is 270ms, both changed in
+         * round 9.** Round 8 configured 40ms and asserted under 2000ms — fifty
+         * intervals of slack, which measures "the hook returned eventually" and
+         * would pass against a deadline of a second and a half. That is the
+         * fault round 8 itself corrected in `ws-server.test.ts`'s window tests
+         * and did not carry to its own, and it is the polish item on the round-8
+         * delta. Slack has to be small next to the number under test.
+         *
+         * Two-sided on purpose. The upper bound fails a deadline that is wider
+         * than advertised; the lower bound fails a "deadline" that does not wait
+         * at all — a `Promise.race` against an already-resolved promise, say,
+         * which would satisfy an upper bound alone.
+         */
+        const cleanupReportTimeoutMs = 150;
         const logger = { warn: vi.fn(), error: vi.fn() };
         const hooks = options(failingSweep(), {
           logger,
-          cleanupReportTimeoutMs: 40,
+          cleanupReportTimeoutMs,
           // Never. Not slow — never.
           onCleanupFailure: () => new Promise<void>(() => {}),
         }).organizationHooks;
@@ -603,14 +618,12 @@ describe('revocation hooks', () => {
         await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
         const elapsed = Date.now() - started;
 
-        // Generous upper bound, because a loaded CI box schedules timers late.
-        // It still fails by orders of magnitude against an undeadlined await,
-        // which never resolves at all.
-        expect(elapsed).toBeLessThan(2_000);
+        expect(elapsed).toBeGreaterThanOrEqual(cleanupReportTimeoutMs - 20);
+        expect(elapsed).toBeLessThan(cleanupReportTimeoutMs + 120);
         expect(logger.error).toHaveBeenCalledTimes(2);
         expect(logger.error.mock.calls[1]?.[1]).toMatchObject({
           event: 'room_cleanup_reporter_timed_out',
-          timeoutMs: 40,
+          timeoutMs: cleanupReportTimeoutMs,
         });
       });
 
@@ -1091,6 +1104,47 @@ describe('afterCreateInvitation — the time-of-check/time-of-use compensation',
       racingPorts('member', {
         voidInvitation: async () => {
           throw new Error('database is on fire');
+        },
+      }),
+    ).organizationHooks;
+
+    await expect(hooks.beforeCreateInvitation(invitation('admin'))).resolves.toBeUndefined();
+    await expect(hooks.afterCreateInvitation(created)).rejects.toMatchObject({
+      status: 'INTERNAL_SERVER_ERROR',
+    });
+  });
+
+  it('fails loudly even when the compensation rejects with something unreadable', async () => {
+    /**
+     * The round-9 class sweep reaching this file's other two format sites.
+     *
+     * The `catch` above exists to convert a failed compensation into a legible
+     * refusal — "The invitation could not be issued. Nothing was granted" — and
+     * round 8 read `(error as Error).message` on the line *before* that throw.
+     * A port rejecting with a throwing `message` getter replaced the deliberate
+     * `APIError` with a raw `TypeError`, so the caller got an unexplained 500
+     * about a state nobody had described, on a path whose whole job is to
+     * describe it.
+     *
+     * Less severe than the sweep — this path fails either way — which is why it
+     * is here rather than in the blocking item. It is the same defect, and
+     * leaving one instance of a class behind after two rounds of it is how a
+     * class survives to a third.
+     *
+     * **Against `fix/auth-r8` this test fails**: the rejection is a `TypeError`
+     * with no `status`, so `toMatchObject` does not match.
+     *
+     * Catches: restoring `(error as Error).message` in either invitation catch —
+     * the `invitation-reads-error-message` entry in the mutation ledger.
+     */
+    const hooks = optionsWith(
+      racingPorts('member', {
+        voidInvitation: async () => {
+          throw {
+            get message(): string {
+              throw new Error('reading this rejection is itself a failure');
+            },
+          };
         },
       }),
     ).organizationHooks;

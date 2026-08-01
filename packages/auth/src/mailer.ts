@@ -1,4 +1,5 @@
 import { appendFileSync } from 'node:fs';
+import { describeUnknown } from './errors.js';
 
 /**
  * The mailer. In development it is a console transport: every message Atrium
@@ -79,8 +80,12 @@ export const consoleMailer: Mailer = async (message) => {
   try {
     appendFileSync(path, `${JSON.stringify(record)}\n`, 'utf8');
   } catch (error) {
-    // A broken outbox must never break a signup.
-    warnOnce(`could not write the mail outbox at ${path}: ${(error as Error).message}`);
+    // A broken outbox must never break a signup — and `(error as Error).message`
+    // was how it could. `appendFileSync` throws whatever the platform hands it;
+    // a `message` getter that throws made the *description* of the failure the
+    // thing that propagated, out of a `catch` written to guarantee it would not.
+    // `describeUnknown` is total. See `errors.ts` for the class.
+    warnOnce(`could not write the mail outbox at ${path}: ${describeUnknown(error)}`);
   }
 };
 

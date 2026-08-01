@@ -1,5 +1,7 @@
 import {
   createAtriumAuth,
+  describeUnknown,
+  guardedErrorLog,
   loadRoomMembership as loadAuthorizedRoomMembership,
   resolveAuthSecret,
   trustedProxyStrategy,
@@ -20,6 +22,7 @@ import { createRealtimeServer, type LoadRoomMembership } from './ws-server.js';
 async function main(): Promise<void> {
   const env = loadEnv();
   const logger = createLogger(env.LOG_LEVEL);
+  const logSafely = guardedErrorLog(logger);
 
   logger.info('atrium server starting', { env: env.NODE_ENV, port: env.SERVER_PORT });
 
@@ -117,7 +120,10 @@ async function main(): Promise<void> {
       logger.info('shutdown complete');
       process.exit(0);
     } catch (error) {
-      logger.error('shutdown failed', { error: (error as Error).message });
+      // Exit code before description, everywhere in this file. See the block
+      // below `unhandledRejection` for why that ordering is not pedantry.
+      process.exitCode = 1;
+      logSafely('shutdown failed', () => ({ error: describeUnknown(error) }));
       process.exit(1);
     }
   };
@@ -134,17 +140,42 @@ async function main(): Promise<void> {
   // hours. Exit, and let compose's `restart: unless-stopped` bring back a
   // process whose state we understand. Deliberately not a graceful shutdown —
   // the shutdown path itself may be what failed.
+  /**
+   * The last two handlers in the process, and the ones that most needed this.
+   *
+   * `String(reason)` is not total — that is the whole finding of round 9 — and
+   * this listener is the one place where a throw has nowhere to go: a throw
+   * inside an `unhandledRejection` listener is re-raised as an *uncaught
+   * exception*, so a rejection value carrying a hostile `Symbol.toPrimitive`
+   * skipped the `process.exit(1)` below it and diverted the process into the
+   * graceful shutdown it deliberately does not want. The handler written to
+   * guarantee "exit, and let compose restart us" could be argued out of it by
+   * the value it was reporting.
+   *
+   * `exitCode` is set before anything is described, so even a total description
+   * that somehow throws still leaves a process that dies non-zero.
+   */
   process.on('unhandledRejection', (reason) => {
-    logger.error('unhandled rejection — exiting', { reason: String(reason) });
+    process.exitCode = 1;
+    logSafely('unhandled rejection — exiting', () => ({ reason: describeUnknown(reason) }));
     process.exit(1);
   });
-  process.on('uncaughtException', (error: Error) => {
-    logger.error('uncaught exception', { error: error.message, stack: error.stack });
+  process.on('uncaughtException', (error: unknown) => {
+    // Typed `Error` by Node's own signature, but `throw {}` is legal JavaScript
+    // and reaches here verbatim. `stack` is read inside the guarded thunk.
+    process.exitCode = 1;
+    logSafely('uncaught exception', () => ({
+      error: describeUnknown(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    }));
     void shutdown('uncaughtException');
   });
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : error);
+  // `instanceof` runs a Proxy's `getPrototypeOf` trap, so even this line was a
+  // way to start the process and never set a failing exit code.
+  process.exitCode = 1;
+  console.error(describeUnknown(error));
   process.exit(1);
 });

@@ -1,5 +1,11 @@
 import type { IncomingMessage } from 'node:http';
-import { type AtriumAuth, type AtriumSession, getAtriumSession } from '@atrium/auth';
+import {
+  type AtriumAuth,
+  type AtriumSession,
+  describeUnknown,
+  getAtriumSession,
+  guardedErrorLog,
+} from '@atrium/auth';
 import type { Logger } from './logger.js';
 
 /**
@@ -59,14 +65,19 @@ export function createUpgradeAuthenticator(options: UpgradeAuthOptions): Authent
  */
 export function createSessionResolver(options: UpgradeAuthOptions): RevalidateSession {
   const { auth, logger } = options;
+  const logSafely = guardedErrorLog(logger);
 
   return async function resolveSession(headers) {
     let session: AtriumSession | null;
     try {
       session = await getAtriumSession(auth, headers);
     } catch (error) {
-      // A database blip must read as "not authenticated", never as "sure, come in".
-      logger.error('ws session lookup failed', { error: (error as Error).message });
+      // A database blip must read as "not authenticated", never as "sure, come
+      // in" — and never as "reject with whatever the driver threw", which is
+      // what `(error as Error).message` allowed. `return null` is the verdict
+      // this catch exists to produce; describing the failure must not be able to
+      // stop it being reached. See `@atrium/auth`'s `errors.ts` for the class.
+      logSafely('ws session lookup failed', () => ({ error: describeUnknown(error) }));
       return null;
     }
 

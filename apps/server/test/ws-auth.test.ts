@@ -117,6 +117,41 @@ describe('createSessionResolver', () => {
     expect(await resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).toBeNull();
     error.mockRestore();
   });
+
+  it('returns null even when the thrown value cannot be described', async () => {
+    /**
+     * The round-9 class sweep, at this site. The `catch` above is the one place
+     * in the realtime stack that turns "the database did not answer" into "not
+     * authenticated" — and round 8 wrote `(error as Error).message` on the line
+     * *before* `return null`. A driver rejecting with a lazily-decoded error
+     * object, a Proxy, or anything else with a throwing `message` getter made
+     * the resolver **reject** instead of returning the fail-closed verdict.
+     *
+     * That rejection had somewhere to go. `handleUpgrade` awaits this and had no
+     * catch, so the TCP socket was left neither upgraded nor refused — open,
+     * attached to nothing — and the rejection reached `index.ts`, which exits the
+     * process on an unhandled rejection by design.
+     *
+     * **Against `fix/auth-r8` this test fails**: the assertion below sees a
+     * rejection rather than `null`.
+     *
+     * Catches: restoring `(error as Error).message` in `createSessionResolver`'s
+     * catch — the `resolver-reads-error-message` entry in the mutation ledger.
+     */
+    const resolve = createSessionResolver({
+      auth: fakeAuth(() => {
+        throw {
+          get message(): string {
+            throw new Error('reading this rejection is itself a failure');
+          },
+        };
+      }),
+      logger,
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).resolves.toBeNull();
+    error.mockRestore();
+  });
 });
 
 describe('toHeaders', () => {

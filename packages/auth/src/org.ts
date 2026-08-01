@@ -1,6 +1,7 @@
 import { APIError } from 'better-auth/api';
 import type { OrganizationOptions } from 'better-auth/plugins/organization';
 import { authorize, mayGrantRole, parseRole, roleRank } from './authz.js';
+import { describeUnknown, guardedErrorLog, toReportableError } from './errors.js';
 import type { Mailer } from './mailer.js';
 import type { InvitationVoidOutcome } from './workspace.js';
 
@@ -209,52 +210,6 @@ const noopLogger: OrganizationLogger = { warn: () => {}, error: () => {} };
 export const DEFAULT_CLEANUP_REPORT_TIMEOUT_MS = 5_000;
 
 /**
- * Describe an unknown value as a string, and never throw doing it.
- *
- * This exists because round 7's crash guard had a hole one line upstream of
- * itself: `new Error(String(error))` ran at the *call site*, outside the guard,
- * on a value the guard was there to defend against. `String(x)` is not total —
- * `Object.create(null)` has no `toString`, a `Symbol.toPrimitive` can throw
- * whatever it likes, and a `Proxy` can throw from any trap — so a port that
- * rejected with one of those made `afterRemoveMember` reject *after the removal
- * had committed*, which is the exact failure the guard existed to close.
- *
- * Every conversion below is therefore attempted rather than assumed, including
- * the `instanceof` (a proxy with a hostile `getPrototypeOf` throws from that
- * too) and the `.message` read (a getter, on some implementations).
- */
-function describeUnknown(value: unknown): string {
-  try {
-    if (value instanceof Error) return value.message;
-  } catch {
-    // A hostile prototype chain or a throwing `message` getter. Fall through to
-    // the string conversion, which is guarded in its turn.
-  }
-  try {
-    return String(value);
-  } catch {
-    // `Object.create(null)`, a throwing `Symbol.toPrimitive`, a Proxy.
-  }
-  return '<a rejection value that cannot be converted to a string>';
-}
-
-/**
- * Normalize anything a port rejected with into an `Error`, totally.
- *
- * Total is the whole requirement. The code that formats an error on a
- * post-commit path is as much a part of that path as the code that reports it,
- * and this one is called from inside the guard for that reason.
- */
-export function toReportableError(value: unknown): Error {
-  try {
-    if (value instanceof Error) return value;
-  } catch {
-    // See `describeUnknown`.
-  }
-  return new Error(describeUnknown(value));
-}
-
-/**
  * Await `work`, but not for longer than `timeoutMs`.
  *
  * Two properties, and the second is the one that is easy to lose:
@@ -383,23 +338,13 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
   /**
    * Log, without letting the logging become the failure.
    *
-   * The fields arrive as a thunk rather than a value so that *building* them is
-   * inside the guard too: every field below reads a property off an `Error` this
-   * module did not create, and `stack` in particular is a getter on some
-   * implementations. A logger that throws — a transport with a closed socket, a
-   * serializer that chokes on a circular `cause` — is the last thing that may
-   * take a request down, so it is caught here and nowhere else.
-   *
-   * Nothing is re-reported from the catch: reporting it would use the same
-   * logger. Dropped deliberately, which is not the same as dropped by omission.
+   * Round 8 wrote this guard here. Round 9 moved it to `errors.ts` unchanged,
+   * because the round-8 delta found the same class in `apps/server` — see that
+   * module's header for the rule. The thunk is the load-bearing part: *building*
+   * the fields is inside the guard too, and the fields are where an `Error` this
+   * module did not create gets its properties read.
    */
-  const logSafely = (message: string, fields: () => Record<string, unknown>): void => {
-    try {
-      logger.error(message, fields());
-    } catch {
-      // Intentionally empty; see above.
-    }
-  };
+  const logSafely = guardedErrorLog(logger);
 
   /**
    * Report a cleanup failure loudly, then carry on.
@@ -653,10 +598,15 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
         try {
           found = await ports.voidInvitation({ invitationId: data.invitation.id, workspaceId });
         } catch (error) {
-          logger.error('failed to void an over-privileged invitation', {
+          // `describeUnknown`, not `(error as Error).message`. The line below
+          // this one is the deliberate refusal — the whole point of the branch —
+          // and a `message` getter that throws would replace it with a raw
+          // `TypeError`, turning a legible "nothing was granted" into an
+          // unexplained 500. Same class as the sweep; see `errors.ts`.
+          logSafely('failed to void an over-privileged invitation', () => ({
             invitationId: data.invitation.id,
-            error: (error as Error).message,
-          });
+            error: describeUnknown(error),
+          }));
           throw new APIError('INTERNAL_SERVER_ERROR', {
             message: 'The invitation could not be issued. Nothing was granted; please try again.',
           });
@@ -684,11 +634,13 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
               revokedRooms: undone.rooms,
             });
           } catch (error) {
-            logger.error('failed to undo an accepted over-privileged invitation', {
+            // As above: the refusal below must be what the caller gets, and a
+            // hostile `message` getter must not be able to replace it.
+            logSafely('failed to undo an accepted over-privileged invitation', () => ({
               invitationId: data.invitation.id,
               email: found.email,
-              error: (error as Error).message,
-            });
+              error: describeUnknown(error),
+            }));
             throw new APIError('INTERNAL_SERVER_ERROR', {
               message:
                 'That invitation was accepted while your permission to send it changed, and ' +

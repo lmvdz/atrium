@@ -9,6 +9,7 @@
 export * from './auth.js';
 export * from './authz.js';
 export * from './client-ip.js';
+export * from './errors.js';
 export * from './mailer.js';
 export * from './mounted.js';
 export * from './org.js';
