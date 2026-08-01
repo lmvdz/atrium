@@ -105,8 +105,15 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   /**
    * What each socket has acknowledged holding, per room. The head frame's only
    * stopping condition — see `head-acks.ts` for why an attempt is not one.
+   *
+   * Bounded by the hub's own subscription map rather than by a cap: a socket can
+   * only acknowledge rooms it is in, and `handleSubscribe` is the only thing that
+   * puts it in one, after `requireMembership`. So this map holds exactly the
+   * rooms a socket could be sent a head frame about (r4 delta, major).
    */
-  const headAcks = createHeadAcks();
+  const headAcks = createHeadAcks({
+    subscribed: (subscriberId, roomId) => hub.isSubscribed(roomId, subscriberId),
+  });
 
   const httpServer = createServer((req, res) => {
     if (req.url === '/health') {
@@ -284,11 +291,24 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         send(socket, { type: 'unsubscribed', roomId: frame.data.roomId });
         return;
       case 'ack_head':
-        // No reply, and no membership check: this is a statement a socket makes
-        // about itself, it is only ever read to decide whether to send that same
-        // socket a `head` frame, and answering it would be one more frame in the
-        // loop this exists to terminate.
-        headAcks.record(connection.id, frame.data.roomId, frame.data.roomSeq);
+        // No reply: this is a statement a socket makes about itself, it is only
+        // ever read to decide whether to send that same socket a `head` frame,
+        // and answering it would be one more frame in the loop this exists to
+        // terminate.
+        //
+        // It is not unbounded, though — r4's version was, and that was the r4
+        // delta's major. `record` refuses a room the socket is not subscribed to,
+        // so a client cannot grow the server's map by naming rooms it invented.
+        // Refusal is logged rather than nacked: an `ack_head` and an
+        // `unsubscribe` can legitimately cross on the wire, and a client that has
+        // just left a room should not get an error for the frame it had already
+        // sent.
+        if (!headAcks.record(connection.id, frame.data.roomId, frame.data.roomSeq)) {
+          logger.debug('ignored ack_head for an unsubscribed room', {
+            connectionId: connection.id,
+            roomId: frame.data.roomId,
+          });
+        }
         return;
       case 'since':
         await handleSince(socket, connection, frame.data);

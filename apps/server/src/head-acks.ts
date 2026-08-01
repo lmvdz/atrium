@@ -48,7 +48,40 @@
  *    ledger, or anybody else's cursor. A client lying here is a client choosing
  *    not to be told about its own gap, which it could equally achieve by ignoring
  *    the frame.
+ *
+ * ## What the record is allowed to contain (#22 gauntlet r4 delta, major)
+ *
+ * > ACK bookkeeping is unbounded for a live socket — `head-acks.ts:96` records
+ * > arbitrary room ids with no subscription or authorization check.
+ *
+ * Round 4's `record` created a map entry for whatever room id arrived, so one
+ * open socket could grow this map without limit by sending `ack_head` frames
+ * naming rooms that do not exist. The cleanup on close was correct and irrelevant:
+ * a socket that stays open never reaches it.
+ *
+ * The bound is not a cap, because a cap picks an arbitrary number and still lets
+ * a client fill it with lies. It is the **subscription set**: `record` writes only
+ * where `subscribed(socket, room)` says the socket is in the room right now, and
+ * `subscribe` is where authorization happens (`requireMembership`, before
+ * `hub.subscribe`). So the entries a socket can hold are exactly the rooms it is
+ * both subscribed to and authorized for, which is the same set the reconciler
+ * would send it head frames about — and the map is bounded by the user's own room
+ * count rather than by anything the client says. An unsubscribe or a close empties
+ * it the way it always did.
+ *
+ * This also removes the affordance rather than validating it: a room the socket
+ * cannot be told the head of has no acknowledgement worth recording.
  */
+
+/** Everything this record needs from the outside: who is in which room. */
+export interface HeadAcksOptions {
+  /**
+   * Is this socket currently subscribed to this room? Backed by `hub`, which is
+   * the same map the head frame is delivered from — so "recorded" and
+   * "deliverable" cannot describe different sets.
+   */
+  subscribed: (subscriberId: string, roomId: string) => boolean;
+}
 
 export interface HeadAcks {
   /**
@@ -56,8 +89,14 @@ export interface HeadAcks {
    * cannot go backwards within one subscription, and a late-arriving ack that
    * names an older position must not re-open head frames the client has already
    * answered.
+   *
+   * Returns whether the acknowledgement was recorded. `false` means the socket is
+   * not subscribed to that room, and nothing is stored — see the note above on
+   * why the bound is the subscription set. The caller uses the answer to log; it
+   * is deliberately not an error frame, because a `subscribe`/`unsubscribe` and an
+   * in-flight `ack_head` can legitimately cross on the wire.
    */
-  record: (subscriberId: string, roomId: string, roomSeq: number) => void;
+  record: (subscriberId: string, roomId: string, roomSeq: number) => boolean;
   /** Does this socket still need to be told `head`? */
   behind: (subscriberId: string, roomId: string, head: number) => boolean;
   /** The acknowledged cursor, for tests and diagnostics. 0 when never told. */
@@ -78,9 +117,11 @@ export interface HeadAcks {
   forget: (subscriberId: string) => void;
   /** Sockets currently tracked. Asserted by a test, so the leak stays closed. */
   size: () => number;
+  /** Rooms tracked for one socket. Asserted by a test, so the bound stays real. */
+  roomCount: (subscriberId: string) => number;
 }
 
-export function createHeadAcks(): HeadAcks {
+export function createHeadAcks({ subscribed }: HeadAcksOptions): HeadAcks {
   const bySubscriber = new Map<string, Map<string, number>>();
 
   const rooms = (subscriberId: string): Map<string, number> => {
@@ -94,9 +135,16 @@ export function createHeadAcks(): HeadAcks {
 
   return {
     record: (subscriberId, roomId, roomSeq) => {
-      if (!Number.isFinite(roomSeq) || roomSeq < 0) return;
+      if (!Number.isFinite(roomSeq) || roomSeq < 0) return false;
+      // The bound, and the authorization: a socket may only speak about rooms it
+      // is in, and it is only in rooms `handleSubscribe` let it into. Checked
+      // before the map is touched, so a refused frame allocates nothing at all —
+      // a check after `rooms(subscriberId)` would still have created the entry
+      // this exists to prevent.
+      if (!subscribed(subscriberId, roomId)) return false;
       const held = rooms(subscriberId);
       held.set(roomId, Math.max(held.get(roomId) ?? 0, roomSeq));
+      return true;
     },
     behind: (subscriberId, roomId, head) =>
       (bySubscriber.get(subscriberId)?.get(roomId) ?? 0) < head,
@@ -114,5 +162,6 @@ export function createHeadAcks(): HeadAcks {
       bySubscriber.delete(subscriberId);
     },
     size: () => bySubscriber.size,
+    roomCount: (subscriberId) => bySubscriber.get(subscriberId)?.size ?? 0,
   };
 }

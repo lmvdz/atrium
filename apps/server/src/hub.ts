@@ -47,6 +47,17 @@ export interface Hub<T> {
    * mid-iteration.
    */
   subscribers: (roomId: string) => Subscriber<T>[];
+  /**
+   * Is this socket in this room right now?
+   *
+   * The membership question, asked per frame rather than per pass. `head-acks`
+   * needs it because a client frame naming a room is a client naming a room:
+   * without this, an `ack_head` for a room the socket never joined allocates a
+   * map entry for a room id the socket invented (#22 gauntlet r4 delta, major).
+   * A lookup rather than a scan of `subscribers`, because it runs on a frame
+   * a client controls the rate of.
+   */
+  isSubscribed: (roomId: string, subscriberId: string) => boolean;
   broadcast: (roomId: string, frame: T) => number;
   /**
    * Everyone in the room except one subscriber. Used for nothing today — the
@@ -108,6 +119,7 @@ export function createHub<T>(): Hub<T> {
     // keys of `rooms` are exactly the rooms with a live subscriber.
     activeRooms: () => [...rooms.keys()],
     subscribers: (roomId) => [...(rooms.get(roomId)?.values() ?? [])],
+    isSubscribed: (roomId, subscriberId) => rooms.get(roomId)?.has(subscriberId) ?? false,
     broadcast: (roomId, frame) => {
       const members = rooms.get(roomId);
       if (!members) return 0;
