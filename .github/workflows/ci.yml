@@ -397,6 +397,138 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  deploy:
+    name: compose stack (serves a page)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # ┌─ WHY THIS JOB EXISTS ────────────────────────────────────────────────────
+    # │ Issue #40. Three rounds of gauntlet receipts described the compose
+    # │ deployment as working; it had never served a page. Under
+    # │ `NODE_ENV=production` `app` answered 500 to every request — no mail
+    # │ transport behind a correct boot gate, and a `ws://` realtime URL
+    # │ compiled into the bundle at build time — and neither Dockerfile had
+    # │ built at all since a workspace package landed. Every existing gate was
+    # │ green because every existing gate tested a part.
+    # │
+    # │ So this one runs the product. It builds both images from the shipped
+    # │ Dockerfiles, brings up the shipped `docker-compose.yml` — plus
+    # │ `docker-compose.mailpit.yml`, which adds a mail catcher and nothing
+    # │ else — and asserts real behaviour against it over TLS, through the
+    # │ shipped Caddy config, on the published port.
+    # │
+    # │ NOT A HEALTH ENDPOINT. The whole lesson of round 4 is that a healthy
+    # │ container is not a serving one: `app` reported healthy for three rounds
+    # │ while 500ing. The assertions here fetch pages, submit the real sign-up
+    # │ form, read the mail that was actually sent over SMTP, follow the link in
+    # │ it, and open a WebSocket with the session that produced.
+    # │
+    # │ The overlay is the one lever that could make this job assert something
+    # │ other than the shipped configuration, so `assert-stack-config.mjs` reads
+    # │ NODE_ENV, both origins, the proxy hop count and the mail transport back
+    # │ out of the *running containers* and fails if any of them drifted.
+    # └──────────────────────────────────────────────────────────────────────────
+
+    env:
+      # The whole stack's configuration, in one place. `atrium.localhost` is the
+      # hostname because Caddy issues certificates for `.localhost` names from
+      # its own internal CA — no ACME, no public DNS, no rate limit — so the
+      # *shipped* Caddyfile serves real TLS here with no edit. The assertions
+      # trust that CA explicitly (see scripts/ci/stack-client.mjs); certificate
+      # verification is never disabled.
+      ATRIUM_COMPOSE_PROJECT: atrium-ci
+      ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml
+      ATRIUM_STACK_DOMAIN: atrium.localhost
+      ATRIUM_STACK_CA: ${{ github.workspace }}/caddy-root.crt
+      ATRIUM_WEB_IMAGE: atrium-ci-app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        # No pnpm here: every script this job runs is dependency-free by design,
+        # so the assertions cannot be broken by an install that resolved
+        # differently from the one inside the images.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Write the deployment environment
+        # docker-compose.yml refuses to interpolate without these; that refusal
+        # is a feature and it is why they are written out rather than defaulted.
+        # The secrets are CI values for a stack that lives for ten minutes on a
+        # runner with no published database port.
+        run: |
+          set -euo pipefail
+          cat > .env <<'ENVIRONMENT'
+          POSTGRES_USER=atrium
+          POSTGRES_PASSWORD=atrium-ci-not-a-real-password
+          POSTGRES_DB=atrium
+          DATABASE_URL=postgres://atrium:atrium-ci-not-a-real-password@postgres:5432/atrium
+          LOG_LEVEL=info
+          ATRIUM_DOMAIN=atrium.localhost
+          HTTPS_PORT=443
+          HTTP_PORT=80
+          BETTER_AUTH_SECRET=atrium-ci-secret-not-for-production-0123456789
+          S3_ACCESS_KEY_ID=atrium
+          S3_SECRET_ACCESS_KEY=atrium-ci-not-a-real-secret
+          ATRIUM_MAIL_TRANSPORT=smtp
+          ATRIUM_MAIL_FROM=Atrium CI <no-reply@atrium.test>
+          ENVIRONMENT
+          test -s .env
+
+      - name: Build the images
+        # From the shipped Dockerfiles, from a clean checkout. This is the step
+        # that had silently been failing for everyone since `packages/ingest`
+        # landed without its manifest being copied.
+        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml build
+
+      - name: Bring the stack up
+        # `--wait` blocks until every service is settled, and fails if one never
+        # becomes healthy. It is a wait, not an assertion — see
+        # scripts/ci/assert-stack-health.mjs for the three things it does not
+        # prove and this job therefore checks separately.
+        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml up -d --wait --wait-timeout 300
+
+      - name: Trust the deployment's certificate authority
+        # Caddy's internal root, copied out of the running proxy. Every
+        # assertion below verifies the certificate chain against it, so a stack
+        # whose TLS was broken fails rather than being waved through — which is
+        # what `rejectUnauthorized: false` would have done, and it appears
+        # nowhere in this repository.
+        run: |
+          set -euo pipefail
+          docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml cp proxy:/data/caddy/pki/authorities/local/root.crt "$ATRIUM_STACK_CA"
+          test -s "$ATRIUM_STACK_CA"
+
+      - name: Assert every container is healthy
+        run: node scripts/ci/assert-stack-health.mjs
+
+      - name: Assert the stack is running the production configuration
+        run: node scripts/ci/assert-stack-config.mjs
+
+      - name: Assert no realtime origin is compiled into the web image
+        run: node scripts/ci/assert-image-origins.mjs
+
+      - name: Assert the app serves a real page
+        run: node scripts/ci/assert-page-serves.mjs
+
+      - name: Assert signup sends a verification mail that verifies
+        run: node scripts/ci/assert-signup-verifies.mjs
+
+      - name: Assert an authenticated websocket upgrade completes
+        run: node scripts/ci/assert-ws-upgrade.mjs
+
+      - name: Assert the rate limiter counts per address
+        run: node scripts/ci/assert-rate-limit.mjs
+
+      - name: Tear down the stack
+        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml down -v --remove-orphans
+
+      - name: Assert the teardown left nothing behind
+        run: node scripts/ci/assert-stack-teardown.mjs
+
   gate:
     name: gate
     # ─── THE ONLY CHECK TO MARK REQUIRED ──────────────────────────────────────
@@ -411,7 +543,7 @@ jobs:
     # fails the build if a new job is added without being covered here.
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [verify, e2e]
+    needs: [verify, e2e, deploy]
     if: always()
 
     steps:

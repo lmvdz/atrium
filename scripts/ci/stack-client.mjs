@@ -38,6 +38,7 @@
  * page names, and the limiter in front of it.
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -330,11 +331,49 @@ export function check(condition, message) {
   return condition;
 }
 
+/**
+ * The stack's own logs, printed when an assertion fails.
+ *
+ * There is nowhere else they can come from. `.github/workflows/ci.yml` allows
+ * no `continue-on-error` and no step condition except `failure()` on an
+ * artifact upload, so a failing assertion ends the job before any later step
+ * could collect them — and a red deploy job whose only evidence is "GET /
+ * returned 500" is a red deploy job somebody re-runs instead of reading. So the
+ * script that failed prints them itself.
+ *
+ * Best-effort by construction: `probe-caller.mjs` imports this module and runs
+ * inside a container with no docker socket, so every failure here is swallowed.
+ * That is the one place in this repository where swallowing an error is right —
+ * it is decorating a failure that has already been decided, and letting it throw
+ * would replace a real assertion message with a spurious one.
+ */
+function dumpStackLogs() {
+  const project = process.env.ATRIUM_COMPOSE_PROJECT?.trim();
+  if (!project) return;
+  try {
+    const files = (process.env.ATRIUM_COMPOSE_FILES?.trim() || 'docker-compose.yml')
+      .split(/[:,]/)
+      .filter(Boolean)
+      .flatMap((file) => ['-f', file]);
+    const logs = execFileSync(
+      'docker',
+      ['compose', '-p', project, ...files, 'logs', '--no-color', '--tail', '120'],
+      { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    console.error(`::group::${project} container logs (last 120 lines per service)`);
+    console.error(logs);
+    console.error('::endgroup::');
+  } catch {
+    // No docker here, or the project is already gone. Not worth a word.
+  }
+}
+
 /** Print every failure as a GitHub annotation and exit accordingly. */
 export function report(what) {
   if (failures.length > 0) {
     for (const failure of failures) console.error(`::error::${what}: ${failure}`);
     console.error(`${what}: ${failures.length} assertion(s) failed.`);
+    dumpStackLogs();
     process.exit(1);
   }
   console.info(`${what}: passed.`);

@@ -336,6 +336,42 @@ const INSTALLS_CHROMIUM = binary('playwright', 'install');
 const ASSERTS_CHROMIUM = invokes('assert-chromium\\.mjs');
 const RUNS_PLAYWRIGHT = binary('playwright', 'test');
 
+/**
+ * The `deploy` job's four `docker compose` verbs (#40).
+ *
+ * Recognised by membership rather than by position, for the reason `git -c x=y
+ * fetch` needed the same treatment: every one of these is invoked with `-p` and
+ * two `-f` flags in front of the verb, so `argv[1]` is never the subcommand.
+ */
+function dockerCompose(describes, predicate) {
+  return command(describes, ['docker'], ({ argv }) => {
+    if (basename(argv[0]) !== 'docker') return false;
+    const words = argv.slice(1);
+    if (!words.includes('compose')) return false;
+    return predicate(words);
+  });
+}
+
+const BUILDS_IMAGES = dockerCompose('`docker compose … build`', (words) => words.includes('build'));
+const STARTS_STACK = dockerCompose(
+  '`docker compose … up -d --wait`',
+  // `--wait` is part of the claim, not decoration: `up -d` alone returns the
+  // moment the containers are created, so every assertion after it would race a
+  // stack that has not finished starting — and a race that loses reads as a
+  // broken deployment rather than a slow one.
+  (words) => words.includes('up') && words.includes('--wait'),
+);
+const TRUSTS_CA = dockerCompose(
+  '`docker compose … cp proxy:…/root.crt`',
+  (words) => words.includes('cp') && words.some((word) => word.includes('root.crt')),
+);
+const TEARS_DOWN = dockerCompose(
+  '`docker compose … down -v`',
+  // `-v` is the whole point: `down` without it leaves every named volume, and
+  // the assertion after it exists to notice exactly that.
+  (words) => words.includes('down') && words.includes('-v'),
+);
+
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
   test: command('`git fetch … refs/heads/main`', ['git'], ({ argv }) => {
@@ -495,6 +531,153 @@ const REQUIRED_STEPS = {
           what: 'the Playwright suite',
           test: RUNS_PLAYWRIGHT,
           because: 'same as the vitest gate: a report read before the run is last run’s report',
+        },
+      ],
+    },
+  ],
+  /**
+   * The deployment job (#40), where every gate is about a running stack.
+   *
+   * Ordering is nearly the whole content of these rules. Every assertion here
+   * reads state that an earlier step created — the images, the containers, the
+   * certificate authority, the absence of the containers — and every one of
+   * them, run early, would be *right about the wrong moment*. Two of them would
+   * fail loudly (there is no stack to inspect); the teardown assertion is the
+   * dangerous shape, because run before the teardown it inspects a stack that
+   * is still up, and run after a teardown that lost its `-v` it inspects
+   * volumes nobody deleted.
+   */
+  deploy: [
+    {
+      rule: 'required-job-steps',
+      what: 'the image build',
+      test: BUILDS_IMAGES,
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the stack boot',
+      test: STARTS_STACK,
+      requires: [
+        {
+          what: 'the image build',
+          test: BUILDS_IMAGES,
+          because:
+            'compose would otherwise start whatever image happens to be in the local cache from a previous run — which is how a build that has been failing since a workspace package landed goes unnoticed for three rounds',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the certificate-authority copy',
+      test: TRUSTS_CA,
+      requires: [
+        {
+          what: 'the stack boot',
+          test: STARTS_STACK,
+          because:
+            "Caddy mints its internal root the first time it serves, so copying it out before the proxy is running copies nothing and every assertion afterwards falls back to the system trust store — where this deployment's certificate is not, so they would all fail for the wrong reason",
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the container-health assertion',
+      test: invokes('assert-stack-health\\.mjs'),
+      requires: [
+        {
+          what: 'the stack boot',
+          test: STARTS_STACK,
+          because:
+            'inspecting the health of containers that were never started reports that the stack has no containers, which is true and is not the question',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the production-configuration assertion',
+      test: invokes('assert-stack-config\\.mjs'),
+      requires: [
+        {
+          what: 'the stack boot',
+          test: STARTS_STACK,
+          because:
+            'this reads NODE_ENV and both public origins back out of the *running* containers, precisely so an overlay cannot quietly turn the job into a check on a development stack; there is nothing to read before they run',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the compiled-origin assertion',
+      test: invokes('assert-image-origins\\.mjs'),
+      requires: [
+        {
+          what: 'the image build',
+          test: BUILDS_IMAGES,
+          because:
+            'it scans the image that was just built; against a stale one it reports on a bundle nobody is about to deploy',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the real-page assertion',
+      test: invokes('assert-page-serves\\.mjs'),
+      requires: [
+        {
+          what: 'the certificate-authority copy',
+          test: TRUSTS_CA,
+          because:
+            'the client verifies the chain against that root and never disables verification, so without it every request fails on the certificate instead of telling anybody whether the app serves',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the signup-and-verification assertion',
+      test: invokes('assert-signup-verifies\\.mjs'),
+      requires: [
+        {
+          what: 'the certificate-authority copy',
+          test: TRUSTS_CA,
+          because: 'same client, same verification, same failure without the root',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the websocket-upgrade assertion',
+      test: invokes('assert-ws-upgrade\\.mjs'),
+      requires: [
+        {
+          what: 'the certificate-authority copy',
+          test: TRUSTS_CA,
+          because: 'the upgrade is a TLS connection first; without the root it never gets that far',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the per-address rate-limit assertion',
+      test: invokes('assert-rate-limit\\.mjs'),
+      requires: [
+        {
+          what: 'the certificate-authority copy',
+          test: TRUSTS_CA,
+          because:
+            'its two callers run in containers that mount that root and verify against it, so without the file both of them fail to connect and the limiter is never exercised',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the teardown assertion',
+      test: invokes('assert-stack-teardown\\.mjs'),
+      requires: [
+        {
+          what: 'the teardown',
+          test: TEARS_DOWN,
+          because:
+            'run before the teardown it finds a running stack and calls it a leak; and it is the only thing that notices a teardown which lost its `-v` and left four named volumes behind, which on a real host is next month’s database being adopted with last month’s schema in it',
         },
       ],
     },

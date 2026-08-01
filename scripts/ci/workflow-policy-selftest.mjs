@@ -305,6 +305,58 @@ const PAIRS = {
     step: 'the e2e report gate',
     needs: 'the Playwright suite',
   },
+
+  // ---- the deployment job (#40) -------------------------------------------
+  bootNeedsBuild: {
+    job: 'deploy',
+    step: 'the stack boot',
+    needs: 'the image build',
+  },
+  caNeedsBoot: {
+    job: 'deploy',
+    step: 'the certificate-authority copy',
+    needs: 'the stack boot',
+  },
+  healthNeedsBoot: {
+    job: 'deploy',
+    step: 'the container-health assertion',
+    needs: 'the stack boot',
+  },
+  configNeedsBoot: {
+    job: 'deploy',
+    step: 'the production-configuration assertion',
+    needs: 'the stack boot',
+  },
+  imageOriginsNeedsBuild: {
+    job: 'deploy',
+    step: 'the compiled-origin assertion',
+    needs: 'the image build',
+  },
+  pageNeedsCa: {
+    job: 'deploy',
+    step: 'the real-page assertion',
+    needs: 'the certificate-authority copy',
+  },
+  signupNeedsCa: {
+    job: 'deploy',
+    step: 'the signup-and-verification assertion',
+    needs: 'the certificate-authority copy',
+  },
+  wsNeedsCa: {
+    job: 'deploy',
+    step: 'the websocket-upgrade assertion',
+    needs: 'the certificate-authority copy',
+  },
+  rateLimitNeedsCa: {
+    job: 'deploy',
+    step: 'the per-address rate-limit assertion',
+    needs: 'the certificate-authority copy',
+  },
+  teardownAssertionNeedsTeardown: {
+    job: 'deploy',
+    step: 'the teardown assertion',
+    needs: 'the teardown',
+  },
 };
 
 /** Where a violation says it is: `jobs.<job>.steps.<n>.<key>`. */
@@ -403,14 +455,18 @@ const MUTATIONS = [
     name: 'the gate losing always()',
     rule: 'gate-runs-always',
     mutate: (s) =>
-      replaceOnce(s, '    needs: [verify, e2e]\n    if: always()\n', '    needs: [verify, e2e]\n'),
+      replaceOnce(
+        s,
+        '    needs: [verify, e2e, deploy]\n    if: always()\n',
+        '    needs: [verify, e2e, deploy]\n',
+      ),
     message: /`gate` must declare `if: always\(\)`/,
   },
   {
     name: 'the gate quietly dropping a job from needs',
     rule: 'gate-covers-all-jobs',
-    mutate: (s) => replaceOnce(s, '    needs: [verify, e2e]', '    needs: [verify]'),
-    message: /job\(s\) `e2e` are not in `gate\.needs`/,
+    mutate: (s) => replaceOnce(s, '    needs: [verify, e2e, deploy]', '    needs: [verify]'),
+    message: /job\(s\) `e2e`, `deploy` are not in `gate\.needs`/,
   },
   {
     name: 'the gate no longer reading the results it needs',
@@ -832,6 +888,142 @@ const MUTATIONS = [
     rule: 'required-step-prerequisites',
     mutate: (s) => replaceOnce(s, '>> "$GITHUB_ENV"', ">> '$GITHUB_ENV'"),
     pair: PAIRS.suiteNeedsReset,
+  },
+
+  // ---- the deployment job's ten pairs (#40) -------------------------------
+  //
+  // Every one of these is a *reorder*, not a deletion, for the reason round 4's
+  // gauntlet gave: a mutation that deletes a step which is also required in its
+  // own right goes red under `required-job-steps` and would go red with the
+  // prerequisite rule removed from the engine entirely. Reordered, the step is
+  // still present, still named, still invoked, and only the ordering half of the
+  // pair is broken — which is exactly the accident a rebase produces.
+  //
+  // Several of them break more than one pair, because several steps depend on
+  // the same setup: moving the stack boot past the health assertion also moves
+  // it past the certificate copy. That is fine and is not theatre — the
+  // self-test asserts on the *identity* of the pair each mutation claims, so a
+  // mutation that broke a different pair would not satisfy the one it names.
+  //
+  // The last two are the ones worth reading. `teardownAssertionNeedsTeardown`
+  // is the only pair in this file whose broken form fails *open*: an assertion
+  // that "nothing survives `docker compose down -v`", run before the teardown,
+  // inspects a stack that is still up and says so — loud. But quote the
+  // teardown into an `echo` and it is the ratchet's no-baseline shape all over
+  // again, so both spellings are here.
+  {
+    name: 'the stack brought up from whatever image happened to be cached',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => moveStepAfter(s, 'Build the images', 'Bring the stack up'),
+    pair: PAIRS.bootNeedsBuild,
+  },
+  {
+    name: 'the image scanned before it is built, so it reports on the last run’s bundle',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Build the images',
+        'Assert no realtime origin is compiled into the web image',
+      ),
+    pair: PAIRS.imageOriginsNeedsBuild,
+  },
+  {
+    name: 'the certificate authority copied before the proxy that mints it has started',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(s, 'Bring the stack up', "Trust the deployment's certificate authority"),
+    pair: PAIRS.caNeedsBoot,
+  },
+  {
+    name: 'the health of containers nothing has started yet',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => moveStepAfter(s, 'Bring the stack up', 'Assert every container is healthy'),
+    pair: PAIRS.healthNeedsBoot,
+  },
+  {
+    name: 'the running configuration read before anything is running',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Bring the stack up',
+        'Assert the stack is running the production configuration',
+      ),
+    pair: PAIRS.configNeedsBoot,
+  },
+  {
+    name: 'the page assertion run before the certificate it verifies against exists',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        "Trust the deployment's certificate authority",
+        'Assert the app serves a real page',
+      ),
+    pair: PAIRS.pageNeedsCa,
+  },
+  {
+    name: 'the signup assertion run before the certificate authority is trusted',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        "Trust the deployment's certificate authority",
+        'Assert signup sends a verification mail that verifies',
+      ),
+    pair: PAIRS.signupNeedsCa,
+  },
+  {
+    name: 'the websocket assertion run before the certificate authority is trusted',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        "Trust the deployment's certificate authority",
+        'Assert an authenticated websocket upgrade completes',
+      ),
+    pair: PAIRS.wsNeedsCa,
+  },
+  {
+    name: 'the rate-limit assertion run before its callers can verify the certificate',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        "Trust the deployment's certificate authority",
+        'Assert the rate limiter counts per address',
+      ),
+    pair: PAIRS.rateLimitNeedsCa,
+  },
+  {
+    name: 'the teardown assertion run before the teardown, against a stack that is still up',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(s, 'Tear down the stack', 'Assert the teardown left nothing behind'),
+    pair: PAIRS.teardownAssertionNeedsTeardown,
+  },
+  {
+    name: 'the teardown quoted into an echo, so four named volumes survive it',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => decoyStep(s, 'Tear down the stack'),
+    pair: PAIRS.teardownAssertionNeedsTeardown,
+  },
+  {
+    name: 'the stack boot losing `--wait`, so every assertion races a starting stack',
+    rule: 'required-job-steps',
+    mutate: (s) => replaceOnce(s, ' up -d --wait --wait-timeout 300', ' up -d'),
+    message: /never runs the stack boot/,
+    // Every assertion in the job depends on the boot, so removing the shape the
+    // rule recognises necessarily orphans all four prerequisite pairs that
+    // point at it. One edit, five true statements.
+    also: ['required-step-prerequisites'],
+  },
+  {
+    name: 'the teardown losing `-v`, so the named volumes outlive the run',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => replaceOnce(s, ' down -v --remove-orphans', ' down --remove-orphans'),
+    pair: PAIRS.teardownAssertionNeedsTeardown,
   },
 
   // Every entry in REJECTED_FORMS, as a mutation of the baseline fetch step.

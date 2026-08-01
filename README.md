@@ -33,30 +33,91 @@ Everything in containers instead:
 
 ```bash
 ATRIUM_DOMAIN=atrium.example.com    # in .env; required, no default
+ATRIUM_MAIL_TRANSPORT=smtp          # in .env; required, no default — see below
 docker compose up --build           # postgres, minio, migrate, server, app, proxy
 ```
 
 `docker-compose.yml` is the **production** stack and it is HTTPS-only. Point a
 hostname at the box, put it in `ATRIUM_DOMAIN`, and Caddy (`deploy/Caddyfile`)
-obtains and renews the certificate itself; `APP_URL` and `NEXT_PUBLIC_WS_URL`
-are derived from that one value as `https://` and `wss://` and are not
-separately settable. Everything arrives through the `proxy` service — `/ws` to
-the realtime server, everything else to the app — and it publishes 443 and 80
-(the second answers the ACME challenge and redirects). Neither `app` nor
-`server` publishes a port of its own, and that is load-bearing rather than tidy
-— see below.
+obtains and renews the certificate itself; `APP_URL` and `ATRIUM_WS_URL` are
+derived from that one value as `https://` and `wss://` and are not separately
+settable. Everything arrives through the `proxy` service — `/ws` to the realtime
+server, everything else to the app — and it publishes 443 and 80 (the second
+answers the ACME challenge and redirects). Neither `app` nor `server` publishes a
+port of its own, and that is load-bearing rather than tidy — see below.
 
-For the same topology on a laptop, over plaintext:
+That stack needs a mail relay before it will start, because the console
+transport prints one-click sign-in links and `resolveMailer` refuses it in
+production. Say which one in `.env`:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+ATRIUM_MAIL_TRANSPORT=smtp
+ATRIUM_MAIL_FROM='Atrium <no-reply@example.com>'
+SMTP_URL=smtps://user:password@relay.example.com   # or SMTP_HOST/PORT/USER/PASSWORD
 ```
 
-That override is development-only, says so at the top of the file, and also
-sets `NODE_ENV=development` — because under `NODE_ENV=production` both
-processes refuse to start with an `http://` origin at all. It is a second file
-rather than a variable for exactly that reason. The everyday loop needs neither:
+`smtps://` is implicit TLS; plain `smtp://` negotiates, and `SMTP_REQUIRE_TLS=true`
+makes it refuse a session that never reaches STARTTLS. Use one of those two for
+any relay that is not on this deployment's own private network — the message
+carries the verification link. `ATRIUM_MAIL_TRANSPORT=console` is a legitimate
+answer meaning "no relay", and in production it means the stack refuses to boot.
+The full contract is at the top of `packages/auth/src/smtp.ts`.
+
+For the same topology on a laptop, with a mail catcher and a certificate from
+Caddy's own internal CA:
+
+```bash
+docker compose -f docker-compose.yml \
+               -f docker-compose.mailpit.yml \
+               -f docker-compose.dev.yml up --build
+```
+
+That serves `https://localhost:3000` and puts every message Atrium sends in
+mailpit's web UI on `:8025`. Your browser will not trust the certificate until
+you install Caddy's root — `docker compose cp
+proxy:/data/caddy/pki/authorities/local/root.crt /tmp/atrium-root.crt` — which is
+the honest cost of the local stack being genuinely encrypted. Until #40 this
+override served cleartext and set `NODE_ENV=development` on `app`; the first was
+one `cp` from being somebody's production Caddyfile and the second never worked
+at all, because a Next standalone entrypoint assigns `NODE_ENV=production` to
+itself before any application code runs. The everyday loop needs none of it:
 `pnpm infra:up && pnpm dev`.
+
+### The deployment is proved by a CI job, not by a receipt
+
+Three rounds of gauntlet receipts described this compose stack as working. It had
+never served a page: under `NODE_ENV=production` `app` answered 500 to every
+request, and neither image had built at all since `packages/ingest` landed
+without its manifest being copied into the Dockerfiles. Every gate was green
+because every gate tested a part.
+
+So `.github/workflows/ci.yml`'s `deploy` job runs the product. It builds both
+images from the shipped Dockerfiles, brings up `docker-compose.yml` plus
+`docker-compose.mailpit.yml` (a mail catcher and nothing else), and asserts,
+over TLS through the shipped Caddyfile, on the published port:
+
+- every container healthy, none restarting, both one-shot jobs exited 0
+  (`assert-stack-health.mjs`);
+- the running containers' own `NODE_ENV`, origins, hop count and mail transport
+  are the production ones — read back with `docker inspect`, so the overlay
+  cannot quietly turn this into a check on a development stack
+  (`assert-stack-config.mjs`);
+- no realtime origin compiled into the web image (`assert-image-origins.mjs`);
+- **a real page** returns 200 with the content only that page renders, HSTS is
+  present, and `:80` redirects rather than serving (`assert-page-serves.mjs`);
+- signing up through the real form sends a verification mail over real SMTP, and
+  the link in the message that arrived signs the account in
+  (`assert-signup-verifies.mjs`);
+- an authenticated `wss://` upgrade completes and an unauthenticated one is
+  refused (`assert-ws-upgrade.mjs`);
+- the sign-in limiter refuses a caller at its configured cap and lets a caller at
+  a different address straight through (`assert-rate-limit.mjs`);
+- `docker compose down -v` leaves no container, volume or network
+  (`assert-stack-teardown.mjs`).
+
+Not a health endpoint, deliberately: `app` reported healthy for three rounds
+while 500ing, and a check that cannot tell those apart is the instrument that
+allowed it.
 
 ### HTTPS is a boot condition, not a recommendation
 
@@ -70,7 +131,7 @@ four:
 - Caddy refuses an empty site address, and a hostname is what switches its
   automatic HTTPS on (an IP or a bare `:80` would switch it off);
 - `apps/web` and `apps/server` each refuse to serve production with an
-  `http://` `APP_URL` or a `ws://` `NEXT_PUBLIC_WS_URL`, and so does
+  `http://` `APP_URL` or a `ws://` `ATRIUM_WS_URL`, and so does
   `createAtriumAuth`, which both processes build through — the rule itself is
   one function, `assertSecureTransport` in `packages/auth/src/transport.ts`, so
   the two cannot end up with different ideas of "secure enough to serve";
@@ -587,11 +648,15 @@ zero tests exits 0 just like one that passed 315:
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. 9 pairs across 8 steps: the
+  prerequisite is in the same job *and earlier*. 19 pairs across 18 steps: the
   ratchet's fetch of `origin/main`; both report resets, before the runs they
   reset for; both report gates, after those runs; the migration's wait for
-  Postgres and the schema assertion's migration; and the browser install and
-  browser check the Playwright suite needs. The count is derived —
+  Postgres and the schema assertion's migration; the browser install and browser
+  check the Playwright suite needs; and, in the `deploy` job, everything that
+  depends on a running stack — the boot's dependence on the image build, the
+  certificate copy's on the boot, four assertions' on that certificate, two
+  more on the boot, the image scan's on the build, and the teardown
+  assertion's on the teardown. The count is derived —
   `PREREQUISITE_PAIRS.length`, printed by the self-test — because a hand-counted
   number in a receipt is how round 2 claimed 15 rules over an engine with 18.
   Every number in this section is now read back out of the code by the
@@ -639,10 +704,10 @@ zero tests exits 0 just like one that passed 315:
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
   action pinned to a commit SHA, no reusable workflows (a job body that is not in
   the file cannot be checked by anything in the file), `gate.needs` covering every
-  job, and — self-referentially — `verify` and `e2e` still *containing* the steps
-  that do the checking, each assert script named and each one's setup ordered
-  before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 72
+  job, and — self-referentially — `verify`, `e2e` and `deploy` still *containing*
+  the steps that do the checking, each assert script named and each one's setup
+  ordered before it. `actionlint` runs alongside it.
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 85
   mutated copies of the real workflow and additionally asserts that every one of
   the 23 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules

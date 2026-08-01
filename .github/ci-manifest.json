@@ -12,14 +12,27 @@
     "file on origin/main.",
     "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
     "target: the point is to catch a suite that shrank, not to go red every time a test is",
-    "renamed away. Counted from a real run of the merged tree (scaffold-r4 + ingest):",
-    "core 129, db 11, ingest 150, server 25 — 315 tests across 14 files."
+    "renamed away. Counted from a real run of this tree (fix/ci-r6 merged into fix/auth-r5,",
+    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16 — 642 tests across",
+    "30 files.",
+    "apps/web left `exempt` and acquired a floor in #40's merge: fix/auth-r5 gave it a Vitest",
+    "project for its server-side modules (the boot conditions in `lib/env.ts`, and #40's",
+    "rules about build-time constants in `next.config.ts`), which a browser suite cannot",
+    "reach. Its Playwright suite is still the `playwright` section below."
   ],
   "vitest": {
     "workspaces": {
       "apps/server": {
         "project": "server",
-        "minTests": 22
+        "minTests": 95
+      },
+      "apps/web": {
+        "project": "web",
+        "minTests": 12
+      },
+      "packages/auth": {
+        "project": "auth",
+        "minTests": 200
       },
       "packages/core": {
         "project": "core",
@@ -27,17 +40,15 @@
       },
       "packages/db": {
         "project": "db",
-        "minTests": 10
+        "minTests": 20
       },
       "packages/ingest": {
         "project": "ingest",
         "minTests": 140
       }
     },
-    "exempt": {
-      "apps/web": "Browser surface. Its suite is the Playwright project below; the Vitest workspace stays browser-free on purpose, so apps/web contributes zero unit tests by design."
-    },
-    "minTotalTests": 300
+    "exempt": {},
+    "minTotalTests": 600
   },
   "playwright": {
     "projects": {
