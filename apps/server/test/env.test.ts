@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadEnv } from '../src/env.js';
+import { loadEnv, loadMigrationEnv } from '../src/env.js';
 
 /**
  * Configuration is the one place where "it worked on my laptop" ships a public
@@ -63,6 +63,24 @@ describe('loadEnv — S3 credentials', () => {
         S3_SECRET_ACCESS_KEY: '',
       }),
     ).toThrow(/S3_ACCESS_KEY_ID/);
+  });
+});
+
+describe('loadMigrationEnv — narrower on purpose', () => {
+  it('boots in production on a connection string alone', () => {
+    // The migrate service runs the production image with no S3 config at all.
+    const env = loadMigrationEnv({ ...BASE, NODE_ENV: 'production' });
+    expect(env.DATABASE_URL).toBe(BASE.DATABASE_URL);
+    expect(env.NODE_ENV).toBe('production');
+  });
+
+  it('still refuses to run without a database', () => {
+    expect(() => loadMigrationEnv({ NODE_ENV: 'production' })).toThrow(/DATABASE_URL/);
+  });
+
+  it('does not carry S3 settings at all', () => {
+    const env = loadMigrationEnv({ ...BASE, NODE_ENV: 'production', S3_BUCKET: 'ignored' });
+    expect(env).not.toHaveProperty('S3_BUCKET');
   });
 });
 

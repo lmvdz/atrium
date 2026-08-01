@@ -29,12 +29,18 @@ function loadDotEnv(): void {
 const DEV_S3_ACCESS_KEY_ID = 'atrium';
 const DEV_S3_SECRET_ACCESS_KEY = 'atrium-dev-secret';
 
-const RawEnvSchema = z.object({
+/**
+ * What every entrypoint in this app needs. The migration runner needs exactly
+ * this and nothing more — see `loadMigrationEnv`.
+ */
+const BaseEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required — copy .env.example to .env'),
+});
 
+const RawEnvSchema = BaseEnvSchema.extend({
   SERVER_HOST: z.string().default('0.0.0.0'),
   SERVER_PORT: z.coerce.number().int().positive().default(4000),
 
@@ -83,10 +89,11 @@ const EnvSchema = RawEnvSchema.transform((raw, ctx) => {
 });
 
 export type Env = z.infer<typeof EnvSchema>;
+export type MigrationEnv = z.infer<typeof BaseEnvSchema>;
 
-export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+function parseOrThrow<T extends z.ZodType>(schema: T, source: NodeJS.ProcessEnv): z.infer<T> {
   loadDotEnv();
-  const parsed = EnvSchema.safeParse({ ...source });
+  const parsed = schema.safeParse({ ...source });
   if (!parsed.success) {
     const details = parsed.error.issues
       .map((issue) => `  ${issue.path.join('.') || '(root)'}: ${issue.message}`)
@@ -94,4 +101,21 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     throw new Error(`invalid environment:\n${details}`);
   }
   return parsed.data;
+}
+
+/** The full server environment — realtime, workers, and object storage. */
+export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+  return parseOrThrow(EnvSchema, source);
+}
+
+/**
+ * The migration runner's environment: a connection string and a log level.
+ *
+ * Deliberately narrower than `loadEnv`. `migrate.js` never touches S3, and it
+ * runs from the same production image as the server — demanding object-store
+ * credentials it cannot use would train whoever deploys this to paste dummy
+ * values into the one place the real check lives.
+ */
+export function loadMigrationEnv(source: NodeJS.ProcessEnv = process.env): MigrationEnv {
+  return parseOrThrow(BaseEnvSchema, source);
 }
