@@ -13,12 +13,12 @@
     "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
     "target: the point is to catch a suite that shrank, not to go red every time a test is",
     "renamed away. Counted from a real run of this tree (fix/ci-r6 merged into fix/auth-r5,",
-    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 119 — 761",
-    "tests across 31 files. Round 7 took ci-guard from 49 to 119: the outside witness now",
+    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 124 — 766",
+    "tests across 31 files. Round 7 took ci-guard from 49 to 124: the outside witness now",
     "tests the *behaviour* of every shared decision under scripts/ci/, not only the shape of",
-    "the guard in its callers — see scripts/ci/checker-graph.mjs. Its floor moved 40 -> 110,",
-    "because a floor 9 under a real count is a loss detector and one 9 under half the count",
-    "is a place four tests can be deleted from.",
+    "the guard in its callers — see scripts/ci/checker-graph.mjs. Its floor moved 40 -> 115,",
+    "because a floor a few under a real count is a loss detector and one 84 under it",
+    "is a place seventy tests can be deleted from.",
     "packages/ci-guard is #40 round 6. It exists to run checks from *outside* scripts/: the",
     "main-module guard scanner was enforced only from gate-selftest.mjs, a file it scans, so",
     "one `&&` in that file removed 316 assertions with every gate green. Its floor is what",
@@ -42,7 +42,7 @@
       },
       "packages/ci-guard": {
         "project": "ci-guard",
-        "minTests": 110
+        "minTests": 115
       },
       "packages/auth": {
         "project": "auth",
@@ -62,7 +62,7 @@
       }
     },
     "exempt": {},
-    "minTotalTests": 730
+    "minTotalTests": 735
   },
   "playwright": {
     "projects": {

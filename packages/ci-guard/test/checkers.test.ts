@@ -57,6 +57,7 @@ import {
   assertedNames,
   checkerGraphProblems,
   ENFORCEMENT,
+  exportedNames,
   sharedModuleProblems,
 } from '../../../scripts/ci/checker-graph.mjs';
 import { composeArgs } from '../../../scripts/ci/compose.mjs';
@@ -620,7 +621,16 @@ describe('the registry proves the check still does something', () => {
   it('reports a row whose contract nothing could fail', () => {
     const problems = checkerGraphProblems({
       root: REPO,
-      registry: [{ ...row(), contract: () => [] }],
+      // Runs the check and asserts nothing about what came back.
+      registry: [
+        {
+          ...row(),
+          contract: (scan: (directory: string) => string[]) => {
+            scan('scripts');
+            return [];
+          },
+        },
+      ],
     });
     expect(problems.join(' | ')).toMatch(/does not reject the mutant/);
   });
@@ -631,6 +641,28 @@ describe('the registry proves the check still does something', () => {
       registry: [{ ...row(), mutants: [] }],
     });
     expect(problems.join(' | ')).toMatch(/has no mutants declared/);
+  });
+
+  /**
+   * Found attacking this round's own fix, with D1's class as the checklist.
+   * `definedIn` was checked only for existing — nothing tied it to `check`, and
+   * it is what `sharedModuleProblems` counts and what the witness set excludes.
+   * A row naming a module it does not come from is D3 one level up.
+   */
+  it('reports a row whose module does not export the check it names', () => {
+    const problems = checkerGraphProblems({
+      root: REPO,
+      registry: [{ ...row(), definedIn: 'scripts/ci/compose.mjs' }],
+    });
+    expect(problems.join(' | ')).toMatch(/exports no such name/);
+  });
+
+  it('every row in the real registry is exported by the module it names', () => {
+    const missing = ENFORCEMENT.filter((entry: { check: string; definedIn: string }) => {
+      const exports = exportedNames(entry.definedIn, readFileSync(at(entry.definedIn), 'utf8'));
+      return !exports.has(entry.check);
+    }).map((entry: { check: string; definedIn: string }) => `${entry.check} in ${entry.definedIn}`);
+    expect(missing).toEqual([]);
   });
 
   it('reports a row with no contract at all', () => {
@@ -658,7 +690,49 @@ describe('the registry proves the check still does something', () => {
         },
       ],
     });
-    expect(problems.join(' | ')).toMatch(/does not reject the mutant/);
+    expect(problems.join(' | ')).toMatch(/never called the implementation it was handed/);
+  });
+
+  /**
+   * The evasion found by attacking this round's own fix, which is the same class
+   * as D3 one turn further in. `(fn) => fn === theRealOne ? [] : ['wrong']` is
+   * clean for the implementation and loud for every mutant — it proves the two
+   * runs referenced the same thing, not that the thing did anything, and it
+   * passes every other rule in the file. So the handing is counted.
+   */
+  it('reports a contract that compares identity instead of behaviour', () => {
+    const real = row()?.fn;
+    const problems = checkerGraphProblems({
+      root: REPO,
+      registry: [
+        { ...row(), contract: (scan: unknown) => (scan === real ? [] : ['not the real one']) },
+      ],
+    });
+    expect(problems.join(' | ')).toMatch(
+      /does not satisfy its own contract|never called the implementation it was handed/,
+    );
+  });
+
+  it('reports a row whose only mutant refuses to run at all', () => {
+    const problems = checkerGraphProblems({
+      root: REPO,
+      registry: [
+        {
+          ...row(),
+          mutants: [
+            {
+              name: 'throws the moment it is called',
+              fn: () => {
+                throw new Error('no');
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(problems.join(' | ')).toMatch(
+      /rejected by throwing rather than by anything the contract checked/,
+    );
   });
 });
 
@@ -790,6 +864,41 @@ describe('the shared decisions many scripts depend on', () => {
     const status = verdict('probe');
     unmute();
     expect(status).toBe(0);
+  });
+
+  /**
+   * `report` cannot be tested in the process that calls it, so it is tested in
+   * another one.
+   *
+   * Splitting it into `verdict` and `process.exit(verdict(…))` is this round's
+   * own refactor, and it opened exactly the hole this round is about: `verdict`
+   * got a contract and the one line that acts on it got nothing. A `report`
+   * rewritten to `process.exit(0)` turns six deploy assertions green with every
+   * other test here still passing. So: a real child process, a recorded failure,
+   * and an exit status that has to be 1.
+   */
+  it('report exits non-zero for a recorded failure and zero for a clean run', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'atrium-report-'));
+    const client = pathToFileURL(at('scripts/ci/stack-client.mjs')).href;
+    const write = (name: string, body: string) => {
+      const path = join(workspace, name);
+      writeFileSync(path, `import { check, report } from ${JSON.stringify(client)};\n${body}`);
+      return path;
+    };
+    const failing = write('failing.mjs', "check(false, 'a planted failure');\nreport('probe');\n");
+    const passing = write(
+      'passing.mjs',
+      "check(true, 'a satisfied assertion');\nreport('probe');\n",
+    );
+    const status = (script: string) => {
+      try {
+        execFileSync(process.execPath, [script], { encoding: 'utf8', stdio: 'pipe' });
+        return 0;
+      } catch (error) {
+        return (error as { status?: number }).status ?? -1;
+      }
+    };
+    expect([status(failing), status(passing)]).toEqual([1, 0]);
   });
 
   it("composeArgs resolves the deploy job's whole file list, overlay included", () => {

@@ -1727,6 +1727,34 @@ const MUTATIONS = [
   },
 
   // ---- one compose file list, not two -------------------------------------
+  // And the list itself, not merely the fact that there is one (#40 round 7).
+  // The rule asked whether `ATRIUM_COMPOSE_FILES` was a non-empty string and
+  // never read it, so a blind critic dropped the mail overlay and got a clean
+  // policy — and a clean `gate-selftest.mjs`, whose `composeEnv()` was a
+  // hard-coded copy of the value rather than a readback of this file. Both ends
+  // agreeing about a third thing neither was reading.
+  {
+    name: 'the mail catcher dropped from the deploy job’s compose file list',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml',
+        'ATRIUM_COMPOSE_FILES: docker-compose.yml',
+      ),
+    message: /declares `ATRIUM_COMPOSE_FILES: docker-compose\.yml`, and this deployment is exactly/,
+  },
+  {
+    name: 'a fourth compose file added to the list the preflight approved',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml',
+        'ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml:docker-compose.dev.yml',
+      ),
+    message: /and this deployment is exactly/,
+  },
   {
     name: 'the compose file list re-pointed for one command by a one-shot assignment',
     rule: 'compose-through-one-entrypoint',

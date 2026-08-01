@@ -123,6 +123,9 @@ const REGISTRY_FILE = 'scripts/ci/checker-graph.mjs';
 /** The fixture the guard scanner must object to, in its round-5 spelling. */
 const BROKEN_GUARD =
   "import { isMainModule } from './main-module.mjs';\nif (isMainModule(import.meta.url) && process.env.CI === undefined) {\n  process.exit(main());\n}\n";
+/** The same attack in its round-7 spelling: the gate is inside the exit. */
+const GATED_EXIT_GUARD =
+  "import { isMainModule } from './main-module.mjs';\nif (isMainModule(import.meta.url)) {\n  process.exit(process.env.CI === undefined ? await main() : 0);\n}\n";
 
 /**
  * `expected` unless `actual` says so, as a problem list.
@@ -176,6 +179,14 @@ export const ENFORCEMENT = [
           path.endsWith('assert-tables.mjs') ? BROKEN_GUARD : readFileSync(path, 'utf8'),
         ).some((problem) => /condition is not exactly/.test(problem)),
         'it says nothing about the round-5 guard planted in assert-tables.mjs — the exact two-character edit that removed 316 assertions',
+      ),
+      // And the round-7 spelling of the same attack, which round 6's body rule
+      // accepted: the gate is not in the condition, it is in the exit's argument.
+      ...expectProblem(
+        scan(join(root, 'scripts'), (path) =>
+          path.endsWith('assert-tables.mjs') ? GATED_EXIT_GUARD : readFileSync(path, 'utf8'),
+        ).some((problem) => /decided by something other than the work/.test(problem)),
+        'it says nothing about a guard whose exit status is `process.env.CI === undefined ? await main() : 0` — the round-5 conjunct moved into the argument, one insertion per file, which round 6 accepted',
       ),
     ],
     mutants: [
@@ -234,16 +245,62 @@ export const ENFORCEMENT = [
         'it accepts a check whose only witness is one of its own subjects — the round-5 graph exactly',
       ),
       ...expectProblem(
+        graph({
+          root,
+          registry: [{ ...HEALTHY_ROW, definedIn: 'scripts/ci/compose.mjs' }],
+        }).some((problem) => /exports no such name/.test(problem)),
+        'it accepts a row that names a module the check does not come from — which is what `sharedModuleProblems` counts and what the witness set excludes',
+      ),
+      ...expectProblem(
         graph({ root, registry: [{ ...HEALTHY_ROW, mutants: [] }] }).some((problem) =>
           /no mutants/.test(problem),
         ),
         'it accepts a row whose contract nothing can fail',
       ),
       ...expectProblem(
-        graph({ root, registry: [{ ...HEALTHY_ROW, contract: () => [] }] }).some((problem) =>
-          /does not reject the mutant/.test(problem),
-        ),
+        graph({
+          root,
+          // Calls what it was handed, and asserts nothing about the answer.
+          registry: [
+            {
+              ...HEALTHY_ROW,
+              contract: (scan) => {
+                scan();
+                return [];
+              },
+            },
+          ],
+        }).some((problem) => /does not reject the mutant/.test(problem)),
         'it accepts a contract that reports nothing about a deliberately wrong implementation — the shape a fixture takes when it ignores what it was handed and calls the real function by name',
+      ),
+      ...expectProblem(
+        graph({ root, registry: [{ ...HEALTHY_ROW, contract: () => [] }] }).some((problem) =>
+          /never called the implementation it was handed/.test(problem),
+        ),
+        'it accepts a contract that never runs the check at all — `(fn) => fn === theRealOne ? [] : ["wrong"]` is clean for the implementation and loud for every mutant while asserting nothing whatsoever, and it passes every other rule here',
+      ),
+      ...expectProblem(
+        graph({
+          root,
+          // Every mutant refuses to run at all, so each is "rejected" by its own
+          // shape and the contract is never asked anything.
+          registry: [
+            {
+              ...HEALTHY_ROW,
+              mutants: [
+                {
+                  name: 'throws the moment it is called',
+                  fn: () => {
+                    throw new Error('no');
+                  },
+                },
+              ],
+            },
+          ],
+        }).some((problem) =>
+          /rejected by throwing rather than by anything the contract checked/.test(problem),
+        ),
+        'it accepts a row whose only mutant is rejected by throwing, which tests the mutant rather than the contract',
       ),
     ],
     mutants: [
@@ -483,7 +540,11 @@ export const ENFORCEMENT = [
     check: 'completedCommands',
     definedIn: 'scripts/ci/shell-command.mjs',
     fn: completedCommands,
-    subjects: ['.github/workflows/'],
+    // Both: it *reads* the workflows, and the edit that would break it is in
+    // `scripts/`. `subjects` is "where the edit this check is supposed to notice
+    // could live", and naming only the workflows would have let a witness under
+    // `scripts/` satisfy the outside-witness rule for a parser that lives there.
+    subjects: ['scripts/', '.github/workflows/'],
     invokers: ['packages/ci-guard/test/checkers.test.ts'],
     because:
       'every presence rule in workflow-policy.mjs is a predicate over what this returns, so a parser that yields nothing makes every required step read as present-or-absent by accident rather than by reading the script',
@@ -681,6 +742,15 @@ const DEAD_POSITIONS = [
  * are the real ones for `mainGuardProblems`, because the row still has to pass
  * the graph half — "declared witnesses must actually assert on it, and CI must
  * run them" is what makes this a control rather than a tautology.
+ *
+ * Its `check` therefore names a real function while its `fn` is a stub, which is
+ * the very mismatch D3 is about. That is deliberate and it is safe for exactly
+ * one reason: this row never reaches the real registry. It is passed to
+ * `checkerGraphProblems` as an injected `registry`, so the two halves it
+ * exercises are the graph rules (which need a name with real witnesses) and the
+ * effect rules (which only ever see `fn`). A row in `ENFORCEMENT` cannot do this
+ * — `definedIn` must export `check`, and the contract must call what it is
+ * handed.
  */
 const HEALTHY_ROW = {
   check: 'mainGuardProblems',
@@ -754,28 +824,30 @@ function mainModuleContract(isMain, workspace) {
 
   // And the half no argument can express: the answer must not depend on where it
   // is running. This is the round-7 critical finding, as a fixture.
-  const before = { ...process.env };
-  const answers = () => cases.map(([, run]) => run());
-  const honest = answers();
-  Object.assign(process.env, {
+  const POISON = {
     CI: 'true',
     GITHUB_ACTIONS: 'true',
     GITHUB_JOB: 'verify',
     GITHUB_WORKFLOW: 'CI',
     GITHUB_RUN_ID: '1',
     NODE_ENV: 'production',
-  });
-  const poisoned = answers();
-  for (const key of [
-    'CI',
-    'GITHUB_ACTIONS',
-    'GITHUB_JOB',
-    'GITHUB_WORKFLOW',
-    'GITHUB_RUN_ID',
-    'NODE_ENV',
-  ]) {
-    if (before[key] === undefined) delete process.env[key];
-    else process.env[key] = before[key];
+  };
+  const before = { ...process.env };
+  const answers = () => cases.map(([, run]) => run());
+  const honest = answers();
+  let poisoned;
+  try {
+    Object.assign(process.env, POISON);
+    poisoned = answers();
+  } finally {
+    // Restored even when a mutant throws. Without the `finally` a fixture that
+    // failed halfway would leave this process running under a forged
+    // `GITHUB_JOB` for every later row — a probe editing the world it measures,
+    // which is the class of thing this file exists to refuse.
+    for (const key of Object.keys(POISON)) {
+      if (before[key] === undefined) delete process.env[key];
+      else process.env[key] = before[key];
+    }
   }
   problems.push(
     ...expectProblem(
@@ -830,9 +902,17 @@ function effectProblems(registry, context) {
       continue;
     }
 
+    // ── AND THE CONTRACT HAS TO *CALL* WHAT IT WAS HANDED ──────────────────
+    // Found attacking this round's own fix, which is where D1 came from and is
+    // therefore where this round's checklist starts. `contract: (fn) => fn ===
+    // mainGuardProblems ? [] : ['not the real one']` satisfies both runs above
+    // — clean for the implementation, loud for every mutant — while asserting
+    // nothing whatsoever about behaviour. A row is *handed* the check precisely
+    // so that it exercises it, so the handing is counted.
+    const counted = { calls: 0 };
     let honest;
     try {
-      honest = entry.contract(entry.fn, context);
+      honest = entry.contract(countingProxy(entry.fn, counted), context);
     } catch (error) {
       problems.push(
         `${entry.check}'s contract threw against the real implementation: ${error.stack}`,
@@ -849,24 +929,65 @@ function effectProblems(registry, context) {
       );
       continue;
     }
+    if (counted.calls === 0) {
+      problems.push(
+        `${entry.check}'s contract never called the implementation it was handed. A contract that only inspects its argument — comparing it against the module binding, say — is clean for the real one and loud for every mutant while asserting nothing about behaviour at all, which passes every other rule in this file.`,
+      );
+      continue;
+    }
 
+    let rejectedByReport = 0;
     for (const mutant of entry.mutants) {
       let reported;
       try {
         reported = entry.contract(mutant.fn, context);
       } catch {
         // A mutant that makes the contract throw is a mutant the contract
-        // noticed, in the loudest way available. That counts as rejected.
+        // noticed, in the loudest way available. That counts as rejected — but
+        // not towards the requirement below, because a mutant that throws the
+        // moment it is called is rejected by its own shape rather than by
+        // anything the contract asserts.
         continue;
       }
       if (!Array.isArray(reported) || reported.length === 0) {
         problems.push(
           `${entry.check}'s contract does not reject the mutant "${mutant.name}" — it reported nothing about an implementation that is deliberately wrong. Either the contract asserts nothing about the behaviour that mutant changes, or it is ignoring the implementation it was handed and calling ${entry.check} by name instead, which is how a row came to probe a different function than the one it names.`,
         );
+        continue;
       }
+      rejectedByReport += 1;
+    }
+    if (rejectedByReport === 0) {
+      problems.push(
+        `${entry.check}'s mutants are all rejected by throwing rather than by anything the contract checked. \`fn: () => { throw }\` is refused by its own shape whatever the contract says; declare at least one replacement that returns a plausible wrong answer, which is the shape a real regression takes.`,
+      );
     }
   }
   return problems;
+}
+
+/**
+ * The implementation, wrapped so that "did the contract use it?" is a fact.
+ *
+ * A row's `fn` is either a function or an object of them (`stack-client.mjs`
+ * hands over `check`, `verdict` and the failure list together, because its
+ * decision is spread across the three). Both are wrapped the same way, and
+ * non-function properties — the `failures` array — are passed through, since a
+ * contract reading one of those is reading state the functions produced.
+ */
+function countingProxy(fn, counted) {
+  if (typeof fn === 'function') {
+    return (...args) => {
+      counted.calls += 1;
+      return fn(...args);
+    };
+  }
+  if (typeof fn !== 'object' || fn === null) return fn;
+  const wrapped = {};
+  for (const [name, value] of Object.entries(fn)) {
+    wrapped[name] = typeof value === 'function' ? countingProxy(value, counted) : value;
+  }
+  return wrapped;
 }
 
 const toPosix = (path) => path.split(sep).join(posix.sep);
@@ -942,7 +1063,47 @@ const ASSERT = 'expect';
  * nothing calls does not.
  */
 export function assertedNames(path, source) {
-  const parsed = ts.createSourceFile(path, source, ts.ScriptTarget.ESNext, true, scriptKind(path));
+  const key = `${path}\u0000${source}`;
+  const remembered = ASSERTED_CACHE.get(key);
+  if (remembered !== undefined) return remembered;
+  const found = assertedNamesUncached(path, source);
+  ASSERTED_CACHE.set(key, found);
+  return found;
+}
+
+/**
+ * Content-addressed, because this file reads the same tree several times over.
+ *
+ * `checkerGraphProblems`'s own contract calls it five more times with fixture
+ * registries, and each call parsed every source file under `scripts/`,
+ * `packages/` and `apps/` — six full passes over ~190 files. That took the
+ * `packages/ci-guard` suite past Vitest's 5s default timeout roughly one run in
+ * five on a loaded machine. Found by running the whole suite in a loop rather
+ * than by reading it, and worth writing down: the failure was a *timeout*
+ * wearing an assertion's clothes, and a gate that goes red one run in five is a
+ * gate people rerun until it is green, which is a gate that has stopped being
+ * one.
+ *
+ * Keyed by path *and* content, so a file that changed on disk between calls is a
+ * different entry and never a stale answer.
+ */
+const ASSERTED_CACHE = new Map();
+
+/** The same memo, for the scans that only read a file's declarations. */
+const PARSE_CACHE = new Map();
+
+function parseOnce(path, source) {
+  const key = `${path}\u0000${source}`;
+  let parsed = PARSE_CACHE.get(key);
+  if (parsed === undefined) {
+    parsed = ts.createSourceFile(path, source, ts.ScriptTarget.ESNext, true, scriptKind(path));
+    PARSE_CACHE.set(key, parsed);
+  }
+  return parsed;
+}
+
+function assertedNamesUncached(path, source) {
+  const parsed = parseOnce(path, source);
   const names = new Set();
 
   /** Top-level `function f(){}` and `const f = () => {}`, by name. */
@@ -1100,7 +1261,12 @@ export function assertedNames(path, source) {
     // `.mjs` entry point keeps its whole body in here, so without this shape the
     // two self-tests witness nothing at all; with it, they witness what runs
     // when CI runs them and nothing else. It is an allowlist entry that another
-    // rule pins the spelling of, which is the only reason it is safe.
+    // rule pins the spelling of, which is the only reason it is safe — and the
+    // lean is explicit: `guard-scan.mjs` refuses a locally declared or foreign
+    // `isMainModule` for every file under `scripts/`, so inside that directory
+    // this shape cannot be forged. Outside it, a file could write the same three
+    // tokens over a predicate of its own — which buys a *witness*, not the loss
+    // of one, and still requires a real assertion inside the body.
     if (ts.isIfStatement(statement) && isMainModuleGuard(statement)) {
       const body = statement.thenStatement;
       walkStatements(ts.isBlock(body) ? body.statements : [body], bindings);
@@ -1263,6 +1429,45 @@ function isMainModuleGuard(statement) {
   );
 }
 
+/**
+ * Every name a module exports.
+ *
+ * `export function f`, `export const f =`, `export class f`, and
+ * `export { a, b as c }`. A re-export from elsewhere still counts as this
+ * module's surface, which is the honest answer: `definedIn` is about where the
+ * binding a caller reaches for comes from.
+ */
+export function exportedNames(path, source) {
+  const parsed = parseOnce(path, source);
+  const names = new Set();
+  const exported = (node) =>
+    ts.canHaveModifiers(node) &&
+    (ts.getModifiers(node) ?? []).some((one) => one.kind === ts.SyntaxKind.ExportKeyword);
+  for (const statement of parsed.statements) {
+    if (ts.isExportDeclaration(statement)) {
+      const clause = statement.exportClause;
+      if (clause !== undefined && ts.isNamedExports(clause)) {
+        for (const element of clause.elements) names.add(element.name.text);
+      }
+      continue;
+    }
+    if (
+      (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+      exported(statement) &&
+      statement.name !== undefined
+    ) {
+      names.add(statement.name.text);
+      continue;
+    }
+    if (ts.isVariableStatement(statement) && exported(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text);
+      }
+    }
+  }
+  return names;
+}
+
 function collectIdentifiers(node, into) {
   if (ts.isIdentifier(node)) into.add(node.text);
   node.forEachChild((child) => collectIdentifiers(child, into));
@@ -1400,20 +1605,20 @@ export function sharedModuleProblems(
     } catch {
       continue;
     }
-    const parsed = ts.createSourceFile(
-      file,
-      source,
-      ts.ScriptTarget.ESNext,
-      true,
-      scriptKind(file),
-    );
+    const parsed = parseOnce(file, source);
     for (const statement of parsed.statements) {
       if (!ts.isImportDeclaration(statement)) continue;
       const specifier = statement.moduleSpecifier;
       if (!ts.isStringLiteral(specifier)) continue;
-      const match = /^(?:\.\/|(?:\.\.\/)+)([A-Za-z0-9._-]+\.mjs)$/.exec(specifier.text);
-      if (match === null) continue;
-      const target = `scripts/ci/${match[1]}`;
+      if (!specifier.text.startsWith('.') || !specifier.text.endsWith('.mjs')) continue;
+      // Resolved against the *importing file's* directory, not assumed to be
+      // `scripts/ci/`. `scripts/ci` is flat today and "the directory happens to
+      // be flat today" is this ticket's own founding assumption: a script at
+      // `scripts/other/x.mjs` importing `./y.mjs` means `scripts/other/y.mjs`,
+      // and reading that as `scripts/ci/y.mjs` would credit one module with
+      // another's importers and miss the real one entirely. Found attacking this
+      // round's own fix.
+      const target = toPosix(posix.join(posix.dirname(file), specifier.text));
       if (!importers.has(target)) importers.set(target, new Set());
       importers.get(target).add(file);
     }
@@ -1468,6 +1673,30 @@ export function checkerGraphProblems({
     if (!files.includes(definedIn)) {
       problems.push(
         `${check} is declared as living in ${definedIn}, which is not a source file this scan found. The registry in ${REGISTRY_FILE} and the tree have drifted.`,
+      );
+      continue;
+    }
+
+    // ── AND `definedIn` HAS TO ACTUALLY DEFINE IT (#40 round 7) ─────────────
+    // Found attacking this round's own fix, with D1's class as the checklist.
+    // `definedIn` was checked only for *existing*. Nothing tied it to `check`,
+    // and nothing tied either of them to the `fn` the contract is handed — so a
+    // row could name `scripts/ci/compose.mjs`, satisfy `sharedModuleProblems`
+    // for it, and hand its contract a function from somewhere else entirely.
+    // That is D3 — a row naming one thing and probing another — moved up from
+    // the function to the module, written inside the commit that fixes D3.
+    let exports;
+    try {
+      exports = exportedNames(definedIn, String(read(join(root, definedIn), 'utf8')));
+    } catch (error) {
+      problems.push(
+        `${definedIn} could not be read to confirm it defines ${check}: ${error.message}`,
+      );
+      continue;
+    }
+    if (!exports.has(check)) {
+      problems.push(
+        `the registry says ${check} lives in ${definedIn}, and ${definedIn} exports no such name (it exports ${[...exports].sort().join(', ') || 'nothing'}). \`definedIn\` is what makes a row a claim about a real module — it is what \`sharedModuleProblems\` counts, and what the graph excludes from the witness set — so a row naming a module it does not come from is D3 one level up: a row that names one thing and probes another.`,
       );
       continue;
     }
@@ -1537,7 +1766,18 @@ export function checkerGraphProblems({
   // And the half none of the above can reach: does each check still *do*
   // anything, and would its own fixture notice if it stopped? A perfect graph
   // over a gutted rule is the failure this whole file is about, one level up.
-  const workspace = mkdtempSync(join(tmpdir(), 'atrium-checker-graph-'));
-  problems.push(...effectProblems(registry, { root, read, workspace }));
+  // Created on demand rather than per call: this function runs six more times
+  // inside its own contract, and a scratch directory per invocation is fifty of
+  // them per test run for the two rows that want one.
+  let scratch;
+  const context = {
+    root,
+    read,
+    get workspace() {
+      scratch ??= mkdtempSync(join(tmpdir(), 'atrium-checker-graph-'));
+      return scratch;
+    },
+  };
+  problems.push(...effectProblems(registry, context));
   return problems;
 }

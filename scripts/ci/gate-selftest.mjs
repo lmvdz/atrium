@@ -1784,9 +1784,61 @@ const CASES = [
     // `guardProblems`, so gutting the named function left ci-guard at 49 passed.
     // A contract that reaches for the module binding instead of using what it
     // was handed answers the same for a mutant as for the real one.
-    name: 'a contract that ignores the implementation it was handed',
-    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], contract: () => [] }] }),
+    name: 'a contract that runs the check and asserts nothing about the answer',
+    run: () =>
+      checkerGraphProblems({
+        registry: [
+          {
+            ...ENFORCEMENT[0],
+            contract: (scan) => {
+              scan('scripts');
+              return [];
+            },
+          },
+        ],
+      }),
     expect: /does not reject the mutant/,
+  },
+  {
+    // Found attacking this round's own fix. `(fn) => fn === mainGuardProblems ?
+    // [] : ['wrong']` is clean for the implementation and loud for every mutant
+    // while asserting nothing about behaviour — it proves the two runs
+    // referenced the same thing, not that the thing did anything. So the handing
+    // is counted, and a contract that never calls what it was given is refused.
+    name: 'a contract that never calls the implementation it was handed',
+    run: () => checkerGraphProblems({ registry: [{ ...ENFORCEMENT[0], contract: () => [] }] }),
+    expect: /never called the implementation it was handed/,
+  },
+  {
+    name: 'a row whose only mutant is rejected by throwing rather than by the contract',
+    run: () =>
+      checkerGraphProblems({
+        registry: [
+          {
+            ...ENFORCEMENT[0],
+            mutants: [
+              {
+                name: 'throws the moment it is called',
+                fn: () => {
+                  throw new Error('no');
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    expect: /rejected by throwing rather than by anything the contract checked/,
+  },
+  {
+    // Found attacking this round's own fix. `definedIn` was checked only for
+    // existing, so a row could name a module it does not come from — which is
+    // what `sharedModuleProblems` counts and what the witness set excludes.
+    name: 'a registry row whose module does not export the check it names',
+    run: () =>
+      checkerGraphProblems({
+        registry: [{ ...ENFORCEMENT[0], definedIn: 'scripts/ci/compose.mjs' }],
+      }),
+    expect: /exports no such name/,
   },
   {
     name: 'a registry row with no contract at all',
@@ -2163,11 +2215,38 @@ function fileList(argv) {
   return argv.filter((_word, index) => argv[index - 1] === '-f').join(':');
 }
 
-/** The deploy job's own compose environment, as ci.yml declares it. */
+/**
+ * The deploy job's own compose environment, read out of `ci.yml`.
+ *
+ * ── WHY THIS IS A READBACK NOW (#40 round 7) ────────────────────────────────
+ * It used to be a hard-coded object with the same three values written out. A
+ * blind critic measured what that costs: drop `docker-compose.mailpit.yml` from
+ * the job's `env:` and the policy engine was clean — it checked only that
+ * `ATRIUM_COMPOSE_FILES` was a non-empty string — *and* every case below was
+ * clean, because they were comparing the workflow's file list against a copy of
+ * the workflow's file list that no longer came from the workflow. Two halves of
+ * one verification stack agreeing with each other about a third thing neither
+ * was reading.
+ *
+ * So the value comes from the file, and `workflow-policy.mjs` now pins what the
+ * file may say. A fixture that quotes the thing it is checking is this ticket's
+ * oldest defect — it is why `gate-selftest.mjs` satisfied round 5's substring
+ * scanner with a string literal — and it does not stop being that defect because
+ * the quoted thing is an environment variable.
+ */
 function composeEnv() {
+  const job = parse(readFileSync(WORKFLOW, 'utf8'))?.jobs?.deploy;
+  const env = job?.env ?? {};
+  for (const name of ['ATRIUM_COMPOSE_PROJECT', 'ATRIUM_COMPOSE_FILES']) {
+    if (typeof env[name] !== 'string' || env[name].trim() === '') {
+      throw new Error(
+        `${WORKFLOW} does not declare \`${name}\` on the deploy job, so these cases have nothing to compare the compose argv against. The policy engine's \`compose-through-one-entrypoint\` rule owns whether that is allowed; this is the readback that keeps this file from inventing a value it should be reading.`,
+      );
+    }
+  }
   return {
-    ATRIUM_COMPOSE_PROJECT: 'atrium-ci',
-    ATRIUM_COMPOSE_FILES: 'docker-compose.yml:docker-compose.mailpit.yml',
+    ATRIUM_COMPOSE_PROJECT: env.ATRIUM_COMPOSE_PROJECT.trim(),
+    ATRIUM_COMPOSE_FILES: env.ATRIUM_COMPOSE_FILES.trim(),
     ATRIUM_STACK_CA: '/tmp/caddy-root.crt',
   };
 }

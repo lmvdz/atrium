@@ -2188,6 +2188,18 @@ function checkManagerSelection(jobs, path, add) {
  */
 const COMPOSE_VARIABLES = ['ATRIUM_COMPOSE_FILES', 'ATRIUM_COMPOSE_PROJECT'];
 
+/**
+ * The compose files this deployment *is*, in order.
+ *
+ * The base stack plus the mail catcher and nothing else — `docker-compose.dev.yml`
+ * exists in this repository and is not part of what CI deploys. Written here
+ * rather than derived from a glob, because "every compose file in the root" is a
+ * set that grows by accident, and read back by `gate-selftest.mjs` out of
+ * `ci.yml` rather than copied, because a copy is what let both halves agree
+ * about a value neither was reading.
+ */
+export const DEPLOYED_COMPOSE_FILES = ['docker-compose.yml', 'docker-compose.mailpit.yml'];
+
 /** `scripts/ci/<name>.mjs`, however many `../` the step's directory needs. */
 export const CI_SCRIPT_PATH = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
 
@@ -2277,6 +2289,22 @@ function checkComposeEntrypoint(jobs, path, add) {
     add(
       'compose-through-one-entrypoint',
       `${path}: job \`${DEPLOY_JOB}\` does not declare \`ATRIUM_COMPOSE_FILES\` in its \`env:\`. Every compose invocation in this job — the verbs and the assertions alike — resolves its file list from that variable, and unset it means \`docker-compose.yml\` alone: no mail catcher, and a mail assertion waiting for a message nothing could have sent.`,
+    );
+  } else if (files.trim() !== DEPLOYED_COMPOSE_FILES.join(':')) {
+    // ── VALUE, NOT PRESENCE (#40 round 7) ──────────────────────────────────
+    // This rule asked whether the variable was a non-empty string and never
+    // read it. Measured by a blind critic: drop `docker-compose.mailpit.yml`
+    // from the list and the policy is clean at this end *and* clean at the
+    // other, because `gate-selftest.mjs`'s `composeEnv()` was a hard-coded copy
+    // of the value rather than a readback of this file — two halves of one
+    // verification stack agreeing with each other about a third thing neither
+    // of them was reading. Round 4's `echo`-the-fetch and round 6's
+    // `VITEST_RUN_START=` are the same defect: the rule was about the
+    // identifier and the meaning was in the value. So the value is the rule,
+    // and `gate-selftest.mjs` reads it out of this file now.
+    add(
+      'compose-through-one-entrypoint',
+      `${path}: job \`${DEPLOY_JOB}\` declares \`ATRIUM_COMPOSE_FILES: ${files.trim()}\`, and this deployment is exactly \`${DEPLOYED_COMPOSE_FILES.join(':')}\`. Dropping \`docker-compose.mailpit.yml\` leaves \`assert-signup-verifies.mjs\` waiting for a message no relay could have sent; adding a file adds configuration the preflight approved a different version of. A file list checked only for being a non-empty string is the value-vs-presence defect this engine has now made three times.`,
     );
   }
   const steps = Array.isArray(job.steps) ? job.steps : [];
