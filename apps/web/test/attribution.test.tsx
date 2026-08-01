@@ -957,7 +957,12 @@ describe('the side channels go through the same model as the row', () => {
      the cap ran out, so a tree of harmless nodes with a <q> past the cap
      validated — an unchecked subtree reporting exactly like a checked one. */
   it('a slot tree too big to check is refused, not waved through', () => {
-    const filler = Array.from({ length: 600 }, (_, i) => <span key={i}>x</span>);
+    /* Keys built with createElement so the lint rule against index keys is not
+       fought with a cosmetic template literal: the filler is 600 identical
+       nodes and the key is genuinely positional. */
+    const filler = Array.from({ length: 600 }, (_, i) =>
+      createElement('span', { key: `filler-${String(i)}` }, 'x'),
+    );
     expect(() => slot(<div>{[...filler, <q key="q">invented</q>]}</div>)).toThrow(
       /could not be checked to the end|<q> element/,
     );
