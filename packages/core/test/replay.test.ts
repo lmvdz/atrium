@@ -139,7 +139,7 @@ function oracleConsumed(arrival: readonly AuthoredEvent[]): AuthoredEvent[] {
 interface Staged {
   id: string;
   roomId: string;
-  type: 'decision' | 'claim';
+  type: StagedType;
   /** The statement that was staged — what an acceptance must carry verbatim. */
   text: string;
   /** The span it rests on, and the message that bears it. */
@@ -148,10 +148,28 @@ interface Staged {
   window: ProvenanceMessage[];
 }
 
-const payloadFor = (type: 'decision' | 'claim', text: string, verified = false) =>
+/**
+ * **`open_question` joined the corpus in r7.** A model may no longer land a
+ * claim — nothing in the words certifies that they were a claim rather than a
+ * commitment (`typeCertifiableFromText`) — so `open_question` is the only type a
+ * generated model acceptance can still get through, and without it the corpus
+ * stopped reaching `confidence_floor` at all: every model acceptance in it was a
+ * claim, and claims are now refused for the type before θ is consulted.
+ */
+type StagedType = 'decision' | 'claim' | 'open_question';
+
+/** A question-shaped text, so `statement_is_not_a_question` does not fire on it. */
+const textFor = (type: StagedType, index: number): string =>
+  type === 'open_question'
+    ? `do we keep the migration plan ${index} after launch?`
+    : `proposed ${index} on the shared migration plan`;
+
+const payloadFor = (type: StagedType, text: string, verified = false) =>
   type === 'claim'
     ? { statement: text, claimant: BOB, ...(verified ? { verification: 'verified' as const } : {}) }
-    : { statement: text, decidedBy: ALICE };
+    : type === 'open_question'
+      ? { question: text }
+      : { statement: text, decidedBy: ALICE };
 
 const HUMAN: Actor = { kind: 'human', userId: ALICE };
 const MODEL: Actor = { kind: 'model', model: 'test-model' };
@@ -190,7 +208,9 @@ function generateLog(seed: number, size: number): AuthoredEvent[] {
     const id = nextId(index);
     const at = minute(rng);
     const roomId = pick(rng, ROOMS);
-    const type = rng() < 0.5 ? 'decision' : 'claim';
+    const typeRoll = rng();
+    const type: StagedType =
+      typeRoll < 0.4 ? 'decision' : typeRoll < 0.8 ? 'claim' : 'open_question';
     const roll = rng();
 
     if (roll < 0.24) {
@@ -203,7 +223,7 @@ function generateLog(seed: number, size: number): AuthoredEvent[] {
       // *is* this text and since r3 a short quote is a rejected receipt. A
       // corpus of two-word statements would have quietly turned every model
       // acceptance into a receipt failure and stopped testing the clean path.
-      const text = `proposed ${index} on the shared migration plan`;
+      const text = textFor(type, index);
       const messageId = `msg_${index}`;
       const staged: Staged = {
         id: proposalId,
@@ -216,7 +236,17 @@ function generateLog(seed: number, size: number): AuthoredEvent[] {
         // to be whole sentences of the message, and a corpus whose every quote
         // was a fragment would have turned every model acceptance into a
         // receipt refusal and stopped testing the clean path.
-        window: [{ id: messageId, authorId: BOB, body: `We talked. ${text}. Agreed.` }],
+        // r7: an open question's text already ends in '?', and appending a
+        // second terminator would leave the quote spanning a sentence the body
+        // does not have — a receipt refusal, which would hide the floor gate
+        // this corpus reaches through open questions.
+        window: [
+          {
+            id: messageId,
+            authorId: BOB,
+            body: `We talked. ${text}${type === 'open_question' ? '' : '.'} Agreed.`,
+          },
+        ],
       };
       events.push(
         row(
@@ -295,7 +325,7 @@ function generateLog(seed: number, size: number): AuthoredEvent[] {
       // Most acceptances carry the reading that was staged; some do not, which
       // is the payload-binding gate. Same for the citation set and the window.
       const faithful = staged !== undefined && rng() < 0.7;
-      const text = faithful ? staged.text : `accepted ${index}`;
+      const text = faithful ? staged.text : textFor(objectType, index);
       const messageIds = faithful ? [staged.messageId] : [`msg_${index}`];
       const window = staged && rng() < 0.85 ? staged.window : undefined;
       events.push(
@@ -507,7 +537,7 @@ function gateProbes(seed: number): AuthoredEvent[] {
 
   const object = (
     index: number,
-    type: 'decision' | 'claim',
+    type: StagedType,
     payload: Record<string, unknown>,
     actor: Actor,
     proposalId: string | null,
@@ -537,6 +567,7 @@ function gateProbes(seed: number): AuthoredEvent[] {
     proposalId: string,
     text: string,
     confidence: number,
+    type: StagedType = 'claim',
   ) =>
     row(
       {
@@ -546,8 +577,8 @@ function gateProbes(seed: number): AuthoredEvent[] {
         proposal: {
           id: proposalId,
           roomId: room,
-          type: 'claim',
-          payload: { statement: text, claimant: BOB },
+          type,
+          payload: payloadFor(type, text),
           confidence,
           proposer: MODEL,
           provenance: [`msg_${tag}`],
@@ -637,17 +668,51 @@ function gateProbes(seed: number): AuthoredEvent[] {
 
     // ── #21 r1's additions to the floor ───────────────────────────────────
     //
-    // A low-confidence claim proposal, staged by MODEL, that both acceptance
-    // gates are aimed at in turn.
-    modelClaimProposal(18, `pprop_low_${seed}`, `${tag} is unsure about the migration plan`, 0.05),
+    // A low-confidence proposal, staged by MODEL, that both acceptance gates are
+    // aimed at in turn.
+    //
+    // **An `open_question` since r7, and that is the fourth time this one
+    // assertion has caught this probe.** A claim's floor became unreachable —
+    // no confidence clears it, because nothing in the words says the words were
+    // a claim — so a low-confidence *claim* is refused for its type before θ is
+    // read, and `confidence_floor` went unreached again. An open question is the
+    // one type a machine may still mint, so it is the one that has a threshold
+    // to be under.
+    modelClaimProposal(
+      18,
+      `pprop_low_${seed}`,
+      `${tag} is unsure about the migration plan?`,
+      0.05,
+      'open_question',
+    ),
     // Gate: a model may not accept a reading it does not stand behind.
     object(
       19,
-      'claim',
-      { statement: `${tag} is unsure about the migration plan`, claimant: BOB },
+      'open_question',
+      { question: `${tag} is unsure about the migration plan?` },
       MODEL,
       `pprop_low_${seed}`,
-      claimWindow(`${tag} is unsure about the migration plan`),
+      claimWindow(`${tag} is unsure about the migration plan?`),
+    ),
+    // r7. A well-founded *claim*, staged by MODEL and accepted by MODEL, with a
+    // receipt nothing is wrong with. It is refused anyway: the receipt certifies
+    // that these words are in the record and who wrote them, and `type` is the
+    // one field the proposal fills in for itself. This is the round's finding as
+    // a corpus row, and it is the only thing in the corpus that reaches
+    // `certification_floor`.
+    modelClaimProposal(
+      36,
+      `pprop_cert_${seed}`,
+      `${tag} is certain about the migration plan`,
+      0.95,
+    ),
+    object(
+      37,
+      'claim',
+      { statement: `${tag} is certain about the migration plan`, claimant: BOB },
+      MODEL,
+      `pprop_cert_${seed}`,
+      claimWindow(`${tag} is certain about the migration plan`),
     ),
     // A well-founded proposal, staged by MODEL…
     modelClaimProposal(
@@ -1094,6 +1159,10 @@ const GATE_MARKERS = {
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
   confidence_floor: 'below the floor',
+  // r7. A claim's floor is unreachable, so its refusal names the reason instead
+  // of reporting `Infinity` — a different message and a different fact, so a
+  // different marker. See `confidenceFloorRefusal`.
+  certification_floor: 'nothing in the words says whether they were a',
   dangling_objective: 'which does not exist',
   payload_binding: 'does not carry its payload',
   provenance_binding: 'the receipt may not change on the way through',

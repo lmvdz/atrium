@@ -101,6 +101,11 @@ const GATES = {
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
   confidence_floor: 'below the floor',
+  // r7. A claim's floor is unreachable — nothing in the words establishes that
+  // they were a claim rather than a commitment — so it refuses in words rather
+  // than reporting an unreachable number. Its own row, because 'refused for a
+  // reason' and 'refused by a threshold' are different facts about a reading.
+  certification_floor: 'nothing in the words says whether they were a',
   payload_binding: 'does not carry its payload',
   provenance_binding: 'the receipt may not change on the way through',
   missing_receipt_context: 'no message window supplied',
@@ -121,7 +126,9 @@ const FLOOR: Record<AcceptedObjectType, number> = {
   // is what everything else is filed under. Neither is a machine's to mint.
   commitment: Number.POSITIVE_INFINITY,
   open_question: 0.6,
-  claim: 0.7,
+  // r7: a machine may perform this act and cannot certify that it *was* this
+  // act, so no confidence clears it. See `typeCertifiableFromText`.
+  claim: Number.POSITIVE_INFINITY,
   objective: Number.POSITIVE_INFINITY,
 };
 
@@ -172,8 +179,12 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   if (testCase.cited !== 'none' && !ownsProposal(testCase.actor, testCase.cited)) {
     return 'acceptance_binding';
   }
-  if (testCase.cited !== 'none' && !human && testCase.confidence === 'below') {
-    return 'confidence_floor';
+  if (testCase.cited !== 'none' && !human) {
+    // r7. An unreachable floor and a missed threshold are refused at the same
+    // point and say different things, so the oracle splits them the way the
+    // reducer does.
+    if (!Number.isFinite(FLOOR[testCase.type])) return 'certification_floor';
+    if (testCase.confidence === 'below') return 'confidence_floor';
   }
   return 'allowed';
 }
@@ -219,8 +230,15 @@ function expectedForReceipt(actor: ActorKind, shape: ReceiptShape): Gate | 'allo
       return 'receipt_failed';
     case 'uncertifiable':
       return 'receipt_not_certifiable';
+    // r7. A model with a *perfect* receipt still does not land a claim: the
+    // receipt certifies that these words are in the record and who wrote them,
+    // and says nothing about whether they were a claim rather than a commitment,
+    // which is the one field the proposal supplies. The receipt row of this
+    // matrix runs on claims, so this cell is the whole finding in one line —
+    // "faithful" used to mean "allowed", and faithfulness was never the question
+    // the type was answering.
     case 'faithful':
-      return 'allowed';
+      return 'certification_floor';
   }
 }
 

@@ -134,6 +134,16 @@ export type HumanOnlyGate =
  * them as "confidence 0.95 is below the floor of Infinity", which tells a room
  * nothing about why. `RETRO.md`: a rule applied at one site is not a rule, and a
  * refusal that does not name itself is a dead end.
+ *
+ * **Since r7 the two are no longer the same set, and that is deliberate too.**
+ * `claim` has an unreachable floor and no gate here: its refusal is not "a
+ * machine may not perform this act" — a machine reading a room and recording
+ * what it found is the whole product — but "nothing proves this *was* a claim
+ * rather than a commitment". That is a fact about the reading, so it rides with
+ * θ, and `confidenceFloorRefusal` says it in words. Putting it here instead was
+ * built and reverted: this switch runs before the verified-claim check, so a
+ * gate on every claim shadows `claim_verification` into unreachability, and a
+ * defence deleted by being shadowed costs more than the message it buys.
  */
 export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null {
   switch (type) {
@@ -143,6 +153,22 @@ export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null
       return 'commitment_acceptance';
     case 'objective':
       return 'objective_acceptance';
+    // ── Why `claim` is not in this row, r7 ──────────────────────────────────
+    //
+    // A model may not *land* a claim any more either — `MODEL_ACCEPTANCE_FLOOR`
+    // is `+Infinity` for it since r7, because `typeCertifiableFromText` says
+    // nothing in the words establishes that they were a claim rather than a
+    // commitment. That is enforced one screen down, at the floor.
+    //
+    // It was implemented here first, as a `claim_acceptance` gate, and put back:
+    // this switch runs **before** the verified-claim check, so a named gate on
+    // every claim swallows `claim_verification` whole and makes it unreachable —
+    // a defence deleted by being shadowed, which is worse than the message it
+    // was buying. The gates in this row say *a machine may not perform this
+    // act*; the claim rule says *nothing proves this was that act*, which is a
+    // fact about the reading and belongs with θ. `confidenceFloorRefusal` names
+    // it in words rather than reporting an unreachable number, which is the
+    // objection the paragraph above raised against a floor-only refusal.
     case 'claim':
     case 'open_question':
       return null;
@@ -284,6 +310,18 @@ export function confidenceFloorRefusal(
   confidence: number,
 ): string {
   const floor = MODEL_ACCEPTANCE_FLOOR[type];
+  // ── An unreachable floor says *why* it is unreachable, r7 ────────────────
+  //
+  // "below the floor of Infinity" is a number a room cannot act on, and the
+  // docblock on `modelMintingGate` says so. Every type whose floor is unreachable
+  // for the *authority* reason has a named gate up there and never reaches this
+  // line; `claim` reaches it, because its floor is unreachable for a different
+  // reason — nothing in the words establishes that they were a claim rather than
+  // a commitment, a decision or an objective, so the type is the proposal's own
+  // word. See `typeCertifiableFromText`.
+  if (!Number.isFinite(floor)) {
+    return `${actorName(actor)} accepted ${type} proposal "${proposalId}" at confidence ${confidence}, and no confidence clears the floor for a ${type} — the receipt certifies that these words are in the record and who wrote them, and nothing in the words says whether they were a ${type}, a commitment, a decision or an objective, so accepting one on the proposal's own word lets the proposal pick the rule that judges it; propose it and let a human accept`;
+  }
   return `${actorName(actor)} accepted ${type} proposal "${proposalId}" at confidence ${confidence}, below the floor of ${floor} for that type — a non-human actor may not mint an object from a reading it does not stand behind; propose it and let a human accept`;
 }
 

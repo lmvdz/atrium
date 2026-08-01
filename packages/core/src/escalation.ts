@@ -13,7 +13,7 @@ import {
   statementBearing,
 } from './matching.js';
 import type { AcceptedObjectType } from './objects.js';
-import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
+import { DEFAULT_ACCEPTANCE_RULES, RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
 
 /**
  * Deterministic text triggers, computed *before* any model call, plus the
@@ -770,6 +770,7 @@ export const PROVENANCE_PROBLEM_KINDS = [
   'quote_omits_surrounding_text',
   'superseded_by_later_message',
   'statement_is_not_an_assertion',
+  'statement_is_not_a_question',
   'statement_uncheckable',
   'ambiguous_quote',
   'attributed_person_not_author',
@@ -1081,7 +1082,7 @@ export function validateProposalProvenance(
           severity: 'refer',
           detail:
             revisited.why === 'window_ends_at_the_citations'
-              ? `the window carries nothing after the messages this proposal cites that the proposal did not itself choose, so the correction scan read no evidence it does not control — whether a later message takes the quoted sentence back was never established, and a window that ends where the citations end cannot answer that (see \`AcceptanceContext.messages\`)`
+              ? `the window carries nothing after the newest message this proposal cites, so the correction scan read no evidence about what came after the quoted sentence — whether a later message takes it back was never established, and a window that ends at the citations cannot answer that (see \`AcceptanceContext.messages\`)`
               : `the window carries more after this citation than this check will read (${policy.maxLaterMessagesScanned} messages, ${policy.maxScannedSentences} sentences each, ${policy.maxAlignedTokens} tokens a sentence), so whether one of them corrects the quoted sentence was never established — an unread window is not a clean one, and a check that declined to run is not a check that passed`,
           messageId: null,
         });
@@ -1110,6 +1111,37 @@ export function validateProposalProvenance(
         kind: 'statement_is_not_an_assertion',
         severity: 'refer',
         detail: `the ${subject.type} being minted carries a question mark — a question quoted verbatim is an open question or a referral, never an assertion about what somebody holds, and nothing here can tell a rhetorical question from a real one`,
+        messageId: bearing?.id ?? null,
+      });
+    }
+
+    // ── …and the mirror, which was the cheaper half of the same laundering ──
+    //
+    // r7. The check above is one-directional, and `type` is model-supplied, so
+    // the direction it does not cover is the direction with a *lower bar*:
+    // `open_question` carries θ_auto **0.6** against a claim's 0.7 and a
+    // commitment's 0.75 (`DEFAULT_ACCEPTANCE_RULES`). An ordinary declarative
+    // sentence — no question mark anywhere in it — minted as an `open_question`
+    // at confidence 0.65 auto-accepted, where the same sentence as a `claim`
+    // landed in `theta_band / pending`. **The proposer picked the rule that
+    // judged it**, and the receipt had nothing to say because a receipt
+    // certifies provenance and this is a question about the kind of act.
+    //
+    // This half is certifiable, and that is why it ships as a refusal rather
+    // than as the disposition below it: an interrogative is a property of the
+    // text, `QUESTION_MARKS` already enumerates every mark that makes one across
+    // every script, and `isAssertion` is the instrument the other direction
+    // already runs on. A statement with no question mark in it is not a
+    // question, in the same sense and by the same measurement that a statement
+    // with one is not an assertion.
+    //
+    // `refer`, matching its mirror: the disposition on a mistyped reading is
+    // that a person decides what it was, not that the words are thrown away.
+    if (fromModel && subject.type === 'open_question' && isAssertion(subject.statement ?? '')) {
+      problems.push({
+        kind: 'statement_is_not_a_question',
+        severity: 'refer',
+        detail: `the open question being minted carries no question mark — an open question is the type with the lowest bar a machine may accept at (θ_auto ${DEFAULT_ACCEPTANCE_RULES.open_question.thetaAuto} against a claim's ${DEFAULT_ACCEPTANCE_RULES.claim.thetaAuto}), and a declarative sentence filed under it is a reading routed around its own threshold rather than an unresolved question`,
         messageId: bearing?.id ?? null,
       });
     }
@@ -1457,8 +1489,11 @@ export function laterRevision(
   // be a correction of it, and a cited message is not a revision of itself.
   const cited = new Set(citedIds);
   let firstCited = -1;
+  let lastCited = -1;
   for (const [index, message] of messages.entries()) {
-    if (cited.has(message.id) && firstCited === -1) firstCited = index;
+    if (!cited.has(message.id)) continue;
+    if (firstCited === -1) firstCited = index;
+    lastCited = index;
   }
   if (firstCited === -1) return scanned(0);
 
@@ -1480,13 +1515,52 @@ export function laterRevision(
   // attack this file has been through, and "the caller happened to include some
   // earlier chatter" is not evidence about what came after.
   //
-  // The cost, stated as a disposition: **a reading whose citation is the newest
-  // message in the window is never auto-accepted.** Nothing later exists to have
-  // corrected it, and core cannot tell that from a window that stops early — it
-  // has no message table and no clock. The honest answer to a question this
-  // function cannot ask is the one it gives everywhere else, and `refer` keeps
-  // the reading staged for a person rather than destroying it.
-  if (!messages.slice(firstCited + 1).some((message) => !cited.has(message.id))) {
+  // The cost, stated as a disposition: **a reading whose newest citation is the
+  // newest message in the window is never auto-accepted.** Nothing later exists
+  // to have corrected it, and core cannot tell that from a window that stops
+  // early — it has no message table and no clock. The honest answer to a
+  // question this function cannot ask is the one it gives everywhere else, and
+  // `refer` keeps the reading staged for a person rather than destroying it.
+  //
+  // ── Who supplies `citedIds`: the proposal. Why this is still a check ──────
+  //
+  // r7, and the third time this one boundary has moved. r6 asked the existence
+  // question from `firstCited + 1` — the same index the scan starts at — and a
+  // window of `[cited, uncited, cited]` answered it *yes* while every message
+  // the scan read sat at or before the sentence. `provenance` is model-supplied,
+  // so **citing one extra earlier message turned the gate off**: cite only the
+  // bearing message and the reading is `pending`; add the standup chatter three
+  // lines above it and the same reading is `auto_accept`. That is not an
+  // adversarial shape. An extraction drawn from two messages, in a window
+  // ending at the newest one — the ordinary case — hits it on the first try.
+  //
+  // The question the gate has to ask is **"was anything read after the
+  // sentence?"**, and the only bound on where the sentence sits that this
+  // function can compute is `lastCited`: `validateProposalProvenance` rejects a
+  // proposal whose quote is in no *cited* message (`quote_not_found`), so the
+  // bearing message is always one of the cited ones, so nothing after
+  // `lastCited` can be the sentence. Hence the existence test runs from
+  // `lastCited + 1`.
+  //
+  // **And it is the one index in this function the proposal cannot profit from
+  // moving.** Padding the citation list with a *later* message raises
+  // `lastCited` and makes the gate stricter; padding it with an *earlier* one —
+  // the r6 exploit — no longer moves it at all; dropping a citation is refused
+  // upstream the moment it is the one carrying the quote. Every direction the
+  // proposer can push this value pushes toward a referral. The *scan* still
+  // starts at `firstCited + 1`, for the reason the paragraphs above give: a
+  // correction sitting between two citations must be read, and that floor being
+  // proposal-controlled only ever makes the scan read more.
+  //
+  // The `!cited.has` predicate is redundant — every index past `lastCited` is
+  // uncited by construction — and it is written out anyway, because the property
+  // being asserted is *"the scan read evidence the proposal did not choose"* and
+  // not *"the array is longer than an index"*. If a later reader makes
+  // `lastCited` mean something else, this reads as the claim it is making.
+  const readSomethingUnchosenAfterTheSentence = messages
+    .slice(lastCited + 1)
+    .some((message) => !cited.has(message.id));
+  if (!readSomethingUnchosenAfterTheSentence) {
     return unscanned('window_ends_at_the_citations');
   }
 

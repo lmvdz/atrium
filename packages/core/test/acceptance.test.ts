@@ -17,6 +17,7 @@ import {
   defaultAcceptanceConfig,
   findDuplicate,
   MODEL_ACCEPTANCE_FLOOR,
+  modelMayMint,
   modelMintingGate,
   type Proposal,
   Proposal as ProposalSchema,
@@ -192,14 +193,32 @@ for (const type of ['claim', 'open_question'] as const) {
       visibility: 'quiet',
       rule: 'theta_band',
     },
-    {
-      label: `${type} at θ_auto`,
-      type,
-      band: 'above',
-      verdict: 'auto_accept',
-      visibility: 'accepted',
-      rule: 'auto_accept',
-    },
+    // **r7 splits this cell by type, and the split is the round's finding.**
+    // `type` is model-supplied and it used to select the rule that judged the
+    // proposal: one body, one quote, one author, confidence 0.95, minted as a
+    // `commitment` → `pending / never_auto_accepts`, minted as a `claim` →
+    // `auto_accept`. An `open_question` is certifiable from the text — an
+    // interrogative carries a question mark and `escalation.ts` now refuses both
+    // directions — so it keeps the cell. A `claim` is not: claim, commitment,
+    // decision and objective are all assertions and nothing in the characters
+    // says which, so at θ_auto it goes to Needs-you for a person instead.
+    type === 'open_question'
+      ? {
+          label: `${type} at θ_auto`,
+          type,
+          band: 'above',
+          verdict: 'auto_accept',
+          visibility: 'accepted',
+          rule: 'auto_accept',
+        }
+      : {
+          label: `${type} at θ_auto`,
+          type,
+          band: 'above',
+          verdict: 'pending',
+          visibility: 'needs_you',
+          rule: 'type_not_certified',
+        },
   );
 }
 for (const band of ['below', 'between', 'above'] as const) {
@@ -355,16 +374,29 @@ describe('#4 acceptance matrix — one test per cell', () => {
     expect(CELLS).toHaveLength(expected.size + 1);
   });
 
-  it('gates exactly the types the θ table refuses to auto-accept', () => {
+  it('gates exactly the types a machine may not perform, and floors the ones it cannot certify', () => {
     // grok's pass: `modelMintingGate` says in its own doc comment that it is
     // derived from the same table `MODEL_ACCEPTANCE_FLOOR` is derived from, "so
     // the named refusal and the unreachable number cannot drift" — and nothing
     // checked it. A `switch` is not a derivation; this is what makes the claim
     // true.
+    //
+    // **r7 splits the two, and the split is the finding.** They used to be the
+    // same set because there was one reason to refuse a machine: *this act is a
+    // person's to perform*. There is a second reason now — *nothing proves this
+    // was that act* — and it lands on `claim`, which a machine may perform and
+    // cannot certify. So the gate tracks `autoAcceptable` and the floor tracks
+    // `modelMayMint`, and the two disagree on exactly one type. Asserted as two
+    // derivations rather than one, because collapsing them again is how the
+    // certification rule would silently disappear.
     for (const type of OBJECT_TYPES) {
-      expect(modelMintingGate(type) === null).toBe(autoAcceptable(type));
-      expect(Number.isFinite(MODEL_ACCEPTANCE_FLOOR[type])).toBe(autoAcceptable(type));
+      expect(modelMintingGate(type) === null, type).toBe(autoAcceptable(type));
+      expect(Number.isFinite(MODEL_ACCEPTANCE_FLOOR[type]), type).toBe(modelMayMint(type));
     }
+    // …and they differ, so this is not one rule asserted twice.
+    expect(OBJECT_TYPES.filter((type) => autoAcceptable(type) !== modelMayMint(type))).toEqual([
+      'claim',
+    ]);
   });
 
   it('probes the band each literal claims to be in', () => {
@@ -545,7 +577,9 @@ describe('the θ table itself — pinned by value, not derived', () => {
 
     expect(verdictAt('claim', 0.45)).toBe('none'); // under θ_min 0.5
     expect(verdictAt('claim', 0.6)).toBe('quiet'); // in the band
-    expect(verdictAt('claim', 0.75)).toBe('accepted'); // over θ_auto 0.7
+    // r7: over θ_auto and still Needs-you — a claim's *kind* is the proposal's
+    // own word, so the band still bands and only this cell moved.
+    expect(verdictAt('claim', 0.75)).toBe('needs_you'); // over θ_auto 0.7
 
     expect(verdictAt('open_question', 0.35)).toBe('none');
     expect(verdictAt('open_question', 0.5)).toBe('quiet');
@@ -572,12 +606,14 @@ describe('the θ table itself — pinned by value, not derived', () => {
       decision: Number.POSITIVE_INFINITY,
       commitment: Number.POSITIVE_INFINITY,
       open_question: 0.6,
-      claim: 0.7,
+      // r7: unreachable, and for a reason the other three do not share — a
+      // machine may perform this act and cannot certify that it *was* this act.
+      claim: Number.POSITIVE_INFINITY,
       objective: Number.POSITIVE_INFINITY,
     });
-    for (const [type, rule] of Object.entries(DEFAULT_ACCEPTANCE_RULES)) {
-      expect(MODEL_ACCEPTANCE_FLOOR[type as AcceptedObjectType]).toBe(
-        rule.autoAccept ? rule.thetaAuto : Number.POSITIVE_INFINITY,
+    for (const type of OBJECT_TYPES) {
+      expect(MODEL_ACCEPTANCE_FLOOR[type], type).toBe(
+        modelMayMint(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,
       );
     }
   });
@@ -593,16 +629,26 @@ describe('the θ boundaries are inclusive at θ_auto and exclusive at θ_min', (
    * run time, and would have gone on passing at any θ whatsoever. A claim's
    * θ_auto is 0.7 and its θ_min is 0.5, and this suite now says so out loud.
    */
-  it('accepts exactly at θ_auto (0.7 for a claim)', () => {
-    expect(decideAcceptance(proposal({ type: 'claim', confidence: 0.7 }), context).verdict).toBe(
-      'auto_accept',
-    );
+  it('crosses θ_auto exactly at 0.7 for a claim', () => {
+    // **The inclusivity is asserted on the `rule`, not the verdict, since r7.**
+    // A claim at or above θ_auto is `type_not_certified` rather than
+    // `auto_accept` — its *kind* is the proposal's own word — so the verdict is
+    // `pending` on both sides of the line and would pin nothing. The rule name
+    // still moves exactly at 0.7, which is what this test is about.
+    const at = decideAcceptance(proposal({ type: 'claim', confidence: 0.7 }), context);
+    expect(at.rule).toBe('type_not_certified');
+    expect(at.visibility).toBe('needs_you');
+    // …and the type whose kind the text does certify still accepts there.
+    expect(
+      decideAcceptance(proposal({ type: 'open_question', confidence: 0.6 }), context).verdict,
+    ).toBe('auto_accept');
   });
 
   it('does not accept a hair under θ_auto (0.6999)', () => {
     const decision = decideAcceptance(proposal({ type: 'claim', confidence: 0.6999 }), context);
     expect(decision.verdict).toBe('pending');
     expect(decision.visibility).toBe('quiet');
+    expect(decision.rule).toBe('theta_band');
   });
 
   it('keeps a proposal exactly at θ_min (0.5) rather than discarding it', () => {
@@ -749,9 +795,15 @@ describe('AcceptanceConfig — the invariants that keep the engine above the flo
   it('refuses a θ_auto below the reducer’s floor', () => {
     // The whole point: a config looser than the floor emits acceptances the
     // reducer refuses, and the only symptom is a growing `issues` list.
-    expect(() => resolveAcceptanceConfig({ claim: { thetaAuto: 0.1, thetaMin: 0.05 } })).toThrow(
-      /below the reducer's acceptance floor/,
-    );
+    //
+    // **`open_question`, not `claim`, since r7.** A claim's floor is
+    // `+Infinity` now — no confidence clears it, because nothing in the text
+    // certifies that the words were a claim — and the invariant is guarded by
+    // `Number.isFinite`, so a claim override cannot exercise it. This has to run
+    // on the one type a machine may still mint or it asserts nothing.
+    expect(() =>
+      resolveAcceptanceConfig({ open_question: { thetaAuto: 0.1, thetaMin: 0.05 } }),
+    ).toThrow(/below the reducer's acceptance floor/);
   });
 
   it('refuses an inverted band', () => {

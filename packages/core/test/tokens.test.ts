@@ -111,18 +111,49 @@ describe('r6 — the token stream is the text, so token equality is text equalit
     }
   });
 
-  it('reassembles a text built from any code point, not only the ones somebody listed', () => {
-    // The corpus above is a list, and a list is the instrument this package keeps
-    // being failed for. So: every code point, in a word, on its own, and between
-    // two letters.
-    for (let cp = 0; cp <= 0x10ffff; cp += 1) {
-      if (cp >= 0xd800 && cp <= 0xdfff) continue;
-      const char = String.fromCodePoint(cp);
-      const text = `x${char}y`;
-      if (orderedTokens(text).join('') !== normalizeForReceipt(text)) {
-        throw new Error(`U+${cp.toString(16).toUpperCase()} does not reassemble`);
+  // **Sharded by plane, and r7's review is why.** As one `it` this loop measured
+  // 5277 ms on the reviewer's machine against vitest's undeclared 5000 ms
+  // default, so `pnpm test` was a coin flip — six consecutive runs went 1, 1, 0,
+  // 1, 0, 0 — and the two tests it flipped were the two brute forces the whole
+  // evidentiary posture of this round rests on. A slower box fails always.
+  //
+  // Seventeen shards cover 0…0x10FFFF exactly, so the totality claim is
+  // unchanged and now auditable a plane at a time; each shard runs in roughly a
+  // sixteenth of the time, which keeps the per-test budget in `vitest.config.ts`
+  // meaningful instead of merely large. The failure message gains the plane.
+  const PLANES = Array.from({ length: 17 }, (_, plane) => plane);
+  it.each(PLANES)(
+    'reassembles a text built from any code point in plane %i, not only the ones somebody listed',
+    (plane) => {
+      // The corpus above is a list, and a list is the instrument this package
+      // keeps being failed for. So: every code point, between two letters.
+      const start = plane * 0x10000;
+      for (let cp = start; cp < start + 0x10000; cp += 1) {
+        if (cp >= 0xd800 && cp <= 0xdfff) continue;
+        const char = String.fromCodePoint(cp);
+        const text = `x${char}y`;
+        if (orderedTokens(text).join('') !== normalizeForReceipt(text)) {
+          throw new Error(`U+${cp.toString(16).toUpperCase()} does not reassemble`);
+        }
       }
-    }
+    },
+  );
+
+  it('sweeps every code point across the shards, with nothing between them', () => {
+    // The shard boundaries are arithmetic, and arithmetic in a test is a place
+    // to drop a range silently. This asserts the seventeen shards partition
+    // 0…0x10FFFF exactly — the surrogates excluded and nothing else.
+    const covered = PLANES.reduce((total, plane) => {
+      const start = plane * 0x10000;
+      let count = 0;
+      for (let cp = start; cp < start + 0x10000; cp += 1) {
+        if (cp < 0xd800 || cp > 0xdfff) count += 1;
+      }
+      return total + count;
+    }, 0);
+    expect(covered).toBe(0x110000 - 0x800);
+    expect(covered).toBe(1_112_064);
+    expect(PLANES.at(-1) as number).toBe(0x10ffff >>> 16);
   });
 
   it('is borne exactly when the two normalized texts are the same string', () => {
@@ -266,23 +297,33 @@ describe('r6 — the token stream is the text, so token equality is text equalit
 });
 
 describe('r6 — a receipt that refuses says what it found', () => {
-  it('never refuses a bearing check without naming the difference', () => {
-    // The rule the whole campaign turns on, as a property over a generated space
-    // rather than an example: **a check that ran and refused must report
-    // something**, or a refusal and a pass are the same value. `escalation.ts`
-    // branches on `borne` and names every way it can be false precisely so this
-    // holds by construction; this measures it.
-    //
-    // The alphabet carries a space, a doubled space, a full stop, both kinds of
-    // quote mark, a backtick, a tab, a newline, a control character, a
-    // zero-width space and a bidi override — every class this file has been
-    // broken by — in every position of a short sentence.
-    const alphabet = ['a', ' ', '  ', '.', "'", '`', ',', '?', '\t', '\n', '', '​', '‮'];
-    let checked = 0;
-    for (const p1 of alphabet) {
-      for (const p2 of alphabet) {
-        for (const q1 of alphabet) {
-          for (const q2 of alphabet) {
+  // The alphabet carries a space, a doubled space, a full stop, both kinds of
+  // quote mark, a backtick, a tab, a newline, a control character, a zero-width
+  // space and a bidi override — every class this file has been broken by — in
+  // every position of a short sentence.
+  const SILENCE_ALPHABET = ['a', ' ', '  ', '.', "'", '`', ',', '?', '\t', '\n', '', '​', '‮'];
+  /** Every combination the sweep below ranges over, counted rather than asserted. */
+  const SILENCE_PAIRS = SILENCE_ALPHABET.length ** 4;
+  const checkedPerShard = new Map<string, number>();
+
+  // **Sharded on the quote's first insert, and r7's review is why.** As one `it`
+  // this measured 5277 ms on the reviewer's machine against vitest's undeclared
+  // 5000 ms default, so `pnpm test` was a coin flip — six consecutive runs went
+  // 1, 1, 0, 1, 0, 0 — and this is one of the two brute forces the round's whole
+  // evidentiary posture rests on. Thirteen shards, one per alphabet entry, range
+  // over the same product; the test below adds up what they covered.
+  it.each(SILENCE_ALPHABET)(
+    'never refuses a bearing check without naming the difference (quote insert %j)',
+    (p1) => {
+      // The rule the whole campaign turns on, as a property over a generated
+      // space rather than an example: **a check that ran and refused must report
+      // something**, or a refusal and a pass are the same value. `escalation.ts`
+      // branches on `borne` and names every way it can be false precisely so
+      // this holds by construction; this measures it.
+      let checked = 0;
+      for (const p2 of SILENCE_ALPHABET) {
+        for (const q1 of SILENCE_ALPHABET) {
+          for (const q2 of SILENCE_ALPHABET) {
             const body = `we will deploy${p1}${p2}production friday`;
             const minted = `we will deploy${q1}${q2}production friday`;
             if (isBlank(body) || isBlank(minted)) continue;
@@ -310,8 +351,34 @@ describe('r6 — a receipt that refuses says what it found', () => {
           }
         }
       }
+      checkedPerShard.set(p1, checked);
+      expect(checked).toBeGreaterThan(1500);
+    },
+  );
+
+  it('covers the same space the unsharded loop did, shard by shard', () => {
+    // Sharding a property is a way to check a fraction of it and report the
+    // whole. Every shard ran, and their sum is the full product minus exactly
+    // the blank combinations the loop skips — computed here, not asserted.
+    expect(checkedPerShard.size).toBe(SILENCE_ALPHABET.length);
+    const total = [...checkedPerShard.values()].reduce((sum, count) => sum + count, 0);
+    expect(total).toBeGreaterThan(20000);
+    let skipped = 0;
+    for (const p1 of SILENCE_ALPHABET) {
+      for (const p2 of SILENCE_ALPHABET) {
+        for (const q1 of SILENCE_ALPHABET) {
+          for (const q2 of SILENCE_ALPHABET) {
+            if (
+              isBlank(`we will deploy${p1}${p2}production friday`) ||
+              isBlank(`we will deploy${q1}${q2}production friday`)
+            ) {
+              skipped += 1;
+            }
+          }
+        }
+      }
     }
-    expect(checked).toBeGreaterThan(20000);
+    expect(total).toBe(SILENCE_PAIRS - skipped);
   });
 
   it('never refuses a message quoted as itself', () => {
@@ -597,7 +664,7 @@ describe('r6 — the correction scan cannot be turned off by the window the call
     const problems = validateProposalProvenance(subject, citedOnly);
     expect(problems.map((problem) => problem.kind)).toEqual(['superseded_by_later_message']);
     expect(problems[0]?.severity).toBe('refer');
-    expect(problems[0]?.detail).toContain('that the proposal did not itself choose');
+    expect(problems[0]?.detail).toContain('the newest message this proposal cites');
 
     expect(
       decideAcceptance(modelClaim(STATEMENT, STATEMENT), { messages: citedOnly }).verdict,
@@ -667,6 +734,198 @@ describe('r6 — the correction scan cannot be turned off by the window the call
         { id: 'msg_2', authorId: ALICE, body: 'The staging cluster is green.' },
       ]),
     ).toEqual([]);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Major (r7) — the gate read a value the model controls
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * **The same boundary, a third time, and the first two repairs are why.**
+ *
+ * r6 asked its existence question from `firstCited + 1` — the index the *scan*
+ * starts at — so the gate passed as soon as some uncited message sat after the
+ * **earliest** citation. `provenance` is model-supplied, so citing one extra
+ * *earlier* message satisfied it while every message the scan read sat at or
+ * before the sentence: `[cited, uncited, cited]`, zero messages read after the
+ * quoted sentence, `auto_accept`.
+ *
+ * Every test in this block fails on `fix/core-engine-r6` as committed.
+ *
+ * The rule: **the existence test runs from the newest citation.** The scan still
+ * starts at the earliest one, because a correction sitting between two citations
+ * has to be read — and every direction the proposer can push `lastCited` pushes
+ * toward a referral.
+ */
+describe('r7 — padding the citation list with earlier chatter does not turn the scan on', () => {
+  const SENTENCE = 'We will deploy production Friday afternoon as planned.';
+
+  /**
+   * The whole exploit, as three messages. The sentence is last in the window —
+   * **the ordinary case**, a room read up to its newest message — and the two
+   * pad messages are the sort of thing that sits above any sentence in any room.
+   */
+  const ROOM_MESSAGES: ProvenanceMessage[] = [
+    { id: 'msg_a', authorId: BOB, body: 'Morning everyone, standup in five minutes.' },
+    { id: 'msg_b', authorId: ALICE, body: 'Anyway, the coffee machine downstairs works again.' },
+    { id: 'msg_c', authorId: BOB, body: SENTENCE },
+  ];
+
+  const cites = (provenance: string[]) => ({
+    type: 'claim' as const,
+    provenance,
+    quote: SENTENCE,
+    statement: SENTENCE,
+    proposer: { kind: 'model' as const },
+    attributedTo: BOB,
+  });
+
+  it('reads the newest citation, not the earliest, so a second citation buys nothing', () => {
+    // The pair, at the function. One citation: refused, because nothing after
+    // the sentence was read. Two citations, the extra one *earlier* than the
+    // sentence: on r6 this returned `{ kind: 'none', scannedAfterCitations: 2 }`
+    // — a clean scan — and the two messages it counted are the coffee machine
+    // and the sentence itself. Neither is evidence about what came after.
+    expect(laterRevision(SENTENCE, ['msg_c'], ROOM_MESSAGES)).toEqual({
+      kind: 'unscanned',
+      why: 'window_ends_at_the_citations',
+    });
+    expect(laterRevision(SENTENCE, ['msg_a', 'msg_c'], ROOM_MESSAGES)).toEqual({
+      kind: 'unscanned',
+      why: 'window_ends_at_the_citations',
+    });
+
+    // …and the shape stated as the review stated it: `[cited, uncited, cited]`.
+    expect(laterRevision(SENTENCE, ['msg_a', 'msg_b', 'msg_c'], ROOM_MESSAGES)).toEqual({
+      kind: 'unscanned',
+      why: 'window_ends_at_the_citations',
+    });
+  });
+
+  it('refuses the padded multi-citation window at both enforcement points', () => {
+    // They share `validateProposalProvenance`, so they fall together — which is
+    // the reason this defect reached `auto_accept` rather than stopping at the
+    // engine.
+    for (const provenance of [['msg_c'], ['msg_a', 'msg_c'], ['msg_a', 'msg_b', 'msg_c']]) {
+      const label = provenance.join('+');
+      const problems = validateProposalProvenance(cites(provenance), ROOM_MESSAGES);
+      expect(
+        problems.map((problem) => problem.kind),
+        label,
+      ).toEqual(['superseded_by_later_message']);
+      expect(problems[0]?.severity, label).toBe('refer');
+      expect(
+        decideAcceptance(modelClaim(SENTENCE, SENTENCE, provenance), { messages: ROOM_MESSAGES })
+          .verdict,
+        label,
+      ).toBe('pending');
+    }
+
+    // Asserted after the loop, deliberately: the wording changed this round too,
+    // and a run on `fix/core-engine-r6` must fail on `auto_accept` — the thing
+    // that matters — rather than stopping early on a changed sentence.
+    expect(
+      validateProposalProvenance(cites(['msg_a', 'msg_c']), ROOM_MESSAGES)[0]?.detail,
+    ).toContain('the newest message this proposal cites');
+  });
+
+  it('refuses the padded window at the reducer, where it is a boundary', () => {
+    // r5's lesson, run over r7's defect: the engine is advice and `appendEvent`
+    // is the trust boundary. On r6 this landed the object with outcome
+    // `applied`; the single-citation form of the same proposal did not.
+    const state = reduce([
+      event({
+        id: 'ev_p',
+        at: at(1),
+        actor: model(),
+        type: 'proposal_recorded',
+        proposal: {
+          id: 'prop_1',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: SENTENCE, claimant: BOB },
+          confidence: 0.95,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['msg_a', 'msg_c'],
+          quote: SENTENCE,
+          createdAt: at(1),
+        },
+      }),
+      event({
+        id: 'ev_a',
+        at: at(2),
+        actor: model(),
+        messages: ROOM_MESSAGES,
+        type: 'object_accepted',
+        object: {
+          id: 'obj_1',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: SENTENCE, claimant: BOB },
+          provenance: { messageIds: ['msg_a', 'msg_c'], proposalId: 'prop_1' },
+          createdAt: at(2),
+          updatedAt: at(2),
+        },
+      }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toBeTruthy();
+  });
+
+  it('still reads a correction sitting between two citations', () => {
+    // The other half, and the reason the *scan* keeps its earlier floor. Cite
+    // the sentence and something later; the correction in between must still be
+    // found. Moving the scan's start to `lastCited` would lose this, which is
+    // the defect r6 was fixing when it moved the existence test with it.
+    const withCorrection: ProvenanceMessage[] = [
+      { id: 'm1', authorId: BOB, body: SENTENCE },
+      { id: 'm2', authorId: BOB, body: 'Correction: we will not deploy production Friday.' },
+      { id: 'm3', authorId: ALICE, body: 'The staging cluster is green.' },
+      UNCITED_TAIL,
+    ];
+    expect(laterRevision(SENTENCE, ['m1', 'm3'], withCorrection)).toMatchObject({
+      kind: 'revision',
+      message: { id: 'm2' },
+    });
+  });
+
+  it('lets a genuinely later window through, so this is not "refuse every window"', () => {
+    // The gate is about evidence, not about citation count: the same padded
+    // citation list passes the moment one message actually sits after the
+    // newest citation.
+    const withTail: ProvenanceMessage[] = [...ROOM_MESSAGES, UNCITED_TAIL];
+    expect(laterRevision(SENTENCE, ['msg_a', 'msg_c'], withTail)).toEqual({
+      kind: 'none',
+      scannedAfterCitations: 3,
+    });
+    expect(kinds(cites(['msg_a', 'msg_c']), withTail)).toEqual([]);
+  });
+
+  it('cannot be helped by citing something later either', () => {
+    // The mirror direction, stated so the fix is not only "not worse": raising
+    // `lastCited` makes the gate stricter. Citing the tail turns a passing
+    // window into a refused one, and there is no citation list over this window
+    // that both cites the newest message and gets scanned.
+    const withTail: ProvenanceMessage[] = [...ROOM_MESSAGES, UNCITED_TAIL];
+    expect(laterRevision(SENTENCE, ['msg_c', UNCITED_TAIL.id], withTail)).toEqual({
+      kind: 'unscanned',
+      why: 'window_ends_at_the_citations',
+    });
+  });
+
+  it('cannot be helped by dropping the citation that carries the quote', () => {
+    // `lastCited` is a sound bound on where the sentence sits only because the
+    // bearing message is always cited. Not citing it is refused upstream, so
+    // the cheaper way of lowering `lastCited` is not available either.
+    expect(kinds(cites(['msg_a']), ROOM_MESSAGES)).toEqual([
+      'attributed_person_not_author',
+      'quote_not_found',
+    ]);
+    expect(
+      decideAcceptance(modelClaim(SENTENCE, SENTENCE, ['msg_a']), { messages: ROOM_MESSAGES })
+        .verdict,
+    ).not.toBe('auto_accept');
   });
 });
 

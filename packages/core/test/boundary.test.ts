@@ -51,7 +51,12 @@ import { ALICE, append, at, BOB, event, human, model, ROOM, rawEvent, room } fro
  */
 
 const CLAIM = 'the migration is reversible and can be rolled back';
-const WINDOW: ProvenanceMessage[] = room({ id: 'msg_1', authorId: ALICE, body: CLAIM });
+/** r7: the one type a machine may still mint, so the window carries one too. */
+const QUESTION = 'do we keep the migration flag after launch?';
+const WINDOW: ProvenanceMessage[] = room(
+  { id: 'msg_1', authorId: ALICE, body: CLAIM },
+  { id: 'msg_q', authorId: ALICE, body: QUESTION },
+);
 
 /** A model claim proposal, as an untyped caller would hand it over. */
 function rawClaimProposal(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -70,6 +75,46 @@ function rawClaimProposal(overrides: Record<string, unknown> = {}): Record<strin
       quote: CLAIM,
       createdAt: at(1),
       ...overrides,
+    },
+  };
+}
+
+/**
+ * The same pair as an open question — the one type a machine may still mint
+ * since r7, so "a well-formed row folds" has something to be shown on.
+ */
+function rawQuestionProposal(): Record<string, unknown> {
+  return {
+    id: 'ev_p',
+    at: at(1),
+    type: 'proposal_recorded',
+    proposal: {
+      id: 'prop_1',
+      roomId: ROOM,
+      type: 'open_question',
+      payload: { question: QUESTION },
+      confidence: 0.95,
+      proposer: { kind: 'model', model: 'test-model' },
+      provenance: ['msg_q'],
+      quote: QUESTION,
+      createdAt: at(1),
+    },
+  };
+}
+
+function rawQuestionAcceptance(): Record<string, unknown> {
+  return {
+    id: 'ev_a',
+    at: at(2),
+    type: 'object_accepted',
+    object: {
+      id: 'obj_1',
+      roomId: ROOM,
+      type: 'open_question',
+      payload: { question: QUESTION },
+      provenance: { messageIds: ['msg_q'], proposalId: 'prop_1' },
+      createdAt: at(2),
+      updatedAt: at(2),
     },
   };
 }
@@ -183,12 +228,27 @@ describe('the boundary — appendEvent and reduce parse before they fold', () =>
   });
 
   it('accepts a raw row that is well-formed — the boundary is a check, not a wall', () => {
+    // **r7 moved this off a claim.** A model may no longer land one at any
+    // confidence — nothing in the words certifies that they were a claim rather
+    // than a commitment — so a claim here would prove only that r7's rule fires,
+    // not that a well-formed raw row folds. `open_question` is the type a
+    // machine may still mint, so it is the one that shows the wall has a door.
     const state = reduce([
-      rawEvent(rawClaimProposal(), { actor: model() }),
-      rawEvent(rawAcceptance(), { actor: model(), messages: WINDOW }),
+      rawEvent(rawQuestionProposal(), { actor: model() }),
+      rawEvent(rawQuestionAcceptance(), { actor: model(), messages: WINDOW }),
     ]);
     expect(state.issues).toEqual([]);
     expect(state.objects.obj_1).toBeDefined();
+
+    // …and the claim form of exactly the same row does not, which is r7.
+    const asClaim = reduce([
+      rawEvent(rawClaimProposal(), { actor: model() }),
+      rawEvent(rawAcceptance(), { actor: model(), messages: WINDOW }),
+    ]);
+    expect(asClaim.objects).toEqual({});
+    expect(asClaim.issues.at(-1)?.reason).toContain(
+      'nothing in the words says whether they were a claim',
+    );
   });
 });
 
@@ -579,7 +639,13 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
       }),
       { messages: room({ id: 'msg_p', authorId: BOB, body: promise }) },
     );
-    expect(decision.verdict).toBe('auto_accept');
+    // **r7: `type_not_certified`, not `auto_accept`.** A model claim no longer
+    // auto-accepts — its *kind* is the one field the proposal supplies and
+    // nothing in the words certifies it (`typeCertifiableFromText`) — so the
+    // anti-vacuity assertion is that the receipt found **nothing wrong**, which
+    // is what this test was ever about. A broken check lands on a receipt rule
+    // (`provenance_failed`, `receipt_not_certifiable`) and this catches it.
+    expect(decision.rule).toBe('type_not_certified');
   });
 
   it('refers a paraphrase of the quote to a person instead of accepting it', () => {
@@ -653,7 +719,13 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
     // Two messages by one person do not make "who said this" undetermined, which
     // is the whole point of scoping `ambiguous_quote` to two *authors*. An exact
     // restatement is agreement, so the later-revision scan passes over it too.
-    expect(decision.verdict).toBe('auto_accept');
+    // **r7: `type_not_certified`, not `auto_accept`.** A model claim no longer
+    // auto-accepts — its *kind* is the one field the proposal supplies and
+    // nothing in the words certifies it (`typeCertifiableFromText`) — so the
+    // anti-vacuity assertion is that the receipt found **nothing wrong**, which
+    // is what this test was ever about. A broken check lands on a receipt rule
+    // (`provenance_failed`, `receipt_not_certifiable`) and this catches it.
+    expect(decision.rule).toBe('type_not_certified');
   });
 
   it('refers when the second telling adds words to the first', () => {

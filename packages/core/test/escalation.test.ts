@@ -789,6 +789,34 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
 
     // …and when the owner really did write the bearing sentence, it is clean —
     // the check has not simply become "always third-party".
+    //
+    // **The trailing message is r7's finding, sitting in this test since r1.**
+    // Without it the window is `[cited, uncited, cited]` and stops at the newest
+    // citation, which is exactly the shape `laterRevision`'s gate now refuses:
+    // nothing after the sentence was read, so nothing is known about whether
+    // anything corrected it. Until r7 that window came back `[]` — clean — and
+    // the reason is that the gate ran its existence test from the *earliest*
+    // citation, so `m_commit` sitting between the two citations satisfied it.
+    // This assertion was passing because of the defect it is not about.
+    expect(
+      validateProposalProvenance(
+        {
+          ...subject,
+          quote: "I'll land the narrowing fix on Friday.",
+          statement: "I'll land the narrowing fix on Friday.",
+          provenance: ['m_pad', 'm_self'],
+        },
+        [
+          ...window,
+          { id: 'm_self', authorId: DHLOLO, body: "I'll land the narrowing fix on Friday." },
+          { id: 'm_after', authorId: JORDAN, body: 'Thanks, I will watch the dashboard.' },
+        ],
+      ),
+    ).toEqual([]);
+
+    // …and the same proposal against a window that stops at its own newest
+    // citation is referred rather than clean, which is the point of the message
+    // above being there.
     expect(
       validateProposalProvenance(
         {
@@ -801,8 +829,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           ...window,
           { id: 'm_self', authorId: DHLOLO, body: "I'll land the narrowing fix on Friday." },
         ],
-      ),
-    ).toEqual([]);
+      ).map((problem) => problem.kind),
+    ).toEqual(['superseded_by_later_message']);
   });
 
   it('reports the same finding at different severities for claim and commitment', () => {
@@ -857,9 +885,17 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         },
         messages,
       ),
-      // The one finding is about the scissors, not about attribution: an open
-      // question names nobody, so `attributed_person_not_author` cannot fire.
-    ).toEqual(['quote_omits_surrounding_text']);
+      // The findings are about the scissors and the *type*, not about
+      // attribution: an open question names nobody, so
+      // `attributed_person_not_author` cannot fire.
+      //
+      // **`statement_is_not_a_question` is r7.** `DISPUTE_SENTENCE` is a
+      // declarative with no question mark in it, and `open_question` carries the
+      // lowest θ_auto in the table (0.6 against a claim's 0.7), so filing a
+      // statement under it is a reading routed around its own threshold. The
+      // check that refuses a question minted as a claim was one-directional
+      // until r7 and the missing direction was the one with the lower bar.
+    ).toEqual(['quote_omits_surrounding_text', 'statement_is_not_a_question']);
     expect(
       problemKinds(
         { type: 'open_question', provenance: [messageDispute.id], proposer: { kind: 'model' } },
@@ -1059,6 +1095,22 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
             authorId: JORDAN,
             body: 'Would we deploy production on Friday afternoon?',
           },
+        ],
+      ],
+      // statement_is_not_a_question — r7's mirror: a declarative filed under the
+      // type with the lowest θ_auto in the table, which is the direction the
+      // one-sided check above did not cover.
+      [
+        {
+          type: 'open_question',
+          provenance: ['m_flat'],
+          quote: 'We keep the flag after launch.',
+          statement: 'We keep the flag after launch.',
+          proposer: { kind: 'model' },
+        },
+        [
+          { id: 'm_flat', authorId: JORDAN, body: 'We keep the flag after launch.' },
+          { id: 'm_flat_tail', authorId: DHLOLO, body: 'noted, thanks for confirming' },
         ],
       ],
       // attributed_person_not_author

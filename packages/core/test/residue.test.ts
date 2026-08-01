@@ -284,6 +284,26 @@ describe('r5 — normalization may not do semantic damage', () => {
     );
   });
 
+  // **Sharded by plane, r7.** The sweep below is the third full-range brute
+  // force in this package, and at 2849 ms it was the next one to cross vitest's
+  // 5000 ms default on a slower box — the two that already had are why
+  // `vitest.config.ts` now declares a budget. Seventeen shards cover
+  // 0…0x10FFFF exactly; the assertion that follows them is the original one,
+  // over the union, and it fails loudly if a shard did not run.
+  const PLANES = Array.from({ length: 17 }, (_, plane) => plane);
+  const deletedByPlane = new Map<number, number[]>();
+
+  it.each(PLANES)('collects every code point the fold deletes in plane %i', (plane) => {
+    const found: number[] = [];
+    const start = plane * 0x10000;
+    for (let cp = start; cp < start + 0x10000; cp += 1) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      // `x` and `y` are ordinary letters, so anything deleted between them fuses.
+      if (normalizeForReceipt(`x${String.fromCodePoint(cp)}y`) === 'xy') found.push(cp);
+    }
+    deletedByPlane.set(plane, found);
+  });
+
   it('deletes exactly this set of code points, and fuses two words with none of them', () => {
     // **r6, and the test it replaces is the reason the defect survived r5.** It
     // was titled "does not fuse two words by deleting the tab between them" and
@@ -295,12 +315,11 @@ describe('r5 — normalization may not do semantic damage', () => {
     // LineTerminator, and it is a Unicode **mandatory** line break, so deleting
     // it changes what a reader sees. A comment asserting a property of the
     // language is a factual claim, so this test measures instead of arguing.
-    const deleted: number[] = [];
-    for (let cp = 0; cp <= 0x10ffff; cp += 1) {
-      if (cp >= 0xd800 && cp <= 0xdfff) continue;
-      // `x` and `y` are ordinary letters, so anything deleted between them fuses.
-      if (normalizeForReceipt(`x${String.fromCodePoint(cp)}y`) === 'xy') deleted.push(cp);
-    }
+    // Every shard ran, and their union is the sweep the unsharded loop did.
+    expect(deletedByPlane.size).toBe(PLANES.length);
+    const deleted = PLANES.flatMap((plane) => deletedByPlane.get(plane) ?? []).sort(
+      (a, b) => a - b,
+    );
     // The whole set, written out — the enumeration `matching.ts` says it is.
     expect(deleted.map((cp) => cp.toString(16).toUpperCase().padStart(4, '0'))).toEqual([
       '200B', // ZERO WIDTH SPACE

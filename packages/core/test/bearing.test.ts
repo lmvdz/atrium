@@ -148,10 +148,17 @@ describe('the receipt refuses the negation of the sentence it validates', () => 
     // Catches: any mutation that makes `statementBearing` always false — the
     // refusals above have to be about the negation, not about the check being
     // broken.
+    // **r7: `type_not_certified`, not `auto_accept`.** A model claim no longer
+    // auto-accepts — its *kind* is the one field the proposal supplies and
+    // nothing in the words certifies it (`typeCertifiableFromText`) — so the
+    // anti-vacuity assertion is that the receipt found **nothing wrong**, which
+    // is what this test was ever about. A broken check lands on a receipt rule
+    // (`provenance_failed`, `receipt_not_certifiable`) and this catches it.
     const decision = decideAcceptance(modelProposal({ statement: TRUTH, quote: TRUTH }), {
       messages: window,
     });
-    expect(decision.verdict).toBe('auto_accept');
+    expect(decision.rule).toBe('type_not_certified');
+    expect(decision.verdict).toBe('pending');
   });
 
   it('leaves the reading staged rather than deleting it, so a person sees the discrepancy', () => {
@@ -654,11 +661,17 @@ describe('the quote must be whole sentences, not a span cut out of one', () => {
     // droppable, so "the whole sentence" means all of it.
     const whole = 'Bob will deploy production Friday under any circumstances.';
     expect(quoteSpansWholeSentences(whole, body)).toBe(true);
+    // **r7: `type_not_certified`, not `auto_accept`.** A model claim no longer
+    // auto-accepts — its *kind* is the one field the proposal supplies and
+    // nothing in the words certifies it (`typeCertifiableFromText`) — so the
+    // anti-vacuity assertion is that the receipt found **nothing wrong**, which
+    // is what this test was ever about. A broken check lands on a receipt rule
+    // (`provenance_failed`, `receipt_not_certifiable`) and this catches it.
     expect(
       decideAcceptance(modelProposal({ statement: whole, quote: whole, provenance: ['msg_m'] }), {
         messages: window,
-      }).verdict,
-    ).toBe('auto_accept');
+      }).rule,
+    ).toBe('type_not_certified');
   });
 
   it('accepts a run of several whole sentences, and refuses half of one', () => {

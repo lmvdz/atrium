@@ -142,17 +142,19 @@ export const DEFAULT_ACCEPTANCE_RULES: Readonly<Record<AcceptedObjectType, Accep
  * policy in the layer that mints events, and a policy in the minting layer holds
  * exactly as long as that layer is the only writer. It is a trust boundary now.
  *
- * A type that never auto-accepts gets `+Infinity`: unreachable by construction,
+ * A type a machine may not mint gets `+Infinity`: unreachable by construction,
  * so the table stays total over the five types and cannot silently acquire a
  * hole if the human-only gate above it is ever moved.
+ *
+ * **Since r7 that is `modelMayMint`, not `autoAccept`** — a type whose *kind of
+ * act* the text cannot certify is one the proposal named for itself, and the
+ * floor is the reducer's half of refusing that. See `typeCertifiableFromText`.
  */
 export const MODEL_ACCEPTANCE_FLOOR: Readonly<Record<AcceptedObjectType, number>> = Object.freeze(
   Object.fromEntries(
     AcceptedObjectType.options.map((type) => [
       type,
-      DEFAULT_ACCEPTANCE_RULES[type].autoAccept
-        ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto
-        : Number.POSITIVE_INFINITY,
+      modelMayMint(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,
     ]),
   ) as Record<AcceptedObjectType, number>,
 );
@@ -160,6 +162,83 @@ export const MODEL_ACCEPTANCE_FLOOR: Readonly<Record<AcceptedObjectType, number>
 /** May a non-human actor ever accept this type, at any confidence? */
 export function autoAcceptable(type: AcceptedObjectType): boolean {
   return DEFAULT_ACCEPTANCE_RULES[type].autoAccept;
+}
+
+/**
+ * **Can the text certify that it was this kind of act?**
+ *
+ * r7, and it is the axis this package did not have. Everything the receipt
+ * proves is about *provenance*: these words are in the record, this person wrote
+ * them, nothing later took them back. `type` is not in that set — it is supplied
+ * by the proposal, and until r7 **it selected the rule that judged the
+ * proposal**. One body, one quote, one author, and the verdict moved with a
+ * field the model filled in:
+ *
+ * | minted as                             | verdict                         |
+ * | ------------------------------------- | ------------------------------- |
+ * | `commitment`, owner Bob, conf 0.95    | `pending / never_auto_accepts`  |
+ * | `claim`, claimant Bob, conf 0.95      | **`auto_accept`**               |
+ * | `claim`, conf 0.65                    | `pending / theta_band`          |
+ * | `open_question`, conf 0.65            | **`auto_accept`** (θ_auto 0.6)  |
+ *
+ * So the question a type has to answer before its rule is applied: **is being
+ * this type a property of the text, or of the proposal?**
+ *
+ *  - `open_question` — a property of the text. An interrogative carries a
+ *    question mark, `QUESTION_MARKS` enumerates every mark that makes one in
+ *    every script, and `escalation.ts` refuses both directions: a question minted
+ *    as an assertion, and a declarative minted as an open question. Certified.
+ *  - `claim`, `commitment`, `decision`, `objective` — **not**. All four are
+ *    assertions. "Bob will land the fix Friday" is a claim about the world, a
+ *    commitment Bob made, a decision the room took, or an objective, and nothing
+ *    in the characters says which. Telling them apart is reading intent, which is
+ *    what a model is for and what `#8`'s escalation tier is where a model belongs.
+ *
+ * The three uncertified types that never auto-accept lose nothing by this,
+ * because a person was already deciding. `claim` is the one where it bites, and
+ * that is exactly where the laundering paid: a commitment nobody confirmed,
+ * filed as a claim, machine-accepted.
+ *
+ * ## Why this is the axis and not a receipt problem, measured
+ *
+ * The first implementation put it in `validateProposalProvenance` as a
+ * `refer`-severity problem, which is where the adjudication's words point. It
+ * was run: **78 of 1027 tests fell, and the shape of the fall is the argument
+ * against it.** A `refer` outranks θ, so a claim at 0.4999 — a reading the table
+ * says to *discard* — came back `pending`, and the θ band came back
+ * `receipt_not_certifiable`. That does not stage uncertified readings for a
+ * person; it empties the discard cell into Needs-you and makes the whole θ table
+ * unreachable for claims. The gap is that the type picked the rule, so the
+ * repair belongs where the rule is picked: **below θ_min still discards, the
+ * band still bands, and only the auto-accept cell is refused.**
+ */
+export function typeCertifiableFromText(type: AcceptedObjectType): boolean {
+  switch (type) {
+    case 'open_question':
+      return true;
+    case 'claim':
+    case 'commitment':
+    case 'decision':
+    case 'objective':
+      return false;
+    default: {
+      const exhaustive: never = type;
+      // A type nobody has classified is not a type whose kind a machine may assert.
+      return JSON.stringify(exhaustive) === '' ? false : false;
+    }
+  }
+}
+
+/**
+ * The one predicate both enforcement points read: a machine may mint this type
+ * only if the table lets it **and** the text can certify the type is what the
+ * proposal says it is.
+ *
+ * Derived rather than restated, because the whole D1/#1 class in this package is
+ * one rule written at two sites drifting apart.
+ */
+export function modelMayMint(type: AcceptedObjectType): boolean {
+  return autoAcceptable(type) && typeCertifiableFromText(type);
 }
 
 /**

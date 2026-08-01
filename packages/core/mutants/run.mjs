@@ -2,6 +2,30 @@
 /**
  * The mutant runner for @atrium/core.
  *
+ * ## ⚠ THIS SCRIPT EDITS `packages/core/src/*.ts` IN PLACE — INCLUDING `--check`
+ *
+ * There is no dry-run mode. Every invocation, `--check` included, writes each
+ * mutant into its source file, runs the suite against the mutated tree, and
+ * restores the original afterwards; `--check` only changes the *exit code*.
+ * A full run also rewrites `RESULTS.md`. While it runs, the working tree is
+ * **wrong**, for minutes at a time.
+ *
+ * Two consequences, both learned the expensive way in r7's review round:
+ *
+ *  1. **Do not read or edit `packages/core/src` while this is running.** The
+ *     reviewer caught itself reviewing a mutant inside its first ten minutes.
+ *     Work from `git archive HEAD` or a copy of the tree instead.
+ *  2. **Give it a private, exclusively-owned checkout.** Two concurrent runs —
+ *     or one run beside anything else that reads these files — interleave their
+ *     mutations, and the result is a green that means nothing: a sibling lane
+ *     took a passing integration gate against a schema another run was
+ *     mutating. `RETRO.md`: a shared mutable state invalidates a green, not
+ *     just a count.
+ *
+ * Sources are restored in a `finally` and on SIGINT/SIGTERM, so an ordinary
+ * interruption is safe. A hard kill is not: `git diff packages/core/src` after
+ * one, and `git checkout -- packages/core/src` to undo it.
+ *
  * Standing campaign rule, routed out of #21's round-2 gauntlet: **a mutation
  * claim ships with a committed, re-runnable mutant list and its results, or it
  * is not evidence.** Round 2's write-up claimed "25 run, 25 caught" and left

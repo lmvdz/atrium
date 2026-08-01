@@ -42,8 +42,22 @@ const corrected = (
   } as Parameters<typeof event>[0]);
 
 /** A claim accepted by a model, through its own proposal — so it starts at `~`. */
+/**
+ * A model-accepted object, which is what `epistemicStateOf` calls `unconfirmed`.
+ *
+ * **An open question since r7, and the rename is the finding.** This was a
+ * model-accepted *claim* until r7 found that `type` is a model-supplied field
+ * which selected the rule that judged the proposal — so a model may no longer
+ * land a claim at all (`typeCertifiableFromText`) and the fixture stopped
+ * producing an object. `open_question` is the one type the text certifies, so
+ * it is the one that still reaches `~`.
+ */
 function modelAcceptedClaim(): AuthoredEvent[] {
-  const messages = room({ id: 'msg_1', authorId: BOB, body: 'the build is green on main' });
+  const question = 'do we keep the flag after launch?';
+  const messages = room(
+    { id: 'msg_1', authorId: BOB, body: question },
+    { id: 'msg_2', authorId: ALICE, body: 'good question, adding it to the agenda' },
+  );
   return [
     event({
       id: 'ev_mp',
@@ -53,12 +67,12 @@ function modelAcceptedClaim(): AuthoredEvent[] {
       proposal: {
         id: 'prop_m',
         roomId: ROOM,
-        type: 'claim',
-        payload: { statement: 'the build is green on main', claimant: BOB },
+        type: 'open_question',
+        payload: { question },
         confidence: 0.9,
         proposer: { kind: 'model', model: 'test-model' },
         provenance: ['msg_1'],
-        quote: 'the build is green on main',
+        quote: question,
         createdAt: at(1),
       },
     }),
@@ -71,8 +85,8 @@ function modelAcceptedClaim(): AuthoredEvent[] {
       object: {
         id: 'obj_model_claim',
         roomId: ROOM,
-        type: 'claim',
-        payload: { statement: 'the build is green on main', claimant: BOB },
+        type: 'open_question',
+        payload: { question },
         provenance: { messageIds: ['msg_1'], proposalId: 'prop_m' },
         createdAt: at(2),
         updatedAt: at(2),
@@ -498,7 +512,7 @@ describe('epistemic state — `~` until a person touches it', () => {
         at: at(3),
         objectId: 'obj_model_claim',
         action: 'amend',
-        patch: { statement: 'the build is green on main and on the release branch' },
+        patch: { question: 'do we keep the flag after launch, or after the retro?' },
       }),
     ]);
     const record = state.objects.obj_model_claim;
@@ -533,7 +547,7 @@ describe('epistemic state — `~` until a person touches it', () => {
         at: at(4),
         objectId: 'obj_model_claim',
         action: 'amend',
-        patch: { statement: 'the build is green on main and on the release branch' },
+        patch: { question: 'do we keep the flag after launch, or after the retro?' },
       }),
     ]);
     const touchedRecord = touched.objects.obj_model_claim;

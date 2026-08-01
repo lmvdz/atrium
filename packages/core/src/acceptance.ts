@@ -15,7 +15,11 @@ import {
   type DecisionPayload,
   payloadText,
 } from './objects.js';
-import { type AcceptanceConfig, defaultAcceptanceConfig } from './policy.js';
+import {
+  type AcceptanceConfig,
+  defaultAcceptanceConfig,
+  typeCertifiableFromText,
+} from './policy.js';
 import type { Proposal, StoredProposal } from './proposal.js';
 import { appendEvent, compareCursor } from './reduce.js';
 import type { CoreState } from './state.js';
@@ -129,6 +133,11 @@ export type AcceptanceVisibility =
  *    any confidence. Named for the *rule* rather than the type: it was
  *    `decision_never_auto`, which misnamed every non-decision that reached it,
  *    and since r5 three types are in that row.
+ *  - `type_not_certified` — at or above θ_auto, for a type whose rule the
+ *    proposal is entitled to *apply* but whose being-this-type nothing in the
+ *    text establishes. r7. Kept distinct from `never_auto_accepts` because they
+ *    are different facts: one says a machine may not perform this act, the other
+ *    says nothing proves this *was* that act.
  *  - `third_party_commitment` — an obligation somebody else's sentence put a
  *    name on. It goes to the named owner.
  *  - `human_proposer` — a person staged it, so θ does not apply.
@@ -142,6 +151,7 @@ export const ACCEPTANCE_RULE_NAMES = [
   'theta_band',
   'auto_accept',
   'never_auto_accepts',
+  'type_not_certified',
   'third_party_commitment',
   'human_proposer',
 ] as const;
@@ -644,6 +654,45 @@ export function decideAcceptance(
       visibility: 'needs_you',
       rule: 'never_auto_accepts',
       reason: `a ${proposal.type} never auto-accepts at any confidence (#4) — at ${proposal.confidence} the pass is confident, so it goes to Needs-you for a person to accept or decline; the room's current state is unsettled until somebody rules on it`,
+    };
+  }
+
+  // ── …and above θ_auto for a type nothing in the text certifies ───────────
+  //
+  // **r7, and the last place a proposal chose the rule that judged it.** Every
+  // check above this line reads the *message bodies* and asks whether the
+  // proposal is faithful to them. `proposal.type` is not in the bodies — the
+  // model supplies it — and until r7 it selected `rule` on line one of this
+  // function. One body, one quote, one author, confidence 0.95: minted as a
+  // `commitment` the verdict was `pending / never_auto_accepts`, minted as a
+  // `claim` it was `auto_accept`. The cheaper variant needed no type change at
+  // all, only the *lowest* θ in the table: an ordinary declarative sentence
+  // minted as an `open_question` at 0.65 auto-accepted where the same sentence
+  // as a `claim` sat in `theta_band`. (That half is closed in the receipt
+  // instead, by `statement_is_not_a_question` — an interrogative is a property
+  // of the text, so it is certifiable rather than merely refused.)
+  //
+  // **Why this row and not a receipt problem, measured.** The first
+  // implementation was a `refer`-severity provenance problem, which is where the
+  // adjudication's words point. 78 of 1027 tests fell and the shape of the fall
+  // refused it: a `refer` outranks θ, so a claim at 0.4999 — a reading the table
+  // says to *discard* — came back `pending`, and the whole θ band came back
+  // `receipt_not_certifiable`. That empties the discard cell into Needs-you. The
+  // gap was that the type picked the rule, so the repair belongs where the rule
+  // is picked: below θ_min still discards, the band still bands, and only this
+  // one cell changes.
+  //
+  // The floor twin is `MODEL_ACCEPTANCE_FLOOR`, derived from the same
+  // `modelMayMint`, and the reducer's named refusal is `claim_acceptance` — all
+  // three from one predicate, because a rule applied at one site is not a rule.
+  if (!typeCertifiableFromText(proposal.type)) {
+    return {
+      ...base,
+      attribution,
+      verdict: 'pending',
+      visibility: 'needs_you',
+      rule: 'type_not_certified',
+      reason: `the receipt certifies that these words are in the record and who wrote them, and nothing in the words says whether they were a ${proposal.type}, a commitment, a decision or an objective — at ${proposal.confidence} the reading is confident and its *kind* is the proposal's own word, so it goes to Needs-you for a person to accept or decline rather than being accepted on the strength of a field the proposal filled in`,
     };
   }
 

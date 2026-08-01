@@ -182,13 +182,48 @@
     },
     {
       "id": "floor_decoupled_from_theta",
-      "why": "The reducer's floor goes back to being a second, lower set of numbers than the engine's θ.",
+      "why": "The reducer's floor stops asking whether the *type* can be certified and goes back to asking only whether the table lets a machine mint it — which is r7's defect exactly: `type` is model-supplied, so a commitment filed as a claim clears a floor a commitment never could.",
       "file": "src/policy.ts",
-      "find": "      DEFAULT_ACCEPTANCE_RULES[type].autoAccept\n        ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto\n        : Number.POSITIVE_INFINITY,",
-      "replace": "      DEFAULT_ACCEPTANCE_RULES[type].autoAccept ? 0.5 : Number.POSITIVE_INFINITY,",
+      "find": "      modelMayMint(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,",
+      "replace": "      autoAcceptable(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,",
       "catches": [
         "is the same number the reducer folds against — one table, not two",
-        "is the engine’s θ, not a second number under it"
+        "refuses a claim at any confidence, and says so differently",
+        "gates exactly the types a machine may not perform, and floors the ones it cannot certify"
+      ]
+    },
+    {
+      "id": "type_certification_removed",
+      "why": "r7. Deletes the engine's refusal to auto-accept a type nothing in the text certifies, so `type` — a model-supplied field — again selects the rule that judges the proposal. One body, one quote, one author, confidence 0.95: as a `commitment` it is `pending / never_auto_accepts`, as a `claim` it is `auto_accept`.",
+      "file": "src/acceptance.ts",
+      "find": "  if (!typeCertifiableFromText(proposal.type)) {",
+      "replace": "  if (false) {",
+      "catches": [
+        "crosses θ_auto exactly at 0.7 for a claim",
+        "crosses θ_auto exactly at 0.7 for a claim",
+        "places fixed confidences in the cells the table implies"
+      ]
+    },
+    {
+      "id": "open_question_certification_inverted",
+      "why": "r7. Says every type is certifiable from its text, which is the claim `open_question` earns by carrying a question mark and the four assertion types cannot: a claim, a commitment, a decision and an objective are the same characters.",
+      "file": "src/policy.ts",
+      "find": "    case 'open_question':\n      return true;\n    case 'claim':",
+      "replace": "    case 'open_question':\n      return true;\n    // @ts-expect-error mutant\n    case 'claim':\n      return true;\n    case 'commitment2':",
+      "catches": [
+        "crosses θ_auto exactly at 0.7 for a claim",
+        "gates exactly the types a machine may not perform, and floors the ones it cannot certify"
+      ]
+    },
+    {
+      "id": "declarative_open_question_allowed",
+      "why": "r7's mirror. Deletes the refusal of a declarative sentence minted as an `open_question` — the type with the lowest θ_auto in the table (0.6 against a claim's 0.7), so a reading routed through it clears a bar its own type would not.",
+      "file": "src/escalation.ts",
+      "find": "    if (fromModel && subject.type === 'open_question' && isAssertion(subject.statement ?? '')) {",
+      "replace": "    if (false) {",
+      "catches": [
+        "covers every problem kind it declares",
+        "does not police attribution on types that name nobody — but still requires their receipt"
       ]
     },
     {
@@ -245,7 +280,7 @@
       "find": "      if (proposal.proposal.confidence < floor) {",
       "replace": "      if (false && proposal.proposal.confidence < floor) {",
       "catches": [
-        "refuses a model accepting its own near-zero-confidence claim",
+        "refuses a model accepting its own near-zero-confidence open question",
         "is the engine’s θ, not a second number under it"
       ]
     },
@@ -842,8 +877,8 @@
       "id": "later_scan_starts_after_last_citation",
       "why": "Starts the later-correction scan after the *last* cited message instead of the first, so padding the citation list with an unrelated later message hides a correction behind the scan's start. The same attack r1's gauntlet found against the attribution check.",
       "file": "src/escalation.ts",
-      "find": "    if (cited.has(message.id) && firstCited === -1) firstCited = index;",
-      "replace": "    if (cited.has(message.id)) firstCited = index;",
+      "find": "    if (firstCited === -1) firstCited = index;\n    lastCited = index;",
+      "replace": "    firstCited = index;\n    lastCited = index;",
       "catches": ["cannot be skipped by padding the citation list"]
     },
     {
@@ -969,13 +1004,26 @@
     },
     {
       "id": "later_revision_window_gate_removed",
-      "why": "Removes the check that the correction scan actually read something the proposal did not choose. A caller supplying 'the messages this receipt cites' — the natural reading of the field — then turns the scan off in silence: whole room refuses, cited-only auto-accepts. Same fail-open as messages: [] and [{ body: '' }], one level out. r6's first repair asked whether the *window* held an uncited message, and grok's blind pass padded it with an *earlier* one — which cannot correct a later message — so the question is what the scan read.",
+      "why": "Removes the check that the correction scan actually read something the proposal did not choose. A caller supplying 'the messages this receipt cites' — the natural reading of the field — then turns the scan off in silence: whole room refuses, cited-only auto-accepts. Same fail-open as messages: [] and [{ body: '' }], one level out. r6's first repair asked whether the *window* held an uncited message, and grok's blind pass padded it with an *earlier* one — which cannot correct a later message — so the question is what the scan read. r7 moved the gate's existence test from the earliest citation to the newest; the mutant that restores r6's version of it is `later_revision_gate_reads_the_earliest_citation`.",
       "file": "src/escalation.ts",
-      "find": "  if (!messages.slice(firstCited + 1).some((message) => !cited.has(message.id))) {\n    return unscanned('window_ends_at_the_citations');\n  }",
+      "find": "  const readSomethingUnchosenAfterTheSentence = messages\n    .slice(lastCited + 1)\n    .some((message) => !cited.has(message.id));\n  if (!readSomethingUnchosenAfterTheSentence) {\n    return unscanned('window_ends_at_the_citations');\n  }",
       "replace": "  // window gate removed",
       "catches": [
         "refuses a window that stops where the citations stop",
-        "says how far it read, so \"found nothing\" is not \"read nothing\""
+        "says how far it read, so \"found nothing\" is not \"read nothing\"",
+        "reads the newest citation, not the earliest, so a second citation buys nothing"
+      ]
+    },
+    {
+      "id": "later_revision_gate_reads_the_earliest_citation",
+      "why": "r7's finding, and r6's shipped code. The window gate's existence test ran from `firstCited + 1` — the index the *scan* starts at — so it passed as soon as some uncited message sat after the *earliest* citation. `provenance` is model-supplied, so citing one extra *earlier* message turned the gate off while every message the scan read sat at or before the sentence: `[cited, uncited, cited]` went from `pending` to `auto_accept`, at the engine and at the reducer both. A rule over a value the proposer controls measures the proposer's cooperation.",
+      "file": "src/escalation.ts",
+      "find": "    .slice(lastCited + 1)",
+      "replace": "    .slice(firstCited + 1)",
+      "catches": [
+        "reads the newest citation, not the earliest, so a second citation buys nothing",
+        "refuses the padded multi-citation window at both enforcement points",
+        "refuses the padded window at the reducer, where it is a boundary"
       ]
     },
     {

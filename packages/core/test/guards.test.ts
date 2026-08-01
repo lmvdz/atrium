@@ -54,12 +54,28 @@ const DECISION_TEXT = 'adopt the watermark contract';
  * These two sentences used to share a body, which made every acceptance here a
  * referral and hid the gate each test is about.
  */
+/**
+ * …and the open question. **r7.** A model may no longer land a claim — see
+ * `typeCertifiableFromText` — so `open_question` is the one type left that a
+ * machine may accept, and the tests about the route that stays open have to run
+ * on it or they assert nothing.
+ */
+const QUESTION_TEXT = 'do we keep the flag after launch?';
 const MSG_9: ProvenanceMessage[] = [
   { id: 'msg_9', authorId: ALICE, body: CLAIM_TEXT },
   { id: 'msg_10', authorId: ALICE, body: DECISION_TEXT },
+  { id: 'msg_11', authorId: ALICE, body: QUESTION_TEXT },
+  // Nobody cites this one: `laterRevision` refuses a window that stops at the
+  // newest citation, so without a tail every acceptance here is a referral.
+  { id: 'msg_12', authorId: BOB, body: 'thanks, watching the dashboard now' },
 ];
+type FixtureType = 'decision' | 'claim' | 'open_question';
 /** Which of them carries the sentence a proposal of this type is read out of. */
-const citedFor = (type: 'decision' | 'claim'): string[] => [type === 'claim' ? 'msg_9' : 'msg_10'];
+const citedFor = (type: FixtureType): string[] => [
+  { claim: 'msg_9', decision: 'msg_10', open_question: 'msg_11' }[type],
+];
+const textFor = (type: FixtureType): string =>
+  ({ claim: CLAIM_TEXT, decision: DECISION_TEXT, open_question: QUESTION_TEXT })[type];
 
 function proposalEvent(
   overrides: {
@@ -68,7 +84,7 @@ function proposalEvent(
     at?: string;
     roomId?: string;
     status?: 'proposed' | 'accepted' | 'rejected' | 'superseded';
-    type?: 'decision' | 'claim';
+    type?: FixtureType;
     confidence?: number;
     proposer?: { kind: 'model'; model: string } | { kind: 'human'; userId: string };
     /** Who recorded it — drawn independently of who is named as proposer. */
@@ -89,11 +105,13 @@ function proposalEvent(
       payload:
         type === 'claim'
           ? { statement: CLAIM_TEXT, claimant: ALICE }
-          : { statement: DECISION_TEXT },
+          : type === 'open_question'
+            ? { question: QUESTION_TEXT }
+            : { statement: DECISION_TEXT },
       confidence: overrides.confidence ?? 0.9,
       proposer: overrides.proposer ?? { kind: 'model', model: 'test-model' },
       provenance: citedFor(type),
-      quote: type === 'claim' ? CLAIM_TEXT : DECISION_TEXT,
+      quote: textFor(type),
       createdAt: minute,
       ...(overrides.status ? { status: overrides.status } : {}),
     },
@@ -107,7 +125,7 @@ function acceptEvent(
     at?: string;
     roomId?: string;
     proposalId?: string | null;
-    type?: 'decision' | 'claim';
+    type?: FixtureType;
     actor?: TestActor;
     /** The receipt window. `null` supplies none at all, which is a refusal. */
     messages?: ProvenanceMessage[] | null;
@@ -132,7 +150,12 @@ function acceptEvent(
       payload:
         type === 'claim'
           ? { statement: overrides.statement ?? CLAIM_TEXT, claimant: ALICE }
-          : { statement: overrides.statement ?? 'Adopt the watermark contract', decidedBy: ALICE },
+          : type === 'open_question'
+            ? { question: overrides.statement ?? QUESTION_TEXT }
+            : {
+                statement: overrides.statement ?? 'Adopt the watermark contract',
+                decidedBy: ALICE,
+              },
       provenance: {
         messageIds: overrides.citing ?? citedFor(type),
         proposalId: overrides.proposalId === undefined ? 'prop_x' : overrides.proposalId,
@@ -342,18 +365,48 @@ describe('the actor floor — gate 1: an acceptance with no proposal is human-on
     expect(state.consumedEventIds).toEqual(['ev_accept']);
   });
 
-  it('lets a model actor accept its own claim proposal — the route that stays open', () => {
-    // #4's auto-accept path, and the one this whole floor must not break: a
-    // claim is inherently "X said Y", its truth status lives in `verification`,
-    // and the cost asymmetry favours recall. So a model may close the loop on
-    // its own claim proposal — and only on the types #4 says it may.
+  it('lets a model actor accept its own open-question proposal — the route that stays open', () => {
+    // #4's auto-accept path, and the one this whole floor must not break: the
+    // cost asymmetry favours recall, so a model may close the loop on its own
+    // proposal — and only on the types #4 says it may.
+    //
+    // **r7 moved `claim` out of that set and this test with it.** A claim was
+    // the example here because "X said Y" is inherently a reading rather than a
+    // ruling; what the round found is that *being a claim* is not a reading of
+    // anything — it is one model-supplied field, and it selected the rule that
+    // judged the proposal. The same body, quote and author minted as a
+    // `commitment` was `pending`; as a `claim` it landed. An `open_question` is
+    // the one type the text certifies (`typeCertifiableFromText`), so it is the
+    // one that keeps this path, and the path is genuinely still open.
     const state = reduce([
-      proposalEvent({ type: 'claim' }),
-      acceptEvent({ type: 'claim', actor: model() }),
+      proposalEvent({ type: 'open_question' }),
+      acceptEvent({ type: 'open_question', actor: model() }),
     ]);
     expect(state.issues).toEqual([]);
     expect(state.objects.obj_x).toBeDefined();
     expect(state.proposals.prop_x?.status).toBe('accepted');
+  });
+
+  it('refuses the same model accepting its own claim proposal, however good the receipt', () => {
+    // The other half, and r7's finding at the trust boundary. Nothing is wrong
+    // with the reading: the quote is real, the author is real, the confidence is
+    // high. What is missing is any evidence that the words were a *claim*.
+    const state = reduce([
+      proposalEvent({ type: 'claim' }),
+      acceptEvent({ type: 'claim', actor: model() }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain(
+      'nothing in the words says whether they were a claim',
+    );
+    // …and a person accepting exactly the same reading still lands it, so this
+    // is a rule about who may assert the type, not about the reading.
+    const byHuman = reduce([
+      proposalEvent({ type: 'claim' }),
+      acceptEvent({ type: 'claim', actor: human() }),
+    ]);
+    expect(byHuman.issues).toEqual([]);
+    expect(byHuman.objects.obj_x).toBeDefined();
   });
 
   it('gates on the acceptance actor, not on who proposed', () => {
@@ -452,17 +505,32 @@ describe('the actor floor — gate 3: only a human marks a claim verified', () =
     expect(state.issues[0]?.reason).toContain('unverified or disputed');
   });
 
-  it('still lets a model accept the same claim unverified — the `~` path', () => {
+  it('refuses the same claim unverified too — the `~` path closed in r7', () => {
+    // **This is the cost of r7's finding, stated where it hurts.** The `~`
+    // path — a model accepting a claim as unverified, rendering as "~" and
+    // never as a fact — was #4's auto-accept loop, and it is gone: nothing in
+    // the words says the words were a *claim* rather than a commitment, and the
+    // type is the one field the proposal fills in for itself. The reading is not
+    // destroyed, it is staged, and a person accepting it lands it unchanged.
     const state = reduce([claimEvent({ verification: 'unverified', actor: model() })]);
-    // Proposal-less, so gate 1 catches it; through a proposal it is legal.
+    // Proposal-less, so gate 1 catches it first.
     expect(state.issues[0]?.reason).toContain('only a human may accept an object directly');
 
     const viaProposal = reduce([
       proposalEvent({ type: 'claim' }),
       acceptEvent({ type: 'claim', actor: model() }),
     ]);
-    expect(viaProposal.issues).toEqual([]);
-    const accepted = viaProposal.objects.obj_x?.object;
+    expect(viaProposal.objects).toEqual({});
+    expect(viaProposal.issues[0]?.reason).toContain(
+      'nothing in the words says whether they were a claim',
+    );
+
+    const viaHuman = reduce([
+      proposalEvent({ type: 'claim' }),
+      acceptEvent({ type: 'claim', actor: human() }),
+    ]);
+    expect(viaHuman.issues).toEqual([]);
+    const accepted = viaHuman.objects.obj_x?.object;
     expect(accepted?.type === 'claim' && accepted.payload.verification).toBe('unverified');
   });
 
@@ -825,10 +893,16 @@ describe('the actor floor — gate 7: a machine may not accept below the confide
    * confidence, including zero, because θ lived entirely in the layer that mints
    * the events — a policy that holds only while that layer is the only writer.
    */
-  it('refuses a model accepting its own near-zero-confidence claim', () => {
+  // **On `open_question`, since r7.** These ran on a claim, whose floor is now
+  // `+Infinity` — no confidence clears it, because nothing in the words
+  // establishes that they were a claim rather than a commitment — so a claim
+  // pair would show the same refusal on both sides and pin no threshold at all.
+  // `open_question` is the type a machine may still mint, so it is the one that
+  // has a threshold to be under and over.
+  it('refuses a model accepting its own near-zero-confidence open question', () => {
     const state = reduce([
-      proposalEvent({ type: 'claim', confidence: 0.01 }),
-      acceptEvent({ type: 'claim', actor: model() }),
+      proposalEvent({ type: 'open_question', confidence: 0.01 }),
+      acceptEvent({ type: 'open_question', actor: model() }),
     ]);
     expect(state.objects).toEqual({});
     expect(state.proposals.prop_x?.status).toBe('proposed');
@@ -838,11 +912,28 @@ describe('the actor floor — gate 7: a machine may not accept below the confide
 
   it('lets the same acceptance through once it clears the floor', () => {
     const state = reduce([
-      proposalEvent({ type: 'claim', confidence: 0.7 }),
-      acceptEvent({ type: 'claim', actor: model() }),
+      proposalEvent({ type: 'open_question', confidence: 0.6 }),
+      acceptEvent({ type: 'open_question', actor: model() }),
     ]);
     expect(state.issues).toEqual([]);
     expect(state.objects.obj_x).toBeDefined();
+  });
+
+  it('refuses a claim at any confidence, and says so differently', () => {
+    // r7. An unreachable floor is not a high one: the message names the reason
+    // rather than reporting `Infinity`, which is the objection
+    // `modelMintingGate`'s docblock raises against a floor-only refusal.
+    for (const confidence of [0.01, 0.7, 1]) {
+      const state = reduce([
+        proposalEvent({ type: 'claim', confidence }),
+        acceptEvent({ type: 'claim', actor: model() }),
+      ]);
+      expect(state.objects, String(confidence)).toEqual({});
+      expect(state.issues[0]?.reason, String(confidence)).toContain(
+        'no confidence clears the floor for a claim',
+      );
+      expect(state.issues[0]?.reason, String(confidence)).not.toContain('Infinity');
+    }
   });
 
   it('reports the receipt fault rather than the confidence, when both hold', () => {
@@ -895,18 +986,26 @@ describe('the actor floor — gate 7: a machine may not accept below the confide
     // acceptance the engine would never have emitted, and the only place θ was
     // enforced was the layer that mints events. One table now (`policy.ts`),
     // read by both, and the reducer is where it binds.
+    //
+    // **On `open_question` since r7**, whose θ_auto is 0.6: a claim's floor is
+    // unreachable now, so a claim at 0.55 is refused for the type rather than
+    // for the number and would pin nothing about θ.
     const state = reduce([
-      proposalEvent({ type: 'claim', confidence: 0.55 }),
-      acceptEvent({ type: 'claim', actor: model() }),
+      proposalEvent({ type: 'open_question', confidence: 0.55 }),
+      acceptEvent({ type: 'open_question', actor: model() }),
     ]);
     expect(state.objects).toEqual({});
-    expect(state.issues[0]?.reason).toContain('below the floor of 0.7');
+    expect(state.issues[0]?.reason).toContain('below the floor of 0.6');
     // Both sides literal. Comparing the floor to `DEFAULT_ACCEPTANCE_RULES` —
     // which is what round 2 did here — asserts they are derived from each other
     // and nothing about what either of them is; move θ_auto to 0.6 and the
     // equality still holds while the product's behaviour has changed.
-    expect(MODEL_ACCEPTANCE_FLOOR.claim).toBe(0.7);
+    expect(MODEL_ACCEPTANCE_FLOOR.open_question).toBe(0.6);
+    expect(DEFAULT_ACCEPTANCE_RULES.open_question.thetaAuto).toBe(0.6);
+    // …and the claim row, which is the same table saying a different thing: the
+    // engine's θ_auto is still 0.7 and no machine reaches it.
     expect(DEFAULT_ACCEPTANCE_RULES.claim.thetaAuto).toBe(0.7);
+    expect(MODEL_ACCEPTANCE_FLOOR.claim).toBe(Number.POSITIVE_INFINITY);
   });
 });
 
