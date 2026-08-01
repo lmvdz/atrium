@@ -139,14 +139,48 @@ Do not add a confirmation modal to a reversible action, and do not let an
 irreversible one through on a single click. The hold is the confirmation — it is
 cheaper to explain and impossible to muscle-memory through.
 
+**A hold has to be implemented, not declared.** Found in the #39 round-1
+gauntlet: five buttons carried `data-hold="2000"`, the label said "— hold" and
+the tooltip promised two seconds, while `onClick` fired on the first press and
+nothing anywhere read the attribute. A safety affordance that does not exist is
+worse than none, because the person trusts it. The working shape is
+`primitives/HoldToAct.tsx`: an elapsed-time gate on `performance.now()`, a
+progress bar driven by that same clock, cancel on any release before completion,
+keyboard parity (the browser synthesises a click for Space and Enter, so the
+default must be suppressed), and an `Arming` record — who, when, how long held —
+delivered to `onArm` *before* `onAct`. The gate must not be an animation or a
+transition: `prefers-reduced-motion` kills both, and a safety mechanism that
+switches off for the motion-sensitive is not one.
+
+**The destructive control wears red, and the friction follows the action rather
+than the layout.** Round 1 also found the destructive primary rendering `--amb2`
+— byte-identical to the reversible gate's primary — and the compressed pin row
+with no destructive variant at all, so compressing an item turned a two-second
+hold into a one-click destruction. Use `--red3` as the fill with `--bg3` as the
+label (7.47:1 light, 5.81:1 dark; `--red2` is 4.21:1 in dark, the same latent
+bug recorded below for the glyphs).
+
 ## Motion
 
-Three keyframes, and no others without a reason:
+Three keyframes in the system, two of them live in v1:
 
-- `gl-blink` — 1s infinite, hard on/off. Live/recording indicators only.
 - `gl-pulse` — 1.2s or 1.6s infinite, opacity 1 → .35. In-progress states.
 - `gl-rise` — .15s / .2s / .25s ease, a 2px translate plus fade. New rows entering
   the timeline (`.mrow`) and content appearing.
+- `gl-blink` — 1s infinite, hard on/off. Live/recording indicators only, and
+  therefore **not declared in v1**: Atrium v1 is human-only with no voice
+  surface, so it goes where the call-era tokens went — it returns in Phase 4
+  with the thing it indicates. Found unreferenced during #39; a keyframe nothing
+  uses is a keyframe nobody notices has stopped working.
+
+**Declare an animation beside its keyframes, never inside a CSS Module.** A CSS
+Module rewrites the `animation-name` it sees, including a reference to a
+globally-declared keyframe, so `animation: gl-pulse` in a `.module.css` resolves
+to a scoped name no keyframe has. Found in #39: the live indicator had been a
+static dot since it was written, `getAnimations()` returned `[]`, and nothing
+noticed because a static dot looks exactly like a dot. App-wide motion utilities
+(`atr-rise`, `atr-rise-s`, `atr-pulse`) live in `globals.css` and are worn as
+classes in markup; the module beside the component styles everything else.
 
 Everything is short. Nothing in this system eases in over half a second; a feed
 that animates slowly is a feed you cannot read while it moves.
@@ -189,12 +223,41 @@ Enforcement: any quotation-context element must carry provenance proving its tex
 
 **The rule covers authorship, not just invention.** A message the interface authors on a person's behalf — the text of an option they clicked, a template filled with their name — may never be attributed to them as their words, and may never satisfy the quotation check. Found in the #10 round-4 gauntlet: one-click answers appended a message authored as the user containing the card's sentence, and the checker then validated the quotation against that page-fabricated message, passing on exactly the class it exists to prevent. Messages carry their origin (`typed` vs `chosen`); only typed text and seeded human messages can be quoted; chosen answers render in system voice ("chose: <option>"), never in quotation marks.
 
+**The rule covers the attribution, not just the words.** Found in the #39 round-1 gauntlet, independently by both lineages: the enforcement above governed *what was said* and left *who it was said by* as a free string beside it. The primary message path was `actor + body`, with the origin read once and discarded, so a page-authored answer rendered under a real person's name in the same slot as their own sentences — the cardinal defect, live in the demo. Separately, every name printed next to quoted text (the reply banner, the receipt's provenance rows, a correction's reason) was supplied alongside the quotation rather than derived from it, so nothing stopped priya's name sitting over lars's sentence.
+
+Two structural rules follow, and they are what the enforcement now rests on:
+
+- **A quotation carries the actor and the moment it was minted from.** Any component that renders a name beside quoted text takes the quotation, not a string. There is no `by` prop anywhere.
+- **The message-rendering path is discriminated on origin, and the arms have different fields.** The human-authored arm has an attribution and a body; the page-authored arm has neither, only a system-voice statement. A page-authored answer cannot reach a human-attributed row because the row shape that would render it does not exist.
+
+**What the branded types actually buy.** `Quotation`, `SystemStatement`, `Rationale` and `Slot` all carry phantom brands keyed by module-private `unique symbol`s. Those are `declare`-only: they exist in the type system and nowhere else. They stop a TypeScript author from writing the literal, which is the mistake a person makes at 2am. **They are not a guarantee about data from outside the compiler** — `JSON.parse`, a cast, `Object.assign` and any JavaScript caller all walk straight through. Describe them as a convention with teeth, never as a proof. Where untrusted data enters, use the runtime parsers (`parseQuotation`, `parseMessageRecord`, `parseSystemStatement`, `isRationale`, `maybe`) rather than a brand and a hope.
+
 ## Measured contrast exceptions
 
 Verified against the tokens as extracted (not guesses — measured at the sizes actually used):
 
 - **`--red2` fails AA in dark at glyph sizes** (4.21–4.26:1 on `--bg1`/`--bg3` at 10.5px). Use **`--red3`** for `■` and `✗` glyphs and any small red text: 7.03:1 light, 5.85:1 dark — one token that clears both themes. Found during #39; the token values are byte-identical to the source corpus, so this is a latent contrast bug inherited from it, corrected in *usage*. Never edit `design/tokens.css` values to fix contrast — change which token the usage picks.
 - Measured floor across the shipped component set: 4.53:1 light / 5.37:1 dark (`--amb2` on `--ambbg`).
+
+- **The focus ring is `--tx1`, and it is part of the contrast audit.** WCAG 1.4.11
+  wants ≥3:1 against every adjacent colour. `--line3` — the obvious choice, and
+  what shipped — measures 1.63:1 light and 1.17:1 dark at its worst surface, and
+  since nothing else in this shell reacts to focus, the ring is the only keyboard
+  wayfinding there is. `--tx1` measures 8.32:1 light and 7.82:1 dark against the
+  19 surfaces the ring can land on, and it inverts with the theme for free. The
+  ring sits outside the border box with a 1px offset, so a control's own fill is
+  never adjacent to it — the offset gap shows the parent. Found in #39 round 1,
+  where the contrast note in `globals.css` audited text in detail and never
+  audited the ring; `test/token-contrast.test.ts` now reads the ring token out of
+  the stylesheet and `e2e/gallery.spec.ts` tabs through the real controls.
+
+- **Do not fade a row to de-emphasise it.** The weakest thing a row can carry is
+  an amber needs-you tag, which is the 4.53:1 floor above at *full* opacity — so
+  any opacity below 1 puts it under AA. There is no fade that is both visible and
+  legible. Where a filter needs to distinguish rows, LIFT what matches onto a
+  different surface and leave everything else at 100% of its contrast. Found in
+  #39: `opacity: .3` put a filtered row's text at 1.48–1.71:1 while the frame's
+  own caption said "a row you cannot see is a row you cannot check."
 
 ## Animation fill mode
 
