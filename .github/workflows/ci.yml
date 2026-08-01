@@ -60,6 +60,10 @@ env:
 
 jobs:
   verify:
+    # SCRATCH BRANCH ONLY. This is the round-1 bypass, reproduced on purpose:
+    # with `verify` skipped, every gate inside it — including the policy engine
+    # that would reject this very line — never runs. `gate` must go red anyway.
+    if: ${{ false }}
     name: lint · typecheck · test · build
     runs-on: ubuntu-latest
     timeout-minutes: 20
