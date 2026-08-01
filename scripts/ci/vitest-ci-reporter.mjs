@@ -15,8 +15,16 @@
  *      floor. This reporter counts per project and per workspace directory.
  *
  * Written to VITEST_CI_REPORT (default `vitest-ci-report.json`). The gate
- * cross-checks its totals against the stock json report and fails if the two
+ * cross-checks this file against the stock json report and fails if the two
  * disagree — so a bug in this file cannot quietly relax the gate.
+ *
+ * That cross-check is why every module below also records the *identity* of
+ * every test it ran, not just how many. Matching totals prove very little: a
+ * gutted version of this reporter that emitted the right four numbers and no
+ * real data would pass a totals-only comparison. It cannot invent 315 test
+ * names that agree, file for file, with the ones Vitest's own reporter wrote.
+ * The names use Vitest's ` > ` separator; the gate rebuilds the same string
+ * from the stock report's `ancestorTitles` + `title`.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -63,9 +71,11 @@ export default class CiReporter {
       const workspace = workspaceOf(testModule.moduleId);
       const project = bucket(projects, projectName);
       const ws = bucket(workspaces, workspace);
+      const testNames = [];
       let moduleTests = 0;
 
       for (const test of testModule.children.allTests()) {
+        testNames.push(test.fullName);
         const state = test.result().state;
         const mode = test.options?.mode;
         const fails = test.options?.fails === true;
@@ -93,6 +103,7 @@ export default class CiReporter {
         moduleId: relative(ROOT, testModule.moduleId),
         state: testModule.state(),
         tests: moduleTests,
+        testNames,
       });
     }
 
