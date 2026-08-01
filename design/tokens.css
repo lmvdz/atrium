@@ -18,62 +18,62 @@
 /* light - warm paper (default) */
 :root {
   /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
-  --bg0: #E6E2DA;
-  --bg1: #F4F1EA;
-  --bg2: #ECE8DF;
-  --bg3: #FAF8F3;
-  --bg4: #EAE5DA;
-  --bg5: #E2DCCF;
-  --bg6: #DDD6C8;
-  --bg7: #EFEAE0;
+  --bg0: #e6e2da;
+  --bg1: #f4f1ea;
+  --bg2: #ece8df;
+  --bg3: #faf8f3;
+  --bg4: #eae5da;
+  --bg5: #e2dccf;
+  --bg6: #ddd6c8;
+  --bg7: #efeae0;
 
   /* neutral rules - line (hairline) / line2 (divider) / line3 (emphatic) */
-  --line: #D4CDBD;
-  --line2: #C8C1B4;
-  --line3: #B0A896;
+  --line: #d4cdbd;
+  --line2: #c8c1b4;
+  --line3: #b0a896;
 
   /* neutral text - tx0 (primary) ... tx4 (faintest) */
-  --tx0: #171A18;
-  --tx1: #3A362E;
-  --tx2: #57534A;
-  --tx3: #7D7666;
-  --tx4: #A39B89;
+  --tx0: #171a18;
+  --tx1: #3a362e;
+  --tx2: #57534a;
+  --tx3: #7d7666;
+  --tx4: #a39b89;
 
   /* green - verified / settled / passing */
-  --grn: #4E9161;
-  --grn2: #3E7B52;
-  --grn3: #5B8A6B;
-  --grnbd: #9DC4A8;
-  --grnbg: #E3EDE2;
-  --grnav: #CBE0CE;
+  --grn: #4e9161;
+  --grn2: #3e7b52;
+  --grn3: #5b8a6b;
+  --grnbd: #9dc4a8;
+  --grnbg: #e3ede2;
+  --grnav: #cbe0ce;
 
   /* amber - needs you / gate awaiting a human */
-  --amb: #B07D2A;
-  --amb2: #8A6220;
-  --ambbd: #D9B36A;
-  --ambbd2: #E3C88F;
-  --ambbg: #F5E9CD;
-  --ambbg2: #F0E2C2;
-  --ambbg3: #EBDAB1;
-  --ambbg4: #EFDFB9;
-  --ambbg5: #F6EDDA;
+  --amb: #b07d2a;
+  --amb2: #8a6220;
+  --ambbd: #d9b36a;
+  --ambbd2: #e3c88f;
+  --ambbg: #f5e9cd;
+  --ambbg2: #f0e2c2;
+  --ambbg3: #ebdab1;
+  --ambbg4: #efdfb9;
+  --ambbg5: #f6edda;
 
   /* red - destructive / failed */
-  --red: #B3402E;
-  --red2: #A63A28;
-  --red3: #8F3222;
-  --redbd: #DBA090;
-  --redbg: #F6DFD7;
-  --redbg2: #F1D3CA;
-  --redbg3: #E4B8AC;
+  --red: #b3402e;
+  --red2: #a63a28;
+  --red3: #8f3222;
+  --redbd: #dba090;
+  --redbg: #f6dfd7;
+  --redbg2: #f1d3ca;
+  --redbg3: #e4b8ac;
 
   /* blue - human / person-authored surfaces */
-  --blu: #3D6BB3;
-  --blu2: #2F5590;
-  --blu3: #8A97AC;
-  --replybg: #DFE7F2;
-  --filebg: #DFE9F4;
-  --filebd: #B7CCE4;
+  --blu: #3d6bb3;
+  --blu2: #2f5590;
+  --blu3: #8a97ac;
+  --replybg: #dfe7f2;
+  --filebg: #dfe9f4;
+  --filebd: #b7cce4;
 
   /* -------------------------------------------------------------- */
   /* call-era - unused in v1, kept for Phase 4.                      */
@@ -84,13 +84,13 @@
   /* is human-only with no voice surface, so nothing consumes these  */
   /* yet; they are kept verbatim for when calls return in Phase 4.   */
   /* -------------------------------------------------------------- */
-  --live: #9BB3A0;
-  --strip: #173A32;
-  --stile: rgba(244,241,234,.10);
-  --stileac: #F4F1EA;
-  --stbd: rgba(244,241,234,.25);
-  --stx: #C9D6CB;
-  --stxac: #173A32;
+  --live: #9bb3a0;
+  --strip: #173a32;
+  --stile: rgba(244, 241, 234, 0.1);
+  --stileac: #f4f1ea;
+  --stbd: rgba(244, 241, 234, 0.25);
+  --stx: #c9d6cb;
+  --stxac: #173a32;
 }
 
 /* dark - near-black (opt-in via `atr-dark` on <html>) */
@@ -118,38 +118,38 @@ html.atr-dark {
   --tx4: #575e66;
 
   /* green - verified / settled / passing */
-  --grn: #5CB27A;
-  --grn2: #4EA76B;
-  --grn3: #6FA383;
-  --grnbd: #2E5A40;
-  --grnbg: #14261B;
-  --grnav: #1E3A2A;
+  --grn: #5cb27a;
+  --grn2: #4ea76b;
+  --grn3: #6fa383;
+  --grnbd: #2e5a40;
+  --grnbg: #14261b;
+  --grnav: #1e3a2a;
 
   /* amber - needs you / gate awaiting a human */
-  --amb: #C99A3F;
-  --amb2: #E0C077;
-  --ambbd: #6E5320;
-  --ambbd2: #57431C;
-  --ambbg: #221C0E;
-  --ambbg2: #2A2210;
-  --ambbg3: #332A14;
-  --ambbg4: #332A14;
-  --ambbg5: #201A0E;
+  --amb: #c99a3f;
+  --amb2: #e0c077;
+  --ambbd: #6e5320;
+  --ambbd2: #57431c;
+  --ambbg: #221c0e;
+  --ambbg2: #2a2210;
+  --ambbg3: #332a14;
+  --ambbg4: #332a14;
+  --ambbg5: #201a0e;
 
   /* red - destructive / failed */
-  --red: #D4604A;
-  --red2: #C25340;
-  --red3: #E06A52;
-  --redbd: #6E3427;
+  --red: #d4604a;
+  --red2: #c25340;
+  --red3: #e06a52;
+  --redbd: #6e3427;
   --redbg: #261311;
-  --redbg2: #2E1714;
-  --redbg3: #57271E;
+  --redbg2: #2e1714;
+  --redbg3: #57271e;
 
   /* blue - human / person-authored surfaces */
-  --blu: #8AB4F8;
-  --blu2: #AECBFA;
-  --blu3: #6B89B3;
-  --replybg: #1C2836;
+  --blu: #8ab4f8;
+  --blu2: #aecbfa;
+  --blu3: #6b89b3;
+  --replybg: #1c2836;
   --filebg: #16222f;
   --filebd: #24435f;
 
@@ -162,11 +162,11 @@ html.atr-dark {
   /* is human-only with no voice surface, so nothing consumes these  */
   /* yet; they are kept verbatim for when calls return in Phase 4.   */
   /* -------------------------------------------------------------- */
-  --live: #3E5748;
-  --strip: #0E1A15;
-  --stile: #16241D;
-  --stileac: #1E3A2A;
-  --stbd: #2E5A40;
-  --stx: #7FA98A;
-  --stxac: #5CB27A;
+  --live: #3e5748;
+  --strip: #0e1a15;
+  --stile: #16241d;
+  --stileac: #1e3a2a;
+  --stbd: #2e5a40;
+  --stx: #7fa98a;
+  --stxac: #5cb27a;
 }

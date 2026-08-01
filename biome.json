@@ -16,7 +16,8 @@
       "!**/playwright-report",
       "!**/test-results",
       "!packages/db/drizzle",
-      "!pnpm-lock.yaml"
+      "!pnpm-lock.yaml",
+      "!**/.claude"
     ]
   },
   "formatter": {
@@ -42,7 +43,12 @@
       },
       "suspicious": {
         "noExplicitAny": "error",
-        "noConsole": { "level": "error", "options": { "allow": ["error", "warn", "info"] } }
+        "noConsole": {
+          "level": "error",
+          "options": {
+            "allow": ["error", "warn", "info"]
+          }
+        }
       }
     }
   },
