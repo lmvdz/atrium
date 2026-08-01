@@ -88,11 +88,30 @@ export const RULES = [
   'no-stray-condition',
   'policy-steps-present',
   'required-job-steps',
+  'required-step-prerequisites',
   'no-remote-reusable-workflow',
 ];
 
 /**
- * Steps that must exist, by job.
+ * Matches a script being *invoked*, not merely mentioned.
+ *
+ * The path has to sit in command position — at the start of a line, optionally
+ * behind a `… exec ` prefix, because half of these run through
+ * `pnpm --filter X exec node ../../scripts/ci/…`. That is deliberately a claim
+ * about *invocation shape* and nothing more: see the SCOPE note above and the
+ * one in ci.yml. It stops `echo node scripts/ci/assert-tables.mjs` from
+ * satisfying a presence rule; it cannot stop the script's own contents being
+ * replaced with `process.exit(0)`, and nothing in a workflow can.
+ */
+function invokes(script) {
+  return new RegExp(
+    String.raw`(?:^|\n)[^\S\n]*(?:\S[^\n]*?\bexec\s+)?node\s+(?:\.\.\/)*scripts\/ci\/${script}\b`,
+  );
+}
+
+/**
+ * Steps that must exist, by job — and, where one only means something because
+ * of an earlier step, that pair.
  *
  * A job can satisfy every rule above and still prove nothing, by simply not
  * running the checks any more — delete the policy step and the policy stops
@@ -102,9 +121,52 @@ export const RULES = [
  * without its call site, a job hollowed out to "make CI fast" — which is the
  * threat model this repo actually has today.
  *
+ * ── PREREQUISITES (round 4) ─────────────────────────────────────────────────
+ * Round 3 required each assert script to be present and stopped there, and the
+ * round-3 gauntlet found the hole that leaves: `assert-floor-ratchet.mjs` is
+ * only a ratchet because the step *before* it fetches `origin/main`. Delete the
+ * fetch — one line, the sort of thing a rebase does without malice — and the
+ * assertion still runs, finds no baseline, says so politely, and exits 0. The
+ * gate is present, named, invoked, and comparing against nothing.
+ *
+ * So a required step may declare what it depends on, and the policy enforces
+ * the pair: the prerequisite must be in the same job *and* run before it.
+ * Presence alone is not the property that matters — a report reset that happens
+ * after the run it is meant to precede is as useless as one that is missing.
+ *
+ * The rule is general on purpose. Every assert script below was re-examined for
+ * a setup dependency and the ones that have one now declare it, so the next
+ * script to acquire one has an obvious place to say so rather than a comment
+ * nobody reads. Of the five pairs, the ratchet's is the only one that failed
+ * *open* on its own — the rest already went red at runtime when their setup was
+ * missing (a report gate with no run-start timestamp refuses to prove freshness;
+ * `assert-tables.mjs` against an unmigrated database finds an empty table set;
+ * `assert-chromium.mjs` without an install finds no browser). Declaring them
+ * moves the failure from the middle of a CI run to the edit that caused it, and
+ * the ordering half of the rule is new information for all five.
+ *
  * `policy-steps-present` covers the meta-guards: the things that check the
  * workflow itself. `required-job-steps` covers the verification work.
+ * `required-step-prerequisites` covers what has to have happened first.
  */
+const FETCHES_BASELINE = {
+  what: 'the fetch of the baseline manifest from main',
+  test: /\bgit fetch\b[^\n]*\brefs\/heads\/main\b/,
+  because:
+    'without it the shallow clone actions/checkout leaves has no `origin/main`, so the ratchet finds no baseline, reports that politely, and exits 0 — a floor lowered in the same pull request would sail through the very gate that exists to catch it',
+};
+const RESETS_VITEST_REPORT = {
+  what: 'the step that deletes the vitest reports and records VITEST_RUN_START',
+  test: /\bVITEST_RUN_START=/,
+  because:
+    "the gate proves a report is fresh by comparing its mtime against that timestamp; with no reset the previous run's report is still on disk, and with no timestamp freshness cannot be proven at all",
+};
+const RESETS_E2E_REPORT = {
+  what: 'the step that deletes the e2e report and records E2E_RUN_START',
+  test: /\bE2E_RUN_START=/,
+  because: 'same reason as the vitest reset: a leftover report is the quietest possible green',
+};
+
 const REQUIRED_STEPS = {
   verify: [
     // Matches actionlint being *run*, not merely downloaded — the install step
@@ -114,54 +176,122 @@ const REQUIRED_STEPS = {
     {
       rule: 'policy-steps-present',
       what: 'the workflow policy engine',
-      test: /scripts\/ci\/workflow-policy\.mjs\b/,
+      test: invokes('workflow-policy\\.mjs'),
     },
     {
       rule: 'policy-steps-present',
       what: "the policy engine's own self-test",
-      test: /scripts\/ci\/workflow-policy-selftest\.mjs\b/,
+      test: invokes('workflow-policy-selftest\\.mjs'),
     },
     {
       rule: 'policy-steps-present',
       what: "the test gates' self-test",
-      test: /scripts\/ci\/gate-selftest\.mjs\b/,
+      test: invokes('gate-selftest\\.mjs'),
     },
     { rule: 'required-job-steps', what: 'the linter', test: /\bpnpm (?:run )?lint\b/ },
     { rule: 'required-job-steps', what: 'the typechecker', test: /\bpnpm (?:run )?typecheck\b/ },
-    { rule: 'required-job-steps', what: 'the unit/integration suite', test: /\bpnpm vitest run\b/ },
     { rule: 'required-job-steps', what: 'the build', test: /\bpnpm (?:run )?build\b/ },
     {
       rule: 'required-job-steps',
       what: 'the workspace-enrollment assertion',
-      test: /scripts\/ci\/assert-workspace-enrollment\.mjs\b/,
+      test: invokes('assert-workspace-enrollment\\.mjs'),
     },
     {
       rule: 'required-job-steps',
       what: 'the floor-ratchet assertion',
-      test: /scripts\/ci\/assert-floor-ratchet\.mjs\b/,
+      test: invokes('assert-floor-ratchet\\.mjs'),
+      requires: [FETCHES_BASELINE],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the wait for Postgres',
+      test: invokes('wait-for-postgres\\.mjs'),
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the migrations',
+      test: /\bdrizzle-kit migrate\b/,
+      requires: [
+        {
+          what: 'the wait for Postgres',
+          test: /scripts\/ci\/wait-for-postgres\.mjs\b/,
+          because:
+            'migrating against a container that has not finished starting is a race, and a race that loses looks like a broken migration rather than a slow database',
+        },
+      ],
     },
     {
       rule: 'required-job-steps',
       what: 'the schema set-equality assertion',
-      test: /scripts\/ci\/assert-tables\.mjs\b/,
+      test: invokes('assert-tables\\.mjs'),
+      requires: [
+        {
+          what: 'the migrations',
+          test: /\bdrizzle-kit migrate\b/,
+          because:
+            'set equality against a database nobody migrated compares the built schema with an empty database — which is a real failure, but a confusing one, and the ordering is the thing that makes the assertion mean "the migrations did work"',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the unit/integration suite',
+      test: /\bpnpm vitest run\b/,
+      requires: [RESETS_VITEST_REPORT],
     },
     {
       rule: 'required-job-steps',
       what: 'the vitest report gate',
-      test: /scripts\/ci\/assert-vitest-report\.mjs\b/,
+      test: invokes('assert-vitest-report\\.mjs'),
+      requires: [
+        {
+          what: 'the unit/integration suite',
+          test: /\bpnpm vitest run\b/,
+          because:
+            'a report gate that runs before the runner reads whatever was on disk beforehand, which is the definition of the stale-report failure it exists to prevent',
+        },
+      ],
     },
   ],
   e2e: [
     {
       rule: 'required-job-steps',
       what: 'the browser-presence assertion',
-      test: /scripts\/ci\/assert-chromium\.mjs\b/,
+      test: invokes('assert-chromium\\.mjs'),
+      requires: [
+        {
+          what: 'the Chromium install',
+          test: /\bplaywright install\b/,
+          because:
+            'asserting a browser is present before anything installs one is a check guaranteed to fail, and a check guaranteed to fail is a check somebody will delete',
+        },
+      ],
     },
-    { rule: 'required-job-steps', what: 'the Playwright suite', test: /\bplaywright test\b/ },
+    {
+      rule: 'required-job-steps',
+      what: 'the Playwright suite',
+      test: /\bplaywright test\b/,
+      requires: [
+        RESETS_E2E_REPORT,
+        {
+          what: 'the browser-presence assertion',
+          test: /scripts\/ci\/assert-chromium\.mjs\b/,
+          because:
+            'the smoke spec skips itself when no browser is installed, which is right on a laptop and a lie in CI; the assertion has to come first or the suite has already reported green over zero executed tests',
+        },
+      ],
+    },
     {
       rule: 'required-job-steps',
       what: 'the e2e report gate',
-      test: /scripts\/ci\/assert-playwright-report\.mjs\b/,
+      test: invokes('assert-playwright-report\\.mjs'),
+      requires: [
+        {
+          what: 'the Playwright suite',
+          test: /\bplaywright test\b/,
+          because: 'same as the vitest gate: a report read before the run is last run’s report',
+        },
+      ],
     },
   ],
 };
@@ -375,13 +505,35 @@ export function checkWorkflow(source, path = '<workflow>') {
       );
       continue;
     }
-    const script = jobScriptText(job);
-    for (const { rule, what, test } of required) {
-      if (!test.test(script)) {
+    const scripts = jobStepScripts(job);
+    const at = (test) => scripts.findIndex((step) => test.test(step));
+
+    for (const { rule, what, test, requires = [] } of required) {
+      const index = at(test);
+      if (index === -1) {
         add(
           rule,
           `${path}: job \`${jobId}\` never runs ${what} (nothing in its steps matches ${test}). A job can satisfy every other rule here and still prove nothing by quietly dropping the step that does the proving.`,
         );
+        continue;
+      }
+      // The step is here. Everything it silently depends on had better be here
+      // too, and earlier — a gate whose setup is gone does not fail, it drifts.
+      for (const prerequisite of requires) {
+        const before = at(prerequisite.test);
+        if (before === -1) {
+          add(
+            'required-step-prerequisites',
+            `${path}: job \`${jobId}\` runs ${what} but never runs ${prerequisite.what}, which it depends on (nothing matches ${prerequisite.test}). ${prerequisite.because}. A gate that still runs with its setup deleted is worse than a deleted gate: it reports.`,
+          );
+          continue;
+        }
+        if (before > index) {
+          add(
+            'required-step-prerequisites',
+            `${path}: job \`${jobId}\` runs ${what} at step ${index} but ${prerequisite.what} only at step ${before}, i.e. afterwards. ${prerequisite.because}. Order the pair, or the earlier step is decoration.`,
+          );
+        }
       }
     }
   }
@@ -423,12 +575,18 @@ export function checkWorkflow(source, path = '<workflow>') {
   return violations;
 }
 
-/** Flattens every `run:` and `uses:` in a job into one string, for presence checks. */
-function jobScriptText(job) {
+/**
+ * One script per step, in order.
+ *
+ * Round 3 flattened the whole job into a single string, which answers "is this
+ * mentioned anywhere" and nothing else. Prerequisites are a question about
+ * *order*, so the steps have to stay separate: a report reset that happens after
+ * the run it is supposed to precede reads exactly like one that happens before
+ * it, once the newlines are gone.
+ */
+function jobStepScripts(job) {
   const steps = Array.isArray(job.steps) ? job.steps : [];
-  return steps
-    .map((step) => (isPlainObject(step) ? `${step.run ?? ''}\n${step.uses ?? ''}` : ''))
-    .join('\n');
+  return steps.map((step) => (isPlainObject(step) ? `${step.run ?? ''}\n${step.uses ?? ''}` : ''));
 }
 
 /**

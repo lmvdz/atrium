@@ -42,6 +42,50 @@ function replaceOnce(source, from, to) {
   return source.replace(from, to);
 }
 
+/**
+ * The line range of one `- name: …` step, comments above the next step excluded.
+ *
+ * Prerequisite mutations are about whole steps rather than single lines: the
+ * accident being modelled is a rebase dropping a step, or a reorder putting a
+ * setup after the thing it sets up, and neither is expressible as a substring
+ * edit.
+ */
+function stepRange(rows, name) {
+  const start = rows.findIndex((row) => row.trim() === `- name: ${name}`);
+  if (start === -1) throw new Error(`mutation step not found: ${name}`);
+  const indent = rows[start].slice(0, rows[start].indexOf('-'));
+  let end = start + 1;
+  while (end < rows.length) {
+    const row = rows[end];
+    const isNextStep = row.startsWith(`${indent}- `);
+    const isComment = row.startsWith(`${indent}#`);
+    const isDedent = row.trim() !== '' && !row.startsWith(indent);
+    if (isNextStep || isComment || isDedent) break;
+    end += 1;
+  }
+  // Trailing blank lines belong to the gap, not to the step.
+  while (end > start + 1 && rows[end - 1].trim() === '') end -= 1;
+  return { start, end };
+}
+
+/** Removes a whole step from the workflow, the way a bad rebase would. */
+function deleteStep(source, name) {
+  const rows = source.split('\n');
+  const { start, end } = stepRange(rows, name);
+  rows.splice(start, end - start);
+  return rows.join('\n');
+}
+
+/** Moves a whole step to sit immediately after another one, preserving both. */
+function moveStepAfter(source, name, anchor) {
+  const rows = source.split('\n');
+  const { start, end } = stepRange(rows, name);
+  const block = rows.splice(start, end - start);
+  const target = stepRange(rows, anchor);
+  rows.splice(target.end, 0, ...block);
+  return rows.join('\n');
+}
+
 const MUTATIONS = [
   {
     name: 'a step allowed to fail',
@@ -294,6 +338,70 @@ const MUTATIONS = [
         throw new Error('mutation target not found: process.exit(1);');
       return s.split('process.exit(1);').join('console.info("would have failed");');
     },
+  },
+
+  // ---- the rules round 4 adds ---------------------------------------------
+  // Every one of these leaves the assert script in place, named, and running.
+  // That is the point: round 3's presence rules all pass on each of them.
+  {
+    name: "the ratchet's baseline fetch deleted, sending it down its green no-baseline path",
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Fetch the baseline manifest from main'),
+  },
+  {
+    name: 'the baseline fetch moved to after the ratchet that reads it',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Fetch the baseline manifest from main',
+        'Assert the CI floors have not been ratcheted down',
+      ),
+  },
+  {
+    name: 'the vitest report reset deleted, so freshness can no longer be proven',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Reset the test reports'),
+  },
+  {
+    name: 'the report reset moved to after the run it is supposed to precede',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => moveStepAfter(s, 'Reset the test reports', 'Unit + integration tests'),
+  },
+  {
+    name: 'migrations dropped while the schema assertion still runs against the empty database',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Apply migrations'),
+  },
+  {
+    name: 'the wait for Postgres dropped, turning the migration into a race',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Wait for Postgres'),
+  },
+  {
+    name: 'the e2e report reset deleted, so a leftover report can stand in for a run',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Reset the e2e report'),
+  },
+  {
+    name: 'the browser-presence assertion moved to after the suite it guards',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => moveStepAfter(s, 'Assert Chromium is present', 'Run e2e suite'),
+  },
+  {
+    name: 'the Chromium install dropped, leaving the assertion guaranteed to fail',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Install Chromium'),
+  },
+  {
+    name: 'an assert script demoted to something a shell merely prints',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'pnpm --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs',
+        'echo node ../../scripts/ci/assert-tables.mjs',
+      ),
   },
 ];
 
