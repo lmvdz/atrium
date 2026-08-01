@@ -1,10 +1,17 @@
 import {
   AcceptedObject,
   type AcceptedObjectInput,
+  type Actor,
+  type AppendResult,
+  type AuthoredEvent,
+  appendEvent,
+  authored,
   type CoreEvent,
   type CoreEventInput,
   CoreEvent as CoreEventSchema,
+  type CoreState,
   emptyProvenance,
+  type ProvenanceMessage,
 } from '../src/index.js';
 
 export const ROOM = 'room_1';
@@ -21,8 +28,74 @@ export function object(input: AcceptedObjectInput) {
   return AcceptedObject.parse(input);
 }
 
-export function event(input: CoreEventInput): CoreEvent {
+/** The raw payload, with no actor anywhere near it. */
+export function payload(input: CoreEventInput): CoreEvent {
   return CoreEventSchema.parse(input);
+}
+
+/**
+ * One ledger row, the way a command layer produces it: the payload, plus the
+ * actor it authenticated and the messages it can show for the receipt.
+ *
+ * The `actor` key here is **not** part of the event — this helper is standing in
+ * for the session lookup #22 will do, and it splits the actor out into the
+ * trusted slot before the payload is ever parsed. Putting one in the payload is
+ * a parse error, which `guards.test.ts` pins.
+ */
+export function event(
+  input: CoreEventInput & { actor: Actor; messages?: readonly ProvenanceMessage[] },
+): AuthoredEvent {
+  const { actor, messages, ...rest } = input as Record<string, unknown> & {
+    actor: Actor;
+    messages?: readonly ProvenanceMessage[];
+  };
+  return authored(CoreEventSchema.parse(rest), {
+    actor,
+    ...(messages === undefined ? {} : { messages }),
+  });
+}
+
+/**
+ * A ledger row whose payload is **not parsed** — the shape a command layer
+ * actually hands over when the event came off a wire, out of a jsonb column, or
+ * through any call site TypeScript could not see.
+ *
+ * This is the one deliberate cast in the test suite, and it exists because r2's
+ * gauntlet found that its absence was the whole gap: `event()` above parses
+ * every fixture, so the tests proved the *schemas* refuse things while proving
+ * nothing about whether the reducer ever runs them. Rows built here go in raw,
+ * exactly as an untyped caller's would.
+ */
+export function rawEvent(
+  payload: unknown,
+  trusted: { actor: Actor; messages?: readonly ProvenanceMessage[] },
+): AuthoredEvent {
+  return authored(payload as CoreEvent, trusted);
+}
+
+/** `appendEvent` for a ledger row — the payload and its trusted context, split. */
+export function append(state: CoreState, entry: AuthoredEvent): AppendResult {
+  return appendEvent(state, entry.event, entry);
+}
+
+/** The event ids of a log, in order. */
+export function ids(log: readonly AuthoredEvent[]): string[] {
+  return log.map((entry) => entry.event.id);
+}
+
+/** The same row, re-minted at a different position — a redelivery, as the wire makes one. */
+export function reminted(
+  entry: AuthoredEvent,
+  changes: { at?: string; id?: string },
+): AuthoredEvent {
+  return {
+    ...entry,
+    event: {
+      ...entry.event,
+      ...(changes.at === undefined ? {} : { at: changes.at }),
+      ...(changes.id === undefined ? {} : { id: changes.id }),
+    },
+  };
 }
 
 export const human = (userId = ALICE) => ({ kind: 'human', userId }) as const;
@@ -30,16 +103,32 @@ export const model = (name = 'test-model') => ({ kind: 'model', model: name }) a
 export const system = () => ({ kind: 'system' }) as const;
 
 /**
+ * The room's messages, as the trusted context supplies them.
+ *
+ * `msg_1` is ALICE's own words and `msg_3` is BOB's, so a claim of ALICE's
+ * quoting `msg_1` has a receipt that holds and a commitment owned by BOB quoting
+ * `msg_3` is self-stated. `msg_2` is BOB quoting ALICE — the blockquote shape
+ * that makes a receipt look right and be wrong.
+ */
+export const MESSAGES: ProvenanceMessage[] = [
+  { id: 'msg_1', authorId: ALICE, body: 'Ship the scaffold behind a flag, I think.' },
+  { id: 'msg_2', authorId: BOB, body: '> Ship the scaffold behind a flag, I think.\n\nAgreed.' },
+  { id: 'msg_3', authorId: BOB, body: "I'll wire the flag into the server tomorrow." },
+  { id: 'msg_4', authorId: ALICE, body: 'Do we keep the flag after launch?' },
+  { id: 'msg_5', authorId: ALICE, body: 'Drop the flag; ship it on.' },
+];
+
+/**
  * A small but complete log: a model proposes a decision, a human accepts it,
  * amends the wording, opens a commitment and a question, then a second decision
  * supersedes the first and answers the question.
  */
-export function sampleLog(): CoreEvent[] {
+export function sampleLog(): AuthoredEvent[] {
   return [
     event({
       id: 'ev_01',
       at: at(1),
-      actor: { kind: 'model', model: 'test-model' },
+      actor: model(),
       type: 'proposal_recorded',
       proposal: {
         id: 'prop_1',
@@ -49,6 +138,7 @@ export function sampleLog(): CoreEvent[] {
         confidence: 0.82,
         proposer: { kind: 'model', model: 'test-model' },
         provenance: ['msg_1', 'msg_2'],
+        quote: 'Ship the scaffold behind a flag',
         createdAt: at(1),
       },
     }),

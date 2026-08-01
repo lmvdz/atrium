@@ -110,6 +110,26 @@ export type OpenQuestion = z.infer<typeof OpenQuestion>;
 export type Claim = z.infer<typeof Claim>;
 export type Objective = z.infer<typeof Objective>;
 
+/**
+ * The text field of a payload, whichever the type calls it: `question` for an
+ * open question, `title` for an objective, `statement` for the other three.
+ *
+ * It lives here, on the types themselves, rather than in the acceptance engine
+ * where it started — `authority.ts` needs it to ask whether a quote bears the
+ * sentence being minted, and it must not import the engine to find out (the
+ * engine imports the reducer, which imports `authority.ts`).
+ */
+export function payloadText(type: AcceptedObjectType, payload: Record<string, unknown>): string {
+  const key = type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';
+  const value = payload[key];
+  return typeof value === 'string' ? value : '';
+}
+
+/** `payloadText` for a whole object. */
+export function objectStatement(object: AcceptedObject): string {
+  return payloadText(object.type, object.payload as unknown as Record<string, unknown>);
+}
+
 /** Narrowing helper — `type` is the discriminator everywhere in the system. */
 export function isType<T extends AcceptedObjectType>(
   object: AcceptedObject,

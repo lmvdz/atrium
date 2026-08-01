@@ -2,7 +2,12 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // The compile-time half of the zero-I/O boundary: with no ambient types,
+    // `src` importing `node:fs` — or touching `process` — does not compile.
+    // `purity.test.ts` is the runtime half, and catches what a type could not
+    // (a dynamic import, a bare `fetch`, a clock read).
+    "types": []
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]

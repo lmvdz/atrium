@@ -1,7 +1,6 @@
-import type { AttentionItem } from './attention.js';
-import type { Actor, Id, Timestamp } from './common.js';
+import type { Actor, Id, Provenance, Timestamp } from './common.js';
 import type { CorrectionAction } from './events.js';
-import type { AcceptedObject } from './objects.js';
+import type { AcceptedObject, AcceptedObjectType } from './objects.js';
 import type { Proposal, ProposalStatus, StoredProposal } from './proposal.js';
 import type { Relation } from './relations.js';
 
@@ -10,12 +9,36 @@ export interface ObjectRecord {
   object: AcceptedObject;
   acceptedAt: Timestamp;
   updatedAt: Timestamp;
+  /**
+   * Who accepted it. The epistemic glyph is derived from this and nothing else
+   * (`epistemic.ts`): `~` for a model-accepted object, `✓` once a human has
+   * touched it. Recording it on the record rather than re-deriving it from the
+   * log is what lets a projection answer "is this a fact yet" without a replay.
+   */
+  acceptedBy: Actor;
+  /**
+   * When a human first touched this object — accepted it, or corrected it
+   * afterwards. `null` while it is still only a machine's reading.
+   */
+  humanTouchedAt: Timestamp | null;
   /** Bumped by every correction. Cheap optimistic-concurrency token. */
   revision: number;
   /** Set by a `retract` correction. Retracted objects stay in state, visibly. */
   retractedAt: Timestamp | null;
   /** Set when another object supersedes this one. */
   supersededById: Id | null;
+  /**
+   * Relation ids that answered this question before it was reopened, newest
+   * last. Empty for everything else.
+   *
+   * #5's `reopen` returns an answered question to open "prior answer preserved
+   * on record". The `answers` edges themselves are never removed — the relation
+   * log is append-only — but once the status flips back to `open` there is
+   * nothing distinguishing "answered by that edge" from "reopened despite that
+   * edge", and the UI has to be able to say *what* the room had settled on
+   * before somebody reopened it. This is that list.
+   */
+  reopenedFromAnswers: Id[];
 }
 
 /**
@@ -30,6 +53,13 @@ export interface ProposalRecord {
   /** The accepted object this proposal turned into, if any. */
   acceptedObjectId: Id | null;
   rejectedReason: string | null;
+  /**
+   * The newer reading that retired this one, when `status === 'superseded'`.
+   * `null` when a re-interpretation retired it without naming a replacement.
+   */
+  supersededByProposalId: Id | null;
+  /** Why it was superseded, when the event said. */
+  supersededReason: string | null;
 }
 
 /** The whole proposal, status included — assembled from the single source. */
@@ -41,10 +71,21 @@ export function proposalWithStatus(record: ProposalRecord): Proposal {
 export interface CorrectionRecord {
   eventId: Id;
   objectId: Id;
+  /**
+   * The object's type **at the moment of correction**, before a `retype`
+   * changed it. Stored rather than looked up, because looking it up gives the
+   * type the object has *now*, and the whole point of the counterexample
+   * extractor (#5) is "the room keeps correcting things we read as decisions" —
+   * a query that resolves through the current type answers the opposite
+   * question after every retype.
+   */
+  objectType: AcceptedObjectType;
   action: CorrectionAction;
   before: unknown;
   after: unknown;
   actor: Actor;
+  /** The messages that motivated the correction (#19 r1). */
+  provenance: Provenance;
   note: string | null;
   at: Timestamp;
 }
@@ -159,38 +200,4 @@ function canonicalize(value: unknown): unknown {
     return out;
   }
   return value;
-}
-
-/**
- * Attention projection. v1 derives the one class that needs no interpretation
- * at all: an open commitment routes to its owner. `needs_decision`, `mention`
- * and `blocking_question` need the interpretation pipeline and message bodies,
- * so they are produced upstream and are deliberately not faked here.
- *
- * Deterministic: output is sorted by (objectId), never by insertion.
- */
-export function computeAttention(state: CoreState, now: Timestamp): AttentionItem[] {
-  const items: AttentionItem[] = [];
-  for (const id of Object.keys(state.objects).sort()) {
-    const record = state.objects[id];
-    if (!record || record.retractedAt !== null || record.supersededById !== null) continue;
-    const { object } = record;
-    if (object.type !== 'commitment' || object.payload.status !== 'open') continue;
-    items.push({
-      id: `attn:${object.id}:owned_commitment`,
-      roomId: object.roomId,
-      userId: object.payload.owner,
-      objectId: object.id,
-      // An owned commitment is always an accepted object; only `needs_decision`
-      // can point at a proposal, and that class is produced upstream.
-      subjectKind: 'object',
-      class: 'owned_commitment',
-      rationale: `you own this commitment — "${object.payload.statement}"${
-        object.payload.due ? ` (due ${object.payload.due})` : ''
-      }`,
-      status: 'pending',
-      createdAt: now,
-    });
-  }
-  return items;
 }
