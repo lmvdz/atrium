@@ -30,6 +30,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         {/* The theme class must be set before first paint; a component effect
             runs too late and a dark-mode user gets a flash of warm paper. The
             script is a constant defined above — no interpolation reaches it. */}
+        {/* biome-ignore lint/security/noDangerouslySetInnerHtml: `themeBootstrap`
+            is a module-level string literal with no interpolation and no data
+            from a request, a prop or storage flowing into it. There is no
+            supported way to emit a pre-paint inline script in the App Router
+            without this prop, and the alternative — setting the class from an
+            effect — is the flash-of-wrong-theme this exists to prevent. */}
         <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
       </head>
       <body>{children}</body>

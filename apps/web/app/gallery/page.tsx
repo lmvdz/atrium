@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { ReceiptView } from '../../src/components';
+import { ReceiptView, slot } from '../../src/components';
 import * as f from './fixtures';
 import styles from './gallery.module.css';
 import type { RoomFrameProps } from './RoomFrame';
@@ -62,7 +62,7 @@ const FRAMES: readonly GalleryFrame[] = [
   {
     id: 'filtered',
     title: 'Filtered to what needs you',
-    note: 'Clicking a count chip filters the feed. Non-matching rows DIM rather than disappear: a row you cannot see is a row you cannot check, and the filter is a lens over the record, not an edit to it. The group is marked seen, so the divider is muted but still present — no fake mark-all-read.',
+    note: 'Clicking a count chip filters the feed. Matching rows are LIFTED; nothing is hidden and nothing is faded — a row you cannot read is a row you cannot check, and measured against these tokens the weakest thing a row can carry (an amber needs-you tag) is already at the shell’s 4.53:1 floor, so any fade at all would put it under AA. The group is marked seen, so the divider is muted but still present — no fake mark-all-read.',
     props: {
       ...base,
       entries: f.timeline({ seen: true, filter: 'need', routineOpen: true }),
@@ -79,7 +79,7 @@ const FRAMES: readonly GalleryFrame[] = [
       ...base,
       entries: f.timeline({ seen: true, filter: null, routineOpen: false }),
       openAttentionId: 'P1',
-      receipt: <ReceiptView receipt={f.RECEIPT} />,
+      receipt: slot(<ReceiptView receipt={f.RECEIPT} />),
       label: 'receipt-open',
     },
   },

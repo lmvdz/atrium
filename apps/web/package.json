@@ -9,6 +9,8 @@
     "build": "next build",
     "start": "next start --port ${WEB_PORT:-3000}",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:mutations": "node test/mutations.mjs",
     "test:e2e": "playwright test",
     "clean": "rm -rf .next"
   },

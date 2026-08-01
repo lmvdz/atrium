@@ -7,7 +7,7 @@
  * | lens frame with real content in all three surfaces.
  * ------------------------------------------------------------------------- */
 
-import { Fragment, type ReactNode } from 'react';
+import { Fragment } from 'react';
 import {
   AppFrame,
   Composer,
@@ -17,6 +17,7 @@ import {
   RoomHead,
   StateLens,
   SurfaceIndicators,
+  slot,
   Timeline,
   WorkspaceSpacer,
   WorkspaceTile,
@@ -30,6 +31,7 @@ import type {
   ObjectiveRecord,
   RoomHeadRecord,
   RoomSummary,
+  Slot,
   StateObject,
   SurfaceId,
   TimelineEntry,
@@ -57,7 +59,7 @@ export interface RoomFrameProps {
   readonly binding: ComposerBinding;
   readonly composerNote: string;
   readonly jump?: CrossRoomJumpRecord;
-  readonly receipt?: ReactNode;
+  readonly receipt?: Slot;
   readonly boxed?: boolean;
   readonly label?: string;
 }
@@ -67,7 +69,7 @@ export function RoomFrame(props: RoomFrameProps) {
     <AppFrame
       boxed={props.boxed ?? true}
       label={props.label ?? 'atrium'}
-      lens={
+      lens={slot(
         <StateLens
           key="lens"
           objectives={props.objectives}
@@ -75,9 +77,9 @@ export function RoomFrame(props: RoomFrameProps) {
           receipt={props.receipt}
           roomName={props.room.name}
           updatedAt={props.updatedAt}
-        />
-      }
-      rail={
+        />,
+      )}
+      rail={slot(
         <Rail
           key="rail"
           humans={props.humans}
@@ -86,19 +88,19 @@ export function RoomFrame(props: RoomFrameProps) {
           viewerNote={props.viewerNote}
           workspaceName="atrium"
           workspaceSub="4 rooms · 5 humans"
-        />
-      }
+        />,
+      )}
       /* Every element handed across a slot boundary carries a key. React's dev
          build validates slot content as a child list, and an unkeyed element
          created in one component and rendered inside another trips the "unique
          key" warning even when the slot only ever holds one thing. */
-      strip={[
+      strip={slot([
         <WorkspaceTile code="AT" key="tile" title="Atrium — this workspace" />,
         <WorkspaceSpacer key="spacer" />,
         <ThemeToggle key="theme" />,
         <WorkspaceYou initials="LV" key="you" title="lars — you" />,
-      ]}
-      workspace={[
+      ])}
+      workspace={slot([
         <Fragment key="workspace">
           <RoomHead
             room={props.room}
@@ -112,7 +114,6 @@ export function RoomFrame(props: RoomFrameProps) {
           />
           {props.jump === undefined ? <div /> : <CrossRoomJump jump={props.jump} />}
           <Pin
-            folded={false}
             items={props.attention}
             lastCheck={props.lastCheck}
             openId={props.openAttentionId}
@@ -125,7 +126,7 @@ export function RoomFrame(props: RoomFrameProps) {
             roomName={props.room.name}
           />
         </Fragment>,
-      ]}
+      ])}
     />
   );
 }

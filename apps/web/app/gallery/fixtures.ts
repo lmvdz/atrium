@@ -18,10 +18,12 @@ import type {
   CorrectionEntry,
   CrossRoomJumpRecord,
   HumanSummary,
+  Maybe,
   MessageEntry,
   MessageRecord,
   ObjectiveRecord,
   ProvenanceEntry,
+  Quotation,
   ReceiptRecord,
   RoomHeadRecord,
   RoomSummary,
@@ -30,10 +32,11 @@ import type {
   StateObject,
   SurfaceIndicator,
   SystemEntry,
+  SystemStatement,
   TimelineEntry,
 } from '../../src/components/model';
 import {
-  chosenAnswer,
+  messageEntry,
   quotationFrom,
   rationale,
   systemStatement,
@@ -367,18 +370,12 @@ export const ATTENTION: readonly AttentionItem[] = [
   },
 ];
 
-export const TRAILER = trailerFor({
-  objects: OBJECTS,
-  objectives: OBJECTIVES,
-  overdue: 1,
-  lastCheck: '12:29',
-});
+export const TRAILER = trailerFor({ objects: OBJECTS, objectives: OBJECTIVES, overdue: 1 });
 
 export const TRAILER_QUIET = trailerFor({
   objects: OBJECTS_QUIET,
   objectives: OBJECTIVES.map((objective) => ({ ...objective, status: 'active' as const })),
   overdue: 0,
-  lastCheck: '13:41',
 });
 
 /* --- timeline ------------------------------------------------------------ */
@@ -395,27 +392,17 @@ function message(
   input: {
     state: MessageEntry['state'];
     body?: readonly BodySegment[];
-    note?: MessageEntry['note'];
+    note?: Maybe<SystemStatement>;
     tag?: MessageEntry['tag'];
-    replyTo?: MessageEntry['replyTo'];
+    replyTo?: Maybe<Quotation>;
   },
 ): MessageEntry {
   const record = MESSAGES[id];
   if (record === undefined) throw new Error(`fixture: no message ${id}`);
-  return {
-    type: 'message',
-    id: record.id,
-    at: record.at,
-    actor: record.actor,
-    body: input.body ?? [{ kind: 'text', text: record.text }],
-    state: input.state,
-    fromViewer: record.actor === VIEWER.name,
-    replyTo: input.replyTo ?? null,
-    note: input.note ?? null,
-    tag: input.tag ?? null,
-    targeted: false,
-    matchesFilter: true,
-  };
+  /* `messageEntry` is the only constructor, and it reads the record's ORIGIN.
+     There is no way to spell a fixture that renders m-chosen under lars's name:
+     the chosen arm of the union has no actor field and no body field. */
+  return messageEntry(record, { ...input, viewer: VIEWER.name });
 }
 
 const CLAIM = {
@@ -544,14 +531,16 @@ const AFTER: readonly TimelineEntry[] = [
   }),
   message('m21', {
     state: TALK,
-    replyTo: { actor: 'justin', at: '12:31', excerpt: quote('m17') },
+    // the reply banner's actor and time come off the quotation, not beside it
+    replyTo: quote('m17'),
   }),
+  /* The one-click answer. `messageEntry` reads origin `chosen` and returns the
+     arm of the union that has NO actor and NO body — the row renders as
+     "lars chose: …" in system voice, mono and unquoted, with an empty actor
+     column. Round 1 found this exact record rendering as lars's own sentence
+     under his name; that shape no longer type-checks. */
   message('m-chosen', {
     state: ACCEPTED,
-    // The row's own note is SYSTEM VOICE and says the answer was chosen, not
-    // typed. `chosenAnswer` is the only constructor that produces it, and it
-    // renders "chose: …" with no quotation marks anywhere near it.
-    note: chosenAnswer(MESSAGES['m-chosen']?.text ?? '', 'm-chosen'),
     tag: { label: 'resolves ◆ · answer-bound · nothing inferred', tone: 'verified' },
   }),
 ];
@@ -600,19 +589,17 @@ export const FRESH_TIMELINE: readonly TimelineEntry[] = [...BEFORE, ...AFTER.sli
 
 /* --- receipt ------------------------------------------------------------- */
 
+/* No `who` and no `at`: both are read off the excerpt. A fixture cannot put
+   priya's name over lars's sentence here, because there is no field for it. */
 const PROVENANCE: readonly ProvenanceEntry[] = [
   {
     id: 'p1',
-    who: 'priya',
-    at: '11:02',
     excerpt: quote('m10'),
     note: 'the proposal, as she wrote it in #identity-service',
     jump: { messageId: 'm10', room: 'identity-service' },
   },
   {
     id: 'p2',
-    who: 'lars',
-    at: '13:07',
     excerpt: quote('m21'),
     note: 'typed into the bound composer — recorded as the answer, not interpreted from it',
     jump: { messageId: 'm21', room: null },
@@ -645,9 +632,10 @@ const CORRECTIONS: readonly CorrectionEntry[] = [
     now: systemStatement('pending again — the previous answer stays on the record'),
     fact: systemStatement('reopened by lars at 13:14 · parity #418 arrived after the answer'),
     // The human's reason is a real typed message, so it is quoted and it is
-    // provable. A synthesized sentence could not get here: `reason` takes a
-    // Quotation, and Quotations only come from typed or seeded messages.
-    reason: { quotation: quote('m14'), by: 'lars' },
+    // provable. A synthesized sentence could not get here: `reason` IS a
+    // Quotation, Quotations only come from typed or seeded messages, and the
+    // name rendered beside it is the quotation's own actor.
+    reason: quote('m14'),
     link: {
       label: 'the superseded answer is still in the room →',
       ref: { messageId: 'm-chosen', room: null },
@@ -665,30 +653,47 @@ export const RECEIPT: ReceiptRecord = {
     'confidence .71',
     'renders as a claim until a human answers',
   ],
+  /* Every line's words are a SystemStatement: third person, page-authored,
+     visibly not speech. Nothing on a history line is quoted, so `who` names the
+     actor of the event rather than attributing a sentence to anybody. */
   happened: [
-    { id: 'h1', kind: 'claim', who: 'priya', at: '11:02', text: 'proposed the cutover date' },
+    {
+      id: 'h1',
+      kind: 'claim',
+      who: 'priya',
+      at: '11:02',
+      statement: systemStatement('proposed the cutover date'),
+    },
     {
       id: 'h2',
       kind: 'verified',
       who: 'the migration harness',
       at: '11:57',
-      text: 'parity #415 passed with 0 diffs',
+      statement: systemStatement('parity #415 passed with 0 diffs'),
     },
     {
       id: 'h3',
       kind: 'accepted',
       who: 'lars',
       at: '13:09',
-      text: 'answered it directly — the resolution was recorded from the answer, not interpreted from it',
+      statement: systemStatement(
+        'answered it directly — the resolution was recorded from the answer, not interpreted from it',
+      ),
     },
     {
       id: 'h4',
       kind: 'failed',
       who: 'the migration harness',
       at: '12:29',
-      text: 'parity #418 returned 12 checksum diffs',
+      statement: systemStatement('parity #418 returned 12 checksum diffs'),
     },
-    { id: 'h5', kind: 'gate', who: 'lars', at: '13:14', text: 'reopened it — pending again' },
+    {
+      id: 'h5',
+      kind: 'gate',
+      who: 'lars',
+      at: '13:14',
+      statement: systemStatement('reopened it — pending again'),
+    },
   ],
   provenance: PROVENANCE,
   corrections: CORRECTIONS,
@@ -718,7 +723,55 @@ export const BOUND: ComposerBinding = {
 
 export const FREE: ComposerBinding = { mode: 'free' };
 
-export const REPLYING: ComposerBinding = {
-  mode: 'replying',
-  to: { actor: 'justin', at: '12:31', excerpt: quote('m17') },
-};
+export const REPLYING: ComposerBinding = { mode: 'replying', to: quote('m17') };
+
+/* --- the pin under load -------------------------------------------------- */
+
+/**
+ * Owed items on demand, for the load the pin exists for. Round 1 measured the
+ * unbounded pin pushing the composer out of a 900px viewport at 19 items with
+ * no way to scroll it back; `/gallery/pin/[n]` renders these at 4, 13, 19 and
+ * 34 so the bound is measured rather than asserted.
+ */
+export function manyOwed(n: number): readonly AttentionItem[] {
+  const shapes = [
+    { state: DESTRUCTIVE, kind: 'drop', why: 'destructive and nothing else can authorise it' },
+    { state: GATE, kind: 'gate', why: 'a decision routed to you — decisions never auto-accept' },
+    {
+      state: {
+        kind: 'event',
+        verification: 'failed',
+        owedToViewer: true,
+        irreversible: false,
+      } as const,
+      kind: 'failure',
+      why: 'it failed and the explanation is owed to you',
+    },
+    {
+      state: {
+        kind: 'question',
+        verification: 'open',
+        owedToViewer: true,
+        irreversible: false,
+      } as const,
+      kind: 'question',
+      why: 'you opened it and nobody else can carry it',
+    },
+  ] as const;
+  return Array.from({ length: n }, (_, index) => {
+    const shape = shapes[index % shapes.length];
+    if (shape === undefined) throw new Error('fixture: no shape');
+    return {
+      id: `load-${index}`,
+      state: shape.state,
+      title: `${shape.kind} #${index + 1} — an owed item in a room carrying ${n} of them`,
+      rationale: rationale(`${shape.why} · item ${index + 1} of ${n}`),
+      facts: [`raised ${9 + (index % 5)}:0${index % 6}`, shape.kind],
+      source: null,
+      actions: [
+        { id: 'act', label: 'Answer it', emphasis: 'primary' as const, statement: null },
+        { id: 'defer', label: 'Defer', emphasis: 'ghost' as const, statement: null },
+      ],
+    };
+  });
+}
