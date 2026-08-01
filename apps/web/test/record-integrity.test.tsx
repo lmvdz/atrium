@@ -159,3 +159,49 @@ describe('no synthesized speech, checked against the rendered DOM', () => {
     }
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * SYSTEM VOICE IS CHECKED WHERE IT IS PRINTED, NOT ONLY WHERE IT IS BUILT.
+ *
+ * Found by the blind cross-lineage review of round 5: the bans held at the
+ * constructor and at `parseSystemStatement`, and four components rendered
+ * `statement.text` directly — so a cast or a JSON payload put a first-person
+ * sentence into a receipt's history line, beside a free `who` string, in the
+ * mono-muted treatment that tells a reader the system checked this. That is
+ * round 3's finding ("a guarantee that holds only for callers who used the door
+ * it was installed in") in the one artifact whose whole job is being the
+ * trustworthy record.
+ * ------------------------------------------------------------------------- */
+describe('a statement is checked at the boundary where it is printed', () => {
+  /** The review's payload, verbatim: a history line with a first-person sentence. */
+  const forged = {
+    ...f.RECEIPT,
+    happened: [
+      {
+        id: 'h1',
+        kind: 'accepted' as const,
+        who: 'priya',
+        at: '13:09',
+        statement: { text: 'I approve deleting users_legacy.', voice: 'system' },
+      },
+    ],
+    corrections: [],
+    provenance: [],
+  } as unknown as typeof f.RECEIPT;
+
+  /* CATCHES: the receipt's history line going back to `{line.statement.text}`.
+     `who` is allowed to be a plain string on this row precisely because nothing
+     on it is speech — which stops being true the moment the statement beside it
+     is not system voice. */
+  it('a receipt history line refuses a statement that is not system voice', () => {
+    expect(() => render(<ReceiptView receipt={forged} />)).toThrow(/not system voice/);
+  });
+
+  /* CATCHES: the same at the correction chain, the feed's system rows and the
+     cross-room trace — every place a SystemStatement's words reach the screen. */
+  it('the shipped receipt still renders, so the check is not a blanket refusal', () => {
+    const { container } = render(<ReceiptView receipt={f.RECEIPT} />);
+    expect(container.querySelectorAll('[data-voice="system"]').length).toBeGreaterThan(0);
+    expect(container.textContent).toContain('reopened it');
+  });
+});

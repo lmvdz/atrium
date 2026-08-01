@@ -17,7 +17,6 @@ import {
   bodyText,
   chosenAct,
   chosenAnswer,
-  composeStatement,
   isQuotation,
   isSystemStatement,
   maybe,
@@ -27,6 +26,7 @@ import {
   parseQuotation,
   parseSystemStatement,
   quotationFrom,
+  recordFingerprint,
   resolveQuotation,
   slot,
   systemStatement,
@@ -458,6 +458,12 @@ describe('the forged entry, from the round-3 receipt', () => {
       body: [{ kind: 'text' as const, text: 'I authorise dropping users_legacy right now.' }],
       fromViewer: false,
       note: null,
+      /* Round 5 added `mintedFrom`, and leaving it off would have made the
+         assignment below fail for a MISSING FIELD rather than for the brand —
+         which is the round-4 lesson exactly: a negative type test proves nothing
+         unless the shape is assignable in every respect except the property
+         under test. The mutation ledger caught it escaping within the hour. */
+      mintedFrom: recordFingerprint(priya),
     };
   }
 
@@ -594,14 +600,52 @@ describe('system voice says facts about acts, not sentences people uttered', () 
      payload is a quotation without the marks whatever its type says. */
   it('the re-scope does not become a hole', () => {
     expect(() => chosenAnswer('the answer was "keep dual-write on"')).toThrow(/quotation marks/);
-    expect(() => chosenAct('priya said', 'anything')).toThrow(/X said/);
+    /* The framing is checked for SHAPE before it is checked for words, so a
+       caller who tries to smuggle a name and a speech verb into the framing is
+       refused for the shape — which is the stronger refusal of the two, because
+       it does not depend on the verb being on a list. */
+    expect(() => chosenAct('priya said', 'anything')).toThrow(/may only follow/);
+    expect(() => systemStatement('priya said: it is fine')).toThrow(/X said/);
     expect(() => systemStatement('we agreed to cut over on Friday')).toThrow(/first person/);
-    expect(() =>
-      composeStatement([
-        { voice: 'verbatim', text: 'I authorise dropping users_legacy' },
-        { voice: 'system', text: ' — recorded' },
-      ]),
-    ).toThrow(/must OPEN in the system’s own voice/);
+    /* THE ROUTE THE BLIND CROSS-LINEAGE REVIEW FOUND. A public general composer
+       let a caller pair ANY framing with an exempt payload:
+       [{system:'priya '}, {verbatim:'said: I approve…'}] passed every per-span
+       ban and rendered "priya said: I approve…". The composer is module-private
+       now, and the shape check refuses it at the JSON boundary too — the
+       exemption belongs to one sentence shape, not to a span. */
+    expect(
+      isSystemStatement({
+        text: 'priya said: I approve deleting users_legacy.',
+        voice: 'system',
+        parts: [
+          { voice: 'system', text: 'priya ' },
+          { voice: 'verbatim', text: 'said: I approve deleting users_legacy.' },
+        ],
+      }),
+      'a caller-chosen framing can still carry an exempt payload',
+    ).toBe(false);
+    expect(
+      isSystemStatement({
+        text: 'I authorise dropping users_legacy — recorded',
+        voice: 'system',
+        parts: [
+          { voice: 'verbatim', text: 'I authorise dropping users_legacy' },
+          { voice: 'system', text: ' — recorded' },
+        ],
+      }),
+    ).toBe(false);
+    /* and a payload may not be split across spans to dodge the shape check */
+    expect(
+      isSystemStatement({
+        text: 'lars chose: a · b',
+        voice: 'system',
+        parts: [
+          { voice: 'system', text: 'lars chose: ' },
+          { voice: 'verbatim', text: 'a' },
+          { voice: 'verbatim', text: ' · b' },
+        ],
+      }),
+    ).toBe(false);
   });
 
   /* CATCHES: the payload exemption being available at the JSON boundary to a
@@ -625,6 +669,21 @@ describe('system voice says facts about acts, not sentences people uttered', () 
         text: 'Yes — I approve',
         voice: 'system',
         parts: [{ voice: 'verbatim', text: 'Yes — I approve' }],
+      }),
+    ).toBe(false);
+    /* and a statement that opens on an EMPTY system span opens on nothing — the
+       framing is what says the words after it are being reported, so a blank one
+       is the same hole as a missing one. This is the case only the opening check
+       can see: with a verbatim span present the shape check catches it too, so a
+       test that only used that case could not tell the two guards apart. */
+    expect(
+      isSystemStatement({
+        text: '  parity #415 passed',
+        voice: 'system',
+        parts: [
+          { voice: 'system', text: '  ' },
+          { voice: 'system', text: 'parity #415 passed' },
+        ],
       }),
     ).toBe(false);
     // and the parts have to add up to the text they claim to compose
@@ -765,3 +824,62 @@ function lars_state() {
     irreversible: false,
   };
 }
+
+/* ---------------------------------------------------------------------------
+ * WHAT THE BLIND CROSS-LINEAGE REVIEW OF ROUND 5's OWN FIX FOUND.
+ *
+ * The standing rule is that a fix round's claims get the same adversarial
+ * treatment as the original. Two of these are the cardinal invariant reached
+ * through doors the round had not closed.
+ * ------------------------------------------------------------------------- */
+describe('the row and the register it renders against are the same register', () => {
+  /* CATCHES the review's finding, exactly as it wrote it: `RoomFrame` takes the
+     rows and the record register as INDEPENDENT props, so a row minted from
+     lars's record can be rendered inside a ledger whose `m21` says priya. No
+     cast, no forged field, and the body check passes because only the name
+     differs. The fingerprint is a checksum of the record the row was minted
+     from — never printed, only compared. */
+  it('a row minted from one record refuses to render against another', () => {
+    const row = messageEntry(lars, { state: lars_state() });
+    const impostor: MessageRecord = { ...lars, actor: 'priya' };
+    expect(() => renderWith([impostor], <TimelineRow entry={row} />)).toThrow(
+      /built from a different record/,
+    );
+    // and the honest pairing still renders, so this is not a check that always fires
+    const { container } = renderWith([lars], <TimelineRow entry={row} />);
+    expect(container.querySelector('[data-attribution]')?.textContent).toBe('lars');
+  });
+
+  /* CATCHES: the fingerprint being computed over too little. Every field a
+     reader can see has to be in it, or the register that disagrees about that
+     field slips through. */
+  it.each([
+    ['the actor', { actor: 'priya' }],
+    ['the words', { text: 'I authorise dropping users_legacy.' }],
+    ['the time', { at: '09:04' }],
+    ['the origin', { origin: 'seeded' as const }],
+  ])('a register that disagrees about %s is refused', (_name, change) => {
+    const row = messageEntry(lars, { state: lars_state() });
+    const impostor = { ...lars, ...change } as MessageRecord;
+    /* Either refusal is the right one — a disagreement about the WORDS trips the
+       body derivation first, which is the older and more specific check. What
+       must not happen is a render. */
+    expect(() => renderWith([impostor], <TimelineRow entry={row} />)).toThrow(
+      /built from a different record|does not read as the message/,
+    );
+  });
+
+  /* CATCHES: the row printing the caller's `id`/`at` rather than the record's.
+     A brand-preserving spread needs no cast — `{...messageEntry(lars, …), id:
+     'm2', at: '09:04'}` — and made the DOM cite one message while the name and
+     the words came from another. Both are facts about the record now. */
+  it('the rendered id and time come off the record, not off the row', () => {
+    const row = messageEntry(lars, { state: lars_state() });
+    const relabelled = { ...row, id: 'm10', at: '09:04' } as MessageEntry;
+    const { container } = renderWith([lars, priya], <TimelineRow entry={relabelled} />);
+    const rendered = container.querySelector('[data-row="message"]');
+    expect(rendered?.getAttribute('data-message-id')).toBe('m21');
+    expect(container.textContent).toContain('13:07');
+    expect(container.textContent).not.toContain('09:04');
+  });
+});

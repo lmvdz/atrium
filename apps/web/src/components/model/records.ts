@@ -20,7 +20,7 @@ import type {
   Quotation,
   SystemStatement,
 } from './quotation';
-import { chosenAct, quotationFrom } from './quotation';
+import { chosenAct, quotationFrom, recordFingerprint } from './quotation';
 import type { Rationale } from './rationale';
 import type { Maybe } from './text';
 
@@ -222,8 +222,19 @@ interface MessageEntryCommon {
 /** A row whose words are the actor's own — typed here or already on the record. */
 export interface AuthoredMessageEntry extends MessageEntryCommon {
   readonly origin: QuotableOrigin;
-  /** the proof: the words, the actor and the message id, from one record */
+  /** the citation: the message id this row's words and name come from */
   readonly attribution: Quotation;
+  /**
+   * A checksum of the record this row was minted from — NEVER rendered, only
+   * compared against the record the row is resolved against.
+   *
+   * The blind cross-lineage review of round 5 found the frame taking the rows
+   * and the record register as independent props, so a row minted from lars's
+   * record could be rendered inside a ledger whose `m14` says priya, with no
+   * cast and no forged field. This is what makes "the row and the ledger are the
+   * same register" checkable rather than assumed. See `recordFingerprint`.
+   */
+  readonly mintedFrom: string;
   readonly body: readonly BodySegment[];
   readonly fromViewer: boolean;
   /**
@@ -320,6 +331,7 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
     ...common,
     origin: record.origin,
     attribution,
+    mintedFrom: recordFingerprint(record),
     body: input.body ?? [{ kind: 'text', text: record.text }],
     fromViewer: input.viewer !== undefined && record.actor === input.viewer,
     note: input.note ?? null,
@@ -667,9 +679,6 @@ export function hardestGlyph(items: readonly { readonly state: EpistemicState }[
 /** One open card, then this many compressed rows, then the overflow line. */
 export const PIN_COMPACT_BUDGET = 4;
 
-/** The window advances by exactly what it shows: one page is one budget. */
-export const PIN_PAGE = PIN_COMPACT_BUDGET;
-
 /* ---------------------------------------------------------------------------
  * ROUND 4's GAUNTLET: THE BUDGET WAS A CONSTANT AND SO WAS THE BELT.
  *
@@ -702,7 +711,9 @@ export const PIN_GEOMETRY = {
   row: 39,
   /** flex gap between them */
   gap: 4,
-  /** the "N more owed" control, which must never be the thing that gets clipped */
+  /** the gap the belt leaves so a card that grew a line is visibly clipped rather
+      than exactly filling the box — the "N more owed" control is a SIBLING of the
+      clipped list now (attention.module.css, .pinMore), so it is not in this sum */
   overflow: 46,
   /** `.pinList`'s max-height, both halves of it */
   beltMax: 340,

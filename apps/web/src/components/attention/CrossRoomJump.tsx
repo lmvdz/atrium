@@ -10,6 +10,7 @@
  * cannot be dressed as anybody's words.
  * ------------------------------------------------------------------------- */
 
+import { statementText } from '../model/quotation';
 import type { CrossRoomJumpRecord } from '../model/records';
 import styles from '../timeline/timeline.module.css';
 
@@ -27,7 +28,7 @@ export function CrossRoomJump({ jump, onReveal, onBack, onDismiss }: CrossRoomJu
       <span aria-hidden="true">↪</span>
       {/* The room names are in the sentence and in the back link; repeating
           them a third time is what pushed the reason itself off the end. */}
-      <span className={styles.traceText}>{jump.why.text}</span>
+      <span className={styles.traceText}>{statementText(jump.why, 'CrossRoomJump')}</span>
       <button
         className={styles.traceBack}
         onClick={onReveal === undefined ? undefined : () => onReveal(jump.targetMessage)}

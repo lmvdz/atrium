@@ -43,8 +43,13 @@ const THEMES = ['light', 'dark'] as const;
    list because it is the number the gauntlet reproduced at. */
 const HEIGHTS = [420, 500, 640, 768, 900] as const;
 
-/** Every element inside the pin's list that a person is meant to be able to hit. */
-const REACHABLE = '[data-pin-list] [data-attention-id], [data-pin-list] [data-pin-overflow]';
+/** Every element in the pin that a person is meant to be able to hit.
+    The overflow control is a SIBLING of the clipped list since round 5's blind
+    review — a card that grows past the belt may cost a row, but it may not cost
+    the affordance that pages past them — so it is selected from the pin, not
+    from the list, and checked against the pin's box below. */
+const REACHABLE =
+  '[data-pin-list] [data-attention-id], [data-region="needs-you"] [data-pin-overflow]';
 
 test.describe('the pin bounds itself', () => {
   test.skip(
@@ -124,18 +129,18 @@ test.describe('the pin bounds itself', () => {
           if (overflow > 0) {
             const seen = await page.evaluate(() => {
               const more = document.querySelector('[data-pin-overflow]');
-              const list = document.querySelector('[data-pin-list]');
-              if (more === null || list === null) return null;
+              const pin = document.querySelector('[data-region="needs-you"]');
+              if (more === null || pin === null) return null;
               const a = more.getBoundingClientRect();
-              const b = list.getBoundingClientRect();
-              return { moreBottom: a.bottom, listBottom: b.bottom, height: a.height };
+              const b = pin.getBoundingClientRect();
+              return { moreBottom: a.bottom, pinBottom: b.bottom, height: a.height };
             });
             expect(seen, 'the overflow affordance is not in the DOM').not.toBeNull();
             expect(seen?.height ?? 0).toBeGreaterThan(0);
             expect(
               seen?.moreBottom ?? Number.POSITIVE_INFINITY,
               'the pin clips its own "N more owed" line',
-            ).toBeLessThanOrEqual((seen?.listBottom ?? 0) + 1);
+            ).toBeLessThanOrEqual((seen?.pinBottom ?? 0) + 1);
           }
         }
       });
@@ -213,7 +218,8 @@ test.describe('the pin bounds itself', () => {
             expect(
               measured.more.bottom,
               `the pin clips its own "N more owed" line at ${height}px`,
-            ).toBeLessThanOrEqual((measured.list?.bottom ?? 0) + 1);
+            ).toBeLessThanOrEqual((measured.pin?.bottom ?? 0) + 1);
+            expect(measured.more.height, 'the overflow control has no box').toBeGreaterThan(0);
           }
         }
       }
@@ -247,7 +253,10 @@ test.describe('the pin bounds itself', () => {
           const list = document.querySelector('[data-pin-list]');
           if (list === null) return null;
           const listBox = list.getBoundingClientRect();
+          const pin = document.querySelector('[data-region="needs-you"]');
+          const pinBox = pin === null ? listBox : pin.getBoundingClientRect();
           const items = [...document.querySelectorAll(selector)].map((el) => {
+            const bounds = el.hasAttribute('data-pin-overflow') ? pinBox : listBox;
             const box = el.getBoundingClientRect();
             const x = box.left + box.width / 2;
             const y = box.top + box.height / 2;
@@ -255,9 +264,7 @@ test.describe('the pin bounds itself', () => {
             return {
               id: el.getAttribute('data-attention-id') ?? 'overflow',
               inside:
-                box.top >= listBox.top - 0.5 &&
-                box.bottom <= listBox.bottom + 0.5 &&
-                box.height > 0,
+                box.top >= bounds.top - 0.5 && box.bottom <= bounds.bottom + 0.5 && box.height > 0,
               reachable: hit !== null && (hit === el || el.contains(hit)),
               text: (el.textContent ?? '').slice(0, 40),
             };
@@ -335,6 +342,72 @@ test.describe('the pin bounds itself', () => {
         };
       });
       expect(bottom.bottom).toBeLessThanOrEqual(bottom.viewport + 1);
+    });
+  }
+
+  /* -------------------------------------------------------------------------
+   * A CARD THAT GREW MAY COST A ROW; IT MAY NOT COST THE WAY PAST THE ROWS.
+   *
+   * Found by the blind cross-lineage review of round 5. The row budget is
+   * computed from a MEASURED card height, and `AttentionCard` bounds neither its
+   * title nor its action count — so an item with a long enough title pushes the
+   * card past the belt, and while the "N more owed" control lived inside
+   * `.pinList` the first thing `overflow: hidden` ate was the control. Owed
+   * items behind an affordance that cannot be reached is round 2's stranding
+   * defect with a different cause.
+   *
+   * The title is clamped to two lines AND the control is a sibling of the
+   * clipped list. This drives the pathological case the clamp is supposed to
+   * make impossible — a title stretched in the DOM, past any clamp — so the
+   * structural half is what is being tested rather than the arithmetic half.
+   * ---------------------------------------------------------------------- */
+  for (const height of [420, 900] as const) {
+    test(`a pathological card cannot strand the way out of the fold — @${height}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 1124, height });
+      await page.goto('/gallery/pin/34?theme=light');
+      await expect(page.locator('[data-pin-list]')).toHaveAttribute('data-pin-measured', 'true');
+
+      await page.evaluate(() => {
+        const title = document.querySelector('[data-pin-list] article div');
+        if (title === null) throw new Error('no open card title to stretch');
+        /* Past the two-line clamp on purpose: the clamp is the arithmetic
+           defence and this test is about the structural one. */
+        (title as HTMLElement).style.webkitLineClamp = 'unset';
+        (title as HTMLElement).style.display = 'block';
+        title.textContent = `${'an owed item whose title runs on and on '.repeat(30)}.`;
+      });
+
+      const seen = await page.evaluate(() => {
+        const more = document.querySelector('[data-pin-overflow]');
+        const pin = document.querySelector('[data-region="needs-you"]');
+        if (more === null || pin === null) return null;
+        const box = more.getBoundingClientRect();
+        const hit = document.elementFromPoint(
+          box.left + box.width / 2,
+          box.top + Math.min(box.height / 2, 8),
+        );
+        return {
+          height: box.height,
+          insidePin: box.bottom <= pin.getBoundingClientRect().bottom + 1,
+          reachable: hit !== null && (hit === more || more.contains(hit)),
+        };
+      });
+      console.info(`stretched card @${height}: overflow control ${JSON.stringify(seen)}`);
+      expect(seen, 'the overflow control left the DOM').not.toBeNull();
+      expect(seen?.height ?? 0, 'a long title clipped the overflow control').toBeGreaterThan(0);
+      expect(seen?.insidePin, 'the overflow control was pushed out of the pin').toBe(true);
+      expect(seen?.reachable, 'the overflow control cannot be hit by a pointer').toBe(true);
+
+      // and it still pages: the owed items behind it are still reachable
+      const before = await page.locator('[data-pin-overflow]').getAttribute('data-pin-overflow');
+      await page.locator('[data-pin-overflow]').click();
+      const rows = await page.locator('[data-pin-list] [data-attention-id]').count();
+      console.info(
+        `stretched card @${height}: ${before} overflow before the click, ${rows} rows after`,
+      );
+      expect(rows, 'the control did nothing').toBeGreaterThan(0);
     });
   }
 

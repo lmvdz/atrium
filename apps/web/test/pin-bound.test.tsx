@@ -16,7 +16,6 @@ import type { AttentionItem, TrailerSummary } from '../src/components/model';
 import {
   foldPin,
   PIN_COMPACT_BUDGET,
-  PIN_PAGE,
   pinBudgetFor,
   rationale,
   trailerFor,
@@ -156,7 +155,12 @@ describe('the affordance out of the fold is not decorative', () => {
       for (const item of fold.compact) seen.add(item.id);
     }
     expect(seen.size, `${seen.size} of ${n} owed items were reachable`).toBe(n);
-    expect(pageCount).toBeLessThanOrEqual(Math.ceil(n / PIN_PAGE));
+    /* The window advances by exactly what it shows, so the number of pages is
+       the item count over the budget. `PIN_PAGE` used to be a second name for
+       `PIN_COMPACT_BUDGET` and stopped being true the moment the budget started
+       moving with the viewport — a stale alias is a second source of truth
+       waiting to drift. */
+    expect(pageCount).toBeLessThanOrEqual(Math.ceil(n / PIN_COMPACT_BUDGET));
   });
 
   /* CATCHES: a label that names the total behind the fold as though one click
@@ -331,5 +335,47 @@ describe('the pin’s row budget shrinks with the viewport', () => {
     );
     unmount();
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: original });
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE WAY OUT OF THE FOLD IS NOT INSIDE THE THING THAT CLIPS.
+ *
+ * Found by the blind cross-lineage review of round 5: the row budget is computed
+ * from a MEASURED card height, and `AttentionCard` bounds neither its title nor
+ * its action count — so an item with a long enough title pushes the card past
+ * the belt, and while the "N more owed" control was a child of `.pinList` the
+ * first thing `overflow: hidden` took was the control. Owed items behind an
+ * affordance that cannot be reached is round 2's stranding defect with a
+ * different cause.
+ *
+ * The pixel half is in e2e/pin-bound.spec.ts, which stretches a title past the
+ * clamp and asserts the control is still hit-testable. This is the structural
+ * half, and it is the one that holds without a browser: the control is a
+ * SIBLING of the clipped list, so no amount of card growth can eat it.
+ * ------------------------------------------------------------------------- */
+describe('the affordance out of the fold is outside the clip', () => {
+  /* CATCHES: the overflow control going back inside the clipped box, by
+     nesting or by wearing the clipped box's own class. */
+  it('the overflow control is not a descendant of the clipped list', () => {
+    const { container } = render(
+      <Pin items={f.manyOwed(34)} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    const list = container.querySelector('[data-pin-list]');
+    const more = container.querySelector('[data-pin-overflow]');
+    expect(list, 'the pin rendered no list').not.toBeNull();
+    expect(more, 'the pin rendered no overflow control').not.toBeNull();
+    expect(
+      list?.contains(more as Node),
+      'the way out of the fold is inside the box that clips',
+    ).toBe(false);
+    /* and not merely un-nested: it must not be wearing the clipping class
+       either, which is the cheapest way to reintroduce the same defect. */
+    const clipped = list?.className ?? '';
+    expect(clipped).not.toBe('');
+    expect(
+      (more as HTMLElement | null)?.closest(`.${clipped.trim().split(/\s+/).join('.')}`),
+      'the way out of the fold wears the clipping belt itself',
+    ).toBeNull();
   });
 });

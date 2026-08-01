@@ -9,6 +9,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
+import { statementText } from '../model/quotation';
 import type { SystemEntry } from '../model/records';
 import { Glyph } from '../primitives/Glyph';
 import styles from './timeline.module.css';
@@ -24,7 +25,7 @@ export function SystemRow({ entry }: SystemRowProps) {
       <Glyph className={styles.glyphCell} state={entry.state} />
       <div className={styles.actor}>system</div>
       <div className={styles.systemBody} data-voice="system">
-        {entry.statement.text}
+        {statementText(entry.statement, 'SystemRow')}
       </div>
     </div>
   );

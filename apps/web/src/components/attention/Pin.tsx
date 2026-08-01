@@ -205,13 +205,34 @@ export function Pin({
               />
             ))}
 
-            {/* THE OVERFLOW AFFORDANCE. Explicit, counted, named by glyph —
+            {/* Everything clean compresses to a count and never takes a row. */}
+            {fold.clean.length === 0 ? null : (
+              <div className={styles.clean} data-pin-clean={String(fold.clean.length)}>
+                {plural(fold.clean.length, 'item')} here no longer needs you ·{' '}
+                <GlyphTally counts={fold.cleanCounts} />
+              </div>
+            )}
+          </div>
+
+          {/* THE WAY OUT OF THE FOLD LIVES OUTSIDE THE CLIP.
+
+              Found by the blind cross-lineage review of round 5: the budget
+              ladder assumes a 74px card, and `AttentionCard` puts no bound on a
+              wrapping title, wrapping facts or the number of actions. An item
+              whose title runs to four lines pushes the card past the belt, and
+              while it sat INSIDE `.pinList` the first thing `overflow: hidden`
+              took was the "N more owed" control — which is round 2's stranding
+              defect exactly: owed items behind an affordance that cannot be
+              used. The rows may be clipped by a card that grew; the affordance
+              that pages past them may not. */}
+          {fold.overflow.length === 0 ? null : (
+            <div className={styles.pinMore}>
+              {/* THE OVERFLOW AFFORDANCE. Explicit, counted, named by glyph —
                 and it PAGES. The count says how much is off the page; the
                 action says exactly what the next click brings, derived from
                 the page it will render. Round 2 shipped these as the same
                 number, which made the second sentence a lie the moment the
                 first exceeded the budget. */}
-            {fold.overflow.length === 0 ? null : (
               <button
                 aria-label={`${nextPageLabel(fold)} of ${fold.overflow.length} owed items not on this page — page ${fold.page + 1} of ${fold.pageCount}`}
                 className={styles.more}
@@ -240,16 +261,8 @@ export function Pin({
                   the pin folds rather than pushing the composer off the screen
                 </span>
               </button>
-            )}
-
-            {/* Everything clean compresses to a count and never takes a row. */}
-            {fold.clean.length === 0 ? null : (
-              <div className={styles.clean} data-pin-clean={String(fold.clean.length)}>
-                {plural(fold.clean.length, 'item')} here no longer needs you ·{' '}
-                <GlyphTally counts={fold.cleanCounts} />
-              </div>
-            )}
-          </div>
+            </div>
+          )}
           <Trailer lastCheck={lastCheck} summary={trailer} />
         </>
       )}

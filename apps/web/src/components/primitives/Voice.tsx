@@ -30,7 +30,7 @@
 
 import { useAttribution } from '../model/ledger';
 import type { Quotation, SystemStatement } from '../model/quotation';
-import { quotationRef } from '../model/quotation';
+import { quotationRef, statementText } from '../model/quotation';
 import styles from './primitives.module.css';
 
 export interface QuotedProps {
@@ -66,6 +66,13 @@ export interface SystemVoiceProps {
 }
 
 export function SystemVoice({ statement, className }: SystemVoiceProps) {
+  /* THE CHECK ON THE PATH EVERY SYSTEM-VOICE RENDER TAKES. The bans held at the
+     constructor and at the JSON parser, and this component printed whatever it
+     was handed — so a cast or a `JSON.parse` put a first-person sentence into
+     the mono-muted treatment that tells a reader the system checked this. Same
+     shape as the attribution half: the constructor is a door, the renderer is
+     the path. Found by the blind cross-lineage review of round 5. */
+  statementText(statement, 'SystemVoice');
   /* A statement that arrived without parts (JSON, an older adapter) is rendered
      as one system-voice span — the same conservative default `isSystemStatement`
      applies, rather than a second, laxer reading of the same value. */

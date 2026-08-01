@@ -171,8 +171,29 @@ export function messageLedger(records: Iterable<MessageRecord>): MessageLedger {
   };
 }
 
-/** The empty ledger, for the "there is no record set here" case. Resolves nothing. */
-export const NO_RECORDS: MessageLedger = messageLedger([]);
+/**
+ * A CHECKSUM OF A RECORD — never rendered, only compared.
+ *
+ * Found by the blind cross-lineage review of round 5, and it is the same
+ * "two sources of truth" shape one level out. `RoomFrame` takes the feed rows
+ * and the record register as INDEPENDENT props, so a caller can mint a row from
+ * lars's record and render it inside a ledger whose `m14` says priya — no cast,
+ * no forged field, and the body check passes because only the name differs.
+ * `messageLedger` refuses two records under one id *within its own input*; it
+ * cannot see the record the row was minted from.
+ *
+ * So a row carries a fingerprint of the record it was minted from, and the
+ * render boundary recomputes it from the record it is about to resolve against.
+ * This is NOT the carried-field pattern this round deleted: nothing here is
+ * printed, nothing here is read for its value, and a mismatch throws rather than
+ * choosing a winner. An attribution is a claim about who; a checksum is a claim
+ * that two registers are the same register.
+ */
+export function recordFingerprint(record: MessageRecord): string {
+  return [record.id, record.origin, record.at, record.actor, record.text]
+    .map((part) => `${part.length}:${part}`)
+    .join('|');
+}
 
 /**
  * THE DERIVATION. Everything a render boundary prints beside quoted words comes
@@ -426,6 +447,25 @@ const BANS_FOR: Readonly<Record<StatementPart['voice'], readonly Ban[]>> = {
   verbatim: VERBATIM_BANS,
 };
 
+/**
+ * The ONE framing a recorded payload may appear behind: "chose: " or
+ * "<who> chose: ".
+ *
+ * Round 5's first version let a caller pair any framing with any payload
+ * through a public `composeStatement`, and the blind cross-lineage review broke
+ * it in one line: `[{system:'priya '}, {verbatim:'said: I approve…'}]` passed,
+ * because the system span held no banned token and the verbatim span was exempt
+ * from the speech-report and first-person bans. The rendered statement read
+ * "priya said: I approve…" — page-authored text made to look like priya
+ * speaking, which is the exact thing this file exists to prevent.
+ *
+ * The payload exemption is not a property of a span; it is a property of ONE
+ * SENTENCE SHAPE — "somebody chose an option, and this is the option". So the
+ * shape is what is checked, the general composer is module-private, and the
+ * only public doors to a payload are `chosenAnswer` and `chosenAct`.
+ */
+const CHOSE_FRAMING = /^(?:[^\s:]+ )?chose: $/;
+
 /** The single description of "this is not the system's voice", shared by the constructor and the boundary. */
 function statementDefect(parts: readonly StatementPart[]): string | null {
   if (parts.length === 0) return 'a system statement with no parts states nothing';
@@ -436,6 +476,21 @@ function statementDefect(parts: readonly StatementPart[]): string | null {
       '  A statement whose first words are a recorded payload is a quotation without the marks — ' +
       'the framing is what says these words are being reported rather than spoken.'
     );
+  }
+  if (parts.some((part) => part.voice === 'verbatim')) {
+    if (parts.length !== 2 || parts[1]?.voice !== 'verbatim') {
+      return (
+        'a recorded payload is one span behind one framing, and nothing else.\n' +
+        '  Anything more is a caller composing a sentence out of an exempt span and a name.'
+      );
+    }
+    if (!CHOSE_FRAMING.test(first.text)) {
+      return (
+        `a recorded payload may only follow "chose: " or "<who> chose: ", not ${JSON.stringify(first.text)}.\n` +
+        '  The exemption belongs to that sentence shape — "somebody chose an option, and this is the option" — ' +
+        'not to any framing a caller cares to write in front of it.'
+      );
+    }
   }
   if (
     parts
@@ -464,14 +519,16 @@ function statementDefect(parts: readonly StatementPart[]): string | null {
 }
 
 /**
- * Build a statement out of spans, each tagged with who wrote it. This is the
- * general constructor; `systemStatement` and `chosenAnswer` are the two shapes
- * the app actually uses.
+ * Build a statement out of spans, each tagged with who wrote it.
+ *
+ * MODULE-PRIVATE ON PURPOSE. The public doors are `systemStatement` (all
+ * framing) and `chosenAnswer` / `chosenAct` (one fixed framing plus one
+ * payload). Exporting the general composer is what let the blind review write
+ * `[{system:'priya '}, {verbatim:'said: I approve…'}]` — the shape check above
+ * refuses it now, and not exporting this means a caller cannot reach for it in
+ * the first place.
  */
-export function composeStatement(
-  parts: readonly StatementPart[],
-  messageId?: MessageId,
-): SystemStatement {
+function composeStatement(parts: readonly StatementPart[], messageId?: MessageId): SystemStatement {
   const trimmed = parts.map((part, index) => ({
     voice: part.voice,
     /* Only the outer edges are trimmed: a space between the framing and the
@@ -523,6 +580,32 @@ export function isSystemStatement(value: unknown): value is SystemStatement {
      property of which door the data came through, which is how the body check
      ended up bypassable in round 3. */
   return statementDefect(parts) === null;
+}
+
+/**
+ * THE RENDER BOUNDARY FOR SYSTEM VOICE. Every place that puts a statement's
+ * words on screen goes through this, and it throws rather than degrading.
+ *
+ * Found by the blind cross-lineage review of round 5: the bans held at the
+ * constructor and at `parseSystemStatement`, and four components rendered
+ * `statement.text` directly — so a cast or a JSON payload put "I approve
+ * deleting users_legacy." into a receipt's history line beside a free `who`
+ * string and it printed. That is round 3's finding ("a guarantee that holds only
+ * for callers who used the door it was installed in") in the one artifact whose
+ * whole job is being the trustworthy record.
+ *
+ * The pattern is the same one the attribution half uses: the check that matters
+ * is the one on the path every render takes, not the one at the constructor.
+ */
+export function statementText(statement: SystemStatement, from: string): string {
+  if (!isSystemStatement(statement)) {
+    throw new Error(
+      `${from}: this is not system voice — a statement the page prints has to be in the system’s own voice ` +
+        '(no quotation marks, no first person, no "X said" framing), and a recorded payload has to say that it is one.\n' +
+        `  rejected: ${JSON.stringify(String((statement as { text?: unknown })?.text).slice(0, 120))}`,
+    );
+  }
+  return statement.text;
 }
 
 /** The runtime boundary for system voice, mirroring `parseQuotation`. */

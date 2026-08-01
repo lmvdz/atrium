@@ -22,7 +22,7 @@
 
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution } from '../model/ledger';
-import { quotationRef } from '../model/quotation';
+import { quotationRef, statementText } from '../model/quotation';
 import type { CorrectionEntry, ProvenanceEntry, ReceiptRecord } from '../model/records';
 import { stateForHappened } from '../model/records';
 import { slot } from '../model/slot';
@@ -78,7 +78,8 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
             <div className={styles.happened} data-voice="system" key={line.id}>
               <Glyph className={styles.happenedGlyph} decorative={false} state={state} />
               <span className={styles.happenedText}>
-                <span className={styles.happenedWho}>{line.who}</span> {line.statement.text}
+                <span className={styles.happenedWho}>{line.who}</span>{' '}
+                {statementText(line.statement, 'ReceiptView history line')}
                 <span className={styles.happenedAt}>{line.at}</span>
               </span>
             </div>
@@ -199,9 +200,9 @@ function CorrectionRow({
       </div>
       <div className={styles.corrBody}>
         <span className={styles.corrWas} data-voice="system">
-          {entry.was.text}
+          {statementText(entry.was, 'ReceiptView correction')}
         </span>{' '}
-        → now: {entry.now.text}
+        → now: {statementText(entry.now, 'ReceiptView correction')}
         {entry.link === null ? null : (
           <>
             {' · '}

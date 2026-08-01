@@ -43,7 +43,7 @@
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution } from '../model/ledger';
 import type { Quotation } from '../model/quotation';
-import { quotationRef } from '../model/quotation';
+import { quotationRef, recordFingerprint } from '../model/quotation';
 import type {
   AuthoredMessageEntry,
   ChosenMessageEntry,
@@ -77,33 +77,36 @@ const TAG_CLASS: Readonly<Record<RowTag['tone'], string | undefined>> = {
   verified: primitives.tagVerified,
 };
 
+/**
+ * The two arms render the WHOLE row each, wrapper included, rather than sharing
+ * one and differing inside it.
+ *
+ * The blind cross-lineage review of round 5 found why that matters: the shared
+ * wrapper printed `entry.id` and `entry.at`, which are caller-supplied, so a
+ * brand-preserving spread — `{...messageEntry(lars, …), id: 'm2', at: '09:04'}`
+ * — made the row cite one message in `data-message-id` while its name and words
+ * came from another. The id and the time are facts about the record, so on the
+ * authored arm they are read from the record, and that lookup is a hook, and a
+ * hook cannot be conditional. Duplicating six lines of wrapper is the cost of
+ * having no unresolved value on the row at all.
+ */
 export function TimelineRow({ entry, actions = [], onOpenTag }: TimelineRowProps) {
-  return (
-    <div
-      className={[
-        styles.mrow,
-        'atr-rise-s',
-        entry.targeted ? styles.targeted : null,
-        entry.matchesFilter ? styles.matched : styles.unmatched,
-      ]
-        .filter(Boolean)
-        .join(' ')}
-      data-dimmed={entry.matchesFilter ? undefined : 'true'}
-      data-message-id={entry.id}
-      data-origin={entry.origin}
-      data-row="message"
-    >
-      <div className={styles.time}>{entry.at}</div>
-      {/* not decorative: on a message row the glyph is the ONLY thing carrying
-          the epistemic state, so a screen reader has to hear it */}
-      <Glyph className={styles.glyphCell} decorative={false} state={entry.state} />
-      {isAuthored(entry) ? (
-        <AuthoredRow actions={actions} entry={entry} onOpenTag={onOpenTag} />
-      ) : (
-        <ChosenRow entry={entry} onOpenTag={onOpenTag} />
-      )}
-    </div>
+  return isAuthored(entry) ? (
+    <AuthoredRow actions={actions} entry={entry} onOpenTag={onOpenTag} />
+  ) : (
+    <ChosenRow entry={entry} onOpenTag={onOpenTag} />
   );
+}
+
+function rowClass(entry: MessageEntry): string {
+  return [
+    styles.mrow,
+    'atr-rise-s',
+    entry.targeted ? styles.targeted : null,
+    entry.matchesFilter ? styles.matched : styles.unmatched,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function RowTagButton({
@@ -150,8 +153,47 @@ function AuthoredRow({
   });
   if (diverged !== null) throw new Error(diverged);
 
+  /* THE ROW AND THE LEDGER ARE THE SAME REGISTER, OR THIS DOES NOT RENDER.
+     Found by the blind cross-lineage review of round 5: the frame takes the rows
+     and the record register as independent props, so a caller could mint a row
+     from lars's record and render it inside a ledger whose `m14` says priya —
+     no cast, no forged field, and the body check passes because only the name
+     differs. The fingerprint is a checksum of the record the row was minted
+     from; it is never printed and never read for its value. A mismatch means
+     two registers disagree about one message, which is exactly the state in
+     which a name over words is a coin flip. */
+  const resolved = recordFingerprint({
+    id: attribution.messageId,
+    at: attribution.at,
+    actor: attribution.actor,
+    text: attribution.text,
+    origin: attribution.origin,
+    ...(attribution.room === null ? {} : { room: attribution.room }),
+  });
+  if (entry.mintedFrom !== resolved) {
+    throw new Error(
+      `TimelineRow: this row was built from a different record than the one this page holds for ${attribution.messageId}.\n` +
+        '  A row and the register it is rendered against have to be the same register; two records for one message id is not a near-miss.\n' +
+        `  minted from: ${entry.mintedFrom}\n` +
+        `  on this page: ${resolved}`,
+    );
+  }
+
   return (
-    <>
+    <div
+      className={rowClass(entry)}
+      data-dimmed={entry.matchesFilter ? undefined : 'true'}
+      /* The id and the time come off the RECORD, not off the row: both are facts
+         about the message, and a caller-supplied copy of a fact is a second
+         source of truth for it. */
+      data-message-id={attribution.messageId}
+      data-origin={attribution.origin}
+      data-row="message"
+    >
+      <div className={styles.time}>{attribution.at}</div>
+      {/* not decorative: on a message row the glyph is the ONLY thing carrying
+          the epistemic state, so a screen reader has to hear it */}
+      <Glyph className={styles.glyphCell} decorative={false} state={entry.state} />
       <div
         className={[styles.actor, entry.fromViewer ? styles.actorMe : null]
           .filter(Boolean)
@@ -184,7 +226,7 @@ function AuthoredRow({
           </div>
         )}
       </div>
-    </>
+    </div>
   );
 }
 
@@ -216,12 +258,20 @@ function ChosenRow({
   readonly onOpenTag?: (entryId: string) => void;
 }) {
   return (
-    <>
+    <div
+      className={rowClass(entry)}
+      data-dimmed={entry.matchesFilter ? undefined : 'true'}
+      data-message-id={entry.id}
+      data-origin={entry.origin}
+      data-row="message"
+    >
+      <div className={styles.time}>{entry.at}</div>
+      <Glyph className={styles.glyphCell} decorative={false} state={entry.state} />
       <div className={styles.actor} data-attribution="none" />
       <div className={styles.systemBody}>
         <SystemVoice className={styles.chosen} statement={entry.statement} />
         <RowTagButton entry={entry} onOpenTag={onOpenTag} />
       </div>
-    </>
+    </div>
   );
 }

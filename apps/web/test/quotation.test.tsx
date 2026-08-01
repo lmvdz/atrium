@@ -127,9 +127,14 @@ describe('the quotation invariant', () => {
 
   it('the types refuse the swap that the runtime also refuses', () => {
     const quotation = quotationFrom(typed) as Quotation;
-    // @ts-expect-error — a Quotation is not a SystemStatement; the two voices
-    // are different types precisely so they cannot be handed to each other.
-    render(<SystemVoice statement={quotation} />);
+    /* And the runtime refuses it too, since round 5's blind review: <SystemVoice>
+       validates what it is about to print rather than trusting the type, so the
+       swap is caught for a JavaScript caller as well as a TypeScript one. */
+    expect(() =>
+      // @ts-expect-error — a Quotation is not a SystemStatement; the two voices
+      // are different types precisely so they cannot be handed to each other.
+      render(<SystemVoice statement={quotation} />),
+    ).toThrow(/not system voice/);
     cleanup();
     /* "the runtime also refuses" is not a figure of speech: with a statement in
        the quote slot the record lookup has no id to look up, and with a literal

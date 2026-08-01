@@ -689,6 +689,61 @@ const LEDGER = [
     replace: '      {note === null ? null : <span className="atr-meta">{note}</span>}',
     test: 'test/attention.test.tsx',
   },
+
+  /* --- round 5, from the blind cross-lineage review of round 5's own fix -----
+   * The standing rule is that a fix round's claims get the same adversarial
+   * treatment as the original. gpt-5.6 found four defects in this round's work
+   * before it was pushed; each is reintroduced here by name.
+   * ---------------------------------------------------------------------- */
+  {
+    name: 'a row can be rendered against a different register than it was minted from',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: '  if (entry.mintedFrom !== resolved) {',
+    replace: '  if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the row prints the caller’s message id and time instead of the record’s',
+    file: 'src/components/timeline/TimelineRow.tsx',
+    find: '      data-message-id={attribution.messageId}\n      data-origin={attribution.origin}',
+    replace: '      data-message-id={entry.id}\n      data-origin={entry.origin}',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'system voice stops being checked at the render boundary',
+    file: 'src/components/primitives/Voice.tsx',
+    find: "  statementText(statement, 'SystemVoice');",
+    replace: '  void statement;',
+    test: 'test/quotation.test.tsx',
+  },
+  {
+    name: 'the receipt’s history line prints an unchecked statement beside a name',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: "                {statementText(line.statement, 'ReceiptView history line')}",
+    replace: '                {line.statement.text}',
+    test: 'test/record-integrity.test.tsx',
+  },
+  {
+    name: 'a recorded payload may follow any framing a caller writes',
+    file: 'src/components/model/quotation.ts',
+    find: '    if (!CHOSE_FRAMING.test(first.text)) {',
+    replace: '    if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a recorded payload may be split across spans to dodge the shape check',
+    file: 'src/components/model/quotation.ts',
+    find: "    if (parts.length !== 2 || parts[1]?.voice !== 'verbatim') {",
+    replace: '    if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the way out of the fold goes back inside the clipped box',
+    file: 'src/components/attention/Pin.tsx',
+    find: '            <div className={styles.pinMore}>',
+    replace: '            <div className={styles.pinList}>',
+    test: 'test/pin-bound.test.tsx',
+  },
 ];
 
 if (process.argv.includes('--list')) {

@@ -104,6 +104,23 @@
   overflow: hidden;
 }
 
+/* THE AFFORDANCE OUT OF THE FOLD IS A SIBLING OF THE CLIPPED LIST, NOT A CHILD.
+
+   Found by the blind cross-lineage review of round 5. The belt is sized from a
+   measured card height, and `AttentionCard` bounds neither its title nor its
+   action count — so an item with a long enough title pushes the card past the
+   belt, and the first thing `overflow: hidden` eats is the last child, which was
+   the "N more owed" control. That is round 2's stranding defect wearing a
+   different cause: owed items behind an affordance that cannot be reached.
+
+   Outside the clip it cannot be eaten, whatever the card does. The card's own
+   growth is bounded separately (`.acardTitle` clamps to two lines) so the budget
+   ladder's geometry stays true, but the two are independent defences on purpose:
+   one of them is arithmetic and the other one is structure. */
+.pinMore {
+  margin-top: 4px;
+}
+
 /* --- the open card ------------------------------------------------------- */
 
 .acard {
@@ -141,11 +158,22 @@
   padding-top: 1px;
 }
 
+/* Clamped to two lines. The pin's row budget is computed from a measured card
+   height (model/records.ts, PIN_GEOMETRY), and an unbounded wrapping title makes
+   that arithmetic false — the card grows and the belt clips rows the fold still
+   counts as shown. Two lines, not one: a decision's title is a sentence, and
+   truncating it to a single line is how "drop users_legacy at cutover rather
+   than after the retention window" becomes "drop users_legacy at cutover…". */
 .acardTitle {
   font-size: 12.5px;
   color: var(--tx0);
   font-weight: 500;
   line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* BRIEF concept 8. The rationale is required by the type, so this element is
