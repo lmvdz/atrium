@@ -1,0 +1,208 @@
+/*
+ * Atrium design tokens — PLACEHOLDER
+ *
+ * TODO(design/tokens): the `design/tokens` branch did not exist when the
+ * scaffold was built (`git fetch origin design/tokens` → "couldn't find remote
+ * ref"). When that branch lands, replace this file wholesale with its
+ * `design/tokens.css`; nothing else needs to change, because the app only ever
+ * reads the variables below and never hardcodes a colour.
+ *
+ * Until then these values are not invented: they are transcribed from the
+ * settled six-version Atrium token system recorded in
+ * `plans/research-live-call-design-system/` (scout-early.md §"Palette
+ * structure", scout-late.md §"Color tokens"), which is prior art for this same
+ * product. Structure:
+ *
+ *   --strip/--stile/--stx…   the dark pine icon rail ("strip"), light or dark
+ *   --bg0 … --bg7            7-step background ramp   (page → card → elevated)
+ *   --line, --line2, --line3 3-step hairline border ramp
+ *   --tx0 … --tx4            5-step text ramp         (0 = primary, 4 = faintest)
+ *   --grn*                   verified / settled       (epistemic ✓)
+ *   --amb*                   needs-you / pending gate (epistemic ~, attention)
+ *   --red*                   blocking / failed / destructive
+ *   --blu*                   human identity, links
+ *
+ * Light (warm paper) is the default; dark is opt-in via `html.atr-dark`.
+ * Semantic meaning is load-bearing: green never means "in progress", amber
+ * always means "a human is required". See the research brief, concept 9.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* icon rail ("strip") — dark pine even in light mode */
+  --strip: #173a32;
+  --stile: rgb(244 241 234 / 10%);
+  --stileac: #f4f1ea;
+  --stbd: rgb(244 241 234 / 25%);
+  --stx: #c9d6cb;
+  --stxac: #173a32;
+
+  /* backgrounds — warm cream/tan, never pure white */
+  --bg0: #e6e2da;
+  --bg1: #f4f1ea;
+  --bg2: #ece8df;
+  --bg3: #faf8f3;
+  --bg4: #eae5da;
+  --bg5: #e2dccf;
+  --bg6: #ddd6c8;
+  --bg7: #efeae0;
+
+  /* hairlines */
+  --line: #d4cdbd;
+  --line2: #c8c1b4;
+  --line3: #b0a896;
+
+  /* text */
+  --tx0: #171a18;
+  --tx1: #3a362e;
+  --tx2: #57534a;
+  --tx3: #7d7666;
+  --tx4: #a39b89;
+
+  /* green — verified / settled */
+  --grn: #4e9161;
+  --grn2: #3e7b52;
+  --grn3: #5b8a6b;
+  --grnbd: #9dc4a8;
+  --grnbg: #e3ede2;
+
+  /* amber — needs you / pending gate */
+  --amb: #b07d2a;
+  --amb2: #8a6220;
+  --ambbd: #d9b36a;
+  --ambbg: #f5e9cd;
+  --ambbg2: #f0e2c2;
+
+  /* red — blocking / failed / destructive */
+  --red: #b3402e;
+  --red2: #a63a28;
+  --redbd: #dba090;
+  --redbg: #f6dfd7;
+
+  /* blue — human identity, links */
+  --blu: #3d6bb3;
+  --blu2: #2f5590;
+  --blu3: #8a97ac;
+  --replybg: #dfe7f2;
+
+  /* typography — mono for machine/timeline rows, sans for human chrome */
+  --font-sans: var(--font-inter, 'Inter'), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono, 'IBM Plex Mono'), ui-monospace, 'SFMono-Regular', monospace;
+  --fs-micro: 10px;
+  --fs-row: 11.5px;
+  --fs-base: 12.5px;
+  --fs-lg: 15px;
+  --fs-xl: 20px;
+  --ls-label: 0.14em;
+
+  /* geometry — the prior system used ad-hoc px; these name the common steps */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 10px;
+  --sp-4: 14px;
+  --sp-5: 20px;
+  --sp-6: 28px;
+  --radius-card: 10px;
+  --radius-pill: 999px;
+}
+
+html.atr-dark {
+  color-scheme: dark;
+
+  --strip: #0e1a15;
+  --stile: #16241d;
+  --stileac: #1e3a2a;
+  --stbd: #2e5a40;
+  --stx: #7fa98a;
+  --stxac: #5cb27a;
+
+  --bg0: #0a0b0c;
+  --bg1: #0c0d0f;
+  --bg2: #0b0c0e;
+  --bg3: #0d0f10;
+  --bg4: #101214;
+  --bg5: #15181b;
+  --bg6: #1a1d21;
+  --bg7: #0e1012;
+
+  --line: #1f2226;
+  --line2: #2a2e33;
+  --line3: #3a3f45;
+
+  --tx0: #e8eaec;
+  --tx1: #c9ced3;
+  --tx2: #9aa1a8;
+  --tx3: #6d747c;
+  --tx4: #575e66;
+
+  --grn: #5cb27a;
+  --grn2: #4ea76b;
+  --grn3: #6fa383;
+  --grnbd: #2e5a40;
+  --grnbg: #14261b;
+
+  --amb: #c99a3f;
+  --amb2: #e0c077;
+  --ambbd: #6e5320;
+  --ambbg: #221c0e;
+  --ambbg2: #2a2210;
+
+  --red: #d4604a;
+  --red2: #c25340;
+  --redbd: #6e3427;
+  --redbg: #261311;
+
+  --blu: #8ab4f8;
+  --blu2: #aecbfa;
+  --blu3: #6b89b3;
+  --replybg: #1c2836;
+}
+
+/* Base reset — deliberately tiny; component styling belongs with components. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg0);
+  color: var(--tx0);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Machine rows — timeline, receipts, provenance — are monospace by rule. */
+.atr-mono {
+  font-family: var(--font-mono);
+}
+
+.atr-label {
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx3);
+}
+
+/* biome-ignore-start lint/complexity/noImportantStyles: a reduced-motion opt-out must beat every component animation, by design */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* biome-ignore-end lint/complexity/noImportantStyles: end reduced-motion block */
