@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createRealtimeClient,
+  memoryWatermarks,
   type RealtimeClient,
   type RoomEventEnvelope,
   type ServerFrame,
@@ -159,6 +160,93 @@ describe('subscribe and catch up', () => {
     });
     expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 2 });
   });
+
+  /**
+   * The r1 blocking finding, from the client's side.
+   *
+   * The server used to compute `more` from page fullness, so a partial page
+   * delivered during concurrent writes said `more: false` while `to < head`.
+   * Round 1's client did `if (frame.more) requestSince(...)` and therefore
+   * stopped — permanently, if the burst had ended and no live event was coming
+   * to reveal the hole. This frame is exactly that: the r1 server's output.
+   *
+   * Against the r1 client this test fails on the first assertion, because no
+   * second `since` is ever sent.
+   */
+  it('asks again when the server says “no more” but its own cursor is behind the head', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 5, seenSeq: 0 });
+    const before = latest().framesOfType('since').length;
+
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 2,
+      head: 5,
+      // The lie r1's arithmetic produced: a short page during concurrent
+      // writes, reported as "you are caught up".
+      more: false,
+      entries: [messageEvent(1, 'a'), messageEvent(2, 'b')],
+    });
+
+    expect(latest().framesOfType('since').length).toBe(before + 1);
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 2 });
+
+    // And the loop terminates when the cursor actually reaches the head.
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 2,
+      to: 5,
+      head: 5,
+      more: false,
+      entries: [messageEvent(3, 'c'), messageEvent(4, 'd'), messageEvent(5, 'e')],
+    });
+    expect(latest().framesOfType('since').length).toBe(before + 1);
+    expect(client.lastSeq(ROOM)).toBe(5);
+  });
+
+  it('gives up loudly rather than spinning when catch-up makes no progress', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 9, seenSeq: 0 });
+    // A server that keeps naming a head it will not send: every round is a
+    // request that comes back empty. The loop must not be infinite.
+    for (let round = 0; round < 20; round += 1) {
+      latest().deliver({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 0,
+        head: 9,
+        more: true,
+        entries: [],
+      });
+    }
+    expect(latest().framesOfType('since').length).toBeLessThanOrEqual(10);
+    expect(errors.some((message) => message.includes('stalled'))).toBe(true);
+  });
+
+  it('resumes from a durable watermark rather than replaying the room', async () => {
+    const marks = memoryWatermarks();
+    marks.write(ROOM, 7);
+    const resumed = createRealtimeClient({
+      userId: ME,
+      url: 'ws://test/ws',
+      reconnect: false,
+      watermarks: marks,
+      socketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    await resumed.connect();
+    latest().open();
+    resumed.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 9, seenSeq: 0 });
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 7 });
+  });
 });
 
 describe('the cursor is the only thing that decides', () => {
@@ -262,6 +350,61 @@ describe('reconnect', () => {
     expect(sockets).toHaveLength(1);
     expect(client.status()).toBe('closed');
   });
+
+  /**
+   * r1 polish: presence, typing and the in-flight command map were all left
+   * intact across a drop. Each is a statement about a socket that no longer
+   * exists — a room stays full of people who never left, a typing indicator
+   * never stops, and the map grows one unanswerable entry per dropped send.
+   */
+  it('forgets presence, typing and in-flight commands when the socket drops', async () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver({
+      type: 'presence',
+      roomId: ROOM,
+      userId: 'user-other',
+      state: 'online',
+      at: '2026-07-31T00:00:00.000Z',
+    });
+    latest().deliver({
+      type: 'typing',
+      roomId: ROOM,
+      userId: 'user-other',
+      typing: true,
+      at: '2026-07-31T00:00:00.000Z',
+    });
+    client.sendMessage(ROOM, 'in flight when the wire died');
+    expect(client.room(ROOM).presence).toEqual({ 'user-other': 'online' });
+    expect(client.room(ROOM).typing).toEqual(['user-other']);
+
+    latest().drop();
+
+    expect(client.room(ROOM).presence).toEqual({});
+    expect(client.room(ROOM).typing).toEqual([]);
+    expect(client.room(ROOM).subscribed).toBe(false);
+    // The optimistic row is kept — nobody should have to retype a message
+    // because of a network blip — but it is honest about not having landed,
+    // and about being safe to send again.
+    const pending = client.room(ROOM).pending[0];
+    expect(pending?.status).toBe('failed');
+    expect(pending?.retryable).toBe(true);
+    expect(pending?.body).toBe('in flight when the wire died');
+
+    // And a late ack for the dead socket's command cannot resurrect anything.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    latest().open();
+    latest().deliver({
+      type: 'ack',
+      commandId: 'c1',
+      roomId: ROOM,
+      seq: 1,
+      roomSeq: 1,
+      eventId: 'e1',
+      issues: [],
+    });
+    expect(client.room(ROOM).pending[0]?.status).toBe('failed');
+  });
 });
 
 describe('optimism is limited to your own message row', () => {
@@ -316,7 +459,25 @@ describe('optimism is limited to your own message row', () => {
     });
     const [pending] = client.room(ROOM).pending;
     expect(pending).toMatchObject({ status: 'failed', body: 'this will be refused' });
+    // A refusal is not a retry. Offering one here would invite a client to
+    // hammer a command that will be refused every time.
+    expect(pending?.retryable).toBe(false);
     expect(errors.at(-1)).toContain('not_a_member');
+  });
+
+  it('marks a busy-ledger send retryable rather than refused', () => {
+    client.sendMessage(ROOM, 'the ledger was busy');
+    const commandId = latest().sent.find((f) => f.type === 'command')?.commandId as string;
+    latest().deliver({
+      type: 'nack',
+      commandId,
+      // The server's mapping of SQLSTATE 55P03/57014 — nothing was written, and
+      // the identical frame is the right thing to send again (r1 polish).
+      code: 'retry',
+      message: 'the ledger was busy (SQLSTATE 55P03); nothing was written',
+    });
+    const [pending] = client.room(ROOM).pending;
+    expect(pending).toMatchObject({ status: 'failed', retryable: true });
   });
 
   it('never renders anything semantic optimistically', () => {

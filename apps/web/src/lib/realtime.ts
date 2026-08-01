@@ -17,6 +17,15 @@ import { resolveWsUrl } from './ws-url.js';
  *    both are answered the same way: ask for the gap and apply it in order.
  *    Nothing is ever applied out of order, and nothing is applied twice.
  *
+ *    Catch-up is a **loop**, not a call. The condition to keep going is
+ *    `lastSeq < head` — never "was that page full?", and never the server's
+ *    word for it alone. #22's r1 gauntlet found the server computing `more`
+ *    from page fullness, which reports "caught up" during concurrent writes;
+ *    a client that trusted one frame stopped there and lost the tail silently.
+ *    The server's arithmetic is fixed too, but this client no longer depends on
+ *    it: it asks again while its own cursor is behind the head it was told,
+ *    whatever `more` says.
+ *
  * 3. **Optimistic about your own message row, and nothing else.** A message you
  *    just typed appears immediately, marked `pending`, matched back to the
  *    server's event by `clientMessageId`. Every*thing* semantic — a proposal
@@ -97,6 +106,88 @@ export interface PendingMessage {
   at: string;
   status: 'pending' | 'failed';
   error?: string;
+  /**
+   * Whether sending the identical frame again is a sensible thing to offer.
+   *
+   * True for a busy ledger (the server's `retry` nack) and for a socket that
+   * dropped before answering; false for a refusal that will refuse again.
+   * `clientMessageId` is an idempotency key, so a retry that turns out to have
+   * been unnecessary collapses into the message that already landed.
+   */
+  retryable?: boolean;
+}
+
+/**
+ * Where the per-room catch-up cursor is written down.
+ *
+ * The recovery loop needs a cursor that outlives any one frame and any one
+ * socket, because "I am caught up" must never rest on a single reply. In memory
+ * is enough for a dropped socket — this client object survives that — and the
+ * seam exists for the case it does not: an app that caches a room's events
+ * across a page load can hand in a store backed by the same lifetime, and
+ * catch-up resumes from the cursor instead of replaying the room.
+ *
+ * The default is deliberately in-memory. This client keeps history in a plain
+ * array, so a watermark that outlived the events would resume past history the
+ * timeline no longer has — an empty room that believes it is up to date. Pair a
+ * durable store with a durable event cache, or not at all.
+ */
+export interface WatermarkStore {
+  read: (roomId: string) => number;
+  write: (roomId: string, roomSeq: number) => void;
+}
+
+/** The default: lives exactly as long as the client does. */
+export function memoryWatermarks(): WatermarkStore {
+  const marks = new Map<string, number>();
+  return {
+    read: (roomId) => marks.get(roomId) ?? 0,
+    write: (roomId, roomSeq) => {
+      marks.set(roomId, Math.max(marks.get(roomId) ?? 0, roomSeq));
+    },
+  };
+}
+
+/**
+ * A `localStorage`-backed store, for an app that also persists the events.
+ *
+ * Not the default, and not used anywhere yet — see the note on `WatermarkStore`
+ * for why pairing matters. Exported because the alternative is every caller
+ * writing this same twelve lines slightly differently.
+ */
+export function localStorageWatermarks(namespace: string): WatermarkStore {
+  const key = (roomId: string) => `atrium:watermark:${namespace}:${roomId}`;
+  const fallback = memoryWatermarks();
+  const storage = (): Storage | null => {
+    try {
+      return typeof localStorage === 'undefined' ? null : localStorage;
+    } catch {
+      // Private-mode and blocked-cookie browsers throw on *access*, not on use.
+      return null;
+    }
+  };
+  return {
+    read: (roomId) => {
+      const store = storage();
+      if (!store) return fallback.read(roomId);
+      const raw = Number(store.getItem(key(roomId)));
+      return Number.isSafeInteger(raw) && raw > 0 ? raw : 0;
+    },
+    write: (roomId, roomSeq) => {
+      const store = storage();
+      if (!store) {
+        fallback.write(roomId, roomSeq);
+        return;
+      }
+      try {
+        store.setItem(key(roomId), String(roomSeq));
+      } catch {
+        // Quota, or a storage that lies about being writable. The in-memory
+        // cursor is still correct for this session; losing the durable one
+        // costs a replay, not correctness.
+      }
+    },
+  };
 }
 
 export interface RoomView {
@@ -131,6 +222,16 @@ export interface RealtimeClientOptions {
   setTimeoutImpl?: (fn: () => void, ms: number) => unknown;
   clearTimeoutImpl?: (handle: unknown) => void;
   onError?: (message: string) => void;
+  /** Where the catch-up cursor is kept. In memory unless you say otherwise. */
+  watermarks?: WatermarkStore;
+  /**
+   * How many catch-up rounds may make no progress before the client stops
+   * asking. A loop with no floor is a loop that can spin against a server whose
+   * `head` names a position it will not send — so it gives up, loudly, instead
+   * of hammering. Reaching this is a bug somewhere; silence about it would be a
+   * second one.
+   */
+  maxStalledCatchups?: number;
 }
 
 export interface RealtimeClient {
@@ -154,6 +255,7 @@ export interface RealtimeClient {
 }
 
 const DEFAULT_RECONNECT = { initialDelayMs: 300, maxDelayMs: 10_000, factor: 2 };
+const DEFAULT_MAX_STALLED_CATCHUPS = 8;
 
 export function createRealtimeClient(options: RealtimeClientOptions): RealtimeClient {
   const now = options.now ?? (() => Date.now());
@@ -164,11 +266,16 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   const backoff =
     options.reconnect === false ? null : { ...DEFAULT_RECONNECT, ...options.reconnect };
 
+  const watermarks = options.watermarks ?? memoryWatermarks();
+  const maxStalledCatchups = options.maxStalledCatchups ?? DEFAULT_MAX_STALLED_CATCHUPS;
+
   const rooms = new Map<string, RoomView>();
   const changeListeners = new Set<(roomId: string, view: RoomView) => void>();
   const statusListeners = new Set<(status: ConnectionStatus) => void>();
   /** commandId → the pending own-message it optimistically rendered. */
   const inFlight = new Map<string, { roomId: string; clientMessageId: string }>();
+  /** Consecutive catch-up rounds that asked for a gap and got no closer to it. */
+  const stalled = new Map<string, number>();
 
   let socket: SocketLike | null = null;
   let status: ConnectionStatus = 'idle';
@@ -182,7 +289,10 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     if (!existing) {
       existing = {
         roomId,
-        lastSeq: 0,
+        // Seeded from the durable cursor. Zero with the default in-memory
+        // store, which is the honest answer for a client whose event list also
+        // starts empty.
+        lastSeq: watermarks.read(roomId),
         head: 0,
         seenSeq: 0,
         events: [],
@@ -261,6 +371,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     room.events.push(entry);
     room.lastSeq = entry.roomSeq;
     room.head = Math.max(room.head, entry.roomSeq);
+    // Written down as it is applied, never in advance: the cursor may only ever
+    // name a position whose event this client actually holds.
+    watermarks.write(entry.roomId, entry.roomSeq);
     reconcilePending(room, entry);
     changed(entry.roomId);
   }
@@ -308,10 +421,35 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         return;
       case 'catchup': {
         const room = view(frame.roomId);
-        room.head = frame.head;
+        const before = room.lastSeq;
+        // `max`, not assignment: a live event may already have carried this
+        // room past the head this page was read against, and a cursor that
+        // moved backwards would make the loop below ask for a gap that has
+        // already been filled.
+        room.head = Math.max(room.head, frame.head);
         for (const entry of frame.entries) applyEntry(entry);
-        // A truncated page is not "caught up". Ask again from where we got to.
-        if (frame.more) requestSince(frame.roomId);
+
+        // The loop condition is this client's own arithmetic: am I at the head
+        // I was told about? `more` is taken as a hint on top, not as the
+        // authority — r1's blocking finding was precisely a server saying
+        // `more: false` while `to < head`, and a client that believed it.
+        if (room.lastSeq < room.head || frame.more) {
+          const progressed = room.lastSeq > before;
+          const rounds = progressed ? 0 : (stalled.get(frame.roomId) ?? 0) + 1;
+          stalled.set(frame.roomId, rounds);
+          if (rounds >= maxStalledCatchups) {
+            // The server keeps naming a head it will not send. Stop asking and
+            // say so: an unbounded loop here would be a client hammering a room
+            // it can never finish, in silence.
+            fail(
+              `catch-up for room "${frame.roomId}" stalled at ${room.lastSeq} of ${room.head} after ${rounds} rounds with no progress`,
+            );
+          } else {
+            requestSince(frame.roomId);
+          }
+        } else {
+          stalled.delete(frame.roomId);
+        }
         changed(frame.roomId);
         return;
       }
@@ -333,6 +471,10 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
             // message the person has to retype from memory.
             item.status = 'failed';
             item.error = frame.message;
+            // `retry` means the ledger was busy and nothing was written — the
+            // one code for which sending the identical frame again is the right
+            // answer rather than a way to make things worse.
+            item.retryable = frame.code === 'retry';
           }
           changed(pending.roomId);
         }
@@ -367,6 +509,48 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     }
   }
 
+  /**
+   * Everything the dead socket was the only evidence for (r1 polish).
+   *
+   * Presence and typing are statements about *now*, made by a server this
+   * client can no longer hear: keeping them across a drop leaves a room full of
+   * people who are online because nobody was around to say they left, and a
+   * typing indicator that never stops. Both are re-established by the server
+   * after the resubscribe, so clearing them costs a flicker and buys a UI that
+   * is never confidently wrong.
+   *
+   * `inFlight` is the same argument about commands. The ack that would have
+   * retired each entry was on that socket, so every one of them is now
+   * unanswerable — and left in the map they would leak one entry per dropped
+   * send, forever, and silently swallow a `nack` if a command id were ever
+   * reused. The optimistic rows they point at are kept and marked retryable:
+   * the send may or may not have landed, `clientMessageId` makes finding out
+   * safe, and a message that vanished on a network blip is a message somebody
+   * has to retype.
+   *
+   * `lastSeq` and the events are *not* touched. Those are the durable half, and
+   * they are exactly what the catch-up loop resumes from.
+   */
+  function dropVolatileState(): void {
+    for (const [commandId, pending] of inFlight) {
+      const room = view(pending.roomId);
+      const item = room.pending.find((p) => p.clientMessageId === pending.clientMessageId);
+      if (item && item.status === 'pending') {
+        item.status = 'failed';
+        item.error = 'the connection dropped before the server answered';
+        item.retryable = true;
+      }
+      inFlight.delete(commandId);
+    }
+    for (const room of rooms.values()) {
+      room.subscribed = false;
+      room.presence = {};
+      room.typing = [];
+      stalled.delete(room.roomId);
+      changed(room.roomId);
+    }
+  }
+
   function attach(next: SocketLike): void {
     socket = next;
     next.onopen = () => {
@@ -394,7 +578,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     };
     next.onclose = () => {
       socket = null;
-      for (const room of rooms.values()) room.subscribed = false;
+      dropVolatileState();
       if (closedByUs || !backoff) {
         setStatus('closed');
         return;
@@ -438,6 +622,11 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       retryHandle = null;
       socket?.close(1000, 'client closing');
       socket = null;
+      // A deliberate close drops the same volatile state as an accidental one:
+      // "who is here" is no more knowable when we hung up than when the wire
+      // did. Some sockets deliver `onclose` for a local close and some do not,
+      // and this must not depend on which.
+      dropVolatileState();
       setStatus('closed');
     },
     status: () => status,
