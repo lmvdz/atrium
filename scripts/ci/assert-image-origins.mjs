@@ -41,14 +41,38 @@
  *   `lib/env.ts`: both the scheme-with-a-host and the host:port match.
  * - hard-coding any `wss://…` for a specific deployment: same match, and the
  *   reason it is refused is that one image has to run at any hostname.
+ *
+ * ## Which image, and why that is not a tag any more
+ *
+ * Round 1's gauntlet: this file used to read `ATRIUM_WEB_IMAGE`, a tag set in
+ * the job's `env:` block independently of the build, so it scanned whatever
+ * currently answered to a name. It now scans the **image ID**
+ * `record-built-images.mjs` captured immediately after `docker compose build`,
+ * and `assert-image-identity.mjs` separately asserts the containers are running
+ * that same ID. Built, scanned and running are one object rather than three
+ * things sharing a name. A missing manifest is an error here, not a fallback:
+ * falling back to a tag would restore exactly the gap this closes.
  */
 
+import { readFileSync } from 'node:fs';
 import { docker } from './compose.mjs';
+import { manifestPath } from './record-built-images.mjs';
 import { check, report } from './stack-client.mjs';
 
-const image = process.env.ATRIUM_WEB_IMAGE?.trim();
+const path = manifestPath();
+let image;
+try {
+  image = JSON.parse(readFileSync(path, 'utf8')).app?.id;
+} catch (error) {
+  console.error(
+    `::error::assert-image-origins: no readable image manifest at ${path}: ${error.message}`,
+  );
+  process.exit(2);
+}
 if (!image) {
-  console.error('::error::assert-image-origins: set ATRIUM_WEB_IMAGE to the built web image');
+  console.error(
+    `::error::assert-image-origins: ${path} records no \`app\` image ID; \`record-built-images.mjs\` runs right after the build and is what this scan reads`,
+  );
   process.exit(2);
 }
 

@@ -44,10 +44,26 @@
  * - `ATRIUM_WS_URL` regressing to a build-time constant: the URL asserted here
  *   is the deployment's, so a socket that only works against
  *   `ws://localhost:4000` fails.
+ * - the `welcome` frame carrying somebody else's session. The identity asserted
+ *   is `welcome.user.id` against the id Postgres holds for the address that
+ *   signed up — an answer the realtime server did not produce — plus a display
+ *   name that is unique per account rather than the constant `CI ws` round 1
+ *   found here.
+ *
+ * ## Which mutation actually reaches this file
+ *
+ * Not the shared-secret one. `docker-compose.yml` gives `app` and `server` one
+ * `BETTER_AUTH_SECRET`, and `assert-stack-config.mjs` compares them across the
+ * two running containers — so a stack where they diverge is red three steps
+ * before this file runs, and the mutation ledger records it under the check that
+ * genuinely fires. The mutation that gets this far is `handle /ws*` removed from
+ * `deploy/Caddyfile` (ledger case `no-ws-route`): every page still serves, the
+ * configuration is still production, and the upgrade lands on the Next app.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
 import { request as httpsRequest } from 'node:https';
+import { queryDatabase, sqlLiteral } from './compose.mjs';
 import { check, establishSession, mailpit, report, stackTarget } from './stack-client.mjs';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -199,6 +215,29 @@ const welcome = authenticated.frames
 check(
   welcome !== undefined,
   `the open socket sent no \`welcome\` frame (got: ${authenticated.frames.join(' | ') || 'nothing'})`,
+);
+/**
+ * Who the account actually is, asked of the database rather than of the socket.
+ *
+ * Round 1's gauntlet: the identity check compared `welcome.user.displayName`
+ * against `CI ws`, a constant. Two things fix that, and both are here because
+ * they answer different questions. The display name is now unique per account
+ * (`stack-client.mjs`), which makes the string worth comparing at all; and the
+ * **user id** is obtained straight from Postgres by the address that signed up,
+ * which is an identity the realtime server had no part in producing. A server
+ * that welcomed some other session — the two-sessions-crossed failure a shared
+ * secret makes possible — now has to agree with a row nobody asked it about.
+ */
+const expectedUserId = queryDatabase(
+  `select id from users where email = ${sqlLiteral(session.email)} limit 1`,
+);
+check(
+  expectedUserId !== null,
+  `no \`users\` row for ${session.email}; the signup that this socket's session came from did not land in the database`,
+);
+check(
+  welcome?.user?.id === expectedUserId,
+  `the socket welcomed user id ${welcome?.user?.id}, not the id Postgres has for the account that opened it (${expectedUserId})`,
 );
 check(
   welcome?.user?.displayName === session.displayName,

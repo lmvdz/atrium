@@ -474,7 +474,12 @@ jobs:
       ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml
       ATRIUM_STACK_DOMAIN: atrium.localhost
       ATRIUM_STACK_CA: ${{ github.workspace }}/caddy-root.crt
-      ATRIUM_WEB_IMAGE: atrium-ci-app
+      # Where this run writes down the image IDs `compose build` produced. There
+      # is deliberately no ATRIUM_WEB_IMAGE any more: a tag configured beside the
+      # build rather than derived from it is what let the scanner read an image
+      # nobody was running (round 1's gauntlet). The manifest binds built,
+      # scanned and running to one content-addressed identity.
+      ATRIUM_IMAGE_MANIFEST: ${{ github.workspace }}/built-images.json
 
     steps:
       - name: Checkout
@@ -512,11 +517,30 @@ jobs:
           ENVIRONMENT
           test -s .env
 
+      - name: Preflight the host before anything is built
+        # Routed here from #26 round 6, and the only check in this job that is
+        # about the *machine* rather than the stack. Docker engines before 28.0.0
+        # publish loopback-bound ports to any host that can route a packet here,
+        # so `127.0.0.1:8025` — mailpit, a store of live sign-in links — is not
+        # the containment the compose file claims; and a hostname matcher cannot
+        # substitute, because `Host` is written by the client. There is no
+        # Caddyfile and no compose file that closes it, so it is a prerequisite,
+        # checked before a single image is built.
+        run: node scripts/ci/assert-deploy-preflight.mjs
+
       - name: Build the images
         # From the shipped Dockerfiles, from a clean checkout. This is the step
         # that had silently been failing for everyone since `packages/ingest`
         # landed without its manifest being copied.
         run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml build
+
+      - name: Record the image IDs this run built
+        # Immediately after the build, and before anything runs or scans one.
+        # Tags are late-binding — `docker tag`, a registry pull, or a build that
+        # failed while the previous image kept answering to the name — so the
+        # three uses of "the image" in this job are bound to each other by ID
+        # from here on.
+        run: node scripts/ci/record-built-images.mjs
 
       - name: Bring the stack up
         # `--wait` blocks until every service is settled, and fails if one never
@@ -541,6 +565,9 @@ jobs:
 
       - name: Assert the stack is running the production configuration
         run: node scripts/ci/assert-stack-config.mjs
+
+      - name: Assert the stack runs exactly the images this run built
+        run: node scripts/ci/assert-image-identity.mjs
 
       - name: Assert no realtime origin is compiled into the web image
         run: node scripts/ci/assert-image-origins.mjs

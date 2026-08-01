@@ -48,6 +48,39 @@ export function inspect(id) {
   return JSON.parse(docker(['inspect', id]))[0];
 }
 
+/**
+ * One value out of the stack's own database, read without going through the app.
+ *
+ * The credentials come from the running `postgres` container rather than from
+ * this process's environment, for the same reason `assert-stack-config.mjs`
+ * reads configuration back out of containers: the point of asking the database
+ * directly is to get an answer that did not come from the thing under test, and
+ * an answer obtained with credentials the test supplied itself is one step less
+ * independent than it looks.
+ *
+ * `-tA` is tuples-only and unaligned, so the result is the value and nothing
+ * else. Returns null for no row.
+ *
+ * Values go in through `sqlLiteral`. Every caller here interpolates a string
+ * this repository generated, so the escaping is hygiene rather than a boundary —
+ * but a helper that invites concatenation is a helper somebody will hand a
+ * fixture name to.
+ */
+export function sqlLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+export function queryDatabase(sql, env = process.env) {
+  const postgres = psAll(env).find((container) => container.Service === 'postgres');
+  if (!postgres) throw new Error('the stack has no `postgres` container to query');
+  const { POSTGRES_USER = 'atrium', POSTGRES_DB = 'atrium' } = containerEnv(postgres.ID);
+  const output = compose(
+    ['exec', '-T', 'postgres', 'psql', '-U', POSTGRES_USER, '-d', POSTGRES_DB, '-tAc', sql],
+    { env },
+  ).trim();
+  return output === '' ? null : output;
+}
+
 /** A container's environment, as a map. */
 export function containerEnv(id) {
   const entries = inspect(id).Config?.Env ?? [];

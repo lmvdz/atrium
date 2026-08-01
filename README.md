@@ -96,20 +96,29 @@ images from the shipped Dockerfiles, brings up `docker-compose.yml` plus
 `docker-compose.mailpit.yml` (a mail catcher and nothing else), and asserts,
 over TLS through the shipped Caddyfile, on the published port:
 
+- the host qualifies at all — Docker Engine ≥ 28.0.0, default NAT, no network in
+  routed or `nat-unprotected` mode (`assert-deploy-preflight.mjs`), checked
+  before a single image is built;
 - every container healthy, none restarting, both one-shot jobs exited 0
   (`assert-stack-health.mjs`);
 - the running containers' own `NODE_ENV`, origins, hop count and mail transport
   are the production ones — read back with `docker inspect`, so the overlay
   cannot quietly turn this into a check on a development stack
   (`assert-stack-config.mjs`);
-- no realtime origin compiled into the web image (`assert-image-origins.mjs`);
+- `app`, `server` and `migrate` are running exactly the image **IDs** this run
+  built, recorded straight after the build (`record-built-images.mjs`,
+  `assert-image-identity.mjs`) — so built, scanned and running are one
+  content-addressed object rather than three uses of a tag;
+- no realtime origin compiled into that image (`assert-image-origins.mjs`, which
+  scans the recorded ID);
 - **a real page** returns 200 with the content only that page renders, HSTS is
   present, and `:80` redirects rather than serving (`assert-page-serves.mjs`);
 - signing up through the real form sends a verification mail over real SMTP, and
   the link in the message that arrived signs the account in
   (`assert-signup-verifies.mjs`);
-- an authenticated `wss://` upgrade completes and an unauthenticated one is
-  refused (`assert-ws-upgrade.mjs`);
+- an authenticated `wss://` upgrade completes, welcomes the user id Postgres
+  holds for that account, and an unauthenticated one is refused
+  (`assert-ws-upgrade.mjs`);
 - the sign-in limiter refuses a caller at its configured cap and lets a caller at
   a different address straight through (`assert-rate-limit.mjs`);
 - `docker compose down -v` leaves no container, volume or network
@@ -118,6 +127,23 @@ over TLS through the shipped Caddyfile, on the published port:
 Not a health endpoint, deliberately: `app` reported healthy for three rounds
 while 500ing, and a check that cannot tell those apart is the instrument that
 allowed it.
+
+**Docker Engine ≥ 28 is a hard deployment prerequisite, not a nicety.** Earlier
+engines insert their DNAT rules ahead of the filter chain, so a port published to
+`127.0.0.1` — mailpit's UI here, a store of live single-use sign-in links — is
+reachable from any host that can route a packet to the box, typically anything on
+the same L2 segment. A hostname matcher in the proxy is not a fix, because `Host`
+is a header the caller writes: a remote client sending `Host: localhost` matches
+whatever `localhost` was meant to protect. Nothing in this repository can close
+it, which is why it is a preflight rather than a configuration change.
+
+`node scripts/ci/deploy-mutation-ledger.mjs` is the receipt behind those claims,
+and since round 2 it runs the **real ordered job** — the stage list is parsed out
+of `ci.yml`'s `deploy` job, every case runs it from the top, and the stage that
+actually fires is what gets credited. A case whose declared check is not the one
+that fired fails the ledger, which is how three cases that had been crediting a
+later check came to name the earlier gate that really stops them. It also refuses
+to run if the job grows a stage no case names and no exemption explains.
 
 ### HTTPS is a boot condition, not a recommendation
 
@@ -648,15 +674,16 @@ zero tests exits 0 just like one that passed 315:
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. 20 pairs across 19 steps: the
-  ratchet's fetch of `origin/main`; both report resets, before the runs they
-  reset for; both report gates, after those runs; the migration's wait for
-  Postgres and the schema assertion's migration; the browser install and browser
-  check the Playwright suite needs, and the database migration without which
-  its two servers query tables that do not exist; and, in the `deploy` job, everything that
-  depends on a running stack — the boot's dependence on the image build, the
-  certificate copy's on the boot, four assertions' on that certificate, two
-  more on the boot, the image scan's on the build, and the teardown
+  prerequisite is in the same job *and earlier*. 25 pairs across 20 steps that
+  declare one: the ratchet's fetch of `origin/main`; both report resets, before
+  the runs they reset for; both report gates, after those runs; the migration's
+  wait for Postgres and the schema assertion's migration; the browser install and
+  browser check the Playwright suite needs, and the database migration without
+  which its two servers query tables that do not exist; and, in the `deploy` job,
+  everything that depends on a running stack — the boot's dependence on the image
+  build and on the host preflight, the certificate copy's on the boot, four
+  assertions' on that certificate, three more on the boot, the image record's on
+  the build, the identity and origin scans' on that record, and the teardown
   assertion's on the teardown. The count is derived —
   `PREREQUISITE_PAIRS.length`, printed by the self-test — because a hand-counted
   number in a receipt is how round 2 claimed 15 rules over an engine with 18.
@@ -708,7 +735,7 @@ zero tests exits 0 just like one that passed 315:
   job, and — self-referentially — `verify`, `e2e` and `deploy` still *containing*
   the steps that do the checking, each assert script named and each one's setup
   ordered before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 87
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 92
   mutated copies of the real workflow and additionally asserts that every one of
   the 23 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
@@ -717,7 +744,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 70 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 86 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

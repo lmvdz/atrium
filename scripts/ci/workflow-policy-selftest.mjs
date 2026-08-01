@@ -317,6 +317,31 @@ const PAIRS = {
     step: 'the stack boot',
     needs: 'the image build',
   },
+  bootNeedsPreflight: {
+    job: 'deploy',
+    step: 'the stack boot',
+    needs: 'the deployment preflight',
+  },
+  recordNeedsBuild: {
+    job: 'deploy',
+    step: 'the image record',
+    needs: 'the image build',
+  },
+  identityNeedsRecord: {
+    job: 'deploy',
+    step: 'the image-identity assertion',
+    needs: 'the image record',
+  },
+  identityNeedsBoot: {
+    job: 'deploy',
+    step: 'the image-identity assertion',
+    needs: 'the stack boot',
+  },
+  imageOriginsNeedsRecord: {
+    job: 'deploy',
+    step: 'the compiled-origin assertion',
+    needs: 'the image record',
+  },
   caNeedsBoot: {
     job: 'deploy',
     step: 'the certificate-authority copy',
@@ -937,6 +962,52 @@ const MUTATIONS = [
     rule: 'required-step-prerequisites',
     mutate: (s) => moveStepAfter(s, 'Build the images', 'Bring the stack up'),
     pair: PAIRS.bootNeedsBuild,
+  },
+  {
+    name: 'the host preflighted after the ports it refuses are already published',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(s, 'Preflight the host before anything is built', 'Bring the stack up'),
+    pair: PAIRS.bootNeedsPreflight,
+  },
+  {
+    name: 'the image IDs recorded before the build that produces them',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => moveStepAfter(s, 'Build the images', 'Record the image IDs this run built'),
+    pair: PAIRS.recordNeedsBuild,
+  },
+  {
+    name: 'the running images compared against a manifest written afterwards',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Record the image IDs this run built',
+        'Assert the stack runs exactly the images this run built',
+      ),
+    pair: PAIRS.identityNeedsRecord,
+  },
+  {
+    name: 'the image identity of containers nothing has started yet',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Bring the stack up',
+        'Assert the stack runs exactly the images this run built',
+      ),
+    pair: PAIRS.identityNeedsBoot,
+  },
+  {
+    name: 'the bundle scanned with nothing yet saying which image ID to scan',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Record the image IDs this run built',
+        'Assert no realtime origin is compiled into the web image',
+      ),
+    pair: PAIRS.imageOriginsNeedsRecord,
   },
   {
     name: 'the image scanned before it is built, so it reports on the last run’s bundle',

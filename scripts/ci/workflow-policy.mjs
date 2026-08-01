@@ -365,6 +365,8 @@ function dockerCompose(describes, predicate) {
 }
 
 const BUILDS_IMAGES = dockerCompose('`docker compose … build`', (words) => words.includes('build'));
+const PREFLIGHTS_HOST = invokes('assert-deploy-preflight\\.mjs');
+const RECORDS_IMAGES = invokes('record-built-images\\.mjs');
 const STARTS_STACK = dockerCompose(
   '`docker compose … up -d --wait`',
   // `--wait` is part of the claim, not decoration: `up -d` alone returns the
@@ -573,8 +575,26 @@ const REQUIRED_STEPS = {
   deploy: [
     {
       rule: 'required-job-steps',
+      what: 'the deployment preflight',
+      test: PREFLIGHTS_HOST,
+    },
+    {
+      rule: 'required-job-steps',
       what: 'the image build',
       test: BUILDS_IMAGES,
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the image record',
+      test: RECORDS_IMAGES,
+      requires: [
+        {
+          what: 'the image build',
+          test: BUILDS_IMAGES,
+          because:
+            'it resolves each service image name to the ID that answers to it *now*; run before the build it records the previous run’s image, and every identity assertion afterwards then agrees with a stale answer',
+        },
+      ],
     },
     {
       rule: 'required-job-steps',
@@ -586,6 +606,12 @@ const REQUIRED_STEPS = {
           test: BUILDS_IMAGES,
           because:
             'compose would otherwise start whatever image happens to be in the local cache from a previous run — which is how a build that has been failing since a workspace package landed goes unnoticed for three rounds',
+        },
+        {
+          what: 'the deployment preflight',
+          test: PREFLIGHTS_HOST,
+          because:
+            'it refuses a host whose engine publishes loopback-bound ports off-box, and the whole value of refusing is refusing *before* the stack is up: after `up` the mailpit UI this deployment documents as unreachable has already been listening on a host where it is not',
         },
       ],
     },
@@ -630,6 +656,25 @@ const REQUIRED_STEPS = {
     },
     {
       rule: 'required-job-steps',
+      what: 'the image-identity assertion',
+      test: invokes('assert-image-identity\\.mjs'),
+      requires: [
+        {
+          what: 'the image record',
+          test: RECORDS_IMAGES,
+          because:
+            'it compares the running containers against the IDs that step wrote down; with no manifest there is nothing to compare to, and the binding between built, scanned and running is back to a shared tag',
+        },
+        {
+          what: 'the stack boot',
+          test: STARTS_STACK,
+          because:
+            'the running side of the comparison is `docker inspect` on containers; before the boot there are none, and "no container is running the wrong image" is true of an empty stack',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
       what: 'the compiled-origin assertion',
       test: invokes('assert-image-origins\\.mjs'),
       requires: [
@@ -638,6 +683,12 @@ const REQUIRED_STEPS = {
           test: BUILDS_IMAGES,
           because:
             'it scans the image that was just built; against a stale one it reports on a bundle nobody is about to deploy',
+        },
+        {
+          what: 'the image record',
+          test: RECORDS_IMAGES,
+          because:
+            'the scan reads the image *ID* that step captured rather than a tag anybody can re-point, so without it there is nothing naming which image to scan — which is precisely how it came to scan one nobody was running',
         },
       ],
     },

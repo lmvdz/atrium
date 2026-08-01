@@ -292,7 +292,18 @@ export function uniqueEmail(prefix) {
 export async function establishSession(target, mail, prefix) {
   const jar = new Jar();
   const email = uniqueEmail(prefix);
-  const displayName = `CI ${prefix}`;
+  /**
+   * The display name carries the address's random suffix.
+   *
+   * Round 1's gauntlet, on the websocket check: it asserted the socket welcomed
+   * `CI ws`, which is the same string on every run and for every account this
+   * helper has ever made. A server that welcomed the *wrong* session would have
+   * satisfied it, and so would one that welcomed a leftover account from an
+   * earlier run against the same database. The name is now unique per account,
+   * so "the socket welcomed the account that opened it" is a claim about this
+   * account rather than about a constant.
+   */
+  const displayName = `CI ${prefix} ${email.slice(prefix.length + 1, email.indexOf('@'))}`;
   const password = 'correct-horse-battery-staple';
 
   const form = await follow(target, '/sign-up', { jar });

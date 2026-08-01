@@ -30,7 +30,9 @@ import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
+import { checkHostNetworkPolicy } from './assert-deploy-preflight.mjs';
 import { checkRatchet } from './assert-floor-ratchet.mjs';
+import { checkImageIdentity } from './assert-image-identity.mjs';
 import { checkPlaywrightReport } from './assert-playwright-report.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
@@ -833,7 +835,158 @@ const CASES = [
     run: () => expectGateExit({}, 1, 'an empty needs object'),
     expect: 'clean',
   },
+
+  // ---- the deployment preflight (#40 r2, routed from #26 r6) --------------
+  //
+  // The verdict is separated from the observing precisely so it can be put
+  // through engines this runner does not have. An engine cannot be downgraded on
+  // a GitHub runner, and "we could not test it" is how a prerequisite becomes a
+  // paragraph nobody has ever seen fail.
+  {
+    name: 'a Docker engine old enough to publish loopback ports off-box',
+    run: () => checkHostNetworkPolicy({ engineVersion: '27.5.1' }),
+    expect: /27\.5\.1/,
+  },
+  {
+    name: 'the last engine before the fix, which is still before the fix',
+    run: () => checkHostNetworkPolicy({ engineVersion: '27.99.99' }),
+    expect: /publishes loopback-bound ports/,
+  },
+  {
+    name: 'the first engine that filters is accepted',
+    run: () => checkHostNetworkPolicy({ engineVersion: '28.0.0' }),
+    expect: 'clean',
+  },
+  {
+    name: 'a prerelease of a new-enough engine is accepted',
+    run: () => checkHostNetworkPolicy({ engineVersion: '29.3.0-rc.1' }),
+    expect: 'clean',
+  },
+  {
+    name: 'an engine that will not say what it is',
+    run: () => checkHostNetworkPolicy({ engineVersion: '' }),
+    expect: /not a version/,
+  },
+  {
+    name: 'a new engine with the daemon default bridge switched to routed',
+    run: () =>
+      checkHostNetworkPolicy({
+        engineVersion: '29.3.0',
+        defaultBridgeOptions: { 'com.docker.network.bridge.gateway_mode_ipv4': 'routed' },
+      }),
+    expect: /default bridge runs with .*gateway_mode_ipv4=routed/,
+  },
+  {
+    name: 'NAT with the filtering explicitly turned off is not NAT',
+    run: () =>
+      checkHostNetworkPolicy({
+        engineVersion: '29.3.0',
+        defaultBridgeOptions: { 'com.docker.network.bridge.gateway_mode_ipv6': 'nat-unprotected' },
+      }),
+    expect: /gateway_mode_ipv6=nat-unprotected/,
+  },
+  {
+    name: "this project's own network switched to routed by an overlay",
+    run: () =>
+      checkHostNetworkPolicy({
+        engineVersion: '29.3.0',
+        composeNetworks: {
+          default: { driver_opts: { 'com.docker.network.bridge.gateway_mode_ipv4': 'routed' } },
+        },
+      }),
+    expect: /compose network `default`/,
+  },
+  {
+    name: 'a stack that simply took the default gateway mode is accepted',
+    run: () =>
+      checkHostNetworkPolicy({
+        engineVersion: '29.3.0',
+        defaultBridgeOptions: { 'com.docker.network.bridge.enable_icc': 'true' },
+        composeNetworks: { default: { ipam: { config: [{ subnet: '172.28.0.0/16' }] } } },
+      }),
+    expect: 'clean',
+  },
+  {
+    name: 'a gateway mode written out as `nat` is the default written out',
+    run: () =>
+      checkHostNetworkPolicy({
+        engineVersion: '29.3.0',
+        composeNetworks: {
+          default: { driver_opts: { 'com.docker.network.bridge.gateway_mode_ipv4': 'nat' } },
+        },
+      }),
+    expect: 'clean',
+  },
+
+  // ---- built, scanned and running are one object (#40 r2) -----------------
+  {
+    name: 'a container running an image this run did not build',
+    run: () =>
+      checkImageIdentity(builtManifest(), {
+        ...runningImages(),
+        app: { id: `sha256:${'b'.repeat(64)}`, image: 'atrium-ci-app' },
+      }),
+    expect: /`app` is running image/,
+  },
+  {
+    name: 'the one-shot that applies the schema, running last week’s image',
+    run: () =>
+      checkImageIdentity(builtManifest(), {
+        ...runningImages(),
+        migrate: { id: `sha256:${'c'.repeat(64)}`, image: 'atrium-ci-migrate' },
+      }),
+    expect: /`migrate` is running image/,
+  },
+  {
+    name: 'a service the manifest never recorded',
+    run: () => {
+      const manifest = builtManifest();
+      delete manifest.server;
+      return checkImageIdentity(manifest, runningImages());
+    },
+    expect: /records no image for `server`/,
+  },
+  {
+    name: 'a service that is not running at all',
+    run: () => {
+      const running = runningImages();
+      delete running.app;
+      return checkImageIdentity(builtManifest(), running);
+    },
+    expect: /no `app` container to compare/,
+  },
+  {
+    name: 'an image recorded but never asserted on',
+    run: () =>
+      checkImageIdentity(
+        {
+          ...builtManifest(),
+          worker: { id: `sha256:${'d'.repeat(64)}`, image: 'atrium-ci-worker' },
+        },
+        runningImages(),
+      ),
+    expect: /which is not one of the services whose image identity is asserted/,
+  },
+  {
+    name: 'the stack running exactly what was built',
+    run: () => checkImageIdentity(builtManifest(), runningImages()),
+    expect: 'clean',
+  },
 ];
+
+/** Three built images, by ID, the way `record-built-images.mjs` writes them. */
+function builtManifest() {
+  return {
+    app: { id: `sha256:${'1'.repeat(64)}`, image: 'atrium-ci-app' },
+    server: { id: `sha256:${'2'.repeat(64)}`, image: 'atrium-ci-server' },
+    migrate: { id: `sha256:${'3'.repeat(64)}`, image: 'atrium-ci-migrate' },
+  };
+}
+
+/** The same three, as `docker inspect` reports the running containers. */
+function runningImages() {
+  return builtManifest();
+}
 
 /** The fixture tables, expanded into ordinary cases. */
 function scannerCases() {
