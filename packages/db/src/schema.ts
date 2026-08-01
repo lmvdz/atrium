@@ -713,8 +713,17 @@ export const attentionItems = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    /** Which table `subject_id` names. @atrium/core's `AttentionSubjectKind`. */
-    subjectKind: attentionSubjectKind('subject_kind').notNull().default('object'),
+    /**
+     * Which table `subject_id` names. @atrium/core's `AttentionSubjectKind`.
+     *
+     * No column default. The migration uses one to backfill the rows that
+     * predate this column and then drops it: a default here would let a writer
+     * omit the discriminator and land on `'object'`, which for a proposal
+     * subject means pointing the object edge at a proposal id. The FK would
+     * refuse it — but a refusal at the right column beats a refusal three
+     * inferences away.
+     */
+    subjectKind: attentionSubjectKind('subject_kind').notNull(),
     /** The accepted object, or the staged proposal — see `subject_kind`. */
     subjectId: uuid('subject_id').notNull(),
     /** Non-null exactly when `subject_kind = 'object'`. Carries that edge's FK. */

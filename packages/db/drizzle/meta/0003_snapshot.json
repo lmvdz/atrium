@@ -274,8 +274,7 @@
           "type": "attention_subject_kind",
           "typeSchema": "public",
           "primaryKey": false,
-          "notNull": true,
-          "default": "'object'"
+          "notNull": true
         },
         "subject_id": {
           "name": "subject_id",

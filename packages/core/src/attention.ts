@@ -44,7 +44,13 @@ export const AttentionItem = z.object({
   userId: Id,
   /** The accepted object, or the staged proposal — see `subjectKind`. */
   objectId: Id,
-  subjectKind: AttentionSubjectKind.default('object'),
+  /**
+   * No default, deliberately. With #22's polymorphic column behind it, an item
+   * that silently defaults to `'object'` points a foreign key at a proposal id
+   * — and the caller who forgot the field gets a refusal from the database
+   * instead of an answer from the schema.
+   */
+  subjectKind: AttentionSubjectKind,
   class: AttentionClass,
   /** Why this person specifically. Never empty. */
   rationale: z.string().min(1),

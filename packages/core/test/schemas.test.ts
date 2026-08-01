@@ -173,11 +173,30 @@ describe('attention item schema', () => {
       roomId: ROOM,
       userId: ALICE,
       objectId: 'obj_1',
+      subjectKind: 'object',
       class: 'owned_commitment',
       createdAt: at(1),
     };
     expect(AttentionItem.safeParse({ ...base, rationale: '' }).success).toBe(false);
     expect(AttentionItem.safeParse(base).success).toBe(false);
     expect(AttentionItem.parse({ ...base, rationale: 'you own it' }).status).toBe('pending');
+  });
+
+  it('will not guess what an item is about', () => {
+    // No default on `subjectKind`. With #22's polymorphic column behind it, an
+    // item that silently defaulted to `'object'` would aim the object foreign
+    // key at a proposal id — so the omission is an error here rather than a
+    // constraint violation two layers down.
+    const withoutKind = {
+      id: 'attn_1',
+      roomId: ROOM,
+      userId: ALICE,
+      objectId: 'prop_1',
+      class: 'needs_decision',
+      rationale: 'you asked for this call',
+      createdAt: at(1),
+    };
+    expect(AttentionItem.safeParse(withoutKind).success).toBe(false);
+    expect(AttentionItem.safeParse({ ...withoutKind, subjectKind: 'proposal' }).success).toBe(true);
   });
 });

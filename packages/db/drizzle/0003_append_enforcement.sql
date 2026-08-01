@@ -265,10 +265,18 @@ CREATE TRIGGER "memberships_seen_seq_within_room_head"
 CREATE TYPE "public"."attention_subject_kind" AS ENUM('object', 'proposal');--> statement-breakpoint
 ALTER TABLE "attention_items" DROP CONSTRAINT "attention_items_object_same_room_fk";--> statement-breakpoint
 DROP INDEX "attention_items_user_object_class_key";--> statement-breakpoint
+-- The default exists for exactly the length of the backfill. Every row that
+-- predates this column points at an accepted object, because that is all the
+-- old foreign key allowed; every row after it must say which kind it means. A
+-- column default here would let a writer omit the discriminator and land on
+-- `'object'` — which, for a proposal subject, aims the object edge at a
+-- proposal id. The FK refuses that, but a refusal at the right column beats a
+-- refusal three inferences away.
 ALTER TABLE "attention_items" ADD COLUMN "subject_kind" "attention_subject_kind" DEFAULT 'object' NOT NULL;--> statement-breakpoint
 ALTER TABLE "attention_items" ADD COLUMN "subject_id" uuid;--> statement-breakpoint
 UPDATE "attention_items" SET "subject_id" = "object_id";--> statement-breakpoint
 ALTER TABLE "attention_items" ALTER COLUMN "subject_id" SET NOT NULL;--> statement-breakpoint
+ALTER TABLE "attention_items" ALTER COLUMN "subject_kind" DROP DEFAULT;--> statement-breakpoint
 ALTER TABLE "attention_items" DROP COLUMN "object_id";--> statement-breakpoint
 ALTER TABLE "attention_items" ADD COLUMN "subject_object_id" uuid GENERATED ALWAYS AS (CASE WHEN "subject_kind" = 'object' THEN "subject_id" END) STORED;--> statement-breakpoint
 ALTER TABLE "attention_items" ADD COLUMN "subject_proposal_id" uuid GENERATED ALWAYS AS (CASE WHEN "subject_kind" = 'proposal' THEN "subject_id" END) STORED;--> statement-breakpoint
