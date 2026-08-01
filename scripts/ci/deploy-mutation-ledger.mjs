@@ -116,16 +116,29 @@ const WORKFLOW = process.env.CI_WORKFLOW ?? '.github/workflows/ci.yml';
  * deploy job without a line here would otherwise be a stage the ledger silently
  * never runs, and every case would keep passing while the job it claims to
  * mirror had grown a check nobody mutated.
+ *
+ * `record-built-images` gets a kind of its own rather than falling into the
+ * generic `script` bucket, and that distinction is load-bearing rather than
+ * tidy: it decides whether the stage sees the mutation overlay. The first run
+ * of this file had it in the generic bucket, so `swapped-image` recorded the
+ * doppelganger as "what this run built" and the identity assertion compared the
+ * mutated stack against a manifest of the mutated stack — and passed. A ledger
+ * case that goes green because the check was handed the wrong baseline is the
+ * exact failure this whole file exists to detect, and it took a full run to
+ * find it. See `runStage`.
  */
+const RECORDS_WHAT_WAS_BUILT = 'record-built-images';
+
 function classify(run) {
   const script = /node\s+scripts\/ci\/([a-z0-9-]+)\.mjs/.exec(run);
   if (script) {
     const name = script[1];
-    return {
-      kind: name.startsWith('assert-') ? 'assertion' : 'script',
-      id: name,
-      script: `scripts/ci/${name}.mjs`,
-    };
+    const kind = name.startsWith('assert-')
+      ? 'assertion'
+      : name === RECORDS_WHAT_WAS_BUILT
+        ? 'record'
+        : 'script';
+    return { kind, id: name, script: `scripts/ci/${name}.mjs` };
   }
   if (/\bdocker\s+compose\b/.test(run)) {
     if (/\bbuild\b/.test(run)) return { kind: 'build', id: 'the image build' };
@@ -528,6 +541,7 @@ function runStage(stage, entry, context) {
       return attempt(() =>
         compose(stageFiles, entry.teardownFlags ?? ['down', '-v', '--remove-orphans'], { env }),
       );
+    case 'record':
     case 'script':
     case 'assertion':
       return attempt(() =>
@@ -636,6 +650,14 @@ function lastLines(text, count) {
   if (annotations.length > 0) {
     return annotations.slice(0, count).join(' | ').replaceAll('::error::', '').slice(0, 700);
   }
+  // A script that *threw* rather than reporting — `assert-signup-verifies`
+  // waiting for mail that never arrives is the one that does — writes a stack
+  // trace, whose last lines are node's own frames. The thrown message is the
+  // line worth reading.
+  const thrown = String(text)
+    .split('\n')
+    .filter((line) => /^[A-Za-z]*Error: /.test(line.trim()));
+  if (thrown.length > 0) return thrown.slice(0, count).join(' | ').slice(0, 700);
   return String(text)
     .split('\n')
     .filter((line) => line.trim() !== '' && !line.startsWith('::group'))
@@ -706,6 +728,38 @@ const coverage = checkCoverage();
 if (coverage.length > 0) {
   for (const problem of coverage) console.error(`::error::deploy-mutation-ledger: ${problem}`);
   process.exit(1);
+}
+
+/**
+ * What this tree built, written down once, before any case runs.
+ *
+ * The pipeline records it too — that is a stage of the real job — but a case's
+ * `prepare` hook runs *before* the pipeline and `swapped-image` needs the
+ * manifest to build its doppelganger from. Leaving that to whichever earlier
+ * case happened to write the file makes a case's result depend on the ones
+ * before it, which is the shape of every "green because of the order" defect
+ * this file is for. So it is written here, from the shipped files, and every
+ * case starts from the same answer.
+ */
+const recorder = PIPELINE.find((stage) => stage.kind === 'record');
+if (recorder) {
+  const recorded = attempt(() =>
+    execFileSync('node', [recorder.script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ATRIUM_COMPOSE_PROJECT: project,
+        ATRIUM_COMPOSE_FILES: baseFiles.join(':'),
+        ATRIUM_IMAGE_MANIFEST: manifestFile,
+      },
+    }),
+  );
+  if (!recorded.ok) {
+    console.error(
+      `::error::deploy-mutation-ledger: could not record what this tree built — the images have to exist before the ledger runs. ${lastLines(recorded.output, 3)}`,
+    );
+    process.exit(2);
+  }
 }
 
 const selected = argv.length > 0 ? CASES.filter((entry) => argv.includes(entry.id)) : CASES;

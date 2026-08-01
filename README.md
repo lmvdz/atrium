@@ -12,7 +12,10 @@ their own responsibilities substantially faster than in Slack?
 
 ## Boot it
 
-Requires Node 22.12+, pnpm 10, and Docker.
+Requires Node 22.12+, pnpm 10, and Docker Engine 28.0.0+. The engine floor is a
+deployment prerequisite rather than a preference — see "the deployment is proved
+by a CI job" below, and `scripts/ci/assert-deploy-preflight.mjs`, which refuses
+to build against a host below it.
 
 ```bash
 cp .env.example .env      # required first — compose has no default secrets
