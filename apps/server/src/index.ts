@@ -26,12 +26,16 @@ async function main(): Promise<void> {
   // Redis, and there is no need for it: a commit is announced on a channel and
   // every instance reads the rows out of the ledger itself. A single-instance
   // deployment carries the bus too and simply never hears from anyone.
+  //
+  // The doorbell is rung by `atrium_append_core_event` rather than by this
+  // process (#22 r3), so the instance id goes to the *ledger*, which passes it
+  // to the function as the notification's origin. The bus only listens.
   const bus = createEventBus({ sql: database.sql, logger });
 
   // The live core state is a fold of the ledger, so it is rebuilt from the
   // ledger — before the socket opens, because a client that connected to a
   // half-hydrated server would be told a `head` the state does not yet reflect.
-  const ledger = createLedger({ db: database.db, logger, bus });
+  const ledger = createLedger({ db: database.db, logger, instanceId: bus.instanceId });
   await ledger.hydrate();
 
   const commands = createCommandService({

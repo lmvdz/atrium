@@ -1,18 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import {
+  type Actor,
   appendEvent,
-  type CoreEvent,
+  type AuthoredEvent,
   type CoreState,
   type EventOutcome,
   emptyState,
   foldEvents,
+  type ProvenanceMessage,
   serializeState,
+  type TrustedContext,
+  trustedContext,
 } from '@atrium/core';
-import { coreEvents, type Database } from '@atrium/db';
-import { and, asc, eq, gt, sql } from 'drizzle-orm';
-import type { EventBus } from './event-bus.js';
+import { coreEvents, type Database, messages } from '@atrium/db';
+import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
 import type { Logger } from './logger.js';
-import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
+import { declaredRoomId, isCoreEvent, provenanceMessageIds, RoomEvent } from './room-events.js';
 
 /**
  * The durable ledger, and the single writer in front of it.
@@ -58,21 +61,38 @@ import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
  * second writer degrades to "slower", never to "divergent". `UNIQUE(room_id,
  * room_seq)` is the last line under both.
  *
- * ## Why the lock is no longer merely cooperative (r1, major 1)
+ * ## The append function is the authorization boundary (r2 delta, blocking 2)
  *
- * Both critics said the same thing about round 1: everything above is a
- * convention between well-behaved callers. Any writer with the same database
- * role could `INSERT INTO core_events` directly and skip canonical minting, the
- * reducer, and gap-free assignment.
+ * Round 2 made the *path* structural — a `SECURITY DEFINER` function plus a
+ * trigger that reads its own call stack — and the delta gauntlet found that a
+ * structural path is not a boundary. The function was executable by `PUBLIC`,
+ * did no membership check, ran no reducer validation and emitted no doorbell, so
+ * calling it directly satisfied every guard round 2 had built and inserted a row
+ * in silence.
  *
- * So it is no longer possible. `drizzle/0003_append_enforcement.sql` adds
- * `atrium_append_core_event(...)` — which takes the lock, mints `room_seq`
- * under it and inserts — and a `BEFORE INSERT` trigger that refuses any insert
- * whose plpgsql call stack does not run through that function *and* whose
- * transaction does not actually hold the lock. `append` below calls the
- * procedure like every other caller must; there is no privileged path, and the
- * integration suite proves it by trying a direct insert as a superuser and
- * being refused.
+ * `drizzle/0004_trusted_actor_and_append_boundary.sql` is the answer and is the
+ * authority on it: `EXECUTE` is revoked from `PUBLIC` and granted to the app
+ * role; a human actor's membership is read `FOR SHARE` inside the function; the
+ * reducer's two rejection reasons — both properties of position — are enforced
+ * there in canonical `(at, id)` order under `COLLATE "C"`; and the notification
+ * is emitted inside, so no path can insert without ringing the bell. This file
+ * still does all of it too, because a boundary that only the outer layer checks
+ * and a boundary that only the inner layer checks are both one layer short.
+ *
+ * ## The actor is a column, and replay reads it back (#21)
+ *
+ * `CoreEvent` has no actor field and refuses a payload carrying one. The actor
+ * is stored as `actor_kind` / `actor_id` on the row, written by the transaction
+ * that assigns `room_seq`, and handed back to `foldEvents` as the trusted
+ * context — because replaying a payload under a different actor is replaying a
+ * different event.
+ *
+ * The second trusted column is the message window, and it is derived rather than
+ * remembered: `provenanceMessageIds` reads the cited ids out of the payload and
+ * both the live append and the replay load those bodies from `messages`, which
+ * is append-only substrate. That is what keeps live ≡ replay true across #21's
+ * receipt checks — a window the append had and the replay lacked would fold the
+ * same row two different ways.
  *
  * ## `seq` may gap. `room_seq` may not.
  *
@@ -187,6 +207,8 @@ export interface LedgerEntry {
   roomSeq: number;
   roomId: string;
   event: RoomEvent;
+  /** The trusted actor, read back from the row's own columns. Never the payload. */
+  actor: Actor;
 }
 
 export interface AppendResult extends LedgerEntry {
@@ -198,6 +220,8 @@ export interface AppendResult extends LedgerEntry {
 export interface AppendRequest<T extends RoomEvent = RoomEvent> {
   /** The room the caller was authorized for. Checked against the event's own. */
   roomId: string;
+  /** The trusted actor, derived from the authenticated session. Never a payload. */
+  actor: Actor;
   /**
    * Re-check the caller's right to write this room, **inside the append
    * transaction** (r1, major 4).
@@ -209,6 +233,11 @@ export interface AppendRequest<T extends RoomEvent = RoomEvent> {
    * transaction handle, after the ledger lock is taken and before anything is
    * minted; it must throw to refuse, and the throw takes the whole append with
    * it.
+   *
+   * As of r3 the append function refuses an unauthorized human actor on its own,
+   * so this is the outer half of two. It stays because it produces the error the
+   * client can act on, and because the two halves answer for different callers:
+   * this one for the command layer, that one for everybody else.
    */
   authorize?: (tx: Tx) => Promise<void>;
   /** Build the event once the ledger has assigned it an id and a timestamp. */
@@ -225,6 +254,8 @@ export interface AppendRequest<T extends RoomEvent = RoomEvent> {
 export interface ProjectionContext<T extends RoomEvent = RoomEvent> {
   tx: Tx;
   event: T;
+  /** The trusted actor this row was appended under — the projections' "who". */
+  actor: Actor;
   roomId: string;
   seq: number;
   roomSeq: number;
@@ -239,11 +270,12 @@ export interface LedgerOptions {
   db: Database;
   logger: Logger;
   /**
-   * Announce commits so other instances can fan them out. Optional: a ledger
-   * with no bus is a single-instance ledger, which is still correct — it just
-   * has nobody to tell.
+   * This process's identity, stamped onto every doorbell so an instance can
+   * ignore the echo of its own commits. Optional: with none, the notification
+   * carries a null origin, which no instance matches — so every instance folds,
+   * which is the safe direction to be wrong in.
    */
-  bus?: Pick<EventBus, 'announce'>;
+  instanceId?: string;
 }
 
 /** A `since` page, with the head it was read against. */
@@ -278,8 +310,11 @@ export interface Ledger {
   append: <T extends RoomEvent>(request: AppendRequest<T>) => Promise<AppendResult>;
   /**
    * Fold everything another instance committed since this one last looked, and
-   * hand back what was newly folded so the caller can fan it out locally. The
-   * cross-instance half of delivery; see `event-bus.ts`.
+   * hand back what was newly folded so the caller can fan it out locally.
+   *
+   * This is the **durable** delivery path, and after the r2 delta gauntlet it is
+   * the primary one: the doorbell only decides *when* it runs, never whether the
+   * rows arrive. See `reconciler.ts`.
    */
   sync: () => Promise<LedgerEntry[]>;
   /** The gap after `roomSeq`, in order. The `since(room, seq)` catch-up. */
@@ -288,13 +323,57 @@ export interface Ledger {
   catchUpPage: (roomId: string, roomSeq: number, limit?: number) => Promise<CatchUpPage>;
   /** The room's newest `room_seq`, or 0 for a room with no history. */
   head: (roomId: string) => Promise<number>;
-  /** Every core event in the ledger, in `seq` order — the replay half. */
-  replayCoreEvents: () => Promise<CoreEvent[]>;
+  /** The head of every room named, in one query. The reconciler's read. */
+  heads: (roomIds: readonly string[]) => Promise<Map<string, number>>;
+  /**
+   * Every core event in the ledger, in `seq` order, **with its trusted context**
+   * — the replay half of live ≡ replay. Rows, not bare payloads: #21's `reduce`
+   * takes `AuthoredEvent[]`, and a replay that invented the actors would be
+   * replaying different events.
+   */
+  replayCoreEvents: () => Promise<AuthoredEvent[]>;
+  /** The message window a receipt is checked against. Exposed for the command layer. */
+  messageWindow: (
+    runner: Pick<Database, 'select'>,
+    messageIds: readonly string[],
+  ) => Promise<ProvenanceMessage[]>;
 }
 
 const PAGE = 500;
 
-export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
+/** Turn the row's two actor columns back into the union core folds. */
+export function actorFromColumns(kind: string, id: string | null): Actor {
+  switch (kind) {
+    case 'human':
+      return { kind: 'human', userId: id ?? '' };
+    case 'model':
+      return { kind: 'model', model: id ?? '' };
+    case 'system':
+      return { kind: 'system' };
+    default:
+      // A kind the enum does not have means the ledger disagrees with this
+      // code. Guessing would fold the row under an actor nobody chose.
+      throw new Error(`core_events.actor_kind holds an unknown value "${kind}"`);
+  }
+}
+
+/** The two columns, from the union. `null` for the system actor, and only it. */
+export function actorToColumns(actor: Actor): { kind: Actor['kind']; id: string | null } {
+  switch (actor.kind) {
+    case 'human':
+      return { kind: 'human', id: actor.userId };
+    case 'model':
+      return { kind: 'model', id: actor.model };
+    case 'system':
+      return { kind: 'system', id: null };
+    default: {
+      const exhaustive: never = actor;
+      throw new Error(`unknown actor ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
+export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger {
   let state: CoreState = emptyState();
   let lastSeq = 0;
   /**
@@ -323,16 +402,76 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
     return run;
   }
 
+  const ROW = {
+    seq: coreEvents.seq,
+    roomSeq: coreEvents.roomSeq,
+    roomId: coreEvents.roomId,
+    payload: coreEvents.payload,
+    actorKind: coreEvents.actorKind,
+    actorId: coreEvents.actorId,
+  } as const;
+
   function parseRow(row: {
     seq: number | string;
     roomSeq: number | string;
     roomId: string;
     payload: unknown;
+    actorKind: string;
+    actorId: string | null;
   }): LedgerEntry {
     // A payload that does not parse means the ledger disagrees with the code
     // reading it. There is no safe way to skip it: skipping changes the fold.
     const event = RoomEvent.parse(row.payload);
-    return { seq: Number(row.seq), roomSeq: Number(row.roomSeq), roomId: row.roomId, event };
+    return {
+      seq: Number(row.seq),
+      roomSeq: Number(row.roomSeq),
+      roomId: row.roomId,
+      event,
+      actor: actorFromColumns(row.actorKind, row.actorId),
+    };
+  }
+
+  /**
+   * Load the bodies of the messages a receipt cites.
+   *
+   * Both the live append and the replay call this, with ids derived from the
+   * same payload field, against the same append-only table. That sameness is the
+   * point: #21's reducer refuses a non-human acceptance whose window is absent
+   * *or empty*, so a path that supplies one and a path that does not would fold
+   * the identical row two different ways and live ≡ replay would be false.
+   */
+  async function messageWindow(
+    runner: Pick<Database, 'select'>,
+    messageIds: readonly string[],
+  ): Promise<ProvenanceMessage[]> {
+    if (messageIds.length === 0) return [];
+    const rows = await runner
+      .select({ id: messages.id, authorId: messages.authorId, body: messages.body })
+      .from(messages)
+      .where(inArray(messages.id, [...new Set(messageIds)]));
+    return rows.map((row) => ({
+      id: row.id,
+      // A message whose author was deleted keeps its text and loses its name.
+      // Empty rather than the id of nobody: attribution to "" matches no actor,
+      // which is the conservative reading the receipt checks want.
+      authorId: row.authorId ?? '',
+      body: row.body,
+    }));
+  }
+
+  /**
+   * The trusted context one row folds under: its actor columns, plus the window
+   * its own payload cites. Never anything the caller happened to have to hand.
+   */
+  async function trustFor(
+    runner: Pick<Database, 'select'>,
+    event: RoomEvent,
+    actor: Actor,
+  ): Promise<TrustedContext> {
+    if (actor.kind === 'human') return trustedContext({ actor });
+    const ids = provenanceMessageIds(event);
+    if (ids.length === 0) return trustedContext({ actor });
+    return trustedContext({ actor, messages: await messageWindow(runner, ids) });
   }
 
   /**
@@ -345,12 +484,7 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
     const folded: LedgerEntry[] = [];
     for (;;) {
       const rows = await runner
-        .select({
-          seq: coreEvents.seq,
-          roomSeq: coreEvents.roomSeq,
-          roomId: coreEvents.roomId,
-          payload: coreEvents.payload,
-        })
+        .select(ROW)
         .from(coreEvents)
         .where(gt(coreEvents.seq, lastSeq))
         .orderBy(asc(coreEvents.seq))
@@ -358,18 +492,31 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
       if (rows.length === 0) break;
 
       const entries = rows.map(parseRow);
-      const core = entries.map((entry) => entry.event).filter(isCoreEvent);
+      const core = [];
+      for (const entry of entries) {
+        if (!isCoreEvent(entry.event)) continue;
+        core.push({
+          ...(await trustFor(runner, entry.event, entry.actor)),
+          event: entry.event,
+        });
+      }
       if (core.length > 0) {
         const result = foldEvents(core, state);
         state = result.state;
         // A rejection here is the invariant in the module header, violated: the
         // ledger held an event that canonical order refuses. It is not
         // recoverable by retrying, and carrying on would serve a state that no
-        // replay reproduces.
+        // replay reproduces. Since r3 the append function refuses those rows in
+        // SQL, so reaching this line means something wrote around the boundary.
         for (const outcome of result.outcomes) {
           if (outcome.outcome === 'rejected') {
             throw new Error(
               `ledger integrity: event "${outcome.event.id}" in core_events was rejected on fold (${outcome.reason}: ${outcome.detail}) — the ledger contains an event that was never canonically consumable`,
+            );
+          }
+          if (outcome.outcome === 'malformed') {
+            throw new Error(
+              `ledger integrity: a row in core_events does not parse as a CoreEvent (${outcome.detail}) — the ledger contains a payload no replay can fold`,
             );
           }
         }
@@ -394,11 +541,11 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
    * The room an event belongs to, checked against the room the caller was
    * authorized for.
    *
-   * `proposal_rejected` and `object_corrected` name a thing rather than a room,
-   * so their room comes from state. Everything else declares one, and a
-   * declaration that disagrees with the authorized room is refused: without
-   * this, a member of room A could accept an object into room B by putting B's
-   * id inside the payload, having passed a membership check for A.
+   * `proposal_rejected`, `proposal_superseded` and `object_corrected` name a
+   * thing rather than a room, so their room comes from state. Everything else
+   * declares one, and a declaration that disagrees with the authorized room is
+   * refused: without this, a member of room A could accept an object into room B
+   * by putting B's id inside the payload, having passed a membership check for A.
    */
   function resolveRoomId(event: RoomEvent, authorizedRoomId: string): string {
     const declared = declaredRoomId(event);
@@ -410,12 +557,12 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
     }
     if (declared !== null) return declared;
 
-    // Only the two room-less kinds reach here; `declaredRoomId` is exhaustive
+    // Only the three room-less kinds reach here; `declaredRoomId` is exhaustive
     // over the rest, so anything else is a union that grew without this
     // switch noticing.
     let fromState: string | undefined;
     let subject: string;
-    if (event.type === 'proposal_rejected') {
+    if (event.type === 'proposal_rejected' || event.type === 'proposal_superseded') {
       fromState = state.proposals[event.proposalId]?.proposal.roomId;
       subject = `proposal "${event.proposalId}"`;
     } else if (event.type === 'object_corrected') {
@@ -473,18 +620,25 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
             );
           }
           const roomId = resolveRoomId(event, request.roomId);
+          const actor = request.actor;
 
           const before = state;
           let after = state;
           let outcome: EventOutcome | null = null;
           if (isCoreEvent(event)) {
-            const applied = appendEvent(state, event);
-            if (applied.outcome === 'rejected') {
+            // The same context a replay will reconstruct — the actor from the
+            // session, and the window derived from the payload rather than from
+            // whatever the caller had open. See `trustFor`.
+            const trusted = await trustFor(tx, event, actor);
+            const applied = appendEvent(state, event, trusted);
+            if (applied.outcome === 'rejected' || applied.outcome === 'malformed') {
               // The whole point. Throwing here aborts the transaction, so the
               // INSERT below never happens and the refused event leaves nothing.
               throw new CommandError(
-                'rejected',
-                `${applied.reason}: ${applied.detail} — re-mint the command at the current position and retry`,
+                applied.outcome === 'rejected' ? 'rejected' : 'invalid',
+                applied.outcome === 'rejected'
+                  ? `${applied.reason}: ${applied.detail} — re-mint the command at the current position and retry`
+                  : applied.detail,
               );
             }
             outcome = applied;
@@ -493,22 +647,26 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
 
           // Through the procedure, like every other writer — there is no
           // privileged path and no direct INSERT anywhere in this codebase. The
-          // procedure mints `room_seq` under the lock it re-takes, and the
-          // trigger behind it refuses anything that did not come this way. See
-          // `drizzle/0003_append_enforcement.sql`.
+          // procedure authorizes the actor, refuses anything out of canonical
+          // order, mints `room_seq` under the lock it re-takes, inserts, and
+          // rings the doorbell; the trigger behind it refuses anything that did
+          // not come this way. See `drizzle/0004_trusted_actor_and_append_boundary.sql`.
           //
           // The whole event goes into `payload`, envelope included: replay is a
           // parse of that column, not a re-assembly from the lifted ones. The
-          // lifted `actor` and `occurred_at` are checked against it by constraint,
-          // so the two can never describe different orders.
+          // actor is NOT in the payload — a constraint refuses one that is — and
+          // rides in its own two columns instead.
+          const columns = actorToColumns(actor);
           const appended = (await tx.execute(sql`
           SELECT "seq", "room_seq" FROM atrium_append_core_event(
             ${roomId}::uuid,
             ${event.id}::text,
             ${event.type}::event_type,
-            ${JSON.stringify(event.actor)}::jsonb,
+            ${columns.kind}::actor_kind,
+            ${columns.id}::text,
             ${JSON.stringify(event)}::jsonb,
-            ${event.at}::timestamptz
+            ${event.at}::timestamptz,
+            ${instanceId ?? null}::text
           )
         `)) as unknown as Array<{ seq: string | number; room_seq: string | number }>;
           const minted = appended[0];
@@ -518,15 +676,20 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
             throw new CommandError('conflict', 'the ledger append procedure returned no position');
           }
 
-          await request.project?.({ tx, event, roomId, seq, roomSeq, before, after, outcome });
-
-          // Inside the transaction on purpose: Postgres queues notifications and
-          // delivers them at commit, so no peer can be told about a row that then
-          // rolls back, and none can read the ledger before the row is visible.
-          await bus?.announce(tx, { roomId, seq, roomSeq });
+          await request.project?.({
+            tx,
+            event,
+            actor,
+            roomId,
+            seq,
+            roomSeq,
+            before,
+            after,
+            outcome,
+          });
 
           return {
-            result: { seq, roomSeq, roomId, event: event as RoomEvent, outcome },
+            result: { seq, roomSeq, roomId, event: event as RoomEvent, actor, outcome },
             staged: { state: after, seq, at: Date.parse(event.at) },
           };
         })
@@ -553,6 +716,7 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
     serialize: () => serializeState(state),
     lastSeq: () => lastSeq,
     append,
+    messageWindow,
     /**
      * Fold whatever a peer instance committed, and report it.
      *
@@ -562,7 +726,8 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
      * folding — and re-broadcasting — a row the appending path is about to
      * announce itself. Idempotent by construction: `catchUp` reads strictly
      * past `lastSeq`, so calling it for a notification that was already covered
-     * by an earlier one returns nothing at all.
+     * by an earlier one returns nothing at all. That idempotence is what makes
+     * it safe to call on a timer as well as on a doorbell.
      */
     sync: () => runExclusive(() => catchUp(db)),
     since: async (roomId, roomSeq, limit = 1000) => {
@@ -570,12 +735,7 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
         throw new CommandError('invalid', 'since cursor must be a non-negative integer');
       }
       const rows = await db
-        .select({
-          seq: coreEvents.seq,
-          roomSeq: coreEvents.roomSeq,
-          roomId: coreEvents.roomId,
-          payload: coreEvents.payload,
-        })
+        .select(ROW)
         .from(coreEvents)
         .where(and(eq(coreEvents.roomId, roomId), gt(coreEvents.roomSeq, roomSeq)))
         .orderBy(asc(coreEvents.roomSeq))
@@ -594,8 +754,9 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
      * that loops until `to === head` terminates for the right reason.
      *
      * That `head` may have moved on by the time the frame reaches the client is
-     * fine and unavoidable: it will be told about that by a live broadcast, or
-     * by the next turn of its own catch-up loop.
+     * fine and unavoidable: it will be told about that by a live broadcast, by
+     * the reconciler's periodic head frame, or by the next turn of its own
+     * catch-up loop.
      */
     catchUpPage: async (roomId, roomSeq, limit = 1000) => {
       if (!Number.isInteger(roomSeq) || roomSeq < 0) {
@@ -604,12 +765,7 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
       return db.transaction(
         async (tx) => {
           const rows = await tx
-            .select({
-              seq: coreEvents.seq,
-              roomSeq: coreEvents.roomSeq,
-              roomId: coreEvents.roomId,
-              payload: coreEvents.payload,
-            })
+            .select(ROW)
             .from(coreEvents)
             .where(and(eq(coreEvents.roomId, roomId), gt(coreEvents.roomSeq, roomSeq)))
             .orderBy(asc(coreEvents.roomSeq))
@@ -637,30 +793,45 @@ export function createLedger({ db, logger, bus }: LedgerOptions): Ledger {
         .where(eq(coreEvents.roomId, roomId));
       return Number(row?.head ?? 0);
     },
+    /**
+     * Every named room's head, in one query.
+     *
+     * The reconciler runs this on a timer over the rooms that have subscribers,
+     * so "cheap and bounded" has to be true rather than hoped for: one indexed
+     * `GROUP BY` over `(room_id, room_seq)` for the whole set, not one round
+     * trip per room. A room with no events is absent from the result and the
+     * caller reads it as 0.
+     */
+    heads: async (roomIds) => {
+      const unique = [...new Set(roomIds)];
+      if (unique.length === 0) return new Map();
+      const rows = await db
+        .select({ roomId: coreEvents.roomId, head: sql<string>`max(${coreEvents.roomSeq})` })
+        .from(coreEvents)
+        .where(inArray(coreEvents.roomId, unique))
+        .groupBy(coreEvents.roomId);
+      return new Map(rows.map((row) => [row.roomId, Number(row.head)]));
+    },
     replayCoreEvents: async () => {
-      const events: CoreEvent[] = [];
+      const rows: AuthoredEvent[] = [];
       let cursor = 0;
       for (;;) {
-        const rows = await db
-          .select({
-            seq: coreEvents.seq,
-            roomSeq: coreEvents.roomSeq,
-            roomId: coreEvents.roomId,
-            payload: coreEvents.payload,
-          })
+        const page = await db
+          .select(ROW)
           .from(coreEvents)
           .where(gt(coreEvents.seq, cursor))
           .orderBy(asc(coreEvents.seq))
           .limit(PAGE);
-        if (rows.length === 0) break;
-        for (const row of rows) {
+        if (page.length === 0) break;
+        for (const row of page) {
           const entry = parseRow(row);
           cursor = Math.max(cursor, entry.seq);
-          if (isCoreEvent(entry.event)) events.push(entry.event);
+          if (!isCoreEvent(entry.event)) continue;
+          rows.push({ ...(await trustFor(db, entry.event, entry.actor)), event: entry.event });
         }
-        if (rows.length < PAGE) break;
+        if (page.length < PAGE) break;
       }
-      return events;
+      return rows;
     },
   };
 }

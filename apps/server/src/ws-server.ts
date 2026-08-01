@@ -4,9 +4,14 @@ import { type WebSocket, WebSocketServer } from 'ws';
 import type { CommandService } from './commands.js';
 import type { EventBus } from './event-bus.js';
 import { createHub, type Hub } from './hub.js';
-import { CommandError, type Ledger } from './ledger.js';
+import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
 import type { Logger } from './logger.js';
 import { ClientFrame, type ServerFrame, type WireEvent } from './protocol.js';
+import {
+  createReconciler,
+  DEFAULT_RECONCILE_INTERVAL_MS,
+  type Reconciler,
+} from './reconciler.js';
 import type { Session, SessionAuthenticator } from './session.js';
 
 /**
@@ -67,6 +72,16 @@ export interface RealtimeOptions {
    * the README both say plainly which mode is which.
    */
   bus?: EventBus;
+  /**
+   * How often to reconcile against the ledger regardless of notifications.
+   *
+   * There is no way to switch it off, and that is deliberate: the r2 delta
+   * gauntlet's blocking finding was a delivery path that existed only while a
+   * doorbell kept being heard, and an option to disable the durable path would
+   * be that finding with a config flag in front of it. Tests shorten it; nothing
+   * removes it.
+   */
+  reconcileIntervalMs?: number;
 }
 
 export interface RealtimeServer {
@@ -74,6 +89,8 @@ export interface RealtimeServer {
   wss: WebSocketServer;
   hub: Hub<ServerFrame>;
   connectionCount: () => number;
+  /** Run one reconciliation pass now — the timer's work, on demand, for tests. */
+  reconcile: () => Promise<void>;
   listen: () => Promise<void>;
   close: () => Promise<void>;
 }
@@ -361,6 +378,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
             roomId: result.roomId,
             roomSeq: result.roomSeq,
             seq: result.seq,
+            actor: result.actor,
             event: result.event,
           };
           send(socket, {
@@ -437,38 +455,48 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   }
 
   /**
-   * A peer instance committed something. Fold it, then fan out what was
-   * actually new.
+   * Fan out rows this instance folded but had not delivered — the reconciler's
+   * output, and the doorbell's, through one function.
    *
-   * `ledger.sync()` is the single source of both effects, which is the point:
-   * this instance's `CoreState` and its subscribers move together, and a row
-   * folded twice is impossible because `sync` reads strictly past `lastSeq`.
-   * Notifications are therefore allowed to arrive out of order, twice, or in a
-   * batch — the doorbell says "look", never "here it is".
+   * That sameness is deliberate. A "reconciliation delivery" written separately
+   * from live delivery is a second implementation of the thing this ticket is
+   * about, free to disagree with the first; there is one, and both triggers call
+   * it. A row folded twice is impossible because `sync` reads strictly past
+   * `lastSeq`, so notifications are allowed to arrive out of order, twice, in a
+   * batch, or not at all — the doorbell says "look", never "here it is", and
+   * after r3 it does not even decide whether anyone looks.
    */
-  async function onPeerCommit(): Promise<void> {
-    if (!ledger) return;
-    try {
-      const folded = await ledger.sync();
-      for (const entry of folded) {
-        hub.broadcast(entry.roomId, {
-          type: 'event',
-          entry: {
-            roomId: entry.roomId,
-            roomSeq: entry.roomSeq,
-            seq: entry.seq,
-            event: entry.event,
-          },
-        });
-      }
-    } catch (error) {
-      // A failed sync is not fatal: the rows are durable, this instance will
-      // fold them on the next notification or the next append, and a client
-      // that noticed a gap asks for it. Loudly logged, because a *persistent*
-      // failure here is a divergence in the making.
-      logger.error('ledger sync after peer commit failed', { error: describe(error) });
+  function fanOut(entries: LedgerEntry[]): void {
+    for (const entry of entries) {
+      hub.broadcast(entry.roomId, {
+        type: 'event',
+        entry: {
+          roomId: entry.roomId,
+          roomSeq: entry.roomSeq,
+          seq: entry.seq,
+          actor: entry.actor,
+          event: entry.event,
+        },
+      });
     }
   }
+
+  /**
+   * The durable delivery path. See `reconciler.ts` for what it covers and why it
+   * cannot be turned off.
+   */
+  const reconciler: Reconciler | null = ledger
+    ? createReconciler({
+        ledger,
+        logger,
+        intervalMs: options.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS,
+        subscribedRooms: () => hub.activeRooms(),
+        onEntries: fanOut,
+        onHead: (roomId, head) => {
+          hub.broadcast(roomId, { type: 'head', roomId, head });
+        },
+      })
+    : null;
 
   // Heartbeat: a socket that misses one full interval without a pong is dead.
   const heartbeat = setInterval(() => {
@@ -491,17 +519,31 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     wss,
     hub,
     connectionCount: () => wss.clients.size,
+    reconcile: async () => {
+      await reconciler?.reconcile();
+    },
     listen: async () => {
       // Before the port opens, so no client can connect into a window where
       // this instance is serving but deaf to its peers.
       await bus?.start({
         onLedger: () => {
-          void onPeerCommit();
+          void reconciler?.reconcile();
         },
         onEphemeral: (note) => {
           hub.broadcast(note.roomId, note.frame as ServerFrame);
         },
+        // Fired on the first LISTEN and on every one postgres-js re-establishes
+        // after a dropped connection. Everything that landed while this process
+        // was deaf produced a notification nobody received, so the resubscribe
+        // is immediately followed by a look at the ledger — which is the whole
+        // of blocking finding 1's second half.
+        onListen: () => {
+          void reconciler?.reconcile();
+        },
       });
+      // Started before the port opens, so there is no window in which this
+      // instance is serving and not reconciling.
+      reconciler?.start();
       await new Promise<void>((resolve, reject) => {
         httpServer.once('error', reject);
         httpServer.listen(options.port, options.host, () => {
@@ -517,6 +559,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     },
     close: async () => {
       clearInterval(heartbeat);
+      reconciler?.stop();
       await bus?.close();
       for (const socket of wss.clients) socket.close(1001, 'server shutting down');
       await new Promise<void>((resolve) => wss.close(() => resolve()));
@@ -526,17 +569,13 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   };
 }
 
-function toWire(entry: {
-  roomId: string;
-  roomSeq: number;
-  seq: number;
-  event: unknown;
-}): WireEvent {
+function toWire(entry: LedgerEntry): WireEvent {
   return {
     roomId: entry.roomId,
     roomSeq: entry.roomSeq,
     seq: entry.seq,
-    event: entry.event as WireEvent['event'],
+    actor: entry.actor,
+    event: entry.event,
   };
 }
 

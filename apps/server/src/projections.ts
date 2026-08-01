@@ -44,6 +44,8 @@ export async function projectRoomEvent(context: ProjectionContext<RoomEvent>): P
       return projectProposalRecorded(context, event);
     case 'proposal_rejected':
       return projectProposalRejected(context, event);
+    case 'proposal_superseded':
+      return projectProposalSuperseded(context, event);
     case 'object_accepted':
       return projectObjectAccepted(context, event);
     case 'object_corrected':
@@ -61,19 +63,28 @@ export async function projectRoomEvent(context: ProjectionContext<RoomEvent>): P
 
 type EventOf<T extends RoomEvent['type']> = Extract<RoomEvent, { type: T }>;
 
-/** The user id when a human acted, `null` for a model or the system. */
+/**
+ * The user id when a human acted, `null` for a model or the system.
+ *
+ * The actor comes off the `ProjectionContext` now, not off the event: #21 took
+ * it out of the payload, so `event.actor` no longer exists and these columns are
+ * written from the ledger row's trusted columns instead. Every `decided_by`,
+ * `accepted_by`, `by_user_id` and `author_id` in this file is therefore an
+ * authenticated identity or NULL — which is what those columns were always
+ * supposed to mean.
+ */
 function humanId(actor: Actor): string | null {
   return actor.kind === 'human' ? actor.userId : null;
 }
 
 async function projectMessagePosted(
-  { tx, roomId }: ProjectionContext<RoomEvent>,
+  { tx, roomId, actor }: ProjectionContext<RoomEvent>,
   event: EventOf<'message_posted'>,
 ): Promise<void> {
   await tx.insert(messages).values({
     id: event.messageId,
     roomId,
-    authorId: humanId(event.actor),
+    authorId: humanId(actor),
     body: event.body,
     replyToId: event.replyToId,
     clientMessageId: event.clientMessageId,
@@ -105,7 +116,7 @@ async function projectProposalRecorded(
 }
 
 async function projectProposalRejected(
-  { tx, roomId, before, after }: ProjectionContext<RoomEvent>,
+  { tx, roomId, actor, before, after }: ProjectionContext<RoomEvent>,
   event: EventOf<'proposal_rejected'>,
 ): Promise<void> {
   const record = after.proposals[event.proposalId];
@@ -116,14 +127,38 @@ async function projectProposalRejected(
     .set({
       status: 'rejected',
       rejectedReason: record.rejectedReason,
-      decidedBy: humanId(event.actor),
+      decidedBy: humanId(actor),
       decidedAt: new Date(event.at),
     })
     .where(and(eq(proposals.id, event.proposalId), eq(proposals.roomId, roomId)));
 }
 
-async function projectObjectAccepted(
+/**
+ * A staged reading retired by a newer one (#8, via #21's sixth core event).
+ *
+ * Deliberately not folded into `projectProposalRejected` even though both write
+ * a status: `rejected` means a person judged the reading and said no, and
+ * `superseded` means nobody judged it at all — a later interpretation pass
+ * replaced it. Collapsing the two would tell the room that somebody declined
+ * something no person ever saw, and `decided_by` would name whoever happened to
+ * be running the worker. So the decision columns are left alone here, which is
+ * the honest record: there was no decision.
+ */
+async function projectProposalSuperseded(
   { tx, roomId, before, after }: ProjectionContext<RoomEvent>,
+  event: EventOf<'proposal_superseded'>,
+): Promise<void> {
+  const record = after.proposals[event.proposalId];
+  if (record?.status !== 'superseded') return;
+  if (before.proposals[event.proposalId]?.status === 'superseded') return;
+  await tx
+    .update(proposals)
+    .set({ status: 'superseded' })
+    .where(and(eq(proposals.id, event.proposalId), eq(proposals.roomId, roomId)));
+}
+
+async function projectObjectAccepted(
+  { tx, roomId, actor, before, after }: ProjectionContext<RoomEvent>,
   event: EventOf<'object_accepted'>,
 ): Promise<void> {
   const id = event.object.id;
@@ -139,7 +174,7 @@ async function projectObjectAccepted(
     objectiveId: object.objectiveId,
     proposalId: object.provenance.proposalId,
     revision: record.revision,
-    acceptedBy: humanId(event.actor),
+    acceptedBy: humanId(actor),
     createdAt: new Date(object.createdAt),
     updatedAt: new Date(record.updatedAt),
   });
@@ -157,7 +192,7 @@ async function projectObjectAccepted(
       .update(proposals)
       .set({
         status: 'accepted',
-        decidedBy: humanId(event.actor),
+        decidedBy: humanId(actor),
         decidedAt: new Date(event.at),
       })
       .where(and(eq(proposals.id, proposalId), eq(proposals.roomId, roomId)));
@@ -165,7 +200,7 @@ async function projectObjectAccepted(
 }
 
 async function projectObjectCorrected(
-  { tx, roomId, before, after }: ProjectionContext<RoomEvent>,
+  { tx, roomId, actor, before, after }: ProjectionContext<RoomEvent>,
   event: EventOf<'object_corrected'>,
 ): Promise<void> {
   // The reducer appends exactly one correction record per correction that
@@ -196,7 +231,7 @@ async function projectObjectCorrected(
     action: correction.action,
     before: correction.before,
     after: correction.after,
-    byUserId: humanId(event.actor),
+    byUserId: humanId(actor),
     note: correction.note,
     eventId: event.id,
   });
@@ -206,7 +241,7 @@ async function projectRelationAdded(
   context: ProjectionContext<RoomEvent>,
   event: EventOf<'relation_added'>,
 ): Promise<void> {
-  const { tx, roomId, before, after } = context;
+  const { tx, roomId, actor, before, after } = context;
   const relation = event.relation;
   const landed = after.relations.some((existing) => existing.id === relation.id);
   const existed = before.relations.some((existing) => existing.id === relation.id);
@@ -219,7 +254,7 @@ async function projectRelationAdded(
     fromObjectId: relation.fromObjectId,
     ...targetColumns(relation),
     note: relation.note,
-    createdBy: humanId(event.actor),
+    createdBy: humanId(actor),
     createdAt: new Date(relation.createdAt),
   });
 
@@ -287,10 +322,10 @@ async function syncObjectRow(
  * happened.
  */
 async function projectAttentionResolved(
-  { tx, roomId }: ProjectionContext<RoomEvent>,
+  { tx, roomId, actor }: ProjectionContext<RoomEvent>,
   event: EventOf<'attention_resolved'>,
 ): Promise<void> {
-  const owner = humanId(event.actor);
+  const owner = humanId(actor);
   const touched = await tx
     .update(attentionItems)
     .set({ status: event.status, resolvedAt: new Date(event.at) })

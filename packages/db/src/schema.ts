@@ -12,6 +12,7 @@ import type {
   ObjectivePayload,
   OpenQuestionPayload,
   ProposalStatus,
+  RationaleReason,
   RelationKind,
 } from '@atrium/core';
 import { sql } from 'drizzle-orm';
@@ -145,12 +146,23 @@ export const interpretationStatus = pgEnum('interpretation_status', [
 export const eventType = pgEnum('event_type', [
   'proposal_recorded',
   'proposal_rejected',
+  'proposal_superseded',
   'object_accepted',
   'object_corrected',
   'relation_added',
   'message_posted',
   'attention_resolved',
 ]);
+
+/**
+ * The trusted actor's kind, lifted out of `@atrium/core`'s `Actor` union and
+ * held to it by the parity assert at the foot of this file.
+ *
+ * It is a **column**, not a payload field, and that is #21's contract rather
+ * than a storage preference: the actor decides every human-only gate in the
+ * reducer, and a payload is whatever the writer says it is. See `core_events`.
+ */
+export const actorKind = pgEnum('actor_kind', ['human', 'model', 'system']);
 
 /** Typed payload union stored in `accepted_objects.payload` / `proposals.payload`. */
 export type ObjectPayload =
@@ -328,8 +340,16 @@ export const coreEvents = pgTable(
     /** The event id from @atrium/core — NOT the primary key. Globally unique. */
     id: text('id').notNull(),
     type: eventType('type').notNull(),
-    /** `{kind:'human',userId} | {kind:'model',model} | {kind:'system'}`. */
-    actor: jsonb('actor').$type<Actor>().notNull(),
+    /**
+     * The trusted actor, as **two columns** (#21 r3).
+     *
+     * `actor_id` is the user id for a human, the model id for a model, and NULL
+     * for the system actor — the shape #21's contract names, checked by
+     * `core_events_actor_id_matches_kind` so the third case cannot be spelled as
+     * an empty string.
+     */
+    actorKind: actorKind('actor_kind').notNull(),
+    actorId: text('actor_id'),
     /** The complete event. `reduce` folds `payload`, not a reassembly of it. */
     payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
     /** The event's own `at` — the first half of the canonical `(at, id)` key. */
@@ -383,8 +403,38 @@ export const coreEvents = pgTable(
       'core_events_payload_at_has_offset',
       sql`${t.payload}->>'at' ~ '(Z|[+-][0-9]{2}:?[0-9]{2})$'`,
     ),
-    /** Same story for the actor: jsonb equality, so a lifted copy cannot lie. */
-    check('core_events_payload_actor_matches', sql`${t.payload}->'actor' = ${t.actor}`),
+    /**
+     * The actor rule, **inverted** by #21's contract — and it is the same rule.
+     *
+     * r1's major 2 said: a lifted column that can disagree with the payload lets
+     * a writer mint a row that replays as something other than what it is. r2
+     * answered it with `payload->'actor' = actor`, which was right for a world
+     * where the payload had an actor.
+     *
+     * #21 r2/r3 removed the actor from `CoreEvent` entirely: the payload has no
+     * place to put one and `CoreEvent.parse` throws on an input that carries one.
+     * Equality is therefore unsatisfiable, and deleting the constraint would
+     * delete the finding — a payload could carry a stray `actor` key that the
+     * reducer refuses at parse time on the live path but that nothing stops from
+     * sitting in the ledger looking authoritative to the next reader.
+     *
+     * So the equality becomes the only equality left that says the same thing:
+     * the payload holds **no** actor, and the columns hold the only one. There is
+     * exactly one actor per row, in exactly one place, by constraint.
+     */
+    check('core_events_payload_has_no_actor', sql`NOT jsonb_exists(${t.payload}, 'actor')`),
+    /**
+     * `actor_id` is the user id for a human and the model id for a model, and is
+     * NULL for the system actor and only for it. Without this, `{kind:'system',
+     * actor_id:'alice'}` is a row that reads as a person having done something
+     * the process did.
+     */
+    check(
+      'core_events_actor_id_matches_kind',
+      sql`(${t.actorKind} = 'system') = (${t.actorId} IS NULL)`,
+    ),
+    check('core_events_actor_id_not_blank', sql`${t.actorId} IS NULL OR length(${t.actorId}) > 0`),
+    index('core_events_actor_idx').on(t.actorKind, t.actorId),
   ],
 );
 
@@ -750,8 +800,18 @@ export const attentionItems = pgTable(
       sql`CASE WHEN "subject_kind" = 'proposal' THEN "subject_id" END`,
     ),
     class: attentionClass('class').notNull(),
-    /** Why this person specifically. NOT NULL by design — no unexplained pings. */
-    rationale: text('rationale').notNull(),
+    /**
+     * Why this person specifically — @atrium/core's `RationaleReason`, structured
+     * (#21 r2, major 8).
+     *
+     * It was `text NOT NULL`, and core no longer produces that string as the
+     * stored value: it produces a discriminated union and renders the sentence on
+     * demand with `renderRationale`. Storing the rendered sentence would freeze a
+     * template into every row — change the wording and the history says the old
+     * one — and would make "which rule raised this" a substring search over
+     * prose. NOT NULL by design either way: no unexplained pings.
+     */
+    reason: jsonb('reason').$type<RationaleReason>().notNull(),
     status: attentionStatus('status').notNull().default('pending'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
@@ -769,7 +829,14 @@ export const attentionItems = pgTable(
       t.class,
     ),
     index('attention_items_user_status_idx').on(t.userId, t.status),
-    check('attention_items_rationale_present', sql`length(btrim(${t.rationale})) > 0`),
+    /**
+     * The structured twin of the old `length(btrim(rationale)) > 0`: an item
+     * whose reason names no rule is the unexplained ping that check existed to
+     * refuse, and `{}` is exactly how one arrives now. The discriminator is the
+     * one field every variant has, so it is the one worth requiring here; the
+     * variant's own fields are @atrium/core's to validate.
+     */
+    check('attention_items_reason_has_kind', sql`length(coalesce(${t.reason}->>'kind', '')) > 0`),
     /**
      * "Needs you" must never point at something from a room you cannot see —
      * and that has to keep holding now that "something" is two tables.
@@ -889,6 +956,10 @@ export type _CorrectionActionParity = Assert<
  */
 export type _CoreEventTypeCoverage = Assert<CoreEventType, (typeof eventType.enumValues)[number]>;
 
+/** `actor_kind` is exactly @atrium/core's `Actor['kind']`, both directions. */
+export type _ActorKindParity = Assert<(typeof actorKind.enumValues)[number], Actor['kind']> &
+  Assert<Actor['kind'], (typeof actorKind.enumValues)[number]>;
+
 /**
  * The `event_type` values the reducer folds — everything else is ledger-only.
  *
@@ -909,6 +980,7 @@ export type _CoreEventTypeCoverage = Assert<CoreEventType, (typeof eventType.enu
 const coreEventTypeSet = {
   proposal_recorded: true,
   proposal_rejected: true,
+  proposal_superseded: true,
   object_accepted: true,
   object_corrected: true,
   relation_added: true,
@@ -917,6 +989,7 @@ const coreEventTypeSet = {
 export const coreEventTypes = [
   'proposal_recorded',
   'proposal_rejected',
+  'proposal_superseded',
   'object_accepted',
   'object_corrected',
   'relation_added',

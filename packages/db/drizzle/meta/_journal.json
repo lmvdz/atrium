@@ -29,6 +29,13 @@
       "when": 1785560065907,
       "tag": "0003_append_enforcement",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785640000000,
+      "tag": "0004_trusted_actor_and_append_boundary",
+      "breakpoints": true
     }
   ]
 }

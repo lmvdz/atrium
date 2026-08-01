@@ -41,15 +41,25 @@ import { resolveWsUrl } from './ws-url.js';
 
 /* ── the wire, as this client needs to see it ───────────────────────────── */
 
+/**
+ * One ledger row, as the wire carries it.
+ *
+ * `actor` is **beside** the event, not inside it. #21 took the actor out of the
+ * event payload entirely — the schema has no place to put one and refuses an
+ * input that carries one — because a payload is whatever the writer says it is
+ * and every trust gate in the reducer reads the actor. The ledger stores it as
+ * columns on the row and the wire carries it as a sibling of `event`. Nothing in
+ * this client may read `entry.event.actor`; there is no such field.
+ */
 export interface RoomEventEnvelope {
   roomId: string;
   roomSeq: number;
   seq: number;
+  actor: { kind: string; userId?: string; model?: string };
   event: {
     id: string;
     at: string;
     type: string;
-    actor: { kind: string; userId?: string; model?: string };
     [key: string]: unknown;
   };
 }
@@ -60,6 +70,14 @@ export type ServerFrame =
   | { type: 'subscribed'; roomId: string; head: number; seenSeq: number }
   | { type: 'unsubscribed'; roomId: string }
   | { type: 'event'; entry: RoomEventEnvelope }
+  /**
+   * "This room is at `head`" — unsolicited, from the server's reconciler.
+   *
+   * A gap signal that does not depend on any frame having arrived. The client
+   * treats it as it treats every other statement about the head: compare it with
+   * its own cursor, and ask for the gap if it is behind.
+   */
+  | { type: 'head'; roomId: string; head: number }
   | {
       type: 'catchup';
       roomId: string;
@@ -118,46 +136,101 @@ export interface PendingMessage {
 }
 
 /**
- * Where the per-room catch-up cursor is written down.
+ * The room's applied history and its cursor, stored as **one thing**.
  *
- * The recovery loop needs a cursor that outlives any one frame and any one
- * socket, because "I am caught up" must never rest on a single reply. In memory
- * is enough for a dropped socket — this client object survives that — and the
- * seam exists for the case it does not: an app that caches a room's events
- * across a page load can hand in a store backed by the same lifetime, and
- * catch-up resumes from the cursor instead of replaying the room.
+ * ## Why this is not a watermark store (#22 gauntlet r2 delta, major 1)
  *
- * The default is deliberately in-memory. This client keeps history in a plain
- * array, so a watermark that outlived the events would resume past history the
- * timeline no longer has — an empty room that believes it is up to date. Pair a
- * durable store with a durable event cache, or not at all.
+ * Round 2 had a `WatermarkStore` with `read`/`write`, and `applyEntry` did this:
+ * push the event onto an in-memory array, then write the cursor. Two steps, and
+ * the gauntlet found the window between them —
+ *
+ * > the client watermark is not crash-safe: it advances after mutating an
+ * > in-memory list, so a crash between the write and the persistence resumes
+ * > past an unheld event.
+ *
+ * — which is exactly right, and it is worse than it sounds, because the two
+ * halves had *different lifetimes*. The events lived in memory and the cursor
+ * could live in `localStorage`, so a reload resumed from a durable cursor into
+ * an empty timeline: a room that believes it is up to date and holds nothing.
+ * r2 knew about that and answered it in a doc comment telling callers to "pair a
+ * durable store with a durable event cache, or not at all" — an instruction,
+ * where the type could have made the pairing impossible to get wrong.
+ *
+ * So the interface takes both together. `commit` is handed the event **and** the
+ * cursor that event implies, and an implementation that persists is required to
+ * make them durable in one operation — one `setItem` of one JSON value, one
+ * IndexedDB transaction, one row. There is then no interval during which the
+ * cursor names an event the store does not hold, because there is no moment at
+ * which only one of them has been written.
+ *
+ * The client's in-memory view is seeded from `load`, so the cursor a room
+ * resumes at is always a cursor whose event is in the array beside it.
+ * `apps/web/test/realtime.test.ts` crashes a client mid-page — the journal
+ * throws partway through a five-entry catch-up — and asserts the resumed
+ * client's `lastSeq` names an event it actually holds.
  */
-export interface WatermarkStore {
-  read: (roomId: string) => number;
-  write: (roomId: string, roomSeq: number) => void;
+export interface RoomJournal {
+  /** Everything durably applied for this room, and the cursor that goes with it. */
+  load: (roomId: string) => { events: RoomEventEnvelope[]; lastSeq: number };
+  /**
+   * Record one applied entry and the cursor it implies, **atomically**.
+   *
+   * `lastSeq` is always `entry.roomSeq`; it is a separate parameter rather than
+   * derived so the contract is legible at the call site and an implementation
+   * writing a compact record does not have to re-derive the client's own
+   * arithmetic. An implementation may not persist one without the other.
+   */
+  commit: (roomId: string, entry: RoomEventEnvelope, lastSeq: number) => void;
 }
 
-/** The default: lives exactly as long as the client does. */
-export function memoryWatermarks(): WatermarkStore {
-  const marks = new Map<string, number>();
+/**
+ * The default: lives exactly as long as the client does.
+ *
+ * Crash-safe by construction rather than by care — a process that dies takes the
+ * events and the cursor with it, so there is no state left to be inconsistent.
+ * It is still written through the same two-in-one interface, because a default
+ * whose shape differs from the durable one is a default that hides the durable
+ * one's bugs.
+ */
+export function memoryJournal(): RoomJournal {
+  const rooms = new Map<string, { events: RoomEventEnvelope[]; lastSeq: number }>();
+  const room = (roomId: string) => {
+    let existing = rooms.get(roomId);
+    if (!existing) {
+      existing = { events: [], lastSeq: 0 };
+      rooms.set(roomId, existing);
+    }
+    return existing;
+  };
   return {
-    read: (roomId) => marks.get(roomId) ?? 0,
-    write: (roomId, roomSeq) => {
-      marks.set(roomId, Math.max(marks.get(roomId) ?? 0, roomSeq));
+    load: (roomId) => {
+      const current = room(roomId);
+      return { events: [...current.events], lastSeq: current.lastSeq };
+    },
+    commit: (roomId, entry, lastSeq) => {
+      const current = room(roomId);
+      current.events.push(entry);
+      current.lastSeq = Math.max(current.lastSeq, lastSeq);
     },
   };
 }
 
 /**
- * A `localStorage`-backed store, for an app that also persists the events.
+ * A `localStorage`-backed journal.
  *
- * Not the default, and not used anywhere yet — see the note on `WatermarkStore`
- * for why pairing matters. Exported because the alternative is every caller
- * writing this same twelve lines slightly differently.
+ * One key per room holding `{events, lastSeq}` as one JSON value, so the durable
+ * write is a single `setItem` — which is the whole reason this is a journal and
+ * not a watermark. `localStorage` offers no transaction across two keys, so two
+ * keys would reintroduce the window this interface exists to close; one key is
+ * how you get atomicity out of a store that does not offer any.
+ *
+ * A record that does not parse, or whose cursor disagrees with its events, is
+ * read as no history at all. That is deliberate: a torn write is the one case
+ * where resuming is *worse* than replaying, and a room is cheap to reload.
  */
-export function localStorageWatermarks(namespace: string): WatermarkStore {
-  const key = (roomId: string) => `atrium:watermark:${namespace}:${roomId}`;
-  const fallback = memoryWatermarks();
+export function localStorageJournal(namespace: string): RoomJournal {
+  const key = (roomId: string) => `atrium:journal:${namespace}:${roomId}`;
+  const fallback = memoryJournal();
   const storage = (): Storage | null => {
     try {
       return typeof localStorage === 'undefined' ? null : localStorage;
@@ -166,26 +239,36 @@ export function localStorageWatermarks(namespace: string): WatermarkStore {
       return null;
     }
   };
+  const readRoom = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
+    const store = storage();
+    if (!store) return fallback.load(roomId);
+    const raw = store.getItem(key(roomId));
+    if (raw === null) return { events: [], lastSeq: 0 };
+    try {
+      const parsed = JSON.parse(raw) as { events?: unknown; lastSeq?: unknown };
+      const events = Array.isArray(parsed.events) ? (parsed.events as RoomEventEnvelope[]) : null;
+      const lastSeq = typeof parsed.lastSeq === 'number' ? parsed.lastSeq : null;
+      if (events === null || lastSeq === null) return { events: [], lastSeq: 0 };
+      // The invariant the whole interface exists for, checked on the way back
+      // in: the cursor may not name a position past the last event held.
+      const held = events.at(-1)?.roomSeq ?? 0;
+      if (lastSeq !== held) return { events: [], lastSeq: 0 };
+      return { events, lastSeq };
+    } catch {
+      return { events: [], lastSeq: 0 };
+    }
+  };
   return {
-    read: (roomId) => {
-      const store = storage();
-      if (!store) return fallback.read(roomId);
-      const raw = Number(store.getItem(key(roomId)));
-      return Number.isSafeInteger(raw) && raw > 0 ? raw : 0;
-    },
-    write: (roomId, roomSeq) => {
+    load: readRoom,
+    commit: (roomId, entry, lastSeq) => {
       const store = storage();
       if (!store) {
-        fallback.write(roomId, roomSeq);
+        fallback.commit(roomId, entry, lastSeq);
         return;
       }
-      try {
-        store.setItem(key(roomId), String(roomSeq));
-      } catch {
-        // Quota, or a storage that lies about being writable. The in-memory
-        // cursor is still correct for this session; losing the durable one
-        // costs a replay, not correctness.
-      }
+      const current = readRoom(roomId);
+      current.events.push(entry);
+      store.setItem(key(roomId), JSON.stringify({ events: current.events, lastSeq }));
     },
   };
 }
@@ -222,8 +305,22 @@ export interface RealtimeClientOptions {
   setTimeoutImpl?: (fn: () => void, ms: number) => unknown;
   clearTimeoutImpl?: (handle: unknown) => void;
   onError?: (message: string) => void;
-  /** Where the catch-up cursor is kept. In memory unless you say otherwise. */
-  watermarks?: WatermarkStore;
+  /**
+   * Where this room's applied events and its cursor are kept — together. In
+   * memory unless you say otherwise; see `RoomJournal` for why the two are one
+   * interface and not two.
+   */
+  journal?: RoomJournal;
+  /**
+   * How many entries to ask for per catch-up page.
+   *
+   * Defaulted rather than fixed because the *tests* need it: with the server's
+   * 1000-entry default, a 12- or 40-event fixture never crosses a page boundary,
+   * so multi-page catch-up went unexercised by anything but a fake socket
+   * (#22 gauntlet r2 delta, major 2). The integration suite sets it to a handful
+   * and the loop is then a real loop over real pages.
+   */
+  catchUpPageSize?: number;
   /**
    * How many catch-up rounds may make no progress before the client stops
    * asking. A loop with no floor is a loop that can spin against a server whose
@@ -266,7 +363,8 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   const backoff =
     options.reconnect === false ? null : { ...DEFAULT_RECONNECT, ...options.reconnect };
 
-  const watermarks = options.watermarks ?? memoryWatermarks();
+  const journal = options.journal ?? memoryJournal();
+  const catchUpPageSize = options.catchUpPageSize;
   const maxStalledCatchups = options.maxStalledCatchups ?? DEFAULT_MAX_STALLED_CATCHUPS;
 
   const rooms = new Map<string, RoomView>();
@@ -287,15 +385,16 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   function view(roomId: string): RoomView {
     let existing = rooms.get(roomId);
     if (!existing) {
+      // Events and cursor together, from one read. They cannot disagree: a
+      // journal that persists is required to write them in one operation, and
+      // one that finds them inconsistent reports no history at all.
+      const held = journal.load(roomId);
       existing = {
         roomId,
-        // Seeded from the durable cursor. Zero with the default in-memory
-        // store, which is the honest answer for a client whose event list also
-        // starts empty.
-        lastSeq: watermarks.read(roomId),
-        head: 0,
+        lastSeq: held.lastSeq,
+        head: held.lastSeq,
         seenSeq: 0,
-        events: [],
+        events: held.events,
         pending: [],
         presence: {},
         typing: [],
@@ -368,12 +467,19 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       requestSince(entry.roomId);
       return;
     }
+    // Durable first, in one operation, and only then in memory.
+    //
+    // The order is the fix for r2-delta major 1. r2 mutated the in-memory array
+    // and then wrote the cursor, so a crash in between left a cursor naming an
+    // event nothing held. Committing the event and the cursor together, before
+    // the in-memory view moves, means the two states a crash can leave are
+    // "neither" and "both" — and a throw from the journal leaves the client's
+    // own cursor where it was, so the entry is simply re-delivered by the next
+    // catch-up rather than skipped.
+    journal.commit(entry.roomId, entry, entry.roomSeq);
     room.events.push(entry);
     room.lastSeq = entry.roomSeq;
     room.head = Math.max(room.head, entry.roomSeq);
-    // Written down as it is applied, never in advance: the cursor may only ever
-    // name a position whose event this client actually holds.
-    watermarks.write(entry.roomId, entry.roomSeq);
     reconcilePending(room, entry);
     changed(entry.roomId);
   }
@@ -389,12 +495,14 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     if (entry.event.type !== 'message_posted') return;
     const clientMessageId = entry.event.clientMessageId;
     if (typeof clientMessageId !== 'string') return;
-    if (entry.event.actor.userId !== options.userId) return;
+    if (entry.actor.userId !== options.userId) return;
     room.pending = room.pending.filter((item) => item.clientMessageId !== clientMessageId);
   }
 
   function requestSince(roomId: string): void {
-    send({ type: 'since', roomId, roomSeq: view(roomId).lastSeq });
+    const frame: Record<string, unknown> = { type: 'since', roomId, roomSeq: view(roomId).lastSeq };
+    if (catchUpPageSize !== undefined) frame.limit = catchUpPageSize;
+    send(frame);
   }
 
   function handleFrame(frame: ServerFrame): void {
@@ -419,6 +527,16 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       case 'event':
         applyEntry(frame.entry);
         return;
+      case 'head': {
+        // The server's reconciler saying where the room actually is, with no
+        // frame required to have arrived. Same arithmetic as everywhere else:
+        // behind the head means ask for the gap.
+        const room = view(frame.roomId);
+        room.head = Math.max(room.head, frame.head);
+        if (room.lastSeq < room.head) requestSince(frame.roomId);
+        changed(frame.roomId);
+        return;
+      }
       case 'catchup': {
         const room = view(frame.roomId);
         const before = room.lastSeq;

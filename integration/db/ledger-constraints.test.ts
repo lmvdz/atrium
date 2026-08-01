@@ -11,7 +11,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { LEDGER_ADVISORY_LOCK_KEY } from '../../apps/server/src/ledger.js';
 import { violatesConstraint } from '../support/constraints.js';
-import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
+import { openDatabase, resetDatabase, seedRoom, until } from '../support/harness.js';
 
 /**
  * The ledger's constraints, against a real Postgres with the real migrations
@@ -42,37 +42,65 @@ afterAll(async () => {
 });
 
 /**
+ * A monotonic clock for the fixtures.
+ *
+ * Not decoration. r3's append function refuses any row that does not sort
+ * strictly after the ledger's own maximum in canonical `(at, id)` order — the
+ * reducer's `out_of_order` refusal, moved into the boundary — so two fixtures
+ * minted inside the same millisecond would tie on `at` and be arbitrated by two
+ * random uuids, which loses about half the time. The server solves this the same
+ * way (`nextTimestamp`, `max(now, last + 1ms)`); the tests must not solve it a
+ * different way, or they would be exercising a clock production does not have.
+ */
+let clock = Date.parse('2026-08-01T00:00:00.000Z');
+function nextAt(): string {
+  clock += 1;
+  return new Date(clock).toISOString();
+}
+
+/**
  * One event, as the append procedure takes it.
  *
- * Note what is *not* here: `room_seq`. It is minted inside
+ * Note what is *not* here. `room_seq` is minted inside
  * `atrium_append_core_event` under the ledger lock and cannot be supplied by a
- * caller — which is the r2 change these tests exist to hold. Everything else a
- * bypassing writer might have got wrong is still expressible, so the checks
- * below are reachable through the only path that exists.
+ * caller — the r2 change these tests exist to hold. And the payload has no
+ * `actor`: #21 took it out of the event entirely, so it arrives as its own two
+ * arguments and lands in its own two columns. Everything else a bypassing writer
+ * might have got wrong is still expressible, so the checks below are reachable
+ * through the only path that exists.
  */
 function ledgerRow(
   roomId: string,
-  overrides: { id?: string; at?: string; occurredAt?: string; actor?: unknown } = {},
+  overrides: {
+    id?: string;
+    at?: string;
+    occurredAt?: string;
+    actorKind?: string;
+    actorId?: string | null;
+    payloadActor?: unknown;
+  } = {},
 ) {
   const id = overrides.id ?? randomUUID();
-  const at = overrides.at ?? new Date().toISOString();
+  const at = overrides.at ?? nextAt();
+  const payload: Record<string, unknown> = {
+    id,
+    at,
+    type: 'message_posted',
+    roomId,
+    messageId: randomUUID(),
+    body: 'hello',
+    replyToId: null,
+    clientMessageId: null,
+    attachments: [],
+  };
+  if (overrides.payloadActor !== undefined) payload.actor = overrides.payloadActor;
   return {
     roomId,
     id,
     type: 'message_posted',
-    actor: overrides.actor ?? { kind: 'system' },
-    payload: {
-      id,
-      at,
-      type: 'message_posted',
-      actor: { kind: 'system' },
-      roomId,
-      messageId: randomUUID(),
-      body: 'hello',
-      replyToId: null,
-      clientMessageId: null,
-      attachments: [],
-    } as Record<string, unknown>,
+    actorKind: overrides.actorKind ?? 'system',
+    actorId: overrides.actorId ?? null,
+    payload,
     occurredAt: overrides.occurredAt ?? at,
   };
 }
@@ -89,16 +117,18 @@ type LedgerRow = ReturnType<typeof ledgerRow>;
  * is exactly the bypass the r1 gauntlet flagged as *possible*; that they could
  * do it was the demonstration.
  */
-async function append(row: LedgerRow) {
+async function append(row: LedgerRow, origin: string | null = null) {
   return handle.db.transaction(async (tx) => {
     const result = await tx.execute<{ seq: string; room_seq: string }>(sql`
       SELECT "seq", "room_seq" FROM atrium_append_core_event(
         ${row.roomId}::uuid,
         ${row.id}::text,
         ${row.type}::event_type,
-        ${JSON.stringify(row.actor)}::jsonb,
+        ${row.actorKind}::actor_kind,
+        ${row.actorId}::text,
         ${JSON.stringify(row.payload)}::jsonb,
-        ${row.occurredAt}::timestamptz
+        ${row.occurredAt}::timestamptz,
+        ${origin}::text
       )
     `);
     const minted = result[0];
@@ -166,8 +196,8 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
    */
   it('refuses a payload whose `at` disagrees with occurred_at', async () => {
     const row = ledgerRow(roomA, {
-      at: '2026-07-31T12:00:09.000Z',
-      occurredAt: '2026-07-31T12:00:03.000Z',
+      at: '2026-08-01T12:00:09.000Z',
+      occurredAt: '2026-08-01T12:00:03.000Z',
     });
     await violatesConstraint('core_events_payload_at_matches', () => append(row));
   });
@@ -176,13 +206,48 @@ describe('core_events — the append invariant, enforced by Postgres', () => {
     // Without one, `::timestamptz` means different instants in different
     // sessions — so the equality above would be a check that could pass in one
     // connection and fail in another.
-    const row = ledgerRow(roomA, { at: '2026-07-31T12:00:03', occurredAt: '2026-07-31T12:00:03Z' });
+    const row = ledgerRow(roomA, { at: '2026-08-01T12:00:03', occurredAt: '2026-08-01T12:00:03Z' });
     await violatesConstraint('core_events_payload_at_has_offset', () => append(row));
   });
 
-  it('refuses a lifted actor that disagrees with the payload', async () => {
-    const row = ledgerRow(roomA, { actor: { kind: 'human', userId: 'somebody-else' } });
-    await violatesConstraint('core_events_payload_actor_matches', () => append(row));
+  /**
+   * r1's major 2, in the shape #21 inverted it into.
+   *
+   * r2 asserted `payload->'actor' = actor`: a lifted column that disagrees with
+   * the payload lets a writer mint a row that replays as something other than
+   * what it is. #21 then removed the actor from `CoreEvent` entirely, so that
+   * equality became unsatisfiable — and deleting it would have deleted the
+   * finding, leaving a payload free to carry a stray `actor` key that the live
+   * path refuses at parse time and that nothing stops from sitting in the ledger
+   * looking authoritative to the next reader.
+   *
+   * So the equality survives as the only one left that says the same thing:
+   * exactly one actor per row, in exactly one place. Catches: dropping
+   * `core_events_payload_has_no_actor` from the schema and the migration.
+   */
+  it('refuses an actor inside the payload — there is exactly one, and it is a column', async () => {
+    const row = ledgerRow(roomA, { payloadActor: { kind: 'human', userId: 'somebody-else' } });
+    await violatesConstraint('core_events_payload_has_no_actor', () => append(row));
+  });
+
+  it('refuses an actor_id that disagrees with its kind', async () => {
+    // `{kind:'system', actor_id:'alice'}` is a row that reads as a person having
+    // done what the process did; `{kind:'human', actor_id:null}` is history with
+    // nobody's name on it. Catches: dropping
+    // `core_events_actor_id_matches_kind`, which is the only thing standing
+    // between those two spellings and the audit trail.
+    await violatesConstraint('core_events_actor_id_matches_kind', () =>
+      append(ledgerRow(roomA, { actorKind: 'system', actorId: 'alice' })),
+    );
+    await violatesConstraint('core_events_actor_id_matches_kind', () =>
+      append(ledgerRow(roomA, { actorKind: 'model', actorId: null })),
+    );
+  });
+
+  it('refuses a blank actor_id, which is how NULL gets spelled by accident', async () => {
+    await violatesConstraint('core_events_actor_id_not_blank', () =>
+      append(ledgerRow(roomA, { actorKind: 'model', actorId: '' })),
+    );
   });
 
   it('refuses an event in a room that does not exist', async () => {
@@ -212,7 +277,8 @@ describe('core_events — the append path is structural, not cooperative', () =>
         roomSeq: 1,
         id: row.id,
         type: 'message_posted',
-        actor: { kind: 'system' },
+        actorKind: 'system',
+        actorId: null,
         payload: row.payload,
         occurredAt: row.occurredAt,
       }),
@@ -244,9 +310,9 @@ describe('core_events — the append path is structural, not cooperative', () =>
         CREATE OR REPLACE FUNCTION atrium_append_core_event(p jsonb) RETURNS void
         LANGUAGE plpgsql AS $spoof$
         BEGIN
-          INSERT INTO core_events (room_id, room_seq, id, type, actor, payload, occurred_at)
+          INSERT INTO core_events (room_id, room_seq, id, type, actor_kind, actor_id, payload, occurred_at)
           VALUES ((p->>'roomId')::uuid, 1, p->>'id', 'message_posted',
-                  p->'actor', p->'payload', (p->>'at')::timestamptz);
+                  'system', NULL, p->'payload', (p->>'at')::timestamptz);
         END $spoof$;
       `),
     );
@@ -258,7 +324,6 @@ describe('core_events — the append path is structural, not cooperative', () =>
             roomId: row.roomId,
             id: row.id,
             at: row.occurredAt,
-            actor: { kind: 'system' },
             payload: row.payload,
           })}::jsonb)`,
         ),
@@ -271,7 +336,7 @@ describe('core_events — the append path is structural, not cooperative', () =>
   it('refuses to rewrite a ledger row after the fact', async () => {
     await append(ledgerRow(roomA));
     await violatesConstraint('core_events_append_only', () =>
-      handle.db.execute(sql`UPDATE core_events SET "actor" = '{"kind":"system"}'::jsonb`),
+      handle.db.execute(sql`UPDATE core_events SET "actor_kind" = 'system'`),
     );
   });
 
@@ -285,10 +350,182 @@ describe('core_events — the append path is structural, not cooperative', () =>
       sql`SELECT prosrc AS src FROM pg_proc
           WHERE proname = 'atrium_append_core_event'
             AND pronamespace = 'public'::regnamespace
-            AND pronargs = 6`,
+            AND pronargs = 8`,
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]?.src).toContain(String(LEDGER_ADVISORY_LOCK_KEY));
+  });
+});
+
+/**
+ * The append function is an **authorization boundary**, not merely a path
+ * (#22 gauntlet r2 delta, blocking 2).
+ *
+ * The finding, in full, because each clause needs its own test:
+ *
+ * > the `SECURITY DEFINER` append function is executable by `PUBLIC`, accepts
+ * > arbitrary event JSON, and performs neither membership authorization nor
+ * > reducer validation; calling it directly satisfies both the call-stack and
+ * > lock checks, inserts a ledger row, and emits no doorbell.
+ *
+ * Round 2's guard asked "did you come through the front door", and the door was
+ * unlocked. These four tests are the four locks.
+ *
+ * What is deliberately *not* tested here, because it cannot be: a superuser who
+ * sets `session_replication_role = replica`, or restores with
+ * `pg_restore --disable-triggers`, walks past every trigger in the schema. That
+ * is operator territory — see the head of
+ * `drizzle/0004_trusted_actor_and_append_boundary.sql`, which says so in as many
+ * words rather than implying coverage it cannot have.
+ */
+describe('core_events — the append function is the authorization boundary', () => {
+  it('is not executable by PUBLIC', async () => {
+    // Catches: the r2 privilege block, which granted EXECUTE to PUBLIC on the
+    // reasoning that the trigger was the real guard. It made the door the guard.
+    const [row] = await handle.db.execute<{ granted: boolean }>(
+      sql`SELECT has_function_privilege('public', p.oid, 'EXECUTE') AS granted
+          FROM pg_proc p
+          WHERE p.proname = 'atrium_append_core_event'
+            AND p.pronamespace = 'public'::regnamespace
+            AND p.pronargs = 8`,
+    );
+    expect(row?.granted).toBe(false);
+  });
+
+  it('is executable by the role the application connects as', async () => {
+    // The other half, and not a formality: a REVOKE that also locked out the app
+    // would be caught by every other test in the suite failing, but stating it
+    // here is what makes the grant deliberate rather than incidental.
+    const [row] = await handle.db.execute<{ granted: boolean }>(
+      sql`SELECT has_function_privilege(current_user, p.oid, 'EXECUTE') AS granted
+          FROM pg_proc p
+          WHERE p.proname = 'atrium_append_core_event'
+            AND p.pronamespace = 'public'::regnamespace
+            AND p.pronargs = 8`,
+    );
+    expect(row?.granted).toBe(true);
+  });
+
+  it('refuses a human actor who holds no membership in the room', async () => {
+    // Catches: removing the membership block from the function. Without it, any
+    // caller that can execute the function writes durable history into any room
+    // as any user — the command layer's checks are the caller's own, and this is
+    // the path a caller that is not the command layer takes.
+    const stranger = randomUUID();
+    await violatesConstraint('core_events_append_actor_authorized', () =>
+      append(ledgerRow(roomA, { actorKind: 'human', actorId: stranger })),
+    );
+    const [{ count } = { count: 0 }] = await handle.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(coreEvents);
+    expect(Number(count)).toBe(0);
+  });
+
+  it('accepts a human actor who does hold one', async () => {
+    const room = await seedRoom(handle, ['carol'], { slug: 'room-c' });
+    const carol = room.people.carol as string;
+    const appended = await append(ledgerRow(room.roomId, { actorKind: 'human', actorId: carol }));
+    expect(appended.roomSeq).toBe(1);
+  });
+
+  it('refuses a human actor id that could not be a member at all', async () => {
+    // `memberships.user_id` is a uuid. Without this the cast raises SQLSTATE
+    // 22P02 and the caller gets "invalid input syntax for type uuid", which is
+    // true and says nothing about what was actually refused.
+    await violatesConstraint('core_events_append_actor_authorized', () =>
+      append(ledgerRow(roomA, { actorKind: 'human', actorId: 'not-a-uuid' })),
+    );
+  });
+
+  /**
+   * The reducer's refusals, enforced in SQL.
+   *
+   * @atrium/core refuses an event for exactly two reasons and both are
+   * properties of *position*: `out_of_order` (it does not sort strictly after
+   * the state's cursor) and `duplicate` (its id is spent). Position is what a
+   * database can check, so both are checked in the function — and with them
+   * enforced, no caller can put a row in this table that a replay would refuse
+   * to fold, which is the invariant the whole ticket rests on.
+   *
+   * The reducer's third verdict, `applied_with_issue`, is not a refusal: the
+   * event happened and the problem is recorded beside it, so there is nothing
+   * for a boundary to reject.
+   */
+  it('refuses an event that does not sort strictly after the ledger cursor', async () => {
+    await append(ledgerRow(roomA, { at: '2026-08-01T10:00:05.000Z' }));
+    // Catches: removing the canonical-order gate from the function. Without it
+    // this row lands durably, and the next `catchUp` folds it, gets `rejected`
+    // back from the reducer, and throws the ledger-integrity error — a server
+    // that cannot start against its own log.
+    await violatesConstraint('core_events_append_canonical_order', () =>
+      append(ledgerRow(roomA, { at: '2026-08-01T10:00:04.000Z' })),
+    );
+    await violatesConstraint('core_events_append_canonical_order', () =>
+      append(ledgerRow(roomB, { at: '2026-08-01T10:00:04.000Z' })),
+    );
+  });
+
+  it('breaks an exact timestamp tie on the event id, the way the reducer does', async () => {
+    const at = '2026-08-01T11:00:00.000Z';
+    await append(ledgerRow(roomA, { at, id: 'bbbb' }));
+    // Same instant, an id that sorts before: the reducer would refuse it, so the
+    // boundary does. Catches: comparing on `occurred_at` alone, which lets a
+    // whole millisecond's worth of ids land in any order.
+    await violatesConstraint('core_events_append_canonical_order', () =>
+      append(ledgerRow(roomA, { at, id: 'aaaa' })),
+    );
+    // …and one that sorts after is fine, which is what makes the rule a tie-break
+    // rather than a ban on sharing a timestamp.
+    expect((await append(ledgerRow(roomA, { at, id: 'cccc' }))).roomSeq).toBe(2);
+  });
+
+  /**
+   * The doorbell is rung by the database, so no writer can insert in silence.
+   *
+   * This is the clause of the finding with the widest blast radius: r2 emitted
+   * `pg_notify` from the application, so a row written by anything else landed
+   * durably and told nobody — and every other instance's subscribers sat at
+   * their cursors indefinitely with no gap to notice.
+   */
+  it('emits the doorbell from inside the function, with the appending origin', async () => {
+    const notifications: string[] = [];
+    const listener = await handle.sql.listen('atrium_ledger', (raw) => {
+      notifications.push(raw);
+    });
+    try {
+      const appended = await append(ledgerRow(roomA), 'instance-under-test');
+      await until(() => notifications.length > 0, 5_000, 'a ledger notification');
+      const note = JSON.parse(notifications[0] as string) as Record<string, unknown>;
+      // Catches: moving `pg_notify` back into the application. A row appended by
+      // this test — which is not the application — must still ring the bell.
+      expect(note).toMatchObject({
+        origin: 'instance-under-test',
+        roomId: roomA,
+        seq: appended.seq,
+        roomSeq: appended.roomSeq,
+      });
+    } finally {
+      await listener.unlisten();
+    }
+  });
+
+  it('rings for everybody when the appender did not name itself', async () => {
+    // A null origin matches no instance, so every instance folds it. That is the
+    // direction to be wrong in: a script or a second application that appends
+    // without an instance id must wake everyone rather than nobody. Catches:
+    // defaulting `p_origin` to a literal, or filtering on truthiness in the bus
+    // (`note.origin && note.origin !== id`) rather than on inequality.
+    const notifications: string[] = [];
+    const listener = await handle.sql.listen('atrium_ledger', (raw) => {
+      notifications.push(raw);
+    });
+    try {
+      await append(ledgerRow(roomA));
+      await until(() => notifications.length > 0, 5_000, 'a ledger notification');
+      expect(JSON.parse(notifications[0] as string)).toMatchObject({ origin: null });
+    } finally {
+      await listener.unlisten();
+    }
   });
 
   /**
@@ -384,7 +621,7 @@ describe('composite (room_id, id) foreign keys — rooms are the isolation bound
         subjectKind: 'object',
         subjectId: foreign,
         class: 'owned_commitment',
-        rationale: 'you own this',
+        reason: { kind: 'commitment_open', statement: 'you own this', due: null } as const,
       }),
     );
   });
@@ -524,7 +761,7 @@ describe('attention_items — a polymorphic subject that is still room-scoped', 
         subjectKind: 'proposal',
         subjectId,
         class: 'needs_decision',
-        rationale: 'you asked for this call',
+        reason: { kind: 'decision_pending', statement: 'you asked for this call', assigned: true } as const,
       }),
     ).resolves.toBeDefined();
 
@@ -552,7 +789,7 @@ describe('attention_items — a polymorphic subject that is still room-scoped', 
         subjectKind: 'proposal',
         subjectId: foreign,
         class: 'needs_decision',
-        rationale: 'cross-room',
+        reason: { kind: 'mention', request: 'cross-room' } as const,
       }),
     );
   });
@@ -569,7 +806,7 @@ describe('attention_items — a polymorphic subject that is still room-scoped', 
         subjectKind: 'object',
         subjectId: proposalId,
         class: 'needs_decision',
-        rationale: 'mislabelled',
+        reason: { kind: 'mention', request: 'mislabelled' } as const,
       }),
     );
   });
@@ -585,7 +822,7 @@ describe('attention_items — a polymorphic subject that is still room-scoped', 
       subjectKind,
       subjectId,
       class: 'needs_decision' as const,
-      rationale: 'both',
+      reason: { kind: 'mention', request: 'both' } as const,
     });
     await handle.db.insert(attentionItems).values(item('proposal', proposalId));
     // The kind is part of the uniqueness key: these are different subjects, and

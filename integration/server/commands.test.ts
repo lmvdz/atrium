@@ -66,13 +66,28 @@ const send = (roomId: string, body: string, clientMessageId: string | null = nul
   attachments: [],
 });
 
-/** The non-payload half of a model proposal — every draft below shares it. */
-const modelDraft: Omit<ProposalDraft, 'type' | 'payload'> = {
-  confidence: 0.7,
-  proposer: { kind: 'model', model: 'test-model' },
-  provenance: [],
-  interpretationId: null,
-};
+/**
+ * The non-payload half of a model proposal — every draft below shares it.
+ *
+ * It takes the cited message rather than defaulting to none, because #21 made
+ * "a model proposal cites at least one message" a schema rule instead of a
+ * comment: a reading with no receipt is an assertion, and the acceptance
+ * boundary exists to refuse assertions. The quote is the span of that message
+ * the reading rests on, and is required outright for a model claim or
+ * commitment — the two types that put a name on somebody.
+ */
+function modelDraft(
+  messageId: string,
+  quote: string,
+): Omit<ProposalDraft, 'type' | 'payload'> {
+  return {
+    confidence: 0.7,
+    proposer: { kind: 'model', model: 'test-model' },
+    provenance: [messageId],
+    quote,
+    interpretationId: null,
+  };
+}
 
 async function ledgerCount(): Promise<number> {
   const [row] = await handle.db.select({ count: count() }).from(coreEvents);
@@ -184,7 +199,25 @@ describe('send_message', () => {
 });
 
 describe('the proposal → acceptance boundary, over the wire', () => {
+  /**
+   * A model proposal has to carry a receipt now (#21).
+   *
+   * `provenance` may not be empty for a model proposer — a model reading with no
+   * cited message is an assertion, and the acceptance boundary exists to refuse
+   * assertions. So the fixture posts the message the reading is drawn from and
+   * cites it, which is what the interpretation pipeline will do. A *human*
+   * proposer may cite nothing, because a person staging their own reading is the
+   * receipt; that path is exercised elsewhere in this file.
+   */
+  async function citedMessage(client: TestClient, body: string): Promise<string> {
+    const ack = await client.command(send(room.roomId, body));
+    expect(ack.type).toBe('ack');
+    const posted = await lastEvent<{ messageId: string }>(room.roomId);
+    return posted.messageId;
+  }
+
   async function acceptedDecision(client: TestClient, statement: string) {
+    const messageId = await citedMessage(client, `we should ${statement}`);
     const recorded = await client.command({
       name: 'record_proposal',
       roomId: room.roomId,
@@ -193,7 +226,8 @@ describe('the proposal → acceptance boundary, over the wire', () => {
         payload: { statement, decidedBy: null, status: 'active' },
         confidence: 0.8,
         proposer: { kind: 'model', model: 'test-model' },
-        provenance: [],
+        provenance: [messageId],
+        quote: `we should ${statement}`,
         interpretationId: null,
       },
     });
@@ -309,6 +343,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
   it('binds an answer to an open question and flips its status', async () => {
     const alice = await connect(room.people.alice as string);
 
+    const asked = await citedMessage(alice, 'when do we ship?');
     const question = await alice.command({
       name: 'record_proposal',
       roomId: room.roomId,
@@ -317,7 +352,8 @@ describe('the proposal → acceptance boundary, over the wire', () => {
         payload: { question: 'when do we ship?', status: 'open' },
         confidence: 0.9,
         proposer: { kind: 'model', model: 'test-model' },
-        provenance: [],
+        provenance: [asked],
+        quote: 'when do we ship?',
         interpretationId: null,
       },
     });
@@ -385,7 +421,7 @@ describe('resolve_attention', () => {
       subjectKind: 'object',
       subjectId: objectId,
       class: 'owned_commitment',
-      rationale: 'you own this commitment',
+      reason: { kind: 'commitment_open', statement: 'you own this commitment', due: null },
     });
 
     const wrongPerson = await bob.command({
@@ -473,7 +509,14 @@ describe('live ≡ replay', () => {
     await alice.subscribe(room.roomId);
 
     // Exercise every event type the reducer folds, plus the two it does not.
-    await alice.command(send(room.roomId, 'we should ship friday'));
+    const quote = 'we should ship friday';
+    await alice.command(send(room.roomId, quote));
+    // The message every model reading below cites. It has to be a real row: the
+    // acceptance projects `object_sources`, whose composite `(room_id,
+    // message_id)` foreign key refuses a citation of a message from another room
+    // or of no message at all.
+    const cited = (await lastEvent<{ messageId: string }>(room.roomId)).messageId;
+    const draft = modelDraft(cited, quote);
 
     const recordProposal = async (draft: ProposalDraft) => {
       await alice.command({
@@ -495,20 +538,20 @@ describe('live ≡ replay', () => {
 
     const questionId = await accept(
       await recordProposal({
-        ...modelDraft,
+        ...draft,
         type: 'open_question',
         payload: { question: 'when?', status: 'open' },
       }),
     );
     const decisionId = await accept(
       await recordProposal({
-        ...modelDraft,
+        ...draft,
         type: 'decision',
         payload: { statement: 'friday', decidedBy: null, status: 'active' },
       }),
     );
     const rejected = await recordProposal({
-      ...modelDraft,
+      ...draft,
       type: 'claim',
       payload: {
         statement: 'the build is green',

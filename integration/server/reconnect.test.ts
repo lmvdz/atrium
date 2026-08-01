@@ -33,6 +33,8 @@ import {
  */
 
 const BURST = 40;
+/** Small enough that a 40-event recovery takes eight pages. See below. */
+const CATCH_UP_PAGE = 5;
 const KILL_AFTER = 12;
 
 let handle: DatabaseHandle;
@@ -104,6 +106,12 @@ describe('kill mid-burst, reconnect through the production client', () => {
       // Tight, so the test is not mostly waiting. The behaviour under test is
       // the catch-up loop, not the backoff curve.
       reconnect: { initialDelayMs: 10, maxDelayMs: 40, factor: 1 },
+      // Five, against a forty-event burst: eight pages, so the recovery this
+      // test is about crosses page boundaries instead of arriving in one frame.
+      // r2 ran this fixture against the server's 1000-entry default, which meant
+      // the acceptance test never once exercised the catch-up loop it exists to
+      // prove (#22 gauntlet r2 delta, major 2).
+      catchUpPageSize: CATCH_UP_PAGE,
       socketFactory: nodeSocketFactory({ onSocket: (socket) => sockets.push(socket) }),
       onError: (message) => errors.push(message),
     });

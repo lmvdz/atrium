@@ -4,11 +4,11 @@ import { createDatabase, type DatabaseHandle } from '@atrium/db';
 import { memberships, rooms, users } from '@atrium/db/schema';
 import { sql } from 'drizzle-orm';
 import { WebSocket } from 'ws';
-import { type Command, createCommandService } from '../../apps/server/src/commands.js';
+import { type CommandInput, createCommandService } from '../../apps/server/src/commands.js';
 import { createEventBus, type EventBus } from '../../apps/server/src/event-bus.js';
 import { createLedger, type Ledger } from '../../apps/server/src/ledger.js';
 import { createLogger } from '../../apps/server/src/logger.js';
-import type { ClientFrame, ServerFrame } from '../../apps/server/src/protocol.js';
+import type { ClientFrameInput, ServerFrame } from '../../apps/server/src/protocol.js';
 import {
   createMembershipAuthorizer,
   createStubSessionAuthenticator,
@@ -113,10 +113,18 @@ export interface TestServerOptions {
    * Off by default so the tests that are about one instance stay about one
    * instance. `startSecondInstance` turns it on for both, which is the only way
    * to ask the question it exists to ask.
+   *
+   * Note what this no longer switches off: **delivery**. The reconciler runs
+   * either way, because a durable path that a flag can remove is the r2-delta
+   * blocking finding with a flag in front of it. Without the bus an instance
+   * simply learns about a peer commit on the next reconcile rather than
+   * immediately.
    */
   bus?: boolean;
-  /** Names the instance in logs and in the origin filter. */
+  /** Names the instance in logs and in the notification origin filter. */
   instanceId?: string;
+  /** Shorten the reconciliation timer so a test does not wait on wall clock. */
+  reconcileIntervalMs?: number;
 }
 
 /** A realtime server on an ephemeral port, wired exactly as `index.ts` wires it. */
@@ -128,7 +136,9 @@ export async function startTestServer(
   const bus = options.bus
     ? createEventBus({ sql: handle.sql, logger, instanceId: options.instanceId })
     : undefined;
-  const ledger = createLedger({ db: handle.db, logger, bus });
+  // The instance id goes to the ledger, which passes it to the append function
+  // as the notification origin — the doorbell is rung by the database now.
+  const ledger = createLedger({ db: handle.db, logger, instanceId: bus?.instanceId });
   await ledger.hydrate();
   const commands = createCommandService({
     db: handle.db,
@@ -144,6 +154,7 @@ export async function startTestServer(
     commands,
     ledger,
     bus,
+    reconcileIntervalMs: options.reconcileIntervalMs ?? 200,
     session: createStubSessionAuthenticator(),
   });
   await realtime.listen();
@@ -269,7 +280,7 @@ export class TestClient {
     return client;
   }
 
-  send(frame: ClientFrame): void {
+  send(frame: ClientFrameInput): void {
     this.socket.send(JSON.stringify(frame));
   }
 
@@ -316,7 +327,7 @@ export class TestClient {
   }
 
   /** Send a command and wait for its ack or nack. */
-  async command(command: Command): Promise<Extract<ServerFrame, { type: 'ack' | 'nack' }>> {
+  async command(command: CommandInput): Promise<Extract<ServerFrame, { type: 'ack' | 'nack' }>> {
     this.nextCommandId += 1;
     const commandId = `c${this.nextCommandId}`;
     this.send({ type: 'command', commandId, command });
@@ -326,7 +337,7 @@ export class TestClient {
   }
 
   /** Fire a command without waiting — for the concurrency tests. */
-  fire(command: Command): Promise<Extract<ServerFrame, { type: 'ack' | 'nack' }>> {
+  fire(command: CommandInput): Promise<Extract<ServerFrame, { type: 'ack' | 'nack' }>> {
     return this.command(command);
   }
 

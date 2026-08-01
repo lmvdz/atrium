@@ -1,16 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import {
   type AcceptedObject,
+  AcceptedObjectType,
   type Actor,
   ClaimPayload,
   CommitmentPayload,
   CorrectionAction,
   DecisionPayload,
+  emptyProvenance,
   Id,
   ObjectivePayload,
   OpenQuestionPayload,
   type Proposal,
   Proposer,
+  Provenance,
   type Relation,
 } from '@atrium/core';
 import type { Database } from '@atrium/db';
@@ -66,8 +69,20 @@ const AttachmentList = z.array(MessageAttachment).max(20).default([]);
 const draftBase = {
   confidence: z.number().min(0).max(1),
   proposer: Proposer,
-  /** Message ids this reading was drawn from. */
+  /** Message ids this reading was drawn from. Non-empty for a model proposer. */
   provenance: z.array(Id).default([]),
+  /**
+   * The verbatim span of a cited message this reading rests on.
+   *
+   * Optional here because a person staging their own reading quotes nobody, and
+   * required by @atrium/core for a model claim or commitment — the two types
+   * that put a name on somebody. #21's r3 binds attribution to the message that
+   * *bears* the sentence, and the quote is the only thing that identifies it.
+   * Passed straight through: the command layer neither invents one nor checks
+   * one, because the check is the reducer's and duplicating it here would be a
+   * second copy free to disagree.
+   */
+  quote: z.string().nullable().default(null),
   interpretationId: Id.nullable().default(null),
 };
 
@@ -112,6 +127,22 @@ export const Command = z.discriminatedUnion('name', [
     objectId: Id,
     action: CorrectionAction,
     patch: z.record(z.string(), z.unknown()).default({}),
+    /**
+     * `retype` only: the type the object becomes (#21's resolution of #5).
+     *
+     * Its own field rather than a key inside `patch`, because the type is not
+     * part of any payload schema — a patch key that silently means something
+     * structural is how a payload edit becomes a type change by accident.
+     */
+    toType: AcceptedObjectType.nullable().default(null),
+    /**
+     * The messages that motivated the correction. #19 r1: a correction with a
+     * receipt can be shown next to the thing it corrected; one without is an
+     * unexplained edit, and #5's counterexample extractor has nothing to point
+     * at. Attribution is the trusted actor and rides beside the payload; this is
+     * the other half.
+     */
+    provenance: Provenance.default(emptyProvenance),
     note: z.string().max(2000).nullable().default(null),
   }),
   z.object({
@@ -134,6 +165,16 @@ export const Command = z.discriminatedUnion('name', [
   z.object({ name: z.literal('advance_seen'), roomId: Id, roomSeq: z.number().int().min(0) }),
 ]);
 export type Command = z.infer<typeof Command>;
+/**
+ * A command as a *caller* writes it — defaults not yet applied.
+ *
+ * The difference is not cosmetic. `Command` is the parsed shape, in which every
+ * `.default()` field is present; a real client sends JSON without them and zod
+ * fills them in. Test harnesses and any in-process caller should speak this
+ * type, because demanding `toType: null, provenance: {…}` from every caller is
+ * demanding a shape no socket ever sends.
+ */
+export type CommandInput = z.input<typeof Command>;
 export type CommandName = Command['name'];
 
 /** What a command did, and therefore what the socket layer should fan out. */
@@ -143,6 +184,8 @@ export type CommandResult =
       roomId: string;
       seq: number;
       roomSeq: number;
+      /** The trusted actor this row was appended under — what the wire carries. */
+      actor: Actor;
       event: RoomEvent;
       /** Business problems the reducer recorded. The event still happened. */
       issues: string[];
@@ -182,7 +225,16 @@ export function createCommandService({
     return { kind: 'human', userId: session.userId };
   }
 
-  /** The append path every non-ephemeral command funnels through. */
+  /**
+   * The append path every non-ephemeral command funnels through.
+   *
+   * `actor` is derived here, from the session the socket authenticated, and
+   * handed to the ledger as a *trusted argument* rather than built into the
+   * event. That is #21's contract and it is the whole of this layer's part in
+   * it: core cannot check that an actor came from an authenticated session — it
+   * has no session — so the guarantee is exactly as good as this one derivation,
+   * which is why there is one of them and it is three lines from the session.
+   */
   async function appendAndProject(
     session: Session,
     roomId: string,
@@ -190,6 +242,7 @@ export function createCommandService({
   ): Promise<CommandResult> {
     const appended = await ledger.append({
       roomId,
+      actor: actorOf(session),
       // The authorization that counts: same question, asked again under the
       // append lock, on the transaction that is about to write.
       authorize: async (tx) => {
@@ -207,6 +260,7 @@ export function createCommandService({
       roomId: appended.roomId,
       seq: appended.seq,
       roomSeq: appended.roomSeq,
+      actor: appended.actor,
       event: appended.event,
       issues,
     };
@@ -217,14 +271,12 @@ export function createCommandService({
     // allowed to become durable is inside the append transaction — see
     // `appendAndProject`.
     await requireMembership(session, command.roomId);
-    const actor = actorOf(session);
 
     switch (command.name) {
       case 'send_message':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
-          actor,
           type: 'message_posted',
           roomId: command.roomId,
           messageId: randomUUID(),
@@ -238,7 +290,6 @@ export function createCommandService({
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
-          actor,
           type: 'proposal_recorded',
           proposal: draftToProposal(command.proposal, command.roomId, at),
         }));
@@ -247,7 +298,6 @@ export function createCommandService({
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
-          actor,
           type: 'proposal_rejected',
           proposalId: command.proposalId,
           reason: command.reason,
@@ -269,7 +319,7 @@ export function createCommandService({
             );
           }
           const object = objectFromProposal(record.proposal, command.objectiveId, at);
-          return { id, at, actor, type: 'object_accepted', object };
+          return { id, at, type: 'object_accepted', object };
         });
       }
 
@@ -277,11 +327,12 @@ export function createCommandService({
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
-          actor,
           type: 'object_corrected',
           objectId: command.objectId,
           action: command.action,
           patch: command.patch,
+          toType: command.toType,
+          provenance: command.provenance,
           note: command.note,
         }));
 
@@ -296,14 +347,13 @@ export function createCommandService({
             note: command.note,
             createdAt: at,
           };
-          return { id, at, actor, type: 'relation_added', relation };
+          return { id, at, type: 'relation_added', relation };
         });
 
       case 'resolve_attention':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
-          actor,
           type: 'attention_resolved',
           roomId: command.roomId,
           attentionId: command.attentionId,
@@ -429,6 +479,7 @@ function draftToProposal(draft: ProposalDraft, roomId: string, at: string): Prop
     confidence: draft.confidence,
     proposer: draft.proposer,
     provenance: draft.provenance,
+    quote: draft.quote,
     interpretationId: draft.interpretationId,
     status: 'proposed',
     createdAt: at,

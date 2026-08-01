@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createRealtimeClient,
-  memoryWatermarks,
+  memoryJournal,
   type RealtimeClient,
+  type RealtimeClientOptions,
+  type RoomJournal,
   type RoomEventEnvelope,
   type ServerFrame,
   type SocketLike,
@@ -84,11 +86,14 @@ function messageEvent(
     roomId: ROOM,
     roomSeq,
     seq: roomSeq,
+    // Beside the event, never inside it: #21 took the actor out of the payload
+    // and the wire follows. A fixture that put one back would be describing a
+    // shape the server can no longer produce.
+    actor: { kind: 'human', userId },
     event: {
       id: `e${roomSeq}`,
       at: `2026-07-31T00:00:${String(roomSeq).padStart(2, '0')}.000Z`,
       type: 'message_posted',
-      actor: { kind: 'human', userId },
       roomId: ROOM,
       messageId: `m${roomSeq}`,
       body,
@@ -103,6 +108,27 @@ function latest(): FakeSocket {
   const socket = sockets.at(-1);
   if (!socket) throw new Error('no socket was created');
   return socket;
+}
+
+/** A second client over the same fake-socket registry, connected and open. */
+async function clientWith(
+  overrides: Partial<RealtimeClientOptions> = {},
+): Promise<RealtimeClient> {
+  const built = createRealtimeClient({
+    userId: ME,
+    url: 'ws://test/ws',
+    reconnect: false,
+    socketFactory: (url) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket;
+    },
+    onError: (message) => errors.push(message),
+    ...overrides,
+  });
+  await built.connect();
+  latest().open();
+  return built;
 }
 
 beforeEach(async () => {
@@ -227,25 +253,167 @@ describe('subscribe and catch up', () => {
     expect(errors.some((message) => message.includes('stalled'))).toBe(true);
   });
 
-  it('resumes from a durable watermark rather than replaying the room', async () => {
-    const marks = memoryWatermarks();
-    marks.write(ROOM, 7);
-    const resumed = createRealtimeClient({
-      userId: ME,
-      url: 'ws://test/ws',
-      reconnect: false,
-      watermarks: marks,
-      socketFactory: (url) => {
-        const socket = new FakeSocket(url);
-        sockets.push(socket);
-        return socket;
-      },
-    });
-    await resumed.connect();
-    latest().open();
+  it('resumes from a durable journal rather than replaying the room', async () => {
+    const journal = memoryJournal();
+    for (const roomSeq of [1, 2, 3, 4, 5, 6, 7]) {
+      journal.commit(ROOM, messageEvent(roomSeq, `m${roomSeq}`), roomSeq);
+    }
+    const resumed = await clientWith({ journal });
     resumed.join(ROOM);
     latest().deliver({ type: 'subscribed', roomId: ROOM, head: 9, seenSeq: 0 });
     expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 7 });
+    // And it resumes holding the history, not only the number. A cursor without
+    // its events is the failure `RoomJournal` exists to make unrepresentable —
+    // catches: seeding `lastSeq` from the store while leaving `events` empty,
+    // which is what r2's `WatermarkStore` did by construction.
+    expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it('asks for a bounded page when one is configured', async () => {
+    const bounded = await clientWith({ catchUpPageSize: 5 });
+    bounded.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 12, seenSeq: 0 });
+    // Catches: dropping `limit` from `requestSince`. Without it the client asks
+    // for the server's 1000-entry default, and no fixture in this repo is large
+    // enough to produce a second page — which is exactly how multi-page catch-up
+    // went unexercised against a real database (r2 delta, major 2).
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 0, limit: 5 });
+  });
+});
+
+/**
+ * Crash-safety of the cursor (#22 gauntlet r2 delta, major 1).
+ *
+ * The finding: the watermark advanced *after* the in-memory list was mutated, so
+ * a crash in between resumed past an event nothing held. Each test below states
+ * the source mutation it catches.
+ */
+describe('the cursor never names an event the client does not hold', () => {
+  /** A journal that dies partway through a page, the way a killed tab does. */
+  function journalDyingAfter(commits: number): { journal: RoomJournal; survivor: RoomJournal } {
+    const survivor = memoryJournal();
+    let committed = 0;
+    return {
+      survivor,
+      journal: {
+        load: survivor.load,
+        commit: (roomId, entry, lastSeq) => {
+          if (committed >= commits) throw new Error('journal died mid-page');
+          committed += 1;
+          survivor.commit(roomId, entry, lastSeq);
+        },
+      },
+    };
+  }
+
+  it('resumes at the last entry it durably committed when it dies mid-page', async () => {
+    // Three of five, then the process is gone.
+    const { journal, survivor } = journalDyingAfter(3);
+    const dying = await clientWith({ journal });
+    dying.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 5, seenSeq: 0 });
+    expect(() =>
+      latest().deliver({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 5,
+        head: 5,
+        more: false,
+        entries: [1, 2, 3, 4, 5].map((n) => messageEvent(n, `m${n}`)),
+      }),
+    ).toThrow('journal died mid-page');
+
+    // The crash: every in-memory thing above is gone and only what the journal
+    // made durable survives. A fresh client over that journal is what a reload
+    // is.
+    const resumed = await clientWith({ journal: survivor });
+    resumed.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 5, seenSeq: 0 });
+
+    // Catches: moving `journal.commit` back after the in-memory push in
+    // `applyEntry`, and splitting the journal back into a cursor and an event
+    // list written separately. Under either, the resumed cursor names position 4
+    // — an event this client never held — and the `since` below asks from past
+    // the hole, so entry 4 is lost permanently and silently.
+    expect(resumed.lastSeq(ROOM)).toBe(3);
+    expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3]);
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 3 });
+  });
+
+  it('leaves its own cursor where it was when the journal refuses an entry', async () => {
+    const { journal } = journalDyingAfter(2);
+    const fragile = await clientWith({ journal });
+    fragile.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 2, seenSeq: 0 });
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 2,
+      head: 2,
+      more: false,
+      entries: [messageEvent(1, 'a'), messageEvent(2, 'b')],
+    });
+    expect(fragile.lastSeq(ROOM)).toBe(2);
+
+    // Catches: advancing `room.lastSeq` before the commit succeeds. The third
+    // entry cannot be made durable, so the live cursor must stay at 2 — one that
+    // ran ahead of the journal would make the entry unrecoverable, because the
+    // next `since` asks from past it.
+    expect(() => latest().deliver({ type: 'event', entry: messageEvent(3, 'c') })).toThrow();
+    expect(fragile.lastSeq(ROOM)).toBe(2);
+    expect(fragile.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+  });
+});
+
+/**
+ * The unsolicited head frame (#22 gauntlet r2 delta, blocking 1, client half).
+ *
+ * The server's reconciler sends it on a timer for every subscribed room. It is
+ * the gap signal that survives a lost frame: a client that missed an `event`
+ * broadcast has nothing to notice, and this is what it notices instead.
+ */
+describe('an unsolicited head frame closes a gap the client could not see', () => {
+  it('asks for the gap when told the room is ahead of its cursor', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 1, seenSeq: 0 });
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 1,
+      head: 1,
+      more: false,
+      entries: [messageEvent(1, 'a')],
+    });
+    const before = latest().framesOfType('since').length;
+
+    // No event frame ever arrived for 2 or 3 — that is the failure being
+    // covered. Catches: dropping the `head` case from `handleFrame`, which
+    // leaves this client at 1 forever with nothing able to tell it otherwise.
+    latest().deliver({ type: 'head', roomId: ROOM, head: 3 });
+    expect(latest().framesOfType('since').length).toBe(before + 1);
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 1 });
+  });
+
+  it('does nothing when the head it is told is one it already reached', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 1, seenSeq: 0 });
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 1,
+      head: 1,
+      more: false,
+      entries: [messageEvent(1, 'a')],
+    });
+    const before = latest().framesOfType('since').length;
+    // Catches: asking on every head frame rather than only when behind, which
+    // would turn a reconciliation tick into a per-room request loop.
+    latest().deliver({ type: 'head', roomId: ROOM, head: 1 });
+    expect(latest().framesOfType('since').length).toBe(before);
   });
 });
 

@@ -12,25 +12,24 @@ import { createStubSessionAuthenticator } from '../src/session.js';
  */
 
 const at = '2026-07-31T12:00:00.000Z';
-const actor = { kind: 'human', userId: 'u1' } as const;
 
 describe('the ledger event union', () => {
-  it('folds exactly @atrium/core’s five types, and no more', () => {
+  it('folds exactly @atrium/core’s six types, and no more', () => {
     const core = [
-      { id: 'e1', at, actor, type: 'proposal_recorded' },
-      { id: 'e2', at, actor, type: 'proposal_rejected' },
-      { id: 'e3', at, actor, type: 'object_accepted' },
-      { id: 'e4', at, actor, type: 'object_corrected' },
-      { id: 'e5', at, actor, type: 'relation_added' },
-    ].map((e) => e.type);
-    expect(core.sort()).toEqual([...coreEventTypes].sort());
+      'proposal_recorded',
+      'proposal_rejected',
+      'proposal_superseded',
+      'object_accepted',
+      'object_corrected',
+      'relation_added',
+    ];
+    expect([...core].sort()).toEqual([...coreEventTypes].sort());
   });
 
   it('treats message_posted and attention_resolved as ledger-only', () => {
     const message = RoomEvent.parse({
       id: 'e1',
       at,
-      actor,
       type: 'message_posted',
       roomId: 'r1',
       messageId: 'm1',
@@ -42,7 +41,6 @@ describe('the ledger event union', () => {
     const attention = RoomEvent.parse({
       id: 'e2',
       at,
-      actor,
       type: 'attention_resolved',
       roomId: 'r1',
       attentionId: 'a1',
@@ -52,38 +50,83 @@ describe('the ledger event union', () => {
     expect(declaredRoomId(attention)).toBe('r1');
   });
 
-  it('refuses presence — it is not a kind of event at all (#14)', () => {
-    expect(
-      RoomEvent.safeParse({ id: 'e1', at, actor, type: 'presence_changed', roomId: 'r1' }).success,
-    ).toBe(false);
-  });
-
-  it('leaves the room of a correction or a rejection to be resolved from state', () => {
-    const corrected = RoomEvent.parse({
+  /**
+   * #21's contract, held at the *ledger's* boundary rather than only at core's.
+   *
+   * `CoreEvent.parse` refuses an actor in the payload, but the two ledger-only
+   * kinds never reach it — they are not core events — so without a guard of its
+   * own this union would be the one door in the wall. The table's
+   * `core_events_payload_has_no_actor` check is a constraint on every row and
+   * cannot make an exception for two types, so the schema must not either.
+   *
+   * Catches: deleting the `superRefine` guard from `RoomEvent`, or narrowing it
+   * to the core-typed variants. Either leaves a `message_posted` payload able to
+   * carry an `actor` key that nothing folds and nothing believes but that sits
+   * in the log looking authoritative — and that the database then rejects at
+   * INSERT, three inferences from the cause.
+   */
+  it('refuses an actor inside the payload, for the ledger-only kinds too', () => {
+    const actor = { kind: 'human', userId: 'u1' };
+    const forged = RoomEvent.safeParse({
       id: 'e1',
       at,
       actor,
-      type: 'object_corrected',
-      objectId: 'o1',
-      action: 'retract',
+      type: 'message_posted',
+      roomId: 'r1',
+      messageId: 'm1',
+      body: 'hello',
     });
-    expect(declaredRoomId(corrected)).toBeNull();
+    expect(forged.success).toBe(false);
+    expect(forged.error?.issues.some((issue) => issue.path[0] === 'actor')).toBe(true);
 
-    const rejected = RoomEvent.parse({
+    const forgedCore = RoomEvent.safeParse({
       id: 'e2',
       at,
       actor,
       type: 'proposal_rejected',
       proposalId: 'p1',
     });
+    expect(forgedCore.success).toBe(false);
+  });
+
+  it('refuses presence — it is not a kind of event at all (#14)', () => {
+    expect(RoomEvent.safeParse({ id: 'e1', at, type: 'presence_changed', roomId: 'r1' }).success).toBe(
+      false,
+    );
+  });
+
+  it('leaves the room of a correction, a rejection or a supersession to state', () => {
+    const corrected = RoomEvent.parse({
+      id: 'e1',
+      at,
+      type: 'object_corrected',
+      objectId: 'o1',
+      action: 'retract',
+    });
+    expect(declaredRoomId(corrected)).toBeNull();
+
+    const rejected = RoomEvent.parse({ id: 'e2', at, type: 'proposal_rejected', proposalId: 'p1' });
     expect(declaredRoomId(rejected)).toBeNull();
+
+    // The sixth core type, which #21 added. Catches: leaving
+    // `proposal_superseded` out of `declaredRoomId`'s room-less arm, where it
+    // would fall through to the exhaustiveness `never` and stop compiling — or,
+    // worse, out of the `RoomEvent` union entirely, where the ledger would parse
+    // a durable row as unknown and refuse to fold the whole page.
+    const superseded = RoomEvent.parse({
+      id: 'e3',
+      at,
+      type: 'proposal_superseded',
+      proposalId: 'p1',
+    });
+    expect(declaredRoomId(superseded)).toBeNull();
+    expect(isCoreEvent(superseded)).toBe(true);
   });
 
   it('requires a canonical timestamp with an offset', () => {
     const bad = RoomEvent.safeParse({
       id: 'e1',
       at: 'yesterday',
-      actor,
       type: 'message_posted',
       roomId: 'r1',
       messageId: 'm1',

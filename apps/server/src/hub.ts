@@ -23,6 +23,15 @@ export interface Hub<T> {
   drop: (subscriberId: string) => void;
   /** Rooms this subscriber is in, for the reconnect/catch-up bookkeeping. */
   roomsOf: (subscriberId: string) => string[];
+  /**
+   * Every room with at least one subscriber on this instance.
+   *
+   * The reconciler's read: it costs one head query per pass over exactly the
+   * rooms somebody is listening to, rather than over every room that has ever
+   * existed. A room with no subscribers here needs no head frame, because there
+   * is nobody on this instance to tell.
+   */
+  activeRooms: () => string[];
   broadcast: (roomId: string, frame: T) => number;
   /**
    * Everyone in the room except one subscriber. Used for nothing today — the
@@ -80,6 +89,9 @@ export function createHub<T>(): Hub<T> {
       bySubscriber.delete(subscriberId);
     },
     roomsOf: (subscriberId) => [...(bySubscriber.get(subscriberId) ?? [])],
+    // `unsubscribe` deletes a room's map when its last member leaves, so the
+    // keys of `rooms` are exactly the rooms with a live subscriber.
+    activeRooms: () => [...rooms.keys()],
     broadcast: (roomId, frame) => {
       const members = rooms.get(roomId);
       if (!members) return 0;

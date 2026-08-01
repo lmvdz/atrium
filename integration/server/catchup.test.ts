@@ -83,13 +83,43 @@ function post(client: TestClient, body: string) {
   });
 }
 
-/** A production client wired to a given server url. */
-function productionClient(url: string, userId: string): RealtimeClient {
+/**
+ * How many entries a catch-up page holds in this suite.
+ *
+ * Deliberately tiny, and the r2 delta gauntlet's major 2 is why:
+ *
+ * > the integration suite does not pin real multi-page catch-up (12- and
+ * > 40-event tests against a 1000-event default page, so the old `more` defect
+ * > is pinned only by a fake-socket unit test).
+ *
+ * That was exactly right. Every fixture in this repo fits in one page at the
+ * default, so the loop this ticket's blocking finding was *about* never ran a
+ * second turn against a real database — the only thing exercising it was
+ * `apps/web/test/realtime.test.ts` handing frames to a fake socket. Five means a
+ * twelve-event room takes three pages and a forty-event one takes eight, and the
+ * `more`/`to < head` arithmetic is evaluated against real rows every time.
+ */
+const PAGE = 5;
+
+/** A production client wired to a given server url, with a bounded page. */
+function productionClient(
+  url: string,
+  userId: string,
+  options: { onFrame?: (frame: { type?: string }) => void } = {},
+): RealtimeClient {
   const client = createRealtimeClient({
     userId,
     url,
     reconnect: { initialDelayMs: 10, maxDelayMs: 40, factor: 1 },
-    socketFactory: nodeSocketFactory(),
+    catchUpPageSize: PAGE,
+    socketFactory: nodeSocketFactory({
+      onSocket: (socket) => {
+        if (!options.onFrame) return;
+        socket.on('message', (raw) => {
+          options.onFrame?.(JSON.parse(raw.toString()) as { type?: string });
+        });
+      },
+    }),
   });
   clients.push(client);
   return client;
@@ -143,18 +173,50 @@ describe('`more` is `to < head`, not "was the page full?"', () => {
     expect(complete).toMatchObject({ to: 5, head: 5, more: false });
   });
 
-  it('drives the production client’s loop to the head across several pages', async () => {
+  /**
+   * Multi-page catch-up, against a real database, actually crossing pages
+   * (#22 gauntlet r2 delta, major 2).
+   *
+   * The previous version of this test posted twelve events and let the client
+   * ask with the server's 1000-entry default: one page, one frame, loop never
+   * turned. It asserted the right end state for the wrong reason. With `PAGE`
+   * bound to five, twelve events is three pages, and the assertions below are
+   * about the *pages* as well as the result — because "it got there" is exactly
+   * what r1's defective client also did whenever the burst happened to fit.
+   */
+  it('drives the production client’s loop to the head across several real pages', async () => {
     const alice = await connect(room.people.alice as string);
     await alice.subscribe(room.roomId);
     for (let i = 0; i < 12; i += 1) await post(alice, `m${i}`);
 
-    const bob = productionClient(server.url, room.people.bob as string);
+    const catchups: Array<{ to?: number; head?: number; more?: boolean; entries?: unknown[] }> = [];
+    const bob = productionClient(server.url, room.people.bob as string, {
+      onFrame: (frame) => {
+        if (frame.type === 'catchup') catchups.push(frame as (typeof catchups)[number]);
+      },
+    });
     await bob.connect();
     bob.join(room.roomId);
     await until(() => bob.lastSeq(room.roomId) === 12, 15_000, 'the client to reach the head');
     expect(bob.room(room.roomId).events.map((e) => e.roomSeq)).toEqual(
       Array.from({ length: 12 }, (_, i) => i + 1),
     );
+
+    // Three pages: 5 + 5 + 2. Catches: dropping `limit` from the client's
+    // `since` frame, or restoring the 1000-entry default here — either collapses
+    // this to a single page and the loop under test stops running at all.
+    expect(catchups.length).toBeGreaterThanOrEqual(3);
+    expect(catchups.slice(0, 2).map((page) => page.entries?.length)).toEqual([PAGE, PAGE]);
+
+    // And every page's `more` was `to < head` — the r1 blocking finding, now
+    // evaluated against a real truncated page rather than a fake socket's frame.
+    // Catches: reverting `more` to page fullness, which reports `true` on the
+    // final short page and `false` on a full one that happens to end at the head.
+    for (const page of catchups) {
+      expect(page.more).toBe((page.to ?? 0) < (page.head ?? 0));
+    }
+    expect(catchups.filter((page) => page.more === true).length).toBeGreaterThanOrEqual(2);
+    expect(catchups.at(-1)?.more).toBe(false);
   });
 });
 
