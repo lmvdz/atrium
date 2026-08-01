@@ -896,6 +896,35 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     return [...byUser.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
+  /**
+   * Presence out to the roster — and the one accepted staleness window in this
+   * file, stated here because this is the line that produces it.
+   *
+   * **The bound: a socket that joined a room before its owner was removed from
+   * the workspace keeps receiving that room's presence frames for up to one
+   * sweep interval (`WS_SWEEP_INTERVAL_MS`, 15s by default).** This loop sends to
+   * whoever is on the roster; it does not re-ask membership per recipient.
+   *
+   * What that window does *not* include, which is why it is accepted rather than
+   * a defect:
+   *
+   *  - **No command authority.** Every inbound frame goes through
+   *    `stillAuthenticated` and a per-command membership read with no cache, so
+   *    a removed member is refused on their very next frame.
+   *  - **No room content.** A presence frame is a list of display names of people
+   *    currently connected to a room the recipient was, until moments ago, a
+   *    member of. Messages and room state are not broadcast from here.
+   *  - **No unbounded tail.** `sweepConnections` runs every `sweepIntervalMs`,
+   *    re-reads membership for every open socket including the silent ones, takes
+   *    the loser off the roster and closes with 1008. 15s is a ceiling, not a
+   *    typical case.
+   *
+   * Re-checking membership per recipient here is *not* the fix: it would put a
+   * database read on every presence fan-out, on the hot path, to shorten a window
+   * on non-content. The clean fix is a post-commit eviction signal — the removal
+   * hook tells the realtime server to drop that socket now — which needs the
+   * LISTEN/NOTIFY plumbing #22 is building. **Routed to #27**, where both exist.
+   */
   function broadcastPresence(roomId: string): void {
     const members = presence(roomId);
     const sockets = roster.get(roomId);

@@ -4,20 +4,25 @@
 // They must stay literal — turning one into a template string would make this
 // file edit something other than what ships.
 /**
- * The mutation ledger for #26 round 6, re-runnable.
+ * The mutation ledger for #26, rounds 6 and 7, re-runnable.
  *
  *   node scripts/mutation-ledger.mjs --list
  *   node scripts/mutation-ledger.mjs <name>      apply one mutation
  *   node scripts/mutation-ledger.mjs --restore   put every touched file back
  *
- * Every "this test catches X" claim in the round-6 receipt was produced by
- * running one of these and then the suite named beside it, rather than by
- * reading the test and believing it. Three rounds of this ticket shipped a
- * first-draft test that asserted a mechanism instead of measuring one, so the
+ * Every "this test catches X" claim in the round-6 and round-7 receipts was
+ * produced by running one of these and then the suite named beside it, rather
+ * than by reading the test and believing it. Three rounds of this ticket shipped
+ * a first-draft test that asserted a mechanism instead of measuring one, so the
  * ledger is a file a reviewer can run rather than a table they have to trust.
  *
- * **`packages/*` mutations need a rebuild before the e2e sees them.** The
- * Playwright suite imports `@atrium/auth` as its built `dist`, so:
+ * ## Rebuild every artifact the suites consume, before running them
+ *
+ * This is the round-6 lesson and it is not a footnote. The Playwright suite
+ * imports `@atrium/auth` as its built `dist`, so a mutation to `packages/*`
+ * source that is not compiled is a mutation the e2e never sees — the first run
+ * of this ledger recorded *seven passes* against `drop-join` for exactly that
+ * reason, which is worse than no ledger at all.
  *
  *   node scripts/mutation-ledger.mjs drop-join
  *   pnpm --filter @atrium/auth build      # tsc exits non-zero on the mutated
@@ -25,8 +30,19 @@
  *   pnpm --filter @atrium/web exec playwright test e2e/room-access.spec.ts
  *   node scripts/mutation-ledger.mjs --restore && pnpm --filter @atrium/auth build
  *
- * Skipping that rebuild is how the first attempt at this ledger recorded "7
- * passed" against a mutation that had never been compiled.
+ * `--restore` prints the rebuild command for the same reason.
+ *
+ * Two of round 7's mutations consume artifacts that are **not** `dist`, and they
+ * are listed here so nobody has to rediscover the rule in a new shape:
+ *
+ *  - `regex-boundary` reverts the import-boundary analysis to round 6's regex.
+ *    Its suite (`packages/auth/test/room-access.test.ts`) imports the analysis
+ *    from source through vitest, so no build step — but it *reads the working
+ *    tree*, so it must be run from a tree with no other mutation applied.
+ *  - `drop-await` and `unguard-logger` are unit-level only
+ *    (`packages/auth/test/org.test.ts`, source-imported). No rebuild needed, and
+ *    saying so is part of the discipline: "no rebuild needed" is a claim about
+ *    how a suite loads its subject, and it was checked.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -34,6 +50,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const TOUCHED = [
   'packages/auth/src/room-access.ts',
   'packages/auth/src/org.ts',
+  'packages/auth/test/support/import-boundary.ts',
+  'packages/auth/test/room-access.test.ts',
+  'apps/server/src/ws-server.ts',
   'docker-compose.dev.yml',
   'docker-compose.yml',
   'deploy/Caddyfile.dev',
@@ -112,6 +131,81 @@ const mutations = {
           '',
         ],
       ]),
+  ],
+
+  // ── round 7 ────────────────────────────────────────────────────────────────
+
+  'drop-await': [
+    "round 6's un-awaited reporter — the live crash path",
+    'packages/auth/test/org.test.ts — 4 of 45, including the unhandled-rejection watch',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          '      await input.onCleanupFailure?.(failure);',
+          '      input.onCleanupFailure?.(failure);',
+        ],
+      ]),
+  ],
+
+  'unguard-logger': [
+    "round 6's unprotected `logger.error` — a throwing log transport fails a committed removal",
+    'packages/auth/test/org.test.ts — 2 of 45',
+    () =>
+      edit('packages/auth/src/org.ts', [
+        [
+          '    try {\n      logger.error(message, fields());\n    } catch {\n      // Intentionally empty; see above.\n    }',
+          '    logger.error(message, fields());',
+        ],
+      ]),
+  ],
+
+  'boundary-names-only': [
+    'the import boundary stops looking at whole-module references (namespace, dynamic, require, `export *`)',
+    'packages/auth/test/room-access.test.ts — 5 of 35',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          '      if (reference.whole) {\n        if (!exposesAnything(target)) continue;',
+          '      if (reference.whole) {\n        continue;\n        // biome-ignore lint/correctness/noUnreachable: mutation\n        if (!exposesAnything(target)) continue;',
+        ],
+      ]),
+  ],
+
+  'boundary-no-helpers': [
+    'rule 2 goes: a module may hold the table and export a wrapper around it',
+    'packages/auth/test/room-access.test.ts — 4 of 35, including the empty-allowlist premise',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        ['        if (touches) before.all = true;', '        void touches;'],
+      ]),
+  ],
+
+  'boundary-no-access': [
+    'the property-access half goes — `db.query.memberships` off a handle stops being seen',
+    'packages/auth/test/room-access.test.ts — 3 of 35',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          'readModule(absolute, path, rule.forbiddenAccessName)',
+          'readModule(absolute, path, undefined)',
+        ],
+      ]),
+  ],
+
+  'regex-boundary': [
+    "round 6's regex, in effect: named imports of a literal specifier and nothing else",
+    'packages/auth/test/room-access.test.ts — 10 of 35; the 12 evasion fixtures drop to 2 caught',
+    () => {
+      mutations['boundary-names-only'][2]();
+      mutations['boundary-no-helpers'][2]();
+      mutations['boundary-no-access'][2]();
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          '    if (found) return rel(found);\n    return root ? rel(root) : null;',
+          '    if (found) return rel(found);\n    return null;',
+        ],
+      ]);
+    },
   ],
 
   'unbind-infra': [

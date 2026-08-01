@@ -168,9 +168,15 @@ export interface OrganizationOptionsInput {
    * reason on {@link RoomCleanupFailure}.
    *
    * A reporter that throws is itself logged and swallowed: a broken alerting
-   * hook must not turn a completed removal into an error.
+   * hook must not turn a completed removal into an error. **The same is true of
+   * one that rejects** — the return type admits a promise on purpose, because
+   * the realistic reporter posts to a pager or enqueues a repair job, and round
+   * 6's signature said `void` while the call site dropped the promise on the
+   * floor. `apps/server` exits on `unhandledRejection`, so that combination let
+   * a completed removal crash the server; the call is now awaited inside a
+   * catch-all.
    */
-  onCleanupFailure?: (failure: RoomCleanupFailure) => void;
+  onCleanupFailure?: (failure: RoomCleanupFailure) => void | Promise<void>;
 }
 
 const noopLogger: OrganizationLogger = { warn: () => {}, error: () => {} };
@@ -244,6 +250,27 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
   const logger = input.logger ?? noopLogger;
 
   /**
+   * Log, without letting the logging become the failure.
+   *
+   * The fields arrive as a thunk rather than a value so that *building* them is
+   * inside the guard too: every field below reads a property off an `Error` this
+   * module did not create, and `stack` in particular is a getter on some
+   * implementations. A logger that throws — a transport with a closed socket, a
+   * serializer that chokes on a circular `cause` — is the last thing that may
+   * take a request down, so it is caught here and nowhere else.
+   *
+   * Nothing is re-reported from the catch: reporting it would use the same
+   * logger. Dropped deliberately, which is not the same as dropped by omission.
+   */
+  const logSafely = (message: string, fields: () => Record<string, unknown>): void => {
+    try {
+      logger.error(message, fields());
+    } catch {
+      // Intentionally empty; see above.
+    }
+  };
+
+  /**
    * Report a cleanup failure loudly, then carry on.
    *
    * "Loudly" is the whole change from round 5, and it is three specific things
@@ -252,9 +279,22 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
    * `DrizzleQueryError` hides the interesting part one `cause` down), and a
    * `consequence` field that says what an operator is looking at — orphaned
    * rows, not lost access — so nobody re-derives that at 3am.
+   *
+   * **Async, and awaited by its caller.** Round 6 called `onCleanupFailure`
+   * without awaiting it, which was fine for a synchronous reporter and a live
+   * crash path for any other: an `async` reporter that rejects produces a
+   * floating rejected promise, and `apps/server/src/index.ts` exits the process
+   * on `unhandledRejection` by design. That made a *successful* member removal
+   * able to take the realtime server down, through a seam whose entire job is to
+   * be wired to something remote and flaky. The rejection is now awaited into a
+   * `catch`, and post-commit reporting cannot escalate into anything at all.
+   *
+   * The two halves are deliberately independent rather than nested: a logger
+   * that blows up must not also cost the operator seam, which is the half a
+   * deployment actually pages on.
    */
-  const reportCleanupFailure = (failure: RoomCleanupFailure): void => {
-    logger.error('room revocation sweep failed after member removal', {
+  const reportCleanupFailure = async (failure: RoomCleanupFailure): Promise<void> => {
+    logSafely('room revocation sweep failed after member removal', () => ({
       event: 'room_cleanup_failed',
       operation: failure.operation,
       phase: failure.phase,
@@ -267,14 +307,18 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
       consequence:
         'the workspace member row is gone, so room authorization already denies this user; ' +
         'orphaned `memberships` rows remain and should be swept',
-    });
+    }));
     try {
-      input.onCleanupFailure?.(failure);
+      // `await` on a possibly-undefined possibly-sync call: it turns a sync
+      // throw, a returned rejected promise and a hostile thenable into the same
+      // caught value, which is the point — the catch has to be total, not
+      // total-for-the-shapes-we-thought-of.
+      await input.onCleanupFailure?.(failure);
     } catch (reporterError) {
-      logger.error('the cleanup-failure reporter itself threw', {
+      logSafely('the cleanup-failure reporter itself threw', () => ({
         event: 'room_cleanup_reporter_failed',
-        error: (reporterError as Error).message,
-      });
+        error: reporterError instanceof Error ? reporterError.message : String(reporterError),
+      }));
     }
   };
 
@@ -563,7 +607,11 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
         try {
           await ports.revokeWorkspaceRooms({ workspaceId, userId: data.member.userId });
         } catch (error) {
-          reportCleanupFailure({
+          // Awaited. `reportCleanupFailure` swallows everything it can reach, so
+          // this cannot reject — but a fire-and-forget call here would put the
+          // reporter's rejection outside this hook's lifetime, which is exactly
+          // the shape that made a completed removal able to exit the process.
+          await reportCleanupFailure({
             operation: 'revokeWorkspaceRooms',
             phase: 'afterRemoveMember',
             workspaceId,

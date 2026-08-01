@@ -246,7 +246,9 @@ test.describe('authorization does not depend on cleanup having succeeded', () =>
       mailer: async () => {},
       schema: organizationSchemaOptions,
       logger: { warn: () => {}, error: () => {} },
-      onCleanupFailure: (f) => reported.push(f),
+      onCleanupFailure: (f) => {
+        reported.push(f);
+      },
     }).organizationHooks;
 
     const [first, second] = memberLockKeys(at.workspaceId, at.userId);

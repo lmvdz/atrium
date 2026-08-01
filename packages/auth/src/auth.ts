@@ -78,8 +78,12 @@ export interface AtriumAuthOptions {
    * authorization joins `workspace_members`, so the rows a failed sweep leaves
    * behind grant nothing — but the seam a deployment alerts on so somebody
    * cleans them up.
+   *
+   * May be `async`. Whatever it returns is awaited inside a catch-all, so a
+   * reporter that rejects is reported and dropped rather than becoming an
+   * unhandled rejection in a process that exits on those.
    */
-  onCleanupFailure?: (failure: RoomCleanupFailure) => void;
+  onCleanupFailure?: (failure: RoomCleanupFailure) => void | Promise<void>;
 }
 
 export type AtriumAuth = ReturnType<typeof createAtriumAuth>;

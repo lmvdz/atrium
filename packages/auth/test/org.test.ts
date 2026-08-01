@@ -220,7 +220,12 @@ describe('revocation hooks', () => {
           throw new Error('database is on fire');
         },
       },
-      { logger: { warn: vi.fn(), error: vi.fn() }, onCleanupFailure: (f) => seen.push(f) },
+      {
+        logger: { warn: vi.fn(), error: vi.fn() },
+        onCleanupFailure: (f) => {
+          seen.push(f);
+        },
+      },
     ).organizationHooks;
 
     await hooks.afterRemoveMember({
@@ -273,12 +278,203 @@ describe('revocation hooks', () => {
     });
   });
 
+  /**
+   * The reporter is a *live crash path*, not an error-handling nicety.
+   *
+   * Round 6 called `onCleanupFailure` without awaiting it. For a synchronous
+   * reporter that was fine; for the realistic one — a POST to a pager, an
+   * enqueue onto pg-boss — the returned promise was dropped on the floor, and a
+   * rejection on a dropped promise is an `unhandledRejection`. `apps/server`
+   * exits the process on those *by design* (`src/index.ts`: "the process is in a
+   * state nobody reasoned about"). So a member removal that fully succeeded
+   * could take the realtime server down, by way of the alerting hook.
+   *
+   * Note what the removal-succeeds assertion alone does **not** catch: under
+   * round 6's shape `afterRemoveMember` still resolves — the rejection escapes
+   * *after* it. So these tests observe the rejection itself, and the awaiting,
+   * rather than only the hook's return value.
+   */
+  describe('a reporter cannot escalate into a request failure or a process exit', () => {
+    /** Everything Node reports as unhandled while `run` is in flight. */
+    async function withUnhandledRejectionWatch(run: () => Promise<void>): Promise<unknown[]> {
+      const seen: unknown[] = [];
+      const listen = (reason: unknown) => seen.push(reason);
+      process.on('unhandledRejection', listen);
+      try {
+        await run();
+        // Node decides a rejection is unhandled at a microtask checkpoint, on a
+        // later turn of the loop than the one that created it — so a real timer,
+        // not `await Promise.resolve()`, which would run too early to see it.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      } finally {
+        process.off('unhandledRejection', listen);
+      }
+      return seen;
+    }
+
+    function failingSweep() {
+      return {
+        revokeWorkspaceRooms: async () => {
+          throw new Error('database is on fire');
+        },
+      };
+    }
+
+    const removal = {
+      member: { userId: 'user-2', organizationId: workspaceId },
+      organization: { id: workspaceId },
+    };
+
+    it('awaits an async reporter that rejects, instead of leaking the rejection', async () => {
+      /**
+       * Catches: dropping the `await` in front of `input.onCleanupFailure?.(…)`.
+       * Under that mutation the hook still resolves and the removal still
+       * succeeds, so only the unhandled-rejection watch goes red — which is the
+       * whole finding, since an unhandled rejection is a process exit here.
+       */
+      const logger = { warn: vi.fn(), error: vi.fn() };
+      const hooks = options(failingSweep(), {
+        logger,
+        onCleanupFailure: async () => {
+          await Promise.resolve();
+          throw new Error('pagerduty returned 503');
+        },
+      }).organizationHooks;
+
+      const unhandled = await withUnhandledRejectionWatch(async () => {
+        await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
+      });
+
+      expect(unhandled).toEqual([]);
+      expect(logger.error).toHaveBeenCalledTimes(2);
+      expect(logger.error.mock.calls[1]?.[1]).toMatchObject({
+        event: 'room_cleanup_reporter_failed',
+        error: 'pagerduty returned 503',
+      });
+    });
+
+    it('does not return before the reporter has finished', async () => {
+      /**
+       * Catches the same dropped `await`, from the other side and without any
+       * dependence on Node's unhandled-rejection timing.
+       *
+       * The reporter waits on a **timer**, and that is not incidental. The first
+       * draft of this test used `await Promise.resolve()` and passed against the
+       * un-awaited round-6 code: the reporter's continuation is a microtask
+       * queued before the hook returns, so it runs before the caller resumes and
+       * the flag is set either way. It was measuring the microtask queue's order
+       * rather than the `await`. A timer crosses a real turn of the event loop,
+       * which nothing but an actual `await` can wait for.
+       */
+      let finished = false;
+      const hooks = options(failingSweep(), {
+        logger: { warn: vi.fn(), error: vi.fn() },
+        onCleanupFailure: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          finished = true;
+        },
+      }).organizationHooks;
+
+      await hooks.afterRemoveMember(removal);
+
+      expect(finished).toBe(true);
+    });
+
+    it('survives a logger that throws, and still reaches the operator seam', async () => {
+      /**
+       * Catches: moving either `logger.error` back outside its guard. Round 6's
+       * first call was unprotected entirely and its second sat in the reporter's
+       * catch block, so a throwing log transport propagated out of
+       * `afterRemoveMember` and failed a removal that had already committed.
+       *
+       * The second assertion is the one that makes this more than "it did not
+       * throw": logging and reporting are independent, so a broken logger must
+       * not also cost the seam a deployment pages on.
+       */
+      const seen: RoomCleanupFailure[] = [];
+      const hooks = options(failingSweep(), {
+        logger: {
+          warn: vi.fn(),
+          error: () => {
+            throw new Error('log transport socket closed');
+          },
+        },
+        onCleanupFailure: (failure) => {
+          seen.push(failure);
+        },
+      }).organizationHooks;
+
+      await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.workspaceId).toBe(workspaceId);
+    });
+
+    it('survives a throwing logger and a rejecting reporter at the same time', async () => {
+      /**
+       * The compound case, because the guards are separate: with the logger
+       * broken there is nowhere to report the reporter's rejection, and the
+       * fallback log is itself the thing that throws. Catches a `logSafely`
+       * whose guard covers the call but not the construction of its fields, and
+       * any arrangement that nests the two guards so one failure disables both.
+       */
+      const hooks = options(failingSweep(), {
+        logger: {
+          warn: vi.fn(),
+          error: () => {
+            throw new Error('log transport socket closed');
+          },
+        },
+        onCleanupFailure: async () => {
+          throw new Error('pagerduty is also on fire');
+        },
+      }).organizationHooks;
+
+      const unhandled = await withUnhandledRejectionWatch(async () => {
+        await expect(hooks.afterRemoveMember(removal)).resolves.toBeUndefined();
+      });
+
+      expect(unhandled).toEqual([]);
+    });
+
+    it('reports an async reporter that rejects with a non-Error', async () => {
+      /**
+       * Catches: the round-6 `(reporterError as Error).message`, which is
+       * `undefined` for a string rejection — a cast is not a check, and a
+       * `reject('timeout')` from a fetch wrapper is not exotic.
+       */
+      const logger = { warn: vi.fn(), error: vi.fn() };
+      const hooks = options(failingSweep(), {
+        logger,
+        onCleanupFailure: () => Promise.reject('pager webhook timed out'),
+      }).organizationHooks;
+
+      const unhandled = await withUnhandledRejectionWatch(async () => {
+        await hooks.afterRemoveMember(removal);
+      });
+
+      expect(unhandled).toEqual([]);
+      expect(logger.error.mock.calls[1]?.[1]).toMatchObject({
+        event: 'room_cleanup_reporter_failed',
+        error: 'pager webhook timed out',
+      });
+    });
+  });
+
   it('reports nothing at all when the sweep succeeds', async () => {
     // The control. Without it, a `reportCleanupFailure` called unconditionally
     // would satisfy every assertion above.
     const logger = { warn: vi.fn(), error: vi.fn() };
     const seen: RoomCleanupFailure[] = [];
-    const hooks = options({}, { logger, onCleanupFailure: (f) => seen.push(f) }).organizationHooks;
+    const hooks = options(
+      {},
+      {
+        logger,
+        onCleanupFailure: (f) => {
+          seen.push(f);
+        },
+      },
+    ).organizationHooks;
 
     await hooks.afterRemoveMember({
       member: { userId: 'user-2', organizationId: workspaceId },

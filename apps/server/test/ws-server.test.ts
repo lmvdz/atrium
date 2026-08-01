@@ -944,6 +944,64 @@ describe('revocation reaches a subscription, not only a command', () => {
     third.close();
   });
 
+  /**
+   * The accepted bound, measured rather than asserted in prose.
+   *
+   * `broadcastPresence` fans out to the roster without re-asking membership per
+   * recipient, so a socket that joined before its owner was removed keeps
+   * receiving that room's presence frames until the next sweep — up to
+   * `WS_SWEEP_INTERVAL_MS`, 15s by default (pinned in `test/env.test.ts`). The
+   * round-6 gauntlet accepted that and routed the eviction signal to #27; the
+   * condition was that r7 state the bound in code and in the README.
+   *
+   * A stated bound is a claim, and this ticket has spent four rounds learning
+   * that a first-draft claim about a mechanism is usually wrong. So both halves
+   * are measured here: what the window *does* leak, and what it does not.
+   */
+  it('leaks presence but never command authority, for one sweep interval', async () => {
+    // The default 60s sweep from `startServer` is what holds the window open —
+    // this test is about what happens *before* the sweep, so nothing may sweep.
+    const removed = await connect('ada');
+    send(removed, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(removed, 'joined');
+    await nextFrame(removed, 'presence');
+
+    // What `beforeRemoveMember` does to the database, mid-connection. This
+    // socket sends nothing, so only the sweep could notice — and it will not.
+    memberships.delete(membershipKey(roomId, ada.userId));
+
+    const staying = await connect('grace');
+    send(staying, { type: 'command', command: 'room.join', roomId });
+    await nextFrame(staying, 'joined');
+
+    /**
+     * The leak, named. Catches: an eviction signal landing here (#27) without
+     * this comment and the README paragraph being updated — this test then fails
+     * and says the accepted bound is no longer the behaviour, which is the point
+     * of writing an accepted limit down as an assertion instead of a sentence.
+     */
+    const leaked = await nextFrame(removed, 'presence');
+    expect(leaked.roomId).toBe(roomId);
+    expect(leaked.members).toHaveLength(2);
+
+    /**
+     * And the half that makes it acceptable: authority is already gone. Catches
+     * any change that lets a removed member's command through on the strength of
+     * still being on the roster — which is what the leak would otherwise imply.
+     */
+    send(removed, { type: 'command', command: 'room.rename', roomId, name: 'mine now' });
+    const denial = await nextFrame(removed, 'command_error');
+    expect(denial.reason).toBe('not_a_member');
+
+    // …and the denial evicted them, so the window closes at the first frame
+    // they send rather than lasting the full interval when they are active.
+    await vi.waitFor(() => {
+      expect(server.presence(roomId)).toEqual([{ userId: grace.userId, displayName: 'grace' }]);
+    });
+    staying.close();
+    removed.close();
+  });
+
   it('tells the room who is left the moment somebody is evicted', async () => {
     await server.close();
     await listen(startServer({ sweepIntervalMs: 25 }));

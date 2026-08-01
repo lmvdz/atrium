@@ -159,9 +159,30 @@ Three things enforce that rather than merely asking:
   newline that came with it still authenticates, and a variable set to nothing
   but whitespace fails as empty instead of passing a length check.
 
-Before exposing anything: set real values in `.env` (or the deployment's own
-secret store), and do not publish 5432 / 9000 / 9001 at all unless you mean to.
-Only `WEB_PORT` — the proxy — needs to face the internet.
+Before exposing anything: set real values in `.env`, or the deployment's own
+secret store.
+
+**On the data ports.** This sentence used to say "do not publish 5432 / 9000 /
+9001 at all unless you mean to", which was an instruction to the operator rather
+than a control — the same shape rounds 4 and 5 removed from the Caddyfile.
+`docker-compose.yml` now publishes those three on `127.0.0.1` explicitly, so the
+default is a decision the file makes rather than one a reader has to remember.
+Only 80 and 443 reach a network, and only through `proxy`.
+
+What that costs, said plainly, because "loopback only" is not free:
+
+- Unaffected: `pnpm infra:up`, `pnpm db:migrate`, `pnpm test:e2e`, and `psql`
+  from the host — every documented use runs on the box and goes over loopback.
+- **Changed: anything reaching the database or MinIO from another host.** A
+  backup job, a remote `pg_dump`, a MinIO console opened from a laptop — those
+  now need an SSH tunnel (`ssh -L 5432:127.0.0.1:5432 …`) or a private network
+  between the hosts. A deployment that genuinely needs it should give the
+  service that network rather than widening the published line.
+- Not a network control on its own: on Docker Engine before 28.0 a
+  `127.0.0.1`-published port can still be reachable from hosts on the same L2
+  segment. Requiring Engine ≥28 with default NAT, or a host firewall policy, is
+  a deployment prerequisite and belongs to **#40** with the rest of the serving
+  stack — a compose file cannot assert it.
 
 ## Layout
 
@@ -221,6 +242,19 @@ protocol (#22) builds on. Two things happen alongside it:
   off that room's roster and closes it with 1008, because "cannot send" is not
   revocation and "cannot see" is. In production the server **refuses to start**
   without a session validator rather than defaulting to trusting the handshake.
+- **Accepted, and bounded at one sweep: presence keeps arriving for up to 15s.**
+  A socket that joined a room before its owner was removed stays on that room's
+  roster until the next sweep, and `broadcastPresence` fans out to the roster
+  without re-asking membership per recipient. So for at most
+  `WS_SWEEP_INTERVAL_MS` a removed member can still see *who is connected* to a
+  room they have lost. Command authority is already gone — the very next frame
+  they send is refused — and no room content travels on that path; it is a list
+  of display names. Re-checking membership per recipient would put a database
+  read on every presence fan-out to shorten a window on non-content, so the
+  clean fix is a post-commit eviction signal instead, which needs the
+  LISTEN/NOTIFY plumbing #22 is building. Routed to **#27**. The same paragraph
+  is on `broadcastPresence` in `apps/server/src/ws-server.ts`, which is the line
+  that produces the window.
 
 Removing or demoting a workspace member reconciles room membership in the same
 request (`packages/auth/src/org.ts`, `workspace.ts`) — room membership is what
