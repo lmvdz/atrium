@@ -16,9 +16,9 @@ import {
   type ProvenanceMessage,
   projectAttention,
   RECEIPT_POLICY,
-  statementBearing,
   reduce,
   type StoredProposal,
+  statementBearing,
   trustedContext,
   validateProposalProvenance,
   wasConsumed,
@@ -687,27 +687,41 @@ describe('the receipt minima are policy, and are pinned by value', () => {
   it('is exactly this table', () => {
     expect(RECEIPT_POLICY).toEqual({
       minQuoteLength: 24,
-      droppableWords: new Set(['a', 'an', 'the']),
+      droppableTokens: new Set(['.']),
       maxAlignedTokens: 400,
+      maxScannedSentences: 200,
       duplicateThreshold: 0.8,
     });
   });
 
-  it('lets nothing but the three articles differ between a quote and its statement', () => {
-    // Catches: adding a word to `droppableWords`. Every entry here is a licence
-    // for a model to drop a word from the sentence it is quoting, so the list is
-    // pinned by value and by behaviour — `not`, `all`, `will` and `only` must
-    // each still break the bearing check.
-    expect([...RECEIPT_POLICY.droppableWords].sort()).toEqual(['a', 'an', 'the']);
+  it('lets nothing but a full stop differ between a quote and its statement', () => {
+    // Catches: `receipt_policy_droppable_widened`. Every entry in this set is a
+    // licence for a model to drop something from the sentence it is quoting, so
+    // it is pinned by value and by behaviour.
+    //
+    // It held `a`, `an` and `the` until r4's own blind review broke the argument
+    // for them — an article carries reference ("**a** maintainer" laundered into
+    // "**the** maintainer") and a one-letter name is spelled like one ("**A**
+    // will deploy" bearing "will deploy"). The words went; the guarantee is now
+    // the sentence that needed no argument.
+    expect([...RECEIPT_POLICY.droppableTokens].sort()).toEqual(['.']);
     for (const word of ['not', 'no', 'never', 'all', 'some', 'will', 'might', 'only', 'unless']) {
       expect(
         statementBearing(`bob ${word} deploys production`, 'bob deploys production').borne,
         `"${word}" must not be droppable`,
       ).toBe(false);
     }
-    // …and the three that are, in both directions.
-    expect(statementBearing('ship the flag', 'ship flag').borne).toBe(true);
-    expect(statementBearing('ship flag', 'ship the flag').borne).toBe(true);
+    expect(statementBearing('a maintainer will deploy', 'the maintainer will deploy').borne).toBe(
+      false,
+    );
+    expect(statementBearing('A will deploy production', 'will deploy production').borne).toBe(
+      false,
+    );
+    // …and the one that is, in both directions.
+    expect(statementBearing('ship the flag.', 'ship the flag').borne).toBe(true);
+    expect(statementBearing('ship the flag', 'ship the flag.').borne).toBe(true);
+    // A question mark is not a full stop: an interrogative is not an assertion.
+    expect(statementBearing('ship the flag?', 'ship the flag').borne).toBe(false);
   });
 
   it('is the number the escalation config quotes by, not a second one', () => {

@@ -10,8 +10,10 @@ import {
   Proposal as ProposalSchema,
   type ProvenanceMessage,
   projectAttention,
+  quoteSpansWholeSentences,
   RECEIPT_POLICY,
   reduce,
+  sentencesOf,
   statementBearing,
   validateProposalProvenance,
 } from '../src/index.js';
@@ -86,10 +88,9 @@ describe('the receipt refuses the negation of the sentence it validates', () => 
     // Catches: `bearing_forgives_interposed_words`, `receipt_policy_droppable_widened`,
     // `quote_bearing_disabled`. On r3 this returned `auto_accept` at 100%
     // support, because `not` was a stopword and overlap was set containment.
-    const decision = decideAcceptance(
-      modelProposal({ statement: INVERSION, quote: TRUTH }),
-      { messages: window },
-    );
+    const decision = decideAcceptance(modelProposal({ statement: INVERSION, quote: TRUTH }), {
+      messages: window,
+    });
 
     expect(decision.verdict).not.toBe('auto_accept');
     expect(decision.visibility).not.toBe('accepted');
@@ -157,10 +158,9 @@ describe('the receipt refuses the negation of the sentence it validates', () => 
     // Catches: giving `quote_carries_more_than_statement` `reject` severity.
     // Discarding would hide the inversion; the whole value of a receipt is that
     // a person can put the quote beside the statement and see it.
-    const decision = decideAcceptance(
-      modelProposal({ statement: INVERSION, quote: TRUTH }),
-      { messages: window },
-    );
+    const decision = decideAcceptance(modelProposal({ statement: INVERSION, quote: TRUTH }), {
+      messages: window,
+    });
     expect(decision.verdict).toBe('pending');
     expect(decision.visibility).toBe('quiet');
   });
@@ -319,7 +319,7 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     // statement keeps asserting — a receipt that covers the first half of a
     // sentence is not a receipt for the sentence.
     const result = refuses('we ship on Friday', 'we ship on Friday unless the migration is red');
-    expect(result.unmatchedInStatement).toEqual(['unless', 'migration', 'is', 'red']);
+    expect(result.unmatchedInStatement).toEqual(['unless', 'the', 'migration', 'is', 'red']);
     expect(result.unmatchedInQuote).toEqual([]);
   });
 
@@ -368,12 +368,81 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     expect(orderedTokens("`'online'` state")).toEqual(['online', 'state']);
   });
 
-  it('accepts the compliant forms, in both directions, for the three articles', () => {
-    // Catches: emptying `droppableWords`, which would make the check refuse
-    // every real reading and be useless in the opposite way.
-    expect(statementBearing('ship the flag on Friday', 'ship flag on Friday').borne).toBe(true);
-    expect(statementBearing('ship flag on Friday', 'ship the flag on Friday').borne).toBe(true);
-    expect(statementBearing('deploy a service', 'deploy an service').borne).toBe(true);
+  it('refuses an article substitution, which laundered an indefinite reference', () => {
+    // Catches: `receipt_policy_droppable_widened`. r4's own blind cross-lineage
+    // review, and the reason `droppableWords` no longer exists: "**a**
+    // maintainer" is somebody unspecified and "**the** maintainer" is a
+    // particular person, and while articles were droppable the first bore the
+    // second word-for-word and auto-accepted. Its sibling — "**A** will deploy
+    // production Friday" bearing "will deploy production Friday", because a
+    // one-letter name is spelled like an article — deleted the subject outright.
+    refuses(
+      'A maintainer will deploy production Friday',
+      'The maintainer will deploy production Friday',
+    );
+    refuses('A will deploy production Friday', 'will deploy production Friday');
+  });
+
+  it('accepts a difference of a full stop, and nothing else', () => {
+    // Catches: emptying `droppableTokens`, which would make the check refuse a
+    // statement for its punctuation and be useless in the opposite way.
+    expect(statementBearing('ship the flag on Friday.', 'ship the flag on Friday').borne).toBe(
+      true,
+    );
+    expect(statementBearing('ship the flag on Friday', 'ship the flag on Friday.').borne).toBe(
+      true,
+    );
+  });
+
+  it('refuses a question minted as an assertion', () => {
+    // Catches: `ordered_tokens_drops_punctuation`. Both reviewers found it: `?`
+    // was a token separator, so "Bob will deploy production Friday?" — a request
+    // for confirmation — bore the assertion word-for-word.
+    refuses('Bob will deploy production Friday?', 'Bob will deploy production Friday');
+  });
+
+  it('refuses a struck-through sentence bearing its own assertion', () => {
+    // Catches: `normalize_folds_strikethrough`. `~~` was in the emphasis-folding
+    // set beside `*` and backtick, so a *retracted* sentence normalized to the
+    // sentence. Emphasis is decoration; a strikethrough is a withdrawal.
+    refuses('~~Bob will deploy production Friday~~', 'Bob will deploy production Friday');
+  });
+
+  it('refuses a symbol that carries the negation', () => {
+    // Catches: `ordered_tokens_drops_punctuation`. A leading ❌ or 🚫 is how a
+    // room says "no" without typing it, and it was deleted as a separator.
+    refuses('❌ Bob will deploy production Friday', 'Bob will deploy production Friday');
+    refuses('Bob will 🚫 deploy production Friday', 'Bob will deploy production Friday');
+  });
+
+  it('refuses a negation written in another script or another width', () => {
+    // Catches: `ordered_tokens_ascii_only`. `orderedTokens` split on
+    // `/[^a-z0-9']+/`, so every non-ASCII word was a *separator* — Cyrillic `не`
+    // and fullwidth `ｎｏｔ` vanished and the affirmative was borne by its own
+    // denial. Fullwidth folds to ASCII through NFKC and then genuinely matches
+    // `not`; Cyrillic stays its own word and is unmatched. Both refuse.
+    refuses('Bob will не deploy production Friday', 'Bob will deploy production Friday');
+    refuses('Bob will ｎｏｔ deploy production Friday', 'Bob will deploy production Friday');
+    refuses('ship ０ production changes on Friday', 'ship production changes on Friday');
+  });
+
+  it('checks a sentence written in a language with no ASCII in it at all', () => {
+    // Catches: `ordered_tokens_ascii_only`, from the other side. The ASCII-only
+    // tokenizer reduced a Russian sentence to *no tokens*, so an exact quote of
+    // it was refused as `statement_uncheckable` — the check did not merely miss
+    // the attack, it stopped working outside English.
+    const russian = 'Боб развернёт продакшен в пятницу';
+    expect(orderedTokens(russian)).toEqual(['боб', 'развернёт', 'продакшен', 'в', 'пятницу']);
+    expect(statementBearing(russian, russian).borne).toBe(true);
+    expect(statementBearing(`Боб не развернёт продакшен в пятницу`, russian).borne).toBe(false);
+  });
+
+  it('treats a typographic apostrophe as an apostrophe', () => {
+    // Catches: dropping the `’` fold from `normalizeForMatch`. Without it
+    // `won’t` tokenizes as `won` + `t` and refuses a faithful quote for a reason
+    // that has nothing to do with what was said.
+    expect(orderedTokens('bob won’t deploy')).toEqual(['bob', "won't", 'deploy']);
+    expect(statementBearing('bob won’t deploy', "bob won't deploy").borne).toBe(true);
   });
 
   it('accepts a quote whose formatting the model dropped', () => {
@@ -385,6 +454,144 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
         'so TypeScript should not be so confident that this.state is still online',
       ).borne,
     ).toBe(true);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Quote-mining: the scissors, not the words
+ * ───────────────────────────────────────────────────────────────────────── */
+
+describe('the quote must be whole sentences, not a span cut out of one', () => {
+  /**
+   * r4's **own blind cross-lineage review**, and the strongest finding of the
+   * round. Making the statement/quote comparison exact does nothing when the
+   * model also chooses where to cut: set `quote === statement` to an affirmative
+   * span and leave the inverter outside it. Every check in the file passes —
+   * verbatim, correctly attributed, long enough, borne word-for-word — and the
+   * record gets the opposite of what the person wrote.
+   */
+  /**
+   * One `it` per shape rather than a table, because a ledger entry has to be
+   * able to name the test that pins it and a template-titled test has no name.
+   *
+   * Every span below is a verbatim substring of a real message written by the
+   * person named, clears `minQuoteLength`, and bears its own statement perfectly
+   * — because the words that reverse it are on the other side of the scissors.
+   */
+  const mined = (body: string, span: string) => {
+    const window: ProvenanceMessage[] = [{ id: 'msg_m', authorId: BOB, body }];
+    expect(statementBearing(span, span).borne, 'the span must bear itself').toBe(true);
+    expect(quoteSpansWholeSentences(span, body)).toBe(false);
+
+    const decision = decideAcceptance(
+      modelProposal({ statement: span, quote: span, provenance: ['msg_m'] }),
+      { messages: window },
+    );
+    expect(decision.verdict).not.toBe('auto_accept');
+    expect(decision.rule).toBe('receipt_not_certifiable');
+    expect(decision.reason).toContain('cut out of the middle of a sentence');
+  };
+
+  it('refuses a quote mined out of an explicit denial', () => {
+    // Catches: `quote_anchoring_disabled`.
+    mined(
+      'It is not true that Bob will deploy production Friday under any circumstances.',
+      'Bob will deploy production Friday under any circumstances',
+    );
+  });
+
+  it('refuses a quote mined out of a report of what nobody thinks', () => {
+    // Catches: `quote_anchoring_disabled`.
+    mined(
+      'Nobody thinks Bob will deploy production Friday this week.',
+      'Bob will deploy production Friday this week',
+    );
+  });
+
+  it('refuses a quote mined out of a hedge', () => {
+    // Catches: `quote_anchoring_disabled`.
+    mined(
+      'I doubt Bob will deploy production Friday this coming week.',
+      'Bob will deploy production Friday this coming week',
+    );
+  });
+
+  it('refuses a quote mined out of a first-person refusal', () => {
+    // Catches: `quote_anchoring_disabled`, `quote_anchoring_allows_a_prefix`.
+    // The negation is at the *start* of the sentence and the span begins after
+    // it, so an anchor that only required the quote to be a prefix of a sentence
+    // would still let this through.
+    mined(
+      'I will not deploy production Friday under any circumstances at all.',
+      'deploy production Friday under any circumstances at all',
+    );
+  });
+
+  it('refuses a quote that stops before the qualifier in its own sentence', () => {
+    // Catches: `quote_anchoring_allows_a_prefix`. The trailing half of the
+    // finding: a quote that *starts* a sentence and stops before "unless the
+    // migration is still red" is a prefix, not a whole sentence, and an anchor
+    // that accepted prefixes would readmit every trailing condition the bearing
+    // check was built to catch. The ledger recorded this mutant as an escape
+    // until this case existed — the two mined cases above both start
+    // mid-sentence, so a prefix rule refused them for the wrong reason.
+    const body = 'We ship the release on Friday unless the migration is still red.';
+    expect(quoteSpansWholeSentences('We ship the release on Friday', body)).toBe(false);
+    expect(quoteSpansWholeSentences(body, body)).toBe(true);
+  });
+
+  it('accepts the same reading once the quote is the whole sentence', () => {
+    // Catches: a version of the anchor that refuses everything. The compliant
+    // form is quoting the sentence — including the part that reverses it, which
+    // the bearing check then refuses on its own.
+    const body = 'Bob will deploy production Friday under any circumstances.';
+    const window: ProvenanceMessage[] = [{ id: 'msg_m', authorId: BOB, body }];
+    const whole = 'Bob will deploy production Friday under any circumstances';
+    expect(quoteSpansWholeSentences(whole, body)).toBe(true);
+    expect(
+      decideAcceptance(modelProposal({ statement: whole, quote: whole, provenance: ['msg_m'] }), {
+        messages: window,
+      }).verdict,
+    ).toBe('auto_accept');
+  });
+
+  it('accepts a run of several whole sentences, and refuses half of one', () => {
+    // Catches: an anchor implemented as "equals one sentence", which would refuse
+    // an honest two-sentence quotation.
+    const body = 'We talked it over. Bob will deploy production Friday. Everyone agreed.';
+    expect(sentencesOf(body)).toEqual([
+      'We talked it over.',
+      'Bob will deploy production Friday.',
+      'Everyone agreed.',
+    ]);
+    expect(
+      quoteSpansWholeSentences('We talked it over. Bob will deploy production Friday.', body),
+    ).toBe(true);
+    expect(
+      quoteSpansWholeSentences('Bob will deploy production Friday. Everyone agreed.', body),
+    ).toBe(true);
+    // …and a run that starts mid-sentence is still a fragment.
+    expect(quoteSpansWholeSentences('deploy production Friday. Everyone agreed.', body)).toBe(
+      false,
+    );
+  });
+
+  it('does not count a sentence the cited author only quoted back', () => {
+    // The anchor reads the author's *own* text, so a reply-blockquote cannot
+    // supply the sentence — the same rule `bearingMessages` enforces, applied to
+    // the span check that runs after it.
+    const body = '> Bob will deploy production Friday.\n\nI disagree with all of that.';
+    const window: ProvenanceMessage[] = [{ id: 'msg_m', authorId: ALICE, body }];
+    const decision = decideAcceptance(
+      modelProposal({
+        statement: 'Bob will deploy production Friday',
+        quote: 'Bob will deploy production Friday',
+        provenance: ['msg_m'],
+      }),
+      { messages: window },
+    );
+    expect(decision.verdict).toBe('discard');
+    expect(decision.reason).toContain('reply-blockquote');
   });
 });
 

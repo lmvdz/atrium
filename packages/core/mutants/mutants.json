@@ -27,9 +27,7 @@
       "file": "src/reduce.ts",
       "find": "  const parsed = CoreEvent.safeParse(event);\n  if (!parsed.success) {\n    return {\n      outcome: 'malformed',\n      event,\n      actor: trusted.actor,\n      detail: parseFailureDetail(parsed.error),\n      state,\n    };\n  }\n  const entry: AuthoredEvent = { ...trusted, event: parsed.data };\n  const rejection = rejectionFor(state, parsed.data);\n  if (rejection) {\n    return { outcome: 'rejected', event: parsed.data, actor: trusted.actor, ...rejection, state };\n  }",
       "replace": "  const entry: AuthoredEvent = { ...trusted, event };\n  const rejection = rejectionFor(state, event);\n  if (rejection) {\n    return { outcome: 'rejected', event, actor: trusted.actor, ...rejection, state };\n  }",
-      "catches": [
-        "refuses a raw payload that smuggles an actor, naming the seam"
-      ]
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
     },
     {
       "id": "boundary_parse_dropped_fold",
@@ -49,9 +47,7 @@
       "file": "src/authority.ts",
       "find": "  if (window === undefined || window.length === 0 || !window.some((m) => hasContent(m.body))) {",
       "replace": "  if (window === undefined) {",
-      "catches": [
-        "refuses `messages: []` at the reducer, exactly as it refuses no messages"
-      ]
+      "catches": ["refuses `messages: []` at the reducer, exactly as it refuses no messages"]
     },
     {
       "id": "empty_window_engine",
@@ -162,10 +158,7 @@
       "file": "src/policy.ts",
       "find": "  duplicateThreshold: 0.8,",
       "replace": "  duplicateThreshold: 0.5,",
-      "catches": [
-        "is exactly this table",
-        "is the number `findDuplicate` discards on"
-      ]
+      "catches": ["is exactly this table", "is the number `findDuplicate` discards on"]
     },
     {
       "id": "claim_theta_auto_lowered",
@@ -185,10 +178,7 @@
       "file": "src/policy.ts",
       "find": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),",
       "replace": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.3, autoAccept: true }),",
-      "catches": [
-        "is exactly this table",
-        "discards a hair under θ_min (0.4999)"
-      ]
+      "catches": ["is exactly this table", "discards a hair under θ_min (0.4999)"]
     },
     {
       "id": "floor_decoupled_from_theta",
@@ -207,9 +197,7 @@
       "file": "src/events.ts",
       "find": "    if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
       "replace": "    if (false && value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
-      "catches": [
-        "refuses a raw payload that smuggles an actor, naming the seam"
-      ]
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
     },
     {
       "id": "receipt_skipped_entirely",
@@ -229,9 +217,7 @@
       "file": "src/authority.ts",
       "find": "  if (canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
       "replace": "  if (false && canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
-      "catches": [
-        "refuses an acceptance whose payload is not the one that was staged"
-      ]
+      "catches": ["refuses an acceptance whose payload is not the one that was staged"]
     },
     {
       "id": "provenance_binding_disabled",
@@ -239,9 +225,7 @@
       "file": "src/authority.ts",
       "find": "  if (canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
       "replace": "  if (false && canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
-      "catches": [
-        "refuses an acceptance that pads or drops cited messages on the way through"
-      ]
+      "catches": ["refuses an acceptance that pads or drops cited messages on the way through"]
     },
     {
       "id": "proposer_binding_disabled",
@@ -282,9 +266,7 @@
       "file": "src/reduce.ts",
       "find": "  if (object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
       "replace": "  if (false && object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
-      "catches": [
-        "refuses a claim born verified on a model actor’s word"
-      ]
+      "catches": ["refuses a claim born verified on a model actor’s word"]
     },
     {
       "id": "direct_acceptance_gate_disabled",
@@ -303,9 +285,7 @@
       "file": "src/reduce.ts",
       "find": "    if (!isHuman(actor)) {\n      fail(\n        state,\n        event.id,\n        humanOnlyRefusal('answer_relation', actor, `relation \"${relation.id}\"`),\n      );\n      return false;\n    }",
       "replace": "    if (false) return false;",
-      "catches": [
-        "refuses a model answering an open question"
-      ]
+      "catches": ["refuses a model answering an open question"]
     },
     {
       "id": "supersession_policy_narrowed",
@@ -313,10 +293,7 @@
       "file": "src/reduce.ts",
       "find": "    if (decideSupersession(retired).authority === 'requires_human' && !isHuman(actor)) {",
       "replace": "    if (retired === 'decision' && !isHuman(actor)) {",
-      "catches": [
-        "refuses a model retiring a commitment",
-        "refuses a model retiring an objective"
-      ]
+      "catches": ["refuses a model retiring a commitment", "refuses a model retiring an objective"]
     },
     {
       "id": "corrections_human_gate_disabled",
@@ -324,9 +301,7 @@
       "file": "src/reduce.ts",
       "find": "  if (!isHuman(actor)) {\n    const verifying =",
       "replace": "  if (false) {\n    const verifying =",
-      "catches": [
-        "refuses a system actor correction as well"
-      ]
+      "catches": ["refuses a system actor correction as well"]
     },
     {
       "id": "blockquote_stripping_neutered",
@@ -334,9 +309,7 @@
       "file": "src/escalation.ts",
       "find": "    .filter((line) => !BLOCKQUOTE_LINE.test(line))\n    .join('\\n');",
       "replace": "    .join('\\n');",
-      "catches": [
-        "refuses one whose quote is only inside somebody else’s blockquote"
-      ]
+      "catches": ["refuses one whose quote is only inside somebody else’s blockquote"]
     },
     {
       "id": "answer_binding_order_check_dropped",
@@ -344,9 +317,7 @@
       "file": "src/acceptance.ts",
       "find": "  if (\n    compareCursor({ at: command.at, id: acceptEventId }, { at: command.at, id: relationEventId }) >=\n    0\n  ) {",
       "replace": "  if (false) {",
-      "catches": [
-        "refuses ids whose order would put the edge before the object"
-      ]
+      "catches": ["refuses ids whose order would put the edge before the object"]
     },
     {
       "id": "answer_binding_question_open_check_dropped",
@@ -354,9 +325,7 @@
       "file": "src/acceptance.ts",
       "find": "  if (record.object.payload.status !== 'open') {",
       "replace": "  if (false) {",
-      "catches": [
-        "refuses a question that is already answered"
-      ]
+      "catches": ["refuses a question that is already answered"]
     },
     {
       "id": "attention_reads_its_own_theta",
@@ -364,9 +333,7 @@
       "file": "src/attention.ts",
       "find": "    if (verdict.visibility !== 'needs_you') continue;",
       "replace": "    if (verdict.visibility === 'nowhere-at-all') continue;",
-      "catches": [
-        "stays quiet about a decision the engine would not surface"
-      ]
+      "catches": ["stays quiet about a decision the engine would not surface"]
     },
     {
       "id": "attention_priority_tiers_swapped",
@@ -374,9 +341,7 @@
       "file": "src/attention.ts",
       "find": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 0,",
       "replace": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 9,",
-      "catches": [
-        "gives every class a tier, and every tier a distinct rank"
-      ]
+      "catches": ["gives every class a tier, and every tier a distinct rank"]
     },
     {
       "id": "ordering_gate_loosened",
@@ -384,9 +349,7 @@
       "file": "src/reduce.ts",
       "find": "  if (state.cursor && compareCursor(cursor, state.cursor) <= 0) {",
       "replace": "  if (state.cursor && compareCursor(cursor, state.cursor) < 0) {",
-      "catches": [
-        "rejects an event that lands on exactly the cursor"
-      ]
+      "catches": ["rejects an event that lands on exactly the cursor"]
     },
     {
       "id": "consumed_ids_not_spent_on_failure",
@@ -394,9 +357,7 @@
       "file": "src/reduce.ts",
       "find": "  state.consumedEventIds.push(event.id);",
       "replace": "  if (applied) state.consumedEventIds.push(event.id);",
-      "catches": [
-        "spends the id of an event that was consumed but did not apply"
-      ]
+      "catches": ["spends the id of an event that was consumed but did not apply"]
     },
     {
       "id": "amend_may_touch_attribution",
@@ -404,9 +365,7 @@
       "file": "src/reduce.ts",
       "find": "  } else if (touchesAttribution) {",
       "replace": "  } else if (false && touchesAttribution) {",
-      "catches": [
-        "refuses an amend that would move the obligation instead"
-      ]
+      "catches": ["refuses an amend that would move the obligation instead"]
     },
     {
       "id": "noop_amend_silent_again",
@@ -425,9 +384,7 @@
       "file": "src/escalation.ts",
       "find": "  'i stand corrected',\n",
       "replace": "",
-      "catches": [
-        "is exactly this list"
-      ]
+      "catches": ["is exactly this list"]
     },
     {
       "id": "one_future_pattern_deleted",
@@ -435,10 +392,7 @@
       "file": "src/escalation.ts",
       "find": "  /\\bplease\\s+(?:can|could|take|handle|own|pick up|review|land|ship)\\b/i,\n",
       "replace": "",
-      "catches": [
-        "is exactly these five patterns",
-        "has a case for every pattern"
-      ]
+      "catches": ["is exactly these five patterns", "has a case for every pattern"]
     },
     {
       "id": "escalation_scan_cap_loosened",
@@ -446,9 +400,7 @@
       "file": "src/escalation.ts",
       "find": "  const body = message.body.slice(0, config.maxScanChars);",
       "replace": "  const body = message.body;",
-      "catches": [
-        "bounds the work per call, so content cannot choose the cost"
-      ]
+      "catches": ["bounds the work per call, so content cannot choose the cost"]
     },
     {
       "id": "rationale_accepts_a_bare_string",
@@ -456,9 +408,7 @@
       "file": "src/attention.ts",
       "find": "export const RationaleReason = z.discriminatedUnion('kind', [",
       "replace": "export const RationaleReason = z.union([z.string(), ...[]] as never) ?? z.discriminatedUnion('kind', [",
-      "catches": [
-        "requires a structured reason — no unexplained attention, and no free text"
-      ]
+      "catches": ["requires a structured reason — no unexplained attention, and no free text"]
     },
     {
       "id": "subject_kind_default_restored",
@@ -466,9 +416,7 @@
       "file": "src/attention.ts",
       "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal']);",
       "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal']).default('object');",
-      "catches": [
-        "has no default for subjectKind — the wrong value there is unfalsifiable"
-      ]
+      "catches": ["has no default for subjectKind — the wrong value there is unfalsifiable"]
     },
     {
       "id": "counterexample_voice_reverted",
@@ -476,9 +424,7 @@
       "file": "src/corrections.ts",
       "find": "correction note:",
       "replace": "the room said:",
-      "catches": [
-        "formats a block ready to inject, quoting the note as a note"
-      ]
+      "catches": ["formats a block ready to inject, quoting the note as a note"]
     },
     {
       "id": "blank_window_reducer",
@@ -486,9 +432,7 @@
       "file": "src/authority.ts",
       "find": "  if (window === undefined || window.length === 0 || !window.some((m) => hasContent(m.body))) {",
       "replace": "  if (window === undefined || window.length === 0) {",
-      "catches": [
-        "refuses a window of messages that exist and say nothing, at the reducer"
-      ]
+      "catches": ["refuses a window of messages that exist and say nothing, at the reducer"]
     },
     {
       "id": "blank_window_engine",
@@ -496,9 +440,7 @@
       "file": "src/acceptance.ts",
       "find": "    messages === undefined || messages.length === 0 || !messages.some((m) => hasContent(m.body));",
       "replace": "    messages === undefined || messages.length === 0;",
-      "catches": [
-        "refuses a window of messages that exist and say nothing, at the engine"
-      ]
+      "catches": ["refuses a window of messages that exist and say nothing, at the engine"]
     },
     {
       "id": "reducer_quote_gate_rescoped",
@@ -575,16 +517,14 @@
       "file": "src/escalation.ts",
       "find": "  for (; j < s.length; j += 1) {\n    const token = s[j];\n    if (!droppable(token) && token !== undefined) unmatchedInStatement.push(token);\n  }",
       "replace": "  j = s.length;",
-      "catches": [
-        "refuses a statement that runs past the end of its quote"
-      ]
+      "catches": ["refuses a statement that runs past the end of its quote"]
     },
     {
       "id": "ordered_tokens_dedup",
       "why": "The bearing tokens become a set again, which is how r3 could not have told double negation from single even with `not` off the stopword list.",
       "file": "src/escalation.ts",
-      "find": "    .map((token) => token.replace(/^'+|'+$/g, ''))\n    .filter((token) => token.length > 0);",
-      "replace": "    .map((token) => token.replace(/^'+|'+$/g, ''))\n    .filter((token) => token.length > 0)\n    .filter((token, index, all) => all.indexOf(token) === index);",
+      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForMatch(text).match(TOKEN) ?? [];\n}",
+      "replace": "export function orderedTokens(text: string): string[] {\n  const all = normalizeForMatch(text).match(TOKEN) ?? [];\n  return all.filter((token, index) => all.indexOf(token) === index);\n}",
       "catches": [
         "counts a repeated word twice, so double negation is not one negation",
         "refuses double negation"
@@ -594,21 +534,19 @@
       "id": "bearing_drops_short_tokens",
       "why": "The three-character floor `contentTokens` uses for routing comes back to the receipt, and `no` stops existing.",
       "file": "src/escalation.ts",
-      "find": "    .split(/[^a-z0-9']+/)\n    .map((token) => token.replace(/^'+|'+$/g, ''))",
-      "replace": "    .split(/[^a-z0-9']+/)\n    .filter((token) => token.length > 2)\n    .map((token) => token.replace(/^'+|'+$/g, ''))",
-      "catches": [
-        "keeps two-letter words, because \"no\" inverts a sentence"
-      ]
+      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForMatch(text).match(TOKEN) ?? [];\n}",
+      "replace": "export function orderedTokens(text: string): string[] {\n  return (normalizeForMatch(text).match(TOKEN) ?? []).filter((token) => token.length > 2);\n}",
+      "catches": ["keeps two-letter words, because \"no\" inverts a sentence"]
     },
     {
       "id": "receipt_policy_droppable_widened",
-      "why": "r3's defect as a one-word policy change: `not` becomes a word a statement may drop from the quote it rests on.",
+      "why": "r3's defect as a one-word policy change: `not` becomes a token a statement may drop from the quote it rests on. The set held three articles until r4's own blind review laundered an indefinite reference through them.",
       "file": "src/policy.ts",
-      "find": "  droppableWords: Object.freeze(new Set(['a', 'an', 'the'])) as ReadonlySet<string>,",
-      "replace": "  droppableWords: Object.freeze(new Set(['a', 'an', 'the', 'not'])) as ReadonlySet<string>,",
+      "find": "  droppableTokens: Object.freeze(new Set(['.'])) as ReadonlySet<string>,",
+      "replace": "  droppableTokens: Object.freeze(new Set(['.', 'not'])) as ReadonlySet<string>,",
       "catches": [
         "is exactly this table",
-        "lets nothing but the three articles differ between a quote and its statement",
+        "lets nothing but a full stop differ between a quote and its statement",
         "refuses the exact pair from the gauntlet at the acceptance engine",
         "refuses negation"
       ]
@@ -641,9 +579,7 @@
       "file": "src/authority.ts",
       "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
       "replace": "  const referring = referringProblems(problems);\n  if (false) {",
-      "catches": [
-        "refuses the exact pair from the gauntlet at the reducer, where it is a boundary"
-      ]
+      "catches": ["refuses the exact pair from the gauntlet at the reducer, where it is a boundary"]
     },
     {
       "id": "refer_severity_ignored_engine",
@@ -694,9 +630,75 @@
       "file": "src/escalation.ts",
       "find": "    .replace(INVISIBLE, '')\n",
       "replace": "",
+      "catches": ["matches a quote whose words a zero-width character was spliced into"]
+    },
+    {
+      "id": "ordered_tokens_ascii_only",
+      "why": "r4's own blind review: the tokenizer split on /[^a-z0-9']+/, which is a denylist of the characters that may carry meaning. Cyrillic and fullwidth negations were deleted as separators and bore their own affirmative; a Russian sentence tokenized to nothing and was refused as empty.",
+      "file": "src/escalation.ts",
+      "find": "const TOKEN = /[\\p{L}\\p{N}\\p{M}]+(?:'[\\p{L}\\p{N}\\p{M}]+)*|[^\\s']/gu;",
+      "replace": "const TOKEN = /[a-z0-9]+(?:'[a-z0-9]+)*/gu;",
       "catches": [
-        "matches a quote whose words a zero-width character was spliced into"
+        "refuses a negation written in another script or another width",
+        "checks a sentence written in a language with no ASCII in it at all"
       ]
+    },
+    {
+      "id": "ordered_tokens_drops_punctuation",
+      "why": "The other half of the same denylist: a visible mark stops being a token, so `Bob will deploy Friday?` bears the assertion and a leading ❌ or 🚫 vanishes.",
+      "file": "src/escalation.ts",
+      "find": "|[^\\s']/gu;",
+      "replace": "/gu;",
+      "catches": [
+        "refuses a question minted as an assertion",
+        "refuses a symbol that carries the negation",
+        "lets nothing but a full stop differ between a quote and its statement"
+      ]
+    },
+    {
+      "id": "normalize_folds_strikethrough",
+      "why": "`~` returns to the emphasis-folding set beside `*` and backtick, so a struck-through — retracted — sentence normalizes to the sentence and bears its own assertion.",
+      "file": "src/escalation.ts",
+      "find": "      .replace(/[*_`]+/g, ' ')",
+      "replace": "      .replace(/[*_`~]+/g, ' ')",
+      "catches": ["refuses a struck-through sentence bearing its own assertion"]
+    },
+    {
+      "id": "quote_anchoring_disabled",
+      "why": "r4's own blind review, and the strongest finding of the round: the quote goes back to being any substring of the cited message, so a model that sets quote === statement to an affirmative span leaves `it is not true that` outside the scissors and auto-accepts the inversion.",
+      "file": "src/escalation.ts",
+      "find": "      fromModel &&\n      bearing &&\n      !quoteSpansWholeSentences(quote, stripReplyBlockquotes(bearing.body), policy)",
+      "replace": "      false &&\n      bearing &&\n      !quoteSpansWholeSentences(quote, stripReplyBlockquotes(bearing.body), policy)",
+      "catches": [
+        "refuses a quote mined out of an explicit denial",
+        "refuses a quote mined out of a report of what nobody thinks",
+        "refuses a quote mined out of a hedge",
+        "refuses a quote mined out of a first-person refusal"
+      ]
+    },
+    {
+      "id": "quote_anchoring_allows_a_prefix",
+      "why": "The anchor accepts a quote that merely *starts* a sentence rather than covering whole ones, which readmits every trailing qualifier — `we ship Friday` mined out of `we ship Friday unless CI is red`.",
+      "file": "src/escalation.ts",
+      "find": "      if (run.length > wanted.length) break;\n      if (run.length === wanted.length && run.every((token, index) => token === wanted[index])) {",
+      "replace": "      if (run.length > wanted.length + 40) break;\n      if (run.length >= wanted.length && wanted.every((token, index) => token === run[index])) {",
+      "catches": ["refuses a quote that stops before the qualifier in its own sentence"]
+    },
+    {
+      "id": "sentence_split_ignores_terminators",
+      "why": "Sentences stop being split on `.`/`?`/`!`, so a multi-sentence message is one sentence and every honest single-sentence quote out of it becomes a fragment — the anchor inverted into an over-refusal nobody would notice until the product refused everything.",
+      "file": "src/escalation.ts",
+      "find": "    .split(/(?<=[.!?…。？！])\\s+|\\n+/u)",
+      "replace": "    .split(/\\n+/u)",
+      "catches": ["accepts a run of several whole sentences, and refuses half of one"]
+    },
+    {
+      "id": "typographic_apostrophe_unfolded",
+      "why": "`won’t` stops being `won't`, so a faithful quotation is refused for its typography — an over-refusal, and the kind that gets 'fixed' later by weakening the check that matters.",
+      "file": "src/escalation.ts",
+      "find": "      .replace(/[’ʼ]/g, \"'\")\n",
+      "replace": "",
+      "catches": ["treats a typographic apostrophe as an apostrophe"]
     }
   ]
 }

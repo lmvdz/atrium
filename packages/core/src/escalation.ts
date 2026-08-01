@@ -139,13 +139,30 @@ const INVISIBLE = /[\p{Cf}\p{Cc}]/gu;
  * that stops being right.
  */
 export function normalizeForMatch(text: string): string {
-  return text
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/[*_`~]+/g, ' ')
-    .replace(INVISIBLE, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+  return (
+    text
+      // NFKC folds the compatibility forms of a character onto the character —
+      // fullwidth `ｎｏｔ` becomes `not`. r4's blind review: without it a
+      // fullwidth or otherwise decorated negation is a *different word*, which
+      // the tokenizer below then drops as punctuation, and the affirmative is
+      // minted from a quote that denies it.
+      .normalize('NFKC')
+      // A typographic apostrophe is an apostrophe. `won’t` and `won't` are the
+      // same word, and treating them as different ones produces a refusal for a
+      // reason that has nothing to do with what was said.
+      .replace(/[’ʼ]/g, "'")
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      // Emphasis and code markers, which both tiers drop while quoting
+      // correctly. **`~` is not here**: `~~struck through~~` is a *retraction*,
+      // not emphasis, and folding it away let a withdrawn sentence bear its own
+      // assertion — r4's blind review, and the reason this set is enumerated
+      // rather than "all punctuation".
+      .replace(/[*_`]+/g, ' ')
+      .replace(INVISIBLE, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+  );
 }
 
 /** Ellipsis characters a model uses when it silently shortens a quote. */
@@ -433,10 +450,28 @@ function overlapOf(
  * ───────────────────────────────────────────────────────────────────────── */
 
 /**
- * Every word of a text, in the order it was written.
+ * A word in any script: letters, digits and combining marks, with apostrophes
+ * *inside* it. Anything else visible is one token of its own.
  *
- * Deliberately unlike `contentTokens` in all three ways that matter, and each
- * one is a defect r3's gauntlet exploited or could have:
+ * The alternation is the whole design. r4's first version split on
+ * `/[^a-z0-9']+/`, which is a **denylist of the characters that may carry
+ * meaning** wearing a tokenizer's clothes, and r4's own blind review walked
+ * through it four ways in one pass: `Bob will ｎｏｔ deploy` (fullwidth — not
+ * `[a-z]`, so deleted), `Bob will не deploy` (Cyrillic — deleted), `❌ Bob will
+ * deploy` (emoji — deleted), and `Bob will deploy Friday?` (the question mark —
+ * deleted). Each one bore its own affirmative and auto-accepted. A Russian
+ * sentence, meanwhile, tokenized to *nothing at all* and was refused as empty.
+ *
+ * So the rule is inverted: a token is a word, or it is a visible character, and
+ * `RECEIPT_POLICY.droppableTokens` is the only thing that may go missing.
+ */
+const TOKEN = /[\p{L}\p{N}\p{M}]+(?:'[\p{L}\p{N}\p{M}]+)*|[^\s']/gu;
+
+/**
+ * Every token of a text, in the order it was written.
+ *
+ * Deliberately unlike `contentTokens` in all four ways that matter, and each
+ * one is a defect the gauntlets exploited or could have:
  *
  *  - **No stopword list.** `not`, `all`, `some`, `will`, `might`, `unless` and
  *    every word nobody has thought of yet are content here. There is no list to
@@ -444,17 +479,92 @@ function overlapOf(
  *  - **No de-duplication.** "not not" is two tokens. A `Set` cannot tell double
  *    negation from single.
  *  - **No length floor.** `no` is two characters and inverts a sentence.
+ *  - **No character class of "real" words.** Every script, every mark and every
+ *    emoji is content; see `TOKEN`.
  *
  * Apostrophes are kept *inside* a word, so `won't` is one token and is not
- * `will`. An apostrophe at either edge is a quotation mark rather than a letter
- * — `'online'` is the word `online` — so it is trimmed, and a token that was
- * nothing but apostrophes disappears.
+ * `will`. A standalone apostrophe is dropped rather than tokenized — it is a
+ * quotation mark, `'online'` is the word `online`, and an apostrophe cannot
+ * negate, quantify, or change a modal.
  */
 export function orderedTokens(text: string): string[] {
-  return normalizeForMatch(text)
-    .split(/[^a-z0-9']+/)
-    .map((token) => token.replace(/^'+|'+$/g, ''))
-    .filter((token) => token.length > 0);
+  return normalizeForMatch(text).match(TOKEN) ?? [];
+}
+
+/**
+ * A text split into sentences: on a terminator followed by space, or a newline.
+ *
+ * Deliberately crude, and crude in the safe direction — it splits *less* than a
+ * linguist would (an abbreviation keeps its sentence whole), and the check that
+ * uses it requires the quote to cover whole sentences, so under-splitting can
+ * only make that harder to satisfy.
+ */
+export function sentencesOf(text: string): string[] {
+  return text
+    .split(/(?<=[.!?…。？！])\s+|\n+/u)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
+}
+
+/**
+ * **Is the quote a run of whole sentences of this text, rather than a span cut
+ * out of the middle of one?**
+ *
+ * r4's own blind review found the defect this exists for, and it is the round's
+ * finding one layer out. Making the *statement vs quote* comparison exact does
+ * nothing if the *quote vs message* relation is still "any substring", because
+ * the model chooses the span:
+ *
+ * | message body                                              | quote = statement                         |
+ * | --------------------------------------------------------- | ----------------------------------------- |
+ * | It is not true that Bob will deploy production Friday …    | Bob will deploy production Friday …       |
+ * | Nobody thinks Bob will deploy production Friday this week   | Bob will deploy production Friday this week |
+ * | I doubt Bob will deploy production Friday this coming week  | Bob will deploy production Friday this coming week |
+ *
+ * Every one of those quotes is verbatim, correctly attributed, long enough, and
+ * borne word-for-word by its own statement — because the inverter was left
+ * outside the span. Quote-mining is the same defect as the stopword list with
+ * the scissors moved.
+ *
+ * The compliant form, allowlisted rather than enumerated against: **the quote is
+ * one or more whole sentences, contiguous, of the author's own text.** Trailing
+ * full stops do not matter (`droppableTokens`); anything else does.
+ *
+ * The residue is stated rather than hidden: polarity that lives in a *different
+ * sentence* ("I will deploy Friday. Not.") is not visible to this and is not
+ * visible to any span rule, because the span really is the whole sentence. That
+ * is a limit of what a receipt can prove about a quote, and it is why the
+ * guarantee is written as "somebody wrote this sentence", not "somebody meant
+ * it".
+ */
+export function quoteSpansWholeSentences(
+  quote: string,
+  ownText: string,
+  policy: ReceiptPolicy = RECEIPT_POLICY,
+): boolean {
+  const significant = (text: string) =>
+    orderedTokens(text).filter((token) => !policy.droppableTokens.has(token));
+
+  const wanted = significant(quote);
+  if (wanted.length === 0) return false;
+
+  const sentences = sentencesOf(ownText);
+  // Bounded, and refusing rather than degrading, for the same reason the
+  // alignment is: the body is somebody else's input.
+  if (sentences.length > policy.maxScannedSentences) return false;
+  const tokenized = sentences.map(significant);
+
+  for (let start = 0; start < tokenized.length; start += 1) {
+    const run: string[] = [];
+    for (let end = start; end < tokenized.length; end += 1) {
+      run.push(...(tokenized[end] ?? []));
+      if (run.length > wanted.length) break;
+      if (run.length === wanted.length && run.every((token, index) => token === wanted[index])) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -465,12 +575,12 @@ export function orderedTokens(text: string): string[] {
 export interface StatementBearing {
   /**
    * True only when the statement is the quote with nothing removed but
-   * `RECEIPT_POLICY.droppableWords`, in the order it was written.
+   * `RECEIPT_POLICY.droppableTokens`, in the order it was written.
    */
   borne: boolean;
-  /** Words the statement asserts that the quote does not contain, in order. */
+  /** Tokens the statement asserts that the quote does not contain, in order. */
   unmatchedInStatement: string[];
-  /** Words the quote contains that the statement drops, in order. */
+  /** Tokens the quote contains that the statement drops, in order. */
   unmatchedInQuote: string[];
   /** Set when the check declined to run at all, rather than running and failing. */
   undecidable: 'empty_quote' | 'empty_statement' | 'too_long' | null;
@@ -484,9 +594,10 @@ export interface StatementBearing {
  * `borne === true` means exactly one thing, and it is worth writing out because
  * the check it replaced claimed something it could not deliver:
  *
- * > Every word of the statement appears in the quote, in the same order, and
- * > every word of the quote appears in the statement, in the same order, except
- * > for the three articles in `RECEIPT_POLICY.droppableWords`.
+ * > Every token of the statement appears in the quote, in the same order, and
+ * > every token of the quote appears in the statement, in the same order, except
+ * > for the full stop in `RECEIPT_POLICY.droppableTokens`. A token is a word in
+ * > any script, or a visible mark.
  *
  * That is a **structural** claim about two strings. It is not entailment, and
  * nothing here can establish entailment — but combined with the checks around it
@@ -548,7 +659,7 @@ export function statementBearing(
   }
 
   const droppable = (token: string | undefined): boolean =>
-    token !== undefined && policy.droppableWords.has(token);
+    token !== undefined && policy.droppableTokens.has(token);
 
   const unmatchedInQuote: string[] = [];
   const unmatchedInStatement: string[] = [];
@@ -563,8 +674,8 @@ export function statementBearing(
       j += 1;
       continue;
     }
-    // An article on either side may be skipped silently — that is the entire
-    // licence this check grants, and `droppableWords` says why.
+    // A full stop on either side may be skipped silently — that is the entire
+    // licence this check grants, and `droppableTokens` says why.
     if (droppable(qt)) {
       i += 1;
       continue;
@@ -865,6 +976,15 @@ export type ProvenanceProblemKind =
    */
   | 'quote_carries_more_than_statement'
   /**
+   * The quote is a span cut out of the middle of a sentence rather than a run of
+   * whole sentences. r4's own blind review: making the statement/quote
+   * comparison exact does nothing when the model also chooses where to put the
+   * scissors — *"It is not true that Bob will deploy production Friday"* quoted
+   * from `Bob will deploy…` onwards is verbatim, correctly attributed, and bears
+   * its own statement perfectly.
+   */
+  | 'quote_is_a_fragment'
+  /**
    * The bearing check could not run: no quote, no statement, or an input too
    * large to align. Fails closed for the same reason every other missing input
    * does — an unchecked receipt is not a passed one.
@@ -1107,6 +1227,28 @@ export function validateProposalProvenance(
         severity: 'reject',
         detail: `the quote "${clip(quote, 40)}" is ${normalizedQuote.length} characters, below the ${policy.minQuoteLength} a receipt needs — a span that short occurs in any thread, so it identifies the conversation rather than the sentence`,
         messageId: bearing?.id ?? null,
+      });
+    }
+
+    // ── …and cut at the sentence, not wherever the model liked ────────────
+    //
+    // r4's own blind review. A model that chooses the span can leave the
+    // inverter outside it — "It is not true that Bob will deploy production
+    // Friday", quoted from "Bob" onwards — and every check in this file, the
+    // strict bearing comparison included, passes on the result. See
+    // `quoteSpansWholeSentences`. `refer` rather than `reject`: a fragment may be
+    // a perfectly fair quotation, and nothing here can read the rest of the
+    // sentence to find out, which is the definition of the third severity.
+    if (
+      fromModel &&
+      bearing &&
+      !quoteSpansWholeSentences(quote, stripReplyBlockquotes(bearing.body), policy)
+    ) {
+      problems.push({
+        kind: 'quote_is_a_fragment',
+        severity: 'refer',
+        detail: `the quote is a span cut out of the middle of a sentence in message "${bearing.id}" rather than one or more whole sentences of it — the words on either side of the cut may qualify or reverse it ("it is not true that …"), and nothing here can read them, so this reading is not accepted on a machine's word`,
+        messageId: bearing.id,
       });
     }
 

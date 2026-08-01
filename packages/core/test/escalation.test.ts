@@ -473,6 +473,22 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     body: message.body,
   }));
 
+  /**
+   * The whole final sentence of `messageDispute`.
+   *
+   * r4: a compliant quote is one or more **whole sentences** of the cited
+   * message. These fixtures used to quote a span out of the middle of this
+   * sentence, which is the shape r4's own blind review turned into an
+   * auto-accept of an inverted claim ("it is not true that …" left outside the
+   * scissors), so they quote the sentence.
+   */
+  const DISPUTE_SENTENCE =
+    "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5, " +
+    'line 6 (`this.bar()`) changes that, so TypeScript *should not* be so confident that ' +
+    "`this.state` is still `'online'` after line 6.";
+  /** The same sentence with the markdown a model drops while quoting. */
+  const DISPUTE_SENTENCE_PLAIN = normalizeForMatch(DISPUTE_SENTENCE);
+
   const problemKinds = (...args: Parameters<typeof validateProposalProvenance>) =>
     validateProposalProvenance(...args)
       .map((problem) => problem.kind)
@@ -529,8 +545,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           type: 'claim',
           provenance: [messageDispute.id],
           // The source says *should not* and `this.state`; the model dropped both.
-          quote: 'so TypeScript should not be so confident that this.state is still',
-          statement: 'so TypeScript should not be so confident that this.state is still',
+          quote: DISPUTE_SENTENCE_PLAIN,
+          statement: DISPUTE_SENTENCE_PLAIN,
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
@@ -606,12 +622,10 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       {
         type: 'commitment',
         provenance: [messageDispute.id],
-        quote:
-          "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
+        quote: DISPUTE_SENTENCE,
         proposer: { kind: 'model' },
         attributedTo: DHLOLO,
-        statement:
-          'While TypeScript is correct that this.state must be online immediately after line 5',
+        statement: DISPUTE_SENTENCE,
       },
       messages,
     );
@@ -669,10 +683,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     // case #4 designs the confirm flow for, and killing it would delete the flow.
     const subject = {
       provenance: [messageDispute.id],
-      quote:
-        "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5",
-      statement:
-        'While TypeScript is correct that this.state must be online immediately after line 5',
+      quote: DISPUTE_SENTENCE,
+      statement: DISPUTE_SENTENCE,
       proposer: { kind: 'model' as const },
       attributedTo: DHLOLO,
     };
@@ -691,7 +703,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         type: 'claim',
         provenance: [messageQuotingOpener.id],
         quote: 'I just ran into a problem with this for the first time despite using TypeScript',
-        statement: 'I just ran into a problem with this for the first time despite using TypeScript',
+        statement:
+          'I just ran into a problem with this for the first time despite using TypeScript',
         proposer: { kind: 'model' },
       },
       messages,
@@ -704,7 +717,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     // names nobody has no attribution to police and still has a sentence, and
     // r3's gauntlet minted a model objective through the version of this rule
     // that read "no name, no receipt".
-    const quoted = 'so TypeScript should not be so confident that this.state is still';
+    const quoted = DISPUTE_SENTENCE_PLAIN;
     expect(
       problemKinds(
         {
@@ -750,6 +763,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
       'quote_too_short',
       'quote_does_not_bear_statement',
       'quote_carries_more_than_statement',
+      'quote_is_a_fragment',
       'statement_uncheckable',
       'ambiguous_quote',
       'attributed_person_not_author',

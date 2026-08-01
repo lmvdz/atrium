@@ -225,7 +225,7 @@ export interface ReceiptPolicy {
    */
   minQuoteLength: number;
   /**
-   * **The only words the bearing check will let differ between a quote and the
+   * **The only tokens the bearing check will let differ between a quote and the
    * statement it is supposed to carry.**
    *
    * r3 answered "does this quote bear this sentence" with lexical overlap over a
@@ -237,15 +237,30 @@ export interface ReceiptPolicy {
    * hedges, subordinators, and whatever the next reviewer thinks of — and a check
    * built on one is wrong until somebody finds the next word.
    *
-   * So this is the other kind of list: not the words that must match, but the
-   * *only* ones that may differ. Everything else in either text is content that
-   * has to be accounted for. The three articles are here because adding or
-   * removing one cannot change **who**, **whether**, **how many**, or **when** —
-   * which is the whole of what the receipt claims. Nothing else has cleared that
-   * bar, and adding a word here is a change to what the product guarantees, not a
-   * tuning knob.
+   * So this is the other kind of list: not the tokens that must match, but the
+   * *only* ones that may differ. Everything else in either text — every word,
+   * every mark, every emoji — is content that has to be accounted for.
+   *
+   * **It contains one entry, and it used to contain four.** r4's own blind
+   * cross-lineage review broke the argument for the other three. `a`, `an` and
+   * `the` were here on the grounds that adding or removing an article cannot
+   * change who, whether, how many or when — and the reviewers produced *"**A**
+   * maintainer will deploy production Friday"* bearing *"**The** maintainer will
+   * deploy production Friday"* (indefinite reference laundered into definite) and
+   * *"**A** will deploy production Friday"* bearing *"will deploy production
+   * Friday"* (the subject dropped entirely, because a one-letter name is spelled
+   * like an article). Both auto-accepted. The justification was wrong, so the
+   * entries went, and what is left is the sentence that needed no justification:
+   * **the statement is the quote.**
+   *
+   * `.` survives because a full stop terminates a sentence and carries no other
+   * meaning — `?` and `!` are *not* here, because "Bob will deploy Friday?" is a
+   * question and minting it as an assertion is the same defect in different
+   * clothes. Adding anything to this set changes what the product guarantees; the
+   * bar is an argument nobody can break, and three of the four entries that used
+   * to be here did not clear it.
    */
-  droppableWords: ReadonlySet<string>;
+  droppableTokens: ReadonlySet<string>;
   /**
    * The most tokens the bearing alignment will compare on either side.
    *
@@ -256,6 +271,13 @@ export interface ReceiptPolicy {
    * to that is the same as every other unanswerable question here.
    */
   maxAlignedTokens: number;
+  /**
+   * Sentences of one message the quote-anchoring check will scan.
+   *
+   * Same argument as `maxAlignedTokens`: the check is quadratic in the sentence
+   * count and the message body is somebody else's input. Above this it refuses.
+   */
+  maxScannedSentences: number;
   /**
    * Fraction of content words two texts must share to be the same reading.
    *
@@ -268,8 +290,9 @@ export interface ReceiptPolicy {
 
 export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
   minQuoteLength: 24,
-  droppableWords: Object.freeze(new Set(['a', 'an', 'the'])) as ReadonlySet<string>,
+  droppableTokens: Object.freeze(new Set(['.'])) as ReadonlySet<string>,
   maxAlignedTokens: 400,
+  maxScannedSentences: 200,
   duplicateThreshold: 0.8,
 });
 

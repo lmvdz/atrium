@@ -201,7 +201,7 @@ export function commitmentAttribution(
   quote: string | null | undefined,
 ): CommitmentAttribution {
   // Absent, empty, and empty-of-content are one state: nobody supplied the words.
-  if (!messages || !messages.some((message) => hasContent(message.body))) return 'third_party';
+  if (!messages?.some((message) => hasContent(message.body))) return 'third_party';
   if (isBlank(quote)) return 'third_party';
   const cited = new Set(citedMessageIds);
   const citedMessages = messages.filter((message) => cited.has(message.id));

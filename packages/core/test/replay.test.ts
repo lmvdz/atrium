@@ -212,7 +212,11 @@ function generateLog(seed: number, size: number): AuthoredEvent[] {
         text,
         quote: text,
         messageId,
-        window: [{ id: messageId, authorId: BOB, body: `and then, ${text}, we agreed` }],
+        // Three sentences, the middle one being the quote: r4 requires the quote
+        // to be whole sentences of the message, and a corpus whose every quote
+        // was a fragment would have turned every model acceptance into a
+        // receipt refusal and stopped testing the clean path.
+        window: [{ id: messageId, authorId: BOB, body: `We talked. ${text}. Agreed.` }],
       };
       events.push(
         row(
@@ -469,8 +473,12 @@ function generateLog(seed: number, size: number): AuthoredEvent[] {
 function gateProbes(seed: number): AuthoredEvent[] {
   const room = ROOMS[0];
   const tag = `probe_${seed}`;
+  // r4: the quote must be a run of *whole sentences* of the cited message. This
+  // used to read `it is true that ${text}`, which makes every probe's quote a
+  // span cut out of the middle of one — the exact shape r4's own blind review
+  // turned into an auto-accept of an inverted claim.
   const claimWindow = (text: string): ProvenanceMessage[] => [
-    { id: `msg_${tag}`, authorId: BOB, body: `it is true that ${text}` },
+    { id: `msg_${tag}`, authorId: BOB, body: `Yes. ${text}. Agreed.` },
   ];
 
   const object = (
@@ -770,7 +778,7 @@ function gateProbes(seed: number): AuthoredEvent[] {
         {
           id: `msg_${tag}`,
           authorId: ALICE,
-          body: `${tag} will land it on Friday afternoon, I think`,
+          body: `${tag} will land it on Friday afternoon. I think so.`,
         },
       ],
     ),
@@ -858,6 +866,47 @@ function gateProbes(seed: number): AuthoredEvent[] {
         },
       },
       MODEL,
+    ),
+    // Gate: a receipt the check declines to rule on. The quote is verbatim,
+    // long enough, a whole sentence and by the right author — and the statement
+    // drops a word from it, which may be an aside or may be a negation. r3's
+    // gauntlet is this shape, and a machine may not act on it.
+    row(
+      {
+        id: `${tag}_41`,
+        at: stamp(41),
+        type: 'proposal_recorded',
+        proposal: {
+          id: `pprop_refer_${seed}`,
+          roomId: room,
+          type: 'claim',
+          payload: { statement: `${tag} is confident about the plan`, claimant: BOB },
+          confidence: 0.95,
+          proposer: MODEL,
+          provenance: [`msg_${tag}`],
+          quote: `${tag} is not confident about the plan`,
+          createdAt: stamp(41),
+        },
+      },
+      MODEL,
+    ),
+    row(
+      {
+        id: `${tag}_42`,
+        at: stamp(42),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_42`,
+          roomId: room,
+          type: 'claim',
+          payload: { statement: `${tag} is confident about the plan`, claimant: BOB },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: `pprop_refer_${seed}` },
+          createdAt: stamp(42),
+          updatedAt: stamp(42),
+        },
+      },
+      MODEL,
+      [{ id: `msg_${tag}`, authorId: BOB, body: `${tag} is not confident about the plan.` }],
     ),
   ];
 }
@@ -1027,6 +1076,12 @@ const GATE_MARKERS = {
   missing_receipt_context: 'no message window supplied',
   receipt_failed: 'on a receipt that does not hold',
   third_party_confirm: 'waits for the named owner to confirm',
+  // `missing_quote` is deliberately absent: the schema refuses a model proposal
+  // with a blank quote at parse time, so the reducer's own gate for it is
+  // defence in depth and unreachable through a delivery stream. It is asserted
+  // straight at the predicate in `boundary.test.ts` instead, which is the point
+  // of a gate that only another gate makes unreachable.
+  receipt_not_certifiable: 'declines to rule on',
   answer_relation: 'declares an open question answered',
 } as const;
 

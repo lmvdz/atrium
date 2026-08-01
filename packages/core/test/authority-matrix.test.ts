@@ -264,14 +264,18 @@ const TEXT: Record<AcceptedObjectType, string> = {
   objective: 'ship the narrowing fix this quarter',
 };
 
+const BODY = Object.values(TEXT)
+  // r4: the quote must be one or more *whole sentences* of the message, not a
+  // span cut out of the middle of one — a model that chooses the scissors can
+  // otherwise leave "it is not true that" outside the quote. Joining these with
+  // an em dash made every one of them a fragment of a single enormous sentence.
+  .map((sentence) => (/[.!?]$/.test(sentence) ? sentence : `${sentence}.`))
+  .join(' ');
+
 /** BOB wrote all of it, and BOB is the claimant and the owner. */
-const WINDOW: ProvenanceMessage[] = [
-  { id: 'msg_1', authorId: BOB, body: Object.values(TEXT).join(' — ') },
-];
+const WINDOW: ProvenanceMessage[] = [{ id: 'msg_1', authorId: BOB, body: BODY }];
 /** The same words from somebody else, which breaks every attribution. */
-const WRONG_AUTHOR_WINDOW: ProvenanceMessage[] = [
-  { id: 'msg_1', authorId: ALICE, body: Object.values(TEXT).join(' — ') },
-];
+const WRONG_AUTHOR_WINDOW: ProvenanceMessage[] = [{ id: 'msg_1', authorId: ALICE, body: BODY }];
 
 function payloadFor(type: AcceptedObjectType, verified = false): Record<string, unknown> {
   switch (type) {

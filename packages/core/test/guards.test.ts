@@ -48,7 +48,7 @@ const CLAIM_TEXT = 'the build is green on main';
  */
 const DECISION_TEXT = 'adopt the watermark contract';
 const MSG_9: ProvenanceMessage[] = [
-  { id: 'msg_9', authorId: ALICE, body: `${CLAIM_TEXT}, so let us ${DECISION_TEXT}` },
+  { id: 'msg_9', authorId: ALICE, body: `${CLAIM_TEXT}. So let us ${DECISION_TEXT}.` },
 ];
 
 function proposalEvent(
