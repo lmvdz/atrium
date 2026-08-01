@@ -10,13 +10,13 @@
     "Gate it:  node mutants/run.mjs --check",
     "Unit only: node mutants/run.mjs --suite unit",
     "",
-    "Every entry restores a behaviour a later round removed — round 4's, round 3's,",
+    "Every entry restores a behaviour a later round removed \u2014 round 4's, round 3's,",
     "round 2's, or round 1's where a later round fixed it and this one must not undo",
     "it. `catches` names the tests that must go red and the runner asserts each one",
     "did, so a mutant tripped by something unrelated is recorded as an escape.",
     "",
     "`sql` mutants are applied to the live database and undone by re-executing the",
-    "statements extracted from the migration each one names — migrations are",
+    "statements extracted from the migration each one names \u2014 migrations are",
     "journalled, so editing an applied one demonstrates nothing, and a restore that",
     "used a copied string could re-deploy something the repo does not ship. The",
     "migration is named rather than assumed because 0004, 0005 and 0006 all define",
@@ -39,7 +39,7 @@
       "file": "apps/server/src/ws-server.ts",
       "find": "      reconciler?.start();\n",
       "replace": "",
-      "catches": ["converges with no event bus at all — the reconciler is the durable path"]
+      "catches": ["converges with no event bus at all \u2014 the reconciler is the durable path"]
     },
     {
       "id": "reconcile_not_on_resubscribe",
@@ -49,7 +49,7 @@
       "file": "apps/server/src/ws-server.ts",
       "find": "        onListen: () => {\n          void reconciler?.reconcile();\n        },\n",
       "replace": "",
-      "catches": ["reconciles on the listener’s resubscribe, not only on the next tick"]
+      "catches": ["reconciles on the listener\u2019s resubscribe, not only on the next tick"]
     },
     {
       "id": "head_frame_never_sent",
@@ -118,12 +118,14 @@
       "id": "payload_may_carry_an_actor",
       "suite": "integration",
       "kind": "sql",
-      "why": "Deletes the inverted r1 major 2. With #21 the payload has no actor, so the old equality became unsatisfiable and the tempting move is to drop it — taking the rule it carried with it.",
+      "why": "Deletes the inverted r1 major 2. With #21 the payload has no actor, so the old equality became unsatisfiable and the tempting move is to drop it \u2014 taking the rule it carried with it.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_has_no_actor",
       "restoreFrom": [
         "ALTER TABLE \"core_events\" ADD CONSTRAINT \"core_events_payload_has_no_actor\""
       ],
-      "catches": ["refuses an actor inside the payload — there is exactly one, and it is a column"],
+      "catches": [
+        "refuses an actor inside the payload \u2014 there is exactly one, and it is a column"
+      ],
       "restoreMigration": "0004_trusted_actor_and_append_boundary.sql"
     },
     {
@@ -147,7 +149,7 @@
       "find": "      const limit = request.limit ?? 1000;",
       "replace": "      const limit = 1000;",
       "catches": [
-        "drives the production client’s loop to the head across several real pages",
+        "drives the production client\u2019s loop to the head across several real pages",
         "says there is more when a page is truncated, and stops when it is not"
       ]
     },
@@ -155,7 +157,7 @@
       "id": "more_is_page_fullness_across_two_reads",
       "suite": "integration",
       "kind": "file",
-      "why": "Round 1's blocking finding, whole: `more` computed from page fullness AND the page and the head read separately. Both halves are needed, and that is the point — with the snapshot read in place an untruncated page always has `to === head`, so r1's arithmetic alone produces the right answer for the wrong reason and escapes. The defect only exists when the two numbers describe two different moments.",
+      "why": "Round 1's blocking finding, whole: `more` computed from page fullness AND the page and the head read separately. Both halves are needed, and that is the point \u2014 with the snapshot read in place an untruncated page always has `to === head`, so r1's arithmetic alone produces the right answer for the wrong reason and escapes. The defect only exists when the two numbers describe two different moments.",
       "file": "apps/server/src/ledger.ts",
       "find": "      return db.transaction(\n        async (tx) => {\n          const rows = await tx\n            .select(ROW)\n            .from(coreEvents)\n            .where(and(eq(coreEvents.roomId, roomId), gt(coreEvents.roomSeq, roomSeq)))\n            .orderBy(asc(coreEvents.roomSeq))\n            .limit(limit);\n          const [headRow] = await tx\n            .select({ head: sql<string>`coalesce(max(${coreEvents.roomSeq}), 0)` })\n            .from(coreEvents)\n            .where(eq(coreEvents.roomId, roomId));\n\n          const entries = rows.map(parseEntry);\n          const head = Number(headRow?.head ?? 0);\n          const to = entries.at(-1)?.roomSeq ?? roomSeq;\n          return { entries, head, to, more: to < head };\n        },\n        // REPEATABLE READ, so the two statements see one snapshot rather than\n        // two consecutive ones. READ COMMITTED would take a fresh snapshot per\n        // statement, which is the race this method exists to close.\n        { isolationLevel: 'repeatable read', accessMode: 'read only' },\n      );",
       "replace": "      const rows = await db\n        .select(ROW)\n        .from(coreEvents)\n        .where(and(eq(coreEvents.roomId, roomId), gt(coreEvents.roomSeq, roomSeq)))\n        .orderBy(asc(coreEvents.roomSeq))\n        .limit(limit);\n      const [headRow] = await db\n        .select({ head: sql<string>`coalesce(max(${coreEvents.roomSeq}), 0)` })\n        .from(coreEvents)\n        .where(eq(coreEvents.roomId, roomId));\n      const entries = rows.map(parseEntry);\n      const head = Number(headRow?.head ?? 0);\n      const to = entries.at(-1)?.roomSeq ?? roomSeq;\n      return { entries, head, to, more: entries.length === limit && to < head };",
@@ -228,9 +230,9 @@
       "id": "reconciler_failure_escapes",
       "suite": "unit",
       "kind": "file",
-      "why": "On the timer's un-awaited call an escaping rejection is an unhandled rejection, which `index.ts` answers by exiting the process — so one bad database minute stops the durable path entirely.",
+      "why": "On the timer's un-awaited call an escaping rejection is an unhandled rejection, which `index.ts` answers by exiting the process \u2014 so one bad database minute stops the durable path entirely.",
       "file": "apps/server/src/reconciler.ts",
-      "find": "      .catch((error: unknown) => {\n        // Not fatal, and deliberately loud. The rows are durable, the next pass\n        // will find them, and a client that noticed a gap asks for it — but a\n        // *persistent* failure here means this instance has stopped delivering\n        // anything a peer wrote, which is the divergence in slow motion.\n        logger.error('ledger reconciliation failed', {\n          error: error instanceof Error ? error.message : String(error),\n        });\n      })\n",
+      "find": "      .catch((error: unknown) => {\n        // Not fatal, and deliberately loud. The rows are durable, the next pass\n        // will find them, and a client that noticed a gap asks for it \u2014 but a\n        // *persistent* failure here means this instance has stopped delivering\n        // anything a peer wrote, which is the divergence in slow motion.\n        logger.error('ledger reconciliation failed', {\n          error: error instanceof Error ? error.message : String(error),\n        });\n      })\n",
       "replace": "",
       "catches": ["survives a failing pass and reconciles again on the next one"]
     },
@@ -238,7 +240,7 @@
       "id": "ledger_payload_may_carry_an_actor",
       "suite": "unit",
       "kind": "file",
-      "why": "The two ledger-only kinds never reach `CoreEvent.parse`, so without this guard they are the one door in the wall — a `message_posted` payload free to carry an actor nothing folds and nothing believes.",
+      "why": "The two ledger-only kinds never reach `CoreEvent.parse`, so without this guard they are the one door in the wall \u2014 a `message_posted` payload free to carry an actor nothing folds and nothing believes.",
       "file": "apps/server/src/room-events.ts",
       "find": "    if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
       "replace": "    if (false) {",
@@ -258,7 +260,7 @@
       "id": "core_event_types_lose_the_sixth",
       "suite": "unit",
       "kind": "file",
-      "why": "r1 major 3, in its live form: a core type the ledger classifies as server-only is never folded and vanishes from every replay while live ingestion still applies it. Pinned by a compile-time parity assert rather than by a test — `packages/db` asserts its enum against @atrium/core's, so the divergence cannot be built, let alone shipped. Declared as `caughtBy: build` because a mutant caught by tsc has not measured any test, and a ledger that let those two look alike would print ticks for rules nothing ran.",
+      "why": "r1 major 3, in its live form: a core type the ledger classifies as server-only is never folded and vanishes from every replay while live ingestion still applies it. Pinned by a compile-time parity assert rather than by a test \u2014 `packages/db` asserts its enum against @atrium/core's, so the divergence cannot be built, let alone shipped. Declared as `caughtBy: build` because a mutant caught by tsc has not measured any test, and a ledger that let those two look alike would print ticks for rules nothing ran.",
       "file": "packages/db/src/schema.ts",
       "find": "export const coreEventTypes = [\n  'proposal_recorded',\n  'proposal_rejected',\n  'proposal_superseded',",
       "replace": "export const coreEventTypes = [\n  'proposal_recorded',\n  'proposal_rejected',",
@@ -269,9 +271,9 @@
       "id": "journal_forgets_the_torn_write_check",
       "suite": "unit",
       "kind": "file",
-      "why": "A partially written record is the one case where resuming is worse than replaying: the cursor names a position whose event the store does not hold, and the next since asks from past the hole.",
+      "why": "A partially written record is the one case where resuming is worse than replaying: the cursor names a position whose event the store does not hold, and the next since asks from past the hole. Moved into StoredRoom in r8 along with the ordering check it sat next to, because both answer the same question \u2014 is this a history \u2014 and the schema is where the two absolute sentences at the top of the file are cashed.",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "      const held = events.at(-1)?.roomSeq ?? 0;\n      if (lastSeq !== held) return { events: [], lastSeq: 0 };\n",
+      "find": "    const held = record.events.at(-1)?.roomSeq ?? 0;\n    if (record.lastSeq !== held) {\n      ctx.addIssue({\n        code: 'custom',\n        path: ['lastSeq'],\n        message: `the cursor must name the last event held: ${record.lastSeq} against ${held}`,\n      });\n    }\n",
       "replace": "",
       "catches": ["reads a torn record as no history at all"]
     },
@@ -279,7 +281,7 @@
       "id": "journal_splits_into_two_keys",
       "suite": "unit",
       "kind": "file",
-      "why": "Two keys is two writes with no transaction between them — the exact window RoomJournal exists to close, reopened by the one storage API that cannot close it any other way.",
+      "why": "Two keys is two writes with no transaction between them \u2014 the exact window RoomJournal exists to close, reopened by the one storage API that cannot close it any other way.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "          store.setItem(key(roomId), JSON.stringify({ events: kept, lastSeq }));",
       "replace": "          store.setItem(key(roomId), JSON.stringify({ events: kept, lastSeq }));\n          store.setItem(`${key(roomId)}:cursor`, String(lastSeq));",
@@ -289,7 +291,7 @@
       "id": "reconciler_latches_the_head_it_reported",
       "suite": "unit",
       "kind": "file",
-      "why": "Round 3's other half: a per-room latch that suppresses a repeat, so a socket which lost the one frame carrying a head is never told again — the head frame failing in exactly the case it exists for. The latch is hung off the callback rather than declared beside `timer` because a mutant is one substitution; the behaviour is r3's exactly.",
+      "why": "Round 3's other half: a per-room latch that suppresses a repeat, so a socket which lost the one frame carrying a head is never told again \u2014 the head frame failing in exactly the case it exists for. The latch is hung off the callback rather than declared beside `timer` because a mutant is one substitution; the behaviour is r3's exactly.",
       "file": "apps/server/src/reconciler.ts",
       "find": "      onHead(roomId, head);\n",
       "replace": "      const latched = onHead as unknown as { announced?: Map<string, number> };\n      latched.announced ??= new Map<string, number>();\n      if ((latched.announced.get(roomId) ?? 0) >= head) continue;\n      latched.announced.set(roomId, head);\n      onHead(roomId, head);\n",
@@ -311,7 +313,7 @@
       "id": "head_acks_ignore_the_client",
       "suite": "integration",
       "kind": "file",
-      "why": "The other direction: never record what a client acknowledges, so the head frame is a permanent per-room heartbeat. Correct, and it makes the frame something a client learns to ignore — which is why r3 tried to suppress it in the first place.",
+      "why": "The other direction: never record what a client acknowledges, so the head frame is a permanent per-room heartbeat. Correct, and it makes the frame something a client learns to ignore \u2014 which is why r3 tried to suppress it in the first place.",
       "file": "apps/server/src/ws-server.ts",
       "find": "        if (!headAcks.record(connection.id, frame.data.roomId, frame.data.roomSeq)) {",
       "replace": "        if (false) {",
@@ -351,7 +353,7 @@
       "id": "client_acknowledges_an_unfinished_catchup",
       "suite": "unit",
       "kind": "file",
-      "why": "Acknowledging a page that says `more` claims a position the client has not reached, so the server stops telling a client that is still several pages behind — the premature silence this whole finding is about, arrived at from the client side.",
+      "why": "Acknowledging a page that says `more` claims a position the client has not reached, so the server stops telling a client that is still several pages behind \u2014 the premature silence this whole finding is about, arrived at from the client side.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "          const rounds = progressed ? 0 : (stalled.get(frame.roomId) ?? 0) + 1;",
       "replace": "          acknowledgeHead(frame.roomId);\n          const rounds = progressed ? 0 : (stalled.get(frame.roomId) ?? 0) + 1;",
@@ -361,7 +363,7 @@
       "id": "replay_rederives_the_receipt_window",
       "suite": "integration",
       "kind": "file",
-      "why": "Round 3's blocking 2, in the shape round 5 leaves available: the replay derives the receipt window again instead of reading the row's. The derivation is the database's now and it is still a derivation *at fold time*, which is the defect — `messages.author_id` is ON DELETE SET NULL, so deleting a human author makes an acceptance that folded cleanly replay as a receipt failure. Same derivation, different substrate.",
+      "why": "Round 3's blocking 2, in the shape round 5 leaves available: the replay derives the receipt window again instead of reading the row's. The derivation is the database's now and it is still a derivation *at fold time*, which is the defect \u2014 `messages.author_id` is ON DELETE SET NULL, so deleting a human author makes an acceptance that folded cleanly replay as a receipt failure. Same derivation, different substrate.",
       "file": "apps/server/src/ledger.ts",
       "find": "          rows.push({ ...trustFromRow(entry.actor, trustedMessages), event: entry.event });",
       "replace": "          rows.push({ ...(await trustToRecord(db, entry.event, entry.actor, entry.roomId)), event: entry.event });",
@@ -371,10 +373,10 @@
       "id": "append_records_no_receipt_window",
       "suite": "integration",
       "kind": "sql",
-      "why": "The other end of r3's blocking 2, expressed where the derivation now lives: the boundary folds and stores no window at all. Every fold then reads NULL, which is the absence #21's reducer refuses — so a model acceptance that should land never does, live or on replay. It was a `file` mutant in r4; there is no TypeScript variable left to remove, which is the point of the round.",
+      "why": "The other end of r3's blocking 2, expressed where the derivation now lives: the boundary folds and stores no window at all. Every fold then reads NULL, which is the absence #21's reducer refuses \u2014 so a model acceptance that should land never does, live or on replay. It was a `file` mutant in r4; there is no TypeScript variable left to remove, which is the point of the round.",
       "catches": [
         "replays an accepted claim identically after its author is deleted",
-        "derives the window from the event’s own provenance, in the room’s own order"
+        "derives the window from the event\u2019s own provenance, in the room\u2019s own order"
       ],
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE sql STABLE AS $m$ SELECT NULL::jsonb $m$",
       "restorePrelude": [
@@ -406,7 +408,7 @@
       "id": "id_charset_unconstrained",
       "suite": "integration",
       "kind": "sql",
-      "why": "Without it an astral-plane id reaches the ledger, and the SQL gate's `COLLATE \"C\"` and the reducer's UTF-16 comparison order it differently — the canonical order stops being one order.",
+      "why": "Without it an astral-plane id reaches the ledger, and the SQL gate's `COLLATE \"C\"` and the reducer's UTF-16 comparison order it differently \u2014 the canonical order stops being one order.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_id_is_safe_to_order",
       "restoreFrom": [
         "ALTER TABLE \"core_events\" ADD CONSTRAINT \"core_events_id_is_safe_to_order\""
@@ -443,7 +445,7 @@
       "id": "journal_throws_on_a_full_store",
       "suite": "unit",
       "kind": "file",
-      "why": "r3's behaviour once the quota is reached: `setItem` throws, `applyEntry` leaves the cursor where it was — correctly, for a transient failure — and a full store is not transient, so the room stops advancing while the socket carries on delivering.",
+      "why": "r3's behaviour once the quota is reached: `setItem` throws, `applyEntry` leaves the cursor where it was \u2014 correctly, for a transient failure \u2014 and a full store is not transient, so the room stops advancing while the socket carries on delivering.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "        } catch (error) {\n",
       "replace": "        } catch (error) {\n          throw error;\n",
@@ -469,7 +471,7 @@
       "id": "append_takes_a_caller_supplied_window",
       "suite": "integration",
       "kind": "sql",
-      "why": "The r4-delta blocking finding, whole: the append boundary accepts the receipt window as a parameter and stores it. A direct caller then fabricates a well-formed snapshot and every later fold validates the receipt against the forgery. Both halves are restored, because since 0008 the derivation is the table's — an argument on the function is only reachable if the trigger also stops overwriting the column, and half of the defect is not the defect.",
+      "why": "The r4-delta blocking finding, whole: the append boundary accepts the receipt window as a parameter and stores it. A direct caller then fabricates a well-formed snapshot and every later fold validates the receipt against the forgery. Both halves are restored, because since 0008 the derivation is the table's \u2014 an argument on the function is only reachable if the trigger also stops overwriting the column, and half of the defect is not the defect.",
       "apply": "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text); CREATE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL, p_trusted_messages jsonb DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_stored jsonb; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); PERFORM set_config('atrium.origin', coalesce(p_origin, ''), true); INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at, trusted_messages) VALUES (p_room_id, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at, p_trusted_messages) RETURNING core_events.seq, core_events.room_seq, core_events.trusted_messages INTO v_seq, v_room_seq, v_stored; \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_stored; RETURN NEXT; END; $m$; CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := coalesce(NEW.trusted_messages, public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload)); RETURN NEW; END; $m$",
       "restorePrelude": [
         "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text, jsonb)",
@@ -502,26 +504,26 @@
         "DO $privileges$"
       ],
       "restoreMigration": "0006_derived_receipt_snapshot.sql",
-      "catches": ["will not put another room’s message in a room’s receipt window"]
+      "catches": ["will not put another room\u2019s message in a room\u2019s receipt window"]
     },
     {
       "id": "append_stores_a_window_it_did_not_derive",
       "suite": "integration",
       "kind": "sql",
-      "why": "The table stores a window that is not the one the derivation produced. Nothing in SQL can notice, because both halves are the database's — so the server compares the window it folded under against the one the append reports storing, and refuses the append rather than committing a row that replays differently than it applied.",
+      "why": "The table stores a window that is not the one the derivation produced. Nothing in SQL can notice, because both halves are the database's \u2014 so the server compares the window it folded under against the one the append reports storing, and refuses the append rather than committing a row that replays differently than it applied.",
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := '[]'::jsonb; RETURN NEW; END; $m$",
       "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
       "restoreMigration": "0008_invariants_on_the_table.sql",
       "catches": [
         "replays an accepted claim identically after its author is deleted",
-        "derives the window from the event’s own provenance, in the room’s own order"
+        "derives the window from the event\u2019s own provenance, in the room\u2019s own order"
       ]
     },
     {
       "id": "payload_room_may_disagree",
       "suite": "integration",
       "kind": "sql",
-      "why": "`room_id` was a lifted column nothing compared to the payload — the last of them. A direct caller files an event under room A whose payload names room B: the fan-out reads the column and delivers to A, the fold reads the payload and files it under B, and `since(A, n)` serves a row that folded into another room. Dropping the constraint outright; `payload_room_check_is_kind_blind` is the subtler half, which keeps a constraint and reverts it to the shape that could be smuggled past.",
+      "why": "`room_id` was a lifted column nothing compared to the payload \u2014 the last of them. A direct caller files an event under room A whose payload names room B: the fan-out reads the column and delivers to A, the fold reads the payload and files it under B, and `since(A, n)` serves a row that folded into another room. Dropping the constraint outright; `payload_room_check_is_kind_blind` is the subtler half, which keeps a constraint and reverts it to the shape that could be smuggled past.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches",
       "restoreFrom": [
         "ALTER TABLE \"core_events\" ADD CONSTRAINT \"core_events_payload_room_matches\""
@@ -533,7 +535,7 @@
       "id": "id_charset_check_loses_its_collation",
       "suite": "integration",
       "kind": "sql",
-      "why": "r4's charset CHECK, which spelled the range `[!-~]` with no collation. A regex bracket range is resolved in the collation of its input, so under ICU or a generated glibc locale it stops meaning printable ASCII. Invisible to every behavioural test in this suite — the compose image's en_US.utf8 behaves as byte order — which is exactly why the pin reads the deployed constraint instead.",
+      "why": "r4's charset CHECK, which spelled the range `[!-~]` with no collation. A regex bracket range is resolved in the collation of its input, so under ICU or a generated glibc locale it stops meaning printable ASCII. Invisible to every behavioural test in this suite \u2014 the compose image's en_US.utf8 behaves as byte order \u2014 which is exactly why the pin reads the deployed constraint instead.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_id_is_safe_to_order; ALTER TABLE core_events ADD CONSTRAINT core_events_id_is_safe_to_order CHECK (core_events.id ~ '^[!-~]+$' AND length(core_events.id) <= 256)",
       "restorePrelude": ["ALTER TABLE core_events DROP CONSTRAINT core_events_id_is_safe_to_order"],
       "restoreFrom": [
@@ -546,7 +548,7 @@
       "id": "at_check_is_shape_only",
       "suite": "integration",
       "kind": "sql",
-      "why": "r4's `at` CHECK: the right shape and no calendar. It admits 2026-13-45T25:00:00.000Z, which @atrium/core's Timestamp refuses — the parity the r4 delta found false, in the direction nobody had looked. Such a row then fails at the ::timestamptz cast in core_events_payload_at_matches as a cast error rather than as a named constraint.",
+      "why": "r4's `at` CHECK: the right shape and no calendar. It admits 2026-13-45T25:00:00.000Z, which @atrium/core's Timestamp refuses \u2014 the parity the r4 delta found false, in the direction nobody had looked. Such a row then fails at the ::timestamptz cast in core_events_payload_at_matches as a cast error rather than as a named constraint.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_at_is_canonical_utc; ALTER TABLE core_events ADD CONSTRAINT core_events_payload_at_is_canonical_utc CHECK (core_events.payload->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$')",
       "restorePrelude": [
         "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_at_is_canonical_utc"
@@ -556,7 +558,7 @@
       ],
       "restoreMigration": "0006_derived_receipt_snapshot.sql",
       "catches": [
-        "accepts and refuses exactly the same strings as @atrium/core’s Timestamp",
+        "accepts and refuses exactly the same strings as @atrium/core\u2019s Timestamp",
         "is the same pattern in the deployed CHECK as in @atrium/core",
         "refuses every spelling the boundary can be handed"
       ]
@@ -565,30 +567,30 @@
       "id": "core_timestamp_accepts_any_iso",
       "suite": "integration",
       "kind": "file",
-      "why": "The other side of the same parity: @atrium/core's Timestamp stops constraining while the CHECK does not. This is r4's arrangement in miniature — a type that admits what the database refuses, so a value passes every type in the system and is refused at the INSERT.",
+      "why": "The other side of the same parity: @atrium/core's Timestamp stops constraining while the CHECK does not. This is r4's arrangement in miniature \u2014 a type that admits what the database refuses, so a value passes every type in the system and is refused at the INSERT.",
       "file": "packages/core/src/common.ts",
       "find": "  .regex(\n    CANONICAL_TIMESTAMP,",
       "replace": "  .regex(\n    /^[\\s\\S]*$/,",
-      "catches": ["accepts and refuses exactly the same strings as @atrium/core’s Timestamp"]
+      "catches": ["accepts and refuses exactly the same strings as @atrium/core\u2019s Timestamp"]
     },
     {
       "id": "canonical_timestamp_edited_without_a_migration",
       "suite": "integration",
       "kind": "file",
-      "why": "The failure mode a shared constant introduces: the pattern moves in TypeScript and the deployed CHECK does not. Parity between the two engines still holds — they are both reading a pattern — so the fuzz stays green, and only a pin that reads pg_get_constraintdef can see that the database is enforcing last week's rule.",
+      "why": "The failure mode a shared constant introduces: the pattern moves in TypeScript and the deployed CHECK does not. Parity between the two engines still holds \u2014 they are both reading a pattern \u2014 so the fuzz stays green, and only a pin that reads pg_get_constraintdef can see that the database is enforcing last week's rule.",
       "file": "packages/core/src/common.ts",
       "find": "  /^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|02-(?:0[1-9]|1\\d|2[0-8])))T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$/;",
       "replace": "  /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$/;",
       "catches": [
         "is the same pattern in the deployed CHECK as in @atrium/core",
-        "accepts and refuses exactly the same strings as @atrium/core’s Timestamp"
+        "accepts and refuses exactly the same strings as @atrium/core\u2019s Timestamp"
       ]
     },
     {
       "id": "head_acks_unbounded",
       "suite": "unit",
       "kind": "file",
-      "why": "r4's acknowledgement record: any room id a live socket names gets an entry. The cleanup on close was correct and beside the point — a socket that never closes never reaches it — so one open connection could grow the server's map without limit by acknowledging rooms it invented.",
+      "why": "r4's acknowledgement record: any room id a live socket names gets an entry. The cleanup on close was correct and beside the point \u2014 a socket that never closes never reaches it \u2014 so one open connection could grow the server's map without limit by acknowledging rooms it invented.",
       "file": "apps/server/src/head-acks.ts",
       "find": "      if (!subscribed(subscriberId, roomId)) return false;\n",
       "replace": "",
@@ -602,9 +604,9 @@
       "id": "journal_getitem_outside_the_try",
       "suite": "unit",
       "kind": "file",
-      "why": "r4's read path, verbatim: `getItem` outside the storage try. Browsers that refuse storage do it on access in some builds and on use in others, so a read that throws escaped `commit` — the same permanent stall the bounded-journal work was about, reached through the other half of the API while 'never throws' was on the receipt.",
+      "why": "r4's read path, verbatim: `getItem` outside the storage try. Browsers that refuse storage do it on access in some builds and on use in others, so a read that throws escaped `commit` \u2014 the same permanent stall the bounded-journal work was about, reached through the other half of the API while 'never throws' was on the receipt.",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "    let raw: string | null;\n    try {\n      raw = store.getItem(key(roomId));\n    } catch (error) {\n      // A store that refuses to be *read* is a store this room cannot use.\n      // Degrading rather than returning \"no history\" matters: \"no history\" is a\n      // legitimate answer that means \"fresh room\", and reporting it here would\n      // make an unusable store look like an empty one for ever — silently\n      // re-fetching the whole room on every load and never saying why.\n      degrade(roomId, fallback.load(roomId), describeStorageError(error));\n      return fallback.load(roomId);\n    }\n    if (raw === null) return { events: [], lastSeq: 0 };\n",
+      "find": "    let raw: string | null;\n    try {\n      raw = store.getItem(key(roomId));\n    } catch (error) {\n      // A store that refuses to be *read* is a store this room cannot use.\n      // Degrading rather than returning \"no history\" matters: \"no history\" is a\n      // legitimate answer that means \"fresh room\", and reporting it here would\n      // make an unusable store look like an empty one for ever \u2014 silently\n      // re-fetching the whole room on every load and never saying why.\n      degrade(roomId, fallback.load(roomId), describeStorageError(error));\n      return fallback.load(roomId);\n    }\n    if (raw === null) return { events: [], lastSeq: 0 };\n",
       "replace": "    const raw = store.getItem(key(roomId));\n    if (raw === null) return { events: [], lastSeq: 0 };\n",
       "catches": ["survives a store that refuses to be read"]
     },
@@ -612,7 +614,7 @@
       "id": "journal_lets_the_callback_throw",
       "suite": "unit",
       "kind": "file",
-      "why": "The journal's one advertised property is that `commit` does not throw, and r4 let a caller's `onDegraded` break it — at the worst moment, since the callback only runs once something has already gone wrong.",
+      "why": "The journal's one advertised property is that `commit` does not throw, and r4 let a caller's `onDegraded` break it \u2014 at the worst moment, since the callback only runs once something has already gone wrong.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "    try {\n      report(roomId, reason);\n    } catch {",
       "replace": "    report(roomId, reason);\n    try {\n      void 0;\n    } catch {",
@@ -632,7 +634,7 @@
       "id": "receipt_window_collapses_null_into_empty",
       "suite": "integration",
       "kind": "sql",
-      "why": "The derivation answers `[]` where it should answer NULL: for a human acceptance, for an event with no receipt, and for an acceptance that cites nothing. Absent and empty are different facts — #21's reducer refuses a non-human acceptance for both, and reports the two differently — so collapsing them makes a replay report the wrong reason, and gives every human acceptance a receipt window it never had.",
+      "why": "The derivation answers `[]` where it should answer NULL: for a human acceptance, for an event with no receipt, and for an acceptance that cites nothing. Absent and empty are different facts \u2014 #21's reducer refuses a non-human acceptance for both, and reports the two differently \u2014 so collapsing them makes a replay report the wrong reason, and gives every human acceptance a receipt window it never had.",
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $m$ DECLARE v_ids jsonb; v_window jsonb; BEGIN IF p_actor_kind = 'human' THEN RETURN '[]'::jsonb; END IF; IF p_payload->>'type' IS DISTINCT FROM 'object_accepted' THEN RETURN '[]'::jsonb; END IF; v_ids := p_payload->'object'->'provenance'->'messageIds'; IF v_ids IS NULL OR jsonb_typeof(v_ids) <> 'array' OR jsonb_array_length(v_ids) = 0 THEN RETURN '[]'::jsonb; END IF; SELECT coalesce(jsonb_agg(jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) ORDER BY m.seq), '[]'::jsonb) INTO v_window FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids)); RETURN v_window; END; $m$",
       "restorePrelude": [
         "DROP FUNCTION IF EXISTS public.atrium_receipt_window(uuid, actor_kind, jsonb)"
@@ -652,7 +654,7 @@
       "id": "fk_delete_action_drifts",
       "suite": "integration",
       "kind": "sql",
-      "why": "The failure the stale FK audit was evidence of: a delete action changes and the paragraph describing it does not. 0005's audit named a column that does not exist under an action it does not have, and omitted one that does — with no way for a reader to tell which of its other rows were also wrong. The audit is read off `pg_constraint` now, so drift fails a test instead of ageing quietly in a comment.",
+      "why": "The failure the stale FK audit was evidence of: a delete action changes and the paragraph describing it does not. 0005's audit named a column that does not exist under an action it does not have, and omitted one that does \u2014 with no way for a reader to tell which of its other rows were also wrong. The audit is read off `pg_constraint` now, so drift fails a test instead of ageing quietly in a comment.",
       "apply": "ALTER TABLE attention_items DROP CONSTRAINT attention_items_user_id_users_id_fk; ALTER TABLE attention_items ADD CONSTRAINT attention_items_user_id_users_id_fk FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL ON UPDATE no action",
       "restorePrelude": [
         "ALTER TABLE attention_items DROP CONSTRAINT attention_items_user_id_users_id_fk"
@@ -661,13 +663,13 @@
         "ALTER TABLE \"attention_items\" ADD CONSTRAINT \"attention_items_user_id_users_id_fk\""
       ],
       "restoreMigration": "0000_classy_shocker.sql",
-      "catches": ["has exactly the delete actions 0006’s audit lists"]
+      "catches": ["has exactly the delete actions 0006\u2019s audit lists"]
     },
     {
       "id": "payload_room_check_is_kind_blind",
       "suite": "integration",
       "kind": "sql",
-      "why": "Round 5's version of the room check: a `coalesce` over every nested room key any member of the union might carry. It takes whichever key appears first in its list rather than the one this event kind actually uses, so an `object_accepted` filed into room B with a real `object.roomId` of room A and a smuggled `proposal: {roomId: B}` passes on the smuggled key — fan-out uses B, the fold uses A. The constraint is still there and still refuses the honest lie, which is what makes this the mutant that matters: dropping it is loud, and this is not.",
+      "why": "Round 5's version of the room check: a `coalesce` over every nested room key any member of the union might carry. It takes whichever key appears first in its list rather than the one this event kind actually uses, so an `object_accepted` filed into room B with a real `object.roomId` of room A and a smuggled `proposal: {roomId: B}` passes on the smuggled key \u2014 fan-out uses B, the fold uses A. The constraint is still there and still refuses the honest lie, which is what makes this the mutant that matters: dropping it is loud, and this is not.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches; ALTER TABLE core_events ADD CONSTRAINT core_events_payload_room_matches CHECK (room_id::text = coalesce(payload->'proposal'->>'roomId', payload->'object'->>'roomId', payload->'relation'->>'roomId', payload->>'roomId', room_id::text))",
       "restorePrelude": [
         "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches"
@@ -677,7 +679,7 @@
       ],
       "restoreMigration": "0007_kind_discriminated_room.sql",
       "catches": [
-        "refuses every kind a room key smuggled from another kind’s shape",
+        "refuses every kind a room key smuggled from another kind\u2019s shape",
         "refuses a room key on the three kinds that declare none"
       ]
     },
@@ -685,7 +687,7 @@
       "id": "append_trusts_a_room_less_kind",
       "suite": "integration",
       "kind": "sql",
-      "why": "The boundary stops resolving a room-less kind back to the room its subject was minted in. `proposal_rejected`, `proposal_superseded` and `object_corrected` name a proposal or an object rather than a room, so no CHECK over a single row can contradict the lifted `room_id` — a caller files a rejection of room A's proposal into room B and both the fan-out and `since(B, n)` believe it. This is r5's behaviour exactly, at r7's location.",
+      "why": "The boundary stops resolving a room-less kind back to the room its subject was minted in. `proposal_rejected`, `proposal_superseded` and `object_corrected` name a proposal or an object rather than a room, so no CHECK over a single row can contradict the lifted `room_id` \u2014 a caller files a rejection of room A's proposal into room B and both the fan-out and `since(B, n)` believe it. This is r5's behaviour exactly, at r7's location.",
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = NEW.room_id; NEW.room_seq := v_room_seq; NEW.trusted_messages := public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload); RETURN NEW; END; $m$",
       "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
       "restoreMigration": "0008_invariants_on_the_table.sql",
@@ -700,7 +702,7 @@
       "id": "append_returns_the_window_it_meant_to_store",
       "suite": "integration",
       "kind": "sql",
-      "why": "The append returns the values it *intended* rather than a `RETURNING` of the columns the table assigned — r5's body, and the overclaim in r5's receipt. The two agree today, so this changes no behaviour and **no behavioural test can catch it**; it is pinned structurally, by reading `prosrc`, and the test says so out loud. Since 0008 the same argument covers `room_seq`, which the trigger mints: a function that recomputes it is a function that can report a position the row does not hold.",
+      "why": "The append returns the values it *intended* rather than a `RETURNING` of the columns the table assigned \u2014 r5's body, and the overclaim in r5's receipt. The two agree today, so this changes no behaviour and **no behavioural test can catch it**; it is pinned structurally, by reading `prosrc`, and the test says so out loud. Since 0008 the same argument covers `room_seq`, which the trigger mints: a function that recomputes it is a function that can report a position the row does not hold.",
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_append_core_event(p_room_id uuid, p_event_id text, p_type event_type, p_actor_kind actor_kind, p_actor_id text, p_payload jsonb, p_occurred_at timestamptz, p_origin text DEFAULT NULL) RETURNS TABLE (\"seq\" bigint, \"room_seq\" bigint, \"trusted_messages\" jsonb) LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_room_seq bigint; v_seq bigint; v_window jsonb; BEGIN PERFORM pg_advisory_xact_lock(1096045106::bigint); PERFORM set_config('atrium.origin', coalesce(p_origin, ''), true); SELECT coalesce(max(e.room_seq), 0) + 1 INTO v_room_seq FROM public.core_events e WHERE e.room_id = p_room_id; v_window := public.atrium_receipt_window(p_room_id, p_actor_kind, p_payload); INSERT INTO public.core_events (room_id, id, type, actor_kind, actor_id, payload, occurred_at) VALUES (p_room_id, p_event_id, p_type, p_actor_kind, p_actor_id, p_payload, p_occurred_at) RETURNING core_events.seq INTO v_seq; \"seq\" := v_seq; \"room_seq\" := v_room_seq; \"trusted_messages\" := v_window; RETURN NEXT; END; $m$",
       "restorePrelude": [
         "DROP FUNCTION IF EXISTS public.atrium_append_core_event(uuid, text, event_type, actor_kind, text, jsonb, timestamptz, text)"
@@ -719,7 +721,7 @@
       "id": "journal_null_store_degrades_silently",
       "suite": "unit",
       "kind": "file",
-      "why": "The fourth way the journal stops being durable, in `commit`: `storage()` answers `null` when `localStorage` is absent or throws on access, and the fallback runs without telling anybody. The room works and silently re-fetches itself from the server on every load for ever. The first version of this mutant claimed both of the tests that cover the fourth path and the ledger caught it out — `load` reported for the test that committed first, so a site with its report removed still looked measured. One mutant per site now; `journal_null_store_reads_as_no_history` is the other.",
+      "why": "The fourth way the journal stops being durable, in `commit`: `storage()` answers `null` when `localStorage` is absent or throws on access, and the fallback runs without telling anybody. The room works and silently re-fetches itself from the server on every load for ever. The first version of this mutant claimed both of the tests that cover the fourth path and the ledger caught it out \u2014 `load` reported for the test that committed first, so a site with its report removed still looked measured. One mutant per site now; `journal_null_store_reads_as_no_history` is the other.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "      if (!access.store) {\n        // Degrade *then* commit, in that order: `degrade` seeds the fallback with\n        // what was held before this entry, so committing first would file it\n        // twice. Reported once per room, like every other way out of durability.\n        degrade(roomId, fallback.load(roomId), access.reason);\n        fallback.commit(roomId, entry, lastSeq);\n        return;\n      }\n",
       "replace": "      if (!access.store) {\n        fallback.commit(roomId, entry, lastSeq);\n        return;\n      }\n",
@@ -739,7 +741,7 @@
       "id": "inflight_recovery_is_a_no_op",
       "suite": "unit",
       "kind": "file",
-      "why": "The mutant runner’s own crash recovery stops looking. Every kill that is not a clean SIGINT then leaves an earlier round’s behaviour in the working tree — or an earlier mutant’s schema in the database — and the next run measures it and credits the results to whatever it was running at the time. The instrument having the defect it hunts, which is a standing RETRO entry.",
+      "why": "The mutant runner\u2019s own crash recovery stops looking. Every kill that is not a clean SIGINT then leaves an earlier round\u2019s behaviour in the working tree \u2014 or an earlier mutant\u2019s schema in the database \u2014 and the next run measures it and credits the results to whatever it was running at the time. The instrument having the defect it hunts, which is a standing RETRO entry.",
       "file": "mutants/inflight.mjs",
       "find": "  if (!existsSync(path)) return { status: 'clean' };\n",
       "replace": "  return { status: 'clean' };\n",
@@ -753,7 +755,7 @@
       "id": "invariants_take_the_room_seq_they_are_given",
       "suite": "integration",
       "kind": "sql",
-      "why": "The trigger stops minting `room_seq` and keeps whatever the INSERT supplied. The append function passes none, so every row lands NULL — but the shape that matters is the r6 exploit's, which supplied 9999: a caller-chosen position is a gap in a sequence the whole `since(room, room_seq)` contract calls contiguous.",
+      "why": "The trigger stops minting `room_seq` and keeps whatever the INSERT supplied. The append function passes none, so every row lands NULL \u2014 but the shape that matters is the r6 exploit's, which supplied 9999: a caller-chosen position is a gap in a sequence the whole `since(room, room_seq)` contract calls contiguous.",
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_invariants() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_max_at timestamptz; v_max_id text; v_subject text; v_subject_rooms uuid[]; v_room_seq bigint; BEGIN IF NEW.actor_kind = 'human' THEN IF NEW.actor_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN RAISE EXCEPTION 'not a user id' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; PERFORM 1 FROM public.memberships m WHERE m.room_id = NEW.room_id AND m.user_id = NEW.actor_id::uuid FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'no membership' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_actor_authorized'; END IF; END IF; IF NEW.payload->>'type' IN ('proposal_rejected', 'proposal_superseded') THEN v_subject := NEW.payload->>'proposalId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'proposal_recorded' AND e.payload->'proposal'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; ELSIF NEW.payload->>'type' = 'object_corrected' THEN v_subject := NEW.payload->>'objectId'; SELECT array_agg(DISTINCT e.room_id) INTO v_subject_rooms FROM public.core_events e WHERE e.type = 'object_accepted' AND e.payload->'object'->>'id' = v_subject; IF v_subject_rooms IS NULL OR array_length(v_subject_rooms, 1) > 1 OR v_subject_rooms[1] <> NEW.room_id THEN RAISE EXCEPTION 'subject room' USING ERRCODE = '23514', CONSTRAINT = 'core_events_subject_room_matches'; END IF; END IF; SELECT e.occurred_at, e.id INTO v_max_at, v_max_id FROM public.core_events e ORDER BY e.occurred_at DESC, e.id COLLATE \"C\" DESC LIMIT 1; IF v_max_at IS NOT NULL AND NOT (NEW.occurred_at > v_max_at OR (NEW.occurred_at = v_max_at AND (NEW.id COLLATE \"C\") > (v_max_id COLLATE \"C\"))) THEN RAISE EXCEPTION 'out of order' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_canonical_order'; END IF; NEW.trusted_messages := public.atrium_receipt_window(NEW.room_id, NEW.actor_kind, NEW.payload); RETURN NEW; END; $m$",
       "restoreMigration": "0008_invariants_on_the_table.sql",
       "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_invariants\""],
@@ -766,26 +768,26 @@
       "id": "append_guard_matches_an_unqualified_name",
       "suite": "integration",
       "kind": "sql",
-      "why": "r6's guard, verbatim: `position('function atrium_append_core_event(' in v_context)`. PL/pgSQL labels each stack frame with `format_procedure` at compile time, which omits the schema qualifier when that schema is on `search_path` at that moment and caches the result for the session — so a function in any schema can wear the name. The r6 gauntlet used it to file a rejection of room A's proposal into room B, at room_seq 9999, dated 2020.",
+      "why": "r6's guard, verbatim: `position('function atrium_append_core_event(' in v_context)`. PL/pgSQL labels each stack frame with `format_procedure` at compile time, which omits the schema qualifier when that schema is on `search_path` at that moment and caches the result for the session \u2014 so a function in any schema can wear the name. The r6 gauntlet used it to file a rejection of room A's proposal into room B, at room_seq 9999, dated 2020.",
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_append_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_context text; v_locked boolean; BEGIN GET DIAGNOSTICS v_context = PG_CONTEXT; IF position('function atrium_append_core_event(' in v_context) = 0 THEN RAISE EXCEPTION 'direct insert' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_through_procedure'; END IF; SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND classid = 0 AND objid = 1096045106 AND objsubid = 1 AND granted) INTO v_locked; IF NOT v_locked THEN RAISE EXCEPTION 'no lock' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_lock_held'; END IF; RETURN NEW; END; $m$",
       "restoreMigration": "0008_invariants_on_the_table.sql",
       "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_append_guard\""],
       "catches": [
-        "refuses a spoofed call frame that borrows the append function’s name",
-        "refuses an append smuggled in from another schema’s atrium_append_core_event"
+        "refuses a spoofed call frame that borrows the append function\u2019s name",
+        "refuses an append smuggled in from another schema\u2019s atrium_append_core_event"
       ]
     },
     {
       "id": "append_guard_opens_when_its_door_is_missing",
       "suite": "integration",
       "kind": "sql",
-      "why": "The guard derives the signature it expects from the catalog, and `position(x in y)` is NULL when either side is. Written as `IF position(...) = 0` without the NULL arm, a guard whose append function has been dropped or renamed stops refusing anything at all — a fail-open guard, produced by the obvious spelling. Mutated by dropping the NULL arm and pointing the lookup at a signature that does not exist, which is the state that spelling mishandles.",
+      "why": "The guard derives the signature it expects from the catalog, and `position(x in y)` is NULL when either side is. Written as `IF position(...) = 0` without the NULL arm, a guard whose append function has been dropped or renamed stops refusing anything at all \u2014 a fail-open guard, produced by the obvious spelling. Mutated by dropping the NULL arm and pointing the lookup at a signature that does not exist, which is the state that spelling mishandles.",
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_core_events_append_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $m$ DECLARE v_context text; v_expected text; v_locked boolean; BEGIN GET DIAGNOSTICS v_context = PG_CONTEXT; v_expected := to_regprocedure('public.atrium_append_core_event(uuid,text,public.event_type,public.actor_kind,text,jsonb,timestamptz,text,text)')::text; IF position('function ' || v_expected || ' line ' in v_context) = 0 THEN RAISE EXCEPTION 'direct insert' USING ERRCODE = '42501', CONSTRAINT = 'core_events_append_through_procedure'; END IF; SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND classid = 0 AND objid = 1096045106 AND objsubid = 1 AND granted) INTO v_locked; IF NOT v_locked THEN RAISE EXCEPTION 'no lock' USING ERRCODE = '55000', CONSTRAINT = 'core_events_append_lock_held'; END IF; RETURN NEW; END; $m$",
       "restoreMigration": "0008_invariants_on_the_table.sql",
       "restoreFrom": ["CREATE OR REPLACE FUNCTION \"atrium_core_events_append_guard\""],
       "catches": [
         "refuses a direct INSERT, even from the table owner",
-        "refuses a spoofed call frame that borrows the append function’s name"
+        "refuses a spoofed call frame that borrows the append function\u2019s name"
       ]
     },
     {
@@ -809,7 +811,7 @@
       "id": "payload_room_check_does_not_fail_closed",
       "suite": "integration",
       "kind": "sql",
-      "why": "The `coalesce(…, false)` wrapper is dropped from `core_events_payload_room_matches`. Both `schema.ts` and 0007 say in prose that it makes an unknown ninth kind fail closed; nothing tested it for two rounds, and it is behaviourally real — with the wrapper gone, a ninth kind with `room_id` = B and `object.roomId` = A lands, because a CHECK passes when its expression is NULL.",
+      "why": "The `coalesce(\u2026, false)` wrapper is dropped from `core_events_payload_room_matches`. Both `schema.ts` and 0007 say in prose that it makes an unknown ninth kind fail closed; nothing tested it for two rounds, and it is behaviourally real \u2014 with the wrapper gone, a ninth kind with `room_id` = B and `object.roomId` = A lands, because a CHECK passes when its expression is NULL.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches; ALTER TABLE core_events ADD CONSTRAINT core_events_payload_room_matches CHECK (array_remove(ARRAY[CASE WHEN payload->'proposal'->>'roomId' IS NOT NULL THEN 'proposal.roomId' END, CASE WHEN payload->'object'->>'roomId' IS NOT NULL THEN 'object.roomId' END, CASE WHEN payload->'relation'->>'roomId' IS NOT NULL THEN 'relation.roomId' END, CASE WHEN payload->>'roomId' IS NOT NULL THEN 'roomId' END], NULL) = CASE payload->>'type' WHEN 'proposal_recorded' THEN ARRAY['proposal.roomId'] WHEN 'object_accepted' THEN ARRAY['object.roomId'] WHEN 'relation_added' THEN ARRAY['relation.roomId'] WHEN 'message_posted' THEN ARRAY['roomId'] WHEN 'attention_resolved' THEN ARRAY['roomId'] WHEN 'proposal_rejected' THEN ARRAY[]::text[] WHEN 'proposal_superseded' THEN ARRAY[]::text[] WHEN 'object_corrected' THEN ARRAY[]::text[] END AND room_id::text IS NOT DISTINCT FROM CASE payload->>'type' WHEN 'proposal_recorded' THEN payload->'proposal'->>'roomId' WHEN 'object_accepted' THEN payload->'object'->>'roomId' WHEN 'relation_added' THEN payload->'relation'->>'roomId' WHEN 'message_posted' THEN payload->>'roomId' WHEN 'attention_resolved' THEN payload->>'roomId' ELSE room_id::text END)",
       "restorePrelude": [
         "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches"
@@ -824,7 +826,7 @@
       "id": "payload_room_check_uses_equality",
       "suite": "integration",
       "kind": "sql",
-      "why": "`IS NOT DISTINCT FROM` becomes `=` in the second clause. This changes no behaviour — clause 1 already guarantees the declared key is present and non-NULL, and `ELSE room_id::text` covers the rest, so no input separates the two spellings; the round-7 comments say exactly that instead of the justification they used to give. It is in the ledger to keep the structural pin honest: a corrected comment with nothing holding the code to it is the same defect one round later.",
+      "why": "`IS NOT DISTINCT FROM` becomes `=` in the second clause. This changes no behaviour \u2014 clause 1 already guarantees the declared key is present and non-NULL, and `ELSE room_id::text` covers the rest, so no input separates the two spellings; the round-7 comments say exactly that instead of the justification they used to give. It is in the ledger to keep the structural pin honest: a corrected comment with nothing holding the code to it is the same defect one round later.",
       "apply": "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches; ALTER TABLE core_events ADD CONSTRAINT core_events_payload_room_matches CHECK (coalesce(array_remove(ARRAY[CASE WHEN payload->'proposal'->>'roomId' IS NOT NULL THEN 'proposal.roomId' END, CASE WHEN payload->'object'->>'roomId' IS NOT NULL THEN 'object.roomId' END, CASE WHEN payload->'relation'->>'roomId' IS NOT NULL THEN 'relation.roomId' END, CASE WHEN payload->>'roomId' IS NOT NULL THEN 'roomId' END], NULL) = CASE payload->>'type' WHEN 'proposal_recorded' THEN ARRAY['proposal.roomId'] WHEN 'object_accepted' THEN ARRAY['object.roomId'] WHEN 'relation_added' THEN ARRAY['relation.roomId'] WHEN 'message_posted' THEN ARRAY['roomId'] WHEN 'attention_resolved' THEN ARRAY['roomId'] WHEN 'proposal_rejected' THEN ARRAY[]::text[] WHEN 'proposal_superseded' THEN ARRAY[]::text[] WHEN 'object_corrected' THEN ARRAY[]::text[] END AND room_id::text = CASE payload->>'type' WHEN 'proposal_recorded' THEN payload->'proposal'->>'roomId' WHEN 'object_accepted' THEN payload->'object'->>'roomId' WHEN 'relation_added' THEN payload->'relation'->>'roomId' WHEN 'message_posted' THEN payload->>'roomId' WHEN 'attention_resolved' THEN payload->>'roomId' ELSE room_id::text END, false))",
       "restorePrelude": [
         "ALTER TABLE core_events DROP CONSTRAINT core_events_payload_room_matches"
@@ -839,7 +841,7 @@
       "id": "event_type_drifts_from_the_deployed_enum",
       "suite": "integration",
       "kind": "file",
-      "why": "The drizzle event_type enum grows a value the database does not have. _CoreEventTypeCoverage asserts only that every core event type is in the enum, so this compiles. It pins that a comparison exists at all — and it is honest to say it does not discriminate r7 from r6, because r6 compared Object.keys(OWN_KEY) against eventType.enumValues and this trips that too. The direction r7 added is the database growing a kind TypeScript has not heard of, which cannot be a mutant at all: ALTER TYPE ... ADD VALUE is irreversible, so it would leak a ninth kind into every later file in the run. That half is verified by hand and the test says so.",
+      "why": "The drizzle event_type enum grows a value the database does not have. _CoreEventTypeCoverage asserts only that every core event type is in the enum, so this compiles. It pins that a comparison exists at all \u2014 and it is honest to say it does not discriminate r7 from r6, because r6 compared Object.keys(OWN_KEY) against eventType.enumValues and this trips that too. The direction r7 added is the database growing a kind TypeScript has not heard of, which cannot be a mutant at all: ALTER TYPE ... ADD VALUE is irreversible, so it would leak a ninth kind into every later file in the run. That half is verified by hand and the test says so.",
       "file": "packages/db/src/schema.ts",
       "find": "  'message_posted',\n  'attention_resolved',\n]);",
       "replace": "  'message_posted',\n  'attention_resolved',\n  'ninth_kind',\n]);",
@@ -849,7 +851,7 @@
       "id": "bus_relays_whatever_is_published",
       "suite": "integration",
       "kind": "file",
-      "why": "The ephemeral channel goes back to casting: `JSON.parse(raw) as EphemeralAnnouncement`, which is r6 exactly. `NOTIFY` needs no privilege, so anything that can reach the database publishes a frame and `hub.broadcast` fans it out — including a durable `event` frame, which the client commits to its journal and advances `lastSeq` past, permanently skipping the real event at that position.",
+      "why": "The ephemeral channel goes back to casting: `JSON.parse(raw) as EphemeralAnnouncement`, which is r6 exactly. `NOTIFY` needs no privilege, so anything that can reach the database publishes a frame and `hub.broadcast` fans it out \u2014 including a durable `event` frame, which the client commits to its journal and advances `lastSeq` past, permanently skipping the real event at that position.",
       "file": "apps/server/src/event-bus.ts",
       "find": "const note = parse(raw, EPHEMERAL_CHANNEL, EphemeralNote);",
       "replace": "const note = parse(raw, EPHEMERAL_CHANNEL, {\n            safeParse: (value: unknown) => ({ success: true as const, data: value as EphemeralAnnouncement }),\n          });",
@@ -859,7 +861,7 @@
       "id": "client_casts_the_frame_it_was_sent",
       "suite": "unit",
       "kind": "file",
-      "why": "The client goes back to `JSON.parse(String(event.data)) as ServerFrame`. `handleFrame` reaches `applyEntry`, which writes the durable journal and moves `lastSeq`, so a frame accepted on the strength of a cast is a position the real event can never occupy — the durable half of r6's major 1.",
+      "why": "The client goes back to `JSON.parse(String(event.data)) as ServerFrame`. `handleFrame` reaches `applyEntry`, which writes the durable journal and moves `lastSeq`, so a frame accepted on the strength of a cast is a position the real event can never occupy \u2014 the durable half of r6's major 1.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "const parsed = ServerFrame.safeParse(json);",
       "replace": "const parsed = { success: true as const, data: json as ServerFrame } as ReturnType<\n        typeof ServerFrame.safeParse\n      >;",
@@ -872,7 +874,7 @@
       "id": "journal_casts_what_it_reads_back",
       "suite": "unit",
       "kind": "file",
-      "why": "The journal goes back to `parsed.events as RoomEventEnvelope[]` behind two `typeof` checks. `localStorage` is shared with everything else on the origin and survives reloads, so a poisoned record is a `lastSeq` this client resumes from — and every real event at or below it is silently skipped. It was the last cast on a durable path in the client.",
+      "why": "The journal goes back to `parsed.events as RoomEventEnvelope[]` behind two `typeof` checks. `localStorage` is shared with everything else on the origin and survives reloads, so a poisoned record is a `lastSeq` this client resumes from \u2014 and every real event at or below it is silently skipped. It was the last cast on a durable path in the client.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "const stored = StoredRoom.safeParse(JSON.parse(raw));",
       "replace": "const loose = JSON.parse(raw) as { events?: unknown; lastSeq?: unknown };\n      const stored =\n        Array.isArray(loose.events) && typeof loose.lastSeq === \"number\"\n          ? { success: true as const, data: { events: loose.events as RoomEventEnvelope[], lastSeq: loose.lastSeq } }\n          : { success: false as const };",
@@ -882,17 +884,17 @@
       "id": "client_resumes_a_cursor_past_the_head",
       "suite": "unit",
       "kind": "file",
-      "why": "The client stops checking its resumed cursor against the head the server states in the subscribed reply. Parsing the journal makes it well-formed, not authentic — localStorage is same-origin and carries no provenance — so a well-shaped forgery with lastSeq 50 resumes a room at 50 and skips every real position at or below it, permanently. Both foreign-lineage reviewers found this in r7s first draft; the arithmetic is the only check available, because the head is the one number the client did not write.",
+      "why": "The client stops checking its resumed cursor against the head the server states in the subscribed reply. Parsing the journal makes it well-formed, not authentic \u2014 localStorage is same-origin and carries no provenance \u2014 so a well-shaped forgery with lastSeq 50 resumes a room at 50 and skips every real position at or below it, permanently. Both foreign-lineage reviewers found this in r7s first draft; the arithmetic is the only check available, because the head is the one number the client did not write.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "        if (room.lastSeq > frame.head) {",
       "replace": "        if (false) {",
-      "catches": ["discards a well-formed journal that resumes past the room’s head"]
+      "catches": ["discards a well-formed journal that resumes past the room\u2019s head"]
     },
     {
       "id": "client_lets_an_event_body_carry_an_actor",
       "suite": "unit",
       "kind": "file",
-      "why": "The client stops refusing an actor inside an event body. z.looseObject keeps unknown keys, so without this refinement event.actor survives the parse while the comment beside it says there is no such field — which is what a foreign-lineage probe of r7s first draft got back out of the journal. The server refuses a payload actor three times over, so a body carrying one did not come from the ledger.",
+      "why": "The client stops refusing an actor inside an event body. z.looseObject keeps unknown keys, so without this refinement event.actor survives the parse while the comment beside it says there is no such field \u2014 which is what a foreign-lineage probe of r7s first draft got back out of the journal. The server refuses a payload actor three times over, so a body carrying one did not come from the ledger.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "    .refine((body) => !('actor' in body), {",
       "replace": "    .refine(() => true, {",
@@ -902,11 +904,55 @@
       "id": "client_applies_a_catchup_page_for_another_room",
       "suite": "unit",
       "kind": "file",
-      "why": "The client stops requiring a catch-up page entries to name the page room. handleFrame does its arithmetic against view(frame.roomId) while applyEntry files each entry under entry.roomId, so a page whose entries name another room moves one room journal on another room cursor. The same cross-check exists on the bus (EphemeralNote) and was missing on the socket — an asymmetry inside r7 own fix, found by a second lineage.",
+      "why": "The client stops requiring a catch-up page entries to name the page room. handleFrame does its arithmetic against view(frame.roomId) while applyEntry files each entry under entry.roomId, so a page whose entries name another room moves one room journal on another room cursor. The same cross-check exists on the bus (EphemeralNote) and was missing on the socket \u2014 an asymmetry inside r7 own fix, found by a second lineage.",
       "file": "apps/web/src/lib/realtime.ts",
       "find": "    .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {",
       "replace": "    .refine(() => true, {",
       "catches": ["refuses a catch-up page whose entries name a different room"]
+    },
+    {
+      "id": "journal_forgets_the_ordering_check",
+      "suite": "unit",
+      "kind": "file",
+      "why": "r7's schema checked the record against its own cursor and never against itself, which is #22 gauntlet r7 defect 2. {events:[{roomSeq:9},{roomSeq:2}], lastSeq:2} is self-consistent by that rule and is not a history: the 9 is in the timeline while the cursor is 2, applyEntry dedups on roomSeq <= lastSeq, and the real event at 9 arrives in catch-up and is applied a second time. The room renders [9,2,3,4,5,6,7,8,9] under a file whose first paragraph says nothing is ever applied out of order and nothing is applied twice.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "      if (previous !== undefined && current !== undefined && current.roomSeq <= previous.roomSeq) {\n",
+      "replace": "      if (previous !== undefined && current !== undefined && false) {\n",
+      "catches": [
+        "reads an out-of-order record as no history at all",
+        "reads a record with a repeated position as no history at all",
+        "never renders the same event twice, given the exact forged record"
+      ]
+    },
+    {
+      "id": "journal_reads_another_rooms_events",
+      "suite": "unit",
+      "kind": "file",
+      "why": "The same question the ordering check answers, asked of the other field the record carries: roomId. The key names the room; the envelopes carry their own, and view() renders held.events as this room's timeline without re-reading them. An entry filed under room A carrying room B's roomId is cross-room content injection for the cost of one setItem, from a store the origin shares with everything on it.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "      if (events.some((entry) => entry.roomId !== roomId)) return { events: [], lastSeq: 0 };\n",
+      "replace": "",
+      "catches": ["reads a record holding another room\u2019s events as no history at all"]
+    },
+    {
+      "id": "journal_reset_leaves_the_record_on_disk",
+      "suite": "unit",
+      "kind": "file",
+      "why": "#22 gauntlet r7 defect 3. reset promises 'after it returns, this room resumes from nothing', and r7 answered a throwing removeItem by degrading \u2014 true for the live instance, false for the store. The poisoned key survived, so the next page load built a fresh journal with an empty degraded set, read the forgery again, fired the same check again, and degraded again, for ever. Resuming is what happens after a reload, so a degradation cannot be the whole of it.",
+      "file": "apps/web/src/lib/realtime.ts",
+      "find": "      try {\n        access.store.setItem(key(roomId), JSON.stringify({ events: [], lastSeq: 0 }));\n      } catch (error) {\n        degrade(roomId, { events: [], lastSeq: 0 }, describeStorageError(error));\n      }\n",
+      "replace": "      degrade(roomId, { events: [], lastSeq: 0 }, 'localStorage is unusable');\n",
+      "catches": ["overwrites the record when removeItem throws, so a reload resumes from nothing"]
+    },
+    {
+      "id": "guard_stops_saying_what_it_is",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#22 gauntlet r7 defect 1 was a SENTENCE, not a statement: the migration claimed the remaining bypass of core_events_append_guard 'costs CREATE on schema public', and it costs one SQL comment from a bare DO block. The code is unchanged in r8 on purpose \u2014 no substring over caller-authored text can be a boundary \u2014 so the only thing standing between a reader and that belief is the description. A claim with nothing testing it is exactly what this defect was, so the claim is what this mutant removes.",
+      "apply": "COMMENT ON FUNCTION public.atrium_core_events_append_guard() IS 'Refuses any INSERT that did not come through the append function.'",
+      "restoreFrom": ["COMMENT ON FUNCTION \"atrium_core_events_append_guard\"()"],
+      "restoreMigration": "0009_the_guard_stops_claiming_an_author.sql",
+      "catches": ["says in its own COMMENT that the guard is an accident check, not a boundary"]
     }
   ]
 }
