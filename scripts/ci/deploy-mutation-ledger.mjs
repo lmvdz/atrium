@@ -464,12 +464,18 @@ const CASES = [
         '\tnot header_regexp Cookie "session"',
         '}',
         'handle @fixture {',
+        // The two headers round 3 compared against `/sign-in`'s, forged
+        // byte-for-byte — including the `Accept-Encoding` Caddy's own `encode`
+        // appends, which took three measurements to get exactly right and is
+        // the whole point: this is a *constant*, and getting a constant right is
+        // an afternoon's work for anybody who wants to. With them wrong round
+        // 3's assertion catches this; with them right it passes.
         '\theader X-Powered-By "Next.js"',
-        '\theader Vary "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch"',
+        '\theader Vary "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"',
         `\trespond \`${PAGE_FIXTURE}\` 200`,
         '}',
       ]),
-    note: "Round 3's own blind review found this and round 3 could not close it: a fixture conditioned on the *presence* of a session cookie leaves the authenticated branch as the real app, so the per-run account name renders, the two polarities differ, and every check round 3 had is satisfied. Round 3 answered it by comparing `x-powered-by` and `Vary` against `/sign-in`'s — and the round-3 gauntlet's first major was that those are constants a Caddyfile writes with one line each, which is what the two `header` directives here demonstrate. What catches it now is a request the fixture cannot be conditioned on: `/` fetched a third time carrying the session cookie's names with values that are not a session, which every cookie-presence rule routes to the app, and a comparison of the `/_next/static/…` chunk names the two signed-out responses reference.",
+    note: "Round 3's own blind review found this and round 3 could not close it: a fixture conditioned on the *presence* of a session cookie leaves the authenticated branch as the real app, so the per-run account name renders, the two polarities differ, and every check round 3 had is satisfied. Round 3 answered it by comparing `x-powered-by` and `Vary` against `/sign-in`'s — and the round-3 gauntlet's first major was that those are constants a Caddyfile writes with one line each, which is what the two `header` directives here demonstrate. Measured on one live stack at one moment, this exact Caddyfile mounted: round 3's `assert-page-serves` printed `passed.`, and round 4's printed two failures. What catches it is a request the fixture cannot be conditioned on: `/` fetched a third time carrying the session cookie's names with values that are not a session, which every cookie-presence rule routes to the app, and a comparison of the `/_next/static/…` chunk names the two signed-out responses reference.",
   },
   {
     id: 'schema-short-of-the-migrations',
