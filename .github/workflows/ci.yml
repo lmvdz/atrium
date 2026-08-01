@@ -14,10 +14,7 @@ name: CI
 
 on:
   push:
-    # TEMPORARY (#28 acceptance): build/ci and ci-negative-control are listed so
-    # the green run and the red run can be demonstrated without opening a PR.
-    # Reverted in the next commit.
-    branches: [main, build/ci, ci-negative-control]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
