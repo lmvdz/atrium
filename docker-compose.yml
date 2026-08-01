@@ -102,6 +102,17 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: 'no'
 
+  # One server, and that is now a capacity decision rather than a correctness
+  # one (#22 gauntlet r2). Appends serialize on a Postgres advisory lock the
+  # database itself asserts, and commits are fanned out to every instance over
+  # LISTEN/NOTIFY, so a second replica would see the same history in the same
+  # order and its clients would be delivered to. What a second replica does NOT
+  # get: a shared presence registry (each instance knows who is connected to it
+  # and learns the rest from relayed updates, so one that starts mid-session
+  # sees nobody until they next speak) and any more append throughput, because
+  # the lock is global by design — core state is global. init.md prescribes one
+  # application server; the README's "what is multi-instance-safe" table is the
+  # long version.
   server:
     build:
       context: .

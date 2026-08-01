@@ -209,16 +209,83 @@ and the canonical `(at, id)` order are the same order by construction rather
 than by luck. There is no status column and no quarantine table: a refused event
 aborts the transaction and leaves no row, no sequence number, and no gap.
 
+**`seq` may gap; `room_seq` may not.** `seq` is a `bigserial` and a sequence does
+not roll back, so an aborted append burns its number forever. That is fine, and
+it is deliberately not claimed otherwise — `seq` is a total *order*, not a
+census, and nothing counts it. `room_seq` is minted `max + 1` under the append
+lock inside the same transaction, so an aborted append gives its number straight
+back. Only the per-room sequence is advertised as gap-free, and only it is what
+`since(room, room_seq)` walks.
+
+**Nothing appends by convention.** `atrium_append_core_event(...)` is the only
+way a row reaches `core_events`: it takes the lock, mints `room_seq` under it,
+and inserts. A `BEFORE INSERT` trigger reads its own plpgsql call stack and
+refuses any insert that did not come through that function, then refuses again
+if the lock is not actually held. A `REVOKE` alone would not do — the app role
+owns the table, and under the compose Postgres image it is also a superuser, and
+neither is bound by one. The revoke is there too, for a deployment that runs the
+app under a dedicated unprivileged role: that role needs `EXECUTE` on the
+function and nothing else. The integration suite proves the trigger by trying a
+direct insert *as the superuser owner* and being refused, and it appends through
+the same procedure the server does — there is no test-only write path.
+
+The honest limit: a role with `CREATE` privilege could define a function with
+the same name and satisfy the stack check. It would still be refused by the lock
+assertion, and anyone with that privilege can drop the trigger anyway. The guard
+is aimed at the accident — the migration, the fix-up script, the well-meant
+backfill — not at a DBA determined to lie to the log.
+
 A command validates membership, folds through `appendEvent` **inside** the
 transaction that inserts, writes its projections there too, and only then
-broadcasts `(room, room_seq)`. Presence and typing skip all of it — they are
-transient frames, never rows, and an integration test floods them and asserts
-the ledger gained nothing.
+broadcasts `(room, room_seq)`. Membership is re-read inside that transaction
+with the row locked: the check before it is a cheap early refusal, but a
+membership revoked in between must not be able to write durable history.
+Presence and typing skip all of it — they are transient frames, never rows, and
+an integration test floods them and asserts the ledger gained nothing.
 
 Rooms are the isolation boundary, so every reference that could cross one is a
 composite `(room_id, id)` foreign key rather than a bare-id one. A plain FK
 checks that a row exists; only the composite one checks that it exists *in this
-room*.
+room*. `attention_items` is the polymorphic case: its subject is an accepted
+object *or* a proposal (a `needs_decision` item names the proposal nobody has
+ruled on yet), so `subject_kind` is projected into two generated columns, each
+carrying its own composite FK. Exactly one is non-null per row, and it is the
+one the discriminator names — by construction, not by a check to keep in step.
+
+### Catch-up, and what is multi-instance-safe
+
+A client's only cursor is `room_seq`. On reconnect — or on any gap in live
+delivery — it asks `since(room, room_seq)` and applies what it is given, in
+order, never twice.
+
+Catch-up is a **loop**, not a call. The server answers with the page *and* the
+head it was read against, from one snapshot, and says `more` exactly when
+`to < head`. The client keeps asking while its own cursor is behind the head it
+was told about, treating `more` as a hint on top of its own arithmetic rather
+than as the authority. (Page fullness is not the question and never was: during
+concurrent writes a page comes back short of the limit while the head has
+already moved.)
+
+Delivery across processes is Postgres `LISTEN`/`NOTIFY` — no Redis, per init.md.
+A commit is announced on a channel; every instance folds the rows it has not
+seen, into its own `CoreState`, and fans them out to its own subscribers. The
+notification is a doorbell and never a payload: the rows come from the ledger,
+which is where the receiver has to read them anyway.
+
+What that does and does not buy, stated plainly:
+
+| | multi-instance safe? |
+| --- | --- |
+| Durable history and ordering | **Yes.** The advisory lock is taken in Postgres and asserted by a trigger, so appends serialize across every process on the database, not just within one. |
+| Live event delivery | **Yes.** A second instance's commits reach the first instance's subscribers, and each instance folds them into its own core state. |
+| Catch-up and recovery | **Yes.** `since(room, room_seq)` reads the ledger; any instance can answer it. |
+| Presence and typing | **Yes, as a relay.** Frames are forwarded on a second channel. There is no shared presence *registry*: each instance knows who is connected to it, and learns about everyone else only from the updates they send. An instance that starts mid-session sees nobody until they next say something. |
+| Notification delivery | **Best-effort.** An instance disconnected when a NOTIFY fires never sees it; it folds those rows on its next sync or append, and clients recover through the catch-up loop. Nothing durable depends on a notification arriving. |
+| Throughput | **Bounded by the global append lock**, deliberately. Appends serialize instance-wide *and* across instances, because core state is global. init.md prescribes one application server; if that stops being true, the fix is to shard core state per room, not to weaken the lock while the state stays global. |
+
+`docker-compose.yml` still runs exactly one `server`. That is a capacity
+decision now, not a correctness one — which is the change this round made.
+
 ### Replay ingest
 
 `packages/ingest` turns a real conversation into the canonical replay format
@@ -306,6 +373,12 @@ it at a database you already have and skips compose entirely. There is
 deliberately no in-suite skip: without a database it exits non-zero, because a
 test that goes green when its dependency is missing turns a verification gate
 into decoration.
+
+`pnpm lint` has one gotcha worth knowing before it wastes an afternoon: Biome
+excludes `**/.claude`, so a checkout made *inside* `.claude/worktrees/` reports
+"no files were processed" and exits successfully having linted nothing. If the
+tree you are working in lives there, verify lint from a copy outside that path
+before believing a green result.
 
 Playwright needs its browser once: `pnpm --filter @atrium/web exec playwright
 install chromium`. Without it the smoke test skips with a reason instead of
