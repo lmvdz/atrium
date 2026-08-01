@@ -86,3 +86,59 @@ export const consoleMailer: Mailer = async (message) => {
 
 /** Drops everything. Used by tests that assert on their own transport. */
 export const nullMailer: Mailer = async () => {};
+
+/**
+ * Which transport Atrium is allowed to run with.
+ *
+ * The console transport prints verification and invitation links. That is
+ * exactly right in development and exactly wrong in production, where those
+ * links are single-use account takeovers sitting in a log aggregator that far
+ * more people can read than can read the recipient's inbox — and with
+ * `autoSignInAfterVerification` on, opening one *is* signing in as them.
+ *
+ * So this refuses to boot. Not a warning: a warning in a log is read by the
+ * same nobody who was going to notice the links.
+ *
+ * Two exemptions, both narrow:
+ *  - `next build` (`NEXT_PHASE=phase-production-build`) compiles route modules
+ *    with `NODE_ENV=production` but serves no request and sends no mail, so
+ *    failing there would only mean "you cannot build an image without SMTP
+ *    credentials on the build machine".
+ *  - An explicit transport passed by the composition root wins outright; that
+ *    is the seam a real Postmark/SES sender lands on.
+ */
+export interface MailerSource {
+  NODE_ENV?: string | undefined;
+  NEXT_PHASE?: string | undefined;
+}
+
+export class MailerNotConfiguredError extends Error {
+  constructor() {
+    super(
+      'No mail transport is configured and NODE_ENV=production. Atrium refuses ' +
+        'to start: the console transport prints verification and invitation ' +
+        'links, and in production those links belong in an inbox, not in a log. ' +
+        'Pass a real transport to createAtriumAuth({ mailer }), or do not run ' +
+        'with NODE_ENV=production.',
+    );
+    this.name = 'MailerNotConfiguredError';
+  }
+}
+
+/**
+ * The transport for this process, or a thrown error.
+ *
+ * @param explicit a transport supplied by the composition root, if any.
+ * @param env      the environment to judge against.
+ */
+export function resolveMailer(
+  explicit: Mailer | undefined,
+  env: MailerSource = process.env,
+): Mailer {
+  if (explicit) return explicit;
+
+  const building = env.NEXT_PHASE === 'phase-production-build';
+  if (env.NODE_ENV === 'production' && !building) throw new MailerNotConfiguredError();
+
+  return consoleMailer;
+}

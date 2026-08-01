@@ -2,7 +2,7 @@ import 'server-only';
 import { type AtriumAuth, createAtriumAuth, resolveAuthSecret } from '@atrium/auth';
 import { nextCookies } from 'better-auth/next-js';
 import { db } from './db';
-import { appUrl, githubOAuth } from './env';
+import { appUrl, githubOAuth, realtimeOrigin } from './env';
 
 /**
  * The web app's Better Auth instance: the shared configuration from
@@ -21,10 +21,14 @@ interface Holder {
 export function auth(): AtriumAuth {
   const holder = globalThis as unknown as Holder;
   const github = githubOAuth();
+  const realtime = realtimeOrigin();
   holder[key] ??= createAtriumAuth({
     db: db(),
     baseURL: appUrl(),
     secret: resolveAuthSecret(process.env),
+    // Both processes pass their configured origins, so neither ends up with a
+    // laxer notion of "us" than the other.
+    trustedOrigins: realtime ? [realtime] : [],
     ...(github ? { github } : {}),
     plugins: [nextCookies()],
   });

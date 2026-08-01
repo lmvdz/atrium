@@ -2,7 +2,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { consoleMailer, type MailMessage } from '../src/mailer.js';
+import {
+  consoleMailer,
+  MailerNotConfiguredError,
+  type MailMessage,
+  nullMailer,
+  resolveMailer,
+} from '../src/mailer.js';
 
 const message: MailMessage = {
   kind: 'email-verification',
@@ -67,5 +73,42 @@ describe('consoleMailer', () => {
   it('never lets a broken outbox break a signup', async () => {
     process.env.ATRIUM_MAIL_OUTBOX = join(dir, 'no', 'such', 'dir', 'outbox.jsonl');
     await expect(consoleMailer(message)).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The console transport prints one-click account-takeover links. Round 1 made
+ * it the default in every environment, with `autoSignInAfterVerification` on —
+ * so a production deploy with no transport wired would have shipped every
+ * verification link into the log aggregator. It now refuses to boot.
+ */
+describe('resolveMailer', () => {
+  it('uses the console transport in development and test', () => {
+    expect(resolveMailer(undefined, { NODE_ENV: 'development' })).toBe(consoleMailer);
+    expect(resolveMailer(undefined, { NODE_ENV: 'test' })).toBe(consoleMailer);
+    expect(resolveMailer(undefined, {})).toBe(consoleMailer);
+  });
+
+  it('refuses to boot in production with no transport configured', () => {
+    expect(() => resolveMailer(undefined, { NODE_ENV: 'production' })).toThrow(
+      MailerNotConfiguredError,
+    );
+    expect(() => resolveMailer(undefined, { NODE_ENV: 'production' })).toThrow(/refuses to start/i);
+  });
+
+  it('takes a real transport in production without complaint', () => {
+    expect(resolveMailer(nullMailer, { NODE_ENV: 'production' })).toBe(nullMailer);
+  });
+
+  it('exempts `next build`, which compiles routes but sends no mail', () => {
+    expect(
+      resolveMailer(undefined, { NODE_ENV: 'production', NEXT_PHASE: 'phase-production-build' }),
+    ).toBe(consoleMailer);
+  });
+
+  it('does not exempt a production server that merely looks like a build', () => {
+    expect(() =>
+      resolveMailer(undefined, { NODE_ENV: 'production', NEXT_PHASE: 'phase-production-server' }),
+    ).toThrow(MailerNotConfiguredError);
   });
 });

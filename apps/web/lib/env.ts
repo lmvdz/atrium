@@ -3,15 +3,59 @@ import 'server-only';
 /**
  * Server-side configuration for the web app.
  *
- * Deliberately tiny and lazy: `next build` imports every route module, so
- * anything that throws at module scope here turns a missing environment
- * variable into a broken build rather than a clear runtime error.
+ * Deliberately lazy: `next build` imports every route module, so anything that
+ * throws at module scope turns a missing environment variable into a broken
+ * build rather than a clear runtime error. Each accessor is called on the
+ * request path instead.
+ *
+ * **Fail closed in production.** Round 1 gave `APP_URL` and `DATABASE_URL`
+ * localhost defaults in every environment, which is a much worse failure than a
+ * missing variable: a production web app silently minting cookies for
+ * `http://localhost:3000` does not error, it just quietly signs nobody in — and
+ * a `DATABASE_URL` default is a production process pointed at whatever happens
+ * to answer on 5432. `apps/server` already refuses to start without them; this
+ * file now matches it, including how it decides what "production" is.
  */
 
-function required(name: string, fallback?: string): string {
+/**
+ * The environment name, from the process environment only.
+ *
+ * Not from a `.env` file, not from an argument, and not overridable by a
+ * caller: "am I in production?" is the question every fail-closed rule below
+ * hangs on, so it must not be answerable by anything that a request could
+ * influence. `next build` sets `NODE_ENV=production` while compiling, which is
+ * why `NEXT_PHASE` is checked alongside it.
+ */
+export function isProduction(): boolean {
+  return process.env.NODE_ENV === 'production';
+}
+
+/** True while `next build` is compiling route modules, serving no request. */
+export function isBuildPhase(): boolean {
+  return process.env.NEXT_PHASE === 'phase-production-build';
+}
+
+/**
+ * A required value, with a development-only fallback.
+ *
+ * The fallback applies in development and test. In production it does not
+ * exist, and the process says which variable is missing rather than pretending
+ * to have one — except during `next build`, which compiles this module without
+ * ever serving a request and must not need production credentials to do it.
+ */
+function required(name: string, developmentFallback?: string): string {
   const value = process.env[name]?.trim();
   if (value) return value;
-  if (fallback !== undefined) return fallback;
+
+  if (isProduction() && !isBuildPhase()) {
+    throw new Error(
+      `${name} is required in production. Atrium will not fall back to a ` +
+        'development default here: a localhost default in production is a ' +
+        'process that starts, looks healthy, and is wrong.',
+    );
+  }
+
+  if (developmentFallback !== undefined) return developmentFallback;
   throw new Error(`${name} is required — copy .env.example to .env`);
 }
 
@@ -22,6 +66,25 @@ export function appUrl(): string {
 
 export function databaseUrl(): string {
   return required('DATABASE_URL', 'postgres://atrium:atrium@localhost:5432/atrium');
+}
+
+/**
+ * The realtime server's public origin, if it differs from the app's.
+ *
+ * Passed to Better Auth as a trusted origin in both processes so the two agree
+ * about who "us" is; derived from `NEXT_PUBLIC_WS_URL` because that is the value
+ * the browser is actually told to connect to.
+ */
+export function realtimeOrigin(): string | null {
+  const raw = process.env.NEXT_PUBLIC_WS_URL?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const scheme = url.protocol === 'wss:' ? 'https:' : 'http:';
+    return `${scheme}//${url.host}`;
+  } catch {
+    return null;
+  }
 }
 
 /**

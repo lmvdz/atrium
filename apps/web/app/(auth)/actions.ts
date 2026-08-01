@@ -1,6 +1,6 @@
 'use server';
 
-import { createThrottle, type Throttle } from '@atrium/auth';
+import { clientIp, createThrottle, type Throttle, trustedProxyHops } from '@atrium/auth';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { z } from 'zod';
@@ -36,13 +36,30 @@ const SignInForm = z.object({
 const safeNext = (value: FormDataEntryValue | null) => safeNextPath(value);
 
 /**
- * Rate limits, per address.
+ * Rate limits, on two dimensions.
  *
  * Better Auth rate-limits its HTTP endpoints, but these actions call `auth.api.*`
  * directly and so never pass through that middleware. Without these, a form post
  * could brute-force a password or mail-bomb an address as fast as the network
  * allows. Kept on `globalThis` so the dev server's hot reload does not hand an
  * attacker a fresh empty counter on every file save.
+ *
+ * **Two dimensions, because one is not enough.** Round 1 keyed only on the email
+ * address, which bounds "many guesses at one account" and does nothing at all
+ * about "one guess at each of ten thousand accounts" — password spray, the
+ * attack that actually works against a user base. Every attempt now counts
+ * against the address *and* against the caller's IP, and the IP limit is the
+ * looser of the two because a shared NAT is a real thing and a spraying script
+ * is still hundreds of times over it.
+ *
+ * Where the IP comes from — and whether it can be trusted — is
+ * `@atrium/auth`'s `clientIp`, which believes the forwarded headers only as far
+ * as `ATRIUM_TRUSTED_PROXY_HOPS` says to. With that unset the IP dimension is
+ * absent rather than forged, and the address dimension carries the load; that is
+ * the honest default for a deployment nobody has described to us.
+ *
+ * Scope caveats (single process, reset on restart) are in
+ * `packages/auth/src/throttle.ts` and hold here.
  */
 const limiters = ((): {
   signIn: Throttle;
@@ -64,8 +81,45 @@ const limiters = ((): {
   return holder[key];
 })();
 
+/**
+ * The IP limit is deliberately looser than the per-address one: an office, a
+ * university or a mobile carrier is one address to us and hundreds of people to
+ * itself. It is still tight enough that spraying one guess at each of a thousand
+ * accounts trips on the twentieth.
+ */
+const ipLimiters = ((): { signIn: Throttle; signUp: Throttle; resend: Throttle } => {
+  const key = Symbol.for('atrium.web.throttles.ip');
+  const holder = globalThis as unknown as { [key]?: ReturnType<typeof build> };
+  function build() {
+    return {
+      signIn: createThrottle({ limit: 60, windowMs: 5 * 60_000 }),
+      signUp: createThrottle({ limit: 20, windowMs: 60 * 60_000 }),
+      resend: createThrottle({ limit: 20, windowMs: 15 * 60_000 }),
+    };
+  }
+  holder[key] ??= build();
+  return holder[key];
+})();
+
 /** Rate-limit keys are case-insensitive; `Ada@` and `ada@` are one address. */
 const limitKey = (email: string) => email.trim().toLowerCase();
+
+/** The caller's address, or null when nothing in front of us can be believed. */
+async function callerIp(): Promise<string | null> {
+  return clientIp(await headers(), { trustProxyHops: trustedProxyHops() });
+}
+
+/**
+ * Record one attempt against both dimensions. False means refused.
+ *
+ * Both counters are always recorded, even when the first already refuses:
+ * otherwise tripping the cheap one would shield the expensive one.
+ */
+function allow(kind: 'signIn' | 'signUp' | 'resend', email: string, ip: string | null): boolean {
+  const byEmail = limiters[kind].attempt(limitKey(email));
+  const byIp = ip === null ? true : ipLimiters[kind].attempt(ip);
+  return byEmail && byIp;
+}
 
 export async function signUpAction(formData: FormData): Promise<never> {
   const next = safeNext(formData.get('next'));
@@ -80,7 +134,7 @@ export async function signUpAction(formData: FormData): Promise<never> {
     redirect(`/sign-up?error=${tooShort ? 'password_too_short' : 'invalid'}`);
   }
 
-  if (!limiters.signUp.attempt(limitKey(parsed.data.email))) {
+  if (!allow('signUp', parsed.data.email, await callerIp())) {
     redirect('/sign-up?error=rate_limited');
   }
 
@@ -115,7 +169,8 @@ export async function signInAction(formData: FormData): Promise<never> {
   if (!parsed.success) redirect(`/sign-in?error=invalid&next=${encodeURIComponent(next)}`);
 
   const key = limitKey(parsed.data.email);
-  if (!limiters.signIn.attempt(key)) {
+  const ip = await callerIp();
+  if (!allow('signIn', parsed.data.email, ip)) {
     redirect(`/sign-in?error=rate_limited&next=${encodeURIComponent(next)}`);
   }
 
@@ -125,8 +180,10 @@ export async function signInAction(formData: FormData): Promise<never> {
       body: { email: parsed.data.email, password: parsed.data.password },
       headers: await headers(),
     });
-    // A correct password clears the counter, so a run of typos costs nothing
-    // once you get it right.
+    // A correct password clears the address counter, so a run of typos costs
+    // nothing once you get it right. The IP counter is deliberately *not*
+    // cleared: one successful sign-in must not reset the budget a spray is
+    // burning through from the same address.
     limiters.signIn.reset(key);
   } catch (error) {
     failure = authErrorCode(error);
@@ -178,7 +235,7 @@ export async function resendVerificationAction(formData: FormData): Promise<neve
   // Over the limit still lands on the same page saying the same thing. Telling
   // the caller "you have been throttled" would confirm the address is worth
   // throttling, and the person who genuinely clicked twice does not care.
-  if (!limiters.resend.attempt(limitKey(email.data))) {
+  if (!allow('resend', email.data, await callerIp())) {
     redirect(`/check-email?email=${encodeURIComponent(email.data)}&resent=1`);
   }
 
