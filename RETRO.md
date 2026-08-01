@@ -177,3 +177,23 @@ Every fix this round was straightforward. All three of the round's real difficul
 - **A regex that matches a condition breaks on the first nested paren.** The check asserting the ring audit no longer skips ring-less controls matched `if\s*\([^)]*outline[^)]*\)\s*return\s+([^;]+);`. The real guard reads `parseFloat(style.outlineWidth) === 0`, so `[^)]*` stopped dead at the inner paren, matched nothing, and the check passed against its own mutation. Splitting on lines and filtering fixed it. This is the same species as r3's grep that matched the *comment* describing the old guard — **when a check greps source, its failure mode is matching nothing, and matching nothing looks exactly like passing.** Every source-grep assertion needs a companion assertion that it found something (`expect(guards.length).toBeGreaterThan(0)`).
 
 The general rule: **a new check is not finished when it passes; it is finished when it has been observed to fail on the defect it names.** The mutation ledger is that observation, which is why type-level guarantees now get a `typecheck: true` lane in it rather than a vitest file that cannot see them.
+
+---
+
+## #39 UI r5 — the fifth fix that was not a fifth guard (2026-08-01)
+
+Four rounds had each answered the same defect by guarding the field the previous round had moved: the actor slot, then the body slot, then the factory, then the field inside the branded value. The r4 receipt named the root cause in one sentence — *nothing tied `quotation.actor` to `quotation.messageId`* — and that sentence is the whole lesson.
+
+**A guard over a carried field is always one field behind. Delete the field.** `Quotation` is now a message id and a brand; there is no actor, text, timestamp or room on it, so there is nothing for a spread to overwrite and nothing for a JSON payload to smuggle. Everything printed beside quoted words is looked up from the page's record register at the render boundary. The check that used to compare two carried values is now a lookup with one input, and the failure mode it had — "I compared the operands the last round moved" — has no analogue.
+
+The general form, for the next time a value's fields must agree: **ask what the smallest thing is that identifies the truth, carry only that, and resolve the rest where it is used.** A validated copy of a record is a second source of truth with a validator attached; a citation is not.
+
+Three things this round got wrong first, all of them instruments rather than subjects, all of them found by running the instrument against a case it should have failed:
+
+- **A fill measured against its own background reports 1.00:1.** The new non-text-graphic sweep composited the element's own `background-color` into the backdrop, so eighteen filled presence dots came back at exactly 1:1 — which read as eighteen failures and was really a measurement that could not come out any other way. A ratio that cannot vary is not a measurement. (The border case had the mirror defect: a border has *two* adjacent colours and the sweep measured the friendlier one, which is how `--ambbd` survived on the attention card through four contrast passes.)
+- **A registry selector that matches nothing reports exactly like one that passes.** The disabled count chip was registered as `.surf[disabled] …` — a CSS-module class that does not exist in the DOM — so the entry ran zero times and contributed zero failures. Same species as the source-grep lesson from r4, one layer out: every registry now has a companion assertion that each registered kind was actually *found* on some route.
+- **A source grep fails by matching the wrong occurrence, not only by matching nothing.** Two of this round's harness checks grepped for an identifier that also appeared in the `console.info` line beside the assertion, and passed with the assertion itself gutted. The mutation ledger caught both. Anchor the grep on the construct, not on the word.
+
+And one about coverage guards specifically, which is what let r4's registry of one look thorough: **a coverage guard must not be satisfiable by a single subject.** `graphicsChecked > 10` was met by one registered graphic's own fifty instances. Count distinct kinds, and assert separately that every kind was found.
+
+Finally, on the round's own scope: five of the six harness exclusions the r4 receipt listed were *clean when the critic ran them un-exempted*, and it would have been cheap to cite that and move on. Removing them anyway turned up nothing in the app and two defects in the harness — which is the argument for doing it: **"clean when somebody else ran it once" is not a property of a repository, it is a property of an afternoon.**
