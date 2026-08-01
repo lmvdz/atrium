@@ -6,6 +6,10 @@ import { chromium, expect, test } from '@playwright/test';
  * where that download is blocked, skip with a reason instead of failing the
  * suite — a red smoke test would say "the app is broken" when the truth is "no
  * browser is installed".
+ *
+ * That courtesy stops at CI. There, a skipped smoke suite is a green run that
+ * proved nothing, which is the exact failure mode CI exists to catch, so the
+ * missing browser becomes a hard error instead.
  */
 function browserAvailable(): boolean {
   try {
@@ -15,11 +19,23 @@ function browserAvailable(): boolean {
   }
 }
 
+const isCI = !!process.env.CI;
+
 test.describe('shell', () => {
   test.skip(
-    !browserAvailable(),
+    !isCI && !browserAvailable(),
     'Playwright browsers are not installed — run `pnpm exec playwright install chromium`',
   );
+
+  test.beforeAll(() => {
+    if (!browserAvailable()) {
+      throw new Error(
+        'Playwright browsers are not installed. In CI this is a failure, not a skip: ' +
+          'a browser suite that silently declines to run reports success it never earned. ' +
+          'Run `pnpm exec playwright install chromium`.',
+      );
+    }
+  });
 
   test('renders the three regions', async ({ page }) => {
     await page.goto('/');

@@ -1,0 +1,320 @@
+name: CI
+
+# Every gate that a builder runs in a worktree runs here, on every PR and every
+# push to main. The design constraint that shaped this file is the fail-open
+# class: a CI run that reports green because the suite never ran. Guarding
+# against it is why several steps below assert on *counts* rather than trusting
+# an exit code, and why nothing here is allowed to degrade gracefully.
+#
+# House rules (enforced by the "No fail-open escape hatches" step):
+#   - no `continue-on-error`, anywhere
+#   - no `|| true`, no `set +e`, no swallowed exit codes
+#   - a missing binary is a failure, never a skip
+#   - `if:` conditions belong only on artifact upload, never on a gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One run per ref; a new push supersedes the old one. main is exempt from
+# cancellation so its history of runs stays complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # engines.node in package.json is >=22.12.0. Pinned to the 22 line so a
+  # runner-image bump cannot silently move the compiler out from under us.
+  NODE_VERSION: '22'
+
+jobs:
+  verify:
+    name: lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # packages/db and any future integration suite talk to a real Postgres.
+    # Same major as docker-compose.yml so CI and laptops disagree about nothing.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: atrium
+          POSTGRES_PASSWORD: atrium
+          POSTGRES_DB: atrium
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atrium -d atrium"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Exported for every step in the job. drizzle.config.ts deliberately
+      # refuses to invent a connection string, so this is the only thing
+      # standing between the db suite and a loud failure.
+      DATABASE_URL: postgres://atrium:atrium@localhost:5432/atrium
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: No fail-open escape hatches in this workflow
+        # Meta-gate: a future edit that reintroduces the class this file exists
+        # to prevent fails here rather than six months later in production.
+        # The patterns are split so the check cannot match its own source.
+        run: |
+          set -euo pipefail
+          file=.github/workflows/ci.yml
+          # Comment lines are stripped first: prose about the rule is not a
+          # violation of it.
+          if grep -vE '^[[:space:]]*#' "$file" | grep -E 'continue-on'-'error|\|\| *true|set \+e'; then
+            echo "::error file=$file::Fail-open construct found. CI must not be able to pass a gate it did not run."
+            exit 1
+          fi
+          echo "No fail-open constructs in $file."
+
+      - name: Set up pnpm
+        # No version pin here on purpose: the action reads packageManager from
+        # package.json, so the lockfile and CI can never disagree.
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Assert toolchain
+        run: |
+          set -euo pipefail
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$node_major" != "22" ]; then
+            echo "::error::Expected Node 22, got $(node -v)."
+            exit 1
+          fi
+          command -v pnpm >/dev/null
+          echo "node $(node -v) · pnpm $(pnpm -v)"
+
+      - name: Install dependencies
+        # --frozen-lockfile: a lockfile that drifted from package.json fails the
+        # run instead of resolving something nobody reviewed.
+        run: pnpm install --frozen-lockfile
+
+      - name: Assert dev toolchain binaries resolve
+        # A missing binary must fail the job, not be quietly stepped over.
+        run: |
+          set -euo pipefail
+          pnpm exec biome --version
+          pnpm exec tsc --version
+          pnpm exec vitest --version
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Wait for Postgres
+        # Uses the workspace's own postgres client rather than pg_isready, so
+        # readiness never depends on what the runner image happens to ship.
+        run: |
+          set -euo pipefail
+          pnpm --filter @atrium/db exec node --input-type=module -e '
+            import postgres from "postgres";
+            const deadline = Date.now() + 60_000;
+            for (;;) {
+              try {
+                const sql = postgres(process.env.DATABASE_URL, { max: 1, connect_timeout: 5 });
+                await sql`select 1`;
+                await sql.end();
+                console.info("Postgres is accepting connections.");
+                break;
+              } catch (error) {
+                if (Date.now() > deadline) {
+                  console.error("::error::Postgres service container never became ready: " + error.message);
+                  process.exit(1);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+            }
+          '
+
+      - name: Apply migrations
+        run: pnpm --filter @atrium/db exec drizzle-kit migrate
+
+      - name: Assert the schema actually landed
+        # Proves the service container was genuinely reachable and the migration
+        # did work, rather than a no-op that exits 0 against nothing.
+        run: |
+          set -euo pipefail
+          pnpm --filter @atrium/db exec node --input-type=module -e '
+            import postgres from "postgres";
+            const expected = [
+              "users", "rooms", "memberships", "messages", "interpretations",
+              "proposals", "accepted_objects", "relations", "attention_items",
+              "corrections", "proposal_sources", "object_sources",
+            ];
+            const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+            const rows = await sql`select table_name from information_schema.tables where table_schema = ${"public"}`;
+            await sql.end();
+            const found = new Set(rows.map((r) => r.table_name));
+            const missing = expected.filter((t) => !found.has(t));
+            if (missing.length > 0) {
+              console.error("::error::Migrations did not create: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.info("Postgres verified: " + expected.length + " tables present.");
+          '
+
+      - name: Unit + integration tests
+        run: pnpm vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=vitest-report.json
+
+      - name: Assert the suite actually ran
+        # The fail-open gate. An exit code of 0 from a runner that collected zero
+        # tests, or that skipped its way to silence, is indistinguishable from a
+        # real pass unless someone counts. This counts.
+        env:
+          MINIMUM_TESTS: '80'
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { existsSync, readFileSync } from "node:fs";
+            const path = "vitest-report.json";
+            if (!existsSync(path)) {
+              console.error("::error::" + path + " was never written — the test runner did not complete.");
+              process.exit(1);
+            }
+            const r = JSON.parse(readFileSync(path, "utf8"));
+            const min = Number(process.env.MINIMUM_TESTS);
+            const problems = [];
+            if (r.success !== true) problems.push("reporter did not record success");
+            if (!(r.numTotalTests >= min)) problems.push(`only ${r.numTotalTests} tests collected, expected at least ${min}`);
+            if (r.numFailedTests > 0) problems.push(`${r.numFailedTests} failed`);
+            if (r.numPendingTests > 0) problems.push(`${r.numPendingTests} skipped — a skipped test is not a passing test`);
+            if (r.numTodoTests > 0) problems.push(`${r.numTodoTests} marked todo`);
+            if (problems.length > 0) {
+              console.error("::error::Test gate failed: " + problems.join("; "));
+              process.exit(1);
+            }
+            console.info(`Test gate passed: ${r.numPassedTests}/${r.numTotalTests} across ${r.numTotalTestSuites} suites, 0 skipped.`);
+          '
+
+      - name: Build
+        run: pnpm build
+
+      # Hook point for the eval gate (#17 / #24). It plugs in here, as a gate in
+      # this job — not as a separate advisory job whose result nobody reads.
+
+  e2e:
+    name: playwright (chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace packages
+        # apps/web imports @atrium/core through its built dist/, so the Next dev
+        # server Playwright boots needs the packages compiled first.
+        run: pnpm --filter "./packages/*" build
+
+      - name: Resolve Playwright version
+        id: playwright
+        run: |
+          set -euo pipefail
+          version="$(pnpm --filter @atrium/web exec playwright --version | awk '{ print $2 }')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      - name: Install Chromium
+        run: pnpm --filter @atrium/web exec playwright install --with-deps chromium
+
+      - name: Assert Chromium is present
+        # The e2e suite skips itself when no browser is installed, which is the
+        # right call on a laptop and a lie in CI. Belt to the spec's braces: if
+        # the download silently failed, stop here rather than report a green run
+        # over zero executed browser tests.
+        run: |
+          set -euo pipefail
+          pnpm --filter @atrium/web exec node --input-type=module -e '
+            import { existsSync } from "node:fs";
+            import { chromium } from "@playwright/test";
+            const path = chromium.executablePath();
+            if (!existsSync(path)) {
+              console.error("::error::Chromium is not installed at " + path);
+              process.exit(1);
+            }
+            console.info("Chromium present at " + path);
+          '
+
+      - name: Run e2e suite
+        env:
+          # Absolute: the json reporter resolves this against the Playwright
+          # process's own cwd, which is apps/web here, not the repo root.
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/playwright-report.json
+        run: pnpm --filter @atrium/web exec playwright test --reporter=list,json
+
+      - name: Assert the e2e suite actually ran
+        env:
+          MINIMUM_TESTS: '2'
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { existsSync, readFileSync } from "node:fs";
+            const path = "playwright-report.json";
+            if (!existsSync(path)) {
+              console.error("::error::" + path + " was never written — Playwright did not complete.");
+              process.exit(1);
+            }
+            const { stats = {} } = JSON.parse(readFileSync(path, "utf8"));
+            const min = Number(process.env.MINIMUM_TESTS);
+            const problems = [];
+            if (!(stats.expected >= min)) problems.push(`only ${stats.expected ?? 0} tests passed, expected at least ${min}`);
+            if (stats.unexpected > 0) problems.push(`${stats.unexpected} failed`);
+            if (stats.skipped > 0) problems.push(`${stats.skipped} skipped — in CI a skipped browser test means no browser, not a pass`);
+            if (problems.length > 0) {
+              console.error("::error::E2E gate failed: " + problems.join("; "));
+              process.exit(1);
+            }
+            console.info(`E2E gate passed: ${stats.expected} tests, 0 skipped.`);
+          '
+
+      - name: Upload Playwright traces
+        # The only conditional in this file, and it gates an artifact, not a
+        # verdict. playwright.config.ts records a trace on first retry.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/web/test-results/
+            apps/web/playwright-report/
+            playwright-report.json
+          retention-days: 7
+          if-no-files-found: ignore

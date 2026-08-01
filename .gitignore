@@ -17,6 +17,9 @@ next-env.d.ts
 coverage/
 playwright-report/
 test-results/
+# machine-readable run summaries the CI gates count tests from
+vitest-report.json
+playwright-report.json
 blob-report/
 .playwright/
 playwright/.cache/
