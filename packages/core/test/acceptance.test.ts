@@ -5,8 +5,10 @@ import {
   type AcceptanceVerdict,
   type AcceptanceVisibility,
   type AcceptedObjectType,
+  AcceptedObjectType as AcceptedObjectTypeSchema,
   answerBindingRefusal,
   applyAnswerBinding,
+  autoAcceptable,
   bindAnswer,
   commitmentAttribution,
   DEFAULT_ACCEPTANCE_RULES,
@@ -15,6 +17,7 @@ import {
   defaultAcceptanceConfig,
   findDuplicate,
   MODEL_ACCEPTANCE_FLOOR,
+  modelMintingGate,
   type Proposal,
   Proposal as ProposalSchema,
   type ProvenanceMessage,
@@ -61,13 +64,13 @@ const QUOTE: Record<AcceptedObjectType, string> = {
   objective: 'Ship the narrowing fix this quarter.',
 };
 
-const OBJECT_TYPES: AcceptedObjectType[] = [
-  'decision',
-  'commitment',
-  'open_question',
-  'claim',
-  'objective',
-];
+/**
+ * **From the schema, not restated beside it.** codex's third pass: the
+ * cross-product below claimed to derive from `AcceptedObjectType` and was in
+ * fact iterating a hand-copied list, so a sixth type would have been invisible
+ * to the exhaustiveness assertion that exists to notice exactly that.
+ */
+const OBJECT_TYPES: AcceptedObjectType[] = [...AcceptedObjectTypeSchema.options];
 
 /** The message each type's quote is the whole of. */
 const MESSAGE_ID: Record<AcceptedObjectType, string> = {
@@ -340,6 +343,18 @@ describe('#4 acceptance matrix — one test per cell', () => {
     // One extra row beyond the cross-product: decision at 1.0, pinning that
     // "never" is a rule and not a threshold.
     expect(CELLS).toHaveLength(expected.size + 1);
+  });
+
+  it('gates exactly the types the θ table refuses to auto-accept', () => {
+    // grok's pass: `modelMintingGate` says in its own doc comment that it is
+    // derived from the same table `MODEL_ACCEPTANCE_FLOOR` is derived from, "so
+    // the named refusal and the unreachable number cannot drift" — and nothing
+    // checked it. A `switch` is not a derivation; this is what makes the claim
+    // true.
+    for (const type of OBJECT_TYPES) {
+      expect(modelMintingGate(type) === null).toBe(autoAcceptable(type));
+      expect(Number.isFinite(MODEL_ACCEPTANCE_FLOOR[type])).toBe(autoAcceptable(type));
+    }
   });
 
   it('probes the band each literal claims to be in', () => {

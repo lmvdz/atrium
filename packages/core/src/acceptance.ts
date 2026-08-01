@@ -326,10 +326,17 @@ export function findDuplicate(
  * | ------------------------ | --------- | ------------------ | --------------------- |
  * | claim                    | discard   | pending, quiet     | auto-accept           |
  * | open_question            | discard   | pending, quiet     | auto-accept           |
- * | objective                | discard   | pending, quiet     | auto-accept           |
- * | commitment, self-stated  | discard   | pending, quiet     | auto-accept           |
+ * | objective                | discard   | pending, quiet     | pending, Needs-you    |
+ * | commitment, self-stated  | discard   | pending, quiet     | pending, Needs-you    |
  * | commitment, third-party  | discard   | pending, quiet     | pending, owner confirm|
  * | decision                 | discard   | pending, quiet     | pending, Needs-you    |
+ *
+ * The `objective` and `commitment` rows moved out of auto-accept in r5 — see
+ * `DEFAULT_ACCEPTANCE_RULES` for why — and **this table said otherwise for one
+ * commit**, which grok's blind pass caught and named as the same class of
+ * confidently-wrong comment the round had just fixed for the bidi fold. The row
+ * a reader trusts is `DEFAULT_ACCEPTANCE_RULES`; this one is prose about it, and
+ * `acceptance.test.ts` drives every cell from the table rather than from here.
  *
  * …with one cell in front of all of them: **no window, no verdict**. A model
  * proposal judged without the messages it cites is discarded, because the
@@ -351,11 +358,15 @@ export function findDuplicate(
  * asked to confirm. A confident decision proposal *does* block something — the
  * room's current state is wrong until somebody rules on it.
  *
- * **Third-party commitment never auto-accepts, at any confidence.** Not a
- * threshold: a rule. The spike could not test it (one commitment in six runs,
- * self-attributed, on a public RFC thread where nobody says "Ryan will handle
- * it"), so it is implemented from #4's text and is the part of this file most
- * in need of the working-team corpus #24 asks for.
+ * **A commitment never auto-accepts, at any confidence, self-stated or not.**
+ * Not a threshold: a rule. #4's row split on who the sentence is *about*; it was
+ * silent on who does the accepting, and #44's fact-check drove a model straight
+ * through that silence. The third-party cell keeps its own name above the
+ * general one because only it knows *whose* Needs-you the item belongs in. The
+ * spike could not test any of this (one commitment in six runs, self-attributed,
+ * on a public RFC thread where nobody says "Ryan will handle it"), so it is
+ * implemented from #4's text and is the part of this file most in need of the
+ * working-team corpus #24 asks for.
  */
 export function decideAcceptance(
   proposal: Proposal | StoredProposal,

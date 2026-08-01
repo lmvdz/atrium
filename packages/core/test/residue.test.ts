@@ -9,6 +9,7 @@ import {
   Proposal as ProposalSchema,
   type ProvenanceMessage,
   type ProvenanceProblemKind,
+  QUESTION_MARKS,
   RECEIPT_POLICY,
   validateProposalProvenance,
 } from '../src/index.js';
@@ -134,6 +135,27 @@ describe('r5 — polarity in a neighbouring sentence', () => {
     }
   });
 
+  it('refers a quote whose author put the inverter in their own blockquote', () => {
+    // grok's blind pass, and this round's own defect class reappearing through
+    // the helper built to prevent a different one. `stripReplyBlockquotes`
+    // deletes every line beginning with `>` whether or not anybody else ever
+    // wrote it — right for asking *who wrote the quote*, wrong for asking *what
+    // surrounds it*. Coverage reads the body now.
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: STATEMENT,
+          statement: STATEMENT,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        [{ id: 'msg_1', authorId: ALICE, body: `${STATEMENT}\n> Not.` }],
+      ),
+    ).toEqual(['quote_omits_surrounding_text']);
+  });
+
   it('refers a leading sentence too — the scissors cut both ways', () => {
     expect(
       kinds(
@@ -247,6 +269,20 @@ describe('r5 — normalization may not do semantic damage', () => {
     expect(normalizeForReceipt('ship\u200B it')).toBe('ship it');
   });
 
+  it('does not delete a character that renders as something', () => {
+    // The third pass, on the second pass's repair. Subtracting the bidi set from
+    // `\p{Cf}` was a denylist of the exceptions somebody had thought of, and the
+    // next reviewer produced two more: a soft hyphen renders as a hyphen at a
+    // line break (`re-sign` is not `resign`), and a zero-width joiner decides
+    // whether two emoji are one glyph.
+    expect(normalizeForReceipt('re\u00ADsign the agreement')).not.toBe(
+      normalizeForReceipt('resign the agreement'),
+    );
+    expect(normalizeForReceipt('\u{1F469}\u200D\u{1F4BB}')).not.toBe(
+      normalizeForReceipt('\u{1F469}\u{1F4BB}'),
+    );
+  });
+
   it('does not fold distinct identifiers onto each other', () => {
     // NFKC maps the fullwidth and compatibility forms onto ASCII, so two
     // different hostnames, two different identifiers, compare equal.
@@ -340,6 +376,56 @@ describe('r5 — a later correction is part of the receipt', () => {
             body: 'Correction: we will not deploy production Friday.',
           },
           { id: 'msg_3', authorId: BOB, body: 'The staging cluster is green.' },
+        ],
+      ),
+    ).toEqual(['superseded_by_later_message']);
+  });
+
+  it('cannot be skipped by citing the correction itself', () => {
+    // The repair for the padding attack filtered cited messages out of the scan,
+    // and the next pass used *that*: put the correction in a message the proposal
+    // cites. A citation is chosen by the proposal, so anything it can exclude is
+    // a boundary the proposal controls.
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1', 'msg_2'],
+          quote: STATEMENT,
+          statement: STATEMENT,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        [
+          { id: 'msg_1', authorId: ALICE, body: STATEMENT },
+          {
+            id: 'msg_2',
+            authorId: ALICE,
+            body: 'Correction: we will not deploy production Friday.',
+          },
+        ],
+      ),
+    ).toEqual(['superseded_by_later_message']);
+  });
+
+  it('refuses to certify when a later message drops a word from the sentence', () => {
+    // The mirror image of the addition case, and the r3 inversion run backwards:
+    // the quote says "not", the later message does not, and the earlier reading
+    // is the one being certified.
+    const negated = 'We will not deploy production Friday.';
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: negated,
+          statement: negated,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        [
+          { id: 'msg_1', authorId: ALICE, body: negated },
+          { id: 'msg_2', authorId: ALICE, body: 'We will deploy production Friday.' },
         ],
       ),
     ).toEqual(['superseded_by_later_message']);
@@ -442,7 +528,9 @@ describe('r5 — speech-act fitness', () => {
     // receipt fold was right — it made distinct hostnames compare equal — and it
     // left this check reading one spelling of a mark that has several. `？`
     // (U+FF1F) is a distinct token, and the claim auto-accepted.
-    for (const mark of ['?', '？', '⁇', '؟', '﹖', '⸮']) {
+    // Driven from the exported inventory, so a mark added to the source without
+    // a case here is not possible, and one removed from it fails.
+    for (const mark of [...QUESTION_MARKS, '？', '﹖']) {
       const body = `Would we deploy production Friday${mark}`;
       expect(
         kinds(
@@ -458,6 +546,28 @@ describe('r5 — speech-act fitness', () => {
         ),
       ).toContain('statement_is_not_an_assertion');
     }
+  });
+
+  it('reads a mark a canonical decomposition would destroy', () => {
+    // U+037E GREEK QUESTION MARK decomposes to an ASCII semicolon, so a check
+    // that normalized first would see punctuation and call it an assertion. The
+    // mutation ledger is what surfaced this: the row deleting the fold *escaped*,
+    // because by then the enumerated inventory made the fold redundant — and a
+    // second mechanism no input can distinguish is one to delete, not to keep.
+    const body = 'Would we deploy production Friday\u037E';
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: body,
+          statement: body,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        [{ id: 'msg_1', authorId: ALICE, body }],
+      ),
+    ).toContain('statement_is_not_an_assertion');
   });
 
   it('reads a mark that opens the sentence instead of closing it', () => {

@@ -628,7 +628,7 @@
       "id": "normalize_keeps_invisibles",
       "why": "The other half: an invisible character spliced into a quote makes it a different string from the message it came out of, so a correct receipt fails for the wrong reason.",
       "file": "src/matching.ts",
-      "find": "  let folded = text.replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
+      "find": "  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
       "replace": "  let folded = text.replace(/[’ʼ]/g, \"'\");",
       "catches": ["matches a quote whose words a zero-width character was spliced into"]
     },
@@ -696,16 +696,16 @@
       "id": "typographic_apostrophe_unfolded",
       "why": "`won’t` stops being `won't`, so a faithful quotation is refused for its typography — an over-refusal, and the kind that gets 'fixed' later by weakening the check that matters.",
       "file": "src/matching.ts",
-      "find": "  let folded = text.replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
-      "replace": "  let folded = text.replace(INVISIBLE, '');",
+      "find": "  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  let folded = text.replace(DELETABLE, '');",
       "catches": ["treats a typographic apostrophe as an apostrophe"]
     },
     {
       "id": "quote_context_unchecked",
       "why": "Drops the rule that a certifiable quote is the whole of what its author wrote. This is r4's documented residue: \"We will deploy production Friday. Not.\" quoted as its first sentence is verbatim, whole-sentence, correctly attributed, and bears its own statement.",
       "file": "src/escalation.ts",
-      "find": "      } else if (!quoteCoversOwnText(quote, ownText, policy)) {",
-      "replace": "      } else if (false && !quoteCoversOwnText(quote, ownText, policy)) {",
+      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body, policy)) {",
+      "replace": "      } else if (false && !quoteCoversOwnText(quote, bearing.body, policy)) {",
       "catches": [
         "does not certify a quote whose message carries a trailing inverter",
         "refers every other way a neighbouring sentence changes the force"
@@ -774,8 +774,8 @@
       "id": "normalize_refolds_nfkc",
       "why": "Re-applies NFKC compatibility folding on the receipt path, so two distinct hostnames and two distinct identifiers compare equal.",
       "file": "src/matching.ts",
-      "find": "  let folded = text.replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
-      "replace": "  let folded = text.normalize('NFKC').replace(INVISIBLE, '').replace(/[’ʼ]/g, \"'\");",
+      "find": "  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  let folded = text.normalize('NFKC').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
       "catches": ["does not fold a fullwidth or ligature spelling onto its ASCII form"]
     },
     {
@@ -806,12 +806,12 @@
       "catches": ["refuses when the window is longer than the scan will read"]
     },
     {
-      "id": "question_mark_ascii_only",
-      "why": "Reads only the ASCII question mark, so `Would we deploy production Friday？` (U+FF1F) is minted as a claim. The receipt fold stopped applying NFKC in r5 for a good reason; this check is a classification question, not a comparison, and needs it.",
+      "id": "question_mark_folded_first",
+      "why": "Normalizes before the question-mark test, which is what the second repair did. NFKC is redundant against the completed inventory and actively destroys one mark: U+037E GREEK QUESTION MARK canonically decomposes to an ASCII semicolon, so the folded form reads as punctuation.",
       "file": "src/matching.ts",
-      "find": "  return !QUESTION_MARKS.test(text.normalize('NFKC'));",
-      "replace": "  return !QUESTION_MARKS.test(text);",
-      "catches": ["reads every spelling of a question mark, not only the ASCII one"]
+      "find": "  return !QUESTION_MARK.test(text);",
+      "replace": "  return !QUESTION_MARK.test(text.normalize('NFKC'));",
+      "catches": ["reads a mark a canonical decomposition would destroy"]
     },
     {
       "id": "code_span_whitespace_collapsed",
@@ -831,10 +831,10 @@
     },
     {
       "id": "bidi_controls_deleted",
-      "why": "Folds the bidi overrides away with the genuinely invisible characters, which is what the first draft did and what its comment wrongly defended. A body of `Bob will \\u202Eton\\u202C deploy production Friday.` renders as \"Bob will not deploy production Friday.\", and deleting the override let a quote of `ton` match it — the record minting the affirmative of what its author visibly wrote.",
+      "why": "Folds every `\\p{Cf}` away again — the bidi overrides, the soft hyphen and the zero-width joiner with the genuinely invisible characters. `Bob will \\u202Eton\\u202C deploy production Friday.` renders as \"Bob will not deploy production Friday.\"; `re\\u00ADsign` renders as \"re-sign\"; and `\\u{1F469}\\u200D\\u{1F4BB}` is one glyph where `\\u{1F469}\\u{1F4BB}` is two.",
       "file": "src/matching.ts",
-      "find": "const INVISIBLE = new RegExp(`(?![${BIDI}])[\\\\p{Cf}\\\\p{Cc}]`, 'gu');",
-      "replace": "const INVISIBLE = /[\\p{Cf}\\p{Cc}]/gu;",
+      "find": "const DELETABLE = /[​⁠-⁤﻿\\p{Cc}]/gu;",
+      "replace": "const DELETABLE = /[\\p{Cf}\\p{Cc}]/gu;",
       "catches": ["does not delete a bidi override, which decides what the reader sees"]
     },
     {
@@ -849,9 +849,41 @@
       "id": "question_mark_set_narrowed",
       "why": "Drops the inverted question mark, which a Spanish interrogative opens with and may carry no other mark at all — `¿Bob will deploy production Friday` minted as a claim.",
       "file": "src/matching.ts",
-      "find": "const QUESTION_MARKS = /[?¿؟፧⸮꘏\\u{11143}]/u;",
-      "replace": "const QUESTION_MARKS = /[?؟፧⸮꘏\\u{11143}]/u;",
+      "find": "  '\\u00BF', // INVERTED QUESTION MARK — a Spanish interrogative opens with one\n",
+      "replace": "",
       "catches": ["reads a mark that opens the sentence instead of closing it"]
+    },
+    {
+      "id": "coverage_reads_the_stripped_text",
+      "why": "Points the coverage check at `stripReplyBlockquotes(body)` instead of the body, which is r5's first draft. `stripReplyBlockquotes` deletes every line beginning with `>` whether or not anybody else wrote it, so an author who writes \"We will deploy production Friday.\" and then \"> Not.\" has their own second line deleted and the first certifies.",
+      "file": "src/escalation.ts",
+      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body, policy)) {",
+      "replace": "      } else if (!quoteCoversOwnText(quote, ownText, policy)) {",
+      "catches": ["refers a quote whose author put the inverter in their own blockquote"]
+    },
+    {
+      "id": "later_revision_addition_only",
+      "why": "Asks only whether a later message *adds* to the statement, so a correction that says the same thing with a word **removed** — the r3 inversion, mirrored — reads as unrelated and the earlier reading auto-accepts.",
+      "file": "src/escalation.ts",
+      "find": "      const contained =\n        aligned.unmatchedInStatement.length === 0 || aligned.unmatchedInQuote.length === 0;",
+      "replace": "      const contained =\n        aligned.unmatchedInStatement.length === 0 && aligned.unmatchedInQuote.length > 0;",
+      "catches": ["refuses to certify when a later message drops a word from the sentence"]
+    },
+    {
+      "id": "later_scan_skips_cited_messages",
+      "why": "Filters the cited messages out of the later-correction scan, so putting the correction in a message the proposal *cites* steps over the check that exists to find corrections. A citation is chosen by the proposal, so anything it can exclude is a boundary the proposal controls.",
+      "file": "src/escalation.ts",
+      "find": "  const later = messages.slice(firstCited + 1);",
+      "replace": "  const later = messages.slice(firstCited + 1).filter((m) => !cited.has(m.id));",
+      "catches": ["cannot be skipped by citing the correction itself"]
+    },
+    {
+      "id": "routing_drops_link_destinations",
+      "why": "Collapses a markdown link to its label in the routing fold, which `laterRevision` runs over — so a later message that changes only the link *destination* reduces to the same tokens as the one before it and does not read as a revision.",
+      "file": "src/matching.ts",
+      "find": "      return target.length === 0 || label_ === target ? label_ : `${label_} ${target}`;",
+      "replace": "      return label_ + (target.length === 0 ? '' : '');",
+      "catches": ["keeps a markdown link\"s destination, exactly as the receipt fold does"]
     }
   ]
 }

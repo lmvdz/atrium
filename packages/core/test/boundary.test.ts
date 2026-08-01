@@ -643,13 +643,37 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
     const said = 'we should reset narrowing on mutating method calls';
     const twice: ProvenanceMessage[] = [
       { id: 'm_a', authorId: ALICE, body: said },
+      { id: 'm_a2', authorId: ALICE, body: said },
+    ];
+    const decision = decideAcceptance(
+      modelProposal({ statement: said, claimant: ALICE, quote: said, provenance: ['m_a', 'm_a2'] }),
+      { messages: twice },
+    );
+    // Two messages by one person do not make "who said this" undetermined, which
+    // is the whole point of scoping `ambiguous_quote` to two *authors*. An exact
+    // restatement is agreement, so the later-revision scan passes over it too.
+    expect(decision.verdict).toBe('auto_accept');
+  });
+
+  it('refers when the second telling adds words to the first', () => {
+    // r5, and the cost of the later-revision rule stated where it is paid.
+    // "as I said before: X" and "it is not true that X" are the same shape to a
+    // string check — the statement, in order, with something in front of it —
+    // and a machine may not decide which one it is looking at. The emphatic
+    // repetition is referred rather than accepted, which is a person's glance,
+    // and the alternative was accepting the retraction.
+    const said = 'we should reset narrowing on mutating method calls';
+    const twice: ProvenanceMessage[] = [
+      { id: 'm_a', authorId: ALICE, body: said },
       { id: 'm_a2', authorId: ALICE, body: `as I said before: ${said}` },
     ];
     const decision = decideAcceptance(
       modelProposal({ statement: said, claimant: ALICE, quote: said, provenance: ['m_a', 'm_a2'] }),
       { messages: twice },
     );
-    expect(decision.verdict).toBe('auto_accept');
+    expect(decision.verdict).toBe('pending');
+    expect(decision.rule).toBe('receipt_not_certifiable');
+    expect(decision.reason).not.toContain('written by different people');
   });
 
   it('reports every bearing message, and names one only when one person wrote it', () => {

@@ -75,11 +75,16 @@ import { canonicalJson } from './state.js';
  * `validateProposalProvenance` the engine does, so a defect in quote semantics
  * is a defect in both. The claim is scoped rather than repeated:
  *
- *  - **Independent of the engine, and unreachable from it**: the actor gates
- *    above; that a cited proposal exists, is open, and matches the object's type
- *    and room; that a non-human acted on its own reading; `MODEL_ACCEPTANCE_FLOOR`;
- *    payload equality; provenance equality; that a window exists; that a quote
- *    exists. Delete `acceptance.ts` entirely and every one of those still holds.
+ *  - **Independent of the engine, and unreachable from it** — delete
+ *    `acceptance.ts` entirely and every one of these still holds. Both blind
+ *    reviews found this list short, so it is enumerated rather than gestured at:
+ *    every human-only gate above (direct acceptance, decision / commitment /
+ *    objective minting, claim verification, supersession, answer relations,
+ *    corrections); that a cited proposal exists, is not rejected, accepted or
+ *    superseded, and matches the object's type and room; that a non-human acted
+ *    on a reading it staged itself; `MODEL_ACCEPTANCE_FLOOR`; payload equality;
+ *    provenance equality; that an `objectiveId` points at a real objective in
+ *    the same room; that a message window exists; that a quote exists.
  *  - **Shared, by design**: what the quote *means* — one implementation, two
  *    call sites, because two implementations of "does this quote bear this
  *    sentence" would be two answers to one question and `policy.ts` exists to

@@ -88,9 +88,13 @@ describe('normalizeForRouting — the lossy fold, for deciding which model reads
     );
   });
 
-  it('collapses a markdown link to its text', () => {
+  it('keeps a markdown link"s destination, exactly as the receipt fold does', () => {
+    // r5's third review pass: `laterRevision` runs over this fold, so collapsing
+    // a link to its label made a later message that changed only the
+    // *destination* read as the same tokens as the one before it. A destination
+    // is content wherever it appears, and there is one answer to that now.
     expect(normalizeForRouting('see [the playground](https://example.com/x?y=1) for it')).toBe(
-      'see the playground for it',
+      'see the playground https://example.com/x?y=1 for it',
     );
   });
 

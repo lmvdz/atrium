@@ -112,39 +112,45 @@ export function isBlank(text: string | null | undefined): boolean {
  * ───────────────────────────────────────────────────────────────────────── */
 
 /**
- * The characters that reorder text rather than disappearing from it: the marks,
- * embeddings, overrides and isolates of the Unicode bidirectional algorithm.
+ * **The characters this fold deletes — enumerated, not subtracted.**
  *
- * **Excluded from the fold, and this round's own blind review is why.** The
- * comment that used to sit below claimed deleting a format character "cannot map
- * two texts a reader sees as *different* onto one — a bidi override that
- * reverses a sentence is deleted, and the reversed bytes stay reversed, so the
- * comparison still refuses." That is confidently wrong, and the reviewer built
- * the input: a message body of `Bob will \u202Eton\u202C deploy production
- * Friday.` **renders as** *"Bob will not deploy production Friday."* Deleting the
- * override normalized the source to `ton`, a quote of `ton` matched it, and the
- * record minted the affirmative of what its author visibly wrote.
+ * This entry took three passes of blind review to get right, and the shape of
+ * each failure is the same one `RETRO.md` keeps recording.
  *
- * These are not invisible. They are instructions about what the reader sees, so
- * dropping them is the one thing this file forbids everywhere else: comparing
- * two texts neither author wrote. Kept, they are ordinary tokens, and a quote
- * that omits them is simply not the text in the message.
+ *  - r4 deleted `\p{Cf}` wholesale, on the argument that a character with no
+ *    rendering cannot carry an assertion. A **bidi override** breaks it: a body
+ *    of `Bob will ‮ton‬ deploy production Friday.` *renders as* "Bob
+ *    will not deploy production Friday.", and deleting the override let a quote
+ *    of `ton` match — the record minting the affirmative of what its author
+ *    visibly wrote.
+ *  - r5's first repair subtracted the bidi set from `\p{Cf}`, which is a
+ *    **denylist of the exceptions somebody has thought of**, and the next pass
+ *    produced two more: `re­sign` (a soft hyphen, which renders as a hyphen
+ *    at a line break — *re-sign* is not *resign*) and `👩‍💻` versus
+ *    `👩💻` (a zero-width joiner, which decides whether two emoji are one
+ *    glyph).
+ *
+ * Both fixes were subtraction, and subtraction from a Unicode category is
+ * unbounded in exactly the way a stopword list is. So this is the other kind of
+ * list: **the characters whose removal provably cannot change what a reader
+ * sees**, each named.
+ *
+ *  - `U+200B` ZERO WIDTH SPACE — r3's gauntlet, the reason any of this exists:
+ *    a zero-width space spliced into a quote made it a different string from the
+ *    message it came out of. It permits a line break and paints nothing.
+ *  - `U+2060` WORD JOINER, and `U+2061`–`U+2064` the invisible mathematical
+ *    operators — no glyph, no shaping effect, no joining behaviour.
+ *  - `U+FEFF` ZERO WIDTH NO-BREAK SPACE / byte-order mark.
+ *  - `\p{Cc}` the C0/C1 controls. The ones that render (tab, newline, carriage
+ *    return) are `\s`, so the whitespace rule has already accounted for them.
+ *
+ * Everything else that used to be swept up here — the bidi marks, embeddings,
+ * overrides and isolates; the soft hyphen; the zero-width joiner and
+ * non-joiner — is **content**, because it changes the glyphs a reader sees or
+ * the order they see them in. Kept, they are ordinary tokens, and a quote that
+ * omits them is simply not the text that is in the message.
  */
-const BIDI = '\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069';
-
-/**
- * Format and control characters that render as nothing at all, which must not
- * survive into a comparison. `\p{Cf}` covers U+200B–U+200D, U+2060–U+2064,
- * U+00AD and U+FEFF; `\p{Cc}` covers the C0/C1 controls. Whitespace of every
- * width is handled by `\s`, which in JavaScript already includes NBSP, the en/em
- * spaces and U+3000. The bidi set above is subtracted.
- *
- * Admitted because a character with **no rendering at all** cannot carry an
- * assertion: deleting one maps texts a reader sees as identical onto each other.
- * That argument is about characters nobody can see, and it never covered
- * characters that decide the order of the ones they can.
- */
-const INVISIBLE = new RegExp(`(?![${BIDI}])[\\p{Cf}\\p{Cc}]`, 'gu');
+const DELETABLE = /[​⁠-⁤﻿\p{Cc}]/gu;
 
 /**
  * A **paired** run of asterisks around a non-empty span — Markdown emphasis, in
@@ -230,7 +236,7 @@ export function normalizeForReceipt(text: string): string {
 }
 
 function foldProse(text: string): string {
-  let folded = text.replace(INVISIBLE, '').replace(/[’ʼ]/g, "'");
+  let folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
   // Emphasis nests (`**bold *and italic* **`), so run to a fixed point rather
   // than once. Bounded: every pass removes at least two characters.
   for (let previous = ''; previous !== folded; ) {
@@ -266,15 +272,28 @@ function foldProse(text: string): string {
  * referral rather than an acceptance, so it wants the loose comparison.
  */
 export function normalizeForRouting(text: string): string {
-  return text
-    .normalize('NFKC')
-    .replace(/[’ʼ]/g, "'")
-    .replace(MARKDOWN_LINK, '$1')
-    .replace(/[*_`]+/g, ' ')
-    .replace(INVISIBLE, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+  return (
+    text
+      .normalize('NFKC')
+      .replace(/[’ʼ]/g, "'")
+      // **The same link policy the receipt uses, and r5's third review pass is
+      // why.** This fold used to collapse `[text](destination)` to its text, and
+      // `laterRevision` runs over it — so a later message that changed only the
+      // *destination* of a link ("Use [https://safe.example/app](https://evil.example/app)
+      // …" after "Use https://safe.example/app …") reduced to the same tokens as
+      // the one before it and did not read as a revision. A destination is content
+      // wherever it appears; there is one answer to that question now, not two.
+      .replace(MARKDOWN_LINK, (_m, label: string, destination: string) => {
+        const label_ = label.trim();
+        const target = destination.trim();
+        return target.length === 0 || label_ === target ? label_ : `${label_} ${target}`;
+      })
+      .replace(/[*_`]+/g, ' ')
+      .replace(DELETABLE, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+  );
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -603,11 +622,33 @@ export function quoteSpansWholeSentences(
  * | quote must reach the end of the text                 | `Hypothetically. We will deploy Friday.`   |
  *
  * The only form with no scissors left in it is the one this function checks:
- * **the quote is the entirety of the author's own text in the bearing message**
- * (reply-blockquotes already removed, since those are somebody else's words).
- * Then there is no neighbouring sentence, so there is nothing for a neighbouring
- * sentence to do, and the guarantee strengthens from *somebody wrote this
- * sentence* to *somebody wrote this message and it says exactly this*.
+ * **the quote is the entirety of the message body** — every line of it,
+ * blockquote markers included. Then there is no neighbouring sentence, so there
+ * is nothing for a neighbouring sentence to do, and the guarantee strengthens
+ * from *somebody wrote this sentence* to *somebody wrote this message and it
+ * says exactly this*.
+ *
+ * ## Why the *body*, and not the "own text"
+ *
+ * r5's first draft compared against `stripReplyBlockquotes(body)`, which is the
+ * right input for asking **who wrote the quote** (r1's finding: a reply-quote
+ * reproduces somebody else's paragraph, and attributing it to the replier is the
+ * spike's worst error). grok's blind pass showed it is the wrong input for
+ * asking **what surrounds the quote**: `stripReplyBlockquotes` deletes every
+ * line beginning with `>` whether or not anybody else ever wrote it, so an
+ * author who writes
+ *
+ *     We will deploy production Friday.
+ *     > Not.
+ *
+ * has their own second line deleted, the first line becomes the whole "own
+ * text", and the sentence certifies. That is this round's own defect class,
+ * reappearing through the helper that was supposed to prevent a different one.
+ *
+ * Two questions, two inputs. Authorship reads the stripped text, because a
+ * blockquote is not the replier's sentence. Coverage reads the body, because
+ * a blockquote is still *there*, and a machine cannot tell the author quoting
+ * somebody from the author formatting an aside.
  *
  * The cost is stated rather than hidden, and it is large: a reading drawn from
  * one sentence of a multi-sentence message is no longer auto-acceptable. It is
@@ -669,20 +710,53 @@ export function quoteCoversOwnText(
  * was right (it made distinct hostnames compare equal) and it left this check
  * reading one spelling of a mark that has several.
  *
- * The fix is NFKC **here**, and the distinction is the point: the receipt asks
- * *are these two texts the same*, where compatibility folding destroys evidence;
- * this asks *what kind of character is this*, which is exactly what compatibility
- * folding answers. NFKC maps U+FF1F, U+FE56 and the ligatures U+2047–U+2049 onto
- * `?`. `QUESTION_MARKS` then carries the ones Unicode gives no decomposition —
- * a **closed, published inventory**, not an open-ended list of things somebody
- * might try, which is the distinction `RETRO.md` draws between an enumeration
- * that is safe and one that is not. `¿` is on it because a Spanish interrogative
- * opens with one and need carry no other mark at all — the review's second pass
- * found that omission after its first pass found the fullwidth form, which is
- * the argument for running the critic again after fixing what it found.
+ * The answer is `QUESTION_MARKS`: **Unicode's own inventory of question marks,
+ * enumerated.** That is a closed, published list, not an open-ended list of
+ * things somebody might try, which is the distinction `RETRO.md` draws between
+ * an enumeration that is safe and one that is not.
+ *
+ * It took three review passes to fill, and the sequence is the argument for
+ * re-running a critic on what it made you change: the first found `？` (U+FF1F,
+ * fullwidth), the second found `¿` (U+00BF — a Spanish interrogative opens with
+ * one and need carry no other mark), the third found `᥅` (U+1945, Limbu) and
+ * `꩝` (U+AA5D, Cham).
+ *
+ * **NFKC was here and is gone.** The second repair folded the text first, on the
+ * argument that this is a classification question rather than a comparison, so
+ * compatibility folding is exactly right. True, and by the time the inventory
+ * was complete it was also *redundant* — every compatibility spelling NFKC
+ * mapped onto `?` (U+FF1F, U+FE56, the U+2047–U+2049 ligatures) is in the list
+ * above, so no input could tell the two mechanisms apart. The mutation ledger
+ * said so out loud: the row that deleted the fold **escaped**, because nothing
+ * pinned it. Worse, folding first *destroys* one mark — U+037E GREEK QUESTION
+ * MARK canonically decomposes to an ASCII semicolon, so a check that read only
+ * the folded form would see punctuation. One mechanism, pinned, reading the text
+ * it was given.
  */
-const QUESTION_MARKS = /[?¿؟፧⸮꘏\u{11143}]/u;
+export const QUESTION_MARKS: readonly string[] = Object.freeze([
+  '\u003F', // QUESTION MARK
+  '\u00BF', // INVERTED QUESTION MARK — a Spanish interrogative opens with one
+  '\u037E', // GREEK QUESTION MARK
+  '\u055E', // ARMENIAN QUESTION MARK
+  '\u061F', // ARABIC QUESTION MARK
+  '\u1367', // ETHIOPIC QUESTION MARK
+  '\u1945', // LIMBU QUESTION MARK
+  '\u2047', // DOUBLE QUESTION MARK
+  '\u2048', // QUESTION EXCLAMATION MARK
+  '\u2049', // EXCLAMATION QUESTION MARK
+  '\u203D', // INTERROBANG
+  '\u2E2E', // REVERSED QUESTION MARK
+  '\uA60F', // VAI QUESTION MARK
+  '\uA6F7', // BAMUM QUESTION MARK
+  '\uAA5D', // CHAM QUESTION MARK
+  '\uFE16', // PRESENTATION FORM FOR VERTICAL QUESTION MARK
+  '\uFE56', // SMALL QUESTION MARK
+  '\uFF1F', // FULLWIDTH QUESTION MARK
+  '\u{11143}', // CHAKMA QUESTION MARK
+]);
+
+const QUESTION_MARK = new RegExp(`[${QUESTION_MARKS.join('')}]`, 'u');
 
 export function isAssertion(text: string): boolean {
-  return !QUESTION_MARKS.test(text.normalize('NFKC'));
+  return !QUESTION_MARK.test(text);
 }

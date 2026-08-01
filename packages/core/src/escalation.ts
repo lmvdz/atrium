@@ -963,7 +963,7 @@ export function validateProposalProvenance(
           detail: `the quote is a span cut out of the middle of a sentence in message "${bearing.id}" rather than one or more whole sentences of it — the words on either side of the cut may qualify or reverse it ("it is not true that …"), and nothing here can read them, so this reading is not accepted on a machine's word`,
           messageId: bearing.id,
         });
-      } else if (!quoteCoversOwnText(quote, ownText, policy)) {
+      } else if (!quoteCoversOwnText(quote, bearing.body, policy)) {
         // ── …and the sentences either side of it are not somebody's scissors ──
         //
         // r5, and it is r4's own documented residue turned into a disposition.
@@ -981,7 +981,7 @@ export function validateProposalProvenance(
         problems.push({
           kind: 'quote_omits_surrounding_text',
           severity: 'refer',
-          detail: `the quote is whole sentences of message "${bearing.id}" but not all of it — its author wrote more around them, and a neighbouring sentence can reverse, condition or withdraw the one being quoted ("… Not.", "Unless CI is red.", "Correction: …") in a way no rule about the quoted span can see, so this reading is not accepted on a machine's word`,
+          detail: `the quote is whole sentences of message "${bearing.id}" but not the whole of it — there is more in that message, and a neighbouring line can reverse, condition or withdraw the one being quoted ("… Not.", "Unless CI is red.", "Correction: …") in a way no rule about the quoted span can see, so this reading is not accepted on a machine's word`,
           messageId: bearing.id,
         });
       }
@@ -1233,7 +1233,15 @@ export function laterRevision(
   }
   if (firstCited === -1) return null;
 
-  const later = messages.slice(firstCited + 1).filter((message) => !cited.has(message.id));
+  // **Cited messages are scanned, not skipped.** The first repair filtered them
+  // out, and the next review pass used that: put the correction in a message the
+  // proposal *cites*, and the scan that exists to find corrections stepped over
+  // it. A citation is chosen by the proposal, so anything a citation can exclude
+  // is a boundary the proposal controls — which is the shape of every padding
+  // attack this file has been through. A cited message aligned against its own
+  // statement is exact, and an exact restatement is not a revision, so scanning
+  // them costs nothing.
+  const later = messages.slice(firstCited + 1);
   // ── The cap fails closed, and that is r5 auditing its own first draft ──────
   //
   // The first version of this scan stopped at the cap and returned "nothing
@@ -1279,11 +1287,29 @@ export function laterRevision(
       const aligned = alignTokens(routingTokens(sentence), wanted, policy);
       if (aligned.undecidable === 'too_long') return 'unscanned';
       if (aligned.undecidable !== null) continue;
-      // Every word of the statement is here, in order, and this sentence says
-      // more. An exact restatement (`unmatchedInQuote` empty) is agreement, and
-      // a sentence missing any of the statement's words is about something else.
-      if (aligned.unmatchedInStatement.length === 0 && aligned.unmatchedInQuote.length > 0) {
-        return { message, added: aligned.unmatchedInQuote };
+      // **One side is contained in the other, and they are not the same.**
+      //
+      // The first draft asked only about *addition* — every word of the statement
+      // present, in order, and the sentence saying more. grok's pass produced the
+      // mirror image: a later message that says the same thing with a word
+      // **removed** is the exact case r3's gauntlet is built on, and it aligned
+      // the other way round, so it read as unrelated. "Bob will not deploy
+      // production Friday." followed by "Bob will deploy production Friday." is a
+      // correction in either direction.
+      //
+      // An exact restatement is agreement, not a revision, and a sentence that
+      // differs on both sides is about something else. Containment in either
+      // direction, and nothing else — no threshold, no opinion about which words
+      // matter.
+      if (aligned.borne) continue;
+      const contained =
+        aligned.unmatchedInStatement.length === 0 || aligned.unmatchedInQuote.length === 0;
+      if (contained) {
+        const changed =
+          aligned.unmatchedInQuote.length > 0
+            ? aligned.unmatchedInQuote
+            : aligned.unmatchedInStatement;
+        return { message, added: changed };
       }
     }
   }
