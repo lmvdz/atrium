@@ -3,7 +3,9 @@ import {
   assertKnownRole,
   atriumOrganizationOptions,
   isDemotion,
+  type OrganizationOptionsInput,
   type OrganizationPorts,
+  type RoomCleanupFailure,
 } from '../src/org.js';
 import { lowerOf } from '../src/workspace.js';
 
@@ -32,12 +34,16 @@ function ports(overrides: Partial<OrganizationPorts> = {}): OrganizationPorts {
   };
 }
 
-function options(overrides: Partial<OrganizationPorts> = {}) {
+function options(
+  overrides: Partial<OrganizationPorts> = {},
+  rest: Partial<Pick<OrganizationOptionsInput, 'logger' | 'onCleanupFailure'>> = {},
+) {
   return atriumOrganizationOptions({
     ports: ports(overrides),
     baseURL: 'https://atrium.test',
     mailer: async () => {},
     schema: {},
+    ...rest,
   });
 }
 
@@ -148,6 +154,139 @@ describe('revocation hooks', () => {
         organization: { id: workspaceId },
       }),
     ).resolves.toBeUndefined();
+  });
+
+  /**
+   * Round 5 caught that failure and logged the message and the user id, and
+   * that was the whole of it — the round-5 gauntlet called the combination
+   * blocking, because at the time those orphaned room rows were still full
+   * authority. Round 6 moved authorization onto the join, so the failure stops
+   * being a security event and starts being one an operator has to be told
+   * about clearly enough to act on.
+   */
+  it('reports a failed post-removal sweep loudly instead of absorbing it', async () => {
+    /**
+     * Catches, each on its own: dropping the stable `event` key (an alert rule
+     * has nothing to match); logging only `error.message` again (round 5
+     * learned the hard way that a `DrizzleQueryError`'s message says nothing
+     * and the `PostgresError` is one `cause` down); dropping the workspace id
+     * (there is then no way to find the orphaned rows).
+     */
+    const error = Object.assign(new Error('lock timeout'), {
+      name: 'MemberLockTimeoutError',
+      cause: new Error('55P03: lock_timeout'),
+    });
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const hooks = options(
+      {
+        revokeWorkspaceRooms: async () => {
+          throw error;
+        },
+      },
+      { logger },
+    ).organizationHooks;
+
+    await hooks.afterRemoveMember({
+      member: { userId: 'user-2', organizationId: workspaceId },
+      organization: { id: workspaceId },
+    });
+
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    const [, fields] = logger.error.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({
+      event: 'room_cleanup_failed',
+      operation: 'revokeWorkspaceRooms',
+      phase: 'afterRemoveMember',
+      workspaceId,
+      userId: 'user-2',
+      errorName: 'MemberLockTimeoutError',
+      error: 'lock timeout',
+      cause: '55P03: lock_timeout',
+    });
+    expect(String((fields as { stack?: string }).stack)).toContain('Error: lock timeout');
+    expect(String((fields as { consequence?: string }).consequence)).toContain('orphaned');
+  });
+
+  it('hands the failure to `onCleanupFailure` so a deployment can alert on it', async () => {
+    /**
+     * Catches: deleting the `input.onCleanupFailure?.(failure)` call. A log line
+     * is where an operator looks *after* they know something is wrong; this is
+     * the seam that tells them.
+     */
+    const seen: RoomCleanupFailure[] = [];
+    const hooks = options(
+      {
+        revokeWorkspaceRooms: async () => {
+          throw new Error('database is on fire');
+        },
+      },
+      { logger: { warn: vi.fn(), error: vi.fn() }, onCleanupFailure: (f) => seen.push(f) },
+    ).organizationHooks;
+
+    await hooks.afterRemoveMember({
+      member: { userId: 'user-2', organizationId: workspaceId },
+      organization: { id: workspaceId },
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      operation: 'revokeWorkspaceRooms',
+      phase: 'afterRemoveMember',
+      workspaceId,
+      userId: 'user-2',
+    });
+    expect(seen[0]?.error.message).toBe('database is on fire');
+  });
+
+  it('survives a reporter that throws, and says that it did', async () => {
+    /**
+     * A broken alerting hook must not undo a completed removal. Catches:
+     * calling `onCleanupFailure` outside the try, which would let a paging
+     * client's bug propagate out of the hook and fail the removal.
+     */
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const hooks = options(
+      {
+        revokeWorkspaceRooms: async () => {
+          throw new Error('database is on fire');
+        },
+      },
+      {
+        logger,
+        onCleanupFailure: () => {
+          throw new Error('pagerduty is also on fire');
+        },
+      },
+    ).organizationHooks;
+
+    await expect(
+      hooks.afterRemoveMember({
+        member: { userId: 'user-2', organizationId: workspaceId },
+        organization: { id: workspaceId },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(logger.error).toHaveBeenCalledTimes(2);
+    expect(logger.error.mock.calls[1]?.[1]).toMatchObject({
+      event: 'room_cleanup_reporter_failed',
+      error: 'pagerduty is also on fire',
+    });
+  });
+
+  it('reports nothing at all when the sweep succeeds', async () => {
+    // The control. Without it, a `reportCleanupFailure` called unconditionally
+    // would satisfy every assertion above.
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const seen: RoomCleanupFailure[] = [];
+    const hooks = options({}, { logger, onCleanupFailure: (f) => seen.push(f) }).organizationHooks;
+
+    await hooks.afterRemoveMember({
+      member: { userId: 'user-2', organizationId: workspaceId },
+      organization: { id: workspaceId },
+    });
+
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(seen).toEqual([]);
   });
 
   it('lets a failed pre-removal revoke abort the removal', async () => {

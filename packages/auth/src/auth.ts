@@ -8,6 +8,7 @@ import {
   atriumOrganizationOptions,
   type OrganizationLogger,
   type OrganizationPorts,
+  type RoomCleanupFailure,
 } from './org.js';
 import { resolveAuthSecret } from './secret.js';
 import { assertSecureTransport, useSecureCookies } from './transport.js';
@@ -70,6 +71,15 @@ export interface AtriumAuthOptions {
   proxyStrategy?: ProxyStrategy;
   /** Where hook denials are recorded. Defaults to the console. */
   logger?: OrganizationLogger;
+  /**
+   * Where a failed post-removal room sweep is reported, besides the log.
+   *
+   * See {@link RoomCleanupFailure}. Not a security seam any more — room
+   * authorization joins `workspace_members`, so the rows a failed sweep leaves
+   * behind grant nothing — but the seam a deployment alerts on so somebody
+   * cleans them up.
+   */
+  onCleanupFailure?: (failure: RoomCleanupFailure) => void;
 }
 
 export type AtriumAuth = ReturnType<typeof createAtriumAuth>;
@@ -358,6 +368,7 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
           mailer,
           schema: organizationSchemaOptions,
           logger,
+          onCleanupFailure: options.onCleanupFailure,
         }),
       ),
       ...(options.plugins ?? []),

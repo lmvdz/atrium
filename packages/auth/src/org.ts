@@ -128,6 +128,27 @@ export interface OrganizationLogger {
   error: (message: string, fields?: Record<string, unknown>) => void;
 }
 
+/**
+ * A room-revocation sweep that failed after the member row was already gone.
+ *
+ * Through round 5 this was a security event and it was swallowed, which is the
+ * combination the round-5 gauntlet called blocking. It is now neither: room
+ * authorization joins `workspace_members` (`room-access.ts`), so the orphaned
+ * `memberships` rows this describes grant nothing at all. What is left is
+ * garbage in a table, and garbage still deserves to be reported rather than
+ * absorbed — the removal itself succeeded, so throwing would tell the caller
+ * the opposite of what happened and invite a retry that can only fail.
+ */
+export interface RoomCleanupFailure {
+  /** The port that rejected. */
+  operation: 'revokeWorkspaceRooms';
+  /** Which hook it rejected in. */
+  phase: 'afterRemoveMember';
+  workspaceId: string;
+  userId: string;
+  error: Error;
+}
+
 export interface OrganizationOptionsInput {
   ports: OrganizationPorts;
   /** Public origin of the web app; invitation links are built against it. */
@@ -136,6 +157,20 @@ export interface OrganizationOptionsInput {
   /** The model/field remapping from `@atrium/db` (`organizationSchemaOptions`). */
   schema: OrganizationOptions['schema'];
   logger?: OrganizationLogger;
+  /**
+   * Where a cleanup failure goes besides the log.
+   *
+   * The seam a deployment alerts on: the log line below is greppable and
+   * carries a stable `event`, but a structured hook is what lets an operator
+   * page on it or enqueue a repair without parsing text. Optional because the
+   * failure is no longer a security event — nothing breaks if a deployment
+   * declines to wire it — and deliberately not defaulted to a throw, for the
+   * reason on {@link RoomCleanupFailure}.
+   *
+   * A reporter that throws is itself logged and swallowed: a broken alerting
+   * hook must not turn a completed removal into an error.
+   */
+  onCleanupFailure?: (failure: RoomCleanupFailure) => void;
 }
 
 const noopLogger: OrganizationLogger = { warn: () => {}, error: () => {} };
@@ -207,6 +242,41 @@ function mayInvite(inviterRole: string | null, requestedRole: string): boolean {
 export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
   const { ports, baseURL, mailer, schema } = input;
   const logger = input.logger ?? noopLogger;
+
+  /**
+   * Report a cleanup failure loudly, then carry on.
+   *
+   * "Loudly" is the whole change from round 5, and it is three specific things
+   * rather than an adverb: a stable `event` key an alert can match on, the
+   * error's `name` and `stack` and not just its `message` (round 5 learned that
+   * `DrizzleQueryError` hides the interesting part one `cause` down), and a
+   * `consequence` field that says what an operator is looking at — orphaned
+   * rows, not lost access — so nobody re-derives that at 3am.
+   */
+  const reportCleanupFailure = (failure: RoomCleanupFailure): void => {
+    logger.error('room revocation sweep failed after member removal', {
+      event: 'room_cleanup_failed',
+      operation: failure.operation,
+      phase: failure.phase,
+      workspaceId: failure.workspaceId,
+      userId: failure.userId,
+      errorName: failure.error.name,
+      error: failure.error.message,
+      stack: failure.error.stack,
+      cause: failure.error.cause instanceof Error ? failure.error.cause.message : undefined,
+      consequence:
+        'the workspace member row is gone, so room authorization already denies this user; ' +
+        'orphaned `memberships` rows remain and should be swept',
+    });
+    try {
+      input.onCleanupFailure?.(failure);
+    } catch (reporterError) {
+      logger.error('the cleanup-failure reporter itself threw', {
+        event: 'room_cleanup_reporter_failed',
+        error: (reporterError as Error).message,
+      });
+    }
+  };
 
   return {
     schema,
@@ -444,12 +514,20 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
        * Removal, revoked *before* the workspace row goes.
        *
        * Ordering is the whole point — and ordering is all it is; the two writes
-       * are separate transactions (see the note at the top of this file). Room
-       * memberships are what the realtime server checks, so dropping them first
-       * means a failure part-way through leaves somebody who is still a
-       * workspace member but can reach no room — annoying, and fixable by
-       * re-adding them. The other order would leave somebody who is no longer a
-       * member but still has every room, which is the failure nobody notices.
+       * are separate transactions (see the note at the top of this file). A
+       * failure part-way through leaves somebody who is still a workspace
+       * member but can reach no room: annoying, and fixable by re-adding them.
+       * The other order would leave somebody who is no longer a member but
+       * still holds room rows.
+       *
+       * Round 6 changed what that second shape *costs*, and the ordering is
+       * kept anyway. Room authorization now joins `workspace_members`
+       * (`room-access.ts`), so retained room rows grant nothing once the member
+       * row is gone — the ordering is no longer the thing standing between a
+       * removed member and their rooms. It stays because leaving the tidier
+       * residue for free is worth having, and because a guarantee that depends
+       * on two hooks running in a particular order is exactly what this ticket
+       * spent five rounds learning not to rely on.
        */
       beforeRemoveMember: async (data: {
         member: { userId: string; organizationId: string };
@@ -461,22 +539,36 @@ export function atriumOrganizationOptions(input: OrganizationOptionsInput) {
         });
       },
 
-      /** Again, idempotently: a join racing the removal must not survive it. */
+      /**
+       * Again, idempotently: a join racing the removal must not survive it.
+       *
+       * And when this sweep fails, it is *reported*, not absorbed. Round 5
+       * caught the failure and logged one line with the message and the user
+       * id, which was a security decision dressed as error handling: the member
+       * row was already gone, the room rows were still there, and room
+       * authorization read only the room rows. Round 6 moved authorization onto
+       * the join, so the same failure now leaves orphaned rows and no access.
+       * That makes it a cleanup concern — one that gets a stable event key, the
+       * whole error, and an operator seam (`onCleanupFailure`).
+       *
+       * Still not a throw. The removal has committed; reporting failure to the
+       * caller would be a false statement about what happened, and the retry it
+       * invites can only fail against a member row that no longer exists.
+       */
       afterRemoveMember: async (data: {
         member: { userId: string; organizationId: string };
         organization: { id: string };
       }) => {
+        const workspaceId = data.member.organizationId ?? data.organization.id;
         try {
-          await ports.revokeWorkspaceRooms({
-            workspaceId: data.member.organizationId ?? data.organization.id,
-            userId: data.member.userId,
-          });
+          await ports.revokeWorkspaceRooms({ workspaceId, userId: data.member.userId });
         } catch (error) {
-          // The membership is already gone; a failed second sweep must not turn
-          // a successful removal into an error the caller retries forever.
-          logger.error('room revocation sweep failed after member removal', {
+          reportCleanupFailure({
+            operation: 'revokeWorkspaceRooms',
+            phase: 'afterRemoveMember',
+            workspaceId,
             userId: data.member.userId,
-            error: (error as Error).message,
+            error: error instanceof Error ? error : new Error(String(error)),
           });
         }
       },
