@@ -71,7 +71,7 @@
 	# Everything else is the Next.js app: pages, Server Actions, the auth
 	# catch-all route.
 	handle {
-		reverse_proxy app:3000
+		reverse_proxy app:3001
 	}
 }
 
