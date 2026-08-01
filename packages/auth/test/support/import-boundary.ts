@@ -73,8 +73,51 @@
  * exist — the table reached by *property name* off a handle, with no import
  * anywhere. No import-boundary rule can see that, so `forbiddenAccessName` adds a
  * second, narrower question to the same AST walk: does any file under a forbidden
- * root name the table as a property at all. Between them there is no way to name
- * the table under `apps/`.
+ * root name the table at all.
+ *
+ * ## The access half: what round 7 got wrong in both directions
+ *
+ * Round 7 asked that question of *any* property access. Too narrow and too wide
+ * at once, and the round-7 gauntlet said so on both counts.
+ *
+ * **Too narrow.** It looked at property and element access only, so two shapes
+ * walked past it. `const { memberships: rows } = db().query` binds the table
+ * without ever writing a property access — no forbidden import, no reported
+ * access, and `rows.findMany()` reads unjoined membership in an app.
+ * `db().query['member' + 'ships']` is the same read with the key computed, which
+ * the literal-key test could not see either.
+ *
+ * **Too wide.** It flagged `anything.memberships` — a response body, a domain
+ * object, a React prop — because it never asked *what the receiver was*. A check
+ * that fails on `workspace.memberships` in a view teaches people to rename their
+ * fields, and a rule people work around is not a rule.
+ *
+ * Both are the same missing question, so both have the same answer: follow the
+ * handle. The access analysis now asks whether the receiver is rooted in a
+ * **database handle** — a value this repository's own module graph says came out
+ * of the package that declares the table — and reports:
+ *
+ *  - the table named as a property or a string index off such a receiver;
+ *  - the table destructured out of one, renamed or nested;
+ *  - *any* computed key off one, because `db.query[x]` cannot be resolved and a
+ *    handle is not a thing an app should be indexing dynamically. This is the
+ *    one conservative rule here, and it is affordable precisely because it is
+ *    asked only of handles.
+ *
+ * A handle is tracked from where it enters a file — an import of the declaring
+ * package, or of a module that exposes one — through assignments, `await`, casts,
+ * calls, member access and destructuring. A module exposes a handle when it
+ * re-exports one, when it exports a binding derived from one, or when it exports
+ * a function annotated as returning one (`apps/web/lib/db.ts`'s
+ * `export function db(): Database`, which is how both apps actually get theirs).
+ *
+ * **The limit this trades for, stated.** A handle that reaches a file as an
+ * un-annotated parameter, or inside a container, is not followed — the analysis
+ * is syntactic, and following a value through an arbitrary function signature
+ * needs a type checker. What it does follow is every route by which a handle
+ * *arrives* in a module, which is the same question the import half answers about
+ * the table itself. Annotating the parameter (`db: Database`) puts it back in
+ * scope, and that is how this repository writes them.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve as resolvePath, sep } from 'node:path';
@@ -105,13 +148,26 @@ export interface BoundaryRule {
   /** Package scope that maps onto `packages/<name>`. */
   workspaceScope?: string;
   /**
-   * A property name that forbidden-root files may not write, at all.
+   * The table's name as a *property*, which forbidden-root files may not reach
+   * off a database handle.
    *
    * The companion to the import analysis, for the table reached off a handle —
-   * `db.query.memberships`, `db['query']['memberships']` — which no import rule
-   * can observe. See the header.
+   * `db.query.memberships`, `db['query']['memberships']`,
+   * `const { memberships } = db().query` — which no import rule can observe. See
+   * the header for what counts as a handle and why the question is asked about
+   * the receiver rather than about every property in the tree.
    */
   forbiddenAccessName?: string;
+  /**
+   * Type names that mean "this value is a database handle".
+   *
+   * The cheap half of the data flow, and the one that carries this repository:
+   * `apps/web/lib/db.ts` exports `function db(): Database`, and a parameter
+   * written `db: Database` is how every function here takes one. An annotation
+   * is not proof, but it is a *statement by the author*, which is a better
+   * signal than any heuristic available to a syntactic pass.
+   */
+  handleTypeNames?: string[];
 }
 
 export type OffenceKind =
@@ -145,10 +201,22 @@ export interface ComputedSpecifier {
   line: number;
 }
 
-/** A forbidden-root file naming the table as a property. */
+/** How a forbidden-root file reached the table off a database handle. */
+export type AccessKind =
+  /** `db.query.memberships` */
+  | 'property'
+  /** `db.query['memberships']` */
+  | 'string-index'
+  /** `const { memberships } = db().query`, renamed or nested */
+  | 'destructured'
+  /** `db.query['member' + 'ships']` — a key this analysis cannot resolve */
+  | 'computed-key';
+
+/** A forbidden-root file reaching the table off a database handle. */
 export interface MemberAccess {
   file: string;
   line: number;
+  kind: AccessKind;
   /** The access as written, for the failure message. */
   text: string;
 }
@@ -168,14 +236,32 @@ interface Reference {
   line: number;
 }
 
+/**
+ * What a file says about database handles, collected in one walk.
+ *
+ * Separate from `Reference` on purpose: the import half has five rounds of tests
+ * behind it and answers a different question (which *names* arrive here), while
+ * this one needs the local identifier a namespace or default import binds so a
+ * receiver can be traced back to it.
+ */
+interface HandleFacts {
+  /** Local binding name → the module and export it came from (`*` = the module). */
+  imported: Map<string, { specifier: string; name: string }>;
+  /** Local binding name → the node that declares it. */
+  declared: Map<string, ts.Node>;
+  /** Exported name → the local binding behind it. */
+  exportedLocals: Map<string, string>;
+}
+
 interface Module {
   /** Relative to `root`. */
   path: string;
   absolute: string;
+  source: ts.SourceFile;
   imports: Reference[];
   reexports: Reference[];
   computed: ComputedSpecifier[];
-  accesses: MemberAccess[];
+  handles: HandleFacts;
 }
 
 const DEFAULT_SKIP = [
@@ -193,6 +279,9 @@ const DEFAULT_SKIP = [
 
 const SOURCE = /\.(?:tsx?|mts|cts)$/;
 
+/** See {@link BoundaryRule.handleTypeNames}. */
+const DEFAULT_HANDLE_TYPES = ['Database'];
+
 function collectSourceFiles(dir: string, skip: string[], out: string[]): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -209,12 +298,58 @@ function scriptKind(file: string): ts.ScriptKind {
   return file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
 }
 
+/** Does this declaration carry an `export` modifier? */
+function isExported(node: ts.Node | undefined): boolean {
+  if (!node || !ts.canHaveModifiers(node)) return false;
+  return (ts.getModifiers(node) ?? []).some(
+    (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+  );
+}
+
+/** Does this type annotation name one of the handle types? */
+function referencesHandleType(type: ts.TypeNode | undefined, names: readonly string[]): boolean {
+  if (!type) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isTypeReferenceNode(node)) {
+      const name = ts.isIdentifier(node.typeName) ? node.typeName.text : node.typeName.right.text;
+      if (names.includes(name)) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(type);
+  return found;
+}
+
+/** The `return` expressions of a function, ignoring any nested inside it. */
+function returnedExpressions(fn: ts.SignatureDeclaration): ts.Expression[] {
+  const out: ts.Expression[] = [];
+  const body = (fn as { body?: ts.Node }).body;
+  if (!body) return out;
+  if (!ts.isBlock(body)) {
+    // A concise arrow body is one big return expression.
+    out.push(body as ts.Expression);
+    return out;
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node) && node.expression) out.push(node.expression);
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(body, visit);
+  return out;
+}
+
 function lineOf(source: ts.SourceFile, node: ts.Node): number {
   return source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
 }
 
 /** Everything one file pulls in or passes on, as an AST question. */
-function readModule(absolute: string, path: string, accessName: string | undefined): Module {
+function readModule(absolute: string, path: string): Module {
   const text = readFileSync(absolute, 'utf8');
   const source = ts.createSourceFile(
     absolute,
@@ -226,10 +361,11 @@ function readModule(absolute: string, path: string, accessName: string | undefin
   const module: Module = {
     path,
     absolute,
+    source,
     imports: [],
     reexports: [],
     computed: [],
-    accesses: [],
+    handles: { imported: new Map(), declared: new Map(), exportedLocals: new Map() },
   };
 
   for (const statement of source.statements) {
@@ -240,6 +376,7 @@ function readModule(absolute: string, path: string, accessName: string | undefin
       // A bare `import 'x'` binds nothing, so it cannot reach the table.
       if (!clause) continue;
       if (clause.name) {
+        module.handles.imported.set(clause.name.text, { specifier, name: 'default' });
         module.imports.push({
           specifier,
           kind: 'default-import',
@@ -250,6 +387,7 @@ function readModule(absolute: string, path: string, accessName: string | undefin
       }
       const bindings = clause.namedBindings;
       if (bindings && ts.isNamespaceImport(bindings)) {
+        module.handles.imported.set(bindings.name.text, { specifier, name: '*' });
         module.imports.push({
           specifier,
           kind: 'namespace-import',
@@ -258,6 +396,12 @@ function readModule(absolute: string, path: string, accessName: string | undefin
           line,
         });
       } else if (bindings && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) {
+          module.handles.imported.set(element.name.text, {
+            specifier,
+            name: (element.propertyName ?? element.name).text,
+          });
+        }
         module.imports.push({
           specifier,
           kind: 'named-import',
@@ -277,8 +421,20 @@ function readModule(absolute: string, path: string, accessName: string | undefin
       const from = statement.moduleSpecifier;
       if (!from || !ts.isStringLiteral(from)) {
         // A local `export { a, b }`. It re-exports bindings this file already
-        // holds, so rule 2 (any toucher taints everything) covers it; there is
-        // no specifier to resolve here.
+        // holds, so rule 2 (any toucher taints everything) covers it for the
+        // *table*; there is no specifier to resolve here. For handles it does
+        // matter which local binding is behind which exported name, because a
+        // module that exports a handle it holds is a module the next one gets a
+        // handle from.
+        const local = statement.exportClause;
+        if (local && ts.isNamedExports(local)) {
+          for (const element of local.elements) {
+            module.handles.exportedLocals.set(
+              element.name.text,
+              (element.propertyName ?? element.name).text,
+            );
+          }
+        }
         continue;
       }
       const specifier = from.text;
@@ -324,21 +480,32 @@ function readModule(absolute: string, path: string, accessName: string | undefin
   }
 
   // `import()` and `require()` are expressions, so they can be anywhere — inside
-  // a function, a ternary, a template. The whole tree gets walked for them.
+  // a function, a ternary, a template. The whole tree gets walked for them, and
+  // for the declarations the handle analysis needs.
   const visit = (node: ts.Node): void => {
-    if (accessName !== undefined) {
-      const named =
-        (ts.isPropertyAccessExpression(node) && node.name.text === accessName) ||
-        (ts.isElementAccessExpression(node) &&
-          ts.isStringLiteral(node.argumentExpression) &&
-          node.argumentExpression.text === accessName);
-      if (named) {
-        module.accesses.push({
-          file: path,
-          line: lineOf(source, node),
-          text: node.getText(source),
-        });
+    /**
+     * Every name this file binds, flat.
+     *
+     * Flat, and therefore blind to shadowing: a file that rebinds `db` inside a
+     * block to something that is not a handle would be read as still holding
+     * one. That errs towards reporting, which is the right direction for a
+     * boundary check, and no file in this repository does it.
+     */
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      module.handles.declared.set(node.name.text, node);
+      if (isExported(node.parent?.parent)) {
+        module.handles.exportedLocals.set(node.name.text, node.name.text);
       }
+    }
+    if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
+      module.handles.declared.set(node.name.text, node);
+    }
+    if (ts.isParameter(node) && ts.isIdentifier(node.name)) {
+      module.handles.declared.set(node.name.text, node);
+    }
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      module.handles.declared.set(node.name.text, node);
+      if (isExported(node)) module.handles.exportedLocals.set(node.name.text, node.name.text);
     }
     if (ts.isCallExpression(node)) {
       const isDynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
@@ -385,6 +552,94 @@ function resolveFilePath(base: string): string | null {
   return firstExisting(candidates);
 }
 
+/**
+ * Every way a file reaches the forbidden name off a database handle.
+ *
+ * Four shapes, and the reason there are four is that round 7 handled two of them
+ * and the round-7 gauntlet demonstrated both of the others as working evasions.
+ * The receiver test is what all four share, and what keeps a domain object's
+ * `.memberships` out of the results.
+ */
+function collectAccesses(
+  module: Module,
+  accessName: string,
+  classifier: { isHandle: (node: ts.Expression) => boolean },
+): MemberAccess[] {
+  const found: MemberAccess[] = [];
+  const { source, path } = module;
+  const record = (node: ts.Node, kind: AccessKind): void => {
+    found.push({ file: path, line: lineOf(source, node), kind, text: node.getText(source) });
+  };
+
+  /** A key written as a string, if it is written as one at all. */
+  const literalKey = (node: ts.Expression): string | null => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+    return null;
+  };
+
+  /**
+   * `const { memberships: rows } = <handle>` and every nesting of it.
+   *
+   * Recursion carries the "rooted in a handle" fact down through nested
+   * patterns, which is what makes `const { query: { memberships } } = db()`
+   * fire — the inner element's receiver is the outer one's value.
+   */
+  const walkPattern = (pattern: ts.BindingPattern): void => {
+    for (const element of pattern.elements) {
+      if (!ts.isBindingElement(element)) continue;
+      const property = element.propertyName;
+      if (property) {
+        if (ts.isComputedPropertyName(property)) {
+          const key = literalKey(property.expression);
+          if (key === accessName) record(element, 'destructured');
+          else if (key === null) record(element, 'computed-key');
+        } else if (
+          (ts.isIdentifier(property) || ts.isStringLiteral(property)) &&
+          property.text === accessName
+        ) {
+          record(element, 'destructured');
+        }
+      } else if (ts.isIdentifier(element.name) && element.name.text === accessName) {
+        record(element, 'destructured');
+      }
+      if (!ts.isIdentifier(element.name)) walkPattern(element.name);
+    }
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(node)) {
+      if (node.name.text === accessName && classifier.isHandle(node.expression)) {
+        record(node, 'property');
+      }
+    } else if (ts.isElementAccessExpression(node)) {
+      if (classifier.isHandle(node.expression)) {
+        const key = literalKey(node.argumentExpression);
+        if (key === accessName) record(node, 'string-index');
+        else if (key === null) {
+          /**
+           * `db.query['member' + 'ships']`, `db.query[name]`. The key cannot be
+           * resolved, so "we could not tell" is reported rather than waved
+           * through — the same rule the computed *specifier* half already
+           * follows. It costs nothing in practice because it is asked only of a
+           * database handle, which no app has a reason to index dynamically.
+           */
+          record(node, 'computed-key');
+        }
+      }
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      !ts.isIdentifier(node.name) &&
+      node.initializer &&
+      classifier.isHandle(node.initializer)
+    ) {
+      walkPattern(node.name);
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(source, visit);
+  return found;
+}
+
 export interface BoundaryAnalysis {
   offences: BoundaryOffence[];
   computed: ComputedSpecifier[];
@@ -413,7 +668,7 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
   const modules = new Map<string, Module>();
   for (const absolute of absoluteFiles) {
     const path = rel(absolute);
-    modules.set(path, readModule(absolute, path, rule.forbiddenAccessName));
+    modules.set(path, readModule(absolute, path));
   }
 
   /**
@@ -515,6 +770,194 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
     }
   }
 
+  /**
+   * ## The handle graph
+   *
+   * A second, independent fixpoint over the same modules, answering a different
+   * question: which exported names hand out a **database handle**. The table
+   * taint above says who can name the table; this says who can reach it off a
+   * connection, which is the half no import rule can see.
+   *
+   * The seed is the package that declares the table. Everything under it is
+   * assumed to expose handles, because that is what such a package is for and
+   * `createDatabase` lives there — assuming *more* here is the conservative
+   * direction, since the only consequence is that a receiver is followed.
+   */
+  const handleTypeNames = rule.handleTypeNames ?? DEFAULT_HANDLE_TYPES;
+  const declaringPackage = (() => {
+    const parts = rule.declaredIn.split('/');
+    // `packages/db/src/schema.ts` → `packages/db/`
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}/` : `${parts[0]}/`;
+  })();
+
+  const handleExports = new Map<string, Taint>();
+  const handlesOf = (path: string): Taint => {
+    let value = handleExports.get(path);
+    if (!value) {
+      value = { names: new Set(), all: path.startsWith(declaringPackage) };
+      handleExports.set(path, value);
+    }
+    return value;
+  };
+  for (const path of modules.keys()) handlesOf(path);
+
+  const exposesHandle = (path: string, name: string): boolean => {
+    const value = handleExports.get(path);
+    if (!value) return false;
+    return value.all || name === '*' ? value.all || value.names.size > 0 : value.names.has(name);
+  };
+
+  /**
+   * Is this expression rooted in a database handle?
+   *
+   * One memo per module, because the answer depends on that module's bindings.
+   * The walk is deliberately short: assignment, `await`, casts, calls, member
+   * access and destructuring are the ways a handle travels inside a file, and
+   * anything else answers no.
+   */
+  function handleClassifier(module: Module) {
+    const memo = new Map<string, boolean>();
+    const inProgress = new Set<string>();
+
+    const bindingIsHandle = (name: string): boolean => {
+      const cached = memo.get(name);
+      if (cached !== undefined) return cached;
+      // Cycles (`const a = b; const b = a;`) answer no rather than recursing.
+      if (inProgress.has(name)) return false;
+      inProgress.add(name);
+      const answer = computeBinding(name);
+      inProgress.delete(name);
+      memo.set(name, answer);
+      return answer;
+    };
+
+    const computeBinding = (name: string): boolean => {
+      const imported = module.handles.imported.get(name);
+      if (imported) {
+        const target = resolveSpecifier(imported.specifier, module.path);
+        return target !== null && exposesHandle(target, imported.name);
+      }
+      const declaration = module.handles.declared.get(name);
+      if (!declaration) return false;
+      if (ts.isVariableDeclaration(declaration)) {
+        if (referencesHandleType(declaration.type, handleTypeNames)) return true;
+        return declaration.initializer ? isHandle(declaration.initializer) : false;
+      }
+      if (ts.isParameter(declaration)) {
+        // An annotation is the author saying so. Without one there is nothing
+        // syntactic to go on, and guessing would be the noise the round-7
+        // gauntlet objected to.
+        return referencesHandleType(declaration.type, handleTypeNames);
+      }
+      if (ts.isBindingElement(declaration)) return bindingElementIsHandle(declaration);
+      if (ts.isFunctionDeclaration(declaration)) return functionYieldsHandle(declaration);
+      return false;
+    };
+
+    /** A name destructured off a handle is still a handle: `const { query } = db`. */
+    const bindingElementIsHandle = (element: ts.BindingElement): boolean => {
+      let pattern: ts.Node = element.parent;
+      while (ts.isBindingElement(pattern.parent)) pattern = pattern.parent.parent;
+      const owner = pattern.parent;
+      if (ts.isVariableDeclaration(owner)) {
+        if (referencesHandleType(owner.type, handleTypeNames)) return true;
+        return owner.initializer ? isHandle(owner.initializer) : false;
+      }
+      if (ts.isParameter(owner)) return referencesHandleType(owner.type, handleTypeNames);
+      return false;
+    };
+
+    const functionYieldsHandle = (fn: ts.SignatureDeclaration): boolean => {
+      if (referencesHandleType(fn.type, handleTypeNames)) return true;
+      return returnedExpressions(fn).some((expression) => isHandle(expression));
+    };
+
+    const isHandle = (node: ts.Expression): boolean => {
+      if (ts.isParenthesizedExpression(node)) return isHandle(node.expression);
+      if (ts.isAwaitExpression(node)) return isHandle(node.expression);
+      if (ts.isNonNullExpression(node)) return isHandle(node.expression);
+      if (ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
+        return referencesHandleType(node.type, handleTypeNames) || isHandle(node.expression);
+      }
+      if (ts.isTypeAssertionExpression(node)) {
+        return referencesHandleType(node.type, handleTypeNames) || isHandle(node.expression);
+      }
+      if (ts.isIdentifier(node)) return bindingIsHandle(node.text);
+      if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        return isHandle(node.expression);
+      }
+      if (ts.isCallExpression(node)) {
+        // `await import('@atrium/db')` and `require('@atrium/db')` hand over the
+        // module object, which for the declaring package is a handle source.
+        const dynamic =
+          node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === 'require');
+        const [argument] = node.arguments;
+        if (dynamic && argument && ts.isStringLiteral(argument)) {
+          const target = resolveSpecifier(argument.text, module.path);
+          return target !== null && exposesHandle(target, '*');
+        }
+        // Otherwise the call yields a handle when the thing being called does —
+        // `createDatabase()`, `db()`, `handle().db`.
+        return isHandle(node.expression);
+      }
+      if (ts.isFunctionExpression(node) || ts.isArrowFunction(node)) {
+        return functionYieldsHandle(node);
+      }
+      return false;
+    };
+
+    return { isHandle, bindingIsHandle };
+  }
+
+  // Fixpoint over the handle graph, same shape and same termination argument as
+  // the taint one above.
+  let handlesChanged = true;
+  let handlePasses = 0;
+  while (handlesChanged && handlePasses <= modules.size + 2) {
+    handlesChanged = false;
+    handlePasses += 1;
+    for (const module of modules.values()) {
+      const before = handlesOf(module.path);
+      const sizeBefore = before.names.size;
+      const allBefore = before.all;
+      const { bindingIsHandle } = handleClassifier(module);
+
+      for (const reference of module.reexports) {
+        const target = resolveSpecifier(reference.specifier, module.path);
+        if (!target) continue;
+        const source = handlesOf(target);
+        if (reference.kind === 'star-reexport') {
+          if (source.all) before.all = true;
+          for (const name of source.names) before.names.add(name);
+        } else if (reference.kind === 'namespace-reexport') {
+          if (source.all || source.names.size > 0) {
+            for (const { exported } of reference.names) before.names.add(exported);
+          }
+        } else {
+          for (const { source: from, exported } of reference.names) {
+            if (source.all || source.names.has(from)) before.names.add(exported);
+          }
+        }
+      }
+
+      for (const [exported, local] of module.handles.exportedLocals) {
+        const declaration = module.handles.declared.get(local);
+        const yieldsHandle = declaration
+          ? bindingIsHandle(local)
+          : (() => {
+              const imported = module.handles.imported.get(local);
+              if (!imported) return false;
+              const target = resolveSpecifier(imported.specifier, module.path);
+              return target !== null && exposesHandle(target, imported.name);
+            })();
+        if (yieldsHandle) before.names.add(exported);
+      }
+
+      if (before.names.size !== sizeBefore || before.all !== allBefore) handlesChanged = true;
+    }
+  }
+
   const offences: BoundaryOffence[] = [];
   const computed: ComputedSpecifier[] = [];
   const accesses: MemberAccess[] = [];
@@ -523,7 +966,9 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
   for (const module of modules.values()) {
     if (!forbidden.some((root) => module.path.startsWith(root))) continue;
     computed.push(...module.computed);
-    accesses.push(...module.accesses);
+    if (rule.forbiddenAccessName !== undefined) {
+      accesses.push(...collectAccesses(module, rule.forbiddenAccessName, handleClassifier(module)));
+    }
 
     for (const reference of [...module.imports, ...module.reexports]) {
       const target = resolveSpecifier(reference.specifier, module.path);

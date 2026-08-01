@@ -344,6 +344,33 @@ describe('room membership is not reachable outside @atrium/auth', () => {
       return [...new Set(analyzeImportBoundary(rule).offences.map((o) => o.file))].sort();
     }
 
+    /**
+     * A miniature `@atrium/db` that hands out a handle, as the real one does.
+     *
+     * The access half is about the table reached off a *connection*, so every
+     * fixture for it needs a connection to reach it off. This is the smallest
+     * arrangement that is honest about how one exists: `createDatabase` holds the
+     * schema (which is why the real `client.ts` is allowlisted) and returns a
+     * handle whose `query` carries every registered table.
+     */
+    const handleFixture: Record<string, string> = {
+      'packages/db/src/client.ts':
+        "import * as schema from './schema.js';\n" +
+        'export function createDatabase() {\n' +
+        '  return { query: schema };\n' +
+        '}\n',
+      'packages/db/src/index.ts': "export * from './schema.js';\nexport * from './client.js';\n",
+    };
+
+    /** The access half's verdict for a fixture, with `client.ts` vetted. */
+    function accessesOf(rule: BoundaryRule): { file: string; kind: string }[] {
+      const { accesses } = analyzeImportBoundary({
+        ...rule,
+        allowed: ['packages/db/src/client.ts'],
+      });
+      return accesses.map((access) => ({ file: access.file, kind: access.kind }));
+    }
+
     it('fires on the plain named import — the shape round 6 did catch', () => {
       // The control for the fixture harness itself. If this did not fire, every
       // assertion below would be measuring a mini-repo that resolves nothing.
@@ -493,12 +520,7 @@ describe('room membership is not reachable outside @atrium/auth', () => {
        * registered the schema, so drizzle's relational API has it by name.
        */
       const rule = fixture({
-        'packages/db/src/client.ts':
-          "import * as schema from './schema.js';\n" +
-          'export function createDatabase() {\n' +
-          '  return { query: schema };\n' +
-          '}\n',
-        'packages/db/src/index.ts': "export * from './schema.js';\nexport * from './client.js';\n",
+        ...handleFixture,
         'apps/web/lib/rooms.ts':
           "import { createDatabase } from '@atrium/db';\n" +
           'export const t = createDatabase().query.memberships;\n',
@@ -511,16 +533,290 @@ describe('room membership is not reachable outside @atrium/auth', () => {
       const { accesses } = analyzeImportBoundary(withClientAllowed);
       expect(accesses.map((access) => access.file)).toEqual(['apps/web/lib/rooms.ts']);
       expect(accesses[0]?.text).toContain('memberships');
+      expect(accesses[0]?.kind).toBe('property');
     });
 
     it('fires on the same access written as a string index', () => {
-      // `db['query']['memberships']` is the same read with the property name
-      // moved into a string, which is where a name-based check usually stops.
+      /**
+       * `db['query']['memberships']` is the same read with the property name
+       * moved into a string, which is where a name-based check usually stops.
+       *
+       * **Round 7 wrote this against `(globalThis as any).db`**, which was a way
+       * of having *some* receiver rather than a claim about which one. That
+       * stopped firing when the check became receiver-aware, and the fixture is
+       * on a real handle now — which is both the realistic shape and the one
+       * that keeps the assertion about the string index rather than about
+       * `globalThis`.
+       */
       const rule = fixture({
-        'apps/web/lib/rooms.ts': "export const t = (globalThis as any).db['memberships'];\n",
+        ...handleFixture,
+        'apps/web/lib/rooms.ts':
+          "import { createDatabase } from '@atrium/db';\n" +
+          "export const t = createDatabase().query['memberships'];\n",
       });
-      const { accesses } = analyzeImportBoundary(rule);
+      const { accesses } = analyzeImportBoundary({
+        ...rule,
+        allowed: ['packages/db/src/client.ts'],
+      });
       expect(accesses.map((access) => access.file)).toEqual(['apps/web/lib/rooms.ts']);
+      expect(accesses[0]?.kind).toBe('string-index');
+    });
+
+    /**
+     * The evasions the round-7 AST rewrite admitted, one fixture each.
+     *
+     * Round 7 replaced a regex with a reachability analysis and measured it: of
+     * twelve evasion fixtures, round 6's regex caught two. The round-7 gauntlet
+     * then demonstrated two more evasions of the *rewrite* — both against the
+     * access half, which only ever looked at property and element access. These
+     * are those, plus the shapes around them, measured the same way against the
+     * round-7 analysis (`node scripts/mutation-ledger.mjs r7-access-analysis`).
+     */
+    describe('evasions the round-7 access check admitted', () => {
+      it('fires on the table destructured straight off a handle', () => {
+        /**
+         * The round-7 delta's first example. No forbidden import, no property
+         * access, no element access — and `rows` is the table.
+         *
+         * Catches: an access check that walks `PropertyAccessExpression` and
+         * `ElementAccessExpression` and nothing else, which is what
+         * `import-boundary.ts:326` did.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function load() {\n' +
+            '  const { memberships } = createDatabase().query;\n' +
+            '  return memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'destructured' }]);
+      });
+
+      it('fires when the destructured table is renamed', () => {
+        // Verbatim from the round-7 delta. Renaming is the first thing anybody
+        // tries against a check that greps for a name.
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function load() {\n' +
+            '  const { memberships: rows } = createDatabase().query;\n' +
+            '  return rows.findMany;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'destructured' }]);
+      });
+
+      it('fires when the destructuring is nested', () => {
+        /**
+         * `const { query: { memberships } } = db()` never names `query` and
+         * `memberships` in the same access, so a check that looked only at the
+         * top level of a pattern would miss it. The receiver fact has to travel
+         * down the pattern, which is what the recursion is for.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function load() {\n' +
+            '  const {\n' +
+            '    query: { memberships },\n' +
+            '  } = createDatabase();\n' +
+            '  return memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'destructured' }]);
+      });
+
+      it('fires on a table read off a handle that was destructured first', () => {
+        /**
+         * The two halves the other way round: destructure `query` off the
+         * handle, then reach the table off *that*. It only fires if a name bound
+         * by destructuring a handle is itself treated as a handle — which is the
+         * difference between following a value and pattern-matching a shape.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function load() {\n' +
+            '  const { query } = createDatabase();\n' +
+            '  return query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires on a computed key it cannot resolve', () => {
+        /**
+         * The round-7 delta's second example: `db().query['member' + 'ships']`.
+         * The key is not a literal, so a literal-key check sees nothing.
+         *
+         * Reported rather than resolved, and deliberately: constant-folding this
+         * one would leave `db.query[name]` open, and "we could not tell" must not
+         * read as "it was fine" — the same rule the computed-*specifier* half has
+         * followed since round 7. It is affordable because it is asked only of a
+         * database handle; an app has no reason to index one dynamically.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            "export const t = createDatabase().query['member' + 'ships'];\n",
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'computed-key' }]);
+      });
+
+      it('fires on a computed key held in a variable', () => {
+        // The same evasion without the concatenation, which is the shape anybody
+        // writing it to evade the check would actually use.
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            "const table = ['member', 'ships'].join('');\n" +
+            'export const t = createDatabase().query[table];\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'computed-key' }]);
+      });
+
+      it('fires through a handle the app gets from its own module', () => {
+        /**
+         * How both apps actually hold a connection: `apps/web/lib/db.ts` exports
+         * `function db(): Database`, and every page and action calls it. Nothing
+         * in `rooms.ts` mentions `@atrium/db`, so the handle has to be followed
+         * *across* the module boundary for this to fire at all.
+         *
+         * Catches: a receiver check seeded only from direct imports of the
+         * declaring package — which would be receiver-aware and useless, because
+         * no app file imports it directly.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/db.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function db() {\n' +
+            '  return createDatabase();\n' +
+            '}\n',
+          'apps/web/lib/rooms.ts':
+            "import { db } from './db.js';\n" + 'export const t = db().query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires through a handle declared only by its type annotation', () => {
+        /**
+         * `apps/web/lib/db.ts`'s real signature is `export function db():
+         * Database` — the body goes through a `globalThis` cache, so there is
+         * nothing syntactic to follow, and the annotation is the only statement
+         * that this is a connection. It is the author's statement, which is a
+         * better signal than any guess, and this is where it is honoured.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'packages/db/src/index.ts':
+            "export * from './schema.js';\n" +
+            "export * from './client.js';\n" +
+            'export type Database = { query: unknown };\n',
+          'apps/web/lib/db.ts':
+            "import type { Database } from '@atrium/db';\n" +
+            'export function db(): Database {\n' +
+            '  return (globalThis as { handle?: Database }).handle as Database;\n' +
+            '}\n',
+          'apps/web/lib/rooms.ts':
+            "import { db } from './db.js';\n" +
+            'export function load() {\n' +
+            '  const { memberships } = db().query;\n' +
+            '  return memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'destructured' }]);
+      });
+
+      it('fires on a handle taken as an annotated parameter', () => {
+        // The other half of the annotation rule, and the shape every function in
+        // `packages/auth` uses: `function f(db: Database)`.
+        const rule = fixture({
+          ...handleFixture,
+          'packages/db/src/index.ts':
+            "export * from './schema.js';\n" +
+            "export * from './client.js';\n" +
+            'export type Database = { query: unknown };\n',
+          'apps/web/lib/rooms.ts':
+            "import type { Database } from '@atrium/db';\n" +
+            'export function load(db: Database) {\n' +
+            '  return db.query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+    });
+
+    /**
+     * The narrowing the round-7 gauntlet asked for, as tests.
+     *
+     * Round 7's access check flagged `anything.memberships` anywhere under
+     * `apps/` — a response body, a domain object, a React prop. A boundary check
+     * that fails on a view model teaches people to rename their fields, and a
+     * rule people work around is not a rule. These four are the legitimate code
+     * that must keep compiling; without them the widening above would just be a
+     * noisier version of the same mistake.
+     */
+    describe('and the receiver, without which the widening is just noise', () => {
+      it('ignores the word on a value that never came from the database', () => {
+        const rule = fixture({
+          'apps/web/lib/rooms.ts':
+            'export async function load() {\n' +
+            "  const response = await fetch('/api/workspace');\n" +
+            '  const body = (await response.json()) as { memberships: string[] };\n' +
+            '  return body.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('ignores a domain object that has a memberships field', () => {
+        // The API-shape case: a workspace summary the server already computed,
+        // through the vetted reader, with the joined read behind it.
+        const rule = fixture({
+          'apps/web/lib/rooms.ts':
+            'interface Workspace {\n' +
+            '  memberships: number;\n' +
+            '}\n' +
+            'export function count(workspace: Workspace) {\n' +
+            '  return workspace.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('ignores a React prop destructured in a parameter', () => {
+        const rule = fixture({
+          'apps/web/lib/rooms.ts':
+            'export function List({ memberships }: { memberships: string[] }) {\n' +
+            '  return memberships.length;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
+      it('ignores a computed key on something that is not a handle', () => {
+        /**
+         * The control that pays for the conservative computed-key rule. Every
+         * `record[key]` in an app would fire if the receiver were not asked
+         * about — which is precisely the objection round 7's known-limits
+         * section raised against doing this at all.
+         */
+        const rule = fixture({
+          'apps/web/lib/rooms.ts':
+            'export function pick(record: Record<string, string>, key: string) {\n' +
+            '  return record[key];\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
     });
 
     it('reports a computed dynamic specifier instead of ignoring it', () => {

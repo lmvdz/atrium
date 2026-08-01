@@ -242,19 +242,34 @@ protocol (#22) builds on. Two things happen alongside it:
   off that room's roster and closes it with 1008, because "cannot send" is not
   revocation and "cannot see" is. In production the server **refuses to start**
   without a session validator rather than defaulting to trusting the handshake.
-- **Accepted, and bounded at one sweep: presence keeps arriving for up to 15s.**
-  A socket that joined a room before its owner was removed stays on that room's
-  roster until the next sweep, and `broadcastPresence` fans out to the roster
-  without re-asking membership per recipient. So for at most
-  `WS_SWEEP_INTERVAL_MS` a removed member can still see *who is connected* to a
-  room they have lost. Command authority is already gone — the very next frame
-  they send is refused — and no room content travels on that path; it is a list
-  of display names. Re-checking membership per recipient would put a database
-  read on every presence fan-out to shorten a window on non-content, so the
-  clean fix is a post-commit eviction signal instead, which needs the
-  LISTEN/NOTIFY plumbing #22 is building. Routed to **#27**. The same paragraph
-  is on `broadcastPresence` in `apps/server/src/ws-server.ts`, which is the line
-  that produces the window.
+- **Accepted, and genuinely bounded: presence keeps arriving until the sweep
+  notices.** A socket that joined a room before its owner was removed stays on
+  that room's roster until the sweep takes it off, and `broadcastPresence` fans
+  out to the roster without re-asking membership per recipient. So a removed
+  member can still see *who is connected* to a room they have lost, for as long
+  as it takes the sweep to reach them. That is bounded two ways, and there is no
+  third case:
+  - **the membership lookup answers** — at most `WS_SWEEP_INTERVAL_MS` (15s);
+  - **it does not answer**, because it threw or because it never returned at all
+    — at most `WS_SWEEP_FAILURE_LIMIT` sweeps (3) or `WS_SWEEP_UNVERIFIED_MS`
+    (60s), whichever comes first, and then the socket is closed with 1008.
+
+  A lookup cannot buy itself more time by hanging: every lookup inside a sweep
+  is deadlined, a sweep that overruns cannot stop the next one starting, and a
+  hung lookup counts as a failure to verify rather than as a pause. That last
+  part is a correction: through round 7 the 15s figure was the *default
+  configuration* rather than a guarantee, because one wedged query held the
+  sweep latch and every later sweep was skipped.
+
+  Command authority is already gone inside the window — the very next frame they
+  send is refused — and no room content travels on that path; it is a list of
+  display names. Re-checking membership per recipient would put a database read
+  on every presence fan-out to shorten a window on non-content, so the clean fix
+  is a post-commit eviction signal instead, which needs the LISTEN/NOTIFY
+  plumbing #22 is building. Routed to **#27**. The same paragraph is on
+  `broadcastPresence` in `apps/server/src/ws-server.ts`, which is the line that
+  produces the window, and `apps/server/test/ws-server.test.ts` measures both
+  bounds with a clock rather than restating them.
 
 Removing or demoting a workspace member reconciles room membership in the same
 request (`packages/auth/src/org.ts`, `workspace.ts`) — room membership is what

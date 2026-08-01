@@ -139,7 +139,7 @@ const mutations = {
 
   'drop-ceiling': [
     'the join stays, only the role ceiling goes — isolates the demotion half',
-    'room-access.spec.ts 1 of 7, and packages/auth/test/room-access.test.ts 4 of 9',
+    'room-access.spec.ts 1 of 7, and packages/auth/test/room-access.test.ts 4 of 48',
     () =>
       edit('packages/auth/src/room-access.ts', [
         [
@@ -151,7 +151,7 @@ const mutations = {
 
   'drop-report': [
     "round 5's swallow: log the message, tell nobody",
-    'packages/auth/test/org.test.ts — 3 of 40',
+    'packages/auth/test/org.test.ts — 14 of 51 (round 7 recorded 3 of 40; the reporter now has eleven more tests around it)',
     () =>
       edit('packages/auth/src/org.ts', [
         [
@@ -188,19 +188,19 @@ const mutations = {
 
   'drop-await': [
     "round 6's un-awaited reporter — the live crash path",
-    'packages/auth/test/org.test.ts — 4 of 45, including the unhandled-rejection watch',
+    'packages/auth/test/org.test.ts — 8 of 51, including the unhandled-rejection watch (round 7: 4 of 45)',
     () =>
       edit('packages/auth/src/org.ts', [
         [
-          '      await input.onCleanupFailure?.(failure);',
-          '      input.onCleanupFailure?.(failure);',
+          '      const returned = input.onCleanupFailure?.(failure);',
+          '      input.onCleanupFailure?.(failure);\n      const returned = undefined;',
         ],
       ]),
   ],
 
   'unguard-logger': [
     "round 6's unprotected `logger.error` — a throwing log transport fails a committed removal",
-    'packages/auth/test/org.test.ts — 2 of 45',
+    'packages/auth/test/org.test.ts — 2 of 51',
     () =>
       edit('packages/auth/src/org.ts', [
         [
@@ -212,7 +212,7 @@ const mutations = {
 
   'boundary-names-only': [
     'the import boundary stops looking at whole-module references (namespace, dynamic, require, `export *`)',
-    'packages/auth/test/room-access.test.ts — 5 of 35',
+    'packages/auth/test/room-access.test.ts — 5 of 48',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
@@ -224,7 +224,7 @@ const mutations = {
 
   'boundary-no-helpers': [
     'rule 2 goes: a module may hold the table and export a wrapper around it',
-    'packages/auth/test/room-access.test.ts — 3 of 35, including the empty-allowlist premise',
+    'packages/auth/test/room-access.test.ts — 3 of 48, including the empty-allowlist premise',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         ['        if (touches) before.all = true;', '        void touches;'],
@@ -232,20 +232,20 @@ const mutations = {
   ],
 
   'boundary-no-access': [
-    'the property-access half goes — `db.query.memberships` off a handle stops being seen',
-    'packages/auth/test/room-access.test.ts — 2 of 35',
+    'the whole access half goes — the table reached off a handle stops being seen at all',
+    'packages/auth/test/room-access.test.ts — 8 of 48',
     () =>
       edit('packages/auth/test/support/import-boundary.ts', [
         [
-          'readModule(absolute, path, rule.forbiddenAccessName)',
-          'readModule(absolute, path, undefined)',
+          '    if (rule.forbiddenAccessName !== undefined) {',
+          '    if (rule.forbiddenAccessName === undefined) {',
         ],
       ]),
   ],
 
   'regex-boundary': [
     "round 6's regex, in effect: named imports of a literal specifier and nothing else",
-    'packages/auth/test/room-access.test.ts — 11 of 35; of the 12 evasion fixtures, 2 still fire',
+    'packages/auth/test/room-access.test.ts — 20 of 48; of the 24 evasion fixtures, 6 still fire — the named-import shapes the regex was written for',
     () => {
       mutations['boundary-names-only'][2]();
       mutations['boundary-no-helpers'][2]();
@@ -285,6 +285,61 @@ const mutations = {
         [
           'function withDeadline(\n  work: Promise<unknown>,',
           "async function withoutDeadline(\n  work: Promise<unknown>,\n  _timeoutMs: number,\n  _onLateRejection: (reason: unknown) => void,\n): Promise<'settled' | 'timed-out'> {\n  await work;\n  return 'settled';\n}\n\nfunction withDeadline(\n  work: Promise<unknown>,",
+        ],
+      ]),
+  ],
+
+  'r7-access-analysis': [
+    "round 7's access check in effect: receiver-blind, property and literal string index only",
+    'packages/auth/test/room-access.test.ts — 8 of 48. The measurement behind the round-8 receipt: 6 of the 9 new evasion fixtures walk past round 7, and 2 of the 4 receiver controls go red on legitimate code',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          '  const visit = (node: ts.Node): void => {\n    if (ts.isPropertyAccessExpression(node)) {',
+          '  const visit = (node: ts.Node): void => {\n' +
+            '    const r7Named =\n' +
+            '      (ts.isPropertyAccessExpression(node) && node.name.text === accessName) ||\n' +
+            '      (ts.isElementAccessExpression(node) &&\n' +
+            '        ts.isStringLiteral(node.argumentExpression) &&\n' +
+            '        node.argumentExpression.text === accessName);\n' +
+            "    if (r7Named) record(node, ts.isElementAccessExpression(node) ? 'string-index' : 'property');\n" +
+            '    ts.forEachChild(node, visit);\n' +
+            '    return;\n' +
+            '    // biome-ignore lint/correctness/noUnreachable: mutation\n' +
+            '    if (ts.isPropertyAccessExpression(node)) {',
+        ],
+      ]),
+  ],
+
+  'boundary-no-destructuring': [
+    'the destructuring half goes — `const { memberships: rows } = db().query` becomes invisible again',
+    'packages/auth/test/room-access.test.ts — 4 of 48',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          '      walkPattern(node.name);\n    }\n    ts.forEachChild(node, visit);',
+          '      void walkPattern;\n    }\n    ts.forEachChild(node, visit);',
+        ],
+      ]),
+  ],
+
+  'boundary-literal-keys-only': [
+    'the unresolvable-key half goes — `db().query[someVar]` reads as fine again',
+    'packages/auth/test/room-access.test.ts — 2 of 48',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        ["          record(node, 'computed-key');", '          void 0;'],
+      ]),
+  ],
+
+  'boundary-blind-receiver': [
+    'the receiver question goes — every `anything.memberships` under apps/ fires again',
+    'packages/auth/test/room-access.test.ts — 4 of 48: three receiver controls plus the real-repo access assertion, which then names 23 legitimate computed accesses under apps/ (`order[level]`, `errors[error]`, `holder[key]`…). That list is the argument for asking about the receiver.',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          '    const isHandle = (node: ts.Expression): boolean => {',
+          '    const isHandle = (_node: ts.Expression): boolean => {\n      return true;\n      // biome-ignore lint/correctness/noUnreachable: mutation\n    };\n    const unusedIsHandle = (node: ts.Expression): boolean => {',
         ],
       ]),
   ],
