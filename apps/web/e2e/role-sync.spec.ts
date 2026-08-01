@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
+  createDefaultRoom,
   joinWorkspaceRooms,
   memberLockKeys,
+  memberLockTimeoutMs,
   revokeAcceptedInvitation,
   revokeWorkspaceRooms,
   syncWorkspaceRoomRoles,
@@ -385,5 +387,331 @@ test.describe('compensating an invitation reports what it found', () => {
         email: 'nobody@atrium.test',
       }),
     ).toEqual({ removed: false, rooms: 0 });
+  });
+
+  /**
+   * Major finding, round-4 delta: the compensation could leave room access
+   * behind.
+   *
+   * Round 4 revoked the room rows through `revokeWorkspaceRooms` — its own
+   * transaction, its own acquisition of the member lock — and then deleted the
+   * `workspace_members` row in a *second* statement. Codex walked the
+   * interleaving: the first transaction commits and **releases the lock**, a
+   * concurrent `afterAcceptInvitation → joinWorkspaceRooms` takes it while the
+   * member row is still there, reads that row, inserts room membership, and
+   * finishes. The compensator then deletes only the workspace row. Final state:
+   * no workspace membership, retained room access — the exact residue the
+   * compensation exists to remove.
+   *
+   * ## Forcing the interleaving, deterministically
+   *
+   * The e2e above is serial, and a concurrency test that relies on timing
+   * proves nothing on a fast machine. So the schedule is *held in place* with a
+   * barrier Postgres enforces rather than a sleep: a third session opens a
+   * transaction and takes a **row lock** on the invitee's `workspace_members`
+   * row (`SELECT … FOR UPDATE`). It takes no advisory lock, so it does not
+   * interfere with the mechanism under test — it only makes one specific
+   * statement, `DELETE FROM workspace_members`, block until the test says
+   * otherwise.
+   *
+   * That parks the compensator at precisely the moment the finding is about:
+   *
+   *  - **Round 4's shape:** the room rows are already deleted, the first
+   *    transaction has committed, the member lock is *free*, and the member row
+   *    still exists. A join started now sails through and re-grants the rooms.
+   *  - **This shape:** both deletes are one transaction, so the compensator is
+   *    parked *holding* the member lock. A join started now blocks, and when it
+   *    finally runs there is no member row for it to read — which
+   *    `joinWorkspaceRooms` treats as a refusal rather than as "use the role I
+   *    was given".
+   *
+   * Catches, each independently: (1) splitting the compensation back into two
+   * transactions — the joiner is then not blocked and the `settled` assertion
+   * fails immediately; (2) restoring `committed ?? input.role` in
+   * `joinWorkspaceRooms` — the joiner then grants rooms to a non-member and the
+   * final assertions fail.
+   */
+  test('an acceptance racing the compensation cannot leave room access behind', async () => {
+    const at = await fixture('admin', 'admin');
+    const [invitee] = await db
+      .insert(users)
+      .values({
+        email: `racing-${randomUUID().slice(0, 8)}@atrium.test`,
+        displayName: 'racing invitee',
+        emailVerified: true,
+      })
+      .returning({ id: users.id, email: users.email });
+    if (!invitee) throw new Error('invitee insert returned nothing');
+
+    await db
+      .insert(workspaceMembers)
+      .values({ organizationId: at.workspaceId, userId: invitee.id, role: 'admin' });
+    await db.insert(memberships).values({ roomId: at.roomId, userId: invitee.id, role: 'admin' });
+
+    const barrier = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+    let releaseBarrier: () => void = () => {};
+    const barrierReleased = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    let barrierTaken: () => void = () => {};
+    const taken = new Promise<void>((resolve) => {
+      barrierTaken = resolve;
+    });
+
+    // The barrier: a row lock on the member row, and nothing else. Held open
+    // until this test releases it.
+    const held = barrier.begin(async (tx) => {
+      await tx`select 1 from workspace_members
+               where organization_id = ${at.workspaceId} and user_id = ${invitee.id}
+               for update`;
+      barrierTaken();
+      await barrierReleased;
+    });
+
+    try {
+      await Promise.race([
+        taken,
+        held.then(() => {
+          throw new Error('the barrier transaction ended before it took the row lock');
+        }),
+      ]);
+
+      // The compensator. It deletes the room rows, then blocks on the member
+      // row — inside the member lock, which is the property under test.
+      const compensating = revokeAcceptedInvitation(db, {
+        workspaceId: at.workspaceId,
+        email: invitee.email,
+      });
+      const compensated = settled(compensating);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(compensated(), 'the compensation ran through the row lock').toBe(false);
+
+      // The acceptance that beat it, started in exactly the window round 4 left
+      // open. It must not get in.
+      const joining = joinWorkspaceRooms(db, {
+        workspaceId: at.workspaceId,
+        userId: invitee.id,
+        role: 'admin',
+      });
+      const joined = settled(joining);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(
+        joined(),
+        'a join ran while the compensation was mid-flight — the member lock was released between its two writes',
+      ).toBe(false);
+
+      releaseBarrier();
+      expect(await compensating).toEqual({ removed: true, rooms: 1 });
+
+      // And now the join gets its turn, against a workspace it is no longer a
+      // member of. It grants nothing.
+      expect(await joining).toBe(0);
+    } finally {
+      releaseBarrier();
+      await held.catch(() => {});
+      await barrier.end({ timeout: 5 });
+    }
+
+    const leftBehind = await db
+      .select({ id: memberships.id })
+      .from(memberships)
+      .where(eq(memberships.userId, invitee.id));
+    expect(leftBehind, 'room membership survived the compensation').toHaveLength(0);
+
+    const member = await db
+      .select({ id: workspaceMembers.id })
+      .from(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.organizationId, at.workspaceId),
+          eq(workspaceMembers.userId, invitee.id),
+        ),
+      );
+    expect(member).toHaveLength(0);
+  });
+
+  test('joining grants nothing at all when there is no workspace member row', async () => {
+    /**
+     * The second half of the same fix, on its own so its mutation is separable.
+     *
+     * Round 4 read a missing committed role as "the library has not committed
+     * yet, so use the role I was handed". The ordering is the other way round —
+     * Better Auth awaits its own transaction before calling
+     * `afterAcceptInvitation` — so an absent member row means gone, not
+     * pending, and granting rooms on it is the residue the compensation exists
+     * to prevent.
+     *
+     * Catches: restoring `lowerOf(input.role, committed ?? input.role)`.
+     */
+    const at = await fixture('member', 'member');
+    await db.delete(memberships).where(eq(memberships.userId, at.userId));
+    await db
+      .delete(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.organizationId, at.workspaceId),
+          eq(workspaceMembers.userId, at.userId),
+        ),
+      );
+
+    expect(
+      await joinWorkspaceRooms(db, {
+        workspaceId: at.workspaceId,
+        userId: at.userId,
+        role: 'admin',
+      }),
+    ).toBe(0);
+    expect(await roomRoleOf(at)).toBeNull();
+  });
+});
+
+/**
+ * The lock's other bound: how long anything waits for it.
+ *
+ * `pg_advisory_xact_lock` waits forever by default, so round 4's version of
+ * this file made a stalled holder — a paused connection, a transaction whose
+ * client vanished — hang every subsequent mutation on that member indefinitely,
+ * with nothing logged and nothing changed. Codex's round-4 delta listed it as
+ * polish; it is the difference between a failed request and a wedged one.
+ */
+test.describe('a stalled lock holder cannot hang a member’s mutations forever', () => {
+  test('gives up after memberLockTimeoutMs instead of waiting for the holder', async () => {
+    /**
+     * Catches: removing the `set local lock_timeout` from `withMemberLock`.
+     * Without it this test does not fail — it *hangs*, and Playwright's 60s
+     * timeout is what would report it. The assertion on elapsed time is what
+     * distinguishes "bounded" from "eventually", and the `MemberLockTimeoutError`
+     * name is what distinguishes it from any other failure.
+     */
+    const at = await fixture('admin', 'admin');
+    const [first, second] = memberLockKeys(at.workspaceId, at.userId);
+
+    const holder = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+    try {
+      await holder`select pg_advisory_lock(${first}, ${second})`;
+
+      const startedAt = Date.now();
+      const failure = await syncWorkspaceRoomRoles(db, {
+        workspaceId: at.workspaceId,
+        userId: at.userId,
+      }).then(
+        () => null,
+        (error: Error) => error,
+      );
+      const elapsed = Date.now() - startedAt;
+
+      expect(failure, 'the sync succeeded while another session held its lock').not.toBeNull();
+      expect(failure?.name).toBe('MemberLockTimeoutError');
+      expect(failure?.message).toContain('pg_stat_activity');
+      // Bounded: it waited roughly the timeout, not forever and not zero.
+      expect(elapsed).toBeGreaterThanOrEqual(memberLockTimeoutMs - 500);
+      expect(elapsed).toBeLessThan(memberLockTimeoutMs + 5_000);
+
+      // And it changed nothing on its way out.
+      expect(await roomRoleOf(at)).toBe('admin');
+    } finally {
+      await holder`select pg_advisory_unlock(${first}, ${second})`;
+      await holder.end({ timeout: 5 });
+    }
+  });
+
+  test('the room writes of a new workspace happen under the member lock too', async () => {
+    /**
+     * Round 4 left `createDefaultRoom` outside the lock on the argument that its
+     * caller has nothing to race with — an argument about a caller, not about
+     * the function. Codex flagged it; the rule worth having is that every write
+     * to `memberships` for one member happens under that member's lock.
+     *
+     * Catches: taking `createDefaultRoom` back out of `withMemberLock`. Without
+     * the lock this call completes while the holder still holds it.
+     */
+    const at = await fixture('owner', 'owner');
+    const [first, second] = memberLockKeys(at.workspaceId, at.userId);
+
+    const holder = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+    try {
+      await holder`select pg_advisory_lock(${first}, ${second})`;
+      const creating = createDefaultRoom(db, {
+        workspaceId: at.workspaceId,
+        userId: at.userId,
+        role: 'owner',
+      });
+      const done = settled(creating);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(done(), 'createDefaultRoom wrote room membership without the member lock').toBe(false);
+
+      await holder`select pg_advisory_unlock(${first}, ${second})`;
+      await creating;
+    } finally {
+      await holder.end({ timeout: 5 });
+    }
+  });
+});
+
+/**
+ * The lock key, and the one honest thing to say about FNV-1a.
+ *
+ * It is not collision-resistant and this does not pretend it is. What matters
+ * is the *direction* a collision fails in, which is the safe one: colliding
+ * pairs take the same lock and serialize against each other. The failure that
+ * would matter — two operations on the *same* pair taking *different* locks —
+ * is impossible because the key is a pure function of the two ids and every
+ * caller derives it from this one place.
+ */
+test.describe('the lock key', () => {
+  test('is a pure function of the pair, so the same member never splits a lock', () => {
+    // Catches: seeding the hash with anything per-call (a timestamp, a random
+    // salt, `Math.random()` in a retry path). That is the only mutation that
+    // could turn a collision property into a mutual-exclusion bug.
+    const a = memberLockKeys('workspace-1', 'user-1');
+    const b = memberLockKeys('workspace-1', 'user-1');
+    expect(a).toEqual(b);
+    expect(memberLockKeys('workspace-1', 'user-2')).not.toEqual(a);
+    expect(memberLockKeys('workspace-2', 'user-1')).not.toEqual(a);
+  });
+
+  test('keeps the two ids in separate halves, so a collision needs both to collide', () => {
+    // Catches: hashing `${workspaceId}:${userId}` into one number, which makes
+    // the whole 64-bit space one 32-bit space and multiplies collisions —
+    // still not a correctness bug, and still a needless bottleneck.
+    const [firstA] = memberLockKeys('workspace-1', 'user-1');
+    const [firstB] = memberLockKeys('workspace-1', 'user-2');
+    expect(firstA).toBe(firstB);
+    const [, secondA] = memberLockKeys('workspace-1', 'user-1');
+    const [, secondB] = memberLockKeys('workspace-2', 'user-1');
+    expect(secondA).toBe(secondB);
+  });
+
+  test('a collision serializes two unrelated members and never skips a lock', async () => {
+    /**
+     * The property, demonstrated rather than asserted: two *different* pairs
+     * that happen to share a key contend, so the cost of a collision is
+     * throughput. Rather than search for a natural FNV collision, this takes
+     * one pair's key from outside and shows that a *different* pair whose ids
+     * hash to it waits — which is what a collision is.
+     *
+     * The keys are integers, so "another pair that hashes here" is simulated
+     * exactly by holding those integers. Nothing about the outcome depends on
+     * which strings produced them.
+     */
+    const at = await fixture('admin', 'admin');
+    const [first, second] = memberLockKeys(at.workspaceId, at.userId);
+
+    const holder = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+    try {
+      await holder`select pg_advisory_lock(${first}, ${second})`;
+      const sync = syncWorkspaceRoomRoles(db, {
+        workspaceId: at.workspaceId,
+        userId: at.userId,
+      });
+      const done = settled(sync);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Waiting, not bypassing: the collision costs time and takes nothing away.
+      expect(done()).toBe(false);
+      await holder`select pg_advisory_unlock(${first}, ${second})`;
+      await sync;
+    } finally {
+      await holder.end({ timeout: 5 });
+    }
   });
 });

@@ -109,8 +109,24 @@ export function roomRole(workspaceRole: string, logger: ReconcileLogger = silent
  * Two 32-bit integers rather than one 64-bit one because `pg_advisory_xact_lock`
  * takes that form and it keeps the two ids in separate halves of the space, so a
  * collision needs both halves to collide. FNV-1a because it is short, has no
- * dependencies, and this is a lock key rather than a digest — a collision costs
- * two unrelated members some serialization, never correctness.
+ * dependencies, and this is a lock key rather than a digest.
+ *
+ * ## The collision property, stated honestly
+ *
+ * FNV-1a is not collision-resistant and nothing here pretends it is. What
+ * matters is **which direction a collision fails in**, and it is the safe one:
+ * two different (workspace, member) pairs that hash to the same key pair take
+ * *the same* lock, so they serialize against each other. The cost is
+ * throughput — two unrelated members briefly queue behind one another — and the
+ * cost is never correctness, because the lock is only ever used to make one
+ * member's own reads and writes atomic with respect to each other.
+ *
+ * The failure that *would* matter is the opposite one: two operations on the
+ * **same** pair taking **different** locks and therefore not excluding each
+ * other. That cannot happen, because the key is a pure function of the two ids
+ * and every caller derives it here. An attacker who could choose ids to force a
+ * collision would gain a slower workspace and nothing else — there is no path
+ * from "these two share a lock" to "this one skipped a lock".
  *
  * Exported so a test can take the *same* lock from a second connection and prove
  * the reconciliation actually waits for it, rather than asserting that a line of
@@ -131,6 +147,72 @@ function fnv1a(value: string): number {
 }
 
 /**
+ * How long any of these transactions will wait for a lock before giving up.
+ *
+ * `pg_advisory_xact_lock` waits forever by default, and "forever" is a real
+ * outcome: a holder that stalls — a paused connection, a transaction whose
+ * client went away without the server noticing, a query stuck behind something
+ * else — hangs *every* subsequent mutation on that member indefinitely. In this
+ * package that means a removal, a demotion or an invitation compensation that
+ * never returns and never errors, which is the worst shape a failure can take:
+ * the caller's request hangs, nothing is logged, and nothing has happened.
+ *
+ * Five seconds. Long enough that ordinary contention (these transactions are
+ * three statements) never trips it, short enough that a stall surfaces as a
+ * failed request an operator can see.
+ *
+ * Deliberately a constant and not a setting. Postgres reads `lock_timeout = 0`
+ * as *disabled*, so a knob here would ship with a value that restores the hang
+ * — the same reason `WS_SWEEP_INTERVAL_MS` has a floor rather than an "off".
+ *
+ * `SET LOCAL` scopes it to this transaction, so it is reverted on commit or
+ * rollback and never leaks to the next user of a pooled connection.
+ */
+export const memberLockTimeoutMs = 5_000;
+
+/** Postgres `lock_not_available`, which is what `lock_timeout` raises. */
+const lockTimeoutSqlState = '55P03';
+
+/**
+ * A stalled lock holder, named rather than surfaced as a raw driver error.
+ *
+ * The hooks in `org.ts` already treat a thrown error as "this mutation did not
+ * happen" and fail closed on it. This only makes the reason legible in a log.
+ */
+export class MemberLockTimeoutError extends Error {
+  constructor(workspaceId: string, userId: string) {
+    super(
+      `timed out after ${memberLockTimeoutMs}ms waiting for the (workspace, member) ` +
+        `lock on ${workspaceId}/${userId}. Another transaction is holding it; nothing ` +
+        'was changed. If this recurs, look for a stalled connection in pg_stat_activity ' +
+        '— see memberLockTimeoutMs in packages/auth/src/workspace.ts.',
+    );
+    this.name = 'MemberLockTimeoutError';
+  }
+}
+
+/**
+ * Walks the `cause` chain, because drizzle wraps.
+ *
+ * Measured rather than assumed: drizzle-orm 0.45 rethrows a failed statement as
+ * a `DrizzleQueryError` whose `name` is the plain `'Error'` and which carries no
+ * `code` of its own — the postgres-js `PostgresError` with `code: '55P03'` is
+ * one `cause` down. A check that only looked at the top-level error would
+ * silently never match, which is how a guard becomes decoration. The chain is
+ * bounded so a self-referential `cause` cannot spin.
+ */
+function isLockTimeout(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && typeof current === 'object' && current !== null; depth += 1) {
+    if ((current as { code?: unknown }).code === lockTimeoutSqlState) return true;
+    const next: unknown = (current as { cause?: unknown }).cause;
+    if (next === current) return false;
+    current = next;
+  }
+  return false;
+}
+
+/**
  * Anything that touches one member's room rows runs inside this.
  *
  * A transaction-scoped advisory lock: taken here, released by the commit or
@@ -138,6 +220,11 @@ function fnv1a(value: string): number {
  * still holding it. That last property is why it is `_xact_` and not the
  * session-scoped form — with a pool, "the same session" is not something a
  * caller can promise.
+ *
+ * `lock_timeout` is set first, so the wait is bounded (see above). It bounds
+ * *every* lock this transaction waits for, not only the advisory one — a row
+ * lock held on `workspace_members` by somebody else counts too, which is the
+ * right answer for the same reason.
  */
 async function withMemberLock<T>(
   db: Database,
@@ -146,10 +233,18 @@ async function withMemberLock<T>(
   body: (tx: Database) => Promise<T>,
 ): Promise<T> {
   const [first, second] = memberLockKeys(workspaceId, userId);
-  return db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(${first}, ${second})`);
-    return body(tx as unknown as Database);
-  });
+  try {
+    return await db.transaction(async (tx) => {
+      // `sql.raw`, because SET takes no bind parameters. The value is a module
+      // constant that is never derived from input.
+      await tx.execute(sql.raw(`set local lock_timeout = ${memberLockTimeoutMs}`));
+      await tx.execute(sql`select pg_advisory_xact_lock(${first}, ${second})`);
+      return body(tx as unknown as Database);
+    });
+  } catch (error) {
+    if (isLockTimeout(error)) throw new MemberLockTimeoutError(workspaceId, userId);
+    throw error;
+  }
 }
 
 /** The committed workspace role, read inside whatever transaction is passed. */
@@ -177,6 +272,29 @@ async function workspaceRoomIds(tx: Database, workspaceId: string): Promise<stri
   return rows.map((room) => room.id);
 }
 
+/**
+ * Take a user's membership of a given set of rooms away, and say how many rows
+ * moved.
+ *
+ * One function rather than three copies of the same `delete … returning`,
+ * because three copies are three chances for one of them to grow a `WHERE`
+ * clause the others do not have. Every caller is already inside the member
+ * lock; this does not take it, so it cannot be used to write outside one by
+ * accident.
+ */
+async function deleteRoomMemberships(
+  tx: Database,
+  userId: string,
+  roomIds: readonly string[],
+): Promise<number> {
+  if (roomIds.length === 0) return 0;
+  const deleted = await tx
+    .delete(memberships)
+    .where(and(eq(memberships.userId, userId), inArray(memberships.roomId, [...roomIds])))
+    .returning({ id: memberships.id });
+  return deleted.length;
+}
+
 export interface RoomGrantInput {
   workspaceId: string;
   userId: string;
@@ -190,10 +308,17 @@ export interface RoomGrantInput {
  * workspace with no room is a dead end) but nobody is granted membership of it,
  * which is the fail-closed direction.
  *
- * No lock and no committed read here on purpose — this runs inside
- * `afterCreateOrganization`, where the workspace has exactly one member and
- * there is nothing to race with. `role` is the creator role the library just
- * wrote.
+ * **Under the member lock**, like every other room-membership write in this
+ * file. Round 4 left it outside on the argument that `afterCreateOrganization`
+ * runs on a workspace with exactly one member and nothing to race with — which
+ * is true today and is an argument about a *caller*, not about this function.
+ * Codex's round-4 delta was right to flag it: the rule worth having is "every
+ * write to `memberships` for one member happens under that member's lock", and
+ * a rule with one documented exception is a rule the next caller has to
+ * re-derive. It costs one advisory lock nobody is contending for.
+ *
+ * `role` is the creator role the library just wrote; there is no committed read
+ * here because the member row is the library's and may not be visible yet.
  */
 export async function createDefaultRoom(
   db: Database,
@@ -202,24 +327,26 @@ export async function createDefaultRoom(
 ): Promise<boolean> {
   const role = roomRole(input.role, logger);
 
-  const [room] = await db
-    .insert(rooms)
-    .values({
-      workspaceId: input.workspaceId,
-      slug: defaultRoomSlug,
-      name: defaultRoomName,
-      createdBy: input.userId,
-    })
-    .onConflictDoNothing({ target: [rooms.workspaceId, rooms.slug] })
-    .returning({ id: rooms.id });
+  return withMemberLock(db, input.workspaceId, input.userId, async (tx) => {
+    const [room] = await tx
+      .insert(rooms)
+      .values({
+        workspaceId: input.workspaceId,
+        slug: defaultRoomSlug,
+        name: defaultRoomName,
+        createdBy: input.userId,
+      })
+      .onConflictDoNothing({ target: [rooms.workspaceId, rooms.slug] })
+      .returning({ id: rooms.id });
 
-  if (!room || !role) return false;
+    if (!room || !role) return false;
 
-  await db
-    .insert(memberships)
-    .values({ roomId: room.id, userId: input.userId, role })
-    .onConflictDoNothing({ target: [memberships.roomId, memberships.userId] });
-  return true;
+    await tx
+      .insert(memberships)
+      .values({ roomId: room.id, userId: input.userId, role })
+      .onConflictDoNothing({ target: [memberships.roomId, memberships.userId] });
+    return true;
+  });
 }
 
 /**
@@ -231,10 +358,25 @@ export async function createDefaultRoom(
  *
  * Under the member lock, and **capped by the committed workspace role**: an
  * acceptance that overlaps a demotion must not hand out the role the invitation
- * was minted with after the demotion has already run. Better Auth commits the
- * member row before this hook fires, so the committed value is visible; if it is
- * somehow not, the supplied role stands, which is the invitation's own role and
- * never higher.
+ * was minted with after the demotion has already run.
+ *
+ * ## No member row is a refusal, not a fallback
+ *
+ * Round 4 read a missing committed role as "the library has not committed yet,
+ * so use the role I was given". That was wrong in the direction that costs
+ * something, and it is the second half of codex's round-4 major finding. The
+ * ordering is the other way round — Better Auth's `accept-invitation` endpoint
+ * awaits its own transaction and *then* calls `afterAcceptInvitation`
+ * (`routes/crud-invites.mjs`), so a member row that is not visible here has not
+ * merely not landed: it is gone, or was never there. The case that produces it
+ * is the compensation race below — `revokeAcceptedInvitation` removing the
+ * member while an acceptance is in flight — and granting rooms to somebody with
+ * no workspace membership is exactly the residue the compensation exists to
+ * prevent.
+ *
+ * So it grants nothing and says why. `syncWorkspaceRoomRoles` already reads a
+ * missing member row as the strongest revocation there is; this now agrees with
+ * it instead of reading the same absence the opposite way.
  */
 export async function joinWorkspaceRooms(
   db: Database,
@@ -243,7 +385,16 @@ export async function joinWorkspaceRooms(
 ): Promise<number> {
   return withMemberLock(db, input.workspaceId, input.userId, async (tx) => {
     const committed = await committedRole(tx, input.workspaceId, input.userId);
-    const role = roomRole(lowerOf(input.role, committed ?? input.role), logger);
+    if (committed === null) {
+      logger.warn('refusing to grant room membership: no workspace member row', {
+        noMemberRow: true,
+        workspaceId: input.workspaceId,
+        userId: input.userId,
+      });
+      return 0;
+    }
+
+    const role = roomRole(lowerOf(input.role, committed), logger);
     if (!role) return 0;
 
     const live = await tx
@@ -282,14 +433,7 @@ export async function revokeWorkspaceRooms(
 ): Promise<number> {
   return withMemberLock(db, input.workspaceId, input.userId, async (tx) => {
     const roomIds = await workspaceRoomIds(tx, input.workspaceId);
-    if (roomIds.length === 0) return 0;
-
-    const deleted = await tx
-      .delete(memberships)
-      .where(and(eq(memberships.userId, input.userId), inArray(memberships.roomId, roomIds)))
-      .returning({ id: memberships.id });
-
-    return deleted.length;
+    return deleteRoomMemberships(tx, input.userId, roomIds);
   });
 }
 
@@ -344,11 +488,7 @@ export async function syncWorkspaceRoomRoles(
     if (roomIds.length === 0) return { role: applied, updated: 0 };
 
     if (applied === null) {
-      const deleted = await tx
-        .delete(memberships)
-        .where(and(eq(memberships.userId, input.userId), inArray(memberships.roomId, roomIds)))
-        .returning({ id: memberships.id });
-      return { role: null, updated: deleted.length };
+      return { role: null, updated: await deleteRoomMemberships(tx, input.userId, roomIds) };
     }
 
     const updated = await tx
@@ -452,15 +592,36 @@ export async function voidInvitation(
  * and threw an error at the inviter about it. Codex found it; this is the state
  * the compensation now reaches.
  *
- * Both halves, under the member lock so it cannot interleave with a role change
- * on the same person: the room rows go first (they are what the realtime server
- * reads), then the workspace member row. The invitation itself is left
- * `accepted`, which is the truth about what happened — it was accepted, and then
- * undone.
+ * ## One transaction, one lock, both writes
+ *
+ * Round 4 called `revokeWorkspaceRooms` and then deleted the member row — two
+ * statements, and therefore two transactions, and therefore a window. Codex's
+ * round-4 delta walked it: the room revocation commits and **releases the
+ * member lock**, and a concurrent `afterAcceptInvitation → joinWorkspaceRooms`
+ * takes that lock while `workspace_members` still has the row it reads,
+ * inserts room membership, and finishes. The compensator's next statement then
+ * deletes only the workspace row. Final state: no workspace membership,
+ * retained room access — precisely the residue this function exists to remove,
+ * reached *through* the function.
+ *
+ * Both writes are now one transaction under one acquisition of the lock. The
+ * room rows still go first (they are what the realtime server reads, so a
+ * failure part-way leaves the benign shape), but "first" is now an ordering
+ * inside a transaction rather than across two. An acceptance that overlaps this
+ * either completes entirely before it — and is undone by it — or waits for the
+ * lock and then finds no member row, which `joinWorkspaceRooms` reads as a
+ * refusal rather than a fallback. There is no third schedule.
+ *
+ * The invitation itself is left `accepted`, which is the truth about what
+ * happened — it was accepted, and then undone.
  *
  * Scoped by the invited address and the workspace. `removed: false` with no
  * matching user means the acceptance had not landed a member row after all,
  * which is a compensation that hit nothing rather than one that failed.
+ *
+ * The user lookup stays outside, because it is a read of a table this lock does
+ * not cover and the lock key needs its result. A user id is immutable once
+ * minted, so nothing about it can change under us.
  */
 export async function revokeAcceptedInvitation(
   db: Database,
@@ -473,22 +634,22 @@ export async function revokeAcceptedInvitation(
     .limit(1);
   if (!user) return { removed: false, rooms: 0 };
 
-  const roomsRevoked = await revokeWorkspaceRooms(db, {
-    workspaceId: input.workspaceId,
-    userId: user.id,
+  return withMemberLock(db, input.workspaceId, user.id, async (tx) => {
+    const roomIds = await workspaceRoomIds(tx, input.workspaceId);
+    const revokedRooms = await deleteRoomMemberships(tx, user.id, roomIds);
+
+    const deleted = await tx
+      .delete(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.organizationId, input.workspaceId),
+          eq(workspaceMembers.userId, user.id),
+        ),
+      )
+      .returning({ id: workspaceMembers.id });
+
+    return { removed: deleted.length > 0, rooms: revokedRooms };
   });
-
-  const deleted = await db
-    .delete(workspaceMembers)
-    .where(
-      and(
-        eq(workspaceMembers.organizationId, input.workspaceId),
-        eq(workspaceMembers.userId, user.id),
-      ),
-    )
-    .returning({ id: workspaceMembers.id });
-
-  return { removed: deleted.length > 0, rooms: roomsRevoked };
 }
 
 /** The caller's workspace role, straight from Better Auth's own member table. */
