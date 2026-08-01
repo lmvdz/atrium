@@ -8,6 +8,20 @@
       "when": 1785548788392,
       "tag": "0000_classy_shocker",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785556820794,
+      "tag": "0001_realtime_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785556895609,
+      "tag": "0002_drop_last_read_seq",
+      "breakpoints": true
     }
   ]
 }
