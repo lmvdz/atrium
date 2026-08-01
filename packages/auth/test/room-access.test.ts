@@ -134,10 +134,14 @@ describe('effectiveRoomRole', () => {
  *    binding through any specifier shape, re-export chain or laundering
  *    wrapper. Resolved to a fixpoint; where it cannot resolve, it reports.
  *  - **Access half — a best-effort check.** It finds `db.query.memberships` and
- *    the shapes around it by tracking the handle syntactically, and five shapes
- *    walk past it. Each has a fixture in "the access half does not see these,
- *    and says so", asserting the miss, so closing one makes those tests fail and
- *    forces the wording to be updated with the code.
+ *    the shapes around it by tracking the handle syntactically, and four kinds
+ *    of shape walk past it. Each has a fixture in "the access half does not see
+ *    these, and says so", asserting the miss, so closing one makes those tests
+ *    fail and forces the wording to be updated with the code. Round 9 said
+ *    *five*, and the round-9 delta found a sixth it had not listed; round 10
+ *    re-derived the list from the grammar of an initializer instead of from the
+ *    implementation, closed seven, and left the four that need a type checker or
+ *    a model of object values.
  *
  * A clean access run means "none of the shapes this check knows about are
  * present" — not "the table is not reached off a handle in this tree".
@@ -837,6 +841,297 @@ describe('room membership is not reachable outside @atrium/auth', () => {
     });
 
     /**
+     * **Evasions the round-9 initializer walk admitted — written from the
+     * grammar, not from the code.**
+     *
+     * The round-9 receipt said handles were traced "through variable
+     * initializers", and the round-9 delta found a sixth escape past that:
+     * `const db = cond ? createDatabase() : createDatabase()`, because
+     * `isHandle` had no `ConditionalExpression` case. The five known-limit
+     * fixtures below did not cover it, so the *narrowing itself was inaccurate*
+     * — which is a worse defect than the gap, because a stated limit is what a
+     * reader is entitled to rely on.
+     *
+     * These fixtures were written the other way round from every previous round:
+     * by enumerating what an initializer can *be* in the grammar — every
+     * expression form that passes a value through, and every declaration form
+     * that carries one — and only then asking the analysis. That found the sixth
+     * the delta named and **six more it did not**, in two families the delta's
+     * list did not reach:
+     *
+     *  - *expression forms*: `?:`, `??`, `||`, `&&`, a comma sequence, an
+     *    assignment expression;
+     *  - *declaration forms*: a parameter **default**, a binding element's own
+     *    **default**, a destructuring pattern in **parameter position** (which
+     *    `collectAccesses` never looked at, annotated or defaulted);
+     *  - and one in the **handle graph**: `export default createDatabase()`,
+     *    which `readModule` never recorded, so a one-line package could launder
+     *    a connection.
+     *
+     * All of them are now closed, so this block is positive — each asserts the
+     * shape *fires*. The limits that remain are in the block below it, and they
+     * are the ones that need a type checker or a model of values rather than
+     * more grammar.
+     *
+     * Catches: `boundary-initializer-walk` in `scripts/mutation-ledger.mjs`,
+     * which reverts `isHandle` and the declaration walk to round 9's.
+     */
+    describe('evasions the round-9 initializer walk admitted', () => {
+      /** The shape the round-9 delta named, and the two one-armed versions. */
+      it('fires on a handle from a conditional initializer', () => {
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'const db = process.env.X ? createDatabase() : createDatabase();\n' +
+            'export const t = db.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires when only one arm of the conditional is a handle', () => {
+        // Either arm is enough. A value that is a handle down one path is a
+        // handle; the check's job is to notice the path, not to prove it taken.
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'declare const fallback: { query: { memberships: unknown } };\n' +
+            'const db = process.env.X ? fallback : createDatabase();\n' +
+            'export const t = db.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires on a handle from `??`, `||` and `&&`', () => {
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'declare const cached: undefined;\n' +
+            'const a = cached ?? createDatabase();\n' +
+            'const b = cached || createDatabase();\n' +
+            'const c = process.env.X && createDatabase();\n' +
+            'export const t = [a.query.memberships, b.query.memberships, c.query.memberships];\n',
+        });
+        expect(accessesOf(rule)).toEqual([
+          { file: 'apps/web/lib/rooms.ts', kind: 'property' },
+          { file: 'apps/web/lib/rooms.ts', kind: 'property' },
+          { file: 'apps/web/lib/rooms.ts', kind: 'property' },
+        ]);
+      });
+
+      it('fires on a comma sequence, including the indirect-call idiom', () => {
+        /**
+         * `(0, createDatabase)()` is the shape a bundler emits and a person
+         * writes to defeat a `this` binding. Its value is the right operand, so
+         * the call is a call of `createDatabase`.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'const a = (console.log("warming"), createDatabase());\n' +
+            'const b = (0, createDatabase)();\n' +
+            'export const t = [a.query.memberships, b.query.memberships];\n',
+        });
+        expect(accessesOf(rule)).toEqual([
+          { file: 'apps/web/lib/rooms.ts', kind: 'property' },
+          { file: 'apps/web/lib/rooms.ts', kind: 'property' },
+        ]);
+      });
+
+      it('fires on an assignment expression used as an initializer', () => {
+        // `let cached; const db = (cached = createDatabase())`. The *assignment*
+        // is still not followed — see the limits below — but the expression's
+        // value is, and that is the one written in a single statement.
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'let cached: unknown;\n' +
+            'const db = (cached = createDatabase());\n' +
+            'export const t = db.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires on a handle that is a parameter default', () => {
+        /**
+         * **The one the delta's list did not reach, and the cheapest of the
+         * lot.** Round 9 read a parameter's *annotation* only, so
+         * `function load(db = createDatabase())` needed no annotation and no
+         * second statement — an initializer written right there, which is
+         * exactly what the header promised to follow.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function load(db = createDatabase()) {\n' +
+            '  return db.query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires on a handle that is a binding element default', () => {
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'declare const options: { db?: { query: { memberships: unknown } } };\n' +
+            'const { db = createDatabase() } = options;\n' +
+            'export const t = db.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires on the table destructured in a parameter default', () => {
+        /**
+         * `collectAccesses` asked its destructuring question of variable
+         * declarations only, so a binding pattern in parameter position took the
+         * table straight off a handle with nothing reported. A pattern is a
+         * pattern wherever it is written.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function load({ memberships } = createDatabase().query) {\n' +
+            '  return memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'destructured' }]);
+      });
+
+      it('fires on the table destructured off an annotated parameter', () => {
+        // The same hole reached through the annotation rather than the default,
+        // and the shape this repository would actually write.
+        const rule = fixture({
+          ...handleFixture,
+          'packages/db/src/client.ts':
+            "import * as schema from './schema.js';\n" +
+            'export interface Database {\n' +
+            '  query: typeof schema;\n' +
+            '}\n' +
+            'export function createDatabase(): Database {\n' +
+            '  return { query: schema };\n' +
+            '}\n',
+          'apps/web/lib/rooms.ts':
+            "import type { Database } from '@atrium/db';\n" +
+            'export function load({ query: { memberships } }: Database) {\n' +
+            '  return memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'destructured' }]);
+      });
+
+      it('fires on a conditional used directly as the receiver', () => {
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export const t = (process.env.X ? createDatabase() : createDatabase()).query\n' +
+            '  .memberships;\n' +
+            'export const { memberships } = (process.env.Y\n' +
+            '  ? createDatabase()\n' +
+            '  : createDatabase()).query;\n',
+        });
+        expect(accessesOf(rule)).toEqual([
+          { file: 'apps/web/lib/rooms.ts', kind: 'property' },
+          { file: 'apps/web/lib/rooms.ts', kind: 'destructured' },
+        ]);
+      });
+
+      it('fires on a handle laundered through another package as `export default`', () => {
+        /**
+         * The handle-graph half of the same audit. `readModule` recorded named
+         * exports, star re-exports and namespace re-exports — and not
+         * `ExportAssignment`, so one line in any package (`export default
+         * createDatabase()`) handed every importer a connection the receiver
+         * test could not root anything in.
+         *
+         * The import half was never blind to this file: `@atrium/helper` is a
+         * toucher, so rule 2 taints everything it exports. This is the *access*
+         * half, and it is the one that has to see the handle to ask about the
+         * receiver at all.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'packages/helper/src/index.ts':
+            "import { createDatabase } from '@atrium/db';\n" + 'export default createDatabase();\n',
+          'apps/web/lib/rooms.ts':
+            "import handle from '@atrium/helper';\n" +
+            'export const t = handle.query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      describe('and the receiver test still holds through every one of them', () => {
+        /**
+         * The widening's own control block. Every case above makes *more* things
+         * count as handles, and the failure mode of that is the round-7 noise
+         * the receiver question was introduced to remove: a check that fires on
+         * `workspace.memberships` in a view. These assert it did not come back.
+         */
+        it('ignores a conditional between two things that are not handles', () => {
+          const rule = fixture({
+            'apps/web/lib/rooms.ts':
+              'declare const a: { memberships: string[] };\n' +
+              'declare const b: { memberships: string[] };\n' +
+              'export const t = (process.env.X ? a : b).memberships;\n',
+          });
+          expect(accessesOf(rule)).toEqual([]);
+        });
+
+        it('ignores `??` and `||` between values that never came from the database', () => {
+          const rule = fixture({
+            'apps/web/lib/rooms.ts':
+              'declare const fromProps: { memberships: string[] } | undefined;\n' +
+              'declare const fromServer: { memberships: string[] };\n' +
+              'const view = fromProps ?? fromServer;\n' +
+              'export const t = view.memberships;\n',
+          });
+          expect(accessesOf(rule)).toEqual([]);
+        });
+
+        it('ignores a computed key on a defaulted parameter that is not a handle', () => {
+          // The conservative computed-key rule is affordable only because it is
+          // asked of handles. Parameter defaults are now followed, so this is
+          // the control for that specific widening.
+          const rule = fixture({
+            'apps/web/lib/rooms.ts':
+              'export function pick(record: Record<string, string> = {}, key = "a") {\n' +
+              '  return record[key];\n' +
+              '}\n',
+          });
+          expect(accessesOf(rule)).toEqual([]);
+        });
+
+        it('ignores an arithmetic or comparison expression that mentions a handle', () => {
+          /**
+           * `binaryIsHandle` answers yes only for the operators that pass a
+           * value *through*. Without that restriction "any expression mentioning
+           * a handle" would be a handle, and `db.query.rooms.length > 0` would
+           * make a plain number one.
+           */
+          const rule = fixture({
+            ...handleFixture,
+            'apps/web/lib/rooms.ts':
+              "import { createDatabase } from '@atrium/db';\n" +
+              'const db = createDatabase();\n' +
+              'const summary = String(db) + "!";\n' +
+              'declare const view: { memberships: string[] };\n' +
+              'const same = (summary === "x" ? view : view);\n' +
+              'export const t = same.memberships;\n',
+          });
+          expect(accessesOf(rule)).toEqual([]);
+        });
+      });
+    });
+
+    /**
      * **The access half is a best-effort check. These are the shapes it does not
      * see, asserted rather than described.**
      *
@@ -857,17 +1152,34 @@ describe('room membership is not reachable outside @atrium/auth', () => {
      *    alternative is a "known limits" list that quietly stops being true —
      *    the exact anti-staleness failure `RETRO.md` exists to prevent.
      *  - **They double as receiver controls.** A receiver-blind check reports
-     *    every one of them, which is why `boundary-blind-receiver` and
-     *    `r7-access-analysis` each fail five more tests than they did in round 8.
+     *    every one of them, which is part of why `boundary-blind-receiver` and
+     *    `r7-access-analysis` fail as widely as their receipts record.
      *
-     * Why narrow rather than close: three of these (class field, object
-     * property, container) are closable syntactically and two (unannotated
-     * parameter, a handle through an arbitrary signature) need a type checker.
-     * Closing three of five would leave the header saying "best-effort" anyway,
-     * for 150 lines of new analysis and a wider surface to be wrong on. **The
-     * import half is unaffected and remains an invariant** — it follows every
-     * acquisition route for the table itself, to a fixpoint. Two different
-     * guarantees, and this round stops stating them as one.
+     * **Round 10 changed the answer to "why narrow rather than close".** Round 9
+     * argued that closing the closable three would leave the header saying
+     * "best-effort" anyway, and the round-9 delta answered it: best-effort is
+     * acceptable only when its stated limits are *accurate*, and a sixth escape
+     * (`cond ? createDatabase() : createDatabase()`) was not in this list. That
+     * is a defect of a different kind from a gap — a reader is entitled to rely
+     * on a stated limit — so round 10 audited what an initializer can be from
+     * the grammar rather than from the code, found six more, and closed every
+     * one of them (see the block above). The claim is unchanged in shape and
+     * this list is now the whole of it:
+     *
+     *  - a handle held in a **class field** or an **object property**;
+     *  - a handle **assigned after its declaration**, with no initializer to
+     *    read at the declaration site;
+     *  - a handle in a **container** — an array element, a `Map` value;
+     *  - a handle arriving as an **un-annotated parameter** the caller supplies
+     *    (a parameter *default* is now followed; it is an initializer).
+     *
+     * Each needs something a syntactic pass does not have: a model of object and
+     * container values for the first three, a type checker for the last. That is
+     * a different sentence from round 9's, which was a cost argument about
+     * shapes that were merely more work. **The import half is unaffected and
+     * remains an invariant** — it follows every acquisition route for the table
+     * itself, to a fixpoint. Two different guarantees, and this round still
+     * states them separately.
      */
     describe('the access half does not see these, and says so', () => {
       it('does not see a handle held in a class field', () => {
@@ -974,8 +1286,8 @@ describe('room membership is not reachable outside @atrium/auth', () => {
          * fires.
          *
          * Catches: any change that makes the annotated-parameter path stop
-         * resolving, which would turn the five fixtures above from documented
-         * limits into a checker that reports nothing at all.
+         * resolving, which would turn the fixtures above from documented limits
+         * into a checker that reports nothing at all.
          */
         const rule = fixture({
           ...handleFixture,

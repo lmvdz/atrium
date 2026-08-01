@@ -20,33 +20,77 @@
  *     "the table is not reached off a handle in this tree".
  *
  * The round-8 receipt said the access half traced a handle "through
- * assignments". It traces through variable *initializers*, annotated
- * parameters, binding elements and function declarations — which is less, and
- * the header below already admitted as much three paragraphs down, so the file
- * contradicted its own summary. **Five shapes walk past it**, each with a
- * fixture in `room-access.test.ts` under "the access half does not see these,
- * and says so":
+ * assignments". It traces through *initializers* — which is less, and the
+ * header below already admitted as much three paragraphs down, so the file
+ * contradicted its own summary.
+ *
+ * **Round 9 then narrowed the claim to five shapes, and the narrowing was
+ * itself inaccurate.** The round-9 delta produced a sixth —
+ * `const db = cond ? createDatabase() : createDatabase()` — which no fixture
+ * covered, because `isHandle` had no `ConditionalExpression` case. Best-effort
+ * is acceptable only when its stated limits are true, so round 10 stopped
+ * enumerating from the code and enumerated from the *grammar*: every expression
+ * form that passes a value through, and every declaration form that carries
+ * one. That found six more and closed all seven.
+ *
+ * ### What an initializer may be, and is now followed through
+ *
+ * Grouped by why each one is a pass-through rather than a new value:
+ *
+ *  - **Wrappers that erase**: parentheses, `await`, `!`, `as T`,
+ *    `satisfies T`, `<T>x`, and a `PartiallyEmittedExpression`.
+ *  - **Choices**: `cond ? a : b`, `a ?? b`, `a || b`, `a && b` — *either* side
+ *    is enough, because a value that is a handle down one path is a handle.
+ *  - **Sequences and assignments**: `(x, y)` and a comma list evaluate to the
+ *    right operand — which is what `(0, createDatabase)()` relies on — and so
+ *    do `=`, `??=`, `||=` and `&&=`.
+ *  - **Everything else binary answers no.** `+`, `===`, `in`, `instanceof` and
+ *    the rest build a new primitive, so a handle mentioned inside one is not a
+ *    handle. Without that restriction this becomes "any expression mentioning a
+ *    connection", which is the round-7 noise the receiver test removed.
+ *  - **Calls**: a call yields a handle when the callee does (`createDatabase()`,
+ *    `db()`, `handle().db`), plus `await import(…)` / `require(…)` of a module
+ *    that exposes one — which covers an IIFE, since its callee is a function
+ *    whose returns are asked.
+ *  - **Declaration forms**: a variable initializer, an annotated parameter, a
+ *    **parameter default**, a binding element and its **own default**, and a
+ *    function declaration's return type or returned expressions. A default is
+ *    an initializer written at the declaration site, which round 9 read only
+ *    for variables — so `function load(db = createDatabase())` needed neither an
+ *    annotation nor a second statement.
+ *  - **Binding patterns in parameter position**: `collectAccesses` asked its
+ *    destructuring question of variable declarations only, so
+ *    `function load({ memberships }: Database)` took the table off a handle with
+ *    nothing reported. A pattern is a pattern wherever it is written.
+ *  - **`export default <expression>`** in the handle graph: `readModule`
+ *    recorded named and star re-exports and not `ExportAssignment`, so one line
+ *    in any package could launder a connection to every importer.
+ *
+ * **Four shapes still walk past it**, each with a fixture in
+ * `room-access.test.ts` under "the access half does not see these, and says so":
  *
  *  - a handle held in a **class field** (`this.db.query.memberships`);
  *  - a handle held in an **object property** (`holder.db…`), however built;
- *  - a handle **assigned after its declaration** (`let d; d = createDatabase()`);
+ *  - a handle **assigned after its declaration** (`let d; d = createDatabase()`),
+ *    where the declaration site has no initializer to read;
  *  - a handle in a **container** — an array element, a `Map` value;
- *  - a handle arriving as an **un-annotated parameter**, including a callback's.
+ *  - a handle arriving as an **un-annotated parameter the caller supplies**,
+ *    including a callback's. (Five bullets, four kinds: the first two and the
+ *    container are one missing capability — a model of what an object holds.)
  *
  * Those fixtures assert that nothing is reported, so they go red the moment a
  * future round closes one — which forces this header to be corrected in the
  * same commit rather than quietly becoming false. They are also receiver
- * controls: `boundary-blind-receiver` and `r7-access-analysis` each fail five
- * more tests because of them, since a receiver-blind check reports every one.
+ * controls: `boundary-blind-receiver` and `r7-access-analysis` each fail on
+ * them too, since a receiver-blind check reports every one.
  *
- * **Why narrowed rather than closed.** Three of the five are closable with more
- * syntax; two need a type checker. Closing three would leave this paragraph
- * saying "best-effort" anyway, in exchange for a much larger analysis with more
- * surface to be wrong on — and eight rounds of this ticket have been spent on
- * guarantees that outran their evidence, which is a worse defect than a narrow
- * guarantee stated accurately. What makes the narrow version worth keeping is
- * the control beside those fixtures: every gap is about *finding* the handle,
- * and none is the check failing on one it has found.
+ * **Why these four are still open, and it is no longer a cost argument.** Round
+ * 9 said the closable ones were merely more work and not worth the surface. The
+ * ones left need something a syntactic pass does not have: a model of object and
+ * container *values* for the first three, and a type checker for the last. What
+ * makes the remainder worth keeping is the control beside those fixtures: every
+ * gap is about *finding* the handle, and none is the check failing on one it has
+ * found.
  *
  * ## Why this is not a grep
  *
@@ -152,18 +196,18 @@
  *    asked only of handles.
  *
  * A handle is tracked from where it enters a file — an import of the declaring
- * package, or of a module that exposes one — through variable *initializers*,
- * `await`, casts, calls, member access and destructuring, plus annotated
- * parameters. A module exposes a handle when it re-exports one, when it exports
- * a binding derived from one, or when it exports a function annotated as
- * returning one (`apps/web/lib/db.ts`'s `export function db(): Database`, which
- * is how both apps actually get theirs).
+ * package, or of a module that exposes one — through every initializer form
+ * enumerated at the top of this file. A module exposes a handle when it
+ * re-exports one, when it exports a binding derived from one, when it exports a
+ * function annotated as returning one (`apps/web/lib/db.ts`'s
+ * `export function db(): Database`, which is how both apps actually get theirs),
+ * or when its `export default` expression is one.
  *
  * Read "initializers", not "assignments", and see the top of this file for the
- * five shapes that walk past that list. Round 8's receipt said "assignments" and
- * the round-8 delta was right to call it: `let d; d = createDatabase()` is an
- * assignment and is not followed. The wording is the defect being corrected here
- * — the analysis is what it always was.
+ * four kinds of shape that walk past that list. Round 8's receipt said
+ * "assignments" and the round-8 delta was right to call it:
+ * `let d; d = createDatabase()` is an assignment and is not followed. Round 9
+ * corrected the wording; round 10 corrected the list the wording pointed at.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve as resolvePath, sep } from 'node:path';
@@ -297,6 +341,16 @@ interface HandleFacts {
   declared: Map<string, ts.Node>;
   /** Exported name → the local binding behind it. */
   exportedLocals: Map<string, string>;
+  /**
+   * `export default <expression>`, which binds no local name at all.
+   *
+   * Kept apart from `exportedLocals` for exactly that reason: there is nothing
+   * to look up, so the expression itself has to be asked. Without it a package
+   * could launder a connection in one line — `export default createDatabase()`
+   * — and the importing app's `handle.query.memberships` had no handle to be
+   * rooted in.
+   */
+  defaultExport?: ts.Expression;
 }
 
 interface Module {
@@ -349,6 +403,14 @@ function isExported(node: ts.Node | undefined): boolean {
   if (!node || !ts.canHaveModifiers(node)) return false;
   return (ts.getModifiers(node) ?? []).some(
     (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+  );
+}
+
+/** Does this declaration carry a `default` modifier? */
+function isDefaultExported(node: ts.Node): boolean {
+  if (!ts.canHaveModifiers(node)) return false;
+  return (ts.getModifiers(node) ?? []).some(
+    (modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword,
   );
 }
 
@@ -510,6 +572,14 @@ function readModule(absolute: string, path: string): Module {
       continue;
     }
 
+    if (ts.isExportAssignment(statement) && statement.isExportEquals !== true) {
+      module.handles.defaultExport = statement.expression;
+      if (ts.isIdentifier(statement.expression)) {
+        module.handles.exportedLocals.set('default', statement.expression.text);
+      }
+      continue;
+    }
+
     if (
       ts.isImportEqualsDeclaration(statement) &&
       ts.isExternalModuleReference(statement.moduleReference) &&
@@ -551,7 +621,17 @@ function readModule(absolute: string, path: string): Module {
     }
     if (ts.isFunctionDeclaration(node) && node.name) {
       module.handles.declared.set(node.name.text, node);
-      if (isExported(node)) module.handles.exportedLocals.set(node.name.text, node.name.text);
+      if (isExported(node)) {
+        module.handles.exportedLocals.set(node.name.text, node.name.text);
+        // `export default function db(): Database {}` — one declaration under
+        // two exported names, and only the second one an importer can name.
+        if (isDefaultExported(node)) module.handles.exportedLocals.set('default', node.name.text);
+      }
+    }
+    if (ts.isFunctionDeclaration(node) && !node.name && isDefaultExported(node)) {
+      // `export default function (): Database {}` — anonymous, so there is no
+      // local name; the expression path handles it.
+      module.handles.defaultExport = node as unknown as ts.Expression;
     }
     if (ts.isCallExpression(node)) {
       const isDynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
@@ -605,11 +685,19 @@ function resolveFilePath(base: string): string | null {
  * and the round-7 gauntlet demonstrated both of the others as working evasions.
  * The receiver test is what all four share, and what keeps a domain object's
  * `.memberships` out of the results.
+ *
+ * The destructuring question is asked of a binding pattern in either position it
+ * can occupy — a variable declaration and a parameter. Round 9 asked it of
+ * variable declarations only, which made `function load({ memberships }:
+ * Database)` a one-line evasion.
  */
 function collectAccesses(
   module: Module,
   accessName: string,
-  classifier: { isHandle: (node: ts.Expression) => boolean },
+  classifier: {
+    isHandle: (node: ts.Expression) => boolean;
+    isHandleDeclaration: (node: ts.Declaration) => boolean;
+  },
 ): MemberAccess[] {
   const found: MemberAccess[] = [];
   const { source, path } = module;
@@ -673,11 +761,21 @@ function collectAccesses(
         }
       }
     } else if (
-      ts.isVariableDeclaration(node) &&
+      (ts.isVariableDeclaration(node) || ts.isParameter(node)) &&
       !ts.isIdentifier(node.name) &&
-      node.initializer &&
-      classifier.isHandle(node.initializer)
+      classifier.isHandleDeclaration(node)
     ) {
+      /**
+       * `const { memberships } = db().query` — and the parameter form of it.
+       *
+       * Round 9 asked this of variable declarations only, so
+       * `function load({ memberships }: Database['query'])` and
+       * `function load({ memberships } = createDatabase().query)` destructured
+       * the table straight out of a handle with nothing reported. A binding
+       * pattern is a binding pattern wherever it is written; the question is
+       * only whether what it destructures is a handle, which
+       * `isHandleDeclaration` answers for both positions the same way.
+       */
       walkPattern(node.name);
     }
     ts.forEachChild(node, visit);
@@ -891,9 +989,17 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       }
       if (ts.isParameter(declaration)) {
         // An annotation is the author saying so. Without one there is nothing
-        // syntactic to go on, and guessing would be the noise the round-7
-        // gauntlet objected to.
-        return referencesHandleType(declaration.type, handleTypeNames);
+        // syntactic to go on *for a value the caller supplies*, and guessing
+        // would be the noise the round-7 gauntlet objected to.
+        if (referencesHandleType(declaration.type, handleTypeNames)) return true;
+        /**
+         * A **default** is not the caller's value, it is an initializer written
+         * right here — `function load(db = createDatabase())`. The header's
+         * promise is "initializers are followed", and this is one; reading only
+         * the annotation made `db = createDatabase()` the cheapest evasion in
+         * the file, because it needs no annotation and no second statement.
+         */
+        return declaration.initializer ? isHandle(declaration.initializer) : false;
       }
       if (ts.isBindingElement(declaration)) return bindingElementIsHandle(declaration);
       if (ts.isFunctionDeclaration(declaration)) return functionYieldsHandle(declaration);
@@ -902,6 +1008,9 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
 
     /** A name destructured off a handle is still a handle: `const { query } = db`. */
     const bindingElementIsHandle = (element: ts.BindingElement): boolean => {
+      // Its own default is an initializer in its own right:
+      // `const { db = createDatabase() } = options`.
+      if (element.initializer && isHandle(element.initializer)) return true;
       let pattern: ts.Node = element.parent;
       while (ts.isBindingElement(pattern.parent)) pattern = pattern.parent.parent;
       const owner = pattern.parent;
@@ -909,13 +1018,48 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
         if (referencesHandleType(owner.type, handleTypeNames)) return true;
         return owner.initializer ? isHandle(owner.initializer) : false;
       }
-      if (ts.isParameter(owner)) return referencesHandleType(owner.type, handleTypeNames);
+      if (ts.isParameter(owner)) {
+        if (referencesHandleType(owner.type, handleTypeNames)) return true;
+        return owner.initializer ? isHandle(owner.initializer) : false;
+      }
       return false;
     };
 
     const functionYieldsHandle = (fn: ts.SignatureDeclaration): boolean => {
       if (referencesHandleType(fn.type, handleTypeNames)) return true;
       return returnedExpressions(fn).some((expression) => isHandle(expression));
+    };
+
+    /**
+     * The binary operators that can *pass a value through*, and only those.
+     *
+     * `a ?? b`, `a || b` and `a && b` each evaluate to one of their operands, so
+     * either operand being a handle makes the whole expression one. A comma
+     * sequence and an assignment both evaluate to their right-hand side —
+     * `(0, createDatabase)()` and `(cached = createDatabase())` are the two
+     * shapes that actually turn up. Every other operator (`+`, `===`, `in`,
+     * `instanceof`…) produces a new primitive, so it answers no, which keeps
+     * this from becoming "any expression mentioning a handle".
+     */
+    const binaryIsHandle = (node: ts.BinaryExpression): boolean => {
+      const operator = node.operatorToken.kind;
+      if (
+        operator === ts.SyntaxKind.QuestionQuestionToken ||
+        operator === ts.SyntaxKind.BarBarToken ||
+        operator === ts.SyntaxKind.AmpersandAmpersandToken
+      ) {
+        return isHandle(node.left) || isHandle(node.right);
+      }
+      if (operator === ts.SyntaxKind.CommaToken) return isHandle(node.right);
+      if (
+        operator === ts.SyntaxKind.EqualsToken ||
+        operator === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+        operator === ts.SyntaxKind.BarBarEqualsToken ||
+        operator === ts.SyntaxKind.AmpersandAmpersandEqualsToken
+      ) {
+        return isHandle(node.right);
+      }
+      return false;
     };
 
     const isHandle = (node: ts.Expression): boolean => {
@@ -927,6 +1071,21 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       }
       if (ts.isTypeAssertionExpression(node)) {
         return referencesHandleType(node.type, handleTypeNames) || isHandle(node.expression);
+      }
+      if (ts.isPartiallyEmittedExpression(node)) return isHandle(node.expression);
+      /**
+       * `cond ? createDatabase() : createDatabase()`, and every one-armed
+       * version of it. **Either branch is enough**, which is the only sound
+       * answer: a value that is a handle down one path is a handle, and the
+       * check's job is to notice the path, not to prove it is always taken.
+       */
+      if (ts.isConditionalExpression(node)) {
+        return isHandle(node.whenTrue) || isHandle(node.whenFalse);
+      }
+      if (ts.isBinaryExpression(node)) return binaryIsHandle(node);
+      // Synthesized by the parser in a few positions; treated like a comma.
+      if (ts.isCommaListExpression(node)) {
+        return node.elements.some((element) => isHandle(element));
       }
       if (ts.isIdentifier(node)) return bindingIsHandle(node.text);
       if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
@@ -953,7 +1112,22 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       return false;
     };
 
-    return { isHandle, bindingIsHandle };
+    /**
+     * Does this declaration's *source* hand out a handle?
+     *
+     * The same question `computeBinding` asks, but about the declaration node
+     * rather than a name, so it answers for a binding *pattern* — which binds
+     * several names and therefore has none of its own to look up.
+     */
+    const isHandleDeclaration = (node: ts.Declaration): boolean => {
+      if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+        if (referencesHandleType(node.type, handleTypeNames)) return true;
+        return node.initializer ? isHandle(node.initializer) : false;
+      }
+      return false;
+    };
+
+    return { isHandle, bindingIsHandle, isHandleDeclaration };
   }
 
   // Fixpoint over the handle graph, same shape and same termination argument as
@@ -967,7 +1141,7 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       const before = handlesOf(module.path);
       const sizeBefore = before.names.size;
       const allBefore = before.all;
-      const { bindingIsHandle } = handleClassifier(module);
+      const { bindingIsHandle, isHandle } = handleClassifier(module);
 
       for (const reference of module.reexports) {
         const target = resolveSpecifier(reference.specifier, module.path);
@@ -998,6 +1172,13 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
               return target !== null && exposesHandle(target, imported.name);
             })();
         if (yieldsHandle) before.names.add(exported);
+      }
+
+      // `export default createDatabase()`: no local name to look up, so the
+      // exported expression is asked directly.
+      const { defaultExport } = module.handles;
+      if (defaultExport && !before.names.has('default') && isHandle(defaultExport)) {
+        before.names.add('default');
       }
 
       if (before.names.size !== sizeBefore || before.all !== allBefore) handlesChanged = true;
