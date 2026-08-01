@@ -75,8 +75,7 @@ export type ServerFrame =
    *
    * A gap signal that does not depend on any frame having arrived. The client
    * treats it as it treats every other statement about the head: compare it with
-   * its own cursor, and ask for the gap if it is behind — and answers with
-   * `ack_head`, which is the only thing that stops the server repeating it.
+   * its own cursor, and ask for the gap if it is behind.
    */
   | { type: 'head'; roomId: string; head: number }
   | {
@@ -217,6 +216,30 @@ export function memoryJournal(): RoomJournal {
 }
 
 /**
+ * How many events one room keeps in `localStorage`.
+ *
+ * Chosen against the store rather than against a room: browsers give an origin
+ * on the order of 5 MB *in total*, and a message event serializes to a few
+ * hundred bytes, so a few hundred events per room leaves room for several rooms
+ * and everything else the origin keeps. It is an option because the right number
+ * is a property of the deployment, not of this file.
+ */
+export const DEFAULT_JOURNAL_MAX_EVENTS = 500;
+
+export interface LocalStorageJournalOptions {
+  /** Events retained per room. Older ones are evicted; see the note on the type. */
+  maxEvents?: number;
+  /**
+   * Called when this journal stops being durable for a room, with the reason.
+   *
+   * Not a silent degradation: a client whose journal has fallen back to memory
+   * still works and still recovers, but it re-fetches the whole room on the next
+   * reload, and an operator looking at why should be able to find out.
+   */
+  onDegraded?: (roomId: string, reason: string) => void;
+}
+
+/**
  * A `localStorage`-backed journal.
  *
  * One key per room holding `{events, lastSeq}` as one JSON value, so the durable
@@ -228,10 +251,49 @@ export function memoryJournal(): RoomJournal {
  * A record that does not parse, or whose cursor disagrees with its events, is
  * read as no history at all. That is deliberate: a torn write is the one case
  * where resuming is *worse* than replaying, and a room is cheap to reload.
+ *
+ * ## Bounded, and it never throws (#22 gauntlet r3 delta, major 2)
+ *
+ * > `localStorageJournal` is unbounded with no `QuotaExceededError` handling — a
+ * > long room throws on every `applyEntry` after quota and stalls durable apply.
+ *
+ * Exactly right, and the second clause is the damaging one. `applyEntry` commits
+ * *before* moving the in-memory view, so a throw from here leaves the client's
+ * cursor where it was — which is the crash-safety property, and which turns into
+ * a permanent stall when the throw is not transient. A full quota is not
+ * transient: every subsequent event takes the same path and fails the same way,
+ * and the room stops advancing at all. An unbounded store guarantees reaching
+ * that state on any room that runs long enough.
+ *
+ * Two changes, and the second one is the contract:
+ *
+ * 1. **A bound.** The newest `maxEvents` are kept and older ones are evicted from
+ *    the front. This is a *resume cache*, not an archive: the cursor still names
+ *    the last event held, so the invariant this whole interface exists for is
+ *    untouched, and a room whose scrollback was evicted re-reads it from the
+ *    server like any other room the client does not have. What it must never do
+ *    is grow until the store refuses it.
+ * 2. **`commit` does not throw.** A write that cannot be made durable evicts
+ *    harder and retries; if even a single entry will not fit, the room degrades
+ *    to the in-memory journal, seeded with what it holds, and `onDegraded` says
+ *    so. The client then behaves exactly like one configured with `memoryJournal`
+ *    — it recovers everything from the server on the next load — instead of
+ *    freezing. Throwing would preserve durability at the cost of the room, which
+ *    is the wrong trade for a cache.
+ *
+ * The `RoomJournal` contract still permits a throw, and `applyEntry` still
+ * handles one correctly; this implementation simply has no failure for which
+ * stopping is better than degrading.
  */
-export function localStorageJournal(namespace: string): RoomJournal {
+export function localStorageJournal(
+  namespace: string,
+  options: LocalStorageJournalOptions = {},
+): RoomJournal {
   const key = (roomId: string) => `atrium:journal:${namespace}:${roomId}`;
+  const maxEvents = Math.max(1, options.maxEvents ?? DEFAULT_JOURNAL_MAX_EVENTS);
   const fallback = memoryJournal();
+  /** Rooms this journal has stopped being durable for. */
+  const degraded = new Set<string>();
   const storage = (): Storage | null => {
     try {
       return typeof localStorage === 'undefined' ? null : localStorage;
@@ -240,9 +302,13 @@ export function localStorageJournal(namespace: string): RoomJournal {
       return null;
     }
   };
-  const readRoom = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
+  /** Keep the newest `maxEvents`. The cursor names the last of them either way. */
+  const trim = (events: RoomEventEnvelope[]): RoomEventEnvelope[] =>
+    events.length <= maxEvents ? events : events.slice(events.length - maxEvents);
+
+  const readDurable = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
     const store = storage();
-    if (!store) return fallback.load(roomId);
+    if (!store) return { events: [], lastSeq: 0 };
     const raw = store.getItem(key(roomId));
     if (raw === null) return { events: [], lastSeq: 0 };
     try {
@@ -251,7 +317,8 @@ export function localStorageJournal(namespace: string): RoomJournal {
       const lastSeq = typeof parsed.lastSeq === 'number' ? parsed.lastSeq : null;
       if (events === null || lastSeq === null) return { events: [], lastSeq: 0 };
       // The invariant the whole interface exists for, checked on the way back
-      // in: the cursor may not name a position past the last event held.
+      // in: the cursor may not name a position past the last event held. Still
+      // exact under eviction — trimming drops from the front, never the end.
       const held = events.at(-1)?.roomSeq ?? 0;
       if (lastSeq !== held) return { events: [], lastSeq: 0 };
       return { events, lastSeq };
@@ -259,19 +326,72 @@ export function localStorageJournal(namespace: string): RoomJournal {
       return { events: [], lastSeq: 0 };
     }
   };
+
+  /**
+   * Hand this room over to memory, keeping everything already held.
+   *
+   * Seeded rather than emptied: `load` must keep returning a cursor whose event
+   * it holds, and dropping the history while keeping the cursor is the exact
+   * inconsistency `RoomJournal` was built to make unrepresentable.
+   */
+  const degrade = (
+    roomId: string,
+    held: { events: RoomEventEnvelope[]; lastSeq: number },
+    reason: string,
+  ): void => {
+    if (!degraded.has(roomId)) {
+      degraded.add(roomId);
+      for (const event of held.events) fallback.commit(roomId, event, event.roomSeq);
+      options.onDegraded?.(roomId, reason);
+    }
+  };
+
+  const readRoom = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
+    if (!storage() || degraded.has(roomId)) return fallback.load(roomId);
+    return readDurable(roomId);
+  };
+
   return {
     load: readRoom,
     commit: (roomId, entry, lastSeq) => {
       const store = storage();
-      if (!store) {
+      if (!store || degraded.has(roomId)) {
         fallback.commit(roomId, entry, lastSeq);
         return;
       }
-      const current = readRoom(roomId);
+      const current = readDurable(roomId);
       current.events.push(entry);
-      store.setItem(key(roomId), JSON.stringify({ events: current.events, lastSeq }));
+      let kept = trim(current.events);
+      for (;;) {
+        try {
+          store.setItem(key(roomId), JSON.stringify({ events: kept, lastSeq }));
+          return;
+        } catch (error) {
+          // Halve and retry: the quota is about bytes and this is the cheapest
+          // way to find a size that fits without measuring the store. One entry
+          // that will not fit is a store that cannot hold this room at all.
+          if (kept.length > 1) {
+            kept = kept.slice(Math.ceil(kept.length / 2));
+            continue;
+          }
+          // `current.events` already carries `entry`, so the seed is the whole
+          // history including this commit — no second write, and no duplicate.
+          degrade(roomId, { events: current.events, lastSeq }, describeStorageError(error));
+          return;
+        }
+      }
     },
   };
+}
+
+/** A storage failure in words, without assuming `DOMException` exists. */
+function describeStorageError(error: unknown): string {
+  const name = (error as { name?: unknown } | null)?.name;
+  if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+    return 'localStorage is full — this room is now kept in memory and will be re-read from the server on the next load';
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return `localStorage refused the write (${message}) — this room is now kept in memory`;
 }
 
 export interface RoomView {

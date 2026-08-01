@@ -444,6 +444,106 @@ describe('the durable journal writes both halves or neither', () => {
     storage.setItem(key as string, 'not json');
     expect(journal.load(ROOM)).toEqual({ events: [], lastSeq: 0 });
   });
+
+  /**
+   * Bounded, and never a throw (#22 gauntlet r3 delta, major 2).
+   *
+   * > `localStorageJournal` is unbounded with no `QuotaExceededError` handling —
+   * > a long room throws on every `applyEntry` after quota and stalls durable
+   * > apply.
+   *
+   * The second clause is the one with teeth. `applyEntry` commits before moving
+   * the in-memory view, so a throw from the journal leaves the client's cursor
+   * where it was — deliberately, because that is what makes a crash mid-page
+   * safe. A *permanent* throw turns that same property into a permanent stall:
+   * every event takes the same path, fails the same way, and the room stops
+   * advancing while the socket carries on delivering.
+   */
+  function quotaError(): Error {
+    const error = new Error('quota');
+    error.name = 'QuotaExceededError';
+    return error;
+  }
+
+  it('keeps a bounded window rather than growing until the store refuses it', () => {
+    // Catches: dropping the trim. Unbounded is not a slow leak here — it is a
+    // guarantee of reaching the quota on any room that runs long enough, and the
+    // failure at that point is the stall below.
+    const journal = localStorageJournal('test', { maxEvents: 3 });
+    for (let seq = 1; seq <= 6; seq += 1) journal.commit(ROOM, messageEvent(seq, `m${seq}`), seq);
+    const held = journal.load(ROOM);
+    expect(held.events.map((e) => e.roomSeq)).toEqual([4, 5, 6]);
+    // Evicted from the front, so the cursor still names the last event held —
+    // the invariant the whole interface exists for, unchanged by the bound.
+    expect(held.lastSeq).toBe(6);
+  });
+
+  it('evicts harder rather than throwing when the store says it is full', () => {
+    // A store that fits four entries but not five. Catches: letting the
+    // `setItem` rejection escape `commit`, which stalls `applyEntry` for the
+    // rest of the room's life.
+    let capacity = 4;
+    const inner = storage.setItem.bind(storage);
+    storage.setItem = (key: string, value: string) => {
+      if ((JSON.parse(value) as { events: unknown[] }).events.length > capacity) throw quotaError();
+      inner(key, value);
+    };
+    const journal = localStorageJournal('test', { maxEvents: 100 });
+    for (let seq = 1; seq <= 8; seq += 1) {
+      expect(() => journal.commit(ROOM, messageEvent(seq, `m${seq}`), seq)).not.toThrow();
+    }
+    const held = journal.load(ROOM);
+    expect(held.lastSeq).toBe(8);
+    expect(held.events.at(-1)?.roomSeq).toBe(8);
+    expect(held.events.length).toBeLessThanOrEqual(4);
+    capacity = 100;
+  });
+
+  it('falls back to memory, loudly, when even one entry will not fit', () => {
+    // The floor: a store that refuses everything. Catches: throwing here, and
+    // catches degrading in silence — a client that has quietly stopped being
+    // durable re-reads its whole history on the next load, which an operator
+    // should be able to find out rather than infer.
+    const degraded: Array<{ roomId: string; reason: string }> = [];
+    storage.setItem = () => {
+      throw quotaError();
+    };
+    const journal = localStorageJournal('test', {
+      maxEvents: 10,
+      onDegraded: (roomId, reason) => degraded.push({ roomId, reason }),
+    });
+    expect(() => journal.commit(ROOM, messageEvent(1, 'a'), 1)).not.toThrow();
+    expect(() => journal.commit(ROOM, messageEvent(2, 'b'), 2)).not.toThrow();
+
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]?.roomId).toBe(ROOM);
+    expect(degraded[0]?.reason).toContain('localStorage is full');
+    // Still a working journal: the cursor names an event it holds, which is the
+    // only promise `RoomJournal` makes. Catches: marking the room degraded
+    // without seeding the memory fallback, which would leave `load` reporting a
+    // cursor of 0 for a client that has applied two events.
+    expect(journal.load(ROOM)).toMatchObject({ lastSeq: 2 });
+    expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+  });
+
+  it('keeps applying events after the journal has degraded', async () => {
+    // The finding's actual symptom, at the client rather than at the journal:
+    // durable apply must not stall. Catches: any version of `commit` that
+    // throws on a full store — `applyEntry` would leave `lastSeq` where it was
+    // and every subsequent event would arrive across a gap it never closes.
+    storage.setItem = () => {
+      throw quotaError();
+    };
+    const journal = localStorageJournal('test', { maxEvents: 10 });
+    const stalling = await clientWith({ journal });
+    stalling.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    for (let seq = 1; seq <= 5; seq += 1) {
+      latest().deliver({ type: 'event', entry: messageEvent(seq, `m${seq}`) });
+    }
+    expect(stalling.lastSeq(ROOM)).toBe(5);
+    expect(stalling.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3, 4, 5]);
+  });
 });
 
 /**
