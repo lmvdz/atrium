@@ -219,6 +219,22 @@ const WHITESPACE_RUN = /\p{White_Space}+/gu;
 const WHITESPACE_TOKEN = /^\p{White_Space}+$/u;
 
 /**
+ * **Where a line ends** — Unicode's mandatory line breaks (UAX #14 class BK),
+ * not `\n`.
+ *
+ * The same finding as `WHITESPACE_RUN`, at the other question this package asks
+ * about whitespace. U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH
+ * SEPARATOR end a line everywhere a line is rendered, and `\n` does not see any
+ * of them. Two answers to "where does a line end" in one package is one answer
+ * too many, and the round that found `\s` was wrong about NEL found this one by
+ * running its own fix back over the rest of the file.
+ */
+export const LINE_BREAK = /[\n\v\f\r\u0085\u2028\u2029]/u;
+
+/** A terminator followed by space, or a line break. See `sentencesOf`. */
+const SENTENCE_BREAK = /(?<=[.!?…。？！])\p{White_Space}+|[\n\v\f\r\u0085\u2028\u2029]+/u;
+
+/**
  * `[text](destination)`, and the image form.
  *
  * **The destination is content.** r4's blind review: a message reading
@@ -248,6 +264,14 @@ const MARKDOWN_LINK = /!?\[([^\]]*)\]\(\s*([^)\s]*)(?:\s+"[^"]*")?\s*\)/g;
  * folding in r4 for the same class of reason (strikethrough is retraction, not
  * emphasis); this is that argument applied to the delimiter that separates
  * quoting a thing from saying it.
+ *
+ * The single-backtick form stops at `\n` and not at every line break
+ * `LINE_BREAK` knows about, which is deliberate rather than an oversight this
+ * round missed: a run of backticks around a U+0085 is not a code span to a
+ * renderer and *is* one here, so more text is compared byte for byte than
+ * strictly needs to be. Over-inclusive is the safe direction for this
+ * particular split — everything inside a code segment is held to a stricter
+ * comparison, never a looser one.
  */
 const CODE_SPAN = /(```[\s\S]*?```|``[\s\S]*?``|`[^`\n]*`)/;
 
@@ -461,16 +485,29 @@ export function routingTokens(text: string): string[] {
 }
 
 /**
- * A text split into sentences: on a terminator followed by space, or a newline.
+ * A text split into sentences: on a terminator followed by whitespace, or on a
+ * line break.
  *
- * Deliberately crude, and crude in the safe direction — it splits *less* than a
- * linguist would (an abbreviation keeps its sentence whole), and every check
- * that uses it requires the quote to cover whole sentences, so under-splitting
- * can only make that harder to satisfy.
+ * Deliberately crude, **and the docblock used to be wrong about which way.** It
+ * said this "splits *less* than a linguist would (an abbreviation keeps its
+ * sentence whole)", so under-splitting could only make the checks harder to
+ * satisfy. `Mr. Smith will ship it.` splits into `Mr.` and `Smith will ship it.`
+ * — it splits *more*, and that direction makes `quoteSpansWholeSentences`
+ * **easier** to satisfy, which is the opposite of what the paragraph promised.
+ * Found by this round's own adversarial pass, which is what a rationale about
+ * behaviour is for: it is a claim, and claims get measured.
+ *
+ * The disposition is unaffected, and that is why the crudeness is still
+ * acceptable rather than a defect with a note attached. Both of the findings
+ * this splitter can produce are `refer` — `quote_is_a_fragment` and
+ * `quote_omits_surrounding_text` — and the gate that decides acceptance is
+ * `quoteCoversOwnText`, which compares against the **whole body** and does not
+ * use this function at all. Over-splitting can move a refusal from one refer to
+ * the other; it cannot produce an acceptance.
  */
 export function sentencesOf(text: string): string[] {
   return text
-    .split(/(?<=[.!?…。？！])\s+|\n+/u)
+    .split(SENTENCE_BREAK)
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length > 0);
 }
@@ -510,10 +547,14 @@ export interface StatementBearing {
    * is a refusal nobody can act on. It is set as collateral whenever words differ
    * too — an inserted word arrives with an inserted space — so it is *decisive*
    * only when the two lists are empty, and `escalation.ts` reads the three in
-   * that order. When it is decisive it means something specific: prose spacing is
-   * collapsed to one space on both sides before anything is compared, so the
-   * difference is inside a code span, which is a different literal rather than a
-   * different line wrap.
+   * that order.
+   *
+   * When it is decisive it means the two texts are spaced differently, and that
+   * is all it is claimed to mean. Two drafts of this docblock tried to enumerate
+   * the ways that can happen — "only inside a code span", then "a code span or a
+   * dropped full stop" — and a brute force over generated pairs broke both, the
+   * second with `wa 'z` against `wa' z`. A list of the ways a thing can happen
+   * is the instrument `RETRO.md` keeps recording, in prose as much as in code.
    */
   whitespaceDiffers: boolean;
   /** Set when the check declined to run at all, rather than running and failing. */

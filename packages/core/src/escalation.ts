@@ -3,6 +3,7 @@ import {
   hasContent,
   isAssertion,
   isBlank,
+  LINE_BREAK,
   normalizeForReceipt,
   normalizeForRouting,
   quoteCoversOwnText,
@@ -60,6 +61,20 @@ import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
 const BLOCKQUOTE_LINE = /^\s*>/;
 
 /**
+ * A body cut into lines.
+ *
+ * `split('\n')` until r6, which is the same defect `matching.ts` found in `\s`
+ * one function over: U+0085 NEL, U+2028 and U+2029 end a line everywhere a line
+ * is rendered and `\n` sees none of them, so a body whose breaks are NEL is one
+ * line — and a reply-blockquote on its first line then swallows the author's own
+ * words with it. That failed closed (the author's own text came back empty, so
+ * nothing bore the quote), which is why it survived; a refusal for a reason
+ * nobody wrote down is one refactor from an acceptance for the same reason.
+ * `matching.LINE_BREAK` is the one answer to where a line ends.
+ */
+const lines = (text: string): string[] => text.split(LINE_BREAK);
+
+/**
  * Drop GitHub reply-blockquotes, leaving only what this author actually wrote.
  *
  * This is the single highest-value function in the file. The spike's worst
@@ -72,8 +87,7 @@ const BLOCKQUOTE_LINE = /^\s*>/;
  * Nested quotes (`> > …`) go with it: they are quoting even harder.
  */
 export function stripReplyBlockquotes(text: string): string {
-  return text
-    .split('\n')
+  return lines(text)
     .filter((line) => !BLOCKQUOTE_LINE.test(line))
     .join('\n');
 }
@@ -82,7 +96,7 @@ export function stripReplyBlockquotes(text: string): string {
 export function replyBlockquotes(text: string): string[] {
   const blocks: string[] = [];
   let current: string[] = [];
-  for (const line of text.split('\n')) {
+  for (const line of lines(text)) {
     if (BLOCKQUOTE_LINE.test(line)) {
       current.push(line.replace(/^\s*>+\s?/, ''));
       continue;
@@ -99,7 +113,7 @@ export function replyBlockquotes(text: string): string[] {
 
 /** True when the text contains at least one blockquote line. */
 export function hasReplyBlockquote(text: string): boolean {
-  return text.split('\n').some((line) => BLOCKQUOTE_LINE.test(line));
+  return lines(text).some((line) => BLOCKQUOTE_LINE.test(line));
 }
 
 /** Ellipsis characters a model uses when it silently shortens a quote. */
@@ -703,12 +717,12 @@ export interface ProvenanceMessage {
  *    may be decorative or it may invert the sentence, and nothing here can tell
  *    which.
  *  - `statement_respaces_the_quote` — **r6.** The two texts hold the same marks
- *    in the same order and space them differently. Prose whitespace is collapsed
- *    to one space on both sides before anything is compared, so the difference
- *    can only be inside a code span — a different literal, not a different line
- *    wrap. `normalizeForReceipt` has passed code segments through byte for byte
- *    since r5 on exactly that argument ("two spaces in a password are a
- *    different password") and nothing at the comparison consulted it, because
+ *    in the same order and space them differently, so the statement is not the
+ *    text in the message. Stated as the fact rather than as a list of the ways
+ *    it can arise, because two drafts of this entry tried the list and a brute
+ *    force broke both. `normalizeForReceipt` has passed code segments through
+ *    byte for byte since r5 on the argument that "two spaces in a password are a
+ *    different password", and nothing at the comparison consulted it, because
  *    the tokenizer threw the spaces away: ``Run `rm -rf / tmp/cache` …`` bore
  *    ``Run `rm -rf /tmp/cache` …`` and auto-accepted.
  *  - `quote_is_a_fragment` — a span cut out of the middle of a sentence rather
@@ -1172,18 +1186,27 @@ export function validateProposalProvenance(
             messageId: where,
           });
         } else if (bearingResult.whitespaceDiffers) {
-          // Same marks, same order, different spacing. Prose whitespace is
-          // collapsed to one space on both sides before this runs, so the only
-          // place a difference can survive is inside a code span — which
-          // `normalizeForReceipt` passes through byte for byte because *two
-          // spaces in a password are a different password*. `reject` and not
-          // `refer`: this is a verdict, not a hesitation. The statement carries a
-          // literal its author did not write, and no reading of the neighbouring
-          // words can make it the one that is in the message.
+          // Same marks, same order, different spacing.
+          //
+          // **The refusal names the fact and not the cause, and two of this
+          // round's own adversarial passes are why.** The first draft said the
+          // difference could only be inside a code span; a brute force over
+          // generated pairs produced 21,344 counterexamples in plain prose. The
+          // second draft named two causes — a code literal, and a droppable full
+          // stop standing where the other side has a space; the next pass
+          // produced a third (`wa 'z` against `wa' z`, a space and a mark
+          // trading places) and there is no reason to think it is the last. A
+          // list of the ways a thing can happen is the instrument `RETRO.md` has
+          // now recorded four times, and it does not stop being one for being
+          // written in prose. What is true of every case is the sentence above.
+          //
+          // `reject` and not `refer`: this is a verdict, not a hesitation. The
+          // statement carries a text its author did not write, and no reading of
+          // the neighbouring words can make it the one that is in the message.
           problems.push({
             kind: 'statement_respaces_the_quote',
             severity: 'reject',
-            detail: `"${clip(statement, 60)}" holds every mark of the quote in order and spaces them differently — prose spacing is folded away before this comparison, so what differs is inside a code span, and a literal respaced is a literal changed (\`rm -rf / tmp/cache\` is not \`rm -rf /tmp/cache\`)`,
+            detail: `"${clip(statement, 60)}" holds every mark of the quote in the same order and spaces them differently, so it is not the text that is in the message — for instance a code literal respaced (\`rm -rf / tmp/cache\` is not \`rm -rf /tmp/cache\`), or a space standing where the quote ends a sentence`,
             messageId: where,
           });
         } else {
@@ -1344,13 +1367,15 @@ const scanned = (scannedAfterCitations: number): LaterRevision => ({
  * to read, and a boundary the proposal controls is the shape of every padding
  * attack this file has been through.
  *
- * What that check cannot see is a window that reaches past the citations and
- * stops short of the room's end — one extra message satisfies it. Core cannot
- * distinguish that from a room that genuinely ends there; it has no message
- * table and no clock. It is recorded beside the two other things `TrustedContext`
- * says core cannot check, and `scannedAfterCitations` on the `none` result
- * reports how far this call actually read, so a caller that wants to assert
- * more has the number to assert it against.
+ * What that check cannot see is a window that is truncated but not *only* the
+ * citations — **any** message the proposal did not cite satisfies it, including
+ * one that sits before the sentence and can therefore never be a correction of
+ * it. Core cannot distinguish a truncated window from a room that genuinely ends
+ * where the window does; it has no message table and no clock. That residue is
+ * recorded beside the two other things `TrustedContext` says core cannot check,
+ * and `scannedAfterCitations` on the `none` result reports how far this call
+ * actually read, so a caller that wants to assert more has the number to assert
+ * it against.
  *
  * ## What this does **not** catch, and what the code does with it
  *

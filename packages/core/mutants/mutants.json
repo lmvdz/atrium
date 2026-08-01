@@ -686,8 +686,8 @@
       "id": "sentence_split_ignores_terminators",
       "why": "Sentences stop being split on `.`/`?`/`!`, so a multi-sentence message is one sentence and every honest single-sentence quote out of it becomes a fragment — the anchor inverted into an over-refusal nobody would notice until the product refused everything.",
       "file": "src/matching.ts",
-      "find": "    .split(/(?<=[.!?…。？！])\\s+|\\n+/u)",
-      "replace": "    .split(/\\n+/u)",
+      "find": "const SENTENCE_BREAK = /(?<=[.!?…。？！])\\p{White_Space}+|[\\n\\v\\f\\r\\u0085\\u2028\\u2029]+/u;",
+      "replace": "const SENTENCE_BREAK = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]+/u;",
       "catches": ["accepts a run of several whole sentences, and refuses half of one"]
     },
     {
@@ -1007,6 +1007,14 @@
         "refuses every one of the four at the engine",
         "refuses to mint a code literal the author did not write, at every layer"
       ]
+    },
+    {
+      "id": "line_break_is_newline_only",
+      "why": "Reads a line break as \\n alone again, which is the same defect `\\s` had for whitespace one function over: U+0085 NEL, U+2028 and U+2029 end a line everywhere a line is rendered and `\\n` sees none of them. A body whose breaks are NEL becomes one line, so a reply-blockquote on its first line swallows the author's own words and a multi-sentence body reads as a single sentence. Found by this round running its own `\\p{White_Space}` fix back over the rest of the package.",
+      "file": "src/matching.ts",
+      "find": "export const LINE_BREAK = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]/u;",
+      "replace": "export const LINE_BREAK = /[\\n]/u;",
+      "catches": ["reads a line break the way every renderer does, not the way a newline does"]
     }
   ]
 }

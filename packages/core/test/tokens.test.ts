@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   decideAcceptance,
+  hasReplyBlockquote,
   isBlank,
   laterRevision,
   normalizeForReceipt,
@@ -13,7 +14,9 @@ import {
   reduce,
   routingTokens,
   SED_CORRECTION,
+  sentencesOf,
   statementBearing,
+  stripReplyBlockquotes,
   validateProposalProvenance,
 } from '../src/index.js';
 import { ALICE, at, BOB, event, model, ROOM, room, UNCITED_TAIL } from './fixtures.js';
@@ -127,20 +130,25 @@ describe('r6 — the token stream is the text, so token equality is text equalit
     // corpus: `borne` implies the two normalized texts are equal once the
     // droppable tokens are taken out of each. Nothing here inspects *how* the
     // alignment decided; it checks the claim the docblock makes.
+    //
+    // **The comparison runs over `normalizeForReceipt` and not over the tokens.**
+    // Computing it from `orderedTokens` would be a probe made out of the thing
+    // under test — the class r4 was failed for and r6 found twice more — and it
+    // passes on `fix/core-engine-r5` for exactly that reason: r5's tokenizer
+    // drops the spaces on *both* sides, so a projection is compared with itself.
+    // The full stop is spelled out because it is the only member of the set, and
+    // the line above holds that to be true.
+    expect([...RECEIPT_POLICY.droppableTokens].sort()).toEqual(['.']);
     const withoutDroppable = (text: string): string =>
-      orderedTokens(text)
-        .filter((token) => !RECEIPT_POLICY.droppableTokens.has(token))
-        .join('')
-        .trim();
+      normalizeForReceipt(text).replaceAll('.', '').replace(/\s+/gu, ' ').trim();
 
     for (const quote of CORPUS) {
       for (const statement of CORPUS) {
         const result = statementBearing(quote, statement);
         if (!result.borne) continue;
-        expect(
-          withoutDroppable(quote).replace(/\s+/gu, ' '),
-          `"${quote}" was borne by "${statement}"`,
-        ).toBe(withoutDroppable(statement).replace(/\s+/gu, ' '));
+        expect(withoutDroppable(quote), `"${quote}" was borne by "${statement}"`).toBe(
+          withoutDroppable(statement),
+        );
       }
     }
   });
@@ -154,6 +162,90 @@ describe('r6 — the token stream is the text, so token equality is text equalit
       if (isBlank(text)) continue;
       if (orderedTokens(text).length > RECEIPT_POLICY.maxAlignedTokens) continue;
       expect(statementBearing(text, text).borne, JSON.stringify(text)).toBe(true);
+    }
+  });
+});
+
+describe('r6 — a receipt that refuses says what it found', () => {
+  it('never refuses a bearing check without naming the difference', () => {
+    // The rule the whole campaign turns on, as a property over a generated space
+    // rather than an example: **a check that ran and refused must report
+    // something**, or a refusal and a pass are the same value. `escalation.ts`
+    // branches on `borne` and names every way it can be false precisely so this
+    // holds by construction; this measures it.
+    //
+    // The alphabet carries a space, a doubled space, a full stop, both kinds of
+    // quote mark, a backtick, a tab, a newline, a control character, a
+    // zero-width space and a bidi override — every class this file has been
+    // broken by — in every position of a short sentence.
+    const alphabet = ['a', ' ', '  ', '.', "'", '`', ',', '?', '\t', '\n', '', '​', '‮'];
+    let checked = 0;
+    for (const p1 of alphabet) {
+      for (const p2 of alphabet) {
+        for (const q1 of alphabet) {
+          for (const q2 of alphabet) {
+            const body = `we will deploy${p1}${p2}production friday`;
+            const minted = `we will deploy${q1}${q2}production friday`;
+            if (isBlank(body) || isBlank(minted)) continue;
+            checked += 1;
+            const problems = validateProposalProvenance(
+              {
+                type: 'claim',
+                provenance: ['m1'],
+                quote: body,
+                statement: minted,
+                proposer: { kind: 'model' },
+                attributedTo: BOB,
+              },
+              [
+                { id: 'm0', authorId: ALICE, body: 'earlier unrelated chatter' },
+                { id: 'm1', authorId: BOB, body },
+              ],
+            );
+            if (!statementBearing(body, minted).borne) {
+              expect(
+                problems.length,
+                `${JSON.stringify([body, minted])} refused silently`,
+              ).toBeGreaterThan(0);
+            }
+            for (const problem of problems) {
+              expect(problem.detail.length, problem.kind).toBeGreaterThan(20);
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(20000);
+  });
+
+  it('never refuses a message quoted as itself', () => {
+    // The anti-vacuity half: the property above is satisfied by a check that
+    // refuses everything, so the same alphabet has to come back clean when the
+    // statement really is the quote.
+    const alphabet = ['a', ' ', '  ', '.', "'", '`', ',', '\t', '\n', '', '​'];
+    for (const p1 of alphabet) {
+      for (const p2 of alphabet) {
+        const body = `we will deploy${p1}${p2}production on friday afternoon`;
+        if (isBlank(body)) continue;
+        const problems = validateProposalProvenance(
+          {
+            type: 'claim',
+            provenance: ['m1'],
+            quote: body,
+            statement: body,
+            proposer: { kind: 'model' },
+            attributedTo: BOB,
+          },
+          [
+            { id: 'm0', authorId: ALICE, body: 'earlier unrelated chatter' },
+            { id: 'm1', authorId: BOB, body },
+          ],
+        );
+        expect(
+          problems.map((problem) => problem.kind),
+          JSON.stringify(body),
+        ).toEqual([]);
+      }
     }
   });
 });
@@ -298,7 +390,7 @@ describe('r6 — the four bodies that minted a sentence nobody wrote', () => {
       }),
     );
     expect(respaced.map((problem) => problem.kind)).toEqual(['statement_respaces_the_quote']);
-    expect(respaced[0]?.detail).toContain('inside a code span');
+    expect(respaced[0]?.detail).toContain('spaces them differently');
 
     const invisible = validateProposalProvenance(
       {
@@ -483,6 +575,48 @@ describe('r6 — the stated limits are the real ones', () => {
     // …and the shapes it really does miss.
     expect(SED_CORRECTION.test('https://x.example/app')).toBe(false);
     expect(SED_CORRECTION.test('docs/api/v1/')).toBe(false);
+  });
+
+  it('reads a line break the way every renderer does, not the way a newline does', () => {
+    // **This round's own fix, run back over the rest of the package.** Once
+    // `\p{White_Space}` replaced `\s` in the fold, `split('\n')` and
+    // `sentencesOf`'s `\n+` were the same defect at the other question: U+0085
+    // NEL, U+2028 and U+2029 end a line everywhere a line is rendered.
+    //
+    // A body whose breaks are NEL was **one line**, so a reply-blockquote on its
+    // first line swallowed the author's own words with it, and a multi-sentence
+    // body read as a single sentence — which is `quoteSpansWholeSentences`'
+    // whole input. Both failed closed, which is why they survived; a refusal for
+    // a reason nobody wrote down is one refactor from an acceptance for it.
+    for (const separator of ['\n', '\u0085', '\u2028', '\u2029', '\r\n']) {
+      expect(
+        sentencesOf(`One sentence${separator}Two sentence`),
+        JSON.stringify(separator),
+      ).toEqual(['One sentence', 'Two sentence']);
+      expect(
+        stripReplyBlockquotes(`> somebody else wrote this${separator}Agreed, all of it.`),
+        JSON.stringify(separator),
+      ).toContain('Agreed, all of it.');
+      expect(hasReplyBlockquote(`Agreed.${separator}> somebody else wrote this`)).toBe(true);
+    }
+
+    // …and the quote-anchoring check reads the sentences, so a NEL-separated
+    // neighbour is a neighbour: quoting one sentence of two is a referral, not a
+    // clean receipt.
+    const body = 'We will deploy production Friday.\u0085Not.';
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: 'We will deploy production Friday.',
+          statement: 'We will deploy production Friday.',
+          proposer: { kind: 'model' },
+          attributedTo: BOB,
+        },
+        room({ id: 'msg_1', authorId: BOB, body }),
+      ),
+    ).toEqual(['quote_omits_surrounding_text']);
   });
 
   it('drops whitespace from the detector"s tokens and only from the detector"s', () => {
