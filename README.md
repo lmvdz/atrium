@@ -1,37 +1,51 @@
 # Atrium
 
-Understanding-first multiplayer conversation. Three synchronized surfaces —
-**Conversation** (what people are saying), **Current state** (what the group now
-understands and is committed to), **Needs you** (what specifically requires this
-person) — over a semantic core that turns messages into typed, correctable,
-provenance-carrying state.
+You step away for four hours. You come back to two hundred messages.
 
-The thesis being tested, from `init.md`: after being absent for several hours,
-can a participant understand the situation, the changes, the open questions and
-their own responsibilities substantially faster than in Slack?
+You can read every one of them and still not answer three questions: what got
+decided, what is owed and by whom, and what is waiting on you.
+
+Atrium's bet is that the durable artifact of a conversation should not be the
+transcript. It should be a structured, correctable statement of what the group
+currently understands and is committed to, with every part of it linked back to
+the messages it came from — and that a machine may *draft* that statement but
+may never be the thing that certifies it. So every line of it carries a mark
+saying which of the two it is:
+
+```
+~  decision   Use Postgres for the event log            alex, 14:02  →
+✓  decision   Use Postgres for the event log            alex, 14:02  →
+```
+
+`~` is a *reading*: something in the transcript looked like a decision, and
+nothing has checked it. `✓` is the same sentence after a person accepted it. The
+arrow is the provenance link back to the messages it was read from. That
+difference is not styling — it is the product, and where exactly it is enforced
+is [the actor floor](#the-actor-floor).
+
+Three surfaces render that state: **Conversation** (what people are saying),
+**Current state** (what the group now understands and is committed to) and
+**Needs you** (what specifically requires this person, and why).
+
+**Most of that does not run yet.** The rules are enforced and tested in
+`packages/core`; the machine reading that would feed them does not exist, and no
+running process is wired to the core at all. [What is actually
+built](#what-is-actually-built) says exactly how much — it is the section to
+read before believing anything above it.
+
+The thesis being tested, from [`init.md`](init.md): after being absent for
+several hours, can a participant understand the situation, the changes, the open
+questions and their own responsibilities substantially faster than in Slack?
 
 ## What goes wrong now
 
-You step away for four hours. You come back to two hundred messages.
-
-You can read every one of them and still not be able to answer three questions:
-what got decided, what is owed and by whom, and what is waiting on you. A
-transcript is a record of what was *said*. It has no position on what is *true*.
-Nothing in it separates a decision from someone thinking out loud, and nothing
-marks the message where last week's decision was quietly reversed.
+A transcript is a record of what was *said*. It has no position on what is
+*true*. Nothing in it separates a decision from someone thinking out loud, and
+nothing marks the message where last week's decision was quietly reversed.
 
 So you re-read, or you ask, and someone answers a question they already
 answered. Every person on the thread pays that cost, every time any of them is
 away.
-
-The bet here is that the durable artifact of a conversation should not be the
-transcript. It should be a structured, correctable statement of what the group
-currently understands and is committed to, with every part of it linked back to
-the messages it came from.
-
-**What Atrium is not:** not a Slack replacement, not a bot platform, no voice or
-video, and no agent execution in v1. `init.md` draws that boundary deliberately —
-v1 is a handful of humans, a few hundred messages, and no autonomous agents.
 
 The nearest familiar thing to this is a memory store: save what was said,
 retrieve it later. That is a different product. A store has no opinion about
@@ -39,45 +53,58 @@ whether what it saved is true, who is accountable for it, or whether it still
 holds — and the moment you need those, deciding what is allowed into the record
 stops being an implementation detail and becomes the entire design.
 
-## A claim is not a fact
+**What Atrium is not:** not a Slack replacement, not a bot platform, no voice or
+video, and no agent execution in v1. [`init.md`](init.md) draws that boundary
+deliberately — v1 is a handful of humans, a few hundred messages, and no
+autonomous agents.
 
-This is the hard part, and it is why "AI summaries" is the wrong description.
+## What the three surfaces look like
+
+**The panel below is the design, not a screenshot.** Nothing renders it today.
+`apps/web` lays out the three regions over hardcoded fixtures, and this sketch is
+drawn from [`design/CONVENTIONS.md`](design/CONVENTIONS.md) rather than captured
+from a running app.
+
+Current state is a flat list, one glyph per line, most recently changed first.
+Needs you is the subset addressed to the person reading it.
+
+```
+CURRENT STATE                                                       #deploy
+
+✓  decision     Self-host on one VPS; compose identical locally    alex  09:14  →
+~  decision     Use Postgres for the event log                     alex  14:02  →
+✓  commitment   sam — wire the flag into the server (due today)    sam   10:04  →
+~  claim        the migration is reversible                        sam   11:30  →
+·  routine      3 more, unchanged since you left
+
+NEEDS YOU                                                                 1
+
+◆  open question   Do we keep the flag after launch?
+                   you opened this on Tuesday and nobody else can settle it
+```
+
+Two things there carry the argument. The `~` decision sits in the list rather
+than in a pending queue — a reading is *in* the state, visible, and simply not
+dressed as settled. And the `◆` item states why it is *this* person's: attention
+items are a recomputed projection over the state, and every one of them must
+carry the sentence that justifies it. "Needs you" without a reason is a
+notification badge, which is the thing this product exists to replace.
+
+## A claim is not a fact
 
 Someone writes: *"yeah that sounds fine, let's go with Postgres."*
 
 Was that a decision? A machine reading says probably. Atrium's answer is to
-record the reading and mark what it is. The grammar renders like this:
+record the reading and mark what it is, rather than to settle it on the reader's
+behalf. It enters the state as `~`. It becomes `✓` only when a person accepts
+it — not when a confidence score crosses a threshold.
 
-```
-~  decision   Use Postgres for the event log            alex, 14:02  →
-```
-
-The `~`, which the design carries as a dotted underline, says: someone said this,
-nothing has checked it. The reading is *in* the state, not hidden, but it does
-not get to look settled. The arrow is the provenance link — every derived object
-points back at the messages it was read from.
-
-It becomes this:
-
-```
-✓  decision   Use Postgres for the event log            alex, 14:02  →
-```
-
-only when a person accepts it. Not when a confidence score crosses a threshold.
-`✓` means checked by something other than whoever claimed it, so a model
-reporting its own success can never earn one.
-
-That rule is not a UI convention. `packages/core/src/authority.ts` refuses to
-fold an acceptance of a decision by a model actor, and the refusal happens in the
-reducer rather than in the layer above it — a boundary enforced only above the
-reducer is one that a second writer, or a replay, can walk around. Four more
-acts sit at the same floor and are human-only: superseding an accepted decision,
-marking a claim verified, every correction, and accepting anything that cites no
-proposal at all.
-
-What is left open is as deliberate as what is closed. A model may accept its own
-claim and open-question readings, and may withdraw a reading it staged —
-throwing away an unaccepted guess destroys nothing.
+That rule is not a UI convention. `packages/core/src/authority.ts` refuses an
+acceptance of a decision by a model actor, and the refusal happens inside the
+reducer rather than in the layer above it, because a boundary enforced only
+above the reducer is one that a second writer, or a replay, can walk around.
+[The actor floor](#the-actor-floor) is the exact list of what that covers — and
+of what it does not cover yet, which is more than `✓` currently implies.
 
 **Corrections are events, not erasures.** Saying *"that was only a suggestion,
 not a decision"* does not delete the decision. It writes a correction that
@@ -89,33 +116,41 @@ That is the structural difference from a summary. A summary is regenerated, so a
 correction to one lasts exactly until the next generation. Here the correction is
 the durable thing.
 
-The full glyph vocabulary — `✓` verified, `~` claim, `?` explicitly unverified,
-`·` routine, `◆` needs you — is in
-[`design/CONVENTIONS.md`](design/CONVENTIONS.md), along with the invariant it
-exists to serve: **a claim never dresses as a fact.**
-
-That is the design. How much of it runs today is the next section, and the
-answer is: the enforcement does, the reading that would feed it does not.
+Seven glyphs carry the whole vocabulary — `✓` verified, `~` claim, `?`
+explicitly unverified, `·` routine, `◆` needs you, `■` destructive decision
+pending, `✗` failed. [`design/CONVENTIONS.md`](design/CONVENTIONS.md) defines
+each one, gives the measured contrast floor it has to clear in both themes, and
+states the invariant they exist to serve: **a claim never dresses as a fact.**
 
 ## What is actually built
 
-Read this section as the answer to "what could I run today", not "what is
-planned".
+**Nothing here is deployed, and nothing that runs touches the semantic core.**
+`apps/web` and `apps/server` both declare `@atrium/core` in their
+`package.json`; neither imports a symbol from it. `apps/server/src/index.ts`
+opens a database handle, starts a WebSocket server and registers a worker, and
+issues no query. The reducer this document spends most of its length on is
+exercised by its test suite and by nothing else. The enforcement is real code
+with real tests, and it is real code that no user action can currently reach.
 
-**On `main`.** `packages/core` is the semantic core: pure TypeScript with no
-I/O and no clock, holding five accepted object types (decision, commitment, open
+**On `main`.** `packages/core` is the semantic core: pure TypeScript with no I/O
+and no clock, holding five accepted object types (decision, commitment, open
 question, claim, objective), typed relations, proposal staging,
 corrections-as-events, and a deterministic reducer whose live-and-replay
-equivalence is checked property-style over generated logs. The human-only floor
-described above is enforced there. `packages/db` has the Drizzle schema and its
-first migration. `packages/ingest` turns a real conversation into canonical
-JSONL, byte-identically on a rerun; three corpora are committed, the largest 454
-messages with 368 reply edges. `design/` holds the token system (51 tokens per
-theme, lifted verbatim from the last of six prototype versions) and the rules for
-using it. `apps/web` is a Next.js shell that lays out the three regions over
-hardcoded fixtures. `apps/server` is one Node process whose WebSocket server is a
-heartbeat-and-echo placeholder and whose job queue is real but registers
-`interpret-message` as a no-op.
+equivalence is checked property-style — the test generates logs and asserts the
+equivalence across all of them, rather than over hand-written cases.
+`packages/db` has the Drizzle schema and its first migration. `packages/ingest`
+turns a real conversation into canonical JSONL, byte-identically on a rerun;
+three corpora are committed, of 454, 111 and 480 messages. `design/` holds the
+token system — 51 variables per theme, lifted byte-for-byte from `Atrium
+v6.dc.html`, the last of the prior prototype lineage — and the rules for using
+it. `apps/web` is a Next.js shell that lays out the three regions over hardcoded
+fixtures; it depends on `@atrium/core` directly rather than through `db`, and
+imports nothing from it. `apps/server` is one Node process whose WebSocket
+server is a heartbeat-and-echo placeholder and whose job queue is real but
+registers `interpret-message` as a no-op.
+
+`pnpm test` is 315 tests across 14 files, all passing. That measures something
+real. It is not evidence that any of it runs inside an application.
 
 **On branches, under review, not merged.** The realtime ledger
 ([#22](https://github.com/lmvdz/atrium/issues/22)), auth and workspaces
@@ -129,7 +164,8 @@ next round of the core engine
 ([#21](https://github.com/lmvdz/atrium/issues/21)). Each is a branch with an open
 ticket and an unfinished review round. None of it is shipped, and there is no
 continuous integration on `main` yet — the workflow that would provide it is
-itself on a branch.
+itself on a branch. There is also no host: the compose stack under "Boot it" has
+been run on laptops and never on a public VPS, which is what #40 is open to fix.
 
 **Not built at all.** No product code here calls a language model — not on
 `main`, not on any branch under review. There is no interpretation job that does
@@ -141,33 +177,47 @@ in the core and rendered against fixtures — it has never yet marked a machine
 reading of a real conversation.
 
 Which means the thesis at the top of this file is still a thesis. It has not been
-tested.
+tested; [what would settle it](#what-would-settle-this) is the last section.
 
 ## Why it is built this way
 
 **Humans before agents.** If a handful of people and a few hundred messages do
 not reorient faster in Atrium than in Slack, agents will not rescue that; they
-will only add volume. Agents arrive in phase 4, after the thing they would
-accelerate is known to work.
+will only add volume. `init.md` sequences the product in five phases — replay a
+historical conversation, add minimal native multiplayer, test long-running
+collaboration, add one narrow agent, add execution only when demanded — and
+agents are the fourth, after the thing they would accelerate is known to work.
 
 **Postgres, not a custom event store.** Append-only events with recomputable
-projections, in an ordinary database. A graph store, an embedding-native store
-and a bespoke event log were all considered and rejected: none of them is where
-this product's difficulty lives
-([#12](https://github.com/lmvdz/atrium/issues/12),
-[#11](https://github.com/lmvdz/atrium/issues/11)).
+projections, in an ordinary database. This one was not argued and won; it was
+inherited. `init.md`'s persistence section is a list of things *not to build* —
+"a custom event database; a graph database; an embedding-native database; a
+distributed ledger" (`init.md:212–217`) — issued as a directive, not as the
+record of a comparison, and nothing in this repository weighs those four against
+Postgres. [#11](https://github.com/lmvdz/atrium/issues/11) locked the stack and
+[#12](https://github.com/lmvdz/atrium/issues/12) settled the table set and the
+wire protocol on top of that premise; neither reopened it. The reason it holds
+is that none of the four is where this product's difficulty lives.
 
 **Server-authoritative WebSockets, not CRDTs.** Messages are append-only and
 semantic state changes through server commands, so there is nothing to merge.
 Who may change shared understanding is an access-control question, not a
-convergence question — and the terminal-multiplexing research found the same
-answer in a different field, where every collaborative terminal resolves
-concurrent input by access control rather than by merging.
+convergence question — and
+[`plans/research-terminal-multiplexing/`](plans/research-terminal-multiplexing/)
+found the same answer in a different field. Of the collaborative terminals
+surveyed — sshx, tmate, Zellij, VS Code Live Share — not one resolves concurrent
+input by merging. Every one of them does it with read-only tokens and
+per-session permissions.
 
-**Borrow the pattern, not the dependency.** The design system, the epistemic
-grammar and the attention rules come from six versions of earlier prototyping;
-several architectural rules come from reading a comparable system's source and
-issue tracker. Both were taken as patterns. Neither was taken as a dependency.
+**Borrow the pattern, not the dependency.** The design system, the glyph grammar
+and the attention rules come from the prior Atrium design lineage recorded in
+[`plans/research-live-call-design-system/`](plans/research-live-call-design-system/).
+Several architectural rules come from reading `block/buzz` — the closest live
+analog — at a pinned commit, source and issue tracker together, in
+[`plans/research-buzz/`](plans/research-buzz/). The finding that mattered there
+was that its specifications are better than this project's and its enforcement
+is worse, and that every serious bug in its tracker lives in that gap. Both were
+taken as patterns. Neither was taken as a dependency.
 
 ## How the work gets reviewed
 
@@ -183,8 +233,7 @@ they are drawn from different model lineages so their blind spots do not line up
 The largest real gap goes back for another round. Some tickets are on their
 tenth.
 
-Two examples of what that catches, because they explain why the tree above is as
-unfinished as it is.
+Two examples of what that catches.
 
 A guard was written to check that a machine-minted commitment was supported by
 the message it cited, by measuring word overlap between the two. `not` was on the
@@ -201,22 +250,23 @@ A critic's finding is a hypothesis, not a verdict, and each one is checked
 against the code before it is acted on; the log records one that was wrong, whose
 suggested fix would itself have broken a working healthcheck. Every closed ticket
 appends what its rounds caught to [`RETRO.md`](RETRO.md) — no entry, no close.
-That file is this project's record of its own errors, and it is the most useful
-thing in the repository for deciding whether to believe the rest of it.
+That file is this project's record of its own errors, including both of the above
+and the two blocking defects a review round found in this README.
 
 ## Where the decisions are written down
 
 - [`init.md`](init.md) — the product bible: what to build from scratch, what to
-  reuse, what to defer, and the five-phase sequence.
+  reuse, what to defer, and the five phases.
 - [Issue #1](https://github.com/lmvdz/atrium/issues/1) — the map. Every settled
   decision, one line each, linked to the ticket that argued it. Start here for
   *why* rather than *what*.
 - [`RETRO.md`](RETRO.md) — what the process got wrong, per ticket, kept so
   decisions are made against evidence rather than memory.
 - [`design/CONVENTIONS.md`](design/CONVENTIONS.md) — the token system, the
-  epistemic glyphs, and the measured contrast floors, as an operating manual.
+  glyphs, and the measured contrast floors, as an operating manual.
 - [`plans/`](plans/) — the research briefs the decisions were made from: the
-  design lineage, a competitive read, and the terminal-multiplexing landscape.
+  prior Atrium design lineage, a read of `block/buzz`, and the
+  terminal-multiplexing landscape.
 
 ## Boot it
 
@@ -298,8 +348,9 @@ discriminator and a typed jsonb payload: **decision**, **commitment**,
 **open_question**, **claim**, **objective**. Supersession, dependency, blocking,
 answering and evidence are typed edges in `relations`, not objects. Proposals
 are pre-acceptance staging and never render as facts. Corrections are events, so
-nothing is ever erased. Attention items are a recomputable projection and every
-one of them must say why it needs *this* person. (Issue #3.)
+nothing is ever erased. Attention items — what the **Needs you** surface
+renders — are a recomputable projection, and every one of them must say why it
+needs *this* person. (Issue #3.)
 
 `reduce(events) → state` in `packages/core` is deterministic and total: events
 are canonically ordered by `(at, id)`, a malformed event is recorded in
@@ -316,13 +367,14 @@ object, and matches the object's type.
 ### The actor floor
 
 [#4](https://github.com/lmvdz/atrium/issues/4) settled acceptance per type. Most
-of that matrix is policy (confidence thresholds, commitment attribution) and
-belongs to the θ engine in
-[#21](https://github.com/lmvdz/atrium/issues/21). Five rows of it are not
-policy — they are the trust boundary itself, and a boundary enforced only above
-the reducer is one a second writer or a replay can walk around. Those are
-enforced in `packages/core/src/authority.ts`, and the reducer refuses to fold an
-event that breaks them:
+of that matrix is policy — the confidence threshold a reading must clear (`θ` in
+the source), which types a model may propose at all, and how a commitment naming
+someone else routes to that person — and that policy belongs to the
+acceptance-policy layer being built in
+[#21](https://github.com/lmvdz/atrium/issues/21). Five rows are not policy. They
+are the trust boundary itself, so they are enforced in
+`packages/core/src/authority.ts`, and the reducer refuses to fold an event that
+breaks them:
 
 | what | who |
 | --- | --- |
@@ -332,12 +384,35 @@ event that breaks them:
 | **Superseding an accepted decision** | human only |
 | **Corrections** — amend, retract, restore | human only |
 
-What stays open is as deliberate as what is closed: a model may accept its own
-**claim** and **open_question** proposals (that is #4's auto-accept path, and
-the epistemic field carries truth status separately), may supersede a claim or a
-question, and may reject a proposal — withdrawing a staged reading destroys
-nothing. Refusals are recorded in `state.issues` with the route that stays open,
-and every gate is tested in both directions.
+Those five rows are the whole floor, and **what they cover is narrower than `✓`
+implies.** Drive the shipped reducer with a model actor proposing an object and
+then accepting its own proposal, one type at a time, and this is what comes
+back:
+
+| type | may a model mint it accepted? | |
+| --- | --- | --- |
+| `decision` | **no** — refused | the floor, above |
+| a claim moving to `verification: 'verified'` | **no** — refused | the floor, above |
+| a claim accepted `unverified` or `disputed` | yes | deliberate: it still renders `~`, never `✓` |
+| `open_question` | yes | deliberate: #4's auto-accept path |
+| `commitment` | **yes — and it should not** | attribution is deferred to #21 |
+| `objective` | **yes — and it should not** | no gate exists |
+
+The commitment row is the sharp one. `{statement: 'Bob will deploy production
+Friday', owner: 'user_bob'}` — a third-party commitment naming a human — is
+accepted on a model actor's word with no issue raised. `authority.ts`'s own
+header concedes why: deciding whether a commitment is self-stated or third-party
+needs the message it was drawn from, which the reducer does not have, so the row
+is routed to [#21](https://github.com/lmvdz/atrium/issues/21). It is scheduled
+rather than unknown. But until #21 lands, "`✓` means a human checked it" is true
+of decisions and of verified claims, and false of commitments and objectives.
+
+The three openings that *are* deliberate are the other rows. A model may accept
+its own claim and open-question readings — a claim carries its truth status in a
+separate `verification` field, so an accepted claim still renders `~` — may
+supersede a claim or a question, and may reject a proposal, because withdrawing
+a staged reading destroys nothing. Refusals are recorded in `state.issues` with
+the route that stays open, and every gate is tested in both directions.
 
 ### Consumed, or rejected
 
@@ -418,9 +493,9 @@ Three corpora are committed:
 
 | File | Source | Role | Why |
 | --- | --- | --- | --- |
-| `corpora/nextjs-isr.jsonl` | Next.js discussion #11552, *RFC: Incremental Static Regeneration* | **demo** | 454 messages, 368 reply edges, 184 participants. A two-year RFC-to-shipped-feature argument with real threading — which is what the replay UI has to render. |
-| `corpora/ts9998.jsonl` | TypeScript #9998, *Trade-offs in Control Flow Analysis* | sample | A decade-long design argument, and the only corpus on the REST path. Flat: GitHub *issues* carry no threading, so it has zero reply edges — which is why it is no longer the demo. |
-| `corpora/holdout-nextjs-rfc.jsonl` | Next.js discussion #37136, *RFC: Layouts* | eval holdout | Reserved for the interpretation-quality golden set, so prompts are never tuned on the corpus they are scored against. Never demoed. |
+| `corpora/nextjs-isr.jsonl` | Next.js discussion #11552, *RFC: Incremental Static Regeneration* | **demo** | 454 messages, 368 reply edges, 184 participants. Not the biggest corpus, but the most deeply threaded — a two-year RFC-to-shipped-feature argument, which is what the replay UI has to render. |
+| `corpora/ts9998.jsonl` | TypeScript #9998, *Trade-offs in Control Flow Analysis* | sample | 111 messages, 70 participants, and the only corpus on the REST path. Flat: GitHub *issues* carry no threading, so it has zero reply edges — which is why it is no longer the demo. |
+| `corpora/holdout-nextjs-rfc.jsonl` | Next.js discussion #37136, *RFC: Layouts* | eval holdout | 480 messages, 314 reply edges, 241 participants — the largest of the three. Held back for the interpretation-quality golden set so prompts are never tuned on the corpus they are scored against. Today that is a role string in the registry and a convention, not a guard: `pnpm ingest all` still fetches it. Making the exclusion structural belongs to [#24](https://github.com/lmvdz/atrium/issues/24). |
 
 A rerun is byte-identical. Ids are derived from the source, messages are sorted
 by `(ts, id)`, keys are written in a fixed order, message bodies are stored
@@ -467,7 +542,8 @@ no attempt to reconcile a stored corpus against later upstream history, and
 | `pnpm typecheck` | `tsc --noEmit` in every workspace |
 | `pnpm db:generate` | Generate a migration from the Drizzle schema |
 | `pnpm db:migrate` | Apply pending migrations |
-| `pnpm infra:up` / `infra:down` | Postgres + MinIO only |
+| `pnpm infra:up` | Start Postgres + MinIO only |
+| `pnpm infra:down` | `docker compose down` — stops every service, not just those two |
 
 Playwright needs its browser once: `pnpm --filter @atrium/web exec playwright
 install chromium`. Without it the smoke test skips with a reason instead of
@@ -489,3 +565,24 @@ here".
 - Adapter seams (`ConversationSource`, `ExecutionProvider`) are type-only ports
   in `packages/core/src/ports.ts`. No integration ships in v1; the door stays
   open.
+
+## What would settle this
+
+Everything above is machinery in service of one unproven sentence: that a person
+returning after four hours can reorient substantially faster here than in Slack.
+Nothing in the repository is evidence for it yet. A passing test suite proves the
+reducer does what it says; it says nothing about whether the state the reducer
+holds is worth reading.
+
+The experiment is already staged. `corpora/holdout-nextjs-rfc.jsonl` — Next.js
+discussion #37136, 480 messages across a year, 314 reply edges, 241 people — was
+fetched, committed, and deliberately never opened for demos or prompt work.
+[#24](https://github.com/lmvdz/atrium/issues/24) is the ticket that turns it into
+a verdict: hand-annotate at least 25 windows of it, including at least 3
+supersessions and 5 commitments naming someone other than the speaker, then score
+the machine reading against those annotations for per-type precision and recall,
+commitment-attribution accuracy, and supersession detection.
+
+Twenty-five windows is the number to watch. Until it exists, this document is a
+design and an argument, and the honest summary of the project is that the hard
+part is specified, partly enforced, and entirely untested against reality.
