@@ -202,6 +202,46 @@ Enforcement: any quotation-context element must carry provenance proving its tex
 
 **A record of an answer contains the answer.** Recording that something was answered while dropping what the answer said is not a record. The same round: clicking `Answer — retention is 90 days` wrote a transition and stored none of the answer's content, so the string on the button appeared nowhere in the object, the history, the feed, the lens or the receipt. Whatever the control promised to record is recorded verbatim, with its authorship disclosed by the rules above.
 
+## A correction's before and after come from the record, not from the render
+
+A chain entry that says one value became another has to read both values out of the object's own history of that field. Display strings — the sentence a row renders, an option's label, a state label composed for a header — may not enter a `change`, and cannot be checked by comparing them to each other, because two different fabrications differ just as convincingly as two real values do.
+
+Found three times in #10, through three different paths, each one invisible to the guard the previous round had added:
+
+- **r4 D7** compared an option's wording to a proposal's wording and recorded "not what was proposed" against an answer that agreed exactly. Fixed with a value (`agrees`).
+- **r6 D1** minted an option without that value, so a re-affirmation printed two byte-identical sentences either side of an arrow. Fixed by computing "did the record change" apart from "did the option depart", and by adding a guard: a `change` whose `from` and `to` are equal is a defect.
+- **r7 D1** computed that guard's operands against `prior.body` — the *system row's display sentence*, `"lars chose: Cut over Friday"`. The two operands differed, so the guard passed honestly, and every re-answer asserted an amendment from a string the record had never held. The mirror defect sat in the same function: answering with the *agreeing* option wrote no chain entry at all while the recorded statement genuinely changed.
+
+Each guard was correct about the relationship it checked and blind to where its operands came from. So the rule is structural, not procedural:
+
+1. **Recorded fields have histories.** One function writes the field, reads back what the object now holds, appends it, and returns the adjacent pair — or nothing, when nothing moved. There is no other way to change a recorded field, and a dev invariant proves it by comparing every field to the last value its own history contains. A future `o.text = …` is caught on the next render whether or not it ever reaches a chain.
+2. **Only that function can mint a `change`.** It marks what it produces; the checker refuses any entry carrying a change without the mark. That is what makes display strings *structurally* unable to reach a correction, rather than merely absent from one by convention.
+3. **The operands are validated, not merely compared.** A `change` whose `from` is not a value the object has ever held is a defect even when `from` and `to` differ, and so is a pair the record never moved through in that order.
+4. **Seeded corrections are corrections.** A fixture's historical amendments are replayed into the field history and minted the same way. An exemption for "this one is data, not behaviour" is exactly the shape every instance of this class arrived through.
+
+**And the two halves of a receipt agree about whether anything happened.** #10 r7 D5: reschedule moved a due date, WHAT HAPPENED said so, and CORRECTION CHAIN forty pixels below rendered "this object has never been amended". Every transition that amends a recorded field writes a chain entry; a field that has moved and an empty chain cannot both be right, and the invariant says so.
+
+## A control has to be legible, not merely non-zero
+
+A geometry tripwire set at `width < 1` catches nothing that matters. #10 r7 D2: an owed item's title rendered **5.36px** wide at 1124 — counted, glyphed, actionable, unidentifiable — and the guard was silent, because the same click path could also drive it to 0 and that was the case the guard had been written for. One pixel above the wire is the same defect.
+
+So the floor is legibility, expressed in the control's own type size rather than a constant: **a control whose label is being truncated must be at least six characters wide at its own font size.** A control showing all of its text is legible at whatever width its text needs; a control with no text only has to be aimable.
+
+**And the layout gives the identifying text priority.** The cause was a track template mixing `auto` and `1fr`: grid sizes auto tracks before it distributes free space, so `nowrap` metadata and buttons took their full max-content width at every viewport and the title absorbed the entire shortfall. Where several things on a row must flex, they are all `fr` so they share the shortfall in a fixed ratio — and controls do not flex at all, because a control whose label you cannot read is not one click to act.
+
+## Focus goes somewhere usable after every interaction, not only after a write
+
+A spec that covers writes will be enforced on writes and nowhere else. #10 r7 wrote "focus follows the record", implemented it for writes, and its checker returned early unless a write flag was set — so routine peek, mark and unmark seen, expanding an objective, opening a receipt, closing it, switching rooms and expanding a pin card, between them the core navigation of the product, all left focus on `BODY` and nothing could see it.
+
+- **Every interaction that re-renders leaves focus somewhere a keyboard reader can act from** — a control, or a surface container that holds one. Never `BODY`, and never an element that survived the rebuild but is now hidden.
+- **A control replaced by what it opened declares its successor.** Same-key restore structurally cannot cover that case: the key it would restore is the element the interaction removed.
+- **A toggle that survives its own render carries a key**, so restore can find it, rather than relying on a declaration.
+- **The checker learns about the interaction from the browser, not from the handler** — a capture-phase listener ahead of every handler on the page. A check that depends on each new interaction remembering to announce itself is a check with the same blind spot as the code it is watching.
+
+## A machine's output is a record, not speech
+
+CI runs, deploy records and parity checks are verbatim and correctly credited, so rendering them is not fabrication — but rendering them in quotation marks with a human voice marker says a person said this about a job, and exempts a machine's string from the page-integrity rules that exist to catch `undefined` in a record. Found in #10 r7 D6. A non-human source's line renders as a record: mono, unquoted, no human-voice marker, disclosure on screen at rest. **It keeps its citation** — the cited message must exist and must contain the text, checked on every render — minus the one clause of the quotation contract that is about people. Dropping the check along with the quotation marks trades a presentation defect for an attribution hole.
+
 ## Page-integrity rules are about the page's own text
 
 The invariants that police rendered output — no quotation marks outside a checked quotation context, no `undefined`/`null`/`NaN` in a rendered record — are assertions about what the *interface* writes. Applied to a human's own sentence they are false alarms on that person's words, and a checker that cries wolf on ordinary input is a checker people learn to ignore. Every surface that renders human-authored characters marks them (`data-voice="human"`), per fragment, so a page sentence that quotes a person keeps the page's half checked and exempts only the half the person typed. Found twice: round 4 for the quote-mark rule (feed bodies only), round 5 for the record-text rule (feed bodies only again — the correction chain's quote, the receipt's excerpt, an object's own text after a bound answer, and the facts a verification note lands in were all still held to a rule about the page).
