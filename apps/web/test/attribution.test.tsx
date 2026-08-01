@@ -11,9 +11,10 @@ import { cleanup, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
-import { Composer, Quoted, ReceiptView, TimelineRow } from '../src/components';
+import { Composer, Quoted, ReceiptView, RoomHead, TimelineRow } from '../src/components';
 import type { MessageRecord, Quotation } from '../src/components/model';
 import {
+  bodyText,
   isQuotation,
   maybe,
   messageEntry,
@@ -152,6 +153,126 @@ describe('the message row is discriminated on origin', () => {
   });
 });
 
+/* ---------------------------------------------------------------------------
+ * THE BODY IS A DERIVATION, NOT AN OVERRIDE.
+ *
+ * Round 2 closed the chosen arm — no actor field, no body field — and the free
+ * string moved one field over. `body?: readonly BodySegment[]` on the AUTHORED
+ * arm was a caller override that nothing reconciled against the record whose
+ * actor and message id the row was about to print. The gauntlet's reproduction,
+ * through the public API with no cast: record m14, actor `lars`,
+ * `data-attribution="m14"`, body reading "I authorise dropping users_legacy
+ * right now." — words lars never wrote, under lars's name, citing lars's
+ * message as the proof.
+ * ------------------------------------------------------------------------- */
+describe('an authored body derives from its record', () => {
+  /* CATCHES: dropping the reconciliation in `messageEntry` — the exact defect,
+     reproduced exactly as the gauntlet reproduced it. If this passes without
+     throwing, a caller can put any sentence at all under a real person's name
+     and the DOM will cite a real message as its proof. */
+  it('a body that says something else throws at construction', () => {
+    expect(() =>
+      messageEntry(lars, {
+        state: lars_state(),
+        body: [{ kind: 'text', text: 'I authorise dropping users_legacy right now.' }],
+      }),
+    ).toThrow(/does not read as the message it is attributed to/);
+  });
+
+  /* CATCHES: a check loose enough to wave through "close enough" — an added
+     clause, a dropped clause, a changed word, a stray space. The words are the
+     record's; only the markup is the caller's. */
+  it.each([
+    ['an added clause', `${lars.text} And drop the table while you are there.`],
+    ['a dropped clause', lars.text.slice(0, 20)],
+    ['a changed word', lars.text.replace('Hold', 'Ship')],
+    ['a stray space', `${lars.text} `],
+  ])('%s is a different message', (_name, text) => {
+    expect(() =>
+      messageEntry(lars, { state: lars_state(), body: [{ kind: 'text', text }] }),
+    ).toThrow(/does not read as the message/);
+  });
+
+  /* CATCHES: over-tightening it into "no markup allowed". Segments exist so a
+     body can carry mentions and code runs; what they may not do is change the
+     words. The `@` counts, because the reader sees it. */
+  it('markup over the same text is accepted, and the @ of a mention counts', () => {
+    const mentioned: MessageRecord = {
+      id: 'm-mention',
+      at: '10:12',
+      actor: 'mateo',
+      text: '@lars this is `users.dualwrite`, not the backfill',
+      origin: 'seeded',
+    };
+    const body = [
+      { kind: 'mention', text: 'lars' },
+      { kind: 'text', text: ' this is `' },
+      { kind: 'code', text: 'users.dualwrite' },
+      { kind: 'text', text: '`, not the backfill' },
+    ] as const;
+    expect(bodyText(body)).toBe(mentioned.text);
+    const entry = messageEntry(mentioned, { state: lars_state(), body });
+    if (entry.origin === 'chosen') throw new Error('unreachable');
+    expect(entry.body).toEqual(body);
+
+    /* And dropping the `@` from the model while `MessageBody` still renders it
+       is caught too: the two now come from one function. */
+    expect(() =>
+      messageEntry(mentioned, {
+        state: lars_state(),
+        body: [{ kind: 'text', text: mentioned.text.slice(1) }, ...body.slice(1)],
+      }),
+    ).toThrow(/does not read as the message/);
+  });
+
+  /* CATCHES the SHIPPED INSTANCE. Round 2's gallery contained one: m7's body
+     added a mention and a whole clause that MESSAGES.m7.text did not have, so
+     the demo the reviewer opens was itself the defect. This walks every authored
+     row in every fixture frame rather than spot-checking m7, because the next
+     one will be a different message. */
+  it('every authored row in the shipped fixtures reads as its own record', () => {
+    const frames = [
+      f.timeline({ seen: false, filter: null, routineOpen: false }),
+      f.timeline({ seen: true, filter: 'need', routineOpen: true }),
+      f.QUIET_TIMELINE,
+      f.FRESH_TIMELINE,
+    ];
+    let checked = 0;
+    for (const entries of frames) {
+      for (const entry of entries) {
+        if (entry.type !== 'message' || entry.origin === 'chosen') continue;
+        const record = f.MESSAGES[entry.id];
+        expect(record, `fixture ${entry.id} has no record`).toBeDefined();
+        expect(bodyText(entry.body), `${entry.id} renders words its record does not have`).toBe(
+          record?.text,
+        );
+        checked += 1;
+      }
+    }
+    expect(checked, 'the walk found no authored rows to check').toBeGreaterThan(8);
+  });
+
+  /* CATCHES: the check passing because the renderer prints something else. The
+     DOM has to agree with the record too, not just the model. */
+  it('the rendered row reads as the record it cites', () => {
+    const entry = messageEntry(f.MESSAGES.m7 as MessageRecord, {
+      state: lars_state(),
+      body: [
+        { kind: 'mention', text: 'lars' },
+        {
+          kind: 'text',
+          text: ' dual-write costs about $900/mo in extra write throughput — that is ',
+        },
+        { kind: 'code', text: 'users.dualwrite' },
+        { kind: 'text', text: ' on both tables, not the backfill.' },
+      ],
+    });
+    const { container } = render(<TimelineRow entry={entry} />);
+    const body = container.querySelector('[data-row-body]');
+    expect(body?.textContent).toBe(f.MESSAGES.m7?.text);
+  });
+});
+
 describe('the runtime boundary', () => {
   /* CATCHES: relying on the `declare`-only brand for data that never went
      through the compiler. JSON, a cast, `Object.assign` and a JavaScript caller
@@ -206,6 +327,30 @@ describe('composition slots', () => {
     const smuggledProp = `dangerously${'SetInnerHTML'}`;
     const smuggled = createElement('div', { [smuggledProp]: { __html: '<q>nope</q>' } });
     expect(() => slot(smuggled)).toThrow(/dangerouslySetInnerHTML/);
+  });
+
+  /* CATCHES: `RoomHead.surfaces` going back to `ReactNode`. It was the last
+     composition hole in the frame taking the widest type React has — in the
+     header of every room, above every conversation — so raw attributed markup
+     could reach the screen there with no cast and no constructor. */
+  it('the room head takes a slot, not a ReactNode', () => {
+    /* The type is the first layer, and `@ts-expect-error` is not decoration:
+       `pnpm typecheck` fails if this line ever starts compiling. It renders
+       nothing at runtime, which is the second half of the same statement — raw
+       markup does not reach the DOM through this prop. */
+    const raw = render(
+      // @ts-expect-error — `surfaces` is a Slot: raw markup does not compile.
+      <RoomHead room={f.ROOM} surfaces={<b data-raw="true">raw</b>} />,
+    );
+    expect(raw.container.querySelector('[data-raw]')).toBeNull();
+    cleanup();
+    expect(() => render(<RoomHead room={f.ROOM} surfaces={slot(<q>invented words</q>)} />)).toThrow(
+      /<q> element/,
+    );
+    const { container } = render(
+      <RoomHead room={f.ROOM} surfaces={slot(<span data-surfaces="true">CONVERSATION</span>)} />,
+    );
+    expect(container.querySelector('[data-surfaces]')?.textContent).toBe('CONVERSATION');
   });
 
   /* CATCHES: over-tightening the walk so the library's own quotation component

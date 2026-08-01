@@ -130,7 +130,14 @@ function AuthoredRow({
             <span data-quoted={quotationRef(entry.replyTo)}>{entry.replyTo.text}</span>
           </span>
         )}
-        <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
+        {/* The words, and nothing else in the body column — tagged with the
+            message they must read as, so a browser can check the rendered row
+            against the record rather than against the model that built it.
+            `messageEntry` proves `bodyText(body) === record.text`; this is what
+            proves the renderer did not then print something else. */}
+        <span data-row-body={entry.attribution.messageId}>
+          <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
+        </span>
         <RowTagButton entry={entry} onOpenTag={onOpenTag} />
         {entry.note === null ? null : (
           <SystemVoice className={styles.note} statement={entry.note} />

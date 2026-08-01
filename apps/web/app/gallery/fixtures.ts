@@ -63,11 +63,15 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     text: '4.7% of sessions still present legacy opaque tokens.',
     origin: 'seeded',
   },
+  /* The inline-runs fixture. Round 2 shipped this record with a body that added
+     a mention and a whole clause the record did not contain — the words under
+     mateo's name were not mateo's. The record now carries the full sentence,
+     and the body below marks THAT text up rather than extending it. */
   m7: {
     id: 'm7',
     at: '10:12',
     actor: 'mateo',
-    text: 'Dual-write costs about $900/mo in extra write throughput.',
+    text: '@lars dual-write costs about $900/mo in extra write throughput — that is users.dualwrite on both tables, not the backfill.',
     origin: 'seeded',
   },
   m10: {
@@ -505,7 +509,10 @@ const BEFORE: readonly TimelineEntry[] = [
   },
   message('m7', {
     state: CLAIM,
-    // the only two inline runs a message body has: code and a mention
+    /* The only two inline runs a message body has: code and a mention. Every
+       character below comes from MESSAGES.m7.text — `messageEntry` throws if
+       the concatenation drifts by so much as a space, so this fixture is
+       checked on every render rather than trusted. */
     body: [
       { kind: 'mention', text: 'lars' },
       {

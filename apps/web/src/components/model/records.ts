@@ -71,6 +71,24 @@ export type BodySegment =
   | { readonly kind: 'code'; readonly text: string }
   | { readonly kind: 'mention'; readonly text: string };
 
+/**
+ * The text one segment PUTS ON SCREEN.
+ *
+ * A mention renders with its `@`, so the `@` is part of what the reader sees and
+ * therefore part of what has to match the record. This function is the single
+ * definition of that, and `MessageBody` renders through it — if the two were
+ * written separately, the check below would be measuring a string the reader
+ * never sees.
+ */
+export function segmentText(segment: BodySegment): string {
+  return segment.kind === 'mention' ? `@${segment.text}` : segment.text;
+}
+
+/** What a whole body reads as, concatenated. */
+export function bodyText(body: readonly BodySegment[]): string {
+  return body.map(segmentText).join('');
+}
+
 /* ---------------------------------------------------------------------------
  * THE MESSAGE ROW, DISCRIMINATED ON ORIGIN.
  *
@@ -91,6 +109,20 @@ export type BodySegment =
  *     `SystemStatement`. There is no field on this arm that a renderer could
  *     put in the human-attributed actor column, so page-authored text cannot
  *     reach a human-attributed row by construction rather than by care.
+ *
+ * ROUND 2's GAUNTLET FOUND THE FREE STRING HAD MOVED, NOT GONE. Closing the
+ * chosen arm shut the actor slot; `body?: readonly BodySegment[]` was still a
+ * caller override that nothing reconciled against the record it sat beside. A
+ * caller could pass m14 — actor `lars`, `data-attribution="m14"` — with a body
+ * reading "I authorise dropping users_legacy right now.", through the public
+ * API, with no cast. The words under a person's name were free text again, one
+ * field over.
+ *
+ * The body is now a DERIVATION, not an override. Segments may add markup over
+ * the record's text — a mention, a link, a code run — but `bodyText(body)` must
+ * equal `record.text` exactly, and `messageEntry` throws when it does not. What
+ * the body can change is how the words are marked up; what it cannot change is
+ * the words.
  * ------------------------------------------------------------------------- */
 
 interface MessageEntryCommon {
@@ -139,7 +171,13 @@ export function isAuthored(entry: MessageEntry): entry is AuthoredMessageEntry {
 
 export interface MessageEntryInput {
   readonly state: EpistemicState;
-  /** overrides the record's flat text with inline runs; authored rows only */
+  /**
+   * Marks the record's text up as inline runs; authored rows only.
+   *
+   * NOT an override. `bodyText(body)` must equal `record.text` character for
+   * character — segments choose the markup, the record owns the words — and
+   * `messageEntry` throws otherwise.
+   */
   readonly body?: readonly BodySegment[];
   readonly note?: Maybe<SystemStatement>;
   readonly tag?: Maybe<RowTag>;
@@ -181,6 +219,22 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
          not "lars said", and it is not in his voice. */
       statement: chosenAct(record.actor, record.text, record.id),
     };
+  }
+
+  /* THE BODY DERIVES FROM THE RECORD. Segments add markup; they do not add,
+     remove or reword anything. A body that reads differently from the message
+     it is attributed to is synthesized speech under a real name — the round-1
+     defect, relocated from the actor slot to the body slot. */
+  if (input.body !== undefined) {
+    const rendered = bodyText(input.body);
+    if (rendered !== record.text) {
+      throw new Error(
+        `messageEntry: ${record.id}'s body does not read as the message it is attributed to (${attribution.actor}). ` +
+          'A body marks the record up; it may not change the words.\n' +
+          `  record: ${JSON.stringify(record.text)}\n` +
+          `  body:   ${JSON.stringify(rendered)}`,
+      );
+    }
   }
 
   return {
@@ -507,18 +561,53 @@ export function hardestGlyph(items: readonly { readonly state: EpistemicState }[
  *
  * The fold is derived HERE, from the items, not handed in by a caller. A
  * `folded` boolean the component never sets is not a bound; it is a hope.
+ *
+ * ROUND 2's GAUNTLET FOUND THE BOUND HELD AND THE WAY PAST IT DID NOT. The
+ * unexpanded pin measured clean at every load; the affordance out of it did
+ * not. `showAll` raised the budget from 4 to a `PIN_HARD_CAP` of 9 and then
+ * did nothing on every subsequent click — at 60 owed items that left 50 of
+ * them behind a live-looking "50 more owed" button that could not reveal
+ * them, unreachable by any pointer input, while keyboard focus scrolled the
+ * `overflow: hidden` list and clipped rows off the top with no way back. A
+ * control whose label promises 50 and delivers 5 once is the round-1
+ * `data-hold` defect wearing different clothes.
+ *
+ * THE FOLD NOW PAGES, AND THE LABEL IS DERIVED FROM THE PAGE IT WILL SHOW.
+ * The budget never moves — the pixel bound that keeps the composer on screen
+ * is the same in every state — and the affordance advances a window through
+ * the owed items instead of raising a cap. Every owed item is reachable in a
+ * bounded number of clicks; the button says how many the next click brings and
+ * how many are still off the page; and the last page wraps back to the hardest
+ * rather than becoming a control that does nothing.
+ *
+ * The pin still FOLDS rather than SCROLLS (BRIEF concept 3, verbatim) — a
+ * scrolling pin is the unbounded pin with a scrollbar, and the round-1 measure-
+ * ment is what that costs.
  */
 
-/** One open card, then compressed rows, then the overflow line. Measured below. */
+/** One open card, then this many compressed rows, then the overflow line. */
 export const PIN_COMPACT_BUDGET = 4;
+
+/** The window advances by exactly what it shows: one page is one budget. */
+export const PIN_PAGE = PIN_COMPACT_BUDGET;
 
 export interface PinFold {
   /** the one item shown as a full card — always the hardest */
   readonly open: Maybe<AttentionItem>;
   /** compressed but present: glyph, title, rationale, primary action */
   readonly compact: readonly AttentionItem[];
-  /** owed and over budget — counted, named by glyph, one click from being seen */
+  /** owed and not on this page — counted, named by glyph, reachable by paging */
   readonly overflow: readonly AttentionItem[];
+  /**
+   * Exactly what one more click puts on screen. The affordance's label is
+   * rendered from this, so it cannot promise a number it will not deliver.
+   */
+  readonly nextPage: readonly AttentionItem[];
+  /** true when the next click returns to the hardest page rather than advancing */
+  readonly wraps: boolean;
+  /** which page of compressed rows is showing, 0-based, already normalised */
+  readonly page: number;
+  readonly pageCount: number;
   /** not owed to this person: these compress to counts and never take a row */
   readonly clean: readonly AttentionItem[];
   readonly owedTotal: number;
@@ -526,33 +615,48 @@ export interface PinFold {
   readonly cleanCounts: readonly GlyphCount[];
 }
 
-/**
- * `showAll` is the "N more owed" affordance having been used. It raises the
- * budget; it does not remove it — the pin still folds rather than scrolling,
- * and the cap that keeps the composer on screen is `PIN_HARD_CAP`.
- */
-export const PIN_HARD_CAP = 9;
-
 export interface FoldOptions {
   /** which item is open. Ignored when it is not owed — the pin opens what needs you. */
   readonly openId?: string;
-  readonly showAll?: boolean;
+  /**
+   * Which page of compressed rows to show. Any integer is legal: it is taken
+   * modulo the page count, so a caller that only ever increments a counter
+   * cannot page off the end into an empty pin.
+   */
+  readonly page?: number;
 }
 
 export function foldPin(items: readonly AttentionItem[], options: FoldOptions = {}): PinFold {
   const owed = hardestFirst(items.filter((item) => needsViewer(item.state)));
   const clean = hardestFirst(items.filter((item) => !needsViewer(item.state)));
-  const budget = options.showAll === true ? PIN_HARD_CAP : PIN_COMPACT_BUDGET;
 
+  /* The open card is the hardest owed item and does not move with the page:
+     paging past the worst thing in the room is not something this surface
+     should be able to do. */
   const open = owed.find((item) => item.id === options.openId) ?? owed[0] ?? null;
   const rest = owed.filter((item) => item.id !== open?.id);
+
+  const pageCount = Math.max(1, Math.ceil(rest.length / PIN_PAGE));
+  const requested = Math.trunc(options.page ?? 0);
+  const page = ((requested % pageCount) + pageCount) % pageCount;
+  const start = page * PIN_PAGE;
+  const compact = rest.slice(start, start + PIN_PAGE);
+  const overflow = rest.filter((_, index) => index < start || index >= start + PIN_PAGE);
+
+  const nextIndex = (page + 1) % pageCount;
+  const nextStart = nextIndex * PIN_PAGE;
+
   return {
     open,
-    compact: rest.slice(0, budget),
-    overflow: rest.slice(budget),
+    compact,
+    overflow,
+    nextPage: rest.slice(nextStart, nextStart + PIN_PAGE),
+    wraps: pageCount > 1 && nextIndex === 0,
+    page,
+    pageCount,
     clean,
     owedTotal: owed.length,
-    overflowCounts: glyphCounts(rest.slice(budget)),
+    overflowCounts: glyphCounts(overflow),
     cleanCounts: glyphCounts(clean),
   };
 }
