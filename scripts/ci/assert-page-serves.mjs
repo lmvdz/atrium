@@ -279,21 +279,6 @@ check(
   'GET / signed out and GET / with a cookie that is not a session reference different build assets, so the two are not being rendered by the same thing. A proxy that answers `/` from a fixture *unless a session cookie is present* is precisely this: the second request carries a cookie, reaches the app, and comes back naming chunks the first response does not.',
 );
 
-/**
- * And every one of those chunks is actually served.
- *
- * The comparison above is two strings from two responses of the same build, so
- * a build with no `static` directory in the image satisfies it perfectly: both
- * responses name the same chunks and every one of them 404s. That is a dead
- * page — no JavaScript, no stylesheet, no hydration — and it is what deleting
- * one `COPY` line from apps/web/Dockerfile produces, with this job green from
- * end to end. Fetching is the only thing that can tell "the build named its
- * assets" from "the build shipped them"; see `buildAssetProblems`.
- */
-for (const problem of await buildAssetProblems(target, anonymous.body)) {
-  check(false, problem);
-}
-
 // The lazy version of the same mutation, caught cheaply. Stated for what it is:
 // these are constants, a Caddyfile can write a header as easily as a body, and
 // this is a tripwire rather than the argument. The argument is above.
@@ -321,6 +306,32 @@ check(
   app.body.includes('data-testid="no-workspaces"'),
   'GET /app rendered no workspace list at all — the page did not reach `listWorkspacesFor`, so it is not reading this stack’s database',
 );
+
+/**
+ * And every chunk any of those four pages names is actually served.
+ *
+ * The set comparison above is two strings from two responses of the same build,
+ * so a build with no `static` directory in the image satisfies it perfectly:
+ * both responses name the same chunks and every one of them 404s. That is a
+ * dead page — no JavaScript, no stylesheet, no hydration — and it is what
+ * deleting one `COPY` line from apps/web/Dockerfile produces, with this job
+ * green from end to end. Fetching is the only thing that can tell "the build
+ * named its assets" from "the build shipped them".
+ *
+ * All four bodies, not just the signed-out one, and that is the second half of
+ * the same lesson: a blind review of the first version pointed out that
+ * checking only `anonymous.body` leaves the chunks a page reaches *only* when
+ * authenticated unfetched — four lines of Caddy (`handle
+ * /_next/static/chunks/app/app/* { respond 404 }`) break the dashboard and
+ * nothing goes red. `/app` is behind `requireSession` and names its own chunks,
+ * so its body has to be in here.
+ */
+for (const problem of await buildAssetProblems(
+  target,
+  [anonymous.body, signedIn.body, withForgedCookie.body, app.body].join('\n'),
+)) {
+  check(false, problem);
+}
 
 // ── 4. The transport the whole deployment is conditioned on ─────────────────
 

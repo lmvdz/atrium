@@ -675,11 +675,15 @@ jobs:
         # cost of a fixture from four lines of markup to a current render of
         # this build; it does not make one impossible.
         #
-        # And every chunk the page names is fetched. Round 4 compared the two
-        # responses' asset *names*, which a build whose `.next/static` never
-        # made it into the image satisfies perfectly: same names both times,
-        # every one of them 404, and the page dead. Nothing in scripts/ci had
-        # ever fetched a `/_next/static/…` URL.
+        # And every chunk any of the four bodies names is fetched — signed
+        # out, signed in, with the forged cookie, and `/app`. Round 4 compared
+        # the two signed-out responses' asset *names*, which a build whose
+        # `.next/static` never made it into the image satisfies perfectly: same
+        # names both times, every one of them 404, and the page dead. Nothing in
+        # scripts/ci had ever fetched a `/_next/static/…` URL. Checking only the
+        # signed-out body would have left the chunks `/app` reaches behind the
+        # session unfetched, which is four lines of Caddy away from a broken
+        # dashboard and a green job.
         run: node scripts/ci/assert-page-serves.mjs
 
       - name: Assert an authenticated websocket upgrade completes

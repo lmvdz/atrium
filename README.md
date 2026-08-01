@@ -785,6 +785,28 @@ zero tests exits 0 just like one that passed 315:
   `$GITHUB_ENV` — is refused without the engine having heard of it. The
   denylist survives underneath, demoted to choosing which sentence the refusal
   prints.
+- **A rule enforced where a matcher already fires is a rule applied to a
+  subset.** The pnpm pairing above was checked through the protected-step shape
+  rule, so `pnpm --filter @atrium/does-not-exist install --frozen-lockfile` on
+  the install step exited 0, installed nothing, and was clean — the round's own
+  meta-defect, in the commit that named it, found by both blind reviews within
+  minutes of each other. `package-managers-select-something` applies the manager
+  half to every `run:` step of every job. The launcher half stays
+  protected-only, deliberately: refusing `xargs` on an ordinary step would be a
+  prohibition with no defect behind it.
+- **An option's value is part of its entry.** The pairing was first checked
+  against the option's *name*, which is right for `--user=root` and wrong for a
+  switch: `--fail-if-no-match=false` satisfied it and restored the fail-open
+  exactly (measured, exit 0 in 406ms where the bare flag exits 1). Options are
+  `BARE` or `VALUE` now, and `--no-fail-if-no-match` needs no clause — a
+  different word is not on the list.
+- **`pin-actions-to-sha` reads the parsed tree, not the lines.** It was a scan
+  of raw source since round 1, because the `# vN.N.N` comment it also requires
+  is not data in the parsed document. So `- { name: Checkout, uses:
+  actions/checkout@v4 }` — legal YAML, run by GitHub — was clean with a mutable
+  tag on the action that checks out the code. The parsed tree enumerates the
+  actions now; the line scan is demoted to supplying the comment, and a `uses:`
+  written where no comment can live is refused for that.
 - **A container is a runtime too.** Round 4 derived "an action is a program" and
   guarded `uses:` in one job; nothing looked at `container:`, where a job runs
   every step inside an author-chosen image — `node` is its node, `bash` is its
@@ -806,7 +828,7 @@ zero tests exits 0 just like one that passed 315:
 - Reports are deleted immediately before each runner starts and rejected unless
   their mtime post-dates that moment, so a leftover file cannot stand in for a
   run.
-- `scripts/ci/workflow-policy.mjs` enforces 27 house rules over the parsed
+- `scripts/ci/workflow-policy.mjs` enforces 28 house rules over the parsed
   workflow: no `continue-on-error`, no job conditions, no step conditions beyond
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
   action pinned to a commit SHA, no reusable workflows (a job body that is not in
@@ -817,9 +839,9 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 159
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 166
   mutated copies of the real workflow and additionally asserts that every one of
-  the 27 declared rules has a mutation proving it fires — coverage derived from
+  the 28 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
   went unexercised through round 2. Each mutation must also name *what* it broke
   (a message pattern, or the exact step→prerequisite edge) and must trip nothing

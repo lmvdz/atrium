@@ -69,6 +69,7 @@ import {
   completedCommands,
   firstOperand,
   LAUNCHER_NAMES,
+  managerProblems,
   PACKAGE_MANAGER_NAMES,
   parseScript,
   runsItsScript,
@@ -211,6 +212,7 @@ export const RULES = [
   'no-remote-reusable-workflow',
   'no-command-shadowing',
   'no-runtime-override',
+  'package-managers-select-something',
   'protected-steps-run-one-command',
   'compose-through-one-entrypoint',
   'protected-commands-cover-the-verbs',
@@ -1051,6 +1053,43 @@ export function protectedCommandCoverage(jobs, protectedCommands = PROTECTED_COM
 const SHADOWING_BUILTINS = new Set(['alias', 'export', 'declare', 'typeset', 'readonly', 'local']);
 
 /**
+ * A word that expands to the job's environment file, or its PATH file.
+ *
+ * ── TWO SPELLINGS, ONE FROM EACH BLIND REVIEW (#40 round 5, second pass) ────
+ * Round 4 tested the redirection target against `/^\$\{?GITHUB_ENV\}?$/`, which
+ * is neither of the two things it needs to be:
+ *
+ *   - It misses the other expansions bash resolves to the same path.
+ *     `echo "NODE_OPTIONS=…" >> "${GITHUB_ENV:?}"` writes the job environment
+ *     and matched nothing, so the payload was never inspected. `${GITHUB_ENV:-}`
+ *     and `${GITHUB_ENV+x}` are the same trick with different punctuation, and
+ *     the next one is a character nobody has thought of — so the *forms* are
+ *     enumerated here rather than the variable's bare name.
+ *   - It only ever looked at *redirections*, and a file can be named as an
+ *     argument: `printf '%s\\n' 'NODE_OPTIONS=…' | tee -a "$GITHUB_ENV"` has no
+ *     redirection at all. `tee`, `dd of=`, `sponge` and the next one are one
+ *     clause if the question is "does any word of this command name that file",
+ *     and an unbounded list if it is "which writer is it".
+ *
+ * What must keep *not* matching is `$GITHUB_ENV.bak` — round 5's own lesson,
+ * from the other direction: a word boundary after `ENV` would read a file
+ * nobody reads as the job environment. So the whole word is compared, and the
+ * only variation allowed is inside the braces.
+ */
+const jobFilePattern = (name) =>
+  new RegExp(String.raw`^\$(?:${name}|\{${name}(?:[:?+=-][^}]*)?\})$`);
+const GITHUB_ENV_FILE = jobFilePattern('GITHUB_ENV');
+const GITHUB_PATH_FILE = jobFilePattern('GITHUB_PATH');
+
+/** True when this command writes that file, by redirection or by argument. */
+function namesJobFile(pattern, { redirections, words }) {
+  const names = ({ expandable, value }) => expandable === true && pattern.test(value);
+  return (
+    (redirections ?? []).some(({ target }) => names(target)) || (words ?? []).slice(1).some(names)
+  );
+}
+
+/**
  * Environment variables that decide what code a protected command runs.
  *
  * ── THE SIXTEENTH BYPASS (#40 round 4, from this round's own blind review) ──
@@ -1255,7 +1294,7 @@ function checkCommandShadowing(script, where, add, path) {
     }
   }
 
-  for (const { raw, argv, assignments, redirections, via } of commands) {
+  for (const { raw, argv, assignments, redirections, via, words } of commands) {
     // `env PATH=/tmp/fake node …` survives `unwrap()` — the launcher's own
     // assignments are not the shell's, so the loop below never saw them. Round
     // 3's gauntlet filed it as polish, and it is the same rule: the protected
@@ -1308,11 +1347,7 @@ function checkCommandShadowing(script, where, add, path) {
     }
     // `echo "$PWD/fake" >> "$GITHUB_PATH"` prepends to PATH for every later step
     // in the job — the same shadowing, spelled as a file write.
-    if (
-      redirections.some(
-        ({ target }) => target.expandable && /^\$\{?GITHUB_PATH\}?$/.test(target.value),
-      )
-    ) {
+    if (namesJobFile(GITHUB_PATH_FILE, { redirections, words })) {
       add(
         'no-command-shadowing',
         `${path}: the script at ${where} writes to \`$GITHUB_PATH\`, which prepends a directory to PATH for every later step in the job. Invoke the binary by its full path instead.`,
@@ -1340,11 +1375,7 @@ function checkCommandShadowing(script, where, add, path) {
     // must say, in a literal word this engine can read, which variable it is
     // setting. `echo NAME=…` and `printf 'NAME=%s\n' …` do; `cat` does not, and
     // neither does `echo "$(…)"`.
-    if (
-      redirections.some(
-        ({ target }) => target.expandable && /^\$\{?GITHUB_ENV\}?$/.test(target.value),
-      )
-    ) {
+    if (namesJobFile(GITHUB_ENV_FILE, { redirections, words })) {
       const assignmentShaped = (word) => /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
       const payload = firstOperand(argv);
       if (payload === undefined || !assignmentShaped(payload)) {
@@ -1411,6 +1442,37 @@ function checkCommandShadowing(script, where, add, path) {
  * side by side in `workflow-policy-selftest.mjs`: recognition asks *is this a
  * command*, this asks *does it always run*.
  */
+/**
+ * Which steps the shape rule owns, as `jobId → Set<index>`.
+ *
+ * Derived once and shared with `checkManagerSelection`, so the two rules cannot
+ * disagree about who is responsible for a step. Two rules that both fire on one
+ * edit break the self-test's purity check; two that both decline to fire are a
+ * hole, and a hole that opens the day the definition of "protected" changes in
+ * one of two places is the kind nobody notices.
+ */
+function protectedStepIndices(jobs) {
+  const owned = new Map();
+  for (const [jobId, required] of Object.entries(REQUIRED_STEPS)) {
+    const job = jobs[jobId];
+    if (!isPlainObject(job)) continue;
+    const matchers = new Set();
+    for (const step of required) {
+      matchers.add(step.test);
+      for (const prerequisite of step.requires ?? []) matchers.add(prerequisite.test);
+    }
+    const indices = new Set();
+    const steps = Array.isArray(job.steps) ? job.steps : [];
+    for (const [index, step] of steps.entries()) {
+      if (!isPlainObject(step) || typeof step.run !== 'string') continue;
+      const protects = [...matchers].filter((matcher) => matcher.test(step.run));
+      if (protects.length > 0 || jobId === DEPLOY_JOB) indices.add(index);
+    }
+    owned.set(jobId, indices);
+  }
+  return owned;
+}
+
 function checkProtectedStepShape(jobs, path, add) {
   for (const [jobId, required] of Object.entries(REQUIRED_STEPS)) {
     const job = jobs[jobId];
@@ -1436,6 +1498,51 @@ function checkProtectedStepShape(jobs, path, add) {
         'protected-steps-run-one-command',
         `${path}: jobs.${jobId}.steps.${index}.run is a protected step — ${because} — but ${problems.join('; and ')}. A protected step must be one unconditional command: \`false && node scripts/ci/assert-x.mjs; true\` satisfies every presence rule here, skips the assertion, and exits green. Split it into separate steps, or move the extra work into the script.`,
       );
+    }
+  }
+}
+
+/**
+ * Every step's package-manager options, not only the protected ones.
+ *
+ * ── THE META-DEFECT, COMMITTED BY THE COMMIT THAT NAMED IT (#40 round 5) ────
+ * The manager table's new rule — a `--filter` that can select nothing is a
+ * command that can fail to run, so it is admissible only with
+ * `--fail-if-no-match` — is a statement about how this workflow invokes pnpm.
+ * It was enforced through `singleCommandProblems`, which the engine asks only
+ * of protected steps and of the deploy job. Both blind reviews of the fix found
+ * the same consequence:
+ *
+ *     run: pnpm --filter @atrium/does-not-exist install --frozen-lockfile
+ *
+ * exits 0 having installed nothing, and the policy called it clean. That is the
+ * rule applied at fewer sites than its own words cover, which is the one thing
+ * this round exists to stop doing.
+ *
+ * So the manager half runs over every `run:` step of every job. The launcher
+ * half deliberately does not: refusing `xargs` or `setsid` on an ordinary step
+ * would be a new prohibition with no defect behind it, while a package manager
+ * that selects nothing is the same silent success wherever it is written.
+ *
+ * Steps the shape rule already owns are skipped, so one edit fires one rule —
+ * the purity the self-test checks.
+ */
+function checkManagerSelection(jobs, path, add) {
+  const owned = protectedStepIndices(jobs);
+  for (const [jobId, job] of Object.entries(jobs)) {
+    if (!isPlainObject(job)) continue;
+    const steps = Array.isArray(job.steps) ? job.steps : [];
+    for (const [index, step] of steps.entries()) {
+      if (!isPlainObject(step) || typeof step.run !== 'string') continue;
+      if (owned.get(jobId)?.has(index)) continue;
+      for (const command of parseScript(step.run).commands) {
+        for (const problem of managerProblems(command)) {
+          add(
+            'package-managers-select-something',
+            `${path}: jobs.${jobId}.steps.${index}.run ${problem}. This is not a protected step, and the rule applies anyway: a package manager whose selection can be empty reports success with nothing having run, wherever it is written — \`pnpm --filter @atrium/does-not-exist install --frozen-lockfile\` exits 0 and installs nothing.`,
+          );
+        }
+      }
     }
   }
 }
@@ -1835,11 +1942,38 @@ export function checkWorkflow(source, path = '<workflow>') {
   }
 
   // ---- actions are pinned to commit SHAs ---------------------------------
-  for (const [index, line] of source.split('\n').entries()) {
+  //
+  // ── WHY THE PARSED TREE DECIDES, AND THE LINES ONLY SUPPLY THE COMMENT ────
+  // Round 1 wrote this as a scan of raw lines, because the `# vN.N.N` comment
+  // it also requires is not in the parsed document at all — YAML comments are
+  // not data. Four rounds later a blind cross-lineage review pointed out what
+  // that costs, and it is the whole rule:
+  //
+  //     - { name: Checkout, uses: actions/checkout@v4 }
+  //
+  // is a legal YAML flow mapping, GitHub runs it, `USES_LINE` does not match
+  // it, and the policy reported **clean** — a mutable tag on the action that
+  // checks out the code, in a file whose first paragraph is about pinning.
+  // Every `uses:` in a workflow this engine has been guarding since round 1
+  // could have been written that way.
+  //
+  // So the parsed tree is now what enumerates the actions — it cannot be
+  // spelled around, because it is what GitHub reads — and the line scan is
+  // demoted to a lookup table for the comment beside each ref. A `uses:` the
+  // line scan never saw is refused *for that reason*: not because the comment
+  // is missing, but because it is written where the comment cannot be.
+  const commentFor = new Map();
+  for (const line of source.split('\n')) {
     const match = USES_LINE.exec(line);
     if (!match) continue;
     const [, ref, comment] = match;
-    const at = `${path}:${index + 1}`;
+    if (!commentFor.has(ref)) commentFor.set(ref, []);
+    commentFor.get(ref).push(comment);
+  }
+  for (const [keyPath, key, value] of walkKeys(workflow)) {
+    if (key !== 'uses' || typeof value !== 'string') continue;
+    const ref = value.trim();
+    const at = `${path}: ${pathString(keyPath, key)}`;
     if (LOCAL_USES.test(ref) || DOCKER_USES.test(ref)) continue;
     if (!PINNED_USES.test(ref)) {
       add(
@@ -1848,7 +1982,16 @@ export function checkWorkflow(source, path = '<workflow>') {
       );
       continue;
     }
-    if (!comment || !VERSION_COMMENT.test(comment)) {
+    const comments = commentFor.get(ref) ?? [];
+    if (comments.length === 0) {
+      add(
+        'pin-actions-to-sha',
+        `${at}: \`uses: ${ref}\` is not written as a \`uses:\` line of its own, so the \`# vN.N.N\` comment this rule requires has nowhere to live and nothing here can read it. A YAML flow mapping — \`- { name: Checkout, uses: … }\` — is what this looked like before the parsed tree became the authority, and for four rounds it was clean with a mutable tag.`,
+      );
+      continue;
+    }
+    const comment = comments.find((one) => one && VERSION_COMMENT.test(one));
+    if (comment === undefined) {
       add(
         'pin-actions-to-sha',
         `${at}: \`uses: ${ref}\` needs a trailing \`# vN.N.N\` comment recording which release the SHA is, so the pin stays auditable.`,
@@ -1945,6 +2088,7 @@ export function checkWorkflow(source, path = '<workflow>') {
 
   // ---- the protected steps are canonical, and compose is resolved once ----
   checkProtectedStepShape(jobs, path, add);
+  checkManagerSelection(jobs, path, add);
   checkComposeEntrypoint(jobs, path, add);
   for (const problem of protectedCommandCoverage(jobs)) {
     add('protected-commands-cover-the-verbs', `${path}: ${problem}`);

@@ -713,36 +713,67 @@ export function singleCommandProblems(script) {
  * provenance is governance-bound and is not claimed here. What changed is only
  * the polarity of the enumeration — an unknown spelling now fails closed.
  */
+/**
+ * An option that carries no value: `--flag`, never `--flag=anything`.
+ *
+ * ── THE SPELLING BOTH BLIND REVIEWS FOUND (#40 round 5, second pass) ────────
+ * The first version of the manager table required `--filter` to be paired with
+ * `--fail-if-no-match`, and checked the pairing against `optionName()`, which
+ * strips an attached value so that `--user=root` and `--user root` are one
+ * option. That is right for an option whose value is data and catastrophic for
+ * one whose value is a *boolean*. Measured, under `bash -e <file>` at the
+ * repository root:
+ *
+ *     pnpm --fail-if-no-match      --filter @atrium/nope exec node fail7.mjs   exit 1
+ *     pnpm --fail-if-no-match=true --filter @atrium/nope exec node fail7.mjs   exit 1
+ *     pnpm --fail-if-no-match=false --filter @atrium/nope exec node fail7.mjs  exit 0
+ *     pnpm --no-fail-if-no-match   --filter @atrium/nope exec node fail7.mjs   exit 0
+ *
+ * `=false` restored the exact fail-open the pairing was written to close, and
+ * the policy called it clean. Two independent cross-lineage reviews found it
+ * within minutes of each other, which is what an allowlist checked by the wrong
+ * comparison looks like.
+ *
+ * So the polarity goes one level further down: an option's *value* is part of
+ * the entry, not incidental to it. `BARE` means the word must be exactly the
+ * flag; `VALUE` means it may carry one, attached or separate, because the value
+ * is a user, a group, a signal, a duration or a workspace selector rather than
+ * a switch. `--no-fail-if-no-match` needs no clause of its own: it is a
+ * different word, and a different word is not on the list.
+ */
+const BARE = { takesValue: false };
+const VALUE = { takesValue: true };
+
 export const PROTECTED_STEP_LAUNCHERS = {
   command: {
-    options: { '-p': true },
+    options: { '-p': BARE },
     why: 'POSIX: `command` executes the utility "in the current shell environment" with the argv it is given, suppressing function lookup — one exec, one wait, and the status is the utility\'s. `-p` only changes which PATH is searched. Measured under `bash -e <file>`: `command false` exits 1 in 1ms, `command sleep 2` takes 2003ms, `command -p false` exits 1 in 2ms. `-v`/`-V` print a path instead of running anything and are refused by `unwrap` itself, one layer earlier.',
   },
   timeout: {
     options: {
-      '-s': true,
-      '--signal': true,
-      '-k': true,
-      '--kill-after': true,
-      '--preserve-status': true,
-      '--foreground': true,
-      '-v': true,
-      '--verbose': true,
+      '-s': VALUE,
+      '--signal': VALUE,
+      '-k': VALUE,
+      '--kill-after': VALUE,
+      '--preserve-status': BARE,
+      '--foreground': BARE,
+      '-v': BARE,
+      '--verbose': BARE,
     },
     why: 'coreutils: "Start COMMAND, and kill it if still running after DURATION"; the exit status is the command\'s, or 124 when the duration expired. Every listed option changes which signal is sent or when — none of them stops the wait, and 124 is non-zero, so a timed-out assertion fails the step rather than passing it. Measured under `bash -e <file>`: `timeout 5 false` exits 1 in 4ms, `timeout 5 sleep 2` takes 2004ms, and `timeout 0 false` exits 1 in 3ms — a duration of 0 is documented as no limit, so neither branch of the argument is a silent success.',
   },
   sudo: {
     options: {
-      '-u': true,
-      '--user': true,
-      '-g': true,
-      '--group': true,
-      '-n': true,
-      '--non-interactive': true,
-      '-E': true,
-      '--preserve-env': true,
-      '-H': true,
-      '--set-home': true,
+      '-u': VALUE,
+      '--user': VALUE,
+      '-g': VALUE,
+      '--group': VALUE,
+      '-n': BARE,
+      '--non-interactive': BARE,
+      '-E': BARE,
+      '--preserve-env': BARE,
+      '-H': BARE,
+      '--set-home': BARE,
     },
     why: 'sudo(8): "sudo will wait until the command has completed" and "exits with the exit status of the command". The listed options choose the target user, group and environment and change nothing about the wait. Not independently measured here: this sandbox has no sudo privileges, so `sudo -n true` exits 1 without running anything — which is fail-closed and therefore says nothing either way about propagation. The manual sentence is the evidence, and it is quoted rather than paraphrased for that reason. `-b`/`--background` is the documented exception — "the command is run in the background … sudo will exit immediately" — and it is refused for not being on this list, which is also why `-B`, `--bell`, or whatever the next release adds is refused without anybody editing anything.',
   },
@@ -825,15 +856,18 @@ export const PROTECTED_STEP_MANAGERS = {
     why: 'pnpm spawns the child, waits for it, and fails the step when it fails. Measured under `bash -e <file>` from the repository root: `pnpm exec node fail7.mjs` exits 7 in 237ms (the status is the child\'s, unfiltered), `pnpm --filter @atrium/web exec node fail7.mjs` exits 1 in 249ms, and `pnpm --fail-if-no-match --filter @atrium/web exec sleep 2` takes 2200ms — so it waits rather than detaching. `pnpm exec` is documented as "Execute a shell command in scope of a project", i.e. an argv it runs, not a string it interprets.',
     options: {
       '--filter': {
+        takesValue: true,
         why: 'pnpm(1): "--filter <selector> … restricts the scope to package names matching the given pattern". It changes *which* project the command runs in and nothing about the wait. Measured under `bash -e <file>`: `pnpm --fail-if-no-match --filter @atrium/web exec node fail7.mjs` exits 1 in 229ms, `pnpm --fail-if-no-match --filter @atrium/web exec sleep 2` takes 2200ms. Alone it fails property 2 — `pnpm --filter @atrium/does-not-exist exec node fail7.mjs` prints "No projects matched the filters" and exits **0 in 194ms** with the command never started — so it is admissible only with `--fail-if-no-match`.',
         requires: ['--fail-if-no-match'],
       },
       '-F': {
+        takesValue: true,
         why: 'the documented short spelling of `--filter`; same measurement, same failure without the pairing (`pnpm -F nope exec node fail7.mjs` exits 0 in 205ms, and `pnpm --filter=@atrium/nope exec node fail7.mjs` — the attached spelling `optionName()` normalises — exits 0 in 193ms).',
         requires: ['--fail-if-no-match'],
       },
       '--fail-if-no-match': {
-        why: 'pnpm(1), verbatim from `pnpm help exec`: "If no projects are matched by the command, exit with exit code 1 (fail)". It is the option that gives `--filter` property 2, and it cannot itself skip the command: measured, `pnpm --fail-if-no-match --filter nope exec node fail7.mjs` exits 1 in 198ms and `pnpm --fail-if-no-match --filter @atrium/web exec sleep 2` takes 2200ms.',
+        takesValue: false,
+        why: 'pnpm(1), verbatim from `pnpm help exec`: "If no projects are matched by the command, exit with exit code 1 (fail)". It is the option that gives `--filter` property 2, and it cannot itself skip the command: measured, `pnpm --fail-if-no-match --filter nope exec node fail7.mjs` exits 1 in 198ms and `pnpm --fail-if-no-match --filter @atrium/web exec sleep 2` takes 2200ms. Admissible **bare only**: `--fail-if-no-match=false` exits 0 on a filter that matches nothing, which is the whole fail-open back again (measured, 406ms), so a value on this flag is not on the list.',
       },
     },
   },
@@ -855,11 +889,12 @@ function optionName(word) {
  * re-scanned (`raw.slice(0, raw.length - argv.length)`) and therefore could not
  * tell whose option a word was.
  */
-export function launcherProblems(command) {
+export function launcherProblems(command, kinds = ['launcher', 'manager']) {
   const problems = [];
   const allowed = Object.keys(PROTECTED_STEP_LAUNCHERS).map((name) => `\`${name}\``);
   const managers = Object.keys(PROTECTED_STEP_MANAGERS).map((name) => `\`${name}\``);
   for (const { name, kind, options } of command.via ?? []) {
+    if (!kinds.includes(kind)) continue;
     const table =
       kind === 'manager'
         ? PROTECTED_STEP_MANAGERS[name]?.options
@@ -870,8 +905,15 @@ export function launcherProblems(command) {
       );
       continue;
     }
-    const flags = (options ?? []).map(optionName);
-    for (const flag of flags) {
+    const words = options ?? [];
+    // The *bare* flags, which is what a companion requirement may be satisfied
+    // by. `--fail-if-no-match=false` is the option's name attached to the value
+    // that turns it off, and counting it as the companion is how the pairing
+    // rule was defeated in the hour after it was written.
+    const flags = words.filter((word) => word.indexOf('=') === -1);
+    for (const word of words) {
+      const flag = optionName(word);
+      const attached = word.indexOf('=') !== -1;
       if (!Object.hasOwn(table, flag)) {
         problems.push(
           `it passes \`${flag}\` to \`${name}\`, which is not one of the options a protected step may use it with (${Object.keys(
@@ -881,6 +923,18 @@ export function launcherProblems(command) {
             .join(
               ', ',
             )}). Being on the launcher allowlist is a property of the binary *with these flags*: \`sudo\` waits for its command and exits with its status, and \`sudo -b\` returns immediately. An option is justified one at a time, with the manual sentence and the two measurements, or it is refused`,
+        );
+        continue;
+      }
+      // An option's *value* is part of the entry. A flag whose value is data —
+      // a user, a signal, a duration, a workspace selector — may carry one; a
+      // flag that is a switch may not, because the switch's other position is
+      // the behaviour the entry was written to refuse. Measured: `pnpm
+      // --fail-if-no-match=false --filter @atrium/nope exec node fail7.mjs`
+      // exits 0 in 406ms, where the bare flag exits 1.
+      if (attached && table[flag]?.takesValue !== true) {
+        problems.push(
+          `it passes \`${word}\` to \`${name}\`. \`${flag}\` is admissible only written bare: it is a switch, and an attached value can set it to the position this allowlist exists to refuse — \`pnpm --fail-if-no-match=false --filter @atrium/nope exec node x\` exits 0 in 406ms with the command never started, where the bare flag exits 1. An option's value is part of its entry, or the entry is a name the next spelling walks past`,
         );
         continue;
       }
@@ -1199,4 +1253,27 @@ export function basename(word) {
  */
 export function completedCommands(script) {
   return parseScript(script).commands.filter((command) => !command.background);
+}
+
+/**
+ * The package-manager half of `launcherProblems`, for every step rather than
+ * only the protected ones.
+ *
+ * ── WHY IT IS SPLIT OUT (#40 round 5, from a blind review of the first fix) ─
+ * `launcherProblems` is reached only through `singleCommandProblems`, which the
+ * policy asks of protected steps and of the whole deploy job. So the rule "a
+ * `--filter` that can match nothing is a command that can not run" was written
+ * about the workflow and enforced on a subset of it: `pnpm --filter
+ * @atrium/does-not-exist install --frozen-lockfile` on the install step was
+ * policy-clean, exits 0, and installs nothing. That is this round's own
+ * meta-defect — a rule applied at fewer sites than its own words cover —
+ * committed in the commit that named it.
+ *
+ * The *launcher* half stays protected-only deliberately, and the difference is
+ * a claim rather than an omission: refusing `xargs` or `setsid` on an ordinary
+ * step would be a new prohibition with no defect behind it, while a package
+ * manager that selects nothing is the same silent success wherever it appears.
+ */
+export function managerProblems(command) {
+  return launcherProblems(command, ['manager']);
 }

@@ -282,8 +282,27 @@ function requireSameExecutionContext(workflow) {
     if (node?.['working-directory'] !== undefined) {
       note(`${where}.working-directory`, 'a different directory');
     }
-    if (node?.['runs-on'] !== undefined && node['runs-on'] !== 'ubuntu-latest') {
-      note(`${where}.runs-on`, 'a different machine');
+    if (node?.['runs-on'] !== undefined) {
+      // `runs-on: [ubuntu-latest]` is the documented list spelling of the same
+      // label, and the policy accepts it. Comparing the array to a string here
+      // would abort the ledger on a workflow the policy calls clean — two
+      // verifiers disagreeing about the workflow rather than about the run,
+      // which is the same defect one level up. Found by a blind review of the
+      // first version of this function.
+      const asked =
+        Array.isArray(node['runs-on']) && node['runs-on'].length === 1
+          ? node['runs-on'][0]
+          : node['runs-on'];
+      if (asked !== 'ubuntu-latest') note(`${where}.runs-on`, 'a different machine');
+    }
+    // A container action is an image with an entrypoint run in place of a step.
+    // The comment above this function claims all four runtime keys are
+    // re-checked here; both blind reviews noticed that this was the one it did
+    // not check, which makes the claim false rather than the ledger unsafe —
+    // and a false claim in a file whose entire value is its claims is the
+    // defect, not a footnote about it.
+    if (typeof node?.uses === 'string' && node.uses.trim().startsWith('docker://')) {
+      note(`${where}.uses`, `the container action ${node.uses}`);
     }
   };
 

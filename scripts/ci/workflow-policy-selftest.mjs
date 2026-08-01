@@ -1890,6 +1890,52 @@ const MUTATIONS = [
     message: /reaches the command through `npx`, which is not on the allowlist/,
   },
 
+  {
+    name: 'a filtered install on a step no presence rule protects, which installs nothing and exits 0',
+    rule: 'package-managers-select-something',
+    // Both blind reviews of the first version of the manager fix found this:
+    // the rule was stated about how the workflow invokes pnpm and enforced only
+    // where a presence matcher already fires. `pnpm --filter
+    // @atrium/does-not-exist install --frozen-lockfile` exits 0, installs
+    // nothing, and was policy-clean.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: pnpm install --frozen-lockfile\n',
+        '        run: pnpm --filter @atrium/does-not-exist install --frozen-lockfile\n',
+      ),
+    message: /passes `--filter` to `pnpm` without `--fail-if-no-match`/,
+  },
+  {
+    name: 'the pairing satisfied by the value that turns it off: `--fail-if-no-match=false`',
+    rule: 'protected-steps-run-one-command',
+    // The critical both foreign lineages found, independently, within minutes.
+    // `optionName()` strips an attached value so `--user=root` and `--user root`
+    // are one option — right for data, catastrophic for a switch. Measured:
+    // `pnpm --fail-if-no-match=false --filter @atrium/nope exec node fail7.mjs`
+    // exits 0 in 406ms where the bare flag exits 1.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: pnpm --fail-if-no-match --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs',
+        'run: pnpm --fail-if-no-match=false --filter @atrium/nope exec node ../../scripts/ci/assert-tables.mjs',
+      ),
+    message: /is admissible only written bare/,
+  },
+  {
+    name: 'the same as a differently-spelled flag: `--no-fail-if-no-match`',
+    rule: 'protected-steps-run-one-command',
+    // Measured at exit 0 as well, and it needs no clause of its own: a
+    // different word is not on the list.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: pnpm --fail-if-no-match --filter @atrium/db exec drizzle-kit migrate',
+        'run: pnpm --no-fail-if-no-match --filter @atrium/nope exec drizzle-kit migrate',
+      ),
+    message: /passes `--no-fail-if-no-match` to `pnpm`, which is not one of the options/,
+  },
+
   // ---- where and in what a step runs (#40 round 5) -------------------------
   // Round 4 derived "an action is a program too" and guarded `uses:` in one
   // job. A container is a runtime too. Each of these was clean against the
@@ -2011,6 +2057,62 @@ const MUTATIONS = [
   // delimiter on any ordinary step of `verify` was clean. The fix is the same
   // polarity as everything else this round: a write to the job environment must
   // name its variable in a word this engine can read.
+  {
+    name: 'a `uses:` in a YAML flow mapping, where the line scan could not see the mutable tag',
+    rule: 'pin-actions-to-sha',
+    // Found by a blind review of this round's fix, and it had been open since
+    // round 1: `USES_LINE` is a scan of raw lines, so `- { name: Checkout,
+    // uses: actions/checkout@v4 }` — legal YAML that GitHub runs — was clean,
+    // with a mutable tag, on the action that checks out the code.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n',
+        '      - { name: Checkout, uses: actions/checkout@v4 }\n',
+      ),
+    message: /`uses: actions\/checkout@v4` is not pinned to a 40-character commit SHA/,
+  },
+  {
+    name: 'the same pinned to a SHA, where the version comment now has nowhere to live',
+    rule: 'pin-actions-to-sha',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Checkout\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n',
+        '      - { name: Checkout, uses: actions/checkout@1111111111111111111111111111111111111111 }\n',
+      ),
+    message: /is not written as a `uses:` line of its own/,
+  },
+  {
+    name: 'the job environment written through an expansion the target test did not know',
+    rule: 'no-command-shadowing',
+    // `${GITHUB_ENV:?}` expands to the same path and matched nothing, so the
+    // payload was never inspected. Found by a blind review of this round's fix.
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n',
+        '        run: echo "NODE_OPTIONS=--require /tmp/nobble.cjs" >> "${GITHUB_ENV:?}"\n',
+      ),
+    message: /writes `NODE_OPTIONS=…` to `\$GITHUB_ENV`/,
+    also: ['required-step-prerequisites'],
+  },
+  {
+    name: 'the job environment written by an argument rather than a redirection: `tee -a`',
+    rule: 'no-command-shadowing',
+    // The other half of the same miss: the check only ever looked at
+    // redirections, and `tee`, `dd of=` and `sponge` name the file as an
+    // argument. One clause if the question is "does any word name that file".
+    mutate: (s) =>
+      insertAfter(s, '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"', [
+        '',
+        '      - name: Note the toolchain',
+        '        run: |',
+        `          printf '%s\\n' 'NODE_OPTIONS=--require /tmp/nobble.cjs' | tee -a "$GITHUB_ENV"`,
+        '          true',
+      ]),
+    message: /writes to `\$GITHUB_ENV`.*without a literal `NAME=`/s,
+  },
   {
     name: 'NODE_OPTIONS smuggled into $GITHUB_ENV through a here-document body',
     rule: 'no-command-shadowing',
