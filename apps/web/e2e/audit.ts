@@ -33,13 +33,31 @@ export interface OverflowReport {
   }[];
 }
 
+/**
+ * A meaningful non-text graphic measured against what it sits on. WCAG 1.4.11
+ * puts the floor at 3:1 — the same floor as the focus ring, and for the same
+ * reason: information carried by a shape rather than by letters still has to be
+ * perceivable.
+ */
+export interface GraphicFailure {
+  readonly ratio: number;
+  readonly what: string;
+  readonly color: string;
+  readonly background: string;
+  readonly text: string;
+  readonly selector: string;
+}
+
 export interface AuditResult {
   readonly contrastFailures: readonly ContrastFailure[];
   readonly fontFailures: readonly FontFailure[];
+  readonly graphicFailures: readonly GraphicFailure[];
   readonly overflow: OverflowReport;
   readonly elementsChecked: number;
   readonly smallestFont: number | null;
   readonly lowestContrast: number | null;
+  readonly graphicsChecked: number;
+  readonly lowestGraphic: number | null;
 }
 
 /**
@@ -186,6 +204,63 @@ export const AUDIT = `(() => {
     }
   }
 
+  /* NON-TEXT GRAPHICS — WCAG 1.4.11, the same 3:1 floor as the focus ring.
+
+     The audit above measures TEXT and the ring audit in gallery.spec.ts measures
+     the ring; between them they had never measured a graphic that carries
+     meaning without being either. The claim underline is exactly that: this
+     codebase's own words are "the dotted underline is the visual difference
+     between 'someone said it' and 'the system checked it'", which is a
+     definition of a meaningful non-text graphic. It shipped as --line3 at
+     1.32–2.23:1 for three rounds because nothing in the harness had a category
+     for it.
+
+     Redundancy is NOT an exemption here, and this is the trap worth naming: on
+     many rows the ~ glyph says the same thing, so the underline looks decorative
+     — but <ClaimText> renders it without a ~ for gate-proposals, and round 3
+     counted 9 elements beside ◆ and 6 beside ■ where the stroke was the only
+     carrier. "Usually redundant" is what an exemption sounds like from the
+     inside; the check measures every instance.
+
+     The registry is explicit rather than a walk over every border in the app: a
+     hairline divider is genuinely decorative and flagging it would train the
+     check to be ignored. Anything ADDED to it has to be a graphic that carries
+     information, and anything that carries information has to be in it. */
+  const GRAPHICS = [
+    { what: 'claim underline', selector: '[data-claim="true"]', side: 'borderBottomColor' },
+  ];
+
+  const graphicFailures = [];
+  let graphicsChecked = 0;
+  let lowestGraphic = Infinity;
+  for (const graphic of GRAPHICS) {
+    for (const el of document.querySelectorAll(graphic.selector)) {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      const alpha = effectiveOpacity(el);
+      if (alpha === 0) continue;
+      const parsed = parseColor(style[graphic.side]);
+      if (!parsed) continue;
+      const ink = { r: parsed.r, g: parsed.g, b: parsed.b, a: parsed.a * alpha };
+      const bg = backdrop(el);
+      const ratio = contrast(over(ink, bg), bg);
+      graphicsChecked += 1;
+      lowestGraphic = Math.min(lowestGraphic, ratio);
+      if (ratio + 0.005 < 3) {
+        graphicFailures.push({
+          ratio: Math.round(ratio * 100) / 100,
+          what: graphic.what,
+          color: style[graphic.side],
+          background: 'rgb(' + Math.round(bg.r) + ', ' + Math.round(bg.g) + ', ' + Math.round(bg.b) + ')',
+          text: ownText(el).slice(0, 60),
+          selector: describe(el),
+        });
+      }
+    }
+  }
+
   /* An element whose layout box runs past the viewport is only overflow if
      nothing between it and the root clips it. A room name that ellipsises
      inside a fixed track still has a wide layout box — the track is doing its
@@ -228,6 +303,9 @@ export const AUDIT = `(() => {
   return {
     contrastFailures,
     fontFailures,
+    graphicFailures,
+    graphicsChecked,
+    lowestGraphic: lowestGraphic === Infinity ? null : Math.round(lowestGraphic * 100) / 100,
     overflow: {
       documentScrollWidth: document.documentElement.scrollWidth,
       documentClientWidth: document.documentElement.clientWidth,

@@ -194,10 +194,28 @@ button {
   color: var(--tx2);
 }
 
-/* a claim never dresses as a fact: the dotted underline is the visual
-   difference between "someone said it" and "the system checked it". */
+/* A claim never dresses as a fact: the dotted underline is the visual
+   difference between "someone said it" and "the system checked it".
+
+   THAT SENTENCE IS WHY THE TOKEN CHANGED. A graphic carrying that distinction
+   is a meaningful non-text graphic under WCAG 1.4.11 and needs 3:1, and
+   --line3 measured 1.32–2.23:1 against the surfaces it lands on — under the
+   floor in every theme. The `~` glyph carries the same meaning redundantly on
+   some rows, but not on all of them: <ClaimText> deliberately renders the
+   underline WITHOUT a `~` for gate-proposals, and round 3's gauntlet counted 9
+   elements beside ◆ and 6 beside ■ where a 1px dotted stroke at sub-2:1 was
+   the sole carrier. A 1.4.11 graphic that is only sometimes redundant is not
+   redundant.
+
+   --tx2 is the quietest token that clears 3:1 against every surface in the app,
+   including the worst of them: 4.29:1 light and 4.69:1 dark on --redbg3. It
+   stays quieter than the words it sits under (--tx0/--tx1) by a token step and
+   by being 1px dotted rather than solid — the same "a token step and a shape,
+   never alpha" rule this file's de-emphasis section already states. Asserted
+   from the tokens in test/token-contrast.test.ts and against the rendered page
+   in the e2e non-text-graphic sweep. */
 .atr-claim {
-  border-bottom: 1px dotted var(--line3);
+  border-bottom: 1px dotted var(--tx2);
   padding-bottom: 1px;
 }
 
