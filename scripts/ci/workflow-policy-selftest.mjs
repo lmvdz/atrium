@@ -164,7 +164,7 @@ function rewriteFetch(source, lines) {
 
 /** The two other real lines these fixtures rewrite. */
 const LINT_RUN = '        run: pnpm lint\n';
-const ENV_LINE = '          echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n';
+const ENV_LINE = '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"\n';
 
 /** An accepted form: one exact line of the real workflow, and what it becomes. */
 const rewritesFetch = (...lines) => [FETCH_RUN, runBlock(lines)];
@@ -186,8 +186,6 @@ const rewritesFetch = (...lines) => [FETCH_RUN, runBlock(lines)];
  * must come back *completely clean*, not merely free of one rule.
  */
 const ACCEPTED_FORMS = {
-  'the fetch inside a subshell': rewritesFetch(`(${FETCH})`),
-  'the fetch after a `&&` list': rewritesFetch(`true && ${FETCH}`),
   'the fetch behind a one-shot environment variable': rewritesFetch(
     `GIT_TERMINAL_PROMPT=0 ${FETCH}`,
   ),
@@ -196,7 +194,6 @@ const ACCEPTED_FORMS = {
   'the fetch behind `command`, which bypasses functions and aliases': rewritesFetch(
     `command ${FETCH}`,
   ),
-  'the fetch driven by xargs': rewritesFetch(`echo main | xargs -I{} ${FETCH}`),
   'the fetch with a per-invocation git config': rewritesFetch(
     `git -c protocol.version=2 fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main`,
   ),
@@ -204,29 +201,55 @@ const ACCEPTED_FORMS = {
     'git fetch --no-tags \\',
     '  --depth=1 origin +refs/heads/main:refs/remotes/origin/main',
   ),
-  'the fetch as the body of a shell function that is then called': rewritesFetch(
-    'fetch_baseline() {',
-    `  ${FETCH}`,
-    '}',
-    'fetch_baseline',
-  ),
   // The tightened $GITHUB_ENV matcher, from the accepting side. Its rejecting
   // side is two mutations below: `$GITHUB_ENV.bak` and `'$GITHUB_ENV'`.
   'the run-start timestamp with braces round the variable': [
     ENV_LINE,
-    '          echo "VITEST_RUN_START=$(date +%s%3N)" >> "${GITHUB_ENV}"\n',
+    '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "${GITHUB_ENV}"\n',
   ],
   'the run-start timestamp written with printf': [
     ENV_LINE,
-    `          printf 'VITEST_RUN_START=%s\\n' "$(date +%s%3N)" >> "$GITHUB_ENV"\n`,
+    `        run: printf 'VITEST_RUN_START=%s\\n' "$(date +%s%3N)" >> "$GITHUB_ENV"\n`,
   ],
   'the run-start timestamp with the variable unquoted': [
     ENV_LINE,
-    '          echo "VITEST_RUN_START=$(date +%s%3N)" >> $GITHUB_ENV\n',
+    '        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> $GITHUB_ENV\n',
   ],
   // A package.json script is still one behind a launcher: `sudo` is not what
   // makes `pnpm lint` a lint, so the rule asks what was unwrapped, not argv[0].
   'the linter behind a launcher': [LINT_RUN, '        run: timeout 300 pnpm lint\n'],
+};
+
+/**
+ * Forms that ARE genuine invocations and are still refused on a protected step.
+ *
+ * ── THE TWO QUESTIONS, KEPT APART (#40 round 3) ─────────────────────────────
+ * All four of these were `ACCEPTED_FORMS` until now, and round 6 was right to
+ * accept them: each one really does run the fetch, and a matcher that reads them
+ * as "the fetch is missing" is wrong in the direction that gets rules deleted.
+ * Recognition still accepts them — which is why every mutation below trips
+ * `protected-steps-run-one-command` and *nothing else*. That purity is the proof
+ * that the presence rules have not moved.
+ *
+ * They are refused for a different reason. `false && git fetch …` and
+ * `true && git fetch …` are the same parse, so the only way to stop a protected
+ * step being written so that it does not run is to refuse the shape. The
+ * round-2 gauntlet's bypass — `false && node scripts/ci/assert-page-serves.mjs;
+ * true` — is a `&&` list with a trailing success, and no parser can draw a
+ * principled line between it and `true && git fetch …`. So the line is "one
+ * unconditional command", and the cost is these four spellings, each of which
+ * has an honest one-command equivalent.
+ */
+const SHAPE_REJECTED_FORMS = {
+  'the fetch inside a subshell': [`(${FETCH})`],
+  'the fetch after a `&&` list, which is the bypass with a true guard': [`true && ${FETCH}`],
+  'the fetch driven by xargs at the end of a pipeline': [`echo main | xargs -I{} ${FETCH}`],
+  'the fetch as the body of a shell function that is then called': [
+    'fetch_baseline() {',
+    `  ${FETCH}`,
+    '}',
+    'fetch_baseline',
+  ],
 };
 
 /**
@@ -387,6 +410,26 @@ const PAIRS = {
     step: 'the teardown assertion',
     needs: 'the teardown',
   },
+  migrationImageNeedsRecord: {
+    job: 'deploy',
+    step: 'the migration-image assertion',
+    needs: 'the image record',
+  },
+  bootNeedsMigrationImage: {
+    job: 'deploy',
+    step: 'the stack boot',
+    needs: 'the migration-image assertion',
+  },
+  schemaNeedsBoot: {
+    job: 'deploy',
+    step: 'the composed-stack schema assertion',
+    needs: 'the stack boot',
+  },
+  pageNeedsSignup: {
+    job: 'deploy',
+    step: 'the real-page assertion',
+    needs: 'the signup-and-verification assertion',
+  },
 };
 
 /** Where a violation says it is: `jobs.<job>.steps.<n>.<key>`. */
@@ -451,6 +494,10 @@ const MUTATIONS = [
     rule: 'no-fail-open-shell',
     mutate: (s) => replaceOnce(s, '        run: pnpm lint\n', '        run: pnpm lint || true\n'),
     message: /`\|\| true` in the script at jobs\.verify\.steps\.\d+\.run/,
+    // `pnpm lint` is a protected step, and `|| true` is two commands joined by a
+    // control operator — which is the shape rule's entire subject. Both rules
+    // are right about it, and each would still catch it with the other gone.
+    also: ['protected-steps-run-one-command'],
   },
   {
     name: 'an action unpinned back to a mutable tag',
@@ -535,6 +582,10 @@ const MUTATIONS = [
         '        run: |\n          echo "${{ github.event.pull_request.title }}"\n          pnpm build\n',
       ),
     message: /attacker-controllable `github\.event` context interpolated/,
+    // Two lines is two commands, and `pnpm build` is protected. Putting the echo
+    // in an unprotected step would test the interpolation rule in isolation and
+    // stop modelling the accident, so the collateral is declared instead.
+    also: ['protected-steps-run-one-command'],
   },
   {
     name: 'a YAML alias hiding a construct from a line-oriented reader',
@@ -731,13 +782,13 @@ const MUTATIONS = [
   {
     name: 'the vitest report reset deleted, so freshness can no longer be proven',
     rule: 'required-step-prerequisites',
-    mutate: (s) => deleteStep(s, 'Reset the test reports'),
+    mutate: (s) => deleteStep(s, 'Record when the test run started'),
     pair: PAIRS.suiteNeedsReset,
   },
   {
     name: 'the report reset moved to after the run it is supposed to precede',
     rule: 'required-step-prerequisites',
-    mutate: (s) => moveStepAfter(s, 'Reset the test reports', 'Unit + integration tests'),
+    mutate: (s) => moveStepAfter(s, 'Record when the test run started', 'Unit + integration tests'),
     pair: PAIRS.suiteNeedsReset,
   },
   // Round 4 modelled these two as deletions. Both deleted a step that is *also*
@@ -765,25 +816,27 @@ const MUTATIONS = [
   {
     name: 'the vitest report gate reordered before the suite, so it reads the previous run',
     rule: 'required-step-prerequisites',
-    mutate: (s) => moveStepAfter(s, 'Assert the suite actually ran', 'Reset the test reports'),
+    mutate: (s) =>
+      moveStepAfter(s, 'Assert the suite actually ran', 'Record when the test run started'),
     pair: PAIRS.vitestGateNeedsSuite,
   },
   {
     name: 'the e2e report gate reordered before the suite it reports on',
     rule: 'required-step-prerequisites',
-    mutate: (s) => moveStepAfter(s, 'Assert the e2e suite actually ran', 'Reset the e2e report'),
+    mutate: (s) =>
+      moveStepAfter(s, 'Assert the e2e suite actually ran', 'Record when the e2e run started'),
     pair: PAIRS.e2eGateNeedsSuite,
   },
   {
     name: 'the e2e report reset deleted, so a leftover report can stand in for a run',
     rule: 'required-step-prerequisites',
-    mutate: (s) => deleteStep(s, 'Reset the e2e report'),
+    mutate: (s) => deleteStep(s, 'Record when the e2e run started'),
     pair: PAIRS.e2eSuiteNeedsReset,
   },
   {
     name: 'the e2e report reset moved to after the suite it is supposed to precede',
     rule: 'required-step-prerequisites',
-    mutate: (s) => moveStepAfter(s, 'Reset the e2e report', 'Run e2e suite'),
+    mutate: (s) => moveStepAfter(s, 'Record when the e2e run started', 'Run e2e suite'),
     pair: PAIRS.e2eSuiteNeedsReset,
   },
   {
@@ -833,13 +886,13 @@ const MUTATIONS = [
   {
     name: 'the vitest report reset quoted into an echo, so VITEST_RUN_START is never exported',
     rule: 'required-step-prerequisites',
-    mutate: (s) => decoyStep(s, 'Reset the test reports'),
+    mutate: (s) => decoyStep(s, 'Record when the test run started'),
     pair: PAIRS.suiteNeedsReset,
   },
   {
     name: 'the e2e report reset quoted into an echo, so E2E_RUN_START is never exported',
     rule: 'required-step-prerequisites',
-    mutate: (s) => decoyStep(s, 'Reset the e2e report'),
+    mutate: (s) => decoyStep(s, 'Record when the e2e run started'),
     pair: PAIRS.e2eSuiteNeedsReset,
   },
   {
@@ -894,18 +947,24 @@ const MUTATIONS = [
     rule: 'no-command-shadowing',
     mutate: (s) => rewriteFetch(s, ['git() { :; }', FETCH]),
     message: /defines a shell function `git\(\)`/,
+    // Shadowing takes a second command to install, and the step it is installed
+    // in is protected. The shape rule sees the extra command; the shadowing rule
+    // sees what that command does. Neither subsumes the other.
+    also: ['protected-steps-run-one-command'],
   },
   {
     name: 'a directory prepended to PATH, which decides what every command word means',
     rule: 'no-command-shadowing',
     mutate: (s) => rewriteFetch(s, ['export PATH="$PWD/.fake-bin:$PATH"', FETCH]),
     message: /runs `export PATH=…`/,
+    also: ['protected-steps-run-one-command'],
   },
   {
     name: 'the same shadowing spelled as a write to $GITHUB_PATH, which outlives the step',
     rule: 'no-command-shadowing',
     mutate: (s) => rewriteFetch(s, ['echo "$PWD/.fake-bin" >> "$GITHUB_PATH"', FETCH]),
     message: /writes to `\$GITHUB_PATH`/,
+    also: ['protected-steps-run-one-command'],
   },
   {
     name: 'the run-start timestamp appended to a lookalike file instead of the job environment',
@@ -1101,21 +1160,168 @@ const MUTATIONS = [
     mutate: (s) => decoyStep(s, 'Tear down the stack'),
     pair: PAIRS.teardownAssertionNeedsTeardown,
   },
+  // ---- the compose verbs (#40 round 3) ------------------------------------
+  // `--wait` and `-v` used to be words in the workflow, and two mutations here
+  // deleted them. They live in scripts/ci/compose-stack.mjs now, with the file
+  // list they had to move with, so what this file can still prove is that the
+  // right *verb* is invoked. That each verb's argv carries its load-bearing flag
+  // is asserted by gate-selftest.mjs, which builds the argv — a test of the code
+  // rather than a match against the text beside it.
   {
-    name: 'the stack boot losing `--wait`, so every assertion races a starting stack',
+    name: 'the stack boot pointed at a different compose verb, so nothing brings the stack up',
     rule: 'required-job-steps',
-    mutate: (s) => replaceOnce(s, ' up -d --wait --wait-timeout 300', ' up -d'),
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/compose-stack.mjs up',
+        'run: node scripts/ci/compose-stack.mjs build',
+      ),
     message: /never runs the stack boot/,
     // Every assertion in the job depends on the boot, so removing the shape the
-    // rule recognises necessarily orphans all four prerequisite pairs that
-    // point at it. One edit, five true statements.
+    // rule recognises necessarily orphans every prerequisite pair pointing at
+    // it. One edit, several true statements.
     also: ['required-step-prerequisites'],
   },
   {
-    name: 'the teardown losing `-v`, so the named volumes outlive the run',
+    name: 'the teardown pointed at a different compose verb, so the named volumes outlive the run',
     rule: 'required-step-prerequisites',
-    mutate: (s) => replaceOnce(s, ' down -v --remove-orphans', ' down --remove-orphans'),
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/compose-stack.mjs down',
+        'run: node scripts/ci/compose-stack.mjs trust-ca',
+      ),
     pair: PAIRS.teardownAssertionNeedsTeardown,
+  },
+
+  // ---- the four new deploy pairs ------------------------------------------
+  {
+    name: 'the image record reordered after the migration-image check that reads it',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Record the image IDs this run built',
+        'Assert the migration image is the one this run built',
+      ),
+    pair: PAIRS.migrationImageNeedsRecord,
+  },
+  {
+    name: 'the migration-image check moved after the boot, so the migration has already run',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Assert the migration image is the one this run built',
+        'Bring the stack up',
+      ),
+    pair: PAIRS.bootNeedsMigrationImage,
+  },
+  {
+    name: 'the schema assertion moved before the boot, so there is no database to read',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Assert the deployed database matches the migrations',
+        'Record the image IDs this run built',
+      ),
+    pair: PAIRS.schemaNeedsBoot,
+  },
+  {
+    name: 'the page assertion moved ahead of the signup it borrows a session from',
+    rule: 'required-step-prerequisites',
+    mutate: (s) =>
+      moveStepAfter(
+        s,
+        'Assert the app serves a real page',
+        'Assert the deployed database matches the migrations',
+      ),
+    pair: PAIRS.pageNeedsSignup,
+  },
+
+  // ---- reachability: a protected step is one unconditional command --------
+  // The round-2 gauntlet's first blocking finding, as fixtures. Every one of
+  // these is a genuine invocation in command position, so every presence rule in
+  // the engine is satisfied by all of them — which is precisely why the shape
+  // has to be refused instead of recognised harder.
+  {
+    name: 'the page assertion behind a false guard, with a trailing `true` to swallow the status',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: false && node scripts/ci/assert-page-serves.mjs; true',
+      ),
+    message: /jobs\.deploy\.steps\.\d+\.run is a protected step/,
+  },
+  {
+    name: 'the rate-limit assertion with a trailing success command',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-rate-limit.mjs',
+        'run: node scripts/ci/assert-rate-limit.mjs; true',
+      ),
+    message: /jobs\.deploy\.steps\.\d+\.run is a protected step/,
+  },
+  {
+    name: 'the typechecker wrapped in an `if` whose condition nobody sets',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: pnpm typecheck\n',
+        '        run: if [ -n "$RUN_TYPECHECK" ]; then pnpm typecheck; fi\n',
+      ),
+    message: /jobs\.verify\.steps\.\d+\.run is a protected step/,
+  },
+  {
+    name: 'a deploy assertion backgrounded, so the step reports before it has finished',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-stack-health.mjs',
+        'run: node scripts/ci/assert-stack-health.mjs &',
+      ),
+    message: /jobs\.deploy\.steps\.\d+\.run is a protected step/,
+    // A backgrounded command is not a completed one, so the presence rule reads
+    // the container-health assertion as absent as well. Both are true, and this
+    // is the one shape of the class that was already caught — by accident.
+    also: ['required-job-steps'],
+  },
+  ...Object.entries(SHAPE_REJECTED_FORMS).map(([name, lines]) => ({
+    name: `a genuine invocation that need not run: ${name}`,
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) => rewriteFetch(s, lines),
+    message: /jobs\.verify\.steps\.\d+\.run is a protected step/,
+  })),
+
+  // ---- one compose file list, not two -------------------------------------
+  {
+    name: 'a bare `docker compose` in the deploy job, carrying its own file list',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      insertAfter(s, '        run: node scripts/ci/compose-stack.mjs up', [
+        '',
+        '      - name: Show what came up',
+        '        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml ps',
+      ]),
+    message: /invokes `docker compose` directly/,
+  },
+  {
+    name: 'the deploy job losing the one variable every compose invocation resolves from',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml\n',
+        '',
+      ),
+    message: /does not declare `ATRIUM_COMPOSE_FILES`/,
   },
 
   // Every entry in REJECTED_FORMS, as a mutation of the baseline fetch step.

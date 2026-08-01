@@ -101,7 +101,13 @@ over TLS through the shipped Caddyfile, on the published port:
 
 - the host qualifies at all — Docker Engine ≥ 28.0.0, default NAT, no network in
   routed or `nat-unprotected` mode (`assert-deploy-preflight.mjs`), checked
-  before a single image is built;
+  before a single image is built, and failing closed when the daemon's bridge
+  cannot be inspected rather than reading an empty answer as a safe one;
+- the **migration** container will run the image this run built — checked
+  *before* `up` (`assert-migration-image.mjs`), because `migrate` is a one-shot
+  that `server` and `app` both wait on, so it executes inside the boot and a
+  wrong image would have altered a persistent volume before any assertion looked
+  at a container;
 - every container healthy, none restarting, both one-shot jobs exited 0
   (`assert-stack-health.mjs`);
 - the running containers' own `NODE_ENV`, origins, hop count and mail transport
@@ -114,11 +120,23 @@ over TLS through the shipped Caddyfile, on the published port:
   content-addressed object rather than three uses of a tag;
 - no realtime origin compiled into that image (`assert-image-origins.mjs`, which
   scans the recorded ID);
-- **a real page** returns 200 with the content only that page renders, HSTS is
-  present, and `:80` redirects rather than serving (`assert-page-serves.mjs`);
+- the **deployed database is the schema the migrations describe** — table set,
+  column set per table, and drizzle's own applied-migration count against this
+  tree's journal (`assert-stack-schema.mjs`). `migrate` exiting 0 is a claim
+  about a process, not about a schema;
 - signing up through the real form sends a verification mail over real SMTP, and
   the link in the message that arrived signs the account in
   (`assert-signup-verifies.mjs`);
+- **a real page**, and one this run's app rendered from this run's database:
+  `/` is fetched as a per-run account and must carry that account's display
+  name, compared against the value read straight out of the `postgres`
+  container; the same URL fetched signed out must *not* carry it; `/app` names
+  the address behind `requireSession`; HSTS is present and `:80` redirects
+  rather than serving (`assert-page-serves.mjs`). Every marker a fixture could
+  copy is a constant, so the assertion rests on the things that are not: a value
+  that did not exist a minute ago, and two different answers to two different
+  requests. A `handle /` in the Caddyfile returning a stale copy of the page
+  passes every structural check and fails exactly there;
 - an authenticated `wss://` upgrade completes, welcomes the user id Postgres
   holds for that account, and an unauthenticated one is refused
   (`assert-ws-upgrade.mjs`);
@@ -146,7 +164,20 @@ of `ci.yml`'s `deploy` job, every case runs it from the top, and the stage that
 actually fires is what gets credited. A case whose declared check is not the one
 that fired fails the ledger, which is how three cases that had been crediting a
 later check came to name the earlier gate that really stops them. It also refuses
-to run if the job grows a stage no case names and no exemption explains.
+to run if the job grows a stage no case names and no exemption explains — 6
+stages are exempt, each with the reason no mutation of it exists, and the number
+is asserted against the table so that exempting a seventh is a visible edit
+rather than a quiet one.
+
+Since round 3 the ledger **executes each step's own argv**, parsed out of
+`ci.yml` with the parser the policy engine uses, instead of recovering a script
+name by regular expression and running something of its own. That is what closes
+the worst failure this ticket found: `false && node scripts/ci/assert-page-serves.mjs;
+true` made CI skip the assertion and exit green *while the ledger certified that
+the same assertion had caught its mutation*. It also requires a clean working
+tree and a HEAD that does not move for the duration, because it reads `ci.yml`
+once and the scripts from disk — a branch switch mid-run produced a receipt for
+workflow A with scripts B, once, for real.
 
 ### HTTPS is a boot condition, not a recommendation
 
@@ -677,7 +708,7 @@ zero tests exits 0 just like one that passed 315:
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. 25 pairs across 20 steps that
+  prerequisite is in the same job *and earlier*. 29 pairs across 23 steps that
   declare one: the ratchet's fetch of `origin/main`; both report resets, before
   the runs they reset for; both report gates, after those runs; the migration's
   wait for Postgres and the schema assertion's migration; the browser install and
@@ -709,9 +740,26 @@ zero tests exits 0 just like one that passed 315:
   subshells — and yields simple commands; a rule is a predicate over the words
   of one command, and `echo exec node x` is an `echo` with two arguments however
   it is spaced. Both polarities are fixtures: the evasions are mutations that
-  must go red, and 14 legitimate rewrites of the real steps must leave the whole
+  must go red, and 10 legitimate rewrites of the real steps must leave the whole
   file clean, because a guard that is wrong in that direction is one somebody
   deletes.
+- **Recognising a command is not proving it runs.** Six rounds asked whether a
+  protected script was *invoked* and got a correct answer.
+  `false && node scripts/ci/assert-page-serves.mjs; true` satisfies that
+  question, skips the assertion, and exits the step green — and the mutation
+  ledger, which recovered the script's name by regular expression and ran it
+  itself, went on certifying that the assertion caught its mutation. No matcher
+  can tell that from `true && …`, because nothing here evaluates a shell. So
+  `protected-steps-run-one-command` refuses the shape instead: a step whose
+  purpose is to fail must be one unconditional command — no `&&`, `||`, `;`,
+  pipe, subshell, reserved word, function definition or background — while
+  launchers, one-shot variables, redirections and wrapped lines all still pass.
+  Four spellings round 6 deliberately accepted are refused here for that reason
+  and are fixtures of it; recognition still sees every one of them, which is
+  what their purity proves. Every `run:` step of `deploy` is held to the same
+  bar, because that job is the pipeline the mutation ledger re-executes command
+  for command — and the ledger now runs each step's own argv rather than a name
+  it recovered.
 - **Recognising a command word is not proving what runs.** `git` means "the word
   `git` in command position", and a shell function, an alias, `hash -p`, a PATH
   assignment or a write to `$GITHUB_PATH` can all make that word mean something
@@ -730,24 +778,27 @@ zero tests exits 0 just like one that passed 315:
 - Reports are deleted immediately before each runner starts and rejected unless
   their mtime post-dates that moment, so a leftover file cannot stand in for a
   run.
-- `scripts/ci/workflow-policy.mjs` enforces 23 house rules over the parsed
+- `scripts/ci/workflow-policy.mjs` enforces 25 house rules over the parsed
   workflow: no `continue-on-error`, no job conditions, no step conditions beyond
   `failure()` on an artifact upload, no shell overrides, no step timeouts, every
   action pinned to a commit SHA, no reusable workflows (a job body that is not in
   the file cannot be checked by anything in the file), `gate.needs` covering every
-  job, and — self-referentially — `verify`, `e2e` and `deploy` still *containing*
-  the steps that do the checking, each assert script named and each one's setup
-  ordered before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 92
+  job, every protected step being one unconditional command, the `deploy` job
+  reaching compose only through `scripts/ci/compose-stack.mjs` so that one
+  resolved file list serves the preflight and the boot alike, and —
+  self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
+  that do the checking, each assert script named and each one's setup ordered
+  before it. `actionlint` runs alongside it.
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 106
   mutated copies of the real workflow and additionally asserts that every one of
-  the 23 declared rules has a mutation proving it fires — coverage derived from
+  the 25 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
   went unexercised through round 2. Each mutation must also name *what* it broke
   (a message pattern, or the exact step→prerequisite edge) and must trip nothing
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 86 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 108 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

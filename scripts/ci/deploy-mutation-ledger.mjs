@@ -69,26 +69,58 @@
  * overlay. That is what makes `swapped-image` meaningful: the manifest says what
  * this tree builds, and the stack is running something else.
  *
+ * ## Round 3: it runs the command the workflow runs, not one of its own
+ *
+ * Round 2's gauntlet found what "runs the real job" was still short of: this
+ * file recovered each step's *script name* with a regular expression and then
+ * invoked `node <that name>` itself. So
+ *
+ *     false && node scripts/ci/assert-page-serves.mjs; true
+ *
+ * skipped the assertion in CI, exited the step green — and the ledger extracted
+ * `assert-page-serves.mjs`, ran it, watched it fail, and certified that the
+ * assertion CI had skipped caught its mutation. Both halves of the verification
+ * stack reported success about something false, which is strictly worse than
+ * either half being missing.
+ *
+ * Two changes, and they are the same change from two ends:
+ *
+ *  1. **The workflow's deploy steps are canonical single commands**, enforced by
+ *     `protected-steps-run-one-command` in `workflow-policy.mjs`. There is no
+ *     conditional form left to recover a name out of.
+ *  2. **This file parses each step with the same parser the policy uses and
+ *     executes the resulting argv verbatim** — `execFileSync(argv[0],
+ *     argv.slice(1))`, no shell, no reconstruction. A step whose argv it cannot
+ *     execute (an expansion it would have to resolve, a shape the policy would
+ *     refuse) is a hard error, not a stage quietly modelled.
+ *
+ * The mutation overlay reaches those commands the way the real job's file list
+ * reaches them: through `ATRIUM_COMPOSE_FILES`, which
+ * `scripts/ci/compose-stack.mjs` and every assertion resolve from. That is why
+ * the compose verbs had to stop carrying literal `-f` flags — with them, no
+ * ledger could have run the workflow's own command against a mutated stack.
+ *
  * ## What a "pass" means here
  *
  * The named stage **failed** against the mutated stack, no earlier stage did,
  * and the whole pipeline passes against the unmutated one — which the deploy job
  * proves on every run.
+ *
+ * ## The tree it reads
+ *
+ * A clean one, at a HEAD that does not move. Round 2 recorded a run that was
+ * invalid because the branch was switched underneath it: the pipeline came from
+ * one `ci.yml` and the scripts from a different working tree. That is checked
+ * now rather than remembered, and there is no override — an override is how a
+ * limitation becomes a receipt nobody can trust.
  */
 
 import { execFileSync } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { firstOperand, parseScript, singleCommandProblems } from './shell-command.mjs';
 
 const project = process.env.ATRIUM_COMPOSE_PROJECT?.trim() || 'atrium-ledger';
 const baseFiles = (
@@ -129,26 +161,47 @@ const WORKFLOW = process.env.CI_WORKFLOW ?? '.github/workflows/ci.yml';
  */
 const RECORDS_WHAT_WAS_BUILT = 'record-built-images';
 
-function classify(run) {
-  const script = /node\s+scripts\/ci\/([a-z0-9-]+)\.mjs/.exec(run);
-  if (script) {
-    const name = script[1];
+/** The compose verbs `scripts/ci/compose-stack.mjs` takes, and what they are. */
+const COMPOSE_VERBS = {
+  build: { kind: 'build', id: 'the image build' },
+  up: { kind: 'up', id: 'the stack boot' },
+  'trust-ca': { kind: 'cp-ca', id: 'the certificate-authority copy' },
+  down: { kind: 'down', id: 'the teardown' },
+};
+
+const CI_SCRIPT = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
+
+/**
+ * One step's argv, classified — never its text.
+ *
+ * Round 2 matched `/node\s+scripts\/ci\/([a-z0-9-]+)\.mjs/` against the whole
+ * `run:` string and executed whatever name came back, which is how
+ * `false && node …assert-page-serves.mjs; true` produced a ledger line
+ * certifying an assertion CI had skipped. The argv comes from the same parser
+ * `workflow-policy.mjs` uses, and it is the thing that gets executed.
+ */
+function classify(argv) {
+  if (argv[0] === 'node') {
+    const script = firstOperand(argv);
+    const found = script === undefined ? null : CI_SCRIPT.exec(script);
+    if (!found) return null;
+    const name = found[1];
+    if (name === 'compose-stack') {
+      const verb = firstOperand(argv, argv.indexOf(script) + 1);
+      const definition = verb && Object.hasOwn(COMPOSE_VERBS, verb) ? COMPOSE_VERBS[verb] : null;
+      return definition ? { ...definition, argv } : null;
+    }
     const kind = name.startsWith('assert-')
       ? 'assertion'
       : name === RECORDS_WHAT_WAS_BUILT
         ? 'record'
         : 'script';
-    return { kind, id: name, script: `scripts/ci/${name}.mjs` };
+    return { kind, id: name, argv };
   }
-  if (/\bdocker\s+compose\b/.test(run)) {
-    if (/\bbuild\b/.test(run)) return { kind: 'build', id: 'the image build' };
-    if (/\bcp\b/.test(run) && /root\.crt/.test(run)) {
-      return { kind: 'cp-ca', id: 'the certificate-authority copy' };
-    }
-    if (/\bup\b/.test(run)) return { kind: 'up', id: 'the stack boot' };
-    if (/\bdown\b/.test(run)) return { kind: 'down', id: 'the teardown' };
-  }
-  if (/cat\s*>\s*\.env/.test(run)) return { kind: 'environment', id: 'the deployment environment' };
+  // The only non-node step of the job: the heredoc that writes `.env`. It is a
+  // redirection, so there is no argv to run without a shell, and there is
+  // nothing in it an overlay could reach. Named rather than pattern-matched.
+  if (argv[0] === 'cat') return { kind: 'environment', id: 'the deployment environment', argv };
   return null;
 }
 
@@ -161,10 +214,32 @@ function readPipeline() {
     // `uses:` steps are the runner's own setup — a checkout and a Node install.
     // They are not stages of the deployment and there is nothing here to mutate.
     if (typeof step?.run !== 'string') continue;
-    const stage = classify(step.run);
+    const where = `the deploy step "${step.name ?? '(unnamed)'}"`;
+
+    // The same question the policy engine asks, asked again here rather than
+    // assumed: this file is only allowed to *execute* what it read, so a step
+    // that is not one unconditional command is a step it cannot honestly run.
+    // The policy would already have refused it; a ledger that trusted the policy
+    // to have run is a ledger with a hole exactly the shape of the last one.
+    const problems = singleCommandProblems(step.run);
+    if (problems.length > 0) {
+      throw new Error(
+        `${WORKFLOW}: ${where} is not a single unconditional command — ${problems.join('; and ')}. This ledger executes each step's own argv, so it cannot run this one, and it will not guess: a stage the ledger models instead of running is how \`false && node …; true\` came to be certified as caught.\n${step.run}`,
+      );
+    }
+
+    const [command] = parseScript(step.run).commands;
+    const expandable = command.words.find((word) => word.expandable);
+    if (expandable) {
+      throw new Error(
+        `${WORKFLOW}: ${where} contains the word ${JSON.stringify(expandable.value)}, which the shell would expand. This ledger runs the argv directly, with no shell, so it cannot know what that becomes — and substituting a guess would mean running a command the workflow does not.`,
+      );
+    }
+
+    const stage = classify(command.argv);
     if (stage === null) {
       throw new Error(
-        `${WORKFLOW}: the deploy step "${step.name ?? '(unnamed)'}" runs something this ledger cannot classify, so every case below would skip it silently. Teach classify() what it is, and give it a mutation:\n${step.run}`,
+        `${WORKFLOW}: ${where} runs \`${command.argv.join(' ')}\`, which this ledger cannot classify, so every case below would skip it silently. Teach classify() what it is, and give it a mutation.`,
       );
     }
     pipeline.push({ ...stage, name: step.name ?? stage.id });
@@ -287,11 +362,34 @@ const CASES = [
     note: "Same correction as `hops-zero`. Both processes work perfectly alone and no session crosses between them — the two-components-that-never-meet class at the deployment layer — and `assert-ws-upgrade` would indeed go red on it. But `assert-stack-config` compares the two containers' secrets and fires first, which is the better outcome: it names the divergence instead of reporting a refused upgrade. The websocket assertion's own demonstration is `no-ws-route`.",
   },
   {
+    id: 'swapped-migration-image',
+    what: 'the migration container pointed at an image that is not the one built',
+    catches: 'assert-migration-image',
+    prepare: (entry) => buildImageDoppelganger(entry, 'migrate'),
+    overlay: (context) => ({ services: { migrate: { image: context.doppelganger } } }),
+    note: "Round 2's gauntlet, on ordering: `migrate` runs *during* `up`, because `server` and `app` both declare `service_completed_successfully` on it — so by the time `assert-image-identity` inspects a container, an unknown migration image has already written to a persistent volume and the job is rejecting a database it cannot un-migrate. The fix is a check that happens before the boot, and this is its mutation. Delete the `Assert the migration image…` step and re-run this case to see the difference: the same overlay then gets all the way to `assert-image-identity`, which is a true statement made too late.",
+  },
+  {
     id: 'proxy-misroute',
-    what: "deploy/Caddyfile's catch-all upstream pointed at app:3001",
+    what: 'deploy/Caddyfile answering `/` — and only `/` — from a port nothing listens on',
     catches: 'assert-page-serves',
-    caddyfile: (text) => text.replace('reverse_proxy app:3000', 'reverse_proxy app:3001'),
-    note: 'The case this ticket exists for, and the one round 1 blocked on: until now no mutation reached the page assertion from a green boot. One character. `app` listens on 3000 and its health check fetches its own `127.0.0.1:3000`, so it is healthy; `server` is untouched; `proxy` health-checks its own loopback admin listener, so it is healthy too. Every container is well, the configuration is production, the images are the built ones — and the proxy answers 502 on `/`. This is the exact shape of #26 round 4, where three rounds of receipts described a working deployment that served nothing, and `assert-page-serves` is the only thing in the job that can see it.',
+    caddyfile: (text) => insertIntoSite(text, ['handle / {', '\treverse_proxy app:3001', '}']),
+    note: 'The case this ticket exists for, and the one round 1 blocked on: until then no mutation reached the page assertion from a green boot. `app` listens on 3000 and its health check fetches its own `127.0.0.1:3000`, so it is healthy; `server` is untouched; `proxy` health-checks its own loopback admin listener, so it is healthy too. Every container is well, the configuration is production, the images are the built ones — and the proxy answers 502 on `/`. Round 2 broke the whole catch-all; this breaks the single route, which is both a sharper statement (`/sign-up` still works, so the mail assertion ahead of this one stays green) and a more realistic one, since a route-specific `handle` is how a real Caddyfile goes wrong.',
+  },
+  {
+    id: 'static-page-fixture',
+    what: 'deploy/Caddyfile answering `/` with a copy of the page instead of proxying it',
+    catches: 'assert-page-serves',
+    caddyfile: (text) =>
+      insertIntoSite(text, ['handle / {', `\trespond \`${PAGE_FIXTURE}\` 200`, '}']),
+    note: 'Round 2\'s gauntlet, blocking 3: "`/` can be a static proxy fixture rather than the app. `assert-page-serves` matches fixed HTML markers and a fixed sign-in link, so a first `handle /` returning a stale copy passes while `/sign-up` stays proxied and health, signup, ws and rate-limit all go green." This is that Caddyfile, and it is a *successful non-product response* — the 502 above was the only failure mode the ledger had. Everything else in the job is untouched and passes: the app\'s own health check fetches `127.0.0.1:3000` and never crosses the proxy, and every other assertion uses another route. What catches it is that the fixture cannot name the account looking at it — the page assertion fetches `/` as a per-run account and compares the rendered name against the one Postgres holds — and cannot answer two different requests differently.',
+  },
+  {
+    id: 'schema-short-of-the-migrations',
+    what: 'a table dropped from the composed stack after a migration that exited 0',
+    catches: 'assert-stack-schema',
+    afterBoot: 'drop table corrections cascade',
+    note: 'Round 2\'s gauntlet: "migration success means only exit code 0, with no composed-stack schema assertion and no ledger case." This produces exactly the state that hides behind a zero exit — the migration ran, the container reported success, and the deployed schema is not what the migrations describe. It is applied as SQL after the boot rather than as an overlay because no overlay can express it: `migrate` would have to run a different program, which is a Dockerfile edit. Nothing else in the job notices, because nothing else in the job reads the schema and none of the asserted paths touches `corrections`.',
   },
   {
     id: 'dead-relay',
@@ -434,6 +532,48 @@ function oldEngineShim(entry) {
 }
 
 /**
+ * A page that carries every structural marker `assert-page-serves` looks for and
+ * is not the app.
+ *
+ * Three `data-region` sections, a sign-in link with its test id, and nothing
+ * else — copied from what the real home page renders, which is exactly the point:
+ * every one of those markers is a constant, and a constant can be copied. What
+ * cannot be copied is the display name of an account created ninety seconds ago,
+ * or a second answer to a second request.
+ *
+ * Backticks, because Caddy takes a backtick-quoted token and the markup has to
+ * carry double quotes to be the markup.
+ */
+const PAGE_FIXTURE = [
+  '<!doctype html><html lang="en"><body><main>',
+  '<section data-region="conversation"><h2>Conversation</h2></section>',
+  '<section data-region="current-state"><h2>Current state</h2></section>',
+  '<section data-region="needs-you"><h2>Needs you</h2></section>',
+  '<span><a data-testid="sign-in-link" href="/sign-in">sign in</a></span>',
+  '</main></body></html>',
+].join('');
+
+/**
+ * The shipped Caddyfile with a `handle` block added to the site, ahead of the
+ * catch-all.
+ *
+ * Ahead of it deliberately: Caddy evaluates `handle` blocks in the order they
+ * are written, so a route-specific one placed first wins — which is both how a
+ * real Caddyfile misroutes a single path and the only way to mutate one route
+ * without touching the others.
+ */
+function insertIntoSite(text, block) {
+  const anchor = '\t# Everything else is the Next.js app';
+  const at = text.indexOf(anchor);
+  if (at === -1) {
+    throw new Error(
+      'deploy/Caddyfile no longer has the catch-all comment this mutation anchors on; a mutation that cannot find its anchor must say so rather than change nothing',
+    );
+  }
+  return `${text.slice(0, at) + block.map((line) => `\t${line}\n`).join('')}\n${text.slice(at)}`;
+}
+
+/**
  * An image that behaves exactly like the built one and is not it.
  *
  * `FROM <the built app image>` plus a label: one extra empty layer, a new image
@@ -447,11 +587,11 @@ function oldEngineShim(entry) {
  * this would be building a doppelganger of whatever happened to answer to the
  * name, which is the very confusion the case exists to demonstrate.
  */
-function buildImageDoppelganger(entry) {
+function buildImageDoppelganger(entry, service = 'app') {
   const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
-  const built = manifest.app;
+  const built = manifest[service];
   if (!built?.id || !built?.image) {
-    throw new Error('no `app` image in the manifest to make a doppelganger of');
+    throw new Error(`no \`${service}\` image in the manifest to make a doppelganger of`);
   }
   const resolved = execFileSync(
     'docker',
@@ -489,16 +629,6 @@ function writeCaddyfile(entry) {
   return { services: { proxy: { volumes: [`${path}:/etc/caddy/Caddyfile:ro`] } } };
 }
 
-function copyCertificateAuthority(files, env) {
-  const target = process.env.ATRIUM_STACK_CA;
-  if (!target) return { ok: true, output: '' };
-  rmSync(target, { force: true });
-  const copied = attempt(() =>
-    compose(files, ['cp', 'proxy:/data/caddy/pki/authorities/local/root.crt', target], { env }),
-  );
-  return { ok: copied.ok && existsSync(target), output: copied.output };
-}
-
 /**
  * Did the boot fail *because of the mutation*, or because of the machine?
  *
@@ -513,6 +643,30 @@ function copyCertificateAuthority(files, env) {
  */
 const CONTAINER_FAILURE = /container .* (is unhealthy|exited|has no healthcheck configured)/i;
 
+/**
+ * The workflow's own command, run with this case's file list in the environment.
+ *
+ * `stage.argv` came out of `ci.yml` and is executed with no shell — the whole
+ * point of round 3. Everything a stage needs to know about *which* stack it is
+ * looking at arrives through the environment, because that is how the real job
+ * tells it too: `compose-stack.mjs` and every assertion resolve their file list
+ * from `ATRIUM_COMPOSE_FILES` via `composeArgs`.
+ */
+function runValidatedCommand(stage, files, env) {
+  return attempt(() =>
+    execFileSync(stage.argv[0], stage.argv.slice(1), {
+      encoding: 'utf8',
+      env: {
+        ...env,
+        ATRIUM_COMPOSE_PROJECT: project,
+        ATRIUM_COMPOSE_FILES: files.join(':'),
+        ATRIUM_IMAGE_MANIFEST: manifestFile,
+      },
+      timeout: 420_000,
+    }),
+  );
+}
+
 function runStage(stage, entry, context) {
   const { files, env } = context;
   // The build and the record describe what this tree produces, so they run
@@ -521,41 +675,30 @@ function runStage(stage, entry, context) {
 
   switch (stage.kind) {
     case 'environment':
-      // The caller's `.env`, which the ledger's own documentation requires; there
-      // is nothing here a mutation could reach that the overlays do not.
+      // A heredoc into `.env`, which the ledger's own documentation requires the
+      // caller to have supplied. There is no argv to run without a shell, and
+      // nothing in it an overlay could reach that the overlays do not.
       return { skipped: true };
     case 'build':
       // The images are built once, before the ledger runs. Rebuilding them per
       // case would be tens of minutes and no case mutates a Dockerfile.
       return { skipped: true };
-    case 'up':
-      return attempt(() =>
-        compose(stageFiles, ['up', '-d', '--wait', '--wait-timeout', '180'], {
-          env,
-          timeout: 420_000,
-        }),
-      );
-    case 'cp-ca':
-      return copyCertificateAuthority(stageFiles, env);
     case 'down':
-      return attempt(() =>
-        compose(stageFiles, entry.teardownFlags ?? ['down', '-v', '--remove-orphans'], { env }),
-      );
+      // The one place a case is allowed to run something other than the
+      // workflow's command, and it is stated where it happens rather than in a
+      // footnote: `teardown-keeps-volumes` mutates the teardown's *flags*, so
+      // for that case the command under test IS the mutation and there is
+      // nothing else it could mean. Every other case runs the real verb.
+      if (entry.teardownFlags) {
+        return attempt(() => compose(stageFiles, entry.teardownFlags, { env }));
+      }
+      return runValidatedCommand(stage, stageFiles, env);
+    case 'cp-ca':
+    case 'up':
     case 'record':
     case 'script':
     case 'assertion':
-      return attempt(() =>
-        execFileSync('node', [stage.script], {
-          encoding: 'utf8',
-          env: {
-            ...env,
-            ATRIUM_COMPOSE_PROJECT: project,
-            ATRIUM_COMPOSE_FILES: stageFiles.join(':'),
-            ATRIUM_IMAGE_MANIFEST: manifestFile,
-          },
-          timeout: 420_000,
-        }),
-      );
+      return runValidatedCommand(stage, stageFiles, env);
     default:
       throw new Error(`unhandled stage kind ${stage.kind}`);
   }
@@ -591,6 +734,7 @@ function runCase(entry) {
 
   let fired = null;
   let output = '';
+  let setupFailure = null;
   for (const stage of PIPELINE) {
     const result = runStage(stage, entry, context);
     if (result.skipped) continue;
@@ -599,11 +743,45 @@ function runCase(entry) {
       output = result.output;
       break;
     }
+    // A mutation that no overlay can express, applied at the one moment it is
+    // expressible. `schema-short-of-the-migrations` is the only user: the state
+    // it needs — a migration that reported success over a schema that is not the
+    // one the migrations describe — exists only once the stack is up, and
+    // producing it any other way means editing a Dockerfile.
+    if (stage.kind === 'up' && entry.afterBoot) {
+      const applied = attempt(() =>
+        compose(
+          context.files,
+          [
+            'exec',
+            '-T',
+            'postgres',
+            'psql',
+            '-U',
+            'atrium',
+            '-d',
+            'atrium',
+            '-v',
+            'ON_ERROR_STOP=1',
+            '-c',
+            entry.afterBoot,
+          ],
+          { env: context.env },
+        ),
+      );
+      if (!applied.ok) {
+        setupFailure = `the post-boot mutation \`${entry.afterBoot}\` did not apply: ${lastLines(applied.output, 2)}`;
+        break;
+      }
+    }
   }
 
   attempt(() => compose(context.files, ['down', '-v', '--remove-orphans'], { env: context.env }));
   for (const cleanup of cleanups) cleanup();
 
+  if (setupFailure !== null) {
+    return { entry, verdict: 'inconclusive', fired: null, detail: setupFailure };
+  }
   if (fired === null) {
     return {
       entry,
@@ -677,30 +855,77 @@ function lastLines(text, count) {
  * is where that becomes visible instead of being noticed two rounds later.
  *
  * `EXEMPT` is the exception list, and every entry states why the stage cannot
- * have a compose-overlay mutation — not why nobody got round to it.
+ * have a mutation of its own — not why nobody got round to it.
+ *
+ * ── ROUND 3: AN EXEMPTION IS A CLAIM, AND CLAIMS GET STATED ─────────────────
+ * Round 2's gauntlet: "ledger coverage exempts six stages rather than exercising
+ * them, so 'a stage no case names refuses to run' is not an invariant — a new
+ * stage can be exempted in the same edit." Both halves are true, and they need
+ * different answers.
+ *
+ * The exemptions themselves survive scrutiny, and each entry below now says
+ * exactly which mutation is impossible rather than gesturing at "no overlay can
+ * express it". Two of them were previously the vaguest and are the most worth
+ * being precise about: `record-built-images` runs against the *shipped* files by
+ * construction — that is what makes `swapped-image` mean anything at all — so no
+ * overlay can reach it by design rather than by omission; and `the teardown` has
+ * no failure of its own to demonstrate, but its argv is not unexercised, because
+ * `teardown-keeps-volumes` mutates exactly that argv and the next stage catches
+ * the result.
+ *
+ * "A new stage can be exempted in the same edit" is the real point and cannot be
+ * closed from inside — but it can stop being quiet. `EXEMPT_COUNT` is asserted
+ * against the table and quoted in the README, so exempting a stage is an edit to
+ * a number a reviewer sees, next to a reason they can read.
  */
 const EXEMPT = {
-  'the deployment environment': 'writes the .env this ledger requires the caller to have supplied',
+  'the deployment environment':
+    'a heredoc writing the .env this ledger requires the caller to have supplied. There is no argv to run without a shell, and every value in it is interpolated by docker-compose.yml with no default — so the mutation "this file is wrong" is already caught by compose refusing to start, one stage later and by name.',
   'the image build':
-    'the ledger runs against images built once beforehand; a mutation here means editing a Dockerfile and rebuilding, which is the one thing no overlay can express',
-  'the certificate-authority copy':
-    "copies a file out of the proxy; it has no configuration of its own, and its failure mode — running before the proxy exists — is the workflow policy's prerequisite rule, which has its own mutation",
+    'the ledger runs against images built once beforehand, because rebuilding per case is tens of minutes. A mutation here is a Dockerfile edit, which is the one thing no overlay can express.',
   'record-built-images':
-    'resolves tags to IDs and writes them down; what it is *for* is asserted by assert-image-identity, whose mutation is `swapped-image`',
+    'it runs against the *shipped* files, always, and that is not an omission — it is what makes `swapped-image` mean anything: the manifest says what this tree builds while the stack runs something else. An overlay that could reach this stage would be an overlay that could forge the baseline, which the round-2 run demonstrated by accident.',
+  'the certificate-authority copy':
+    'copies one file out of the proxy and refuses an empty result. It has no configuration an overlay could reach; its one real failure mode is running before the proxy exists, which is a `required-step-prerequisites` pair in the workflow policy with a mutation of its own.',
   'the teardown':
-    "the only way `docker compose down` fails is the machine, not a configuration; what it is *for* is asserted by assert-stack-teardown, and the mutation for that — `teardown-keeps-volumes` — is a mutation of this stage's own flags",
+    "`docker compose down` fails for reasons that are the machine's, not a configuration's. Its argv is exercised rather than assumed: `teardown-keeps-volumes` mutates this stage's own flags and `assert-stack-teardown` catches the result, so what is missing is a failure *of* this stage, not a test *through* it.",
   'assert-image-origins':
-    'scans the compiled bundle for a build-time constant, which requires building the web image with `next.config.ts` reverted — a rebuild, not an overlay. The measurement that established the literal lands in the bundle is on the issue.',
+    'scans the compiled bundle for a build-time constant, which requires building the web image with `next.config.ts` reverted — a rebuild, not an overlay. The measurement establishing that the literal lands in the bundle is on the issue.',
 };
+
+/**
+ * How many stages of the deploy job have no mutation of their own.
+ *
+ * Asserted against `EXEMPT` rather than derived from it, so that exempting a new
+ * stage is an edit to a number a reviewer can see, in a file the README quotes.
+ */
+export const EXEMPT_COUNT = 6;
 
 function checkCoverage() {
   const named = new Set(CASES.map((entry) => entry.catches));
   const problems = [];
+  if (Object.keys(EXEMPT).length !== EXEMPT_COUNT) {
+    problems.push(
+      `EXEMPT holds ${Object.keys(EXEMPT).length} stages and EXEMPT_COUNT says ${EXEMPT_COUNT}. Exempting a stage is allowed and has to be visible: change the number, and expect to justify it where the README quotes it.`,
+    );
+  }
   for (const stage of PIPELINE) {
     if (named.has(stage.id) || stage.id in EXEMPT) continue;
     problems.push(
       `the deploy job runs \`${stage.name}\` (${stage.id}) and no case in this ledger names it. Add a mutation it catches, or add it to EXEMPT with the reason no overlay can express one.`,
     );
+  }
+  for (const stage of Object.keys(EXEMPT)) {
+    if (!PIPELINE.some((entry) => entry.id === stage)) {
+      problems.push(
+        `EXEMPT names \`${stage}\`, which is not a stage of the deploy job any more. A stale exemption is an exemption nobody re-read.`,
+      );
+    }
+    if (named.has(stage)) {
+      problems.push(
+        `\`${stage}\` is both exempted and named by a case. One of the two is out of date, and the exemption is the one that reads as an excuse.`,
+      );
+    }
   }
   const ids = new Set(PIPELINE.map((stage) => stage.id));
   for (const entry of CASES) {
@@ -711,6 +936,44 @@ function checkCoverage() {
     }
   }
   return problems;
+}
+
+/**
+ * The tree this run is a receipt for: clean, and not moving.
+ *
+ * Round 2 recorded a run it then had to throw away: I switched branches while it
+ * was running, so it read a mutated `deploy/Caddyfile` off disk mid-run. The
+ * pipeline comes from `ci.yml` read once at startup and the stages come from
+ * whatever is in the working tree at the moment each one executes, so a tree
+ * that changes underneath this file produces a receipt about a combination that
+ * never existed — workflow A with scripts B.
+ *
+ * There is deliberately no `--allow-dirty`. A receipt with an override is a
+ * receipt whose reader has to ask whether the override was used, and the whole
+ * value of this file is that its output can be taken at face value. `git stash`
+ * is right there.
+ */
+function treeState() {
+  const git = (args) =>
+    execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return { head: git(['rev-parse', 'HEAD']), dirty: git(['status', '--porcelain']) };
+}
+
+function requireStableTree(before) {
+  const now = treeState();
+  if (now.dirty !== '') {
+    console.error(
+      `::error::deploy-mutation-ledger: the working tree is not clean, so what this run reports would be about files nobody can name:\n${now.dirty}`,
+    );
+    process.exit(2);
+  }
+  if (before && now.head !== before.head) {
+    console.error(
+      `::error::deploy-mutation-ledger: HEAD moved from ${before.head} to ${now.head} while this run was in progress. The pipeline was read from one revision and the scripts from another, which is a receipt for a tree that never existed.`,
+    );
+    process.exit(2);
+  }
+  return now;
 }
 
 const argv = process.argv.slice(2);
@@ -768,11 +1031,15 @@ if (selected.length === 0) {
   process.exit(2);
 }
 
+const tree = requireStableTree();
+console.info(`Working tree clean at ${tree.head}.`);
+
 const results = [];
 for (const entry of selected) {
   console.info(`\n=== ${entry.id}: ${entry.what}`);
   console.info(`    expecting ${entry.catches} to fire, and nothing before it`);
   const result = runCase(entry);
+  requireStableTree(tree);
   results.push(result);
   console.info(`    ${result.verdict.toUpperCase()} — ${result.detail}`);
 }
@@ -800,5 +1067,5 @@ if (bad.length > 0) {
   process.exit(1);
 }
 console.info(
-  `\nAll ${results.length} mutations caught by the stage of the real ${WORKFLOW} pipeline that names them, with no earlier stage firing.`,
+  `\nAll ${results.length} mutations caught by the stage of the real ${WORKFLOW} pipeline that names them, with no earlier stage firing. Every stage ran the command ${WORKFLOW} runs, argv for argv, at ${tree.head} on a clean tree.`,
 );

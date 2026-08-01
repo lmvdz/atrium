@@ -113,18 +113,40 @@ function atLeast(version, floor) {
  * runner does not have through it. Returns human-readable problems; empty means
  * the host qualifies.
  *
+ * ## Why `defaultBridge` is a three-state answer and not a map
+ *
+ * Round 2's gauntlet: "the preflight's 'default bridge NAT' is not asserted — a
+ * failed inspection becomes `{}` and is accepted while the message claims both."
+ * Exactly right, and it is this repository's own recurring defect wearing a
+ * `catch` block: `{}` reads as "no gateway mode is set", which is the *safe*
+ * answer, so an inspection that failed for any reason at all — a daemon that
+ * refused, a permission error, a docker that is not there — was indistinguishable
+ * from a clean bill of health, and the success line went on saying "default NAT".
+ *
+ * So the observation carries its own status. "There is no default bridge" is a
+ * real and safe answer (rootless daemons have none), "here are its options" is a
+ * real answer, and "I could not find out" is a third thing and fails closed.
+ *
  * @param {object} observed
- * @param {string} observed.engineVersion        `docker version -f {{.Server.Version}}`
- * @param {Record<string,string>} observed.defaultBridgeOptions  `docker network inspect bridge`
+ * @param {string} observed.engineVersion  `docker version -f {{.Server.Version}}`
+ * @param {{present: boolean, options?: Record<string,string>, error?: string}} observed.defaultBridge
+ *        what `docker network inspect bridge` said, including that it could not say
  * @param {Record<string, {driver_opts?: Record<string,string>}>} observed.composeNetworks
  *        the `networks:` block of the *resolved* compose configuration
  */
 export function checkHostNetworkPolicy({
   engineVersion,
-  defaultBridgeOptions = {},
+  defaultBridge = { present: false },
   composeNetworks = {},
 }) {
   const problems = [];
+  const defaultBridgeOptions = defaultBridge.present ? (defaultBridge.options ?? {}) : {};
+
+  if (defaultBridge.error) {
+    problems.push(
+      `the daemon's default bridge could not be inspected (${defaultBridge.error}), so whether it runs in NAT mode is unknown. An unknown answer is not a safe one: this check exists because \`routed\` and \`nat-unprotected\` re-open the pre-28 exposure, and reporting "default NAT" over a failed inspection is the shape of failure this whole ticket is about.`,
+    );
+  }
 
   const version = parseEngineVersion(engineVersion);
   if (version === null) {
@@ -161,15 +183,45 @@ export function checkHostNetworkPolicy({
   return problems;
 }
 
-/** `docker network inspect bridge`'s options, or `{}` when there is no such network. */
-function defaultBridgeOptions() {
+/**
+ * What the daemon's default bridge is, or that we could not find out.
+ *
+ * Absence and failure are asked as two questions, because they were one answer
+ * and the safe one won. `docker network ls` says whether a `bridge` network
+ * exists at all — a rootless daemon legitimately has none — and only then is it
+ * inspected. Either command failing is an *error*, not an empty options map.
+ */
+function observeDefaultBridge() {
+  let listed;
   try {
-    return JSON.parse(docker(['network', 'inspect', 'bridge', '--format', '{{json .Options}}']));
-  } catch {
-    // A daemon with no default bridge (rootless, or `bridge` removed) has no
-    // default to be wrong. The engine floor still applies and is checked above.
-    return {};
+    listed = docker(['network', 'ls', '--format', '{{.Name}}']);
+  } catch (error) {
+    return { present: false, error: `docker network ls failed: ${firstLine(error.message)}` };
   }
+  const names = listed
+    .split('\n')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (!names.includes('bridge')) {
+    // No default bridge to be wrong about. Rootless daemons have none, and a
+    // daemon whose `bridge` was removed cannot be running containers on it.
+    return { present: false };
+  }
+  try {
+    const options = JSON.parse(
+      docker(['network', 'inspect', 'bridge', '--format', '{{json .Options}}']),
+    );
+    return { present: true, options: options ?? {} };
+  } catch (error) {
+    return {
+      present: true,
+      error: `docker network inspect bridge failed: ${firstLine(error.message)}`,
+    };
+  }
+}
+
+function firstLine(message) {
+  return String(message ?? '').split('\n')[0];
 }
 
 /**
@@ -186,15 +238,21 @@ function composeNetworks() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const engineVersion = docker(['version', '--format', '{{.Server.Version}}']).trim();
+  const defaultBridge = observeDefaultBridge();
   const problems = checkHostNetworkPolicy({
     engineVersion,
-    defaultBridgeOptions: defaultBridgeOptions(),
+    defaultBridge,
     composeNetworks: composeNetworks(),
   });
   for (const problem of problems) check(false, problem);
   if (problems.length === 0) {
+    // What was observed, not what was hoped for. The old line said "default NAT"
+    // whether or not the bridge had been looked at.
+    const bridge = defaultBridge.present
+      ? `the daemon's default bridge is in ${defaultBridge.options?.['com.docker.network.bridge.gateway_mode_ipv4'] ?? SAFE_GATEWAY_MODE} mode`
+      : 'this daemon has no default bridge network';
     console.info(
-      `Deploy preflight: Docker Engine ${engineVersion}, default NAT, and no gateway mode overridden on any network of this project.`,
+      `Deploy preflight: Docker Engine ${engineVersion}, ${bridge}, and no gateway mode overridden on any network of this project.`,
     );
   }
   report('assert-deploy-preflight');

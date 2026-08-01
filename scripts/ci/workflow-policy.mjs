@@ -70,6 +70,7 @@ import {
   LAUNCHER_NAMES,
   PACKAGE_MANAGER_NAMES,
   parseScript,
+  singleCommandProblems,
 } from './shell-command.mjs';
 
 /** A pinned action reference: `owner/repo@<40 hex>`, optionally `owner/repo/path@sha`. */
@@ -132,7 +133,12 @@ export const RULES = [
   'required-step-prerequisites',
   'no-remote-reusable-workflow',
   'no-command-shadowing',
+  'protected-steps-run-one-command',
+  'compose-through-one-entrypoint',
 ];
+
+/** The deployment job, whose extra rules are about a stack rather than a repo. */
+const DEPLOY_JOB = 'deploy';
 
 /**
  * Command recognition: a parse, not a pattern.
@@ -349,42 +355,46 @@ const ASSERTS_CHROMIUM = invokes('assert-chromium\\.mjs');
 const RUNS_PLAYWRIGHT = binary('playwright', 'test');
 
 /**
- * The `deploy` job's four `docker compose` verbs (#40).
+ * The `deploy` job's four compose verbs (#40).
  *
- * Recognised by membership rather than by position, for the reason `git -c x=y
- * fetch` needed the same treatment: every one of these is invoked with `-p` and
- * two `-f` flags in front of the verb, so `argv[1]` is never the subcommand.
+ * ── WHY THESE ARE NOT `docker compose …` ANY MORE (round 3) ─────────────────
+ * They were, and the round-2 gauntlet found what that cost: "preflight resolves
+ * `ATRIUM_COMPOSE_FILES`; build/up/cp/down hard-code the two base files. An
+ * extra 'safe' overlay lets preflight see `gateway_mode=nat` while the real `up`
+ * uses a routed base network." Two expressions of one file list, and nothing
+ * comparing them — so every check that reads the *resolved configuration* was
+ * inspecting a stack that need not be the one that came up.
+ *
+ * `scripts/ci/compose-stack.mjs` is now the only thing in this repository that
+ * says `docker compose` about the deployed stack, and it takes the file list
+ * from `composeArgs` — the same function every assertion uses. The
+ * `compose-through-one-entrypoint` rule refuses a bare `docker compose` in the
+ * `deploy` job, so a literal file list cannot come back quietly.
+ *
+ * The flags that used to be visible here — `--wait` on the boot, `-v` on the
+ * teardown — moved into that file with them. That is a real trade, paid for in
+ * `gate-selftest.mjs`, which asserts the argv `compose-stack.mjs` builds for
+ * every verb: a test of the code that runs, rather than a match against the text
+ * beside it.
  */
-function dockerCompose(describes, predicate) {
-  return command(describes, ['docker'], ({ argv }) => {
-    if (basename(argv[0]) !== 'docker') return false;
-    const words = argv.slice(1);
-    if (!words.includes('compose')) return false;
-    return predicate(words);
+function composeStack(verb) {
+  const path = /^(?:\.\.\/)*scripts\/ci\/compose-stack\.mjs$/;
+  return command(`\`node scripts/ci/compose-stack.mjs ${verb}\``, ['node'], ({ argv }) => {
+    if (argv[0] !== 'node') return false;
+    const script = firstOperand(argv);
+    if (script === undefined || !path.test(script)) return false;
+    return firstOperand(argv, argv.indexOf(script) + 1) === verb;
   });
 }
 
-const BUILDS_IMAGES = dockerCompose('`docker compose … build`', (words) => words.includes('build'));
+const BUILDS_IMAGES = composeStack('build');
 const PREFLIGHTS_HOST = invokes('assert-deploy-preflight\\.mjs');
 const RECORDS_IMAGES = invokes('record-built-images\\.mjs');
-const STARTS_STACK = dockerCompose(
-  '`docker compose … up -d --wait`',
-  // `--wait` is part of the claim, not decoration: `up -d` alone returns the
-  // moment the containers are created, so every assertion after it would race a
-  // stack that has not finished starting — and a race that loses reads as a
-  // broken deployment rather than a slow one.
-  (words) => words.includes('up') && words.includes('--wait'),
-);
-const TRUSTS_CA = dockerCompose(
-  '`docker compose … cp proxy:…/root.crt`',
-  (words) => words.includes('cp') && words.some((word) => word.includes('root.crt')),
-);
-const TEARS_DOWN = dockerCompose(
-  '`docker compose … down -v`',
-  // `-v` is the whole point: `down` without it leaves every named volume, and
-  // the assertion after it exists to notice exactly that.
-  (words) => words.includes('down') && words.includes('-v'),
-);
+const ASSERTS_MIGRATION_IMAGE = invokes('assert-migration-image\\.mjs');
+const STARTS_STACK = composeStack('up');
+const TRUSTS_CA = composeStack('trust-ca');
+const TEARS_DOWN = composeStack('down');
+const ASSERTS_SIGNUP = invokes('assert-signup-verifies\\.mjs');
 
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
@@ -598,6 +608,19 @@ const REQUIRED_STEPS = {
     },
     {
       rule: 'required-job-steps',
+      what: 'the migration-image assertion',
+      test: ASSERTS_MIGRATION_IMAGE,
+      requires: [
+        {
+          what: 'the image record',
+          test: RECORDS_IMAGES,
+          because:
+            'it compares the image the resolved configuration gives `migrate` against the ID that step wrote down; with no manifest there is nothing to compare against and the one container whose work cannot be undone runs unchecked',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
       what: 'the stack boot',
       test: STARTS_STACK,
       requires: [
@@ -612,6 +635,12 @@ const REQUIRED_STEPS = {
           test: PREFLIGHTS_HOST,
           because:
             'it refuses a host whose engine publishes loopback-bound ports off-box, and the whole value of refusing is refusing *before* the stack is up: after `up` the mailpit UI this deployment documents as unreachable has already been listening on a host where it is not',
+        },
+        {
+          what: 'the migration-image assertion',
+          test: ASSERTS_MIGRATION_IMAGE,
+          because:
+            '`migrate` is a one-shot that `server` and `app` both wait on, so it runs *inside* this step — a wrong migration image has already altered a persistent volume by the time `assert-image-identity` looks at any container. This is the ordering the round-2 gauntlet named, and the only place the answer can still be no is before the boot',
         },
       ],
     },
@@ -694,6 +723,31 @@ const REQUIRED_STEPS = {
     },
     {
       rule: 'required-job-steps',
+      what: 'the composed-stack schema assertion',
+      test: invokes('assert-stack-schema\\.mjs'),
+      requires: [
+        {
+          what: 'the stack boot',
+          test: STARTS_STACK,
+          because:
+            'the migration it is checking the result of runs during the boot, and before that there is no database to read a schema out of',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the signup-and-verification assertion',
+      test: ASSERTS_SIGNUP,
+      requires: [
+        {
+          what: 'the certificate-authority copy',
+          test: TRUSTS_CA,
+          because: 'same client, same verification, same failure without the root',
+        },
+      ],
+    },
+    {
+      rule: 'required-job-steps',
       what: 'the real-page assertion',
       test: invokes('assert-page-serves\\.mjs'),
       requires: [
@@ -703,17 +757,11 @@ const REQUIRED_STEPS = {
           because:
             'the client verifies the chain against that root and never disables verification, so without it every request fails on the certificate instead of telling anybody whether the app serves',
         },
-      ],
-    },
-    {
-      rule: 'required-job-steps',
-      what: 'the signup-and-verification assertion',
-      test: invokes('assert-signup-verifies\\.mjs'),
-      requires: [
         {
-          what: 'the certificate-authority copy',
-          test: TRUSTS_CA,
-          because: 'same client, same verification, same failure without the root',
+          what: 'the signup-and-verification assertion',
+          test: ASSERTS_SIGNUP,
+          because:
+            'the page assertion proves `/` is the app by rendering it *as a per-run account*, which means it drives the same signup-and-verify flow. Run first, it would go red on a broken mail path as well — two steps failing for one reason, and the ledger crediting whichever came first. The mail path belongs to the earlier step, so this one’s failures are about pages',
         },
       ],
     },
@@ -881,6 +929,120 @@ function checkCommandShadowing(script, where, add, path) {
       add(
         'no-command-shadowing',
         `${path}: the script at ${where} writes to \`$GITHUB_PATH\`, which prepends a directory to PATH for every later step in the job. Invoke the binary by its full path instead.`,
+      );
+    }
+  }
+}
+
+/**
+ * A protected step is one command, and it always runs.
+ *
+ * ── THE DEFECT (#40 round 2, shared with #28) ───────────────────────────────
+ * Six rounds of hardening asked whether a protected script was *invoked*, and
+ * the parser answered correctly. `false && node scripts/ci/assert-page-serves.mjs;
+ * true` satisfies that question exactly: `node` is in command position, it is
+ * not backgrounded, it completes. The assertion never runs, the step exits 0,
+ * and — because the mutation ledger recovered the script name by regular
+ * expression and ran it itself — the ledger went on certifying that the
+ * assertion caught its mutation. Both halves of the verification stack agreed on
+ * something false, which is the worst available outcome.
+ *
+ * Recognition cannot fix this, and a seventh matcher would not either:
+ * `false && x` and `true && x` parse identically and nothing here evaluates a
+ * shell. So the answer is to refuse the *shape* where it matters. A protected
+ * step is a step whose whole purpose is to fail; if it can be written so that it
+ * does not run, the guard is decoration. Canonical means: exactly one simple
+ * command, no control operators, no reserved words, no subshell, not
+ * backgrounded. Launchers, one-shot assignments, redirections and backslash
+ * continuations all still pass, because none of them decides whether the command
+ * runs.
+ *
+ * ── WHICH STEPS ─────────────────────────────────────────────────────────────
+ *  - any step, in any job, that runs a command some rule in REQUIRED_STEPS
+ *    depends on. Those are precisely the commands whose failure is the point.
+ *  - *every* `run:` step of the `deploy` job, protected or not. That job is the
+ *    pipeline `deploy-mutation-ledger.mjs` re-executes command for command; a
+ *    step the ledger cannot run verbatim is a step it has to model, and a model
+ *    is where the two descriptions drift apart.
+ *
+ * ── WHAT IT COSTS ───────────────────────────────────────────────────────────
+ * Four forms that round 6 deliberately *accepted* — a subshell, a `&&` list, a
+ * pipeline into `xargs`, and a shell function defined then called — are now
+ * refused on a protected step. Round 6 was right that all four are honest
+ * invocations and that a matcher which cannot see them is wrong; they are still
+ * recognised. They are refused here for a different reason, and the two live
+ * side by side in `workflow-policy-selftest.mjs`: recognition asks *is this a
+ * command*, this asks *does it always run*.
+ */
+function checkProtectedStepShape(jobs, path, add) {
+  for (const [jobId, required] of Object.entries(REQUIRED_STEPS)) {
+    const job = jobs[jobId];
+    if (!isPlainObject(job)) continue;
+    const matchers = new Set();
+    for (const step of required) {
+      matchers.add(step.test);
+      for (const prerequisite of step.requires ?? []) matchers.add(prerequisite.test);
+    }
+    const steps = Array.isArray(job.steps) ? job.steps : [];
+    for (const [index, step] of steps.entries()) {
+      if (!isPlainObject(step) || typeof step.run !== 'string') continue;
+      const protects = [...matchers].filter((matcher) => matcher.test(step.run));
+      const everyStep = jobId === DEPLOY_JOB;
+      if (protects.length === 0 && !everyStep) continue;
+      const problems = singleCommandProblems(step.run);
+      if (problems.length === 0) continue;
+      const because =
+        protects.length > 0
+          ? `it runs ${protects.map(String).join(' and ')}, which this policy requires to be present`
+          : 'every step of the `deploy` job is a stage the mutation ledger re-executes verbatim';
+      add(
+        'protected-steps-run-one-command',
+        `${path}: jobs.${jobId}.steps.${index}.run is a protected step — ${because} — but ${problems.join('; and ')}. A protected step must be one unconditional command: \`false && node scripts/ci/assert-x.mjs; true\` satisfies every presence rule here, skips the assertion, and exits green. Split it into separate steps, or move the extra work into the script.`,
+      );
+    }
+  }
+}
+
+/**
+ * The deploy job resolves its compose file list exactly once.
+ *
+ * ── THE DEFECT (#40 round 2) ────────────────────────────────────────────────
+ * "Preflight may not inspect the configuration that is deployed. Preflight
+ * resolves `ATRIUM_COMPOSE_FILES`; build/up/cp/down hard-code the two base
+ * files. An extra 'safe' overlay lets preflight see `gateway_mode=nat` while the
+ * real `up` uses a routed base network."
+ *
+ * Two expressions of one list is two chances to disagree, and neither half could
+ * see the other. So there is one: `scripts/ci/compose-stack.mjs`, which asks
+ * `composeArgs` — the same function every assertion in the job uses. This rule
+ * is what keeps it one: a bare `docker compose` in this job is refused outright,
+ * because the moment a second `-f` list exists nothing in this file can prove it
+ * matches the first.
+ *
+ * The environment variable itself must be declared on the job, too. Without it
+ * `composeArgs` falls back to `docker-compose.yml` alone — the mailpit overlay
+ * silently gone, which is a stack with no relay and a mail assertion that would
+ * be waiting for a message nobody could have sent.
+ */
+function checkComposeEntrypoint(jobs, path, add) {
+  const job = jobs[DEPLOY_JOB];
+  if (!isPlainObject(job)) return;
+  const files = isPlainObject(job.env) ? job.env.ATRIUM_COMPOSE_FILES : undefined;
+  if (typeof files !== 'string' || files.trim() === '') {
+    add(
+      'compose-through-one-entrypoint',
+      `${path}: job \`${DEPLOY_JOB}\` does not declare \`ATRIUM_COMPOSE_FILES\` in its \`env:\`. Every compose invocation in this job — the verbs and the assertions alike — resolves its file list from that variable, and unset it means \`docker-compose.yml\` alone: no mail catcher, and a mail assertion waiting for a message nothing could have sent.`,
+    );
+  }
+  const steps = Array.isArray(job.steps) ? job.steps : [];
+  for (const [index, step] of steps.entries()) {
+    if (!isPlainObject(step) || typeof step.run !== 'string') continue;
+    for (const { argv } of parseScript(step.run).commands) {
+      if (basename(argv[0] ?? '') !== 'docker') continue;
+      if (!argv.slice(1).includes('compose')) continue;
+      add(
+        'compose-through-one-entrypoint',
+        `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run invokes \`docker compose\` directly. It would carry its own \`-f\` list, and a second file list is one the preflight, the image record and every assertion here cannot see — which is exactly how a "safe" overlay let the preflight approve one stack while another came up. Use \`node scripts/ci/compose-stack.mjs <verb>\`, which resolves the list from ATRIUM_COMPOSE_FILES like everything else in this job.`,
       );
     }
   }
@@ -1142,6 +1304,10 @@ export function checkWorkflow(source, path = '<workflow>') {
       }
     }
   }
+
+  // ---- the protected steps are canonical, and compose is resolved once ----
+  checkProtectedStepShape(jobs, path, add);
+  checkComposeEntrypoint(jobs, path, add);
 
   // ---- the gate ----------------------------------------------------------
   const gate = jobs[GATE_JOB];

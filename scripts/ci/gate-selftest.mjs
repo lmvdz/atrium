@@ -33,9 +33,12 @@ import { parse } from 'yaml';
 import { checkHostNetworkPolicy } from './assert-deploy-preflight.mjs';
 import { checkRatchet } from './assert-floor-ratchet.mjs';
 import { checkImageIdentity } from './assert-image-identity.mjs';
+import { checkMigrationImage } from './assert-migration-image.mjs';
 import { checkPlaywrightReport } from './assert-playwright-report.mjs';
+import { checkSchema } from './assert-stack-schema.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
+import { composeStackArgv, VERBS } from './compose-stack.mjs';
 import { readFreshReport } from './report-file.mjs';
 import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
 
@@ -872,7 +875,10 @@ const CASES = [
     run: () =>
       checkHostNetworkPolicy({
         engineVersion: '29.3.0',
-        defaultBridgeOptions: { 'com.docker.network.bridge.gateway_mode_ipv4': 'routed' },
+        defaultBridge: {
+          present: true,
+          options: { 'com.docker.network.bridge.gateway_mode_ipv4': 'routed' },
+        },
       }),
     expect: /default bridge runs with .*gateway_mode_ipv4=routed/,
   },
@@ -881,7 +887,10 @@ const CASES = [
     run: () =>
       checkHostNetworkPolicy({
         engineVersion: '29.3.0',
-        defaultBridgeOptions: { 'com.docker.network.bridge.gateway_mode_ipv6': 'nat-unprotected' },
+        defaultBridge: {
+          present: true,
+          options: { 'com.docker.network.bridge.gateway_mode_ipv6': 'nat-unprotected' },
+        },
       }),
     expect: /gateway_mode_ipv6=nat-unprotected/,
   },
@@ -901,9 +910,39 @@ const CASES = [
     run: () =>
       checkHostNetworkPolicy({
         engineVersion: '29.3.0',
-        defaultBridgeOptions: { 'com.docker.network.bridge.enable_icc': 'true' },
+        defaultBridge: {
+          present: true,
+          options: { 'com.docker.network.bridge.enable_icc': 'true' },
+        },
         composeNetworks: { default: { ipam: { config: [{ subnet: '172.28.0.0/16' }] } } },
       }),
+    expect: 'clean',
+  },
+  // Round 2's gauntlet: a failed inspection used to become `{}` and be accepted
+  // while the success line went on claiming "default NAT". Absence and failure
+  // are two answers now, and only one of them is safe.
+  {
+    name: 'a default bridge that could not be inspected at all',
+    run: () =>
+      checkHostNetworkPolicy({
+        engineVersion: '29.3.0',
+        defaultBridge: { present: true, error: 'permission denied' },
+      }),
+    expect: /could not be inspected .*permission denied.*whether it runs in NAT mode is unknown/s,
+  },
+  {
+    name: 'a daemon that cannot even be asked what networks it has',
+    run: () =>
+      checkHostNetworkPolicy({
+        engineVersion: '29.3.0',
+        defaultBridge: { present: false, error: 'docker network ls failed: no such host' },
+      }),
+    expect: /could not be inspected/,
+  },
+  {
+    name: 'a rootless daemon with no default bridge, which has no default to be wrong',
+    run: () =>
+      checkHostNetworkPolicy({ engineVersion: '29.3.0', defaultBridge: { present: false } }),
     expect: 'clean',
   },
   {
@@ -972,7 +1011,242 @@ const CASES = [
     run: () => checkImageIdentity(builtManifest(), runningImages()),
     expect: 'clean',
   },
+
+  // ---- the migration image, checked before it can write (#40 r3) ----------
+  {
+    name: 'the migration container pointed at an image this run did not build',
+    run: () =>
+      checkMigrationImage(
+        builtManifest().migrate,
+        'atrium-ledger-doppelganger:x',
+        `sha256:${'e'.repeat(64)}`,
+      ),
+    expect: /runs `migrate` from `atrium-ledger-doppelganger:x`/,
+  },
+  {
+    name: 'a migration image name that resolves to nothing',
+    run: () => checkMigrationImage(builtManifest().migrate, 'atrium-ci-migrate', '(no such image)'),
+    expect: /which is not an image ID/,
+  },
+  {
+    name: 'a manifest with no `migrate` entry at all',
+    run: () => checkMigrationImage(undefined, 'atrium-ci-migrate', `sha256:${'3'.repeat(64)}`),
+    expect: /records nothing for `migrate`/,
+  },
+  {
+    name: 'the migration image that is the one this run built',
+    run: () =>
+      checkMigrationImage(builtManifest().migrate, 'atrium-ci-migrate', `sha256:${'3'.repeat(64)}`),
+    expect: 'clean',
+  },
+
+  // ---- migration success is not the same claim as the schema (#40 r3) -----
+  {
+    name: 'a deployed database missing a table the migrations create',
+    run: () => {
+      const actual = deployedFixture();
+      actual.tables.delete('corrections');
+      return checkSchema(schemaFixture(), actual);
+    },
+    expect: /missing 1 table\(s\) the migrations create: corrections/,
+  },
+  {
+    name: 'a deployed database carrying a table no migration in this tree makes',
+    run: () => {
+      const actual = deployedFixture();
+      actual.tables.set('leftovers', new Set(['id']));
+      return checkSchema(schemaFixture(), actual);
+    },
+    expect: /table\(s\) no migration in this tree creates: leftovers/,
+  },
+  {
+    name: 'a table with the right name and a column short',
+    run: () => {
+      const actual = deployedFixture();
+      actual.tables.get('users').delete('email_verified');
+      return checkSchema(schemaFixture(), actual);
+    },
+    expect: /`users` does not match the migrations: missing email_verified/,
+  },
+  {
+    name: 'a migration folder that never reached the image, so nothing was applied',
+    run: () => checkSchema(schemaFixture(), { ...deployedFixture(), migrations: 0 }),
+    expect: /records 0 applied migration\(s\)/,
+  },
+  {
+    name: 'the deployed database that matches the migrations exactly',
+    run: () => checkSchema(schemaFixture(), deployedFixture()),
+    expect: 'clean',
+  },
+
+  // ---- the compose verbs' argv, built rather than read (#40 r3) -----------
+  //
+  // `--wait` and `-v` used to be words in ci.yml, where workflow-policy.mjs
+  // matched them. They moved into compose-stack.mjs with the file list, so this
+  // is what replaces that check — and it is stronger, because it runs the code
+  // that builds the argv instead of matching the text beside it.
+  {
+    name: 'the boot waits for the stack to settle rather than returning at creation',
+    run: () =>
+      composeStackArgv('up', composeEnv()).includes('--wait') ? [] : ['`up` lost `--wait`'],
+    expect: 'clean',
+  },
+  {
+    name: 'the teardown removes the named volumes',
+    run: () => (composeStackArgv('down', composeEnv()).includes('-v') ? [] : ['`down` lost `-v`']),
+    expect: 'clean',
+  },
+  {
+    name: 'every verb resolves the same file list from the one variable',
+    run: () => {
+      const env = composeEnv();
+      const lists = Object.keys(VERBS).map((verb) =>
+        composeStackArgv(verb, env)
+          .filter((_word, index, argv) => argv[index - 1] === '-f')
+          .join(':'),
+      );
+      return new Set(lists).size === 1 && lists[0] === env.ATRIUM_COMPOSE_FILES
+        ? []
+        : [
+            `the verbs resolve ${JSON.stringify(lists)}, not one list equal to ATRIUM_COMPOSE_FILES`,
+          ];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'an overlay added to the variable reaches every verb, not only the preflight',
+    run: () => {
+      const env = { ...composeEnv(), ATRIUM_COMPOSE_FILES: 'docker-compose.yml:overlay.yml' };
+      const missing = Object.keys(VERBS).filter(
+        (verb) => !composeStackArgv(verb, env).includes('overlay.yml'),
+      );
+      return missing.length === 0 ? [] : [`${missing.join(', ')} did not see the overlay`];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'a compose verb nobody reviewed',
+    run: () => {
+      try {
+        composeStackArgv('exec', composeEnv());
+        return ['an unknown verb was accepted'];
+      } catch (error) {
+        return [error.message];
+      }
+    },
+    expect: /unknown compose verb "exec"/,
+  },
+
+  // ---- the ledger refuses a workflow it cannot honestly execute (#40 r3) ---
+  //
+  // The round-2 gauntlet's blocking finding, from the ledger's end: CI skipped
+  // `assert-page-serves` and the ledger certified that it caught its mutation,
+  // because the ledger recovered a filename by regular expression and ran it
+  // itself. These run the real ledger against mutated copies of the real
+  // workflow, with `--pipeline`, which reads and classifies every step without
+  // starting anything.
+  {
+    name: 'a deploy assertion CI would skip, handed to the ledger',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          'run: node scripts/ci/assert-page-serves.mjs',
+          'run: false && node scripts/ci/assert-page-serves.mjs; true',
+        ),
+      ),
+    expect: /is not a single unconditional command/,
+  },
+  {
+    name: 'a deploy step whose exit status something after it swallows',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          'run: node scripts/ci/assert-ws-upgrade.mjs',
+          'run: node scripts/ci/assert-ws-upgrade.mjs; true',
+        ),
+      ),
+    expect: /is not a single unconditional command/,
+  },
+  {
+    name: 'a deploy step whose command word the shell would have to expand',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace('run: node scripts/ci/assert-rate-limit.mjs', 'run: node "$ASSERTION"'),
+      ),
+    expect: /which the shell would expand/,
+  },
+  {
+    name: 'a deploy stage the ledger has never heard of',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          'run: node scripts/ci/assert-stack-health.mjs',
+          'run: node scripts/ci/assert-something-new.mjs',
+        ),
+      ),
+    expect: /no case in this ledger names it/,
+  },
+  {
+    name: 'the real workflow, which the ledger reads and covers',
+    run: () => ledgerRefuses((source) => source),
+    expect: 'clean',
+  },
 ];
+
+/** The deploy job's own compose environment, as ci.yml declares it. */
+function composeEnv() {
+  return {
+    ATRIUM_COMPOSE_PROJECT: 'atrium-ci',
+    ATRIUM_COMPOSE_FILES: 'docker-compose.yml:docker-compose.mailpit.yml',
+    ATRIUM_STACK_CA: '/tmp/caddy-root.crt',
+  };
+}
+
+/** A three-table schema, the way `expectedSchema()` reports one. */
+function schemaFixture() {
+  return {
+    migrations: 1,
+    tables: new Map([
+      ['users', new Set(['id', 'email', 'display_name', 'email_verified'])],
+      ['auth_sessions', new Set(['id', 'user_id', 'token', 'expires_at'])],
+      ['corrections', new Set(['id', 'message_id', 'action'])],
+    ]),
+  };
+}
+
+/** The same schema, as `deployedSchema()` reads it back out of Postgres. */
+function deployedFixture() {
+  const fixture = schemaFixture();
+  return {
+    migrations: fixture.migrations,
+    tables: new Map([...fixture.tables].map(([name, columns]) => [name, new Set(columns)])),
+  };
+}
+
+/**
+ * Runs `deploy-mutation-ledger.mjs --pipeline` against a mutated copy of the
+ * real workflow and reports what it said.
+ *
+ * `--pipeline` reads `ci.yml`, classifies every deploy step and checks coverage
+ * without starting a container, so this is a few milliseconds and needs no
+ * docker. Returns the ledger's own complaint, or nothing when it accepted the
+ * workflow — the same shape every other case here returns.
+ */
+function ledgerRefuses(mutate) {
+  const directory = mkdtempSync(join(tmpdir(), 'atrium-ledger-selftest-'));
+  const file = join(directory, 'ci.yml');
+  writeFileSync(file, mutate(readFileSync(WORKFLOW, 'utf8')));
+  const result = spawnSync(
+    process.execPath,
+    ['scripts/ci/deploy-mutation-ledger.mjs', '--pipeline'],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, CI_WORKFLOW: file },
+    },
+  );
+  if (result.status === 0) return [];
+  return [`${result.stdout ?? ''}${result.stderr ?? ''}`];
+}
 
 /** Three built images, by ID, the way `record-built-images.mjs` writes them. */
 function builtManifest() {

@@ -45,6 +45,19 @@
  *      That is a deliberate widening — round 5 rejected every conditional form,
  *      including the honest ones — and the cost is stated in ci.yml's scope
  *      block rather than papered over.
+ *
+ *      ── ROUND 3 OF #40: THE COST CAME DUE ───────────────────────────────────
+ *      `false && node scripts/ci/assert-page-serves.mjs; true` satisfies every
+ *      recognition rule, skips the assertion, and exits the step green. The
+ *      widening above is still right about *recognition* — `sudo git fetch …`
+ *      and `git -c x=y fetch …` are honest invocations and must be seen — and it
+ *      was wrong to leave reachability entirely unasked. So this file now also
+ *      reports the script's *shape*: `scriptShape()` below says which control
+ *      operators and reserved words a script uses, and `singleCommandProblems()`
+ *      turns that into the question "is this one command that always runs".
+ *      Recognition and reachability are two questions; the policy asks the
+ *      second one only of the steps whose failure is the point (see
+ *      `protected-steps-run-one-command` in workflow-policy.mjs).
  *   2. Command substitution is opaque. `$(node scripts/ci/assert-tables.mjs)`
  *      genuinely runs the script, and this parser keeps the substitution as text
  *      inside the word that contains it rather than recursing into it. That
@@ -337,6 +350,16 @@ function newCommand() {
   return { raw: [], words: [], assignments: [], redirections: [], background: false };
 }
 
+/**
+ * Control operators, in the spelling a human would recognise them by.
+ *
+ * `\n` is deliberately absent: a `run: |` block always ends with one, and a
+ * newline between two commands is already visible as `commands.length > 1`.
+ * Reporting it as a control operator would make every block scalar look
+ * conditional.
+ */
+const CONTROL_OPERATORS = new Set(['&&', '||', ';', ';;', '|', '|&', '&', '(', ')']);
+
 function isSubstantial(command) {
   return (
     command.raw.length > 0 || command.assignments.length > 0 || command.redirections.length > 0
@@ -347,12 +370,14 @@ function isSubstantial(command) {
  * Every simple command in a script, in order, with the command word first.
  *
  * @param {string} script the text of one `run:` block
- * @returns {{commands: object[], functions: string[]}}
+ * @returns {{commands: object[], functions: string[], controls: string[], keywords: string[]}}
  */
 export function parseScript(script) {
   const tokens = tokenize(String(script ?? ''));
   const commands = [];
   const functions = [];
+  const controls = [];
+  const keywords = [];
   const listStarts = [];
   let listStart = 0;
   let current = newCommand();
@@ -378,6 +403,7 @@ export function parseScript(script) {
         pendingRedirect = token.op;
         continue;
       }
+      if (CONTROL_OPERATORS.has(token.op)) controls.push(token.op);
       if (token.op === '(') {
         flush();
         listStarts.push(listStart);
@@ -434,8 +460,12 @@ export function parseScript(script) {
         if (tokens[index + 1]?.op === '(' && tokens[index + 2]?.op === ')') index += 2;
         continue;
       }
-      if (KEYWORDS.has(token.value)) continue;
+      if (KEYWORDS.has(token.value)) {
+        keywords.push(token.value);
+        continue;
+      }
       if (CLAUSE_KEYWORDS.has(token.value)) {
+        keywords.push(token.value);
         discarding = true;
         continue;
       }
@@ -455,7 +485,71 @@ export function parseScript(script) {
   flush();
 
   for (const command of commands) Object.assign(command, unwrap(command.raw));
-  return { commands, functions };
+  return { commands, functions, controls, keywords };
+}
+
+/**
+ * Is this script exactly one command that always runs?
+ *
+ * ── WHY THIS EXISTS (#40 round 3) ───────────────────────────────────────────
+ * The round-2 gauntlet: "the workflow and the ledger disagree about what ran,
+ * and both report success". `false && node scripts/ci/assert-page-serves.mjs;
+ * true` is a genuine invocation in command position — every recognition rule in
+ * `workflow-policy.mjs` is satisfied — and the assertion never runs, and the
+ * step exits 0. The mutation ledger then recovered the script's *name* from that
+ * text and ran it directly, so it certified that the assertion caught its
+ * mutation while CI had skipped it. Two halves of one verification stack
+ * agreeing on something false.
+ *
+ * Recognition cannot answer this: `false && x` and `true && x` parse identically
+ * and a policy engine does not evaluate shell. The answer is to refuse the
+ * *shape* for the steps whose failure is the whole point — a protected step is
+ * one command, unconditional, not backgrounded, not in a subshell, with nothing
+ * after it to swallow its status. Everything a legitimate invocation needs is
+ * still allowed: launchers (`sudo`, `timeout`, `command`, `xargs` as the command
+ * word), one-shot assignments, redirections, backslash continuations, and any
+ * number of arguments.
+ *
+ * @param {string} script the text of one `run:` block
+ * @returns {string[]} human-readable problems; empty means it is canonical
+ */
+export function singleCommandProblems(script) {
+  const { commands, functions, controls, keywords } = parseScript(script);
+  const problems = [];
+  const unique = (values) => [...new Set(values)];
+
+  if (commands.length === 0) {
+    problems.push('it runs no command at all');
+  } else if (commands.length > 1) {
+    problems.push(
+      `it runs ${commands.length} commands (${commands.map((command) => command.argv[0] ?? '?').join(', ')}); only the first one's failure is guaranteed to fail the step, and only if nothing after it succeeds`,
+    );
+  }
+  if (controls.length > 0) {
+    problems.push(
+      `it uses the shell control operator(s) ${unique(controls)
+        .map((op) => `\`${op}\``)
+        .join(', ')}, which decide whether the command runs and whether its exit status survives`,
+    );
+  }
+  if (keywords.length > 0) {
+    problems.push(
+      `it uses the shell reserved word(s) ${unique(keywords)
+        .map((word) => `\`${word}\``)
+        .join(', ')}, so the command is inside a construct that can skip it`,
+    );
+  }
+  if (functions.length > 0) {
+    problems.push(
+      `it defines the shell function(s) ${unique(functions)
+        .map((name) => `\`${name}()\``)
+        .join(', ')}; a definition is not a call, and a call is a second command`,
+    );
+  }
+  if (commands.some((command) => command.background)) {
+    problems.push('it backgrounds the command, so the step reports before it has finished');
+  }
+  return problems;
 }
 
 /**

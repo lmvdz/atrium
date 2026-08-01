@@ -84,6 +84,21 @@ name: CI
 #     the policy step, both self-tests, and every assert script by name
 #   - no shell function, alias, `hash -p`, PATH assignment or `$GITHUB_PATH`
 #     write that redefines a command word the rules above depend on
+#   - a protected step is ONE UNCONDITIONAL COMMAND. `false && node
+#     scripts/ci/assert-page-serves.mjs; true` is a real invocation in command
+#     position — every presence rule above is satisfied — and the assertion never
+#     runs and the step exits green. Recognition cannot tell that apart from
+#     `true && …`, so the shape is refused instead: no `&&`, `||`, `;`, pipe,
+#     subshell, reserved word, function definition or background on a step whose
+#     purpose is to fail. Launchers, one-shot variables, redirections and
+#     backslash continuations are all still fine. Every `run:` step of `deploy`
+#     is held to it, protected or not, because that job is the pipeline
+#     scripts/ci/deploy-mutation-ledger.mjs re-executes command for command.
+#   - the `deploy` job resolves its compose file list exactly once. Every verb
+#     goes through scripts/ci/compose-stack.mjs, which reads
+#     ATRIUM_COMPOSE_FILES like every assertion does; a bare `docker compose`
+#     there is refused, because a second `-f` list is one the preflight cannot
+#     see
 #   - and where a check only means something because of an earlier step, the
 #     policy enforces the *pair*: the prerequisite must be in the same job, run
 #     first, be a command rather than a mention of one, and not be backgrounded.
@@ -273,25 +288,32 @@ jobs:
       - name: Apply migrations
         run: pnpm --filter @atrium/db exec drizzle-kit migrate
 
+      - name: Build the workspace packages
+        # The schema assertion below derives its expectations from the built
+        # `dist/schema.js`, so the packages have to be compiled first. Its own
+        # step, because it is a protected command: `pnpm build` is one of the
+        # things `required-job-steps` looks for, and a protected step is one
+        # unconditional command (see the policy engine's
+        # `protected-steps-run-one-command`).
+        run: pnpm --filter "./packages/*" build
+
       - name: Assert the database matches the schema exactly
         # Set equality, derived from the built schema export rather than from a
         # hand-copied list: a missing table and an unexpected thirteenth one both
         # fail. Proves the service container was genuinely reachable and the
         # migration did work, rather than a no-op that exits 0 against nothing.
-        run: |
-          set -euo pipefail
-          pnpm --filter "./packages/*" build
-          pnpm --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs
+        run: pnpm --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs
 
-      - name: Reset the test reports
+      - name: Delete the test reports
         # Deleted immediately before the runner starts, with the start time
-        # recorded: the gate then refuses any report whose mtime predates it. A
-        # leftover report from an earlier step or a restored cache is the
-        # quietest possible way to pass a gate without running a suite.
-        run: |
-          set -euo pipefail
-          rm -f vitest-report.json vitest-ci-report.json
-          echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+        # recorded in the step after: the gate then refuses any report whose
+        # mtime predates it. A leftover report from an earlier step or a restored
+        # cache is the quietest possible way to pass a gate without running a
+        # suite.
+        run: rm -f vitest-report.json vitest-ci-report.json
+
+      - name: Record when the test run started
+        run: echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"
 
       - name: Unit + integration tests
         run: >-
@@ -398,11 +420,11 @@ jobs:
         # tables that do not exist. The policy enforces the pair.
         run: pnpm --filter @atrium/web exec node e2e/support/ensure-database.mjs
 
-      - name: Reset the e2e report
-        run: |
-          set -euo pipefail
-          rm -f playwright-report.json
-          echo "E2E_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - name: Delete the e2e report
+        run: rm -f playwright-report.json
+
+      - name: Record when the e2e run started
+        run: echo "E2E_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"
 
       - name: Run e2e suite
         env:
@@ -471,6 +493,14 @@ jobs:
       # trust that CA explicitly (see scripts/ci/stack-client.mjs); certificate
       # verification is never disabled.
       ATRIUM_COMPOSE_PROJECT: atrium-ci
+      # THE file list. Every compose invocation in this job resolves it from
+      # here — the four verbs through scripts/ci/compose-stack.mjs, and every
+      # assertion through composeArgs() in scripts/ci/compose.mjs. Round 2 had
+      # the verbs carrying their own literal `-f` flags while the preflight read
+      # this variable, so an extra overlay could let the preflight approve one
+      # stack while a different one came up and nothing could compare the two.
+      # `compose-through-one-entrypoint` in the policy engine refuses a bare
+      # `docker compose` here for that reason.
       ATRIUM_COMPOSE_FILES: docker-compose.yml:docker-compose.mailpit.yml
       ATRIUM_STACK_DOMAIN: atrium.localhost
       ATRIUM_STACK_CA: ${{ github.workspace }}/caddy-root.crt
@@ -498,8 +528,14 @@ jobs:
         # is a feature and it is why they are written out rather than defaulted.
         # The secrets are CI values for a stack that lives for ten minutes on a
         # runner with no published database port.
+        #
+        # One command, like every step in this job: the heredoc is a redirection,
+        # not a second command, and `set -euo pipefail` is what the default
+        # `bash -e -o pipefail` already is (`no-shell-override` keeps it that
+        # way). A missing or empty file needs no `test -s` here either — every
+        # value below is `${VAR:?…}` in docker-compose.yml, so compose refuses to
+        # start and names the variable.
         run: |
-          set -euo pipefail
           cat > .env <<'ENVIRONMENT'
           POSTGRES_USER=atrium
           POSTGRES_PASSWORD=atrium-ci-not-a-real-password
@@ -515,7 +551,6 @@ jobs:
           ATRIUM_MAIL_TRANSPORT=smtp
           ATRIUM_MAIL_FROM=Atrium CI <no-reply@atrium.test>
           ENVIRONMENT
-          test -s .env
 
       - name: Preflight the host before anything is built
         # Routed here from #26 round 6, and the only check in this job that is
@@ -532,7 +567,7 @@ jobs:
         # From the shipped Dockerfiles, from a clean checkout. This is the step
         # that had silently been failing for everyone since `packages/ingest`
         # landed without its manifest being copied.
-        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml build
+        run: node scripts/ci/compose-stack.mjs build
 
       - name: Record the image IDs this run built
         # Immediately after the build, and before anything runs or scans one.
@@ -542,23 +577,29 @@ jobs:
         # from here on.
         run: node scripts/ci/record-built-images.mjs
 
+      - name: Assert the migration image is the one this run built
+        # Before `up`, and this is the whole point. `migrate` is a one-shot that
+        # `server` and `app` both wait on, so it runs *inside* the boot: by the
+        # time `assert-image-identity` inspects anything, a wrong migration image
+        # has already altered a persistent volume. Round 2's gauntlet named the
+        # ordering; this is the last moment the answer can still be no.
+        run: node scripts/ci/assert-migration-image.mjs
+
       - name: Bring the stack up
         # `--wait` blocks until every service is settled, and fails if one never
         # becomes healthy. It is a wait, not an assertion — see
         # scripts/ci/assert-stack-health.mjs for the three things it does not
-        # prove and this job therefore checks separately.
-        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml up -d --wait --wait-timeout 300
+        # prove and this job therefore checks separately. The flag lives in
+        # compose-stack.mjs with the file list; gate-selftest.mjs asserts it.
+        run: node scripts/ci/compose-stack.mjs up
 
       - name: Trust the deployment's certificate authority
         # Caddy's internal root, copied out of the running proxy. Every
         # assertion below verifies the certificate chain against it, so a stack
         # whose TLS was broken fails rather than being waved through — which is
         # what `rejectUnauthorized: false` would have done, and it appears
-        # nowhere in this repository.
-        run: |
-          set -euo pipefail
-          docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml cp proxy:/data/caddy/pki/authorities/local/root.crt "$ATRIUM_STACK_CA"
-          test -s "$ATRIUM_STACK_CA"
+        # nowhere in this repository. compose-stack.mjs refuses an empty copy.
+        run: node scripts/ci/compose-stack.mjs trust-ca
 
       - name: Assert every container is healthy
         run: node scripts/ci/assert-stack-health.mjs
@@ -572,11 +613,22 @@ jobs:
       - name: Assert no realtime origin is compiled into the web image
         run: node scripts/ci/assert-image-origins.mjs
 
-      - name: Assert the app serves a real page
-        run: node scripts/ci/assert-page-serves.mjs
+      - name: Assert the deployed database matches the migrations
+        # `migrate` exiting 0 is not the same claim as the schema being there.
+        run: node scripts/ci/assert-stack-schema.mjs
 
       - name: Assert signup sends a verification mail that verifies
+        # Before the page assertion, because the page assertion drives the same
+        # flow to get a session: keeping the mail path's failures in one step
+        # means the ledger credits the check that is actually about mail.
         run: node scripts/ci/assert-signup-verifies.mjs
+
+      - name: Assert the app serves a real page
+        # Authenticated and per-run: `/` is fetched as an account this run
+        # created, and the name it renders is compared against the one Postgres
+        # holds. A `handle /` in the Caddyfile answering with a copy of the page
+        # passes every structural check and fails there.
+        run: node scripts/ci/assert-page-serves.mjs
 
       - name: Assert an authenticated websocket upgrade completes
         run: node scripts/ci/assert-ws-upgrade.mjs
@@ -585,7 +637,7 @@ jobs:
         run: node scripts/ci/assert-rate-limit.mjs
 
       - name: Tear down the stack
-        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml -f docker-compose.mailpit.yml down -v --remove-orphans
+        run: node scripts/ci/compose-stack.mjs down
 
       - name: Assert the teardown left nothing behind
         run: node scripts/ci/assert-stack-teardown.mjs
