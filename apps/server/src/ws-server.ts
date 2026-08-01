@@ -168,6 +168,17 @@ interface Connection {
    * derive a different answer.
    */
   revoked: boolean;
+  /**
+   * The session lookup currently in flight for this connection, if any.
+   *
+   * Frames are handled concurrently — `handleFrame` is fired and not awaited —
+   * so ten frames arriving in one burst all reach the cache check before the
+   * first answer comes back, and a cache that only remembers *settled* verdicts
+   * remembers nothing about any of them. They share this promise instead: one
+   * read for the burst, whatever its size, which is what makes "a revoked
+   * socket costs one session read" true rather than aspirational.
+   */
+  pending: Promise<AtriumSession | null> | null;
 }
 
 export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
@@ -292,6 +303,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       validUntil: Date.now() + revalidateTtlMs,
       retryAfter: 0,
       revoked: false,
+      pending: null,
     };
     connections.set(socket, connection);
     logger.info('ws connected', {
@@ -531,7 +543,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
 
     let session: AtriumSession | null;
     try {
-      session = await revalidateSession(connection.headers);
+      session = await revalidateOnce(connection, revalidateSession);
     } catch (error) {
       // Failing to *learn* whether the session is still good is not a reason to
       // hang up on somebody mid-sentence; it is a reason to refuse this command
@@ -545,6 +557,10 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       return false;
     }
 
+    // Another frame from the same burst may have revoked it while this one was
+    // waiting. The verdict is one per connection, not one per frame.
+    if (connection.revoked) return false;
+
     if (!session || session.sessionId !== connection.session.sessionId) {
       revoke(socket, connection, 'session ended', 'session no longer valid');
       return false;
@@ -554,6 +570,30 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     connection.validUntil = Date.now() + revalidateTtlMs;
     connection.retryAfter = 0;
     return true;
+  }
+
+  /**
+   * One session lookup per connection at a time, shared by everything waiting.
+   *
+   * Without this, "negative verdicts are cached" holds only between frames that
+   * are far enough apart to have settled — and a client chooses how far apart
+   * its frames are. Ten in one burst meant ten reads, all of them producing the
+   * same refusal. Now the second through tenth await the first.
+   */
+  function revalidateOnce(
+    connection: Connection,
+    resolve: RevalidateSession,
+  ): Promise<AtriumSession | null> {
+    if (connection.pending) return connection.pending;
+
+    const pending = resolve(connection.headers);
+    connection.pending = pending;
+    const clear = () => {
+      if (connection.pending === pending) connection.pending = null;
+    };
+    // Both arms, and never a new rejection: each awaiter has its own catch.
+    pending.then(clear, clear);
+    return pending;
   }
 
   /**
@@ -624,7 +664,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       if (revalidateSession && Date.now() >= connection.validUntil) {
         let session: AtriumSession | null;
         try {
-          session = await revalidateSession(connection.headers);
+          session = await revalidateOnce(connection, revalidateSession);
         } catch (error) {
           logger.error('session revalidation failed during sweep', {
             connectionId: connection.id,

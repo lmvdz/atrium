@@ -464,15 +464,20 @@ describe('negative verdicts are cached too', () => {
 
     const socket = await connect('ada');
     const closed = new Promise<number>((resolve) => socket.once('close', resolve));
-    send(socket, { type: 'command', command: 'room.join', roomId });
-    expect(await closed).toBe(1008);
 
-    const asked = revalidateSession.mock.calls.length;
-    // Frames can still arrive during the closing handshake; none of them may
-    // cost another lookup.
-    for (let i = 0; i < 5; i += 1) send(socket, { type: 'command', command: 'room.join', roomId });
+    /**
+     * Ten frames in one burst, before the server has answered any of them.
+     * They all arrive; the first revokes the socket and the other nine are
+     * already in the server's buffer when it does, so they are still handled.
+     * The verdict is sticky, so they cost one session read between them —
+     * without that, a client that can send is a client that can make the
+     * session store do work per frame, on the path that is already failing.
+     */
+    for (let i = 0; i < 10; i += 1) send(socket, { type: 'command', command: 'room.join', roomId });
+
+    expect(await closed).toBe(1008);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(revalidateSession.mock.calls.length).toBe(asked);
+    expect(revalidateSession).toHaveBeenCalledTimes(1);
   });
 
   it('backs off instead of reading the session store once per refused frame', async () => {
