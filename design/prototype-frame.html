@@ -394,17 +394,38 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .btn.ghost:hover { background: var(--bg7); color: var(--tx0); }
 .btn.sm { font-size: 11px; padding: 2px 7px 3px; }
 
+/* the trailer WRAPS rather than clipping. Below 1340 the nowrap version ate the
+   checkable half of the sentence — the objective, commitment and failure counts
+   — and left only the lead clause, which is the one part that is a summary
+   rather than a fact. A fact you cannot read is not on the page. */
 .pin-trailer {
   margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--line);
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: baseline; gap: 8px;
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
-  white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.5; min-width: 0;
 }
-.pin-trailer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pin-trailer .g { flex: none; }
 .pin-trailer .g { color: var(--grn2); }
 .pin-trailer .g.warn { color: var(--amb2); }
 .pin-trailer .g.bad { color: var(--red2); }
+.pin-trailer .g.claim { color: var(--tx2); }
 .pin-trailer b { color: var(--tx1); font-weight: 500; }
+
+/* --- cross-room jump trace ----------------------------------------------- */
+/* a highlight fades in two seconds; the reason you are in this room should not */
+.trace {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 16px 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--replybg);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--blu2);
+}
+.trace .g { flex: none; }
+.trace .tx { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace b { font-weight: 600; }
+.trace .back { margin-left: auto; flex: none; color: var(--blu2); border-bottom: 1px solid var(--filebd); }
+.trace .back:hover { color: var(--tx0); border-bottom-color: var(--line3); }
+.trace .x { flex: none; color: inherit; padding: 0 2px; }
 
 /* --- feed ---------------------------------------------------------------- */
 .feed { position: relative; overflow-y: auto; padding: 8px 0 14px; min-height: 0; }
@@ -525,6 +546,14 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .cnt[disabled] { cursor: default; border-style: dashed; border-color: var(--line); background: transparent; }
 .cnt[disabled]:hover { border-color: var(--line); color: var(--tx2); }
 .syl .own { color: var(--blu2); }
+/* BRIEF concept 1: marking a group seen FADES IT TO MUTED. It does not vanish,
+   it keeps its window and its counts, and the unmark link sits on the same line
+   that reports the mark. */
+.syl.muted .lbl { color: var(--tx2); }
+.syl.muted .rule { background: var(--line); }
+.syl.muted .marked { color: var(--tx2); }
+.syl.muted .cnt:not([aria-pressed="true"]):not([disabled]) { background: transparent; color: var(--tx2); }
+.syl.muted .cnt.need:not([aria-pressed="true"]) { border-color: var(--line2); background: transparent; color: var(--tx2); }
 .syl .when {
   margin-top: 5px; padding-left: 2px;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -606,7 +635,16 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }
 .lens-head .sub .live { width: 5px; height: 5px; border-radius: 50%; background: var(--grn2); animation: gl-pulse 1.6s infinite; }
+/* sub-counts that do not sum, reconciled in prose right under the counts */
+.lens-head .sums {
+  margin-top: 3px; padding-left: 11px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); line-height: 1.4;
+}
 .lens-body { overflow-y: auto; overflow-x: hidden; min-height: 0; padding-bottom: 24px; }
+.lensnote {
+  padding: 7px 14px 8px; border-bottom: 1px solid var(--line);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); line-height: 1.45;
+}
 
 .obj { border-bottom: 1px solid var(--line); }
 .obj-head {
@@ -712,7 +750,23 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .corr { border-left: 2px solid var(--line2); padding: 2px 0 2px 9px; margin-bottom: 7px; }
 .corr .hd { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 .corr .bd { font-size: 11px; color: var(--tx1); margin-top: 2px; }
-.corr .bd q { font-style: italic; }
+/* the two voices of a correction, kept visibly apart.
+   SYSTEM: mono, muted, no quotation marks — `.was` and `.fact`.
+   HUMAN:  serif-italic inside <q>, attributed, and only ever real words. */
+.corr .was { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
+.corr .fact {
+  margin-top: 3px; font-family: "IBM Plex Mono", monospace; font-size: 10px;
+  color: var(--tx2); line-height: 1.4;
+}
+.corr .reason {
+  margin-top: 4px; padding: 4px 8px 5px; border-left: 2px solid var(--filebd);
+  background: var(--bg1); border-radius: 0 3px 3px 0;
+}
+.corr .reason q { font-style: italic; font-size: 11px; color: var(--tx0); }
+.corr .reason .src {
+  display: block; margin-top: 2px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
+}
 .corr .lnk { color: var(--blu2); border-bottom: 1px solid var(--filebd); font-family: "IBM Plex Mono", monospace; font-size: 10px; }
 .corr .lnk:hover { color: var(--tx0); border-bottom-color: var(--line3); }
 
@@ -841,11 +895,20 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
       <div class="pin-trailer" id="pinTrailer"></div>
     </section>
 
+    <!-- ---------- cross-room jump trace ---------- -->
+    <!-- why you are standing in this room, and the way back. Rendered only after
+         a jump that changed rooms; a highlight that fades in two seconds is not
+         a record of how you got here. -->
+    <div class="trace" id="trace" hidden></div>
+
     <!-- ---------- feed ---------- -->
-    <!-- not role="log": the feed re-renders wholesale from state, so an implicit
-         live region would re-announce the room on every action. The toast at the
-         bottom of the document is the aria-live channel for state changes. -->
-    <div class="feed scroll" id="feed" aria-label="Conversation"></div>
+    <!-- a <section> with an accessible name, not a div with a dangling
+         aria-label: an aria-label on a roleless generic is ignored, so round 3's
+         name never reached the accessibility tree. It is a region landmark now.
+         Still not role="log": the feed re-renders wholesale from state, so an
+         implicit live region would re-announce the room on every action. The
+         toast at the bottom of the document is the aria-live channel. -->
+    <section class="feed scroll" id="feed" aria-label="Conversation"></section>
 
     <!-- ---------- composer ---------- -->
     <div class="composer" id="composer">
@@ -880,6 +943,8 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
         <span class="live" aria-hidden="true"></span>
         <span id="lensSummary"></span>
       </div>
+      <!-- the sub-counts reconciled in prose, where they are shown -->
+      <div class="sums" id="lensSums"></div>
     </div>
     <div class="lens-body scroll" id="lensBody"></div>
   </aside>
@@ -911,6 +976,22 @@ const S = {
   now: "09:12",
   roomId: "users-migration",
   seq: 9200,
+  /* ---------------------------------------------------------------------
+   * THE HUMAN-SPEECH REGISTER.
+   *
+   * Round 3's cardinal defect: reopen() invented a first-person sentence and
+   * the receipt rendered it inside <q> under a real person's name. Words the
+   * human never said, in the artifact whose entire job is being the record.
+   *
+   * The standing invariant now: nothing on this page is rendered as a person's
+   * words unless it is (a) text a human actually typed into this page, or (b)
+   * text of a seeded message that is in the loaded record. Everything else —
+   * every transition, every reopen, every state change — is stated as a system
+   * fact, in system voice, in a visually distinct treatment that is not
+   * quotation. `S.typed` is the register for (a); `msg:<id>` provenance covers
+   * (b); and checkQuotationInvariant() proves it on every single render.
+   * ------------------------------------------------------------------- */
+  typed: [],
   people: [
     { id: "lars",   presence: "here", note: "you" },
     { id: "priya",  presence: "here", note: "now" },
@@ -936,6 +1017,8 @@ const S = {
     bound: null,           // object id the composer is answer-bound to
     replyTo: null,         // message id being replied to
     verifying: null,       // object id whose evidence prompt is open
+    reopening: null,       // object id whose (optional) reopen-reason prompt is open
+    trace: null,           // why you are in this room: { from, to, objectId, msgId, label }
     jumpTo: null
   },
   rooms: {}
@@ -1056,13 +1139,25 @@ S.rooms["users-migration"] = {
         { k: "claim",    who: "mateo",  tm: "29 Jul 10:55", text: "estimated the extra write cost at ~$900/mo — never checked against a bill" },
         { k: "accepted", who: "lars",   tm: "29 Jul 11:20", text: "accepted by answer-binding — nothing about this line was inferred" }
       ],
+      /* every excerpt below is a substring of a message that is actually in this
+         room's loaded window, and checkQuotationInvariant() proves it on every
+         render. Round 3 had two entries here that were not: a parity line that
+         cited a message carrying different numbers, and a sentence attributed to
+         lars that no message contained — invented speech, the same defect class
+         as the reopen quote. Both now point at the messages they came from. */
       provenance: [
-        { who: "priya",  tm: "29 Jul 09:41", msg: "m0", ex: "Honestly I'd keep dual-write until we've had a full clean week of parity — one green run isn't a signal.", note: "message · seq 8812 · the proposal" },
-        { who: "checks", tm: "29 Jul 10:02", msg: "m3", ex: "parity #391 passed — 4,201,776 / 4,201,776 rows, 0 checksum diffs", note: "verified event · run #391 · no human in the loop" },
-        { who: "lars",   tm: "29 Jul 11:20", msg: "m0", ex: "Yes — keep it until we have a clean week. Don't drop anything before that.", note: "answer-bound reply · proposal pr_4419 · deterministic, not interpreted" }
+        { who: "priya",  tm: "29 Jul 09:41", msg: "m0",  ex: "Honestly I'd keep dual-write until we've had a full clean week of parity — one green run isn't a signal.", note: "message · seq 8812 · the proposal" },
+        { who: "checks", tm: "29 Jul 10:02", msg: "m0p", ex: "parity #391 passed — 4,201,776 / 4,201,776 rows, 0 checksum diffs", note: "verified event · run #391 · no human in the loop" },
+        { who: "lars",   tm: "29 Jul 11:20", msg: "m0c", ex: "Yes — keep it until we have a clean week. Don't drop anything before that.", note: "answer-bound reply · proposal pr_4419 · deterministic, not interpreted" }
       ],
+      /* a correction carries a system fact in system voice (`was` → `after`) and,
+         optionally, the reason a human actually typed. This one is seeded typed
+         input: it is registered in S.typed at boot, so the quotation invariant
+         can prove it the same way it proves a reason typed live. */
       corrections: [
-        { hd: "RETYPED · CLAIM → DECISION", who: "lars", tm: "29 Jul 11:22", text: "This was an actual call, not priya thinking out loud.", after: "Decision (was: Claim by priya)" }
+        { hd: "RETYPED · CLAIM → DECISION", who: "lars", tm: "29 Jul 11:22",
+          was: "Claim (priya's line, read as thinking out loud)", after: "Decision",
+          quote: { text: "This was an actual call, not priya thinking out loud.", by: "lars", src: "typed", seeded: true } }
       ],
       note: "Correction chain is append-only. The original interpretation is retained; nothing here was erased."
     },
@@ -1128,7 +1223,7 @@ S.rooms["users-migration"] = {
       claimant: "priya", verification: "open", askedBy: "priya", askedAt: "09:11", openFor: "3h", assignee: null,
       owedTo: "lars", priority: 10, sourceMsg: "m11",
       answerHint: "retention is 90 days", reassignTo: "justin",
-      why: "blocking — the retention answer gates “Retire the legacy identity path,” the objective you own.",
+      why: "blocking — the retention answer gates the objective you own, Retire the legacy identity path.",
       facts: ["open 3h", "asked by priya", "blocks retiring the legacy path"],
       history: [{ k: "question", who: "priya", tm: "09:11", text: "raised it as the one thing gating the drop — nobody has been assigned" }],
       provenance: [{ who: "priya", tm: "09:11", msg: "m11", ex: "Nobody has confirmed whether legal is fine keeping users_legacy around for 90 days. That gates the drop.", note: "message · seq 9111 · open question, no assignee" }],
@@ -1145,7 +1240,7 @@ S.rooms["users-migration"] = {
       ],
       provenance: [{ who: "mateo", tm: "08:41", msg: "m7", ex: "Dual-write is running about $900/mo in extra write throughput. Eyeballed off last week's bill — that's not a forecast.", note: "message · seq 9106 · auto-accepted as a Claim (θ .63)" }],
       corrections: [],
-      note: "A claim is “X said Y”, kept separately from whether Y is true. Verify it from the row in the feed and it becomes ✓ — with your name and your evidence on it."
+      note: "A claim records that someone said a thing, kept separately from whether the thing is true. Verify it from the row in the feed and it becomes ✓ — with your name and your evidence on it."
     },
     {
       id: "C2", kind: "claim", objectives: ["o1", "o3"], text: "4.7% of sessions still present legacy opaque tokens",
@@ -1199,7 +1294,10 @@ S.rooms["users-migration"] = {
       claimant: "priya", verification: "self_reported", owner: "priya", due: "blocked on Q1",
       facts: ["priya", "blocked on the legal question"],
       history: [{ k: "claim", who: "priya", tm: "23 Jul", text: "took the drop — cannot start until the retention question is answered" }],
-      provenance: [{ who: "priya", tm: "23 Jul", msg: null, ex: "I'll do the drop the day retention clears.", note: "message · #identity-service · seq 7802" }],
+      /* round 3 quoted this sentence with `msg: null` — a person's words with
+         nothing behind them. The message is seeded in #identity-service now, so
+         the quote is a quote and the jump lands. */
+      provenance: [{ who: "priya", tm: "23 Jul", msg: "n0b", room: "identity-service", ex: "I'll do the drop the day retention clears.", note: "message · #identity-service · seq 7802 · self-stated commitment" }],
       corrections: [],
       note: "Blocked, not forgotten. It sits at ~ because it is priya's own word."
     }
@@ -1207,6 +1305,12 @@ S.rooms["users-migration"] = {
   messages: [
     { id: "m0",  t: "29 Jul", actor: "priya",  body: ["Honestly I'd keep dual-write until we've had a full clean week of parity — one green run isn't a signal."], objectId: "D1" },
     { id: "m0b", t: "29 Jul", actor: "lars",   body: ["I'll sign off the rollback runbook before we cut over — give me the final version Monday."], objectId: "K2" },
+    /* D1's other two sources. Round 3 cited a parity run that no message carried
+       and an acceptance sentence that existed nowhere — the receipt quoted both.
+       Nothing on this page may quote a line that is not in the record, so the
+       lines are in the record. */
+    { id: "m0p", t: "29 Jul", actor: "checks", system: true, body: ["parity #391 passed — 4,201,776 / 4,201,776 rows, 0 checksum diffs"] },
+    { id: "m0c", t: "29 Jul", actor: "lars",   body: ["Yes — keep it until we have a clean week. Don't drop anything before that."], objectId: "D1" },
     { id: "m1",  t: "16:02",  actor: "justin", body: ["Shadow-write path is in behind ", { code: "users.dualwrite" }, " — off everywhere except staging."], objectId: "K0" },
     { id: "m2",  t: "16:31",  actor: "priya",  body: ["Staging backfill ran clean — 4.2M rows in 38 minutes."], objectId: "C3" },
     { id: "m3",  t: "16:44",  actor: "checks", system: true, body: ["parity #402 passed — 4,218,904 / 4,218,904 rows, 0 checksum diffs"], objectId: "V1" },
@@ -1329,6 +1433,10 @@ S.rooms["identity-service"] = {
        and the pin over there jumps here. */
     { id: "n0", t: "22 Jul", actor: "lars", body: ["Once retention is up, the gateway refuses opaque tokens outright. No grace period."],
       objectId: "D2", objectRoom: "users-migration" },
+    /* K4 lives in #users-migration; the sentence that created it was said here.
+       Same pattern as n0, and it is what lets K4's receipt quote a real line. */
+    { id: "n0b", t: "23 Jul", actor: "priya", body: ["I'll do the drop the day retention clears."],
+      objectId: "K4", objectRoom: "users-migration" },
     { id: "n1", t: "17:55", actor: "priya",  body: ["Rotation branch is up for review."] },
     { id: "n2", t: "18:20", actor: "justin", body: ["Looking at it in the morning."] },
     /* --- seen cursor sits here (room.seenAfter = "n2") --- */
@@ -1349,6 +1457,18 @@ S.rooms["identity-service"] = {
    moves it again — so no message written after you got back can ever be counted
    as something that happened while you were gone. */
 Object.values(S.rooms).forEach(r => { r.absenceEnd = r.messages[r.messages.length - 1].id; });
+
+/* The absence window's ORIGIN is pinned here too. The seen cursor moves; this
+   does not. It is what lets "mark this group seen" mute the divider instead of
+   destroying it — the group keeps its boundaries, its counts and its chips
+   after the cursor has passed it, and can be un-marked. */
+Object.values(S.rooms).forEach(r => { r.absenceFrom = r.seenAfter; r.markedAt = null; });
+
+/* Seeded human input joins the human-speech register, so a quotation seeded in
+   the corpus is proved exactly the way a quotation typed live is proved. There
+   is no third path into a <q> on this page. */
+Object.values(S.rooms).forEach(r => r.objects.forEach(o =>
+  (o.corrections || []).forEach(c => { if (c.quote && c.quote.src === "typed") S.typed.push(c.quote.text); })));
 
 /* ===========================================================================
  * DERIVED SELECTORS — every count on this page comes through one of these.
@@ -1385,7 +1505,18 @@ function linkedObject(r, m) {
   const home = m.objectRoom ? S.rooms[m.objectRoom] : r;
   return home ? obj(home, id) : null;
 }
-function isAttentionRow(r, m) { const o = linkedObject(r, m); return !!o && needsYou(o); }
+/* ROOM SCOPE. `attention(r)` is per-room, so the linkage test must be too:
+   a row is an attention row when the object it carries is in THIS room's
+   attention collection — not merely when it is owed to you somewhere. Round 3
+   tested `needsYou(linkedObject(...))` globally, so a message carrying another
+   room's owed object (n0 carries #users-migration's D2) highlighted here and
+   was counted in this room's chips, against items this room does not have. In
+   the receipt's own repro the two numbers happened to reconcile, which is what
+   kept it invisible. */
+function isAttentionRow(r, m) {
+  const o = linkedObject(r, m);
+  return !!o && r.objects.indexOf(o) >= 0 && needsYou(o);
+}
 
 /* rows in THIS room linked to an object in the attention collection */
 function attentionRows(r) { return r.messages.filter(m => isAttentionRow(r, m)); }
@@ -1424,7 +1555,10 @@ function msgIsClaim(r, m) {
 function msgClass(r, m) {
   if (m.routine) return "routine";
   const o = linkedObject(r, m);
-  if (o) return needsYou(o) ? "need" : "change";
+  /* NEED means "linked to something in THIS room's attention collection" — the
+     same predicate the highlight uses, so the chip and the pin can never
+     disagree about which room's items they are talking about. */
+  if (o) return isAttentionRow(r, m) ? "need" : "change";
   if (m.system) return "change";          // a recorded transition IS a change
   return "discussion";
 }
@@ -1442,15 +1576,23 @@ function msgClass(r, m) {
  * ------------------------------------------------------------------------ */
 function isMine(m) { return m.actor === S.me || m.byMe === true; }
 
+/* A GROUP'S BOUNDARIES DO NOT MOVE WHEN YOU READ IT.
+ *
+ * Round 3 derived the absence group from the seen cursor, so one unconfirmed
+ * click on "mark this group seen" deleted the whole digest — the window, the
+ * counts, the four filters, all of it, with no way back. BRIEF concept 1 says
+ * the divider FADES TO MUTED; Slack keeps its New line until you leave the
+ * channel. So the absence group is anchored to `absenceFrom` … `absenceEnd`,
+ * both pinned at boot, and marking it seen moves the cursor and nothing else:
+ * the divider stays, muted, still counting, still filterable, still reversible.
+ */
 function groupStart(r, scope) {
-  const cur = idx(r, r.seenAfter), abs = idx(r, r.absenceEnd);
-  if (scope === "absence") return cur + 1;
-  if (scope === "return")  return Math.max(cur, abs) + 1;
+  if (scope === "absence") return idx(r, r.absenceFrom) + 1;
+  if (scope === "return")  return idx(r, r.absenceEnd) + 1;
   return 0;                                  // room
 }
 function groupEnd(r, scope) {
-  const abs = idx(r, r.absenceEnd);
-  if (scope === "absence") return abs;
+  if (scope === "absence") return idx(r, r.absenceEnd);
   return r.messages.length - 1;              // return | room
 }
 function groupMessages(r, scope) {
@@ -1465,7 +1607,14 @@ function ownInGroup(r, scope) {
   if (b < a) return 0;
   return r.messages.slice(a, b + 1).filter(isMine).length;
 }
-function hasAbsenceGroup(r) { return idx(r, r.seenAfter) < idx(r, r.absenceEnd); }
+function hasAbsenceGroup(r) { return idx(r, r.absenceFrom) < idx(r, r.absenceEnd); }
+/* read, not gone: a group whose last row is behind the cursor is muted, not
+   deleted — and it can be un-marked from the line that says so. */
+function groupRead(r, scope) {
+  const b = groupEnd(r, scope);
+  return b >= groupStart(r, scope) && idx(r, r.seenAfter) >= b;
+}
+function absenceRead(r) { return groupRead(r, "absence"); }
 function counts(r, scope) {
   const c = { need: 0, change: 0, discussion: 0, routine: 0 };
   groupMessages(r, scope).forEach(m => { c[msgClass(r, m)]++; });
@@ -1497,12 +1646,33 @@ function clearSummary(r) {
   const commitments = r.objects.filter(o => o.kind === "commitment" && !needsYou(o));
   const overdue = commitments.filter(o => o.overdue).length;
   const failures = r.objects.filter(o => o.verification === "failed").length;
-  const lead = failures ? `${failures} failure${failures === 1 ? "" : "s"} outside your list`
-             : overdue ? `nothing has failed, ${overdue} thing${overdue === 1 ? " is" : "s are"} late`
-             : "everything else is green";
-  const glyph = failures ? "✗" : overdue ? "◆" : "✓";
+
+  /* THE LEAD CONSULTS VERIFICATION, NOT JUST FAILURE AND LATENESS.
+     Round 3 derived the glyph but still said "everything else is green" over
+     eight objects nothing had checked — in the same sentence as "0/2 objectives
+     clear of you". Green means checked by something other than the claimant, so
+     the lead may only say it when that is true of everything outside the pin.
+     When it is not, the lead says what is: how much is unverified, how much is
+     owed, and what is actually settled. */
+  const rest = r.objects.filter(o => !owed.includes(o.id));
+  const unverified = rest.filter(isClaim).length;
+  const openQs = rest.filter(o => o.verification === "open").length;
+  const green = rest.filter(o => o.verification === "verified" || o.verification === "accepted").length;
+
+  /* the lead stays short because the counts it would repeat are already in the
+     clauses beside it — which is also what keeps the whole trailer on one line
+     at 1340 and readable, not clipped, at 1124. */
+  let lead, glyph;
+  if (failures)        { glyph = "✗"; lead = `${failures} failure${failures === 1 ? "" : "s"} outside your list`; }
+  else if (overdue)    { glyph = "◆"; lead = `${overdue} thing${overdue === 1 ? " is" : "s are"} late, none failed`; }
+  else if (unverified) { glyph = "~"; lead = `${unverified} of ${rest.length} still unverified`; }
+  else if (openQs)     { glyph = "?"; lead = `${openQs} question${openQs === 1 ? "" : "s"} still open`; }
+  else if (owed.length){ glyph = "◆"; lead = `the list above is all of it`; }
+  else                 { glyph = "✓"; lead = "everything else is verified"; }
+
   return { objectivesOnTrack, objectivesTotal: r.objectives.length, lead, glyph,
-           commitments: commitments.length, overdue, failures, lastVerified: r.lastVerified };
+           commitments: commitments.length, overdue, failures, unverified, green,
+           lastVerified: r.lastVerified };
 }
 
 /* --- THE ATTENTION INVARIANT --------------------------------------------
@@ -1519,6 +1689,77 @@ function checkAttentionInvariant(r) {
     if (!r.messages.some(m => linkedObject(r, m) === o) && !sourceRoomOf(o))
       console.error("[atrium invariant] owed item is unreachable — no row in this room and no cross-room source declared:", o.id, o);
   });
+}
+
+/* --- THE ROW-SCOPE INVARIANT ---------------------------------------------
+ * Highlighted rows ⊆ rows linked to THIS room's attention items. Checked
+ * against the rendered DOM, not against the function that drew it, so a future
+ * change that re-globalises the linkage is caught by the thing on screen.
+ * ---------------------------------------------------------------------- */
+function checkRowScopeInvariant(r) {
+  if (!DEV) return;
+  const owned = attention(r);
+  document.querySelectorAll('#feed .mrow[data-cls="need"], #feed .mrow.hit').forEach(el => {
+    const m = msg(r, el.dataset.msg);
+    if (!m) return;
+    const o = linkedObject(r, m);
+    if (el.dataset.cls === "need" && owned.indexOf(o) < 0)
+      console.error("[atrium invariant] row classed NEED is not linked to this room's attention collection:", el.dataset.msg, o && o.id);
+    if (el.classList.contains("hit") && S.ui.feedFilter && S.ui.feedFilter.k === "need" && owned.indexOf(o) < 0)
+      console.error("[atrium invariant] highlighted row is outside this room's attention collection:", el.dataset.msg, o && o.id);
+  });
+  /* and the other direction: the count and the highlight must be the same
+     predicate, so the two numbers can differ only in cardinality, never in set */
+  const rows = attentionRows(r);
+  if (rows.some(m => attention(r).indexOf(linkedObject(r, m)) < 0))
+    console.error("[atrium invariant] attentionRows() returned a row outside attention()");
+}
+
+/* --- THE QUOTATION INVARIANT ---------------------------------------------
+ * Round 3's cardinal defect, encoded so it cannot come back: anything rendered
+ * as a person's words must prove where the words came from.
+ *
+ *   1. Every element in a quotation context (<q>, .ex, .quoted) carries
+ *      data-quoted, and it resolves — either "msg:<id>[@room]", in which case
+ *      the rendered text must actually appear in that message, or "typed", in
+ *      which case the text must be in the human-speech register (S.typed).
+ *   2. No quotation marks are rendered anywhere else. A quote outside a
+ *      quotation context is a quote nothing is checking.
+ * ---------------------------------------------------------------------- */
+const QUOTED_SEL = "q, .ex, .quoted";
+function checkQuotationInvariant() {
+  if (!DEV) return;
+  document.querySelectorAll(QUOTED_SEL).forEach(el => {
+    const ref = el.getAttribute("data-quoted");
+    const text = el.textContent.replace(/[“”"]/g, "").replace(/…$/, "").trim();
+    if (!ref) return console.error("[atrium invariant] quoted text with no provenance — nothing proves anyone said this:", text, el);
+    if (ref === "typed") {
+      if (!S.typed.some(s => s.indexOf(text) === 0 || s === text))
+        console.error("[atrium invariant] quoted as typed by a human, but no human typed it:", text, el);
+      return;
+    }
+    const [id, roomId] = ref.replace(/^msg:/, "").split("@");
+    const home = roomId ? S.rooms[roomId] : room();
+    const m = home && msg(home, id);
+    if (!m) return console.error("[atrium invariant] quotation cites a message that does not exist:", ref, el);
+    if (plain(m.body).indexOf(text) < 0)
+      console.error("[atrium invariant] quoted text is not in the message it cites — this is invented speech:", ref, text, el);
+  });
+
+  /* no stray quotation marks: every “ ” on screen must sit inside a checked
+     quotation context. This is what makes rule 1 exhaustive rather than a
+     convention someone can forget to follow. */
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      if (!/[“”]/.test(n.nodeValue)) return NodeFilter.FILTER_REJECT;
+      const p = n.parentElement;
+      if (!p || p.closest("script, style, template")) return NodeFilter.FILTER_REJECT;
+      return p.closest(QUOTED_SEL) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  let n;
+  while ((n = walker.nextNode()))
+    console.error("[atrium invariant] quotation marks outside a checked quotation context:", n.nodeValue.trim(), n.parentElement);
 }
 
 /* WHY YOU is never empty. When the seed carries a rationale, that is the
@@ -1539,7 +1780,7 @@ function whyOf(r, o) {
   if (prior) bits.push(`the prior call was ${prior.who}'s at ${prior.tm}, still on the record below`);
   else {
     const titles = o.objectives.map(id => (r.objectives.find(ob => ob.id === id) || {}).title).filter(Boolean);
-    if (titles.length) bits.push(`it sits under “${titles[0]}”`);
+    if (titles.length) bits.push(`it sits under the objective ${titles[0]}`);
   }
   return bits.join(" · ") + ".";
 }
@@ -1679,17 +1920,21 @@ function renderPin() {
 
   const c = clearSummary(r);
   trailer.innerHTML =
-    `<span class="g ${c.failures ? "bad" : c.overdue ? "warn" : ""}" aria-hidden="true">${c.glyph}</span>` +
+    `<span class="g ${TRAILER_GLYPH_CLASS[c.glyph] || ""}" aria-hidden="true">${c.glyph}</span>` +
     `<span>${esc(c.lead)} — <b>${c.objectivesOnTrack}/${c.objectivesTotal} objectives</b> clear of you · ` +
     `<b>${c.commitments} commitment${c.commitments === 1 ? "" : "s"}</b>, ${c.overdue} overdue · ` +
     `<b>${c.failures} failure${c.failures === 1 ? "" : "s"}</b> · last check ${esc(c.lastVerified)}</span>`;
 }
 
+/* the trailer's glyph is the lead's glyph — the tone follows the sentence */
+const TRAILER_GLYPH_CLASS = { "✗": "bad", "◆": "warn", "?": "warn", "~": "claim", "✓": "" };
+
 /* an owed item whose source message is not in this room says where it is and
    goes there. Round 2 counted it and highlighted nothing. */
 function sourceChip(r, o, compact) {
   const xr = sourceRoomOf(o);
-  if (xr) return `<span aria-hidden="true">·</span><button class="xroom" data-jump="${esc(o.sourceMsg || "")}" data-jumproom="${esc(xr)}">source in #${esc(xr)} →</button>`;
+  if (xr) return `<span aria-hidden="true">·</span><button class="xroom" data-jump="${esc(o.sourceMsg || "")}" data-jumproom="${esc(xr)}"` +
+                 ` data-why="the source of ${esc(glyphOf(o))} ${esc(o.id)}, which #${esc(r.name)} owes you">source in #${esc(xr)} →</button>`;
   if (!o.sourceMsg) return "";
   /* the time already appears in the facts beside this, so the link is the link */
   return `<span aria-hidden="true">·</span><button class="lnk" data-jump="${esc(o.sourceMsg)}">${compact ? "source →" : "jump to source →"}</button>`;
@@ -1758,13 +2003,14 @@ function wireActions(el, o) {
   el.querySelectorAll("[data-opt]").forEach(b => b.addEventListener("click", () => {
     const opt = o.options[Number(b.dataset.opt)];
     answerDecision(o.id, opt.statement, opt.synthesized
-      ? "one-click re-affirmation · the statement already on the record, recorded again verbatim · no model in the path"
-      : "one-click answer · reversible gate · the button's statement recorded verbatim · no model in the path");
+      ? "one-click re-affirmation · the statement already on the record, recorded again verbatim · chosen, not typed · no model in the path"
+      : "one-click answer · reversible gate · the button's statement recorded verbatim · chosen, not typed · no model in the path",
+      "option");
   }));
   const bind = el.querySelector("[data-bind]");
   if (bind) bind.addEventListener("click", () => bindComposer(o.id));
   el.querySelectorAll("[data-fx]").forEach(b => b.addEventListener("click", () => applyEffect(o.id, b.dataset.fx)));
-  el.querySelectorAll("[data-jump]").forEach(b => b.addEventListener("click", () => jumpTo(b.dataset.jump, b.dataset.jumproom)));
+  el.querySelectorAll("[data-jump]").forEach(b => b.addEventListener("click", () => jumpTo(b.dataset.jump, b.dataset.jumproom, b.dataset.why)));
 }
 
 /* ===========================================================================
@@ -1785,7 +2031,8 @@ function renderFeed() {
      separately-scoped chips, which is what stops your own post-return typing
      from being reported back to you as something you missed. */
   const cursorI = idx(r, r.seenAfter);
-  const returnI = Math.max(cursorI, idx(r, r.absenceEnd));
+  const absStartI = idx(r, r.absenceFrom);      // pinned: marking seen never moves it
+  const returnI = idx(r, r.absenceEnd);
   const absence = hasAbsenceGroup(r);
   let routineBuffer = [];
 
@@ -1796,7 +2043,7 @@ function renderFeed() {
   };
 
   r.messages.forEach((m, i) => {
-    if (absence && i === cursorI + 1) { flushRoutine(); feed.appendChild(sylDivider(r, "absence")); }
+    if (absence && i === absStartI + 1) { flushRoutine(); feed.appendChild(sylDivider(r, "absence")); }
     if (i === returnI + 1) { flushRoutine(); feed.appendChild(sylDivider(r, "return")); }
     if (m.routine) { routineBuffer.push(m); return; }
     flushRoutine();
@@ -1822,7 +2069,7 @@ function messageRow(r, m) {
   let inner = "";
   if (m.replyTo) {
     const t = msg(r, m.replyTo);
-    if (t) inner += `<span class="mreply">↩ ${esc(t.actor)} ${esc(t.t)} · ${esc(plain(t.body)).slice(0, 60)}</span>`;
+    if (t) inner += `<span class="mreply">↩ ${esc(t.actor)} ${esc(t.t)} · <span class="quoted" data-quoted="msg:${esc(t.id)}">${esc(plain(t.body).slice(0, 60))}</span></span>`;
   }
   /* the dotted treatment is derived from the object's epistemic state, not from
      the glyph — so a proposal that is ALSO a gate renders ◆ and dotted. */
@@ -1869,8 +2116,12 @@ function objectTag(r, m, o) {
     const current = o.answerMsg === m.id;
     if (current && o.verification === "accepted")
       return `<button class="tag green" ${rc}>resolves ◆ · answer-bound · nothing inferred${where}</button>`;
+    /* it was NOT superseded — nothing replaced it. The object it settled was
+       reopened, so this is still the answer of record and the decision is
+       pending again. Round 3 called this "superseded", which is the word for
+       the other case entirely (a later answer), and the two now read apart. */
     if (current)
-      return `<button class="tag amber" ${rc}>answer superseded · reopened ${esc(o.reopenedAt || "")} · kept on the record${where}</button>`;
+      return `<button class="tag amber" ${rc}>answer reopened ${esc(o.reopenedAt || "")} · still the answer on the record · ${esc(o.kind)} pending again${where}</button>`;
     return `<button class="tag amber" ${rc}>superseded answer · replaced ${esc(m.supersededAt || "")} · kept on the record${where}</button>`;
   }
   if (needsYou(o)) return `<button class="tag amber" data-pin="${esc(o.id)}"${home ? ` data-pinroom="${esc(home)}"` : ""}>${g === "?" ? "? open question · needs " + esc(S.me) : "◆ needs " + esc(S.me)}${where}</button>`;
@@ -1904,7 +2155,7 @@ function verifyBox(o) {
   box.innerHTML =
     `<div class="hd"><span class="lbl">VERIFY THIS CLAIM</span></div>
      <div class="row">
-       <input id="vinput" type="text" aria-label="Evidence note" placeholder="what checked it? (e.g. “July AWS bill, write-throughput line: $912”)">
+       <input id="vinput" type="text" aria-label="Evidence note" placeholder="what checked it? e.g. July AWS bill, write-throughput line: $912">
        <button class="btn sm" id="vgo">Attach &amp; verify</button>
        <button class="btn ghost sm" id="vcancel">Cancel</button>
      </div>
@@ -1918,6 +2169,7 @@ function verifyBox(o) {
   return box;
 }
 function focusVerify() { const i = $("vinput"); if (i) i.focus(); }
+function focusReopen() { const i = $("rinput"); if (i) i.focus(); }
 
 /* --- since you left ------------------------------------------------------ */
 
@@ -1928,8 +2180,9 @@ function focusVerify() { const i = $("vinput"); if (i) i.focus(); }
  * messages are about. The when-line says so, and a chip that counts nothing is
  * disabled rather than a clickable no-op. */
 function sylDivider(r, mode) {
+  const read = mode !== "seen" && groupRead(r, mode === "absence" ? "absence" : "return");
   const el = document.createElement("div");
-  el.className = "syl" + (mode === "seen" ? " seen" : mode === "return" ? " ret" : "");
+  el.className = "syl" + (mode === "seen" ? " seen" : mode === "return" ? " ret" : "") + (read ? " muted" : "");
   if (mode === "absence" || (mode === "seen" && !hasAbsenceGroup(r))) el.id = "syl";
 
   if (mode === "seen") {
@@ -1955,15 +2208,27 @@ function sylDivider(r, mode) {
            `${n ? "" : " disabled"} title="${esc(title)}" aria-pressed="${on}">${n} ${FILTER_LABEL[k]}</button>`;
   }).join("");
 
+  /* marking seen mutes this divider; it does not delete it. The window, the
+     count and the four chips stay exactly where they were, and the mark is
+     reversible from the same line that reports it. */
   const when = mode === "absence"
     ? `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages · frozen at return</span>
        <span aria-hidden="true">·</span>
        <span>chips count rows · NEEDS YOU counts the items behind them</span>
-       <span aria-hidden="true">·</span>
-       <button class="mark" id="markSeen">mark this group seen</button>`
-    : `<span>${c.total} unseen since ${esc(cursorPastAbsence ? "you marked this seen" : r.away.to)}</span>` +
+       <span aria-hidden="true">·</span>` +
+      (read
+        ? `<span class="marked">marked seen ${esc(r.markedAt || "")} · the group stays here, muted</span>
+           <span aria-hidden="true">·</span>
+           <button class="mark" id="unmarkSeen">unmark</button>`
+        : `<button class="mark" id="markSeen">mark this group seen</button>`)
+    : `<span>${c.total} ${read ? "message" + (c.total === 1 ? "" : "s") + " here, all read" : "unseen since " + esc(cursorPastAbsence ? "you marked this seen" : r.away.to)}</span>` +
       (own ? `<span aria-hidden="true">·</span><span class="own">${own} row${own === 1 ? " here is yours" : "s here are yours"} — your own activity is never counted back to you as unseen</span>` : "") +
-      (c.total ? `<span aria-hidden="true">·</span><button class="mark" id="markSeen">mark this group seen</button>` : "");
+      (c.total
+        ? read
+          ? `<span aria-hidden="true">·</span><span class="marked">marked seen ${esc(r.markedAt || "")}</span>
+             <span aria-hidden="true">·</span><button class="mark" id="unmarkSeen">unmark</button>`
+          : `<span aria-hidden="true">·</span><button class="mark" id="markSeen">mark this group seen</button>`
+        : "");
 
   el.innerHTML =
     `<div class="bar">
@@ -1975,6 +2240,8 @@ function sylDivider(r, mode) {
   el.querySelectorAll(".cnt").forEach(b => b.addEventListener("click", () => setFilter(b.dataset.filter, b.dataset.scope)));
   const mk = el.querySelector("#markSeen");
   if (mk) mk.addEventListener("click", markSeen);
+  const un = el.querySelector("#unmarkSeen");
+  if (un) un.addEventListener("click", unmarkSeen);
   return el;
 }
 
@@ -2020,6 +2287,28 @@ function routineStrip(r, rows) {
   return wrap;
 }
 
+/* --- cross-room jump trace ----------------------------------------------- */
+function renderTrace() {
+  const el = $("trace");
+  const tr = S.ui.trace;
+  if (!tr) { el.hidden = true; el.innerHTML = ""; return; }
+  const from = S.rooms[tr.from];
+  el.hidden = false;
+  el.innerHTML =
+    `<span class="g" aria-hidden="true">→</span>
+     <span class="tx">you came from <b>#${esc(from ? from.name : tr.from)}</b>${tr.why ? " · following " + esc(tr.why) : ""} · ${esc(tr.at)}</span>
+     <button class="back" id="traceBack">← back to #${esc(from ? from.name : tr.from)}</button>
+     <button class="x mono" id="traceX" aria-label="Dismiss this trace">✕</button>`;
+  $("traceBack").addEventListener("click", () => {
+    const back = tr.from;
+    switchRoom(back, true);          // clears the trace: you are home, not lost
+    render();
+    bootScroll();
+    toast(`back in #${back} — the row you left is where you left it`, "info");
+  });
+  $("traceX").addEventListener("click", () => { S.ui.trace = null; render(); });
+}
+
 /* ===========================================================================
  * LENS + RECEIPT — both are renders of the same objects the pin and the feed
  * read. There is no separate receipt store any more; a receipt IS an object,
@@ -2036,12 +2325,31 @@ function renderLens() {
   const accepted = r.objects.filter(o => o.verification === "accepted" || o.verification === "verified").length;
   const owed = attention(r).length;
   const claims = r.objects.filter(isClaim).length;
+  const open = r.objects.filter(o => o.verification === "open").length;
   $("lensSummary").textContent =
     `${r.objects.length} objects · ${accepted} settled · ${claims} unverified · ${owed} item${owed === 1 ? "" : "s"} awaiting you · updated ${S.now}`;
+  /* SUB-COUNTS THAT DO NOT SUM ARE EXPLAINED WHERE THEY ARE SHOWN. settled +
+     unverified + open partition the objects; "awaiting you" cuts across all
+     three, so it is not a fourth slice of the same pie. Saying so costs one
+     line and removes the only reading in which these numbers look wrong. */
+  $("lensSums").textContent =
+    `${accepted} + ${claims}${open ? " + " + open + " open" : ""} = ${accepted + claims + open} of ${r.objects.length}` +
+    ` · awaiting you overlaps them, it does not add to them`;
 
   if (S.ui.receiptId && obj(r, S.ui.receiptId)) { renderReceipt(obj(r, S.ui.receiptId)); return; }
 
   body.innerHTML = "";
+  /* one object can sit under two objectives, so the per-objective owed counts
+     can sum to more than the pin's item count. Where that is true, the lens
+     says it in prose rather than leaving two numbers to contradict each other. */
+  const perObjectiveOwed = r.objectives.reduce((n, ob) =>
+    n + r.objects.filter(o => o.objectives.includes(ob.id) && needsYou(o)).length, 0);
+  if (perObjectiveOwed !== owed) {
+    const note = document.createElement("div");
+    note.className = "lensnote";
+    note.textContent = `the need-you counts below sum to ${perObjectiveOwed}, not ${owed} — an object under two objectives is counted by both, and is still one item in Needs you`;
+    body.appendChild(note);
+  }
   r.objectives.forEach(ob => {
     const mine = r.objects.filter(o => o.objectives.includes(ob.id));
     const owedHere = mine.filter(needsYou).length;
@@ -2051,6 +2359,9 @@ function renderLens() {
     const head = document.createElement("button");
     head.className = "obj-head";
     head.setAttribute("aria-expanded", String(!!ob.open));
+    head.title = `${mine.length} object${mine.length === 1 ? "" : "s"} sit under this objective` +
+      (owedHere ? `, ${owedHere} of which need you. An object can sit under more than one objective, so these counts overlap the other objectives and the pin.`
+                : ". Nothing here is waiting on you.");
     head.innerHTML =
       `<span class="tw" aria-hidden="true">${ob.open ? "▾" : "▸"}</span>
        <span><span class="ttl">${esc(ob.title)}</span>
@@ -2100,6 +2411,36 @@ function receiptState(o) {
   return ["CLAIM", "unverified", `claimant: ${o.claimant}`];
 }
 
+/* ---------------------------------------------------------------------------
+ * A CORRECTION ENTRY HAS TWO VOICES AND THEY NEVER MIX.
+ *
+ *   system voice — `was → after`, plus an optional `fact` line: what the page
+ *                  knows happened. Mono, muted, no quotation marks, no first
+ *                  person, no "X said". It is visibly not speech.
+ *   human voice  — `quote`, present only when a person actually typed a reason.
+ *                  Rendered in <q>, attributed, and carrying data-quoted so the
+ *                  invariant checker can prove the words are theirs.
+ *
+ * Round 3 had exactly one voice and put a machine-written first-person sentence
+ * in it. `text:` is gone from the shape so that failure cannot be re-typed.
+ * ------------------------------------------------------------------------ */
+function correctionHtml(c) {
+  const link = c.msg
+    ? ` · <button class="lnk" data-jump="${esc(c.msg)}"${c.room ? ` data-jumproom="${esc(c.room)}"` : ""}>${esc(c.link || "the prior answer is still in the room →")}</button>`
+    : "";
+  const quote = c.quote
+    ? `<div class="reason"><q data-quoted="${esc(quoteRef(c.quote))}">${esc(c.quote.text)}</q>
+         <span class="src">— ${esc(c.quote.by)}, typed here${c.quote.seeded ? " on the record" : ""}</span></div>`
+    : "";
+  const fact = c.fact ? `<div class="fact"><span aria-hidden="true">·</span> ${esc(c.fact)}</div>` : "";
+  return `<div class="corr"><div class="hd">${esc(c.hd)} · ${esc(c.who)} · ${esc(c.tm)}</div>
+     <div class="bd"><span class="was">${esc(c.was)}</span> → now: ${esc(c.after)}${link}</div>
+     ${fact}${quote}</div>`;
+}
+/* a quotation's provenance token: "typed" for text in the human-speech register,
+   "msg:<id>" or "msg:<id>@<room>" for a line that is in the loaded record */
+function quoteRef(q) { return q.src === "typed" ? "typed" : "msg:" + q.msg + (q.room ? "@" + q.room : ""); }
+
 function renderReceipt(o) {
   const g = glyphOf(o);
   const el = document.createElement("div");
@@ -2112,20 +2453,23 @@ function renderReceipt(o) {
        <span class="tt"><span class="who">${esc(h.who)}</span> ${esc(h.text)}<span class="tm">${esc(h.tm)}</span></span></div>`;
   }).join("");
 
-  const prov = o.provenance.map(p =>
-    `<button class="prov"${p.msg ? ` data-jump="${esc(p.msg)}"${p.room ? ` data-jumproom="${esc(p.room)}"` : ""}` : ""}>
-       <span class="hd"><span class="who">${esc(p.who)}</span><span>${esc(p.tm)}</span>${p.msg ? `<span class="jump">jump to source${p.room ? " in #" + esc(p.room) : ""} →</span>` : `<span class="jump">not in the loaded window</span>`}</span>
-       <span class="ex">“${esc(p.ex)}”</span>
+  /* every excerpt is a quotation, so every excerpt must be provably a real line:
+     either a message in the loaded record, or text this human typed into the
+     page. There is no third case, and no way to render one. */
+  const prov = o.provenance.map(p => {
+    const ref = p.msg ? "msg:" + p.msg + (p.room ? "@" + p.room : "") : "typed";
+    return `<button class="prov"${p.msg ? ` data-jump="${esc(p.msg)}"${p.room ? ` data-jumproom="${esc(p.room)}"` : ""}` : ""}>
+       <span class="hd"><span class="who">${esc(p.who)}</span><span>${esc(p.tm)}</span>${p.msg ? `<span class="jump">jump to source${p.room ? " in #" + esc(p.room) : ""} →</span>` : `<span class="jump">typed here · no message carries it</span>`}</span>
+       <span class="ex" data-quoted="${esc(ref)}">“${esc(p.ex)}”</span>
        <span class="full">${esc(p.note)}</span>
-     </button>`).join("");
+     </button>`; }).join("");
 
   const corr = o.corrections.length
-    ? o.corrections.map(c =>
-        `<div class="corr"><div class="hd">${esc(c.hd)} · ${esc(c.who)} · ${esc(c.tm)}</div>
-         <div class="bd"><q>${esc(c.text)}</q> → now: ${esc(c.after)}${c.msg ? ` · <button class="lnk" data-jump="${esc(c.msg)}"${c.room ? ` data-jumproom="${esc(c.room)}"` : ""}>${esc(c.link || "the prior answer is still in the room →")}</button>` : ""}</div></div>`).join("")
+    ? o.corrections.map(c => correctionHtml(c)).join("")
     : `<div class="corr"><div class="bd">no corrections — this object has never been amended</div></div>`;
 
-  const canReopen = o.verification === "accepted" || o.verification === "verified";
+  const reopenable = canReopen(o);
+  const reopening = S.ui.reopening === o.id;
 
   el.innerHTML =
     `<div class="rc-top">
@@ -2138,9 +2482,10 @@ function renderReceipt(o) {
      <div class="rc-sec"><div class="glbl"><span class="lbl">WHAT HAPPENED</span><span class="rule"></span></div>${happened}</div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">PROVENANCE</span><span class="lbl">${o.provenance.length} SOURCES · HOVER TO EXPAND</span><span class="rule"></span></div>${prov}</div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">CORRECTION CHAIN</span><span class="rule"></span></div>${corr}</div>
+     <div class="rc-sec" id="rcReopenBox"></div>
      <div class="rc-foot">
        <span class="note">${esc(o.note || "")}</span>
-       ${canReopen ? `<button class="btn sm" id="rcReopen">Reopen</button>` : ""}
+       ${reopenable ? `<button class="btn sm" id="rcReopen" aria-expanded="${reopening}">Reopen</button>` : ""}
      </div>`;
 
   const body = $("lensBody");
@@ -2149,15 +2494,18 @@ function renderReceipt(o) {
   body.scrollTop = 0;
   el.querySelector("#rcBack").addEventListener("click", () => { S.ui.receiptId = null; render(); });
   const rb = el.querySelector("#rcReopen");
-  if (rb) rb.addEventListener("click", () => reopen(o.id));
-  el.querySelectorAll("[data-jump]").forEach(p => p.addEventListener("click", () => jumpTo(p.dataset.jump, p.dataset.jumproom)));
+  if (rb) rb.addEventListener("click", () => { S.ui.reopening = reopening ? null : o.id; render(); focusReopen(); });
+  if (reopening) el.querySelector("#rcReopenBox").appendChild(reopenBox(o));
+  el.querySelectorAll("[data-jump]").forEach(p => p.addEventListener("click", () => jumpTo(p.dataset.jump, p.dataset.jumproom, p.dataset.why || "a link in this receipt")));
 }
 
 /* a receipt can be opened from a row in another room; the lens follows the
    object home rather than rendering an empty pane. */
 function openReceipt(id, roomId) {
   if (roomId && roomId !== S.roomId && S.rooms[roomId] && obj(S.rooms[roomId], id)) {
+    const from = S.roomId;
     switchRoom(roomId, true);
+    S.ui.trace = { from, msgId: null, why: "the receipt for " + id + ", which lives in this room", at: S.now };
     toast("#" + roomId + " — that object lives in this room's Current state", "info");
   }
   S.ui.receiptId = id;
@@ -2199,13 +2547,23 @@ function clearFresh() {
  * If it contradicts the proposal on the card, the contradiction is what gets
  * recorded: the human's answer is the decision.
  * ----------------------------------------------------------------------- */
-function answerDecision(objectId, statement, provenanceNote) {
+function answerDecision(objectId, statement, provenanceNote, src) {
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
   const t = tick();
+  const typed = src !== "option";
 
-  const m = appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [statement], boundTo: o.id });
+  /* A one-click answer is the human ADOPTING a statement the page offered, not
+     the human writing one. Both are legitimate answers and both are recorded
+     verbatim — but the row says which it was, because a line in the record that
+     reads like something you wrote, and was not, is exactly the class of defect
+     this round exists to close. Only typed text enters the human-speech
+     register. */
+  if (typed) S.typed.push(statement);
+  const m = appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [statement], boundTo: o.id,
+    src: typed ? "typed" : "option",
+    note: typed ? null : "chosen from the options on the card · recorded verbatim, not typed" });
 
   /* the answer that WAS the answer stops being it, on the message itself. That
      is what makes the resolves/answer-bound tag identity-checked rather than
@@ -2234,75 +2592,164 @@ function answerDecision(objectId, statement, provenanceNote) {
      correction chain is where corrections live. Round 2 recorded the
      contradiction in the note and left the chain empty. */
   if (prior || contradicts) {
-    o.corrections.push({
+    const c = {
       hd: prior ? "RE-ANSWERED · PRIOR ANSWER SUPERSEDED" : "ANSWERED · PROPOSAL → DECISION",
       who: S.me, tm: t,
-      text: prior ? priorText : proposal,
+      /* system voice for the before/after; the human's sentence is quoted only
+         when it IS the human's sentence — a prior answer they typed. */
+      was: prior ? "Answer of " + prior.t : "Proposal: " + proposal,
       after: statement + (contradicts && !prior ? " — not what was proposed; your answer is the decision" : ""),
+      fact: prior
+        ? `re-answered by ${S.me} at ${t}` + (typed ? " · typed" : " · chosen from the options on the card")
+        : `answered by ${S.me} at ${t}` + (typed ? " · typed" : " · chosen from the options on the card"),
       msg: prior ? prior.id : (o.sourceMsg || null),
       room: prior ? null : sourceRoomOf(o),
       link: prior ? "the superseded answer is still in the room →" : "the proposal it replaced is still in the room →"
-    });
+    };
+    if (prior && prior.src === "typed") c.quote = { text: priorText, by: S.me, src: "typed" };
+    o.corrections.push(c);
   }
 
-  o.note = "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. " +
+  o.note = (typed
+      ? "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. "
+      : "You chose one of the statements the card offered; it is recorded verbatim, and the row says it was chosen rather than typed. ") +
            (contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
            (prior ? "It replaces your earlier answer, which is still on the record and still in the room." : "");
 
-  appendSystem(r, `decision ${o.id} · ${prior ? "re-answered" : "proposed → accepted"} · recorded verbatim from ${S.me}' answer · nothing inferred`, o.id);
+  appendSystem(r, `decision ${o.id} · ${prior ? "re-answered" : "proposed → accepted"} · recorded verbatim from ${S.me}'s ` +
+                  (typed ? "typed answer" : "one-click answer") + ` · nothing inferred`, o.id);
   S.ui.bound = null; S.ui.replyTo = null; S.ui.pinOpen = null;
   $("cinput").value = "";
   render();
   scrollFeedToEnd();
-  toast(prior ? "re-answered · the earlier answer is now marked superseded, not deleted"
-              : "recorded as a decision · answer-bound, your wording verbatim");
+  /* the toast says which kind of answer it was. Round 3 told you your wording
+     was recorded verbatim even when the wording was the card's, not yours. */
+  toast(prior
+    ? "re-answered · the earlier answer is now marked superseded, not deleted"
+    : typed ? "recorded as a decision · answer-bound, your wording verbatim"
+            : "recorded as a decision · the option you chose, recorded verbatim — not written as your words");
 }
 
-/* --- B2: reopen re-renders EVERYTHING, including the historical row ------ */
-function reopen(objectId) {
+/* --- B2: reopen re-renders EVERYTHING, including the historical row ------
+ *
+ * ROUND 3'S CARDINAL DEFECT LIVED HERE. This function used to write a canned
+ * first-person sentence — "Reopening — the evidence under this was never
+ * checked…" — into the correction chain, where the receipt rendered it in <q>
+ * under the actor's name and time. Nobody said it. It was also false in
+ * context: it asserted an evidence concern after an answer about cutover
+ * timing.
+ *
+ * What replaces it: the correction states what the page actually knows, in
+ * system voice (`was → after` plus a `fact` line), and the human is *offered*
+ * the chance to say why. If they type a reason it is quoted as theirs, tagged
+ * with its provenance, and provable. If they do not — and empty is fine — the
+ * entry simply carries no quotation. The page never speaks for anyone.
+ * ----------------------------------------------------------------------- */
+
+/* which objects can be reopened. BRIEF §5: an item you settled carries the
+   affordance, and "settled" includes a question you answered and a commitment
+   you signed off — round 3 only offered it on accepted/verified. */
+function canReopen(o) {
+  if (needsYou(o)) return false;
+  return o.verification === "accepted" || o.verification === "verified" || !!o.resolvedAt;
+}
+
+/* the reopen states, per kind — all of them land somewhere with an action path */
+const REOPEN_TO = { decision: "proposed", question: "open", commitment: "self_reported", claim: "unverified" };
+
+function reopen(objectId, reason) {
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
   const t = tick();
-  const wasDecision = o.kind === "decision";
-
-  o.verification = wasDecision ? "proposed" : "unverified";
+  const from = o.verification;
+  const wasResolved = !!o.resolvedAt;
+  o.verification = REOPEN_TO[o.kind] || "unverified";
   o.reopenedAt = t;
+  o.resolvedAt = null;
   o.fresh = true;
-  if (wasDecision) {
-    o.owedTo = S.me; o.priority = 20;
+
+  /* a reopened decision, question or commitment owes you an answer again; a
+     reopened claim owes nobody one — it is simply unverified. */
+  const owed = o.kind !== "claim";
+  if (owed) { o.owedTo = S.me; o.priority = o.priority || (o.kind === "decision" ? 20 : 12); }
+  if (o.kind === "decision" && (!o.options || !o.options.length)) {
     /* NO DEAD ATTENTION ITEMS. Options that existed survive the reopen. A
        decision that never carried options gets the one option that is not
        invented — re-affirming the statement already on the record — plus the
        bound composer, which pinActions() offers on every pending decision. */
-    if (!o.options || !o.options.length) {
-      o.options = [{ label: "Re-affirm the prior call", statement: o.text, synthesized: true }];
-    }
+    o.options = [{ label: "Re-affirm the prior call", statement: o.text, synthesized: true }];
   }
-  o.facts = ["reopened by " + S.me, "prior answer kept", "pending again"]
+  if (o.kind === "commitment" && o.priorOverdue) o.overdue = o.priorOverdue;
+
+  const wasLabel = { accepted: "Accepted decision", verified: "Verified claim",
+                     unverified: "Answered question", self_reported: "Signed off, self-reported" }[from]
+                   || from;
+  const nowLabel = { decision: "Proposal — pending again, prior answer preserved on the record",
+                     question: "Open question — the prior answer preserved on the record",
+                     commitment: "Awaiting sign-off again — the prior sign-off preserved on the record",
+                     claim: "Claim — prior verification preserved on the record" }[o.kind];
+
+  const kept = { decision: "prior answer kept", question: "prior answer kept",
+                 commitment: "prior sign-off kept", claim: "prior verification kept" };
+  o.facts = ["reopened by " + S.me + " " + t,
+             wasResolved || o.answerMsg ? kept[o.kind] : "prior state kept",
+             owed ? "pending again" : "unverified again"]
     .concat(sourceRoomOf(o) ? ["source in #" + o.sourceRoom] : []);
+  /* system voice: what happened, not what anyone said about it */
   o.history.push({ k: "gate", who: S.me, tm: t,
-    text: "reopened it — the prior answer stays on the record and is still reachable from here" });
-  o.corrections.push({
-    hd: wasDecision ? "REOPENED · ACCEPTED → PENDING" : "REOPENED · VERIFIED → UNVERIFIED",
+    text: "reopened it · the prior state is kept on the record and stays reachable from here" });
+
+  const c = {
+    hd: "REOPENED · " + String(from).toUpperCase().replace("_", "-") + " → " + String(o.verification).toUpperCase(),
     who: S.me, tm: t,
-    text: "Reopening — the evidence under this was never checked and the whole call rests on it.",
-    after: wasDecision ? "Proposal (prior answer preserved on the record)" : "Claim (prior verification preserved)",
+    was: wasLabel,
+    after: nowLabel,
+    fact: `reopened by ${S.me} at ${t}` + (reason ? "" : " · no reason given, and none was invented"),
     msg: o.answerMsg || o.sourceMsg || (o.provenance[0] && o.provenance[0].msg) || null,
     room: o.answerMsg ? null : sourceRoomOf(o),
     link: o.answerMsg ? "the prior answer is still in the room →" : "the source is still in the room →"
-  });
-  o.note = "Reopening is append-only. The answer at " + (o.acceptedAt || o.verifiedAt || "") +
-           " is still in the conversation, still in this history, and the row that carried it now renders as superseded rather than settled.";
+  };
+  /* the ONLY quotation this transition can produce: words the human typed into
+     the reason field a moment ago, registered in the human-speech register. */
+  if (reason) { S.typed.push(reason); c.quote = { text: reason, by: S.me, src: "typed" }; }
+  o.corrections.push(c);
 
-  appendSystem(r, `${o.kind} ${o.id} · ${wasDecision ? "accepted → proposed" : "verified → unverified"} · reopened by ${S.me} · prior answer kept`, o.id);
+  o.note = "Reopening is append-only. The state at " + (o.acceptedAt || o.verifiedAt || o.reopenedAt) +
+           " is still in the conversation, still in this history, and the row that carried it re-renders to say so. " +
+           (reason ? "The reason above is your own sentence, recorded verbatim."
+                   : "No reason was given, and the page does not write one for you.");
+
+  appendSystem(r, `${o.kind} ${o.id} · ${from} → ${o.verification} · reopened by ${S.me}` +
+                  (reason ? " · reason recorded" : " · no reason given") + " · prior state kept", o.id);
+  S.ui.reopening = null;
   render();
-  /* the toast reports what actually happened to THIS object, not a fixed line:
-     reopening a decision routes it back to you, reopening a verified claim does
-     not put it in anyone's list. */
+  /* the toast reports what actually happened to THIS object, not a fixed line */
   toast(needsYou(o)
-    ? "reopened · back in Needs you as a pending decision, the prior answer on record"
+    ? `reopened · back in Needs you as a pending ${o.kind}, the prior state on record`
     : "reopened · it is a ~ claim again and owes nobody an answer — nothing was added to your list", "warn");
+}
+
+/* the optional reason prompt. Empty is fine and says so: a reason you did not
+   give is not a reason the page may supply. */
+function reopenBox(o) {
+  const box = document.createElement("div");
+  box.className = "vbox rise-s";
+  box.innerHTML =
+    `<div class="hd"><span class="lbl">REOPEN THIS ${esc(o.kind.toUpperCase())}</span></div>
+     <div class="row">
+       <input id="rinput" type="text" aria-label="Reason for reopening (optional)" placeholder="why are you reopening it? (optional — recorded as your words, verbatim)">
+       <button class="btn sm" id="rgo">Reopen</button>
+       <button class="btn ghost sm" id="rcancel">Cancel</button>
+     </div>
+     <div class="hint">Leave it empty if you like. The correction chain records the state change either way, in the system's voice — nothing is ever written in yours.</div>`;
+  box.querySelector("#rgo").addEventListener("click", () => reopen(o.id, box.querySelector("#rinput").value.trim()));
+  box.querySelector("#rcancel").addEventListener("click", () => { S.ui.reopening = null; render(); });
+  box.querySelector("#rinput").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); reopen(o.id, e.target.value.trim()); }
+    if (e.key === "Escape") { S.ui.reopening = null; render(); }
+  });
+  return box;
 }
 
 /* --- the ~ → ✓ pair ----------------------------------------------------- */
@@ -2320,11 +2767,12 @@ function doVerify(objectId, evidence) {
   o.fresh = true;
   o.facts = [o.claimant, "verified by " + S.me + " " + t, evidence];
   o.history.push({ k: "verified", who: S.me, tm: t, text: "attached evidence: " + evidence });
+  S.typed.push(evidence);      // your evidence note is your words, so it is quotable
   o.provenance.unshift({ who: S.me, tm: t, msg: null, ex: evidence,
-    note: "verification note · attached by lars · the claimant did not check their own claim" });
+    note: `verification note · attached by ${S.me} · the claimant did not check their own claim` });
   o.note = "Verified by someone other than the claimant, which is the only thing that makes a line green. " +
            "Reopening it puts the ~ back and keeps this note on the record.";
-  appendSystem(r, `claim ${o.id} · unverified → verified by lars · evidence: ${evidence}`, o.id);
+  appendSystem(r, `claim ${o.id} · unverified → verified by ${S.me} · evidence: ${evidence}`, o.id);
   S.ui.verifying = null;
   render();
   toast("verified · " + o.claimant + " said it, you checked it");
@@ -2346,6 +2794,9 @@ function applyEffect(objectId, fx) {
 
   if (fx === "signed") {
     const wasDue = o.due;
+    /* BRIEF §5: an item you settled keeps its reopen affordance, so signing off
+       records that you settled it and what state to put back. */
+    o.resolvedAt = t; o.priorOverdue = o.overdue;
     o.verification = "self_reported"; o.owedTo = null; o.overdue = null;
     o.facts = [S.me, "marked done " + t, "self-reported"];
     o.history.push({ k: "claim", who: S.me, tm: t, text: "marked it signed off — your own word, nothing has checked it" });
@@ -2363,9 +2814,10 @@ function applyEffect(objectId, fx) {
     msgText = "rescheduled · the original due date stays on the record";
     kind = "info";
   } else if (fx === "answered") {
+    o.resolvedAt = t;
     o.verification = "unverified"; o.owedTo = null;
     o.facts = ["answered by " + S.me + " " + t, "no sign-off attached", "still blocks " + blocks];
-    o.history.push({ k: "claim", who: S.me, tm: t, text: "answered from memory — no written sign-off is attached, so it stays a claim" });
+    o.history.push({ k: "claim", who: S.me, tm: t, text: "answered it with no written sign-off attached, so it stays a claim" });
     o.note = "Answering a question is not the same as verifying the answer. It stays ~ until a sign-off is attached, which is why the objectives it blocks are still blocked.";
     line = `question ${o.id} · open → answered by ${S.me} · unverified (no sign-off attached) · still blocking ${blocks}`;
     msgText = `answered · stays ~ with no sign-off attached, and still blocks ${blocks}`;
@@ -2403,6 +2855,8 @@ function renderComposer() {
     $("ctxGlyph").textContent = "◆";
     $("ctxLabel").textContent = "ANSWER-BINDING";
     $("ctxText").textContent = "what you type is recorded as the decision, verbatim";
+    $("ctxIn").className = "in";
+    $("ctxIn").removeAttribute("data-quoted");
     $("ctxIn").textContent = "in: " + (o ? o.text : "");
     input.placeholder = "Answer in your own words — this text becomes the decision";
     $("cstate").textContent = "bound to ◆ " + (o ? o.id : "") + " · your wording is the record · interpretation is skipped";
@@ -2412,6 +2866,10 @@ function renderComposer() {
     $("ctxGlyph").textContent = "↩";
     $("ctxLabel").textContent = "REPLYING";
     $("ctxText").textContent = m ? m.actor + " · " + m.t : "";
+    /* the quoted context above the composer is a quotation of a real row, and
+       says which one — the checker resolves it back to that message. */
+    $("ctxIn").className = "in quoted";
+    if (m) $("ctxIn").dataset.quoted = "msg:" + m.id; else $("ctxIn").removeAttribute("data-quoted");
     $("ctxIn").textContent = m ? "“" + plain(m.body).slice(0, 70) + "”" : "";
     input.placeholder = "Message #" + r.name;
     $("cstate").textContent = "reply · interpretation runs on send · anything derived lands in Current state as ~";
@@ -2445,10 +2903,11 @@ function send() {
   const v = input.value.trim();
   if (S.ui.bound) {
     if (!v) { toast("type your answer — the composer records what you write, not what the card suggested", "bad"); input.focus(); return; }
-    answerDecision(S.ui.bound, v, "answer-bound reply · typed by lars and recorded verbatim · no model in the path");
+    answerDecision(S.ui.bound, v, `answer-bound reply · typed by ${S.me} and recorded verbatim · no model in the path`, "typed");
     return;
   }
   if (!v) return;
+  S.typed.push(v);
   const t = tick();
   appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [v], replyTo: S.ui.replyTo || null });
   input.value = "";
@@ -2484,13 +2943,25 @@ function normalizeFilter() {
   if (!n) S.ui.feedFilter = null;
 }
 
+/* marking seen moves ONE thing: the cursor. Nothing is destroyed, so nothing
+   needs a confirmation dialog — the undo is on the divider it just muted. */
 function markSeen() {
   const r = room();
-  const scope = hasAbsenceGroup(r) ? "absence" : "return";
+  const scope = absenceRead(r) ? "return" : "absence";
   r.readGroup = counts(r, scope).total;          // what the cursor just swallowed
+  r.markFrom = r.seenAfter;                      // where to put it back
+  r.markedAt = S.now;
   r.seenAfter = r.messages[r.messages.length - 1].id;
   render();
-  toast("seen cursor moved for #" + r.name + " only — every other room keeps its own", "info");
+  toast(`seen cursor moved for #${r.name} only · the group stays on the divider, muted — unmark to put it back`, "info");
+}
+function unmarkSeen() {
+  const r = room();
+  if (r.markFrom == null) return;
+  r.seenAfter = r.markFrom;
+  r.markFrom = null; r.markedAt = null; r.readGroup = 0;
+  render();
+  toast("unmarked · the cursor is back where it was and the group is unread again", "info");
 }
 
 function switchRoom(id, quiet) {
@@ -2498,6 +2969,7 @@ function switchRoom(id, quiet) {
   S.roomId = id;
   S.ui.feedFilter = null; S.ui.receiptId = null; S.ui.bound = null;
   S.ui.replyTo = null; S.ui.verifying = null; S.ui.pinOpen = null;
+  S.ui.reopening = null; S.ui.trace = null;
   S.ui.routineOpen = false; S.ui.routineOpenedByFilter = false;
   $("cinput").value = "";
   if (quiet) return;                              // caller renders and reports
@@ -2508,12 +2980,18 @@ function switchRoom(id, quiet) {
 }
 
 let tgtTimer = null;
-function jumpTo(msgId, roomId) {
+function jumpTo(msgId, roomId, why) {
   if (!msgId) { toast("that source is in another room and this prototype does not seed it", "warn"); return; }
   if (roomId && roomId !== S.roomId) {
     const target = S.rooms[roomId];
     if (!target || !msg(target, msgId)) { toast("that source is outside the loaded window", "warn"); return; }
+    /* A CROSS-ROOM JUMP LEAVES A TRACE. The target highlight fades after two
+       seconds and the toast after three; without a trace you are standing in a
+       room you did not choose with nothing on screen saying why, or how to get
+       back. The trace persists until you dismiss it or navigate again. */
+    const from = S.roomId;
     switchRoom(roomId, true);
+    S.ui.trace = { from, msgId, why: why || null, at: S.now };
     toast("#" + roomId + " — the source of that item lives here, not in the room you came from", "info");
   }
   const r = room();
@@ -2558,8 +3036,12 @@ function render() {
   renderHead();
   renderPin();
   renderFeed();
+  renderTrace();
   renderComposer();
   renderLens();
+  /* the two DOM-level invariants run against what was actually painted */
+  checkRowScopeInvariant(room());
+  checkQuotationInvariant();
   setTimeout(clearFresh, 400);
 }
 
