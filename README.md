@@ -494,7 +494,6 @@ is what `core_events.room_seq` will map onto — but the gate is the global
 `cursor`, because `issues`, `corrections` and `consumedEventIds` are global
 ordered lists and a per-room gate would let two rooms interleave them one way
 live and another way on replay.
-
 ### Replay ingest
 
 `packages/ingest` turns a real conversation into the canonical replay format
