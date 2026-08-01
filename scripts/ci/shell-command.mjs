@@ -805,6 +805,18 @@ export function launcherProblems(command) {
  * Adding one takes the same evidence as a launcher: the manual sentence saying
  * it neither loads code nor changes the exit status, and a measurement that
  * `node <flag> -e 'process.exit(3)'` still exits 3.
+ *
+ * The three that take a value must be written with `=`
+ * (`--max-old-space-size=4096`). Spelled with a space, the value becomes the
+ * first operand, the script is no longer where a matcher looks for it, and the
+ * step reads as missing — which is the wrong error message for the right
+ * reason, and fails closed either way.
+ *
+ * And the environment is the other half of this table: `NODE_OPTIONS` applies
+ * these same flags to every `node` process without appearing in any argv, which
+ * is the sixteenth bypass. It is refused by `INJECTING_VARIABLES` in
+ * `workflow-policy.mjs`; an allowlist here with that variable unguarded would
+ * have been decoration.
  */
 export const NODE_FLAGS_ALLOWED = new Set([
   '--enable-source-maps',
