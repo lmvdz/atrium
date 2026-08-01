@@ -13,6 +13,16 @@
  * Every rule is a hard failure. There are no warnings: a warning is a fail-open
  * construct wearing a different hat.
  *
+ * SCOPE. This engine — and the CI it guards — defends against **accident and
+ * drift**: a step deleted in a hurry, a floor quietly lowered, an action tag
+ * that moved under us, a job that stopped running and nobody noticed. It does
+ * *not* defend against a malicious author with write access, because it cannot:
+ * the policy, its self-test, the reporters and the floors all execute from the
+ * revision under test, so an author who can edit this file can edit what it
+ * checks. The rules below make that expensive and loud, not impossible.
+ * Adversarial closure is the governance trigger in the README — required-check
+ * rulesets, pull requests, and code-owner review — not anything in this file.
+ *
  * Usage:
  *   node scripts/ci/workflow-policy.mjs .github/workflows/*.yml
  *   import { checkWorkflow } from './workflow-policy.mjs'
@@ -47,8 +57,132 @@ const INJECTABLE_CONTEXT =
 const REQUIRED_TRIGGERS = ['pull_request', 'merge_group'];
 const GATE_JOB = 'gate';
 
+/**
+ * Every rule this engine can emit, declared rather than counted by hand.
+ *
+ * Round 2 of this ticket claimed "15 rules" in a receipt while the engine
+ * carried 18, and four of them had never been mutated by the self-test. Both
+ * mistakes were possible because the rule set lived only in the call sites. It
+ * lives here now: `add()` refuses an undeclared rule id, and the self-test
+ * asserts every entry below has at least one mutation proving it fires. The
+ * count in any receipt is `RULES.length`, not a number someone remembered.
+ */
+export const RULES = [
+  'yaml-parse',
+  'no-yaml-alias',
+  'no-yaml-anchor',
+  'no-continue-on-error',
+  'no-shell-override',
+  'no-step-timeout',
+  'no-fail-open-shell',
+  'no-untrusted-interpolation',
+  'required-triggers',
+  'least-privilege',
+  'pin-actions-to-sha',
+  'job-timeout-required',
+  'gate-covers-all-jobs',
+  'gate-runs-always',
+  'gate-inspects-needs',
+  'no-job-condition',
+  'no-step-condition',
+  'no-stray-condition',
+  'policy-steps-present',
+  'required-job-steps',
+  'no-remote-reusable-workflow',
+];
+
+/**
+ * Steps that must exist, by job.
+ *
+ * A job can satisfy every rule above and still prove nothing, by simply not
+ * running the checks any more — delete the policy step and the policy stops
+ * objecting to its own absence. That is circular, and knowingly so: it cannot
+ * stop an author who means it (see SCOPE at the top of this file). What it does
+ * stop is the accident — a step dropped during a rebase, a script renamed
+ * without its call site, a job hollowed out to "make CI fast" — which is the
+ * threat model this repo actually has today.
+ *
+ * `policy-steps-present` covers the meta-guards: the things that check the
+ * workflow itself. `required-job-steps` covers the verification work.
+ */
+const REQUIRED_STEPS = {
+  verify: [
+    // Matches actionlint being *run*, not merely downloaded — the install step
+    // names it too, and a job that fetches a linter it never invokes is exactly
+    // the shape this rule is looking for.
+    { rule: 'policy-steps-present', what: 'actionlint', test: /actionlint"?\s+-{1,2}color\b/ },
+    {
+      rule: 'policy-steps-present',
+      what: 'the workflow policy engine',
+      test: /scripts\/ci\/workflow-policy\.mjs\b/,
+    },
+    {
+      rule: 'policy-steps-present',
+      what: "the policy engine's own self-test",
+      test: /scripts\/ci\/workflow-policy-selftest\.mjs\b/,
+    },
+    {
+      rule: 'policy-steps-present',
+      what: "the test gates' self-test",
+      test: /scripts\/ci\/gate-selftest\.mjs\b/,
+    },
+    { rule: 'required-job-steps', what: 'the linter', test: /\bpnpm (?:run )?lint\b/ },
+    { rule: 'required-job-steps', what: 'the typechecker', test: /\bpnpm (?:run )?typecheck\b/ },
+    { rule: 'required-job-steps', what: 'the unit/integration suite', test: /\bpnpm vitest run\b/ },
+    { rule: 'required-job-steps', what: 'the build', test: /\bpnpm (?:run )?build\b/ },
+    {
+      rule: 'required-job-steps',
+      what: 'the workspace-enrollment assertion',
+      test: /scripts\/ci\/assert-workspace-enrollment\.mjs\b/,
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the floor-ratchet assertion',
+      test: /scripts\/ci\/assert-floor-ratchet\.mjs\b/,
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the schema set-equality assertion',
+      test: /scripts\/ci\/assert-tables\.mjs\b/,
+    },
+    {
+      rule: 'required-job-steps',
+      what: 'the vitest report gate',
+      test: /scripts\/ci\/assert-vitest-report\.mjs\b/,
+    },
+  ],
+  e2e: [
+    {
+      rule: 'required-job-steps',
+      what: 'the browser-presence assertion',
+      test: /scripts\/ci\/assert-chromium\.mjs\b/,
+    },
+    { rule: 'required-job-steps', what: 'the Playwright suite', test: /\bplaywright test\b/ },
+    {
+      rule: 'required-job-steps',
+      what: 'the e2e report gate',
+      test: /scripts\/ci\/assert-playwright-report\.mjs\b/,
+    },
+  ],
+};
+
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Collects violations, refusing any rule id not declared in RULES. A rule the
+ * self-test has never heard of is a rule nobody has proved fires.
+ */
+function makeAdd(violations, path) {
+  return (rule, message) => {
+    if (!RULES.includes(rule)) {
+      throw new Error(
+        `workflow-policy: undeclared rule id "${rule}". Add it to RULES and give it a mutation in workflow-policy-selftest.mjs.`,
+      );
+    }
+    violations.push({ rule, message, path });
+  };
 }
 
 /** Depth-first walk yielding [pathSegments, key, value] for every mapping key. */
@@ -84,7 +218,7 @@ function normalizeCondition(value) {
  */
 export function checkWorkflow(source, path = '<workflow>') {
   const violations = [];
-  const add = (rule, message) => violations.push({ rule, message, path });
+  const add = makeAdd(violations, path);
 
   const doc = parseDocument(source, { merge: false, strict: true });
   for (const error of doc.errors) {
@@ -201,7 +335,7 @@ export function checkWorkflow(source, path = '<workflow>') {
     }
   }
 
-  // ---- every job is bounded ----------------------------------------------
+  // ---- every job is bounded, and defined here -----------------------------
   for (const [jobId, job] of Object.entries(jobs)) {
     if (!isPlainObject(job)) continue;
     if (typeof job['timeout-minutes'] !== 'number') {
@@ -209,6 +343,46 @@ export function checkWorkflow(source, path = '<workflow>') {
         'job-timeout-required',
         `${path}: job \`${jobId}\` has no \`timeout-minutes\`. A job that can hang forever is a check that never reports.`,
       );
+    }
+    // A reusable workflow moves the job body somewhere this engine cannot read
+    // it. For a remote one that body is a different repository's file, on a ref
+    // whose contents can change without a commit here — the policy would be
+    // enforcing rules over a stub while the real steps ran elsewhere. Refused
+    // outright, local ones included, so that adopting one is a deliberate edit
+    // to this rule rather than a quiet hole. (Round-2 receipt: none are used
+    // today; this converts the gap into a loud choice.)
+    if (job.uses !== undefined) {
+      add(
+        'no-remote-reusable-workflow',
+        `${path}: job \`${jobId}\` delegates to the reusable workflow \`${job.uses}\`. Reusable workflows are refused: their steps are not in this file, so nothing here can check them, and a remote one can change without a commit to this repository. Inline the job.`,
+      );
+    }
+    if (job.secrets !== undefined) {
+      add(
+        'no-remote-reusable-workflow',
+        `${path}: job \`${jobId}\` passes \`secrets:\` to a called workflow. Only reusable-workflow calls take that key, and those are refused.`,
+      );
+    }
+  }
+
+  // ---- the checks themselves must still be wired up -----------------------
+  for (const [jobId, required] of Object.entries(REQUIRED_STEPS)) {
+    const job = jobs[jobId];
+    if (!isPlainObject(job)) {
+      add(
+        'required-job-steps',
+        `${path}: no \`${jobId}\` job. The gates this repo relies on are declared per job in scripts/ci/workflow-policy.mjs; a workflow without \`${jobId}\` is missing ${required.length} of them.`,
+      );
+      continue;
+    }
+    const script = jobScriptText(job);
+    for (const { rule, what, test } of required) {
+      if (!test.test(script)) {
+        add(
+          rule,
+          `${path}: job \`${jobId}\` never runs ${what} (nothing in its steps matches ${test}). A job can satisfy every other rule here and still prove nothing by quietly dropping the step that does the proving.`,
+        );
+      }
     }
   }
 
@@ -243,15 +417,88 @@ export function checkWorkflow(source, path = '<workflow>') {
         `${path}: \`${GATE_JOB}\` must declare \`if: always()\`. Without it the gate is skipped whenever a needed job is skipped or fails, and GitHub reports a skipped required check as success.`,
       );
     }
-    if (!JSON.stringify(gate).includes('toJSON(needs)')) {
-      add(
-        'gate-inspects-needs',
-        `${path}: \`${GATE_JOB}\` never reads \`toJSON(needs)\`. It must inspect every needed job's \`result\` and fail unless each one is literally \`success\`.`,
-      );
-    }
+    checkGateInspectsNeeds(gate, path, add);
   }
 
   return violations;
+}
+
+/** Flattens every `run:` and `uses:` in a job into one string, for presence checks. */
+function jobScriptText(job) {
+  const steps = Array.isArray(job.steps) ? job.steps : [];
+  return steps
+    .map((step) => (isPlainObject(step) ? `${step.run ?? ''}\n${step.uses ?? ''}` : ''))
+    .join('\n');
+}
+
+/**
+ * The gate must actually read the results it needs — parsed, not grepped.
+ *
+ * Round 2 checked this with `JSON.stringify(gate).includes('toJSON(needs)')`,
+ * which a comment containing that string satisfies just as well as a working
+ * gate. So: find the step that binds `${{ toJSON(needs) }}` into an environment
+ * variable, then read the script that step runs and require it to read that
+ * variable, iterate it, look at each job's `result`, compare against the
+ * literal `success`, exit non-zero when one is not, and refuse an empty `needs`
+ * rather than passing by vacuous truth. gate-selftest.mjs then extracts that
+ * same script and *runs* it against synthetic `needs` payloads, which is the
+ * only check that can tell working code from convincing code.
+ */
+function checkGateInspectsNeeds(gate, path, add) {
+  const steps = Array.isArray(gate.steps) ? gate.steps : [];
+  let bound;
+  for (const step of steps) {
+    if (!isPlainObject(step) || typeof step.run !== 'string') continue;
+    const env = isPlainObject(step.env) ? step.env : {};
+    const entry = Object.entries(env).find(([, value]) =>
+      /toJSON\s*\(\s*needs\s*\)/.test(String(value)),
+    );
+    if (entry) {
+      bound = { name: entry[0], run: step.run };
+      break;
+    }
+  }
+
+  if (bound === undefined) {
+    add(
+      'gate-inspects-needs',
+      `${path}: no step in \`${GATE_JOB}\` binds \`\${{ toJSON(needs) }}\` into an \`env:\` variable and then reads it. The gate must inspect every needed job's \`result\` and fail unless each one is literally \`success\`.`,
+    );
+    return;
+  }
+
+  const { name, run } = bound;
+  const readsVariable = new RegExp(
+    `process\\.env\\.${name}\\b|process\\.env\\[\\s*["']${name}["']\\s*\\]|\\$\\{?${name}\\b`,
+  );
+  const checks = [
+    { ok: readsVariable.test(run), why: `never reads the \`${name}\` variable it binds` },
+    {
+      ok: /Object\.(entries|values|keys)\s*\(|\bfor\s*\(|\.map\s*\(|\.filter\s*\(/.test(run),
+      why: 'never iterates the needed jobs, so it can only be looking at one of them (or none)',
+    },
+    { ok: /\bresult\b/.test(run), why: "never looks at any job's `result`" },
+    {
+      ok: /["']success["']/.test(run),
+      why: 'never compares a result against the literal `success`, so `skipped` and `cancelled` would read as fine',
+    },
+    {
+      ok: /process\.exit\s*\(\s*[1-9]|\bexit\s+[1-9]/.test(run),
+      why: 'never exits non-zero, so whatever it finds it reports green',
+    },
+    {
+      ok: /length\s*(?:===?|<)\s*[01]\b/.test(run),
+      why: 'does not fail on an empty `needs`, so a gate quietly emptied of its dependencies would pass by vacuous truth',
+    },
+  ];
+  for (const { ok, why } of checks) {
+    if (!ok) {
+      add(
+        'gate-inspects-needs',
+        `${path}: the \`${GATE_JOB}\` step that binds \`toJSON(needs)\` ${why}.`,
+      );
+    }
+  }
 }
 
 /** `if:` is allowed in exactly two places; everything else is a verdict in disguise. */
@@ -311,8 +558,10 @@ export function checkWorkflowFile(source, path) {
   const violations = checkWorkflow(source, path);
   const doc = parseDocument(source, { merge: false, strict: true });
   if (doc.errors.length === 0) {
-    checkConditionalStepsAreUploads(doc.toJS({ maxAliasCount: -1 }) ?? {}, path, (rule, message) =>
-      violations.push({ rule, message, path }),
+    checkConditionalStepsAreUploads(
+      doc.toJS({ maxAliasCount: -1 }) ?? {},
+      path,
+      makeAdd(violations, path),
     );
   }
   return violations;

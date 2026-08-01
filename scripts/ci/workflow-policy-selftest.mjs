@@ -8,6 +8,13 @@
  * must come back clean, so the suite also fails if the policy becomes
  * trigger-happy.
  *
+ * And every rule the engine declares must have at least one mutation here. That
+ * check is the fix for a real round-2 miss: four rules — yaml-parse,
+ * no-yaml-anchor, least-privilege, no-stray-condition — had never been mutated,
+ * and nothing said so, because coverage was something a human counted. It is
+ * now derived from workflow-policy.mjs's own RULES list, so a new rule without
+ * a mutation fails this suite on the commit that adds it.
+ *
  *   node scripts/ci/workflow-policy-selftest.mjs [workflow.yml]
  */
 
@@ -17,7 +24,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions, quoted verbatim
 
 import { readFileSync } from 'node:fs';
-import { checkWorkflowFile } from './workflow-policy.mjs';
+import { checkWorkflowFile, RULES } from './workflow-policy.mjs';
 
 const WORKFLOW = process.argv[2] ?? '.github/workflows/ci.yml';
 
@@ -161,6 +168,133 @@ const MUTATIONS = [
         '  verify:\n    permissions: *perms\n',
       ),
   },
+
+  // ---- the four rules round 2 never mutated -------------------------------
+  {
+    name: 'a workflow that is not valid YAML at all',
+    rule: 'yaml-parse',
+    mutate: (s) => replaceOnce(s, 'name: CI\n', 'name: [CI\n'),
+  },
+  {
+    name: 'a YAML anchor, whose expansion a human reading the file never sees',
+    rule: 'no-yaml-anchor',
+    mutate: (s) =>
+      replaceOnce(s, 'permissions:\n  contents: read', 'permissions: &perms\n  contents: read'),
+  },
+  {
+    name: 'the workflow handing every job write access it never asked for',
+    rule: 'least-privilege',
+    mutate: (s) =>
+      replaceOnce(s, 'permissions:\n  contents: read', 'permissions:\n  contents: write'),
+  },
+  {
+    name: 'a condition somewhere a condition does not belong',
+    rule: 'no-stray-condition',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'permissions:\n  contents: read',
+        'if: always()\npermissions:\n  contents: read',
+      ),
+  },
+
+  // ---- the rules round 3 adds ---------------------------------------------
+  {
+    name: 'the policy step deleted, so the policy stops objecting to anything',
+    rule: 'policy-steps-present',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '        run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml\n',
+        '',
+      ),
+  },
+  {
+    name: "the policy's own self-test deleted, so a policy that stopped firing looks fine",
+    rule: 'policy-steps-present',
+    mutate: (s) =>
+      replaceOnce(s, '        run: node scripts/ci/workflow-policy-selftest.mjs\n', ''),
+  },
+  {
+    name: 'actionlint quietly dropped',
+    rule: 'policy-steps-present',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        `        run: '"$RUNNER_TEMP/actionlint" -color'\n`,
+        '        run: echo skipped\n',
+      ),
+  },
+  {
+    name: 'the gate self-test deleted, so a gate that stopped catching things looks fine',
+    rule: 'policy-steps-present',
+    mutate: (s) => replaceOnce(s, '        run: node scripts/ci/gate-selftest.mjs\n', ''),
+  },
+  {
+    name: 'the test suite removed from verify, leaving a job that lints and calls it a day',
+    rule: 'required-job-steps',
+    mutate: (s) => replaceOnce(s, '          pnpm vitest run\n', '          echo no tests today\n'),
+  },
+  {
+    name: 'the vitest report gate removed while the suite still runs',
+    rule: 'required-job-steps',
+    mutate: (s) => replaceOnce(s, '        run: node scripts/ci/assert-vitest-report.mjs\n', ''),
+  },
+  {
+    name: 'the floor ratchet removed, so lowering a floor becomes free again',
+    rule: 'required-job-steps',
+    mutate: (s) => replaceOnce(s, '        run: node scripts/ci/assert-floor-ratchet.mjs\n', ''),
+  },
+  {
+    name: 'the e2e job hollowed out — the browser gate gone, the job still green',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(s, '        run: node scripts/ci/assert-playwright-report.mjs\n', ''),
+  },
+  {
+    name: 'the whole verify job replaced by a call to a workflow in someone else’s repository',
+    rule: 'no-remote-reusable-workflow',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '  verify:\n    name: lint · typecheck · test · build\n',
+        '  verify:\n    uses: some-org/shared-workflows/.github/workflows/verify.yml@main\n    name: lint · typecheck · test · build\n',
+      ),
+  },
+  {
+    name: 'secrets handed to a called workflow',
+    rule: 'no-remote-reusable-workflow',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '  gate:\n    name: gate\n',
+        '  gate:\n    secrets: inherit\n    name: gate\n',
+      ),
+  },
+  {
+    name: 'the gate no longer comparing results against the literal "success"',
+    rule: 'gate-inspects-needs',
+    mutate: (s) => replaceOnce(s, 'value.result !== "success"', 'value.result !== "anything"'),
+  },
+  {
+    name: 'the gate losing its empty-needs guard, so an emptied gate passes vacuously',
+    rule: 'gate-inspects-needs',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '            if (entries.length === 0) {',
+        '            if (entries.length === -1) {',
+      ),
+  },
+  {
+    name: 'the gate keeping every incriminating word but losing its exit — round 2 passed this',
+    rule: 'gate-inspects-needs',
+    mutate: (s) => {
+      if (!s.includes('process.exit(1);'))
+        throw new Error('mutation target not found: process.exit(1);');
+      return s.split('process.exit(1);').join('console.info("would have failed");');
+    },
+  },
 ];
 
 function main() {
@@ -172,6 +306,25 @@ function main() {
     failures.push(
       `the unmutated ${WORKFLOW} must pass its own policy, but reported: ${clean.map((v) => `[${v.rule}] ${v.message}`).join(' | ')}`,
     );
+  }
+
+  // Coverage, derived rather than counted. A rule with no mutation is a rule
+  // with an unknown pass rate; a mutation for a rule the engine cannot emit is
+  // a test asserting on a typo.
+  const exercised = new Set(MUTATIONS.map((mutation) => mutation.rule));
+  for (const rule of RULES) {
+    if (!exercised.has(rule)) {
+      failures.push(
+        `rule "${rule}" is declared in workflow-policy.mjs but no mutation here proves it ever fires. Add one, or delete the rule.`,
+      );
+    }
+  }
+  for (const rule of exercised) {
+    if (!RULES.includes(rule)) {
+      failures.push(
+        `a mutation asserts on rule "${rule}", which workflow-policy.mjs does not declare. Nothing can ever satisfy it.`,
+      );
+    }
   }
 
   for (const { name, rule, mutate } of MUTATIONS) {
@@ -194,7 +347,7 @@ function main() {
     return 1;
   }
   console.info(
-    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected; the real file clean.`,
+    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected by the rule it targets; all ${RULES.length} declared rules exercised; the real file clean.`,
   );
   return 0;
 }
