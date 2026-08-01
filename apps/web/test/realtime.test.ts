@@ -544,6 +544,115 @@ describe('the durable journal writes both halves or neither', () => {
     expect(stalling.lastSeq(ROOM)).toBe(5);
     expect(stalling.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3, 4, 5]);
   });
+
+  /**
+   * "Never throws" and "never silent", made true (#22 gauntlet r4 delta, major).
+   *
+   * > the journal's `commit` can throw — `getItem` is outside the storage `try`,
+   * > and an `onDegraded` callback may throw — and degrades silently when no
+   * > callback is supplied.
+   *
+   * All three clauses granted, and each gets its own test, because they fail in
+   * different places and a single "it does not throw" would pass on two of them
+   * while the third stayed open. The r3 tests above only ever made `setItem`
+   * throw, which is why the read path and the callback survived a whole round.
+   */
+  it('survives a store that refuses to be read', () => {
+    /**
+     * Some browsers refuse storage on *access* (already handled) and some on
+     * *use*, and Safari's private mode has done both across versions. Round 4's
+     * `getItem` sat outside the try, so a read that threw escaped `commit`
+     * directly — the same permanent stall the whole finding is about, reached
+     * through the other half of the API.
+     *
+     * Catches: moving `store.getItem` back outside its `try` in `readDurable`,
+     * which is the mutant `journal_getitem_outside_the_try`.
+     */
+    const degraded: string[] = [];
+    storage.getItem = () => {
+      throw new Error('SecurityError: the operation is insecure');
+    };
+    const journal = localStorageJournal('test', {
+      maxEvents: 10,
+      onDegraded: (_roomId, reason) => degraded.push(reason),
+    });
+
+    expect(() => journal.commit(ROOM, messageEvent(1, 'a'), 1)).not.toThrow();
+    expect(() => journal.load(ROOM)).not.toThrow();
+    expect(() => journal.commit(ROOM, messageEvent(2, 'b'), 2)).not.toThrow();
+
+    // Degraded, reported, and — the part that is easy to lose — still holding the
+    // events it was given. A read that throws must not be reported as "no
+    // history": that is a legitimate answer meaning "fresh room", and returning it
+    // here would silently re-fetch for ever.
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]).toContain('localStorage refused the write');
+    expect(journal.load(ROOM)).toMatchObject({ lastSeq: 2 });
+    expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+  });
+
+  it('survives an onDegraded callback that throws', () => {
+    // The journal's contract is that `commit` does not throw. A contract a
+    // caller's logging can break is not a contract — and this one breaks at the
+    // worst moment, since the callback only runs when something has already gone
+    // wrong. Catches: dropping the `try` around the report in `degrade`, which is
+    // the mutant `journal_lets_the_callback_throw`.
+    storage.setItem = () => {
+      throw quotaError();
+    };
+    const journal = localStorageJournal('test', {
+      maxEvents: 10,
+      onDegraded: () => {
+        throw new Error('the operator’s logger is having a day');
+      },
+    });
+    expect(() => journal.commit(ROOM, messageEvent(1, 'a'), 1)).not.toThrow();
+    expect(() => journal.commit(ROOM, messageEvent(2, 'b'), 2)).not.toThrow();
+    // …and the degradation still happened, so the swallow is a swallow of the
+    // callback and not of the fallback.
+    expect(journal.load(ROOM)).toMatchObject({ lastSeq: 2 });
+  });
+
+  it('warns when nobody asked to be told, so degradation is never silent', () => {
+    /**
+     * Round 4 made `onDegraded` opt-in, so the default behaviour of a journal that
+     * had stopped being durable was to say nothing at all. The finding is right
+     * that this is the failure the option exists to surface: the client keeps
+     * working, re-reads its whole history on every load, and nothing anywhere
+     * records why.
+     *
+     * The default is now a warning. Silence takes an explicit `() => {}`, which is
+     * a decision somebody wrote down. Catches: restoring `options.onDegraded?.(…)`
+     * at the call site — the mutant `journal_degrades_silently`.
+     */
+    const warnings: unknown[][] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      storage.setItem = () => {
+        throw quotaError();
+      };
+      const journal = localStorageJournal('test', { maxEvents: 10 });
+      journal.commit(ROOM, messageEvent(1, 'a'), 1);
+      journal.commit(ROOM, messageEvent(2, 'b'), 2);
+
+      // Once per room, not once per commit: a warning on every event is a warning
+      // nobody reads.
+      expect(warnings).toHaveLength(1);
+      expect(String(warnings[0]?.[0])).toContain(ROOM);
+      expect(String(warnings[0]?.[0])).toContain('localStorage is full');
+
+      // And an explicit no-op really is silent, so the default is a default rather
+      // than a rule.
+      const quiet = localStorageJournal('quiet', { maxEvents: 10, onDegraded: () => {} });
+      quiet.commit(ROOM, messageEvent(1, 'a'), 1);
+      expect(warnings).toHaveLength(1);
+    } finally {
+      console.warn = original;
+    }
+  });
 });
 
 /**

@@ -235,8 +235,31 @@ export interface LocalStorageJournalOptions {
    * Not a silent degradation: a client whose journal has fallen back to memory
    * still works and still recovers, but it re-fetches the whole room on the next
    * reload, and an operator looking at why should be able to find out.
+   *
+   * **Omitting it does not make degradation silent.** With no callback the
+   * default below writes one `console.warn` per room — because r4's version
+   * reported nothing at all unless a caller opted in, and "the journal quietly
+   * stopped being durable" is the failure this whole option exists to surface
+   * (r4 delta, major). Pass `() => {}` to mean it, which is a decision somebody
+   * had to write down.
+   *
+   * A callback that throws is caught: the journal's contract is that `commit`
+   * does not throw, and a contract that a caller's logging can break is not a
+   * contract.
    */
   onDegraded?: (roomId: string, reason: string) => void;
+}
+
+/**
+ * What `onDegraded` does when nobody supplied one.
+ *
+ * `console.warn` rather than `console.error`: nothing is broken and nothing is
+ * lost — the room still works, it will simply be re-read from the server on the
+ * next load. But it happens once per room and it is the only evidence that the
+ * client's resume cache is gone, so it is not nothing either.
+ */
+function warnDegraded(roomId: string, reason: string): void {
+  console.warn(`[atrium] room ${roomId}: journal degraded to memory — ${reason}`);
 }
 
 /**
@@ -284,6 +307,27 @@ export interface LocalStorageJournalOptions {
  * The `RoomJournal` contract still permits a throw, and `applyEntry` still
  * handles one correctly; this implementation simply has no failure for which
  * stopping is better than degrading.
+ *
+ * ## "Never throws" is now true, and degradation is never silent (r4 delta)
+ *
+ * Round 4 claimed both and held neither:
+ *
+ * > the journal's `commit` can throw — `getItem` is outside the storage `try`,
+ * > and an `onDegraded` callback may throw — and degrades silently when no
+ * > callback is supplied.
+ *
+ * Three ways out, all closed. `getItem` is inside a `try` of its own: browsers
+ * that refuse storage do it on *access* in some builds and on *use* in others,
+ * and a read that throws is a store this room cannot use — so it degrades rather
+ * than reporting "no history", which would look like a fresh room and re-fetch
+ * silently. `JSON.parse` was already guarded. `onDegraded` is invoked inside a
+ * `try`, because a caller's logging must not be able to break the one property
+ * this type advertises. And with no callback at all the default writes a warning
+ * (`warnDegraded`), so "nobody was told" is not reachable by omission — it takes
+ * an explicit `() => {}`.
+ *
+ * `apps/web/test/realtime.test.ts` drives each of the three through a `Storage`
+ * stub that throws where the real one would, and asserts `commit` returns.
  */
 export function localStorageJournal(
   namespace: string,
@@ -292,6 +336,9 @@ export function localStorageJournal(
   const key = (roomId: string) => `atrium:journal:${namespace}:${roomId}`;
   const maxEvents = Math.max(1, options.maxEvents ?? DEFAULT_JOURNAL_MAX_EVENTS);
   const fallback = memoryJournal();
+  // Not `options.onDegraded?.(…)` at the call site: `?.` on an absent callback is
+  // exactly the silent degradation the finding named.
+  const report = options.onDegraded ?? warnDegraded;
   /** Rooms this journal has stopped being durable for. */
   const degraded = new Set<string>();
   const storage = (): Storage | null => {
@@ -306,10 +353,49 @@ export function localStorageJournal(
   const trim = (events: RoomEventEnvelope[]): RoomEventEnvelope[] =>
     events.length <= maxEvents ? events : events.slice(events.length - maxEvents);
 
+  /**
+   * Hand this room over to memory, keeping everything already held.
+   *
+   * Seeded rather than emptied: `load` must keep returning a cursor whose event
+   * it holds, and dropping the history while keeping the cursor is the exact
+   * inconsistency `RoomJournal` was built to make unrepresentable.
+   *
+   * Declared before its callers on purpose: `readDurable` degrades too, and a
+   * reader should not have to check whether a `const` arrow is initialised by the
+   * time the other one runs.
+   */
+  const degrade = (
+    roomId: string,
+    held: { events: RoomEventEnvelope[]; lastSeq: number },
+    reason: string,
+  ): void => {
+    if (degraded.has(roomId)) return;
+    degraded.add(roomId);
+    for (const event of held.events) fallback.commit(roomId, event, event.roomSeq);
+    try {
+      report(roomId, reason);
+    } catch {
+      // A caller's logging is not allowed to break `commit`'s "never throws".
+      // Swallowed rather than re-reported: the fallback for a broken reporter
+      // would be the reporter.
+    }
+  };
+
   const readDurable = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
     const store = storage();
     if (!store) return { events: [], lastSeq: 0 };
-    const raw = store.getItem(key(roomId));
+    let raw: string | null;
+    try {
+      raw = store.getItem(key(roomId));
+    } catch (error) {
+      // A store that refuses to be *read* is a store this room cannot use.
+      // Degrading rather than returning "no history" matters: "no history" is a
+      // legitimate answer that means "fresh room", and reporting it here would
+      // make an unusable store look like an empty one for ever — silently
+      // re-fetching the whole room on every load and never saying why.
+      degrade(roomId, fallback.load(roomId), describeStorageError(error));
+      return fallback.load(roomId);
+    }
     if (raw === null) return { events: [], lastSeq: 0 };
     try {
       const parsed = JSON.parse(raw) as { events?: unknown; lastSeq?: unknown };
@@ -327,25 +413,6 @@ export function localStorageJournal(
     }
   };
 
-  /**
-   * Hand this room over to memory, keeping everything already held.
-   *
-   * Seeded rather than emptied: `load` must keep returning a cursor whose event
-   * it holds, and dropping the history while keeping the cursor is the exact
-   * inconsistency `RoomJournal` was built to make unrepresentable.
-   */
-  const degrade = (
-    roomId: string,
-    held: { events: RoomEventEnvelope[]; lastSeq: number },
-    reason: string,
-  ): void => {
-    if (!degraded.has(roomId)) {
-      degraded.add(roomId);
-      for (const event of held.events) fallback.commit(roomId, event, event.roomSeq);
-      options.onDegraded?.(roomId, reason);
-    }
-  };
-
   const readRoom = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
     if (!storage() || degraded.has(roomId)) return fallback.load(roomId);
     return readDurable(roomId);
@@ -360,6 +427,14 @@ export function localStorageJournal(
         return;
       }
       const current = readDurable(roomId);
+      // `readDurable` degrades the room if the store refuses to be read, and the
+      // entry must land where the room now lives. Without this the `setItem`
+      // below would fail its way down to a `degrade` that is already a no-op, and
+      // the event would be dropped — the one outcome a journal may not have.
+      if (degraded.has(roomId)) {
+        fallback.commit(roomId, entry, lastSeq);
+        return;
+      }
       current.events.push(entry);
       let kept = trim(current.events);
       for (;;) {
