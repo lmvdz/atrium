@@ -12,7 +12,7 @@
  *   node packages/core/mutants/run.mjs --only <id>  # one mutant, no RESULTS.md
  *   node packages/core/mutants/run.mjs --verbose    # ...and list the failing tests
  *
- * How it works, and the two ways it can lie:
+ * How it works, and the three ways it can lie:
  *
  *  1. **A mutant that no longer applies.** Each `find` must occur exactly once in
  *     its file. Zero occurrences means the code moved and the mutant has been
@@ -25,6 +25,15 @@
  *     that only trips some unrelated assertion is recorded as an escape, because
  *     the claim being made is "this test pins this rule", not "something,
  *     somewhere, noticed".
+ *  3. **A mutant credited with nothing having fired.** r3's gauntlet: a suite
+ *     that fails to *load* was recorded as `caught`, so a mutation that broke the
+ *     parse earned a tick with no test naming it — and `RESULTS.md` kept no
+ *     failing-test names, so the claim could not be audited from the artifact
+ *     either. **A catch now requires a named failing test.** A load failure is
+ *     its own verdict, `unpinned`, it is not counted as caught, and it fails
+ *     `--check`: a mutation nothing can name is a mutation nothing pins, whatever
+ *     the compiler thinks of it. Every failing test name is written into
+ *     `RESULTS.md`, so the ledger is auditable without rerunning it.
  *
  * Sources are restored in a `finally` and on SIGINT/SIGTERM. If the process is
  * killed hard, `git diff packages/core/src` shows what is left over.
@@ -155,17 +164,36 @@ try {
     }
 
     if (result.loadError) {
+      // Not a catch. The suite never ran, so no test named this rule, and a
+      // ledger row whose evidence is "nothing happened, loudly" is the vacuity
+      // this file exists to rule out. Fix the mutant so it compiles, or accept
+      // that the rule is unpinned.
       rows.push({
         ...mutant,
-        verdict: 'caught',
-        detail: 'the suite fails to load — the mutation is refused before any test runs',
+        verdict: 'unpinned',
+        detail:
+          'the suite failed to load, so no named test failed — a mutation nothing can name is a mutation nothing pins',
         failures: [],
       });
-      console.log('caught (suite fails to load)');
+      console.log('UNPINNED (suite failed to load; no named test)');
+      exitCode = 1;
       continue;
     }
 
-    const missed = (mutant.catches ?? []).filter((name) => !result.names.includes(name));
+    const claimed = mutant.catches ?? [];
+    if (claimed.length === 0) {
+      rows.push({
+        ...mutant,
+        verdict: 'error',
+        detail: '`catches` is empty — a mutant with no named catcher makes no auditable claim',
+        failures: result.names,
+      });
+      console.log('ERROR (no named catcher)');
+      exitCode = 1;
+      continue;
+    }
+
+    const missed = claimed.filter((name) => !result.names.includes(name));
     if (result.failed === 0) {
       rows.push({ ...mutant, verdict: 'ESCAPED', detail: 'no test failed', failures: [] });
       console.log('ESCAPED');
@@ -210,6 +238,12 @@ if (!only) {
     'else is recorded as an escape, because the claim being made is that a specific',
     'test pins a specific rule.',
     '',
+    '**A suite that fails to load is not a catch.** It is recorded as `unpinned` and',
+    'fails `--check`: no test ran, so no test named the rule, and a row whose whole',
+    'evidence is that nothing happened is the vacuity this ledger exists to rule out.',
+    'Every failing test name is listed below its mutant, so a reader can audit the',
+    'claim from this file without rerunning anything.',
+    '',
     '| mutant | file | verdict | detail |',
     '| --- | --- | --- | --- |',
   ];
@@ -218,11 +252,21 @@ if (!only) {
       `| \`${row.id}\` | \`${row.file}\` | ${row.verdict === 'caught' ? 'caught' : `**${row.verdict}**`} | ${row.detail} |`,
     );
   }
-  lines.push('', '## What each mutant is for', '');
+  lines.push('', '## What each mutant is for, and what actually went red', '');
   for (const row of rows) {
     lines.push(`- **\`${row.id}\`** — ${row.why}`);
     if ((row.catches ?? []).length > 0) {
-      lines.push(`  - caught by: ${row.catches.map((name) => `_${name}_`).join('; ')}`);
+      lines.push(`  - claimed catcher(s): ${row.catches.map((name) => `_${name}_`).join('; ')}`);
+    }
+    // The names, not the count. r3's gauntlet: `RESULTS.md` recorded "27
+    // failing" and nothing a reviewer could check, so the claim was unauditable
+    // from the artifact even when it was true.
+    if ((row.failures ?? []).length > 0) {
+      const unique = [...new Set(row.failures)].sort();
+      lines.push(`  - failing tests (${unique.length}):`);
+      for (const name of unique) lines.push(`    - _${name}_`);
+    } else if (row.verdict === 'caught') {
+      lines.push('  - failing tests: **none recorded — this row is not auditable**');
     }
   }
   lines.push('');
