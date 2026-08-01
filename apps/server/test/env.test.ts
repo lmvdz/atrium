@@ -257,6 +257,45 @@ describe('loadEnv — auth and realtime settings', () => {
     expect(() => loadEnv({ ...PROD, APP_URL: 'https://atrium.example' })).toThrow(/Unset is not 0/);
   });
 
+  /**
+   * Blocking finding, round 4 delta: the shipped compose served production auth
+   * over plaintext, and `deploy/Caddyfile` asked the operator to fix it in a
+   * comment. `APP_URL` is where that reaches this process — it is the origin
+   * session cookies are minted for and the origin the WebSocket upgrade checks
+   * a browser's `Origin` against, so `http://` there means every session cookie
+   * crosses the network readable.
+   *
+   * The rule itself lives in `@atrium/auth` (`isSecureUrl`), so this process and
+   * `apps/web` cannot end up with two definitions of "secure enough to serve".
+   */
+  it('refuses an http:// APP_URL in production, set or not', () => {
+    // Catches: deleting the scheme check from `assertProductionSafe` — every
+    // value below is present and non-empty, so the presence gate above passes
+    // all three.
+    for (const url of ['http://atrium.example', 'http://localhost:3000', 'ws://atrium.example']) {
+      expect(() => loadEnv({ ...PROD, APP_URL: url, ATRIUM_TRUSTED_PROXY_HOPS: '1' })).toThrow(
+        /APP_URL/,
+      );
+      expect(() => loadEnv({ ...PROD, APP_URL: url, ATRIUM_TRUSTED_PROXY_HOPS: '1' })).toThrow(
+        /https:\/\//,
+      );
+    }
+  });
+
+  it('says which value it refused, so the fix is one read of the error', () => {
+    // Catches: a generic "invalid environment" that makes an operator go
+    // looking. Same standard the proxy-hops message already meets.
+    expect(() =>
+      loadEnv({ ...PROD, APP_URL: 'http://atrium.example', ATRIUM_TRUSTED_PROXY_HOPS: '1' }),
+    ).toThrow(/got http:\/\/atrium\.example/);
+  });
+
+  it('leaves development alone, so a laptop still boots on localhost', () => {
+    // Catches: applying the TLS rule outside production, which would break
+    // `pnpm dev` and get the rule switched off.
+    expect(loadEnv({ ...DEV }).APP_URL).toBe('http://localhost:3000');
+  });
+
   it('accepts 0 as a real answer — a published port has nothing in front of it', () => {
     const env = loadEnv({
       ...PROD,

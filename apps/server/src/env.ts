@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
-import { hasProxyStrategy } from '@atrium/auth';
+import { hasProxyStrategy, isSecureUrl } from '@atrium/auth';
 import { z } from 'zod';
 
 /**
@@ -237,6 +237,27 @@ const unparseableProxyHops =
   ' to X-Forwarded-For). A value that does not parse is not a configuration: it' +
   ' leaves the rate limiter’s IP dimension inert while looking configured';
 
+/**
+ * And the one that is *set* and still wrong: a plaintext public origin.
+ *
+ * `APP_URL` is the origin session cookies are minted for and the origin this
+ * process checks a WebSocket `Origin` header against. On `http://` every one of
+ * those cookies crosses the network readable by anything between the browser
+ * and the proxy. Round 4 shipped a compose stack listening on `:80` with a
+ * comment asking the operator to fix it, which is the failure this whole file
+ * exists to refuse in every other variable.
+ *
+ * The rule lives in `@atrium/auth` (`transport.ts`) so this process and the web
+ * app apply exactly one definition of "secure enough to serve", the same way
+ * both ask `trustedProxyStrategy` rather than each parsing the hop count.
+ */
+const insecureAppUrl =
+  'must be an https:// URL in production — it is the origin session cookies are' +
+  ' minted for and the origin the WebSocket upgrade checks against, so on http://' +
+  ' every session cookie and every verification link crosses the network in' +
+  ' cleartext. docker-compose.yml takes a domain in ATRIUM_DOMAIN and Caddy' +
+  ' obtains the certificate itself. There is deliberately no override';
+
 export function assertProductionSafe(source: NodeJS.ProcessEnv, env: Env): void {
   if (env.NODE_ENV !== 'production') return;
 
@@ -248,6 +269,12 @@ export function assertProductionSafe(source: NodeJS.ProcessEnv, env: Env): void 
   // operator did answer, and the answer was not one of the ones that exist.
   if (source.ATRIUM_TRUSTED_PROXY_HOPS?.trim() && !hasProxyStrategy(source)) {
     problems.push(`  ATRIUM_TRUSTED_PROXY_HOPS: ${unparseableProxyHops}`);
+  }
+
+  // Present, parseable, and still not a configuration anybody should serve.
+  const appUrl = source.APP_URL?.trim();
+  if (appUrl && !isSecureUrl(appUrl)) {
+    problems.push(`  APP_URL: ${insecureAppUrl} (got ${appUrl})`);
   }
 
   if (problems.length === 0) return;

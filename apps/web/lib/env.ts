@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { type ProxyStrategy, trustedProxyStrategy } from '@atrium/auth';
+import { assertSecureTransport, type ProxyStrategy, trustedProxyStrategy } from '@atrium/auth';
 
 /**
  * Server-side configuration for the web app.
@@ -61,9 +61,23 @@ function required(name: string, developmentFallback?: string): string {
   throw new Error(`${name} is required — copy .env.example to .env`);
 }
 
-/** Where the browser reaches this app. Better Auth derives cookie rules from it. */
+/**
+ * Where the browser reaches this app. Better Auth derives cookie rules from it.
+ *
+ * In production it must be `https://`. That is not a preference about
+ * deployment style — it is the origin session cookies are minted for, and an
+ * `http://` value means every cookie, verification link and invitation link
+ * this app issues crosses the network in the clear. Round 4 shipped exactly
+ * that (`deploy/Caddyfile` on `:80`, this default) with a comment asking the
+ * operator to change it; `assertSecureTransport` is the control that comment
+ * was pretending to be. See `packages/auth/src/transport.ts` — the rule is
+ * shared with `apps/server` so the two processes cannot disagree, and there is
+ * no override.
+ */
 export function appUrl(): string {
-  return required('APP_URL', 'http://localhost:3000').replace(/\/$/, '');
+  const value = required('APP_URL', 'http://localhost:3000').replace(/\/$/, '');
+  assertSecureTransport([{ name: 'APP_URL', value }]);
+  return value;
 }
 
 export function databaseUrl(): string {
@@ -121,10 +135,17 @@ export function proxyStrategy(): ProxyStrategy {
  * Passed to Better Auth as a trusted origin in both processes so the two agree
  * about who "us" is; derived from `NEXT_PUBLIC_WS_URL` because that is the value
  * the browser is actually told to connect to.
+ *
+ * And judged on the raw value, before the scheme is mapped: `wss://` is the
+ * secure form, and mapping it to `https://` first would launder a `ws://`
+ * setting into an origin that passes the check. A socket carrying a session
+ * cookie over `ws://` is the same exposure as a page served over `http://`, so
+ * in production this refuses to start too.
  */
 export function realtimeOrigin(): string | null {
   const raw = process.env.NEXT_PUBLIC_WS_URL?.trim();
   if (!raw) return null;
+  assertSecureTransport([{ name: 'NEXT_PUBLIC_WS_URL', value: raw }]);
   try {
     const url = new URL(raw);
     const scheme = url.protocol === 'wss:' ? 'https:' : 'http:';

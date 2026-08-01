@@ -16,4 +16,5 @@ export * from './origin.js';
 export * from './secret.js';
 export * from './session.js';
 export * from './throttle.js';
+export * from './transport.js';
 export * from './workspace.js';

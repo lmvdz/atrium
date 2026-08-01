@@ -10,6 +10,7 @@ import {
   type OrganizationPorts,
 } from './org.js';
 import { resolveAuthSecret } from './secret.js';
+import { assertSecureTransport, useSecureCookies } from './transport.js';
 import {
   createDefaultRoom,
   joinWorkspaceRooms,
@@ -129,6 +130,32 @@ export function trustedProxiesFor(strategy: ProxyStrategy): string[] {
 export function createAtriumAuth(options: AtriumAuthOptions) {
   const { db, baseURL } = options;
   const logger = options.logger ?? consoleLogger;
+
+  /**
+   * Two boot conditions, side by side, because they are the same kind of rule.
+   *
+   * `resolveMailer` refuses to hand out a transport that prints links into a
+   * log. `assertSecureTransport` refuses to run at all when the origins this
+   * deployment advertises would carry those links — and the session cookie —
+   * over cleartext. Both live here rather than in one app's config because both
+   * processes build their instance from this function, so neither can end up
+   * with the laxer half of a rule the other enforces.
+   *
+   * Every origin, not just `baseURL`: `trustedOrigins` is where the web app
+   * declares the realtime URL (`NEXT_PUBLIC_WS_URL`) and the realtime server
+   * re-declares the app's. A `wss://` app with a `ws://` socket is still a
+   * deployment that puts a session cookie on the wire in the clear.
+   */
+  const declaredOrigins = [baseURL, ...(options.trustedOrigins ?? [])].filter(
+    (origin, index, all) => all.indexOf(origin) === index,
+  );
+  assertSecureTransport(
+    declaredOrigins.map((origin, index) => ({
+      name: index === 0 ? 'baseURL' : 'trustedOrigins',
+      value: origin,
+    })),
+  );
+
   const mailer = resolveMailer(options.mailer);
   const secret = options.secret ?? resolveAuthSecret();
   const proxy = options.proxyStrategy ?? trustedProxyStrategy();
@@ -142,9 +169,7 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
      * Auth uses this for its own origin check on state-changing requests, so an
      * empty list here is not "no policy", it is "only us".
      */
-    trustedOrigins: [baseURL, ...(options.trustedOrigins ?? [])].filter(
-      (origin, index, all) => all.indexOf(origin) === index,
-    ),
+    trustedOrigins: declaredOrigins,
 
     database: drizzleAdapter(db, {
       provider: 'pg',
@@ -158,6 +183,19 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
     // primary key in the schema and can be foreign-keyed at directly.
     advanced: {
       database: { generateId: 'uuid' },
+      /**
+       * `Secure` on every cookie this deployment sets, stated rather than
+       * inherited.
+       *
+       * Better Auth would infer the same value from `baseURL`. Writing it down
+       * makes it a decision somebody made and, more usefully, a decision a test
+       * can interrogate: `transport.test.ts` hands this exact block to the
+       * library's own `createCookieGetter` and reads the cookie attributes back,
+       * rather than asserting that a line of configuration exists. Combined with
+       * `assertSecureTransport` above, a production process cannot reach this
+       * line with a value of `false`.
+       */
+      useSecureCookies: useSecureCookies(baseURL),
       /**
        * Which headers may name the caller — the same answer `client-ip.ts`
        * gives, derived from the same setting, so the library's limiter and
