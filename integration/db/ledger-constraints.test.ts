@@ -1915,6 +1915,42 @@ describe('core_events — the room key is the one this kind declares, and no oth
     );
   });
 
+  it('refuses a subject the ledger says was minted in two different rooms', async () => {
+    /**
+     * The third refusal, and the only one the command path has no counterpart
+     * for: `resolveRoomId` reads a folded `CoreState`, where a proposal id is a
+     * key and cannot name two rooms at once. The **log** can hold two mintings —
+     * a direct caller records the same proposal id in `roomA` and in `roomB`, each
+     * honest about its own room and so each accepted by the room CHECK — and then
+     * "which room is this proposal in" has two answers.
+     *
+     * `array_agg(DISTINCT …)` rather than `LIMIT 1` is what makes this a refusal
+     * instead of a decision: arbitrating would make the boundary the place that
+     * chose, and a replay would choose differently (the reducer takes the first
+     * minting that applies and records an issue for the rest).
+     *
+     * Availability against a caller that already holds `EXECUTE` is deliberately
+     * not a property of this boundary and never has been — since 0003 a single row
+     * with a far-future `occurred_at` refuses every later append to the whole
+     * ledger — so a refusal scoped to one poisoned subject is strictly weaker than
+     * what the boundary already concedes.
+     *
+     * Catches: `append_trusts_a_room_less_kind`.
+     */
+    const contested = randomUUID();
+    await expect(append(recording(roomA, contested))).resolves.toBeDefined();
+    await expect(append(recording(roomB, contested))).resolves.toBeDefined();
+
+    // Neither room can now file a rejection for it, including the room that
+    // minted it first. That is the point: there is no right answer to pick.
+    await violatesConstraint('core_events_subject_room_matches', () =>
+      append(rejection(roomA, contested)),
+    );
+    await violatesConstraint('core_events_subject_room_matches', () =>
+      append(rejection(roomB, contested)),
+    );
+  });
+
   it('returns the window by RETURNING of the stored column, not the value it meant to store', async () => {
     /**
      * A **structural** pin, and it is called one because it cannot be anything

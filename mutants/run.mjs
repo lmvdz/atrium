@@ -49,7 +49,11 @@
  * carries a `REVOKE EXECUTE ON FUNCTION` for the append and another for the
  * derivation, and a bare `REVOKE EXECUTE ON FUNCTION` would match both.
  *
- * ## The three ways a ledger like this lies, all closed
+ * ## The four ways a ledger like this lies, all closed
+ *
+ * ("Three" until r6, over a list of four — round 5 added the crash-recovery item
+ * and left the heading. A count in a heading that disagrees with the list under
+ * it is the cheapest possible version of the defect this file exists to find.)
  *
  *  1. **A mutant that no longer applies.** A `file` mutant's `find` must occur
  *     exactly once; a `sql` mutant's restore markers must each match exactly one

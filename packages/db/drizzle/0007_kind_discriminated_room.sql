@@ -140,15 +140,42 @@ ALTER TABLE "core_events" ADD CONSTRAINT "core_events_payload_room_matches" CHEC
 -- The answer is read from the **ledger**, not from a projection: `proposals` and
 -- `accepted_objects` are derived tables written by the server after the append,
 -- and a boundary that trusted them would be trusting the thing it exists to
--- authorize. The ledger row that minted the subject is the same fact
--- `resolveRoomId` reads out of the folded `CoreState`, which is that ledger.
+-- authorize.
 --
--- Three outcomes, all refusals, all matching what the command path already does:
--- an unknown subject (`resolveRoomId` throws `unknown proposal`/`unknown object`),
--- a subject that lives in another room (it throws "target belongs to room …"),
--- and — new here, because only a direct caller can create it — a subject minted
--- twice in two different rooms, which is a log no replay can fold and which the
--- boundary refuses rather than arbitrating with a `LIMIT 1`.
+-- Three outcomes, all refusals. Two of them are the command path's:
+-- an unknown subject (`resolveRoomId` throws `unknown proposal`/`unknown object`)
+-- and a subject that lives in another room (it throws "target belongs to room …").
+-- The third is only reachable here, because only a direct caller can create the
+-- log it describes: a subject minted twice in two different rooms, which no
+-- replay can fold and which the boundary refuses rather than arbitrating with a
+-- `LIMIT 1`.
+--
+-- ## This is the log's oracle. It is not the fold's, and the gap is stated here
+--
+-- `resolveRoomId` asks the folded `CoreState`, whose `proposals`/`objects` hold
+-- only subjects whose minting event **applied**. This asks the log, which holds
+-- every minting row that exists. They differ for one shape: a minting event the
+-- reducer refused — an authority gate, a duplicate — which only a direct caller
+-- can put in the ledger, since the server refuses to append one.
+--
+-- For that shape this places the dependent row in the room its refused minting
+-- event was recorded in, and the fold places it in **no** room (`null`, plus an
+-- `unknown object` issue). That is a column-versus-fold difference and it is not
+-- the cross-room misroute this round is about: the fold never answers a
+-- *different* room, because the candidate rooms are exactly the ones the CHECK
+-- above has already pinned to the column, and two candidates in two rooms are
+-- refused outright. Live still equals replay — both fold that row to the same
+-- issue.
+--
+-- Closing it completely would mean folding inside the boundary, which means
+-- running the reducer in SQL. A CHECK and a plpgsql function can be the ledger's
+-- oracle; neither can be the fold's, and claiming otherwise is the class of
+-- overclaim this round exists to stop making.
+--
+-- Availability against a caller that already holds EXECUTE is deliberately not a
+-- property of this boundary and never has been: since 0003 one row with a far
+-- future `occurred_at` refuses every subsequent append to the whole ledger. The
+-- multi-room refusal above is strictly weaker than that.
 --
 -- Replaced by DROP + CREATE rather than CREATE OR REPLACE, for the reason 0005
 -- and 0006 both give: Postgres cannot change a parameter list in place and

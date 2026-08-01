@@ -667,10 +667,37 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    * caller of the granted append function could file a `proposal_rejected` into
    * any room at all — the CHECK's `coalesce` fell through to the column, so
    * `room_id = room_id` held for anything. `atrium_append_core_event` now resolves
-   * the named proposal or object back to the room its own ledger row landed in
-   * and refuses a disagreement, which is this function's answer read out of the
-   * durable log instead of the in-memory fold. Same three refusals, in the same
-   * order: unknown subject, subject in another room.
+   * the named proposal or object back to the room its own ledger row landed in,
+   * and refuses a disagreement.
+   *
+   * ## The two are close and they are not the same oracle, which is the part
+   * worth writing down
+   *
+   * This function asks the **fold**: `state.proposals[id]` holds only subjects
+   * whose minting event actually applied. The boundary asks the **log**: every
+   * `proposal_recorded` row that exists, applied or not. Those differ for exactly
+   * one shape — a minting event the reducer refused (an authority gate, a
+   * duplicate) — which only a direct SQL caller can put there, since this function
+   * refuses to append one.
+   *
+   * For that shape the boundary places the correction in the room the refused
+   * minting event was recorded in, and the fold places it in **no** room at all
+   * (`null`, and an `unknown object` issue). That is a column-versus-fold
+   * difference and it is *not* the cross-room misroute the finding is about: the
+   * fold never answers a *different* room, because the only candidate rooms are
+   * the ones `core_events_payload_room_matches` has already pinned to the column,
+   * and two candidates in two rooms are refused outright. Live still equals
+   * replay — both fold the same row to the same issue.
+   *
+   * Closing it entirely would mean folding inside the boundary, which means
+   * running the reducer in SQL. The boundary is the ledger's oracle; it is not
+   * and cannot be the fold's.
+   *
+   * The refusals are not the same set either, and the difference is the direction
+   * you would expect: this function has two (unknown subject, subject in another
+   * room) and the boundary has three — it also refuses a subject minted in more
+   * than one room, which is a log this function can never produce and a direct
+   * caller can.
    */
   function resolveRoomId(event: RoomEvent, authorizedRoomId: string): string {
     const declared = declaredRoomId(event);

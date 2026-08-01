@@ -309,13 +309,25 @@ export const memberships = pgTable(
  *    any insert not made from inside that function. #22's r1 gauntlet found the
  *    advisory lock to be *cooperative* — a migration, a seed script or an admin
  *    at a psql prompt could bypass canonical minting entirely — and a call-stack
- *    assertion is what makes it structural. It holds against the table owner and
- *    against a superuser, neither of whom a `REVOKE` binds.
+ *    assertion is what makes it structural. It binds the table owner and a
+ *    superuser, neither of whom a `REVOKE` does, **because they are roles**; it
+ *    does not bind an operator who disables the trigger, and `ALTER TABLE …
+ *    DISABLE TRIGGER` is what the migrations themselves use to re-derive a
+ *    column. Privileged bypasses are operator territory and out of scope, which
+ *    is what the function's own `COMMENT` says.
  *  - **The advisory lock is asserted, not assumed.** The function takes it and
  *    the trigger re-checks `pg_locks` before letting the row through.
- *  - **Append-only is enforced.** `UPDATE`, `DELETE` and `TRUNCATE` on this
- *    table raise. "Nothing here is ever updated or deleted" used to be a
- *    sentence in a comment; it is now a trigger.
+ *  - **`UPDATE` raises. `DELETE` and `TRUNCATE` do not, deliberately.**
+ *    `core_events_no_update` is a `BEFORE UPDATE` trigger and nothing else:
+ *    `room_id` cascades from `rooms`, so deleting a room has to be able to take
+ *    its history with it, and the integration suite truncates between files. Both
+ *    are `REVOKE`d from every role a `REVOKE` binds, which is a weaker guarantee
+ *    than a trigger and is the right one here. Rewriting a row in place has no
+ *    legitimate caller at all, and it is the one that would let history be edited
+ *    after the fact without leaving a trace — so that is the one with a trigger.
+ *    (This bullet said all three raised until r6; 0003, which it names as the
+ *    authority, says the opposite in as many words. Two independent reviewers
+ *    found it in the same pass.)
  *
  * ## `seq` may gap; `room_seq` may not
  *

@@ -725,7 +725,8 @@
       "catches": [
         "refuses a rejection filed into a room its proposal does not live in",
         "refuses a correction filed into a room its object does not live in",
-        "refuses a rejection whose proposal is not in the ledger at all"
+        "refuses a rejection whose proposal is not in the ledger at all",
+        "refuses a subject the ledger says was minted in two different rooms"
       ]
     },
     {
