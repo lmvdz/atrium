@@ -120,7 +120,12 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import { firstOperand, parseScript, singleCommandProblems } from './shell-command.mjs';
+import {
+  firstOperand,
+  parseScript,
+  runsItsScript,
+  singleCommandProblems,
+} from './shell-command.mjs';
 
 const project = process.env.ATRIUM_COMPOSE_PROJECT?.trim() || 'atrium-ledger';
 const baseFiles = (
@@ -180,28 +185,45 @@ const CI_SCRIPT = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
  * certifying an assertion CI had skipped. The argv comes from the same parser
  * `workflow-policy.mjs` uses, and it is the thing that gets executed.
  */
-function classify(argv) {
+function classify(command) {
+  const { argv, raw, redirections } = command;
+  // `raw`, not `argv`: the argv has been unwrapped past any launcher, so
+  // `timeout 30 node x` would execute as `node x` — a different command from the
+  // one the workflow runs, which is the whole thing this file claims not to do.
+  // Classification reads the unwrapped form; execution replays the written one.
+  const run = { argv: raw };
   if (argv[0] === 'node') {
     const script = firstOperand(argv);
     const found = script === undefined ? null : CI_SCRIPT.exec(script);
     if (!found) return null;
+    // `node --check x.mjs` compiles the file and runs none of it. It reads as
+    // absent to the policy engine now; here it is a hard error, because a stage
+    // whose command does nothing would make every case after it meaningless.
+    if (!runsItsScript(argv)) return null;
     const name = found[1];
     if (name === 'compose-stack') {
       const verb = firstOperand(argv, argv.indexOf(script) + 1);
       const definition = verb && Object.hasOwn(COMPOSE_VERBS, verb) ? COMPOSE_VERBS[verb] : null;
-      return definition ? { ...definition, argv } : null;
+      return definition ? { ...definition, ...run } : null;
     }
     const kind = name.startsWith('assert-')
       ? 'assertion'
       : name === RECORDS_WHAT_WAS_BUILT
         ? 'record'
         : 'script';
-    return { kind, id: name, argv };
+    return { kind, id: name, ...run };
   }
   // The only non-node step of the job: the heredoc that writes `.env`. It is a
   // redirection, so there is no argv to run without a shell, and there is
-  // nothing in it an overlay could reach. Named rather than pattern-matched.
-  if (argv[0] === 'cat') return { kind: 'environment', id: 'the deployment environment', argv };
+  // nothing in it an overlay could reach. Recognised by *what it writes* — any
+  // `cat` used to satisfy this, so a second one anywhere in the job became a
+  // second "deployment environment" stage and was silently skipped.
+  if (
+    argv[0] === 'cat' &&
+    redirections.some(({ op, target }) => (op === '>' || op === '>>') && target.value === '.env')
+  ) {
+    return { kind: 'environment', id: 'the deployment environment', ...run };
+  }
   return null;
 }
 
@@ -235,11 +257,16 @@ function readPipeline() {
         `${WORKFLOW}: ${where} contains the word ${JSON.stringify(expandable.value)}, which the shell would expand. This ledger runs the argv directly, with no shell, so it cannot know what that becomes — and substituting a guess would mean running a command the workflow does not.`,
       );
     }
+    if (command.assignments.length > 0) {
+      throw new Error(
+        `${WORKFLOW}: ${where} sets ${command.assignments.map(({ name }) => `\`${name}\``).join(', ')} for the command. This ledger replays the written argv with an environment of its own, so a one-shot assignment is a difference between what CI runs and what this file runs — and, for the compose variables, it is the divergence the policy engine refuses outright.`,
+      );
+    }
 
-    const stage = classify(command.argv);
+    const stage = classify(command);
     if (stage === null) {
       throw new Error(
-        `${WORKFLOW}: ${where} runs \`${command.argv.join(' ')}\`, which this ledger cannot classify, so every case below would skip it silently. Teach classify() what it is, and give it a mutation.`,
+        `${WORKFLOW}: ${where} runs \`${command.raw.join(' ')}\`, which this ledger cannot classify, so every case below would skip it silently. Teach classify() what it is, and give it a mutation.`,
       );
     }
     pipeline.push({ ...stage, name: step.name ?? stage.id });

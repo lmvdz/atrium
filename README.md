@@ -708,7 +708,7 @@ zero tests exits 0 just like one that passed 315:
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. 29 pairs across 23 steps that
+  prerequisite is in the same job *and earlier*. 31 pairs across 23 steps that
   declare one: the ratchet's fetch of `origin/main`; both report resets, before
   the runs they reset for; both report gates, after those runs; the migration's
   wait for Postgres and the schema assertion's migration; the browser install and
@@ -789,7 +789,7 @@ zero tests exits 0 just like one that passed 315:
   self-referentially — `verify`, `e2e` and `deploy` still *containing* the steps
   that do the checking, each assert script named and each one's setup ordered
   before it. `actionlint` runs alongside it.
-- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 106
+- Both self-tests run in CI. `workflow-policy-selftest.mjs` feeds the policy 118
   mutated copies of the real workflow and additionally asserts that every one of
   the 25 declared rules has a mutation proving it fires — coverage derived from
   the engine's own rule list rather than counted by hand, which is how four rules
@@ -798,7 +798,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 108 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 112 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

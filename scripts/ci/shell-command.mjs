@@ -549,7 +549,69 @@ export function singleCommandProblems(script) {
   if (commands.some((command) => command.background)) {
     problems.push('it backgrounds the command, so the step reports before it has finished');
   }
+  // ── LAUNCHERS THAT NEED NOT LAUNCH ──────────────────────────────────────
+  // Found by a blind cross-lineage review of the first version of this rule,
+  // which had closed `false && … ; true` and left the same property open one
+  // level down. `unwrap()` sees through a launcher so the command it launches is
+  // recognised where it really is — right for recognition, and it means a
+  // launcher's own options are invisible to every rule that reads `argv`. Two
+  // of them decide whether the command runs at all:
+  //
+  //   xargs -r node scripts/ci/assert-page-serves.mjs   # empty stdin: runs it zero times, exits 0
+  //   sudo -b node scripts/ci/assert-page-serves.mjs    # detaches; the step reports before it finishes
+  //
+  // Both satisfy every presence matcher and, before this, the shape rule too.
+  // This is a list of spellings rather than a proof, exactly like
+  // `no-command-shadowing` — stated there and true here.
+  for (const command of commands) {
+    if ((command.via ?? []).includes('xargs')) {
+      problems.push(
+        'it reaches the command through `xargs`, which decides how many times to run it — including none: `xargs -r … </dev/null` is a real invocation that runs nothing and exits 0',
+      );
+    }
+    const prefix = command.raw.slice(0, command.raw.length - (command.argv?.length ?? 0));
+    const detaches = prefix.find((word) => word === '-b' || word === '--background');
+    if (detaches !== undefined) {
+      problems.push(
+        `it launches the command with \`${detaches}\`, which detaches it — the step reports success before the command has an exit status`,
+      );
+    }
+  }
   return problems;
+}
+
+/**
+ * Node flags that make `node <script>` compile, describe or ignore the script
+ * rather than run it.
+ *
+ * `node --check scripts/ci/assert-page-serves.mjs` parses the file, prints
+ * nothing, exits 0, and executes not one line of it. Every recognition rule here
+ * is satisfied — `node` is the command word and the script is the first operand
+ * — and so was the shape rule, because it is one unconditional command. It is
+ * the round-2 bypass again, at the level below the shell.
+ *
+ * So a matcher asks this too: a `node` invocation carrying one of these is not
+ * an invocation of the script, and reads as *missing*, which is the loud answer.
+ */
+export const NON_EXECUTING_NODE_FLAGS = new Set([
+  '--check',
+  '-c',
+  '--version',
+  '-v',
+  '--help',
+  '-h',
+  '--eval',
+  '-e',
+  '--print',
+  '-p',
+  '--completion-bash',
+  '--v8-options',
+]);
+
+/** True when this argv is `node` doing something other than running its script. */
+export function runsItsScript(argv) {
+  if (argv[0] !== 'node') return true;
+  return !argv.slice(1).some((word) => NON_EXECUTING_NODE_FLAGS.has(word));
 }
 
 /**

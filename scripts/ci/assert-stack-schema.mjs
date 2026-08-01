@@ -40,6 +40,27 @@
  * independent expression of the same truth is worth more here than a shared one.
  * If the two ever disagree, one of them is wrong and both are checked.
  *
+ * ## What "matches" means here, exactly
+ *
+ * **Names.** Table names, column names per table, and a count. Column *types*,
+ * nullability, defaults, indexes, constraints and enum values are not compared,
+ * so a migration that only widens a column or drops a `not null` is invisible to
+ * this file. That was pointed out by a blind review of the first version, whose
+ * header said "the schema the migrations describe" and measured less than that.
+ * Two honest reasons for the boundary, rather than one excuse: the snapshot's
+ * type spellings and `information_schema`'s are different vocabularies
+ * (`varchar(80)` against `character varying`, enum names against `USER-DEFINED`),
+ * so comparing them means a translation table that would be its own source of
+ * false reds; and the failure this step exists for — a migration that reported
+ * success over a schema that is not there — is a *presence* failure. The type
+ * comparison belongs to `verify`'s `assert-tables.mjs`, which has the built
+ * schema export to compare against.
+ *
+ * The migration count is likewise a count: N rows in drizzle's ledger against N
+ * entries in the journal. A volume already holding N *different* migrations
+ * satisfies it. What it catches is the case it was written for — a migration
+ * folder that never reached the image, so nothing was applied at all.
+ *
  * ## Mutations it catches
  *
  * - a table dropped out of the composed stack after a green migration (ledger

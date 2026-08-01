@@ -70,6 +70,7 @@ import {
   LAUNCHER_NAMES,
   PACKAGE_MANAGER_NAMES,
   parseScript,
+  runsItsScript,
   singleCommandProblems,
 } from './shell-command.mjs';
 
@@ -224,6 +225,12 @@ function invokesIn(directory, script) {
   const shown = `${directory}/${script}`.replace(/\\/g, '');
   return command(`\`node …/${shown}\``, ['node'], ({ argv }) => {
     if (argv[0] !== 'node') return false;
+    // `node --check x.mjs` parses the file, exits 0, and runs none of it — and
+    // it is one unconditional command with the script as its first operand, so
+    // the shape rule cannot see it either. Found by a blind cross-lineage review
+    // of the first version of that rule. A node invocation that is not going to
+    // run the script reads as *missing*, which is loud.
+    if (!runsItsScript(argv)) return false;
     const operand = firstOperand(argv);
     return operand !== undefined && path.test(operand);
   });
@@ -396,6 +403,35 @@ const TRUSTS_CA = composeStack('trust-ca');
 const TEARS_DOWN = composeStack('down');
 const ASSERTS_SIGNUP = invokes('assert-signup-verifies\\.mjs');
 
+/**
+ * The report files being *deleted*, which is the other half of a report reset.
+ *
+ * Round 3 of #40 split "Reset the test reports" into a delete step and a record
+ * step, because a protected step is one command now. A blind cross-lineage
+ * review caught what that cost: the pair only ever named the `$GITHUB_ENV`
+ * export, so after the split the delete could be dropped with the policy still
+ * clean. Deleting it is not harmless — the freshness check is an mtime
+ * comparison, and a report restored from a cache with a new mtime passes it.
+ */
+function deletesReports(...files) {
+  return command(`\`rm -f ${files.join(' ')}\``, ['rm'], ({ argv }) => {
+    if (basename(argv[0]) !== 'rm') return false;
+    return files.every((file) => argv.slice(1).includes(file));
+  });
+}
+
+const DELETES_VITEST_REPORTS = {
+  what: 'the step that deletes the vitest reports',
+  test: deletesReports('vitest-report.json', 'vitest-ci-report.json'),
+  because:
+    "freshness is proven by comparing a report's mtime against a recorded timestamp, and a report restored from a cache carries a new mtime; deleting them first is what makes the timestamp mean the run rather than the restore",
+};
+const DELETES_E2E_REPORT = {
+  what: 'the step that deletes the e2e report',
+  test: deletesReports('playwright-report.json'),
+  because: 'same reason as the vitest delete: a leftover report is the quietest possible green',
+};
+
 const FETCHES_BASELINE = {
   what: 'the fetch of the baseline manifest from main',
   test: command('`git fetch … refs/heads/main`', ['git'], ({ argv }) => {
@@ -502,7 +538,7 @@ const REQUIRED_STEPS = {
       rule: 'required-job-steps',
       what: 'the unit/integration suite',
       test: RUNS_VITEST,
-      requires: [RESETS_VITEST_REPORT],
+      requires: [RESETS_VITEST_REPORT, DELETES_VITEST_REPORTS],
     },
     {
       rule: 'required-job-steps',
@@ -543,6 +579,7 @@ const REQUIRED_STEPS = {
       test: RUNS_PLAYWRIGHT,
       requires: [
         RESETS_E2E_REPORT,
+        DELETES_E2E_REPORT,
         {
           what: 'the browser-presence assertion',
           test: ASSERTS_CHROMIUM,
@@ -1019,11 +1056,29 @@ function checkProtectedStepShape(jobs, path, add) {
  * because the moment a second `-f` list exists nothing in this file can prove it
  * matches the first.
  *
- * The environment variable itself must be declared on the job, too. Without it
- * `composeArgs` falls back to `docker-compose.yml` alone — the mailpit overlay
- * silently gone, which is a stack with no relay and a mail assertion that would
- * be waiting for a message nobody could have sent.
+ * The environment variable itself must be declared on the job, and **only** on
+ * the job. Without it `composeArgs` falls back to `docker-compose.yml` alone —
+ * the mailpit overlay silently gone, which is a stack with no relay and a mail
+ * assertion waiting for a message nobody could have sent. And re-declared on a
+ * *step*, it is the original defect with a different spelling: a blind
+ * cross-lineage review of the first version of this rule pointed out that
+ *
+ *     - run: node scripts/ci/assert-deploy-preflight.mjs
+ *     - run: ATRIUM_COMPOSE_FILES=docker-compose.yml node scripts/ci/compose-stack.mjs up
+ *
+ * passed it, and that is exactly "the preflight sees one stack and the boot
+ * brings up another". So the variable may be set in one place, and a step that
+ * re-points it — by `env:` or by a one-shot assignment — is refused.
+ *
+ * Two more spellings from the same review: `docker-compose` (the v1 binary) is a
+ * compose invocation this rule used to read as an unrelated command, and
+ * `sh -c '…'` hides an entire script from an engine that parses `run:`. Neither
+ * has any business in this job, so both are refused by name.
  */
+const COMPOSE_VARIABLES = ['ATRIUM_COMPOSE_FILES', 'ATRIUM_COMPOSE_PROJECT'];
+/** Shells invoked as a command: everything inside `-c` is opaque to this engine. */
+const SHELL_WRAPPERS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'busybox']);
+
 function checkComposeEntrypoint(jobs, path, add) {
   const job = jobs[DEPLOY_JOB];
   if (!isPlainObject(job)) return;
@@ -1036,13 +1091,39 @@ function checkComposeEntrypoint(jobs, path, add) {
   }
   const steps = Array.isArray(job.steps) ? job.steps : [];
   for (const [index, step] of steps.entries()) {
-    if (!isPlainObject(step) || typeof step.run !== 'string') continue;
-    for (const { argv } of parseScript(step.run).commands) {
-      if (basename(argv[0] ?? '') !== 'docker') continue;
-      if (!argv.slice(1).includes('compose')) continue;
+    if (!isPlainObject(step)) continue;
+    for (const variable of COMPOSE_VARIABLES) {
+      if (isPlainObject(step.env) && Object.hasOwn(step.env, variable)) {
+        add(
+          'compose-through-one-entrypoint',
+          `${path}: jobs.${DEPLOY_JOB}.steps.${index}.env re-declares \`${variable}\`. It is declared once, on the job, precisely so that the preflight and the boot cannot be looking at different stacks; a step that re-points it is that divergence with the job-level declaration still in place to reassure the reader.`,
+        );
+      }
+    }
+    if (typeof step.run !== 'string') continue;
+    for (const { argv, raw, assignments } of parseScript(step.run).commands) {
+      for (const { name } of assignments) {
+        if (COMPOSE_VARIABLES.includes(name)) {
+          add(
+            'compose-through-one-entrypoint',
+            `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run sets \`${name}\` for one command. Same divergence as a step \`env:\`, one line shorter: the assertions before and after it resolve a different stack from the one this command touches.`,
+          );
+        }
+      }
+      const word = basename(argv[0] ?? '');
+      if (SHELL_WRAPPERS.has(word) && raw.includes('-c')) {
+        add(
+          'compose-through-one-entrypoint',
+          `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run invokes \`${word} -c\`. Everything inside that string is opaque to this engine — including a second \`docker compose\` with its own \`-f\` list — so it is refused rather than parsed at one remove.`,
+        );
+        continue;
+      }
+      const isCompose =
+        word === 'docker-compose' || (word === 'docker' && argv.slice(1).includes('compose'));
+      if (!isCompose) continue;
       add(
         'compose-through-one-entrypoint',
-        `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run invokes \`docker compose\` directly. It would carry its own \`-f\` list, and a second file list is one the preflight, the image record and every assertion here cannot see — which is exactly how a "safe" overlay let the preflight approve one stack while another came up. Use \`node scripts/ci/compose-stack.mjs <verb>\`, which resolves the list from ATRIUM_COMPOSE_FILES like everything else in this job.`,
+        `${path}: jobs.${DEPLOY_JOB}.steps.${index}.run invokes \`${word}\` directly. It would carry its own \`-f\` list, and a second file list is one the preflight, the image record and every assertion here cannot see — which is exactly how a "safe" overlay let the preflight approve one stack while another came up. Use \`node scripts/ci/compose-stack.mjs <verb>\`, which resolves the list from ATRIUM_COMPOSE_FILES like everything else in this job.`,
       );
     }
   }
@@ -1168,6 +1249,17 @@ export function checkWorkflow(source, path = '<workflow>') {
         );
       }
       checkCommandShadowing(value, where, add, path);
+    }
+
+    // `env: { PATH: … }` is a PATH assignment this rule claimed to ban and did
+    // not, because it only ever read `run:` scripts. GitHub applies it to the
+    // step, the job or the whole workflow depending on where it sits, so it is
+    // the same bypass as `export PATH=…` with a longer reach and no shell.
+    if (key === 'env' && isPlainObject(value) && Object.hasOwn(value, 'PATH')) {
+      add(
+        'no-command-shadowing',
+        `${path}: \`env:\` at ${where} sets \`PATH\`. Every rule in this file recognises a command by its word, and PATH decides which binary that word resolves to — the same bypass as \`export PATH=…\` inside a script, which this rule already refuses. Invoke the binary by its full path instead.`,
+      );
     }
   }
 

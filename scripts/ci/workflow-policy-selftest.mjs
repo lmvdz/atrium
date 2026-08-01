@@ -430,6 +430,16 @@ const PAIRS = {
     step: 'the real-page assertion',
     needs: 'the signup-and-verification assertion',
   },
+  suiteNeedsDelete: {
+    job: 'verify',
+    step: 'the unit/integration suite',
+    needs: 'the step that deletes the vitest reports',
+  },
+  e2eSuiteNeedsDelete: {
+    job: 'e2e',
+    step: 'the Playwright suite',
+    needs: 'the step that deletes the e2e report',
+  },
 };
 
 /** Where a violation says it is: `jobs.<job>.steps.<n>.<key>`. */
@@ -1300,7 +1310,139 @@ const MUTATIONS = [
     message: /jobs\.verify\.steps\.\d+\.run is a protected step/,
   })),
 
+  // ---- what the first version of the shape rule still let through ---------
+  // Every one of these was found by a blind cross-lineage review of that rule,
+  // and every one of them reproduced: the policy engine reported the mutated
+  // workflow clean. They are the same property as `false && …; true` — invoked,
+  // not run — one level below the shell.
+  {
+    name: 'the page assertion compiled rather than run: `node --check`',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: node --check scripts/ci/assert-page-serves.mjs',
+      ),
+    // Deliberately `required-job-steps` and not the shape rule: `node --check`
+    // is one unconditional command and there is nothing wrong with its *shape*.
+    // What is wrong is that it is not an invocation of the script at all, so the
+    // honest answer is that the step is missing.
+    message: /never runs the real-page assertion/,
+  },
+  {
+    name: 'the same, spelled `node -c`',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-ws-upgrade.mjs',
+        'run: node -c scripts/ci/assert-ws-upgrade.mjs',
+      ),
+    message: /never runs the websocket-upgrade assertion/,
+  },
+  {
+    name: 'a version banner instead of an assertion: `node --version`',
+    rule: 'required-job-steps',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-stack-config.mjs',
+        'run: node --version scripts/ci/assert-stack-config.mjs',
+      ),
+    message: /never runs the production-configuration assertion/,
+  },
+  {
+    name: 'the assertion behind `xargs -r`, which runs it zero times on empty stdin',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-page-serves.mjs',
+        'run: xargs -r node scripts/ci/assert-page-serves.mjs',
+      ),
+    message: /reaches the command through `xargs`/,
+  },
+  {
+    name: 'the assertion detached with `sudo -b`, so the step reports before it finishes',
+    rule: 'protected-steps-run-one-command',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/assert-rate-limit.mjs',
+        'run: sudo -b node scripts/ci/assert-rate-limit.mjs',
+      ),
+    message: /which detaches it/,
+  },
+  {
+    name: 'PATH redefined in a step `env:` rather than in a script',
+    rule: 'no-command-shadowing',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Lint\n        run: pnpm lint\n',
+        '      - name: Lint\n        env:\n          PATH: /tmp/fake-bin:/usr/bin\n        run: pnpm lint\n',
+      ),
+    message: /`env:` at .* sets `PATH`/,
+  },
+  {
+    name: 'the vitest report delete dropped, so a restored report keeps its fresh mtime',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Delete the test reports'),
+    pair: PAIRS.suiteNeedsDelete,
+  },
+  {
+    name: 'the e2e report delete dropped for the same reason',
+    rule: 'required-step-prerequisites',
+    mutate: (s) => deleteStep(s, 'Delete the e2e report'),
+    pair: PAIRS.e2eSuiteNeedsDelete,
+  },
+
   // ---- one compose file list, not two -------------------------------------
+  {
+    name: 'the compose file list re-pointed for one command by a one-shot assignment',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        'run: node scripts/ci/compose-stack.mjs up',
+        'run: ATRIUM_COMPOSE_FILES=docker-compose.yml node scripts/ci/compose-stack.mjs up',
+      ),
+    message: /sets `ATRIUM_COMPOSE_FILES` for one command/,
+  },
+  {
+    name: 'the same divergence spelled as a step `env:`',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      replaceOnce(
+        s,
+        '      - name: Bring the stack up\n',
+        '      - name: Bring the stack up\n        env:\n          ATRIUM_COMPOSE_FILES: docker-compose.yml\n',
+      ),
+    message: /re-declares `ATRIUM_COMPOSE_FILES`/,
+  },
+  {
+    name: 'a second stack brought up with the v1 `docker-compose` binary',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      insertAfter(s, '        run: node scripts/ci/compose-stack.mjs up', [
+        '',
+        '      - name: A second stack',
+        '        run: docker-compose -f other.yml -p atrium-ci up -d',
+      ]),
+    message: /invokes `docker-compose` directly/,
+  },
+  {
+    name: 'a compose invocation hidden inside `sh -c`, where this engine cannot read it',
+    rule: 'compose-through-one-entrypoint',
+    mutate: (s) =>
+      insertAfter(s, '        run: node scripts/ci/compose-stack.mjs up', [
+        '',
+        '      - name: A second stack',
+        '        run: sh -c "docker compose -f other.yml -p atrium-ci up -d"',
+      ]),
+    message: /invokes `sh -c`/,
+  },
   {
     name: 'a bare `docker compose` in the deploy job, carrying its own file list',
     rule: 'compose-through-one-entrypoint',
@@ -1310,7 +1452,7 @@ const MUTATIONS = [
         '      - name: Show what came up',
         '        run: docker compose -p "$ATRIUM_COMPOSE_PROJECT" -f docker-compose.yml ps',
       ]),
-    message: /invokes `docker compose` directly/,
+    message: /invokes `docker` directly/,
   },
   {
     name: 'the deploy job losing the one variable every compose invocation resolves from',

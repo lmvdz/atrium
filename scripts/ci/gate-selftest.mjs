@@ -38,6 +38,7 @@ import { checkPlaywrightReport } from './assert-playwright-report.mjs';
 import { checkSchema } from './assert-stack-schema.mjs';
 import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
+import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
 import { readFreshReport } from './report-file.mjs';
 import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
@@ -1097,29 +1098,34 @@ const CASES = [
     expect: 'clean',
   },
   {
-    name: 'every verb resolves the same file list from the one variable',
+    name: 'every verb, and the assertions, resolve one file list from the one variable',
     run: () => {
       const env = composeEnv();
-      const lists = Object.keys(VERBS).map((verb) =>
-        composeStackArgv(verb, env)
-          .filter((_word, index, argv) => argv[index - 1] === '-f')
-          .join(':'),
-      );
-      return new Set(lists).size === 1 && lists[0] === env.ATRIUM_COMPOSE_FILES
+      // `composeArgs` is what every assertion in the job uses — the preflight's
+      // `docker compose config` included — so it is the other side of the
+      // comparison rather than a second copy of the expectation. The first
+      // version of this case compared the four verbs against each other, which
+      // is a claim about four call sites that all read the same constant, and a
+      // blind review said so.
+      const assertions = fileList(composeArgs(env));
+      const verbs = Object.keys(VERBS).map((verb) => fileList(composeStackArgv(verb, env)));
+      const all = new Set([assertions, ...verbs]);
+      return all.size === 1 && assertions === env.ATRIUM_COMPOSE_FILES
         ? []
         : [
-            `the verbs resolve ${JSON.stringify(lists)}, not one list equal to ATRIUM_COMPOSE_FILES`,
+            `the assertions resolve ${JSON.stringify(assertions)} and the verbs resolve ${JSON.stringify(verbs)}; they must be one list, equal to ATRIUM_COMPOSE_FILES`,
           ];
     },
     expect: 'clean',
   },
   {
-    name: 'an overlay added to the variable reaches every verb, not only the preflight',
+    name: 'an overlay added to the variable reaches every verb and the assertions alike',
     run: () => {
       const env = { ...composeEnv(), ATRIUM_COMPOSE_FILES: 'docker-compose.yml:overlay.yml' };
       const missing = Object.keys(VERBS).filter(
         (verb) => !composeStackArgv(verb, env).includes('overlay.yml'),
       );
+      if (!composeArgs(env).includes('overlay.yml')) missing.push('the assertions (composeArgs)');
       return missing.length === 0 ? [] : [`${missing.join(', ')} did not see the overlay`];
     },
     expect: 'clean',
@@ -1176,6 +1182,57 @@ const CASES = [
     expect: /which the shell would expand/,
   },
   {
+    name: 'a deploy step that compiles the assertion instead of running it',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          'run: node scripts/ci/assert-stack-config.mjs',
+          'run: node --check scripts/ci/assert-stack-config.mjs',
+        ),
+      ),
+    // The ledger's version of the `node --check` bypass: the policy reads it as
+    // a missing step, and this file must not go on running the script anyway —
+    // which is exactly what round 2's regex-recovered filename did.
+    expect: /cannot classify/,
+  },
+  {
+    name: 'a deploy step whose assertion `xargs` may run zero times',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          'run: node scripts/ci/assert-stack-health.mjs',
+          'run: xargs -r node scripts/ci/assert-stack-health.mjs',
+        ),
+      ),
+    expect: /is not a single unconditional command/,
+  },
+  {
+    name: 'a deploy step re-pointing the compose file list for one command',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          'run: node scripts/ci/compose-stack.mjs up',
+          'run: ATRIUM_COMPOSE_FILES=docker-compose.yml node scripts/ci/compose-stack.mjs up',
+        ),
+      ),
+    expect: /sets `ATRIUM_COMPOSE_FILES` for the command/,
+  },
+  {
+    name: 'a second `cat` step, which used to become a second "deployment environment"',
+    run: () =>
+      ledgerRefuses((source) =>
+        source.replace(
+          '      - name: Assert every container is healthy\n',
+          '      - name: Dump the host release\n        run: cat /etc/os-release\n\n      - name: Assert every container is healthy\n',
+        ),
+      ),
+    // Round 3's first version classified *any* `cat` as the .env writer, which
+    // is an EXEMPT stage and is skipped — so an added step became a stage the
+    // ledger silently never ran, which is the coverage invariant defeating
+    // itself. The classification reads what the command writes now.
+    expect: /cannot classify/,
+  },
+  {
     name: 'a deploy stage the ledger has never heard of',
     run: () =>
       ledgerRefuses((source) =>
@@ -1192,6 +1249,11 @@ const CASES = [
     expect: 'clean',
   },
 ];
+
+/** The `-f` values of a compose argv, in order, as a colon-joined list. */
+function fileList(argv) {
+  return argv.filter((_word, index) => argv[index - 1] === '-f').join(':');
+}
 
 /** The deploy job's own compose environment, as ci.yml declares it. */
 function composeEnv() {

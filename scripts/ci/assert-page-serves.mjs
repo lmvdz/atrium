@@ -189,6 +189,34 @@ check(
   '`/` renders the same account bar signed in and signed out, so the response does not depend on the request',
 );
 
+/**
+ * And the signed-out half is the app too.
+ *
+ * A blind cross-lineage review of the version above found what it still allowed:
+ * a Caddyfile that proxies `/` **when a session cookie is present** and answers
+ * a fixture otherwise passes every check so far, because the authenticated
+ * branch is the real app and the polarity holds by construction. What is proven
+ * is therefore narrower than "`/` cannot be a fixture" — it is "`/` cannot be a
+ * *session-independent* fixture".
+ *
+ * So the signed-out response is compared against a route that is definitely the
+ * app: `/sign-in`, whose Server Action id could not have been guessed. Next
+ * writes `x-powered-by` and a `Vary` naming its RSC headers on every rendered
+ * page, and `respond` writes neither. Stated for what it is: this is a
+ * *constant* again, and a Caddyfile can forge a header as easily as markup — but
+ * forging these means impersonating the app rather than serving a stale copy of
+ * it, and the boundary this file draws has always been at deliberate
+ * impersonation.
+ */
+for (const header of ['x-powered-by', 'vary']) {
+  const fromSignIn = String(signIn.headers[header] ?? '');
+  const fromRoot = String(anonymous.headers[header] ?? '');
+  check(
+    fromRoot === fromSignIn && fromRoot !== '',
+    `GET / answers with ${header}: ${JSON.stringify(fromRoot || null)} while GET /sign-in — which is unquestionably the app — answers ${JSON.stringify(fromSignIn || null)}. The two routes are not being served by the same thing, which is what a proxy answering \`/\` from a fixture looks like when the fixture is only shown to callers without a session.`,
+  );
+}
+
 // ── 3. A second route, behind the session, reading the same database ─────────
 
 const app = await follow(target, '/app', { jar: session.jar });
