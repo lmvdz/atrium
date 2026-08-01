@@ -137,13 +137,18 @@ function invokes(script) {
  * The rule is general on purpose. Every assert script below was re-examined for
  * a setup dependency and the ones that have one now declare it, so the next
  * script to acquire one has an obvious place to say so rather than a comment
- * nobody reads. Of the five pairs, the ratchet's is the only one that failed
- * *open* on its own — the rest already went red at runtime when their setup was
- * missing (a report gate with no run-start timestamp refuses to prove freshness;
+ * nobody reads. The ratchet's pair is the only one that failed *open* on its
+ * own — the rest already went red at runtime when their setup was missing (a
+ * report gate with no run-start timestamp refuses to prove freshness;
  * `assert-tables.mjs` against an unmigrated database finds an empty table set;
  * `assert-chromium.mjs` without an install finds no browser). Declaring them
  * moves the failure from the middle of a CI run to the edit that caused it, and
- * the ordering half of the rule is new information for all five.
+ * the ordering half of the rule is new information for every one of them.
+ *
+ * How many there are is `PREREQUISITE_PAIRS.length`, derived below and printed
+ * by the self-test — not a number in this comment. A first draft of it said
+ * "five" and the table already held nine, which is round 2's rule-count mistake
+ * reappearing in a fresh place within a day of being fixed elsewhere.
  *
  * `policy-steps-present` covers the meta-guards: the things that check the
  * workflow itself. `required-job-steps` covers the verification work.
@@ -295,6 +300,24 @@ const REQUIRED_STEPS = {
     },
   ],
 };
+
+/**
+ * Every declared (step → prerequisite) edge, derived from REQUIRED_STEPS.
+ *
+ * Round 2's lesson, applied to the new rule before it can bite: the receipt for
+ * that round said "15 rules" over an engine carrying 18, because the number was
+ * something a human counted. Anything a receipt wants to quote about this table
+ * comes from here.
+ */
+export const PREREQUISITE_PAIRS = Object.entries(REQUIRED_STEPS).flatMap(([jobId, required]) =>
+  required.flatMap((step) =>
+    (step.requires ?? []).map((prerequisite) => ({
+      job: jobId,
+      step: step.what,
+      needs: prerequisite.what,
+    })),
+  ),
+);
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

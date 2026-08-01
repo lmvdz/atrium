@@ -345,9 +345,13 @@ zero tests exits 0 just like one that passed 315:
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. Five pairs are declared: the
-  ratchet's fetch, both report resets, the migration's wait for Postgres and the
-  schema assertion's migration, and the browser install the e2e suite needs.
+  prerequisite is in the same job *and earlier*. Nine pairs across eight steps:
+  the ratchet's fetch of `origin/main`; both report resets, before the runs they
+  reset for; both report gates, after those runs; the migration's wait for
+  Postgres and the schema assertion's migration; and the browser install and
+  browser check the Playwright suite needs. The count is derived —
+  `PREREQUISITE_PAIRS.length`, printed by the self-test — because a hand-counted
+  number in a receipt is how round 2 claimed 15 rules over an engine with 18.
 - The two Vitest reports must describe the same run — every status, the file
   count, and the identity of every individual test, not just the total. Matching
   totals prove little; a gutted reporter cannot invent 315 test names that agree

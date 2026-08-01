@@ -24,7 +24,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions, quoted verbatim
 
 import { readFileSync } from 'node:fs';
-import { checkWorkflowFile, RULES } from './workflow-policy.mjs';
+import { checkWorkflowFile, PREREQUISITE_PAIRS, RULES } from './workflow-policy.mjs';
 
 const WORKFLOW = process.argv[2] ?? '.github/workflows/ci.yml';
 
@@ -455,7 +455,7 @@ function main() {
     return 1;
   }
   console.info(
-    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected by the rule it targets; all ${RULES.length} declared rules exercised; the real file clean.`,
+    `Workflow policy self-test passed: ${MUTATIONS.length} mutations of ${WORKFLOW}, each rejected by the rule it targets; all ${RULES.length} declared rules exercised, over ${PREREQUISITE_PAIRS.length} declared step→prerequisite pairs; the real file clean.`,
   );
   return 0;
 }
