@@ -158,23 +158,65 @@ export function isBlank(text: string | null | undefined): boolean {
  *  - `U+2060` WORD JOINER, and `U+2061`–`U+2064` the invisible mathematical
  *    operators — no glyph, no shaping effect, no joining behaviour.
  *  - `U+FEFF` ZERO WIDTH NO-BREAK SPACE / byte-order mark.
- *  - the C0/C1 controls **that are not whitespace**. Tab, newline, vertical tab,
- *    form feed, carriage return and NEL are `\s`, and the whitespace rule above
- *    already owns them: it turns a run of them into one space. Deleting them
- *    here instead **fused the words either side** — `Bob will deploy\tproduction
- *    Friday.` normalized to `deployproduction`, which a quote of
- *    `Bob will deployproduction Friday.` then matched, and the record minted a
- *    word its author never wrote. That was codex's fourth pass, on this
- *    round's own repair. The two clauses partition the controls; neither is an
- *    exception to the other.
  *
  * Everything else that used to be swept up here — the bidi marks, embeddings,
  * overrides and isolates; the soft hyphen; the zero-width joiner and
  * non-joiner — is **content**, because it changes the glyphs a reader sees or
  * the order they see them in. Kept, they are ordinary tokens, and a quote that
  * omits them is simply not the text that is in the message.
+ *
+ * ## The control characters are gone from this list, and r6 is why
+ *
+ * Until r6 there was a second clause, `(?!\s)\p{Cc}`, with a docblock arguing
+ * that it could not fuse two words because "Tab, newline, vertical tab, form
+ * feed, carriage return **and NEL** are `\s`, and the whitespace rule already
+ * owns them".
+ *
+ * **JavaScript's `\s` does not contain U+0085 NEL.** ECMA-262 defines `\s` as
+ * *WhiteSpace* ∪ *LineTerminator*, and NEL is in neither — it is `Cc`, it is not
+ * `Zs`, and it is not a LineTerminator. Nor are U+007F or U+0080–U+009F. The
+ * clause therefore deleted them, and NEL is a Unicode **mandatory line break**
+ * (UAX #14 class BK), so deleting it changes what a reader sees — the exact bar
+ * this list is written to. `Bob will deploy<NEL>production Friday.` normalized to
+ * `deployproduction`, a quote of the fused text matched it, and the receipt was
+ * clean. The comment was false about the *language*, not about the code, which
+ * is the one kind of comment no amount of re-reading the code will catch.
+ *
+ * Two repairs followed, and only the second is a rule:
+ *
+ *  1. Subtract the missing characters — `(?![\t\n\v\f\r ])\p{Cc}` — which is a
+ *     denylist of the controls somebody has checked, and is wrong for U+0085 in
+ *     exactly the same way.
+ *  2. **Stop subtracting.** This list is now nothing but its enumeration, and
+ *     the whitespace rule below reads `\p{White_Space}` — Unicode's own
+ *     published inventory, which *does* contain U+0085 — instead of `\s`. Every
+ *     other control is content: kept, tokenized, and unable to fuse anything.
+ *
+ * The resulting set is enumerated by brute force over U+0000–U+10FFFF in
+ * `residue.test.ts` ("deletes exactly this set of code points and no others"),
+ * because a comment asserting a property of the language is a factual claim and
+ * must be measured rather than reasoned about.
  */
-const DELETABLE = /[​⁠-⁤﻿]|(?!\s)\p{Cc}/gu;
+const DELETABLE = /[\u200B\u2060\u2061\u2062\u2063\u2064\uFEFF]/gu;
+
+/**
+ * **What counts as whitespace** — Unicode's own `White_Space` property, not
+ * JavaScript's `\s`.
+ *
+ * The two differ, and the difference is r6's second major finding. `\s` is
+ * *WhiteSpace* ∪ *LineTerminator* per ECMA-262, which adds U+FEFF (deleted
+ * above, before this ever runs) and, crucially, **omits U+0085 NEL** — a
+ * mandatory line break that every renderer breaks on. A run-collapsing rule that
+ * cannot see NEL leaves a line break inside a "word", and the fold that tried to
+ * compensate deleted it instead and fused the words either side.
+ *
+ * `\p{White_Space}` is a closed, published list, which is the distinction
+ * `RETRO.md` draws between an enumeration that is safe and one that is not.
+ */
+const WHITESPACE_RUN = /\p{White_Space}+/gu;
+
+/** One token that is nothing but whitespace. See `orderedTokens`. */
+const WHITESPACE_TOKEN = /^\p{White_Space}+$/u;
 
 /**
  * `[text](destination)`, and the image form.
@@ -217,8 +259,10 @@ const CODE_SPAN = /(```[\s\S]*?```|``[\s\S]*?``|`[^`\n]*`)/;
  *
  *  1. **Whitespace runs collapse, and the ends are trimmed.** A client wraps a
  *     message and a quote copied out of it carries different line breaks. A run
- *     of horizontal space is not a token in any script.
- *  2. **Characters with no rendering are dropped.** See `INVISIBLE`.
+ *     of horizontal space is not a token in any script. "Whitespace" is
+ *     `\p{White_Space}` and not `\s`; `WHITESPACE_RUN` says why the difference
+ *     cost a round.
+ *  2. **Characters with no rendering are dropped.** See `DELETABLE`.
  *  3. **A typographic apostrophe is an apostrophe.** `won’t` and `won't` are one
  *     word entered two ways; treating them as two produces a refusal that has
  *     nothing to do with what was said.
@@ -259,7 +303,7 @@ function foldProse(text: string): string {
       // autolink does not turn into a stutter that nothing can bear.
       return text === target ? text : `${text} ${target}`;
     })
-    .replace(/\s+/g, ' ');
+    .replace(WHITESPACE_RUN, ' ');
 }
 
 /**
@@ -297,7 +341,7 @@ export function normalizeForRouting(text: string): string {
       })
       .replace(/[*_`]+/g, ' ')
       .replace(DELETABLE, '')
-      .replace(/\s+/g, ' ')
+      .replace(WHITESPACE_RUN, ' ')
       .trim()
       .toLowerCase()
   );
@@ -309,7 +353,8 @@ export function normalizeForRouting(text: string): string {
 
 /**
  * A word in any script: letters, digits and combining marks, with apostrophes
- * *inside* it. Anything else visible is one token of its own.
+ * *inside* it. **Every other single code point is one token of its own** —
+ * including the spaces between words and a standalone apostrophe.
  *
  * The alternation is the whole design. r4's first version split on
  * `/[^a-z0-9']+/`, which is a **denylist of the characters that may carry
@@ -320,15 +365,67 @@ export function normalizeForRouting(text: string): string {
  * deleted). Each one bore its own affirmative and auto-accepted. A Russian
  * sentence, meanwhile, tokenized to *nothing at all* and was refused as empty.
  *
- * So the rule is inverted: a token is a word, or it is a visible character, and
+ * So the rule is inverted: a token is a word, or it is a code point, and
  * `RECEIPT_POLICY.droppableTokens` is the only thing that may go missing.
+ *
+ * ## `[\s\S]` and not `[^\s']`, which is r6's first finding
+ *
+ * r4 fixed the *character class* of the denylist and left the denylist. The
+ * second alternative was `[^\s']`, so the tokenizer **discarded all whitespace
+ * and every standalone ASCII apostrophe** — and the token comparison is the only
+ * comparison the acceptance path makes between a quote and the statement being
+ * minted from it. Four inputs auto-accepted with a `payload.statement` its named
+ * author never wrote:
+ *
+ * | body, quoted verbatim                                | minted statement                          |
+ * | ---------------------------------------------------- | ----------------------------------------- |
+ * | ``Run `rm -rf / tmp/cache` on the box tonight.``      | ``Run `rm -rf /tmp/cache` on the box tonight.`` |
+ * | ``Set the password to `a  b` today, everyone.``       | ``Set the password to `a b` today, everyone.``  |
+ * | `We will deploy production Friday, promise.`          | `We will 'deploy' production 'Friday', promise.` |
+ * | `'We will deploy production Friday.'`                 | the same sentence, as an assertion        |
+ *
+ * The first two are `normalizeForReceipt`'s own named counterexample: it passes
+ * a code segment through byte for byte precisely because *two spaces in a
+ * password are a different password* — and it was correct, and **nothing at the
+ * comparison consulted it**. The last two are the mention/use distinction:
+ * backticks and double quotes are content and were refused, and the plain
+ * apostrophe was invisible, so `'…'` fell through while `‘…’` survived only
+ * because `’` folds to `'` and vanished and `‘` did not. Failing closed by luck
+ * is not a rule.
+ *
+ * The repair is not a longer character class. It is the property that makes the
+ * claim checkable: **the token stream reassembles the text it came from.**
+ * `orderedTokens(t).join('') === normalizeForReceipt(t)` for every `t`, which
+ * `bearing.test.ts` pins over a corpus and over brute-forced code points, and
+ * from which `borne ⇒ the statement is the quote` follows rather than being
+ * asserted in a comment.
  */
-const TOKEN = /[\p{L}\p{N}\p{M}]+(?:'[\p{L}\p{N}\p{M}]+)*|[^\s']/gu;
+const WORD = String.raw`[\p{L}\p{N}\p{M}]+(?:'[\p{L}\p{N}\p{M}]+)*`;
+const TOKEN = new RegExp(String.raw`${WORD}|[\s\S]`, 'gu');
 
 /**
- * Every token of a text, in the order it was written.
+ * The detector's tokenizer: the same word rule, **minus the whitespace**.
  *
- * Deliberately unlike `contentTokens` in all four ways that matter, and each
+ * One difference from `TOKEN`, written as one difference rather than as a second
+ * regex, and it is not a relaxation of the receipt — it is the shape of the two
+ * questions. `routingTokens` runs over `normalizeForRouting`, which has already
+ * collapsed every whitespace run to a single space and deleted the markdown, so
+ * a space token there carries no information at all. Carrying it anyway
+ * **measurably broke the correction scan**: an inserted word arrives with an
+ * inserted space, so `laterRevision` comparing *"We will not deploy production
+ * Friday."* against *"We will deploy production Friday."* resynchronised on the
+ * space instead of on the word, reported a difference on both sides, and read a
+ * plain contradiction as an unrelated sentence.
+ *
+ * The receipt tokenizer cannot make that trade, because there the spacing *is*
+ * the content — see `TOKEN`.
+ */
+const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|\S`, 'gu');
+
+/**
+ * Every token of a text, in the order it was written, **losing nothing**.
+ *
+ * Deliberately unlike `contentTokens` in all five ways that matter, and each
  * one is a defect the gauntlets exploited or could have:
  *
  *  - **No stopword list.** `not`, `all`, `some`, `will`, `might`, `unless` and
@@ -339,19 +436,28 @@ const TOKEN = /[\p{L}\p{N}\p{M}]+(?:'[\p{L}\p{N}\p{M}]+)*|[^\s']/gu;
  *  - **No length floor.** `no` is two characters and inverts a sentence.
  *  - **No character class of "real" words.** Every script, every mark and every
  *    emoji is content; see `TOKEN`.
+ *  - **Nothing is discarded at all.** Not the spaces, not a lone apostrophe.
+ *    `join('')` reconstructs `normalizeForReceipt(text)` exactly, so two equal
+ *    token streams are two equal texts — which is what the receipt claims and,
+ *    until r6, was not what it proved.
  *
  * Apostrophes are kept *inside* a word, so `won't` is one token and is not
- * `will`. A standalone apostrophe is dropped rather than tokenized — it is a
- * quotation mark, `'online'` is the word `online`, and an apostrophe cannot
- * negate, quantify, or change a modal.
+ * `will`. A standalone apostrophe is its own token: `'online'` is three tokens,
+ * because the marks that turn a sentence into a quotation of a sentence are the
+ * same marks the backtick rule already calls content.
  */
 export function orderedTokens(text: string): string[] {
   return normalizeForReceipt(text).match(TOKEN) ?? [];
 }
 
+/** True when a token is nothing but whitespace. See `alignTokens`. */
+export function isWhitespaceToken(token: string): boolean {
+  return WHITESPACE_TOKEN.test(token);
+}
+
 /** `orderedTokens` under the lossy fold — for detectors, never for a receipt. */
 export function routingTokens(text: string): string[] {
-  return normalizeForRouting(text).match(TOKEN) ?? [];
+  return normalizeForRouting(text).match(ROUTING_TOKEN) ?? [];
 }
 
 /**
@@ -375,19 +481,41 @@ export function sentencesOf(text: string): string[] {
 
 /**
  * What the bearing check found. **`borne` is the only affirmative answer** —
- * every other shape of this result is a refusal, and the two lists say which
- * refusal it is.
+ * every other shape of this result is a refusal, and the three fields beside it
+ * say which refusal it is.
  */
 export interface StatementBearing {
   /**
    * True only when the statement is the quote with nothing removed but
-   * `RECEIPT_POLICY.droppableTokens`, in the order it was written.
+   * `RECEIPT_POLICY.droppableTokens`, in the order it was written — **and,
+   * since r6, that is a fact about the two texts and not only about their
+   * words.** `orderedTokens` loses nothing, so equal non-droppable token
+   * streams and equal spacing is equal text.
+   *
+   * The invariant that keeps this honest: `borne` is true exactly when all three
+   * of `unmatchedInQuote`, `unmatchedInStatement` and `whitespaceDiffers` are
+   * empty/false. A caller that reads the two lists and not the flag would fail
+   * open on a re-spaced code literal, so `escalation.ts` branches on `borne`
+   * first and names every way it can be false.
    */
   borne: boolean;
-  /** Tokens the statement asserts that the quote does not contain, in order. */
+  /** Non-whitespace tokens the statement asserts that the quote does not contain, in order. */
   unmatchedInStatement: string[];
-  /** Tokens the quote contains that the statement drops, in order. */
+  /** Non-whitespace tokens the quote contains that the statement drops, in order. */
   unmatchedInQuote: string[];
+  /**
+   * **At least one space could not be paired.**
+   *
+   * Kept out of the two lists because a refusal that reads *the quote says `" "`*
+   * is a refusal nobody can act on. It is set as collateral whenever words differ
+   * too — an inserted word arrives with an inserted space — so it is *decisive*
+   * only when the two lists are empty, and `escalation.ts` reads the three in
+   * that order. When it is decisive it means something specific: prose spacing is
+   * collapsed to one space on both sides before anything is compared, so the
+   * difference is inside a code span, which is a different literal rather than a
+   * different line wrap.
+   */
+  whitespaceDiffers: boolean;
   /** Set when the check declined to run at all, rather than running and failing. */
   undecidable: 'empty_quote' | 'empty_statement' | 'too_long' | null;
 }
@@ -396,8 +524,61 @@ const declined = (undecidable: StatementBearing['undecidable']): StatementBearin
   borne: false,
   unmatchedInStatement: [],
   unmatchedInQuote: [],
+  whitespaceDiffers: false,
   undecidable,
 });
+
+const sameRun = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((token, index) => token === b[index]);
+
+/**
+ * **The droppable tokens taken out, and the spacing they were holding open
+ * closed behind them.**
+ *
+ * `droppableTokens` holds one entry, `.`, and the licence it grants is *a full
+ * stop may differ*. Taking the mark out and leaving its neighbours untouched
+ * does not grant that licence — it grants a narrower and stranger one, because
+ * the spaces around the mark are tokens now. r6's first draft skipped the mark
+ * inside the alignment loop and left the spaces, so
+ *
+ *     quote:     "While TypeScript is correct that ... after line 6"
+ *     statement: "While TypeScript is correct that after line 6"
+ *
+ * came back as *the same words, spaced differently* — the ellipsis was forgiven
+ * three times over as three full stops, and the space it had been sitting in was
+ * reported as a re-spaced code literal. A true finding with a false reason
+ * attached, which is the defect class this round is for.
+ *
+ * So the removal happens once, up front, on both streams: drop the droppable
+ * tokens, and where dropping one leaves two spaces adjacent — or a space at
+ * either end, which the input could not have had, since `normalizeForReceipt`
+ * trims — close the gap. Nothing else is touched: `` `a  b` `` keeps both of its
+ * spaces, because no mark was removed between them.
+ */
+function stripDroppable(tokens: readonly string[], policy: ReceiptPolicy): string[] {
+  const out: string[] = [];
+  let removed = false;
+  for (const current of tokens) {
+    if (policy.droppableTokens.has(current)) {
+      removed = true;
+      continue;
+    }
+    const previous = out[out.length - 1];
+    const closesAGap =
+      removed &&
+      isWhitespaceToken(current) &&
+      previous !== undefined &&
+      isWhitespaceToken(previous);
+    removed = false;
+    if (closesAGap) continue;
+    out.push(current);
+  }
+  // A removal at either end leaves the space that was next to it exposed. The
+  // input was trimmed, so any whitespace here came from the removal.
+  while (out.length > 0 && isWhitespaceToken(out[out.length - 1] as string)) out.pop();
+  while (out.length > 0 && isWhitespaceToken(out[0] as string)) out.shift();
+  return out;
+}
 
 /**
  * The alignment itself, over tokens somebody else produced.
@@ -407,10 +588,26 @@ const declined = (undecidable: StatementBearing['undecidable']): StatementBearin
  * of the alignment. One alignment, two tokenizations, and the caller says which
  * — rather than two alignments that can drift.
  *
- * Greedy, with a one-sided lookahead so a single extra word resynchronises
- * instead of scrambling the rest of the comparison. Deterministic, total, and
- * bounded by `RECEIPT_POLICY.maxAlignedTokens` — an input too big to align is
- * refused, not approximated.
+ * Deterministic, total, and bounded by `RECEIPT_POLICY.maxAlignedTokens` — an
+ * input too big to align is refused, not approximated.
+ *
+ * ## The verdict and the diagnosis are computed separately, and r6 is why
+ *
+ * `borne` is `sameRun` over the two streams with `stripDroppable` applied: two
+ * lists of tokens, equal length, equal element by element. That is the whole
+ * definition, it is a total function of the inputs, and no heuristic reaches it.
+ *
+ * The three fields beside it are a **diagnosis** — greedy, with a one-sided
+ * lookahead so that one interposed word ("not") is reported as one interposed
+ * word instead of knocking every later token out of alignment. A resynchronising
+ * diff is a judgement call about which tokens correspond, and until r6 that
+ * judgement call *was* the verdict: `borne` was "the diff found nothing", so any
+ * way the diff could be fooled was a way the receipt could be fooled. Now it
+ * only decides what the refusal says.
+ *
+ * The two cannot disagree in the affirmative direction — an elementwise-equal
+ * pair produces an empty diff — and if they ever disagree the other way,
+ * `escalation.ts` has a named problem for it rather than a silent pass.
  */
 export function alignTokens(
   q: readonly string[],
@@ -423,40 +620,59 @@ export function alignTokens(
     return declined('too_long');
   }
 
-  const droppable = (token: string | undefined): boolean =>
-    token !== undefined && policy.droppableTokens.has(token);
+  const quote = stripDroppable(q, policy);
+  const statement = stripDroppable(s, policy);
 
   const unmatchedInQuote: string[] = [];
   const unmatchedInStatement: string[] = [];
+  let whitespaceDiffers = false;
+  /**
+   * One token the diff could not pair. Whitespace sets the flag; every other
+   * token is named in its list. The split is about what the refusal *says* —
+   * a refusal reading *the quote says `" "`* is one nobody can act on — and it
+   * cannot change the verdict, which is `sameRun` above.
+   */
+  const unaccounted = (token: string, into: string[]): void => {
+    if (isWhitespaceToken(token)) whitespaceDiffers = true;
+    else into.push(token);
+  };
   let i = 0;
   let j = 0;
 
-  while (i < q.length && j < s.length) {
-    const qt = q[i];
-    const st = s[j];
+  while (i < quote.length && j < statement.length) {
+    const qt = quote[i];
+    const st = statement[j];
     if (qt === st) {
       i += 1;
       j += 1;
       continue;
     }
-    // A full stop on either side may be skipped silently — that is the entire
-    // licence this check grants, and `droppableTokens` says why.
-    if (droppable(qt)) {
+    // **A space never drives the resynchronisation.** The lookahead below asks
+    // "can this token still be matched later", and a space can always be matched
+    // later, so a stream with spaces in it made the diff ping-pong: a substituted
+    // word was reported, then the space after it dragged a word off the other
+    // side, and the two chased each other to the end of the sentence.
+    // `we ship on Friday afternoon` vs `we ship it on Friday afternoon` named
+    // `it`, `on` and `Friday` instead of `it`. Spacing that could not be paired
+    // is recorded and stepped over; only real tokens steer.
+    if (qt !== undefined && isWhitespaceToken(qt) && st !== undefined && !isWhitespaceToken(st)) {
+      whitespaceDiffers = true;
       i += 1;
       continue;
     }
-    if (droppable(st)) {
+    if (st !== undefined && isWhitespaceToken(st) && qt !== undefined && !isWhitespaceToken(qt)) {
+      whitespaceDiffers = true;
       j += 1;
       continue;
     }
     // A real disagreement. Resynchronise towards whichever side can still be
     // matched, so one interposed word ("not") is reported as one interposed word
     // rather than knocking every later token out of alignment.
-    if (st !== undefined && q.indexOf(st, i + 1) !== -1) {
-      if (qt !== undefined) unmatchedInQuote.push(qt);
+    if (st !== undefined && quote.indexOf(st, i + 1) !== -1) {
+      if (qt !== undefined) unaccounted(qt, unmatchedInQuote);
       i += 1;
     } else {
-      if (st !== undefined) unmatchedInStatement.push(st);
+      if (st !== undefined) unaccounted(st, unmatchedInStatement);
       j += 1;
     }
   }
@@ -464,19 +680,20 @@ export function alignTokens(
   // Whatever is left over on either side is unaccounted for — a trailing
   // "unless CI is red" is exactly this case, and it is why the tail is not
   // forgiven.
-  for (; i < q.length; i += 1) {
-    const token = q[i];
-    if (!droppable(token) && token !== undefined) unmatchedInQuote.push(token);
+  for (; i < quote.length; i += 1) {
+    const leftover = quote[i];
+    if (leftover !== undefined) unaccounted(leftover, unmatchedInQuote);
   }
-  for (; j < s.length; j += 1) {
-    const token = s[j];
-    if (!droppable(token) && token !== undefined) unmatchedInStatement.push(token);
+  for (; j < statement.length; j += 1) {
+    const leftover = statement[j];
+    if (leftover !== undefined) unaccounted(leftover, unmatchedInStatement);
   }
 
   return {
-    borne: unmatchedInQuote.length === 0 && unmatchedInStatement.length === 0,
+    borne: sameRun(quote, statement),
     unmatchedInStatement,
     unmatchedInQuote,
+    whitespaceDiffers,
     undecidable: null,
   };
 }
@@ -492,8 +709,23 @@ export function alignTokens(
  * > Every token of the statement appears in the quote, in the same order, and
  * > every token of the quote appears in the statement, in the same order, except
  * > for the full stop in `RECEIPT_POLICY.droppableTokens`. A token is a word in
- * > any script, or a visible mark, after the differences `normalizeForReceipt`
- * > admits.
+ * > any script, or **any single code point** — a mark, a space, an apostrophe —
+ * > after the differences `normalizeForReceipt` admits.
+ *
+ * ## Which is to say: the statement *is* the quote
+ *
+ * That sentence was in this docblock before r6 and was not true of the code.
+ * The tokenizer discarded whitespace and standalone apostrophes, and this
+ * comparison is the only one the acceptance path makes between the quote and the
+ * statement being minted — so ``Run `rm -rf / tmp/cache` …`` bore ``Run `rm -rf
+ * /tmp/cache` …``, and `We will deploy production Friday, promise.` bore `We
+ * will 'deploy' production 'Friday', promise.` `TOKEN` has the table.
+ *
+ * It is true now, and it is true *by construction* rather than by inspection:
+ * `orderedTokens` is exhaustive, so `join('')` rebuilds the normalized text, so
+ * two token streams that are equal after removing droppable tokens are two texts
+ * that are equal after removing droppable tokens. `bearing.test.ts` pins the
+ * reassembly property directly, which is the assertion that carries all of this.
  *
  * That is a **structural** claim about two strings. It is not entailment, and
  * nothing here can establish entailment — but combined with the checks around it
@@ -539,13 +771,24 @@ export function statementBearing(
  * Where the scissors may cut
  * ───────────────────────────────────────────────────────────────────────── */
 
-/** The quote's tokens, with the ones a receipt may lose taken out. */
+/**
+ * The quote's tokens, with the ones a receipt may lose taken out — **and the
+ * spacing between them.**
+ *
+ * The two functions below ask *which marks, in which order*, over a text that
+ * has been cut into sentences and reassembled; the cut throws the whitespace
+ * between two sentences away, so comparing spacing here would compare an
+ * artefact of the splitter. Spacing fidelity is proved twice elsewhere and
+ * neither proof runs through here: `alignTokens` reports `whitespaceDiffers`
+ * between the quote and the statement, and `validateProposalProvenance` requires
+ * the quote to occur in the message body **verbatim** under
+ * `normalizeForReceipt`, which passes code spans through byte for byte.
+ */
 function significant(text: string, policy: ReceiptPolicy): string[] {
-  return orderedTokens(text).filter((token) => !policy.droppableTokens.has(token));
+  return orderedTokens(text).filter(
+    (token) => !policy.droppableTokens.has(token) && !isWhitespaceToken(token),
+  );
 }
-
-const sameRun = (a: readonly string[], b: readonly string[]): boolean =>
-  a.length === b.length && a.every((token, index) => token === b[index]);
 
 /**
  * **Is the quote a run of whole sentences of this text, rather than a span cut

@@ -11,9 +11,10 @@ import {
   type ProvenanceProblemKind,
   QUESTION_MARKS,
   RECEIPT_POLICY,
+  statementBearing,
   validateProposalProvenance,
 } from '../src/index.js';
-import { ALICE, at, BOB, ROOM } from './fixtures.js';
+import { ALICE, at, BOB, ROOM, room } from './fixtures.js';
 
 /**
  * Round 5: the residue.
@@ -55,9 +56,11 @@ describe('r5 — polarity in a neighbouring sentence', () => {
   // escalation.ts:533 — "polarity that lives in a different sentence ('I will
   // deploy Friday. Not.') is not visible to this and is not visible to any span
   // rule". True, and the code auto-accepted it anyway.
-  const messages: ProvenanceMessage[] = [
-    { id: 'msg_1', authorId: ALICE, body: 'We will deploy production Friday. Not.' },
-  ];
+  const messages: ProvenanceMessage[] = room({
+    id: 'msg_1',
+    authorId: ALICE,
+    body: 'We will deploy production Friday. Not.',
+  });
   const STATEMENT = 'We will deploy production Friday.';
 
   it('does not certify a quote whose message carries a trailing inverter', () => {
@@ -100,7 +103,7 @@ describe('r5 — polarity in a neighbouring sentence', () => {
           proposer: { kind: 'model' },
           attributedTo: ALICE,
         },
-        [{ id: 'msg_1', authorId: ALICE, body: 'We will deploy production Friday.' }],
+        room({ id: 'msg_1', authorId: ALICE, body: 'We will deploy production Friday.' }),
       ),
     ).toEqual([]);
   });
@@ -129,7 +132,7 @@ describe('r5 — polarity in a neighbouring sentence', () => {
             proposer: { kind: 'model' },
             attributedTo: ALICE,
           },
-          [{ id: 'msg_1', authorId: ALICE, body: `${STATEMENT} ${tail}` }],
+          room({ id: 'msg_1', authorId: ALICE, body: `${STATEMENT} ${tail}` }),
         ),
       ).toEqual(['quote_omits_surrounding_text']);
     }
@@ -151,7 +154,7 @@ describe('r5 — polarity in a neighbouring sentence', () => {
           proposer: { kind: 'model' },
           attributedTo: ALICE,
         },
-        [{ id: 'msg_1', authorId: ALICE, body: `${STATEMENT}\n> Not.` }],
+        room({ id: 'msg_1', authorId: ALICE, body: `${STATEMENT}\n> Not.` }),
       ),
     ).toEqual(['quote_omits_surrounding_text']);
   });
@@ -167,7 +170,7 @@ describe('r5 — polarity in a neighbouring sentence', () => {
           proposer: { kind: 'model' },
           attributedTo: ALICE,
         },
-        [{ id: 'msg_1', authorId: ALICE, body: `Hypothetically. ${STATEMENT}` }],
+        room({ id: 'msg_1', authorId: ALICE, body: `Hypothetically. ${STATEMENT}` }),
       ),
     ).toEqual(['quote_omits_surrounding_text']);
   });
@@ -175,9 +178,11 @@ describe('r5 — polarity in a neighbouring sentence', () => {
 
 describe('r5 — normalization may not do semantic damage', () => {
   it('does not certify an inline code sample as its author"s assertion', () => {
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: ALICE, body: '`Deploy production Friday.`' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: ALICE,
+      body: '`Deploy production Friday.`',
+    });
     expect(
       kinds(
         {
@@ -194,13 +199,11 @@ describe('r5 — normalization may not do semantic damage', () => {
   });
 
   it('does not certify a fenced code block as its author"s assertion', () => {
-    const messages: ProvenanceMessage[] = [
-      {
-        id: 'msg_1',
-        authorId: ALICE,
-        body: '```\nDeploy production Friday.\n```',
-      },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: ALICE,
+      body: '```\nDeploy production Friday.\n```',
+    });
     expect(
       kinds(
         {
@@ -219,13 +222,11 @@ describe('r5 — normalization may not do semantic damage', () => {
   it('does not let a markdown link"s destination vanish', () => {
     // The security one: the accepted statement names the safe URL while the
     // record's actionable link points somewhere else.
-    const messages: ProvenanceMessage[] = [
-      {
-        id: 'msg_1',
-        authorId: ALICE,
-        body: 'Use [https://safe.example/app](https://evil.example/app) today.',
-      },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: ALICE,
+      body: 'Use [https://safe.example/app](https://evil.example/app) today.',
+    });
     expect(
       kinds(
         {
@@ -261,7 +262,7 @@ describe('r5 — normalization may not do semantic damage', () => {
           proposer: { kind: 'model' },
           attributedTo: BOB,
         },
-        [{ id: 'msg_1', authorId: BOB, body: rendered }],
+        room({ id: 'msg_1', authorId: BOB, body: rendered }),
       ),
     ).not.toEqual([]);
     // …and a character that really does render as nothing is still dropped, so
@@ -283,27 +284,66 @@ describe('r5 — normalization may not do semantic damage', () => {
     );
   });
 
-  it('does not fuse two words by deleting the tab between them', () => {
-    // codex's fourth pass, on this round's own repair. `\p{Cc}` contains tab,
-    // newline and carriage return; deleting them *before* the whitespace collapse
-    // fused the words either side, so `Bob will deploy\tproduction Friday.`
-    // normalized to `deployproduction` and a quote of that matched it.
-    expect(normalizeForReceipt('Bob will deploy\tproduction Friday.')).toBe(
-      'Bob will deploy production Friday.',
-    );
-    expect(
-      kinds(
-        {
-          type: 'claim',
-          provenance: ['msg_1'],
-          quote: 'Bob will deployproduction Friday.',
-          statement: 'Bob will deployproduction Friday.',
-          proposer: { kind: 'model' },
-          attributedTo: BOB,
-        },
-        [{ id: 'msg_1', authorId: BOB, body: 'Bob will deploy\tproduction Friday.' }],
-      ),
-    ).not.toEqual([]);
+  it('deletes exactly this set of code points, and fuses two words with none of them', () => {
+    // **r6, and the test it replaces is the reason the defect survived r5.** It
+    // was titled "does not fuse two words by deleting the tab between them" and
+    // it exercised `\t` — the one control character JavaScript's `\s` actually
+    // contains. The rule it was pinning is *no deletion may fuse two words*, and
+    // the fold deleted U+0000–U+0008, U+000E–U+001F, U+007F and U+0080–U+009F,
+    // every one of which fused. U+0085 NEL is the sharpest: the docblock named it
+    // as a member of `\s` and it is not one — it is `Cc`, it is not a
+    // LineTerminator, and it is a Unicode **mandatory** line break, so deleting
+    // it changes what a reader sees. A comment asserting a property of the
+    // language is a factual claim, so this test measures instead of arguing.
+    const deleted: number[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      // `x` and `y` are ordinary letters, so anything deleted between them fuses.
+      if (normalizeForReceipt(`x${String.fromCodePoint(cp)}y`) === 'xy') deleted.push(cp);
+    }
+    // The whole set, written out — the enumeration `matching.ts` says it is.
+    expect(deleted.map((cp) => cp.toString(16).toUpperCase().padStart(4, '0'))).toEqual([
+      '200B', // ZERO WIDTH SPACE
+      '2060', // WORD JOINER
+      '2061', // FUNCTION APPLICATION
+      '2062', // INVISIBLE TIMES
+      '2063', // INVISIBLE SEPARATOR
+      '2064', // INVISIBLE PLUS
+      'FEFF', // ZERO WIDTH NO-BREAK SPACE
+    ]);
+
+    // …and the whitespace rule reads `\p{White_Space}`, which is where the two
+    // sets differ: every one of these separates its neighbours rather than
+    // joining them, NEL included.
+    for (const space of ['\t', '\n', '\v', '\f', '\r', '\u0085', '\u2028', '\u2029', '\u00A0']) {
+      expect(
+        normalizeForReceipt(`Bob will deploy${space}production Friday.`),
+        `${JSON.stringify(space)} must collapse to a space, not vanish`,
+      ).toBe('Bob will deploy production Friday.');
+    }
+
+    // …and a control that is *not* whitespace is content, so it neither fuses
+    // nor disappears: a quote of the fused text does not match the message.
+    for (const control of ['\u0001', '\u0008', '\u001F', '\u007F', '\u0080', '\u009F']) {
+      expect(
+        kinds(
+          {
+            type: 'claim',
+            provenance: ['msg_1'],
+            quote: 'Bob will deployproduction Friday.',
+            statement: 'Bob will deployproduction Friday.',
+            proposer: { kind: 'model' },
+            attributedTo: BOB,
+          },
+          room({
+            id: 'msg_1',
+            authorId: BOB,
+            body: `Bob will deploy${control}production Friday.`,
+          }),
+        ),
+        `${JSON.stringify(control)} must not fuse two words`,
+      ).not.toEqual([]);
+    }
   });
 
   it('does not fold distinct identifiers onto each other', () => {
@@ -317,10 +357,10 @@ describe('r5 — normalization may not do semantic damage', () => {
 });
 
 describe('r5 — a later correction is part of the receipt', () => {
-  const messages: ProvenanceMessage[] = [
+  const messages: ProvenanceMessage[] = room(
     { id: 'msg_1', authorId: ALICE, body: 'We will deploy production Friday.' },
     { id: 'msg_2', authorId: ALICE, body: 'Correction: we will not deploy production Friday.' },
-  ];
+  );
   const STATEMENT = 'We will deploy production Friday.';
 
   it('refuses to certify a sentence a later message in the window corrects', () => {
@@ -409,6 +449,13 @@ describe('r5 — a later correction is part of the receipt', () => {
     // and the next pass used *that*: put the correction in a message the proposal
     // cites. A citation is chosen by the proposal, so anything it can exclude is
     // a boundary the proposal controls.
+    //
+    // **The window carries an uncited message, and r6's ledger is why.** With a
+    // window of exactly the two cited messages the round's new rule fires first —
+    // a window the proposal chose is not a window — and the reported kind is the
+    // same, so `later_scan_skips_cited_messages` escaped: this test refused for
+    // a reason that had nothing to do with the rule in its title. Two rules
+    // reporting one kind need a fixture that separates them.
     expect(
       kinds(
         {
@@ -419,14 +466,14 @@ describe('r5 — a later correction is part of the receipt', () => {
           proposer: { kind: 'model' },
           attributedTo: ALICE,
         },
-        [
+        room(
           { id: 'msg_1', authorId: ALICE, body: STATEMENT },
           {
             id: 'msg_2',
             authorId: ALICE,
             body: 'Correction: we will not deploy production Friday.',
           },
-        ],
+        ),
       ),
     ).toEqual(['superseded_by_later_message']);
   });
@@ -528,9 +575,11 @@ describe('r5 — a later correction is part of the receipt', () => {
 
 describe('r5 — speech-act fitness', () => {
   it('does not mint a question as a claim', () => {
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: ALICE, body: 'Would we deploy production Friday?' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: ALICE,
+      body: 'Would we deploy production Friday?',
+    });
     expect(
       kinds(
         {
@@ -603,7 +652,7 @@ describe('r5 — speech-act fitness', () => {
             proposer: { kind: 'model' },
             attributedTo: ALICE,
           },
-          [{ id: 'msg_1', authorId: ALICE, body }],
+          room({ id: 'msg_1', authorId: ALICE, body }),
         ),
       ).toContain('statement_is_not_an_assertion');
     }
@@ -626,7 +675,7 @@ describe('r5 — speech-act fitness', () => {
           proposer: { kind: 'model' },
           attributedTo: ALICE,
         },
-        [{ id: 'msg_1', authorId: ALICE, body }],
+        room({ id: 'msg_1', authorId: ALICE, body }),
       ),
     ).toContain('statement_is_not_an_assertion');
   });
@@ -645,15 +694,17 @@ describe('r5 — speech-act fitness', () => {
           proposer: { kind: 'model' },
           attributedTo: BOB,
         },
-        [{ id: 'msg_1', authorId: BOB, body }],
+        room({ id: 'msg_1', authorId: BOB, body }),
       ),
     ).toContain('statement_is_not_an_assertion');
   });
 
   it('mints the same sentence as an open question', () => {
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: ALICE, body: 'Would we deploy production Friday?' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: ALICE,
+      body: 'Would we deploy production Friday?',
+    });
     expect(
       kinds(
         {
@@ -670,7 +721,7 @@ describe('r5 — speech-act fitness', () => {
 });
 
 describe('r5 — a code span is compared byte for byte', () => {
-  it('does not collapse whitespace inside a code literal', () => {
+  it('refuses to mint a code literal the author did not write, at every layer', () => {
     // This round's own blind review, on this round's own allowlist. Every entry
     // in it is an argument about prose, and the whitespace one was being carried
     // into a literal: two spaces in a sentence are a line wrap, two spaces in a
@@ -682,6 +733,68 @@ describe('r5 — a code span is compared byte for byte', () => {
     expect(normalizeForReceipt('Set   the password to `a  b`   today.')).toBe(
       normalizeForReceipt('Set the password to `a  b` today.'),
     );
+
+    // **The three assertions above were the whole of this test, and the rule they
+    // name was violated one layer up the entire time.** `normalizeForReceipt` is
+    // not what the acceptance path compares — `statementBearing` is, over tokens,
+    // and the tokenizer discarded whitespace, so a test titled for the code-literal
+    // rule passed while both of these auto-accepted with a `payload.statement`
+    // their named author never wrote. A test that pins a rule at a layer nothing
+    // consults is a test that pins nothing.
+    const password = 'Set the deployment password to `a  b` today, everyone.';
+    const respaced = 'Set the deployment password to `a b` today, everyone.';
+    const command = 'Run `rm -rf / tmp/cache` on the box tonight, everyone.';
+    const rehomed = 'Run `rm -rf /tmp/cache` on the box tonight, everyone.';
+
+    for (const [body, minted] of [
+      [password, respaced],
+      [command, rehomed],
+    ] as const) {
+      expect(statementBearing(body, minted).borne, `${minted} must not be borne`).toBe(false);
+      expect(statementBearing(body, minted).whitespaceDiffers).toBe(true);
+      expect(
+        kinds(
+          {
+            type: 'claim',
+            provenance: ['msg_1'],
+            quote: body,
+            statement: minted,
+            proposer: { kind: 'model' },
+            attributedTo: BOB,
+          },
+          room({ id: 'msg_1', authorId: BOB, body }),
+        ),
+      ).toEqual(['statement_respaces_the_quote']);
+
+      // …and at the engine, which is where it would have become a fact.
+      const decision = decideAcceptance(
+        modelProposal({
+          type: 'claim',
+          payload: { statement: minted, claimant: BOB },
+          quote: body,
+        }),
+        { messages: room({ id: 'msg_1', authorId: BOB, body }) },
+      );
+      expect(decision.verdict).toBe('discard');
+      expect(decision.rule).toBe('provenance_failed');
+    }
+
+    // …and the compliant form still certifies, so this is not "refuse anything
+    // with a backtick in it".
+    expect(statementBearing(password, password).borne).toBe(true);
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: password,
+          statement: password,
+          proposer: { kind: 'model' },
+          attributedTo: BOB,
+        },
+        room({ id: 'msg_1', authorId: BOB, body: password }),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -691,9 +804,11 @@ describe('r5 — a detected fault is not weakness', () => {
     // detected discrepancy is never destroyed for being low-confidence — and
     // `findDuplicate` was still upstream of it, destroying the same discrepancy
     // for a different reason.
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: BOB, body: 'Bob will not deploy production Friday.' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: BOB,
+      body: 'Bob will not deploy production Friday.',
+    });
     const staged = modelProposal({
       type: 'claim',
       payload: { statement: 'Bob will deploy production Friday.', claimant: BOB },
@@ -716,9 +831,11 @@ describe('r5 — a detected fault is not weakness', () => {
   });
 
   it('refers an inverted receipt that sits below theta_min', () => {
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: BOB, body: 'Bob will not deploy production Friday.' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: BOB,
+      body: 'Bob will not deploy production Friday.',
+    });
     const decision = decideAcceptance(
       modelProposal({
         type: 'claim',
@@ -733,9 +850,11 @@ describe('r5 — a detected fault is not weakness', () => {
   });
 
   it('still discards a weak reading whose receipt is clean', () => {
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: BOB, body: 'Bob will deploy production Friday.' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: BOB,
+      body: 'Bob will deploy production Friday.',
+    });
     const decision = decideAcceptance(
       modelProposal({
         type: 'claim',
@@ -786,9 +905,11 @@ describe('r5 — an emoji is content', () => {
 
 describe('r5 — a model may not mint an obligation with a name on it', () => {
   it('refuses a model-accepted third-party commitment at the floor', () => {
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: BOB, body: 'Bob will deploy production Friday.' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: BOB,
+      body: 'Bob will deploy production Friday.',
+    });
     const decision = decideAcceptance(
       modelProposal({
         type: 'commitment',
@@ -801,9 +922,11 @@ describe('r5 — a model may not mint an obligation with a name on it', () => {
   });
 
   it('refuses a model-accepted objective too', () => {
-    const messages: ProvenanceMessage[] = [
-      { id: 'msg_1', authorId: BOB, body: 'Ship the narrowing fix this quarter.' },
-    ];
+    const messages: ProvenanceMessage[] = room({
+      id: 'msg_1',
+      authorId: BOB,
+      body: 'Ship the narrowing fix this quarter.',
+    });
     const decision = decideAcceptance(
       modelProposal({
         type: 'objective',

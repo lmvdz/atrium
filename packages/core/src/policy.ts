@@ -296,7 +296,18 @@ export interface ReceiptPolicy {
    * case and `quote` arrives from the same untrusted place every other field
    * does. Above this the check does not degrade, it **refuses** — an input too
    * large to align is an input that has not been checked, and the honest answer
-   * to that is the same as every other unanswerable question here.
+   * to that is the same as every other unanswerable question here. The refusal
+   * is `refer` and not `reject` since r6: `escalation.ts` says why an
+   * unjudgeable input is referred rather than destroyed.
+   *
+   * **800 and not 400, and the reach is unchanged.** r6 made `orderedTokens`
+   * exhaustive — the spaces between words are tokens now, because a token stream
+   * that drops them cannot prove the statement is the quote. A message therefore
+   * costs about twice as many tokens as it did in r5 for exactly the same words,
+   * so the number doubled to keep the *limit* where it was. It is stated in
+   * tokens because that is what the loop counts, and pinned in words by
+   * `bearing.test.ts`, which writes out a 401-word input rather than deriving
+   * one from this table.
    */
   maxAlignedTokens: number;
   /**
@@ -317,10 +328,17 @@ export interface ReceiptPolicy {
    * it does not make a later correction part of acceptance.
    *
    * Bounded for the same reason every other scan here is: the window is somebody
-   * else's input and the scan is linear in it times the sentences in each. Above
-   * this the scan stops, and stopping is safe in the direction that matters —
-   * it can only miss a correction, and a missed correction leaves the receipt
-   * exactly as strong as it was in r4.
+   * else's input and the scan is linear in it times the sentences in each.
+   *
+   * **Above this the scan refuses, and this comment used to say the opposite.**
+   * It argued that stopping was safe "in the direction that matters — it can
+   * only miss a correction", which is precisely the sentence `escalation.ts`
+   * quotes as the argument r5 deleted from `laterRevision`: a window with more
+   * messages in it than this is a window the check did not read, an unread
+   * window is not a clean one, and an input inside a documented limit was
+   * auto-accepting. The code has refused since r5; this paragraph is r6 catching
+   * up with it. A stated limit is not a disposition, and a rationale for a
+   * disposition the code no longer has is worse than no rationale.
    */
   maxLaterMessagesScanned: number;
 }
@@ -328,7 +346,7 @@ export interface ReceiptPolicy {
 export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
   minQuoteLength: 24,
   droppableTokens: Object.freeze(new Set(['.'])) as ReadonlySet<string>,
-  maxAlignedTokens: 400,
+  maxAlignedTokens: 800,
   maxScannedSentences: 200,
   maxLaterMessagesScanned: 200,
 });

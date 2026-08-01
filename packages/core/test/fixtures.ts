@@ -110,6 +110,31 @@ export const system = () => ({ kind: 'system' }) as const;
  * `msg_3` is self-stated. `msg_2` is BOB quoting ALICE — the blockquote shape
  * that makes a receipt look right and be wrong.
  */
+/**
+ * A message the proposal does not cite, so a window is a **room** rather than
+ * the proposal's own selection.
+ *
+ * r6. `laterRevision` refuses a window holding nothing but the messages the
+ * proposal cites — the correction scan then has nothing to read that the
+ * proposal did not choose, and a boundary the proposal controls is the shape of
+ * every padding attack this package has been through. Fixtures that were a
+ * single cited message were not modelling a room; `room(...)` makes them one.
+ *
+ * Deliberately inert: a third author, no retraction marker, and no token in
+ * common with any statement under test, so appending it can only satisfy the
+ * window rule and never fire the scan.
+ */
+export const UNCITED_TAIL: ProvenanceMessage = Object.freeze({
+  id: 'msg_uncited_tail',
+  authorId: 'user_dana',
+  body: 'Anyway, the coffee machine downstairs is working again.',
+});
+
+/** The messages a proposal cites, plus one it did not — see `UNCITED_TAIL`. */
+export function room(...messages: ProvenanceMessage[]): ProvenanceMessage[] {
+  return [...messages, UNCITED_TAIL];
+}
+
 export const MESSAGES: ProvenanceMessage[] = [
   { id: 'msg_1', authorId: ALICE, body: 'Ship the scaffold behind a flag, I think.' },
   { id: 'msg_2', authorId: BOB, body: '> Ship the scaffold behind a flag, I think.\n\nAgreed.' },

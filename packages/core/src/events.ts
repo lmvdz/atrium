@@ -213,9 +213,10 @@ export type CoreEventType = CoreEvent['type'];
  *
  * ## `messages`
  *
- * The messages a receipt check can be run against: at minimum every message the
- * accepted proposal cites. Also a trusted read (the room's own message table),
- * also never payload.
+ * The messages a receipt check can be run against. Not "every message the
+ * accepted proposal cites" — **the room's messages, in room order, continuing
+ * past the ones it cites**, read from the room's own message table in the same
+ * request. Also a trusted read, also never payload.
  *
  * **Required, and non-empty, for any non-human acceptance.** Round 1's second
  * blocking finding was that provenance validation was opt-in: omit the window
@@ -224,6 +225,14 @@ export type CoreEventType = CoreEvent['type'];
  * `undefined`-only check and came out the far side as "nothing to check". Absent
  * and empty are one case now, and it is a refusal. A human acceptance needs
  * nothing here — a person reading the room *is* the receipt.
+ *
+ * **And truncated is a third spelling of the same hole, closed in r6.** This
+ * sentence used to say "at minimum every message the accepted proposal cites",
+ * and a caller that read it literally supplied exactly those — which turns the
+ * later-correction scan off, because every message it was allowed to read is one
+ * the proposal chose. `AcceptanceContext.messages` has the table showing the
+ * same proposal auto-accepting on the narrow window and being refused on the
+ * room's; `laterRevision` refuses the narrow one now.
  */
 export interface TrustedContextInput {
   actor: Actor;
@@ -259,9 +268,15 @@ declare const trustedContextBrand: unique symbol;
  *     no signature, no clock and no I/O — it cannot. If the command layer reads
  *     an actor off a request body, a client is a human as far as every gate in
  *     `authority.ts` is concerned, and nothing here will notice.
- *  2. **That `messages` are the room's real messages.** A caller that fabricates
- *     a window fabricates the receipt with it. The window must be read from the
- *     room's own message table inside the same request.
+ *  2. **That `messages` are the room's real messages, or all of them.** A caller
+ *     that fabricates a window fabricates the receipt with it. The window must
+ *     be read from the room's own message table inside the same request, and it
+ *     must continue past the messages the proposal cites — `laterRevision` reads
+ *     nothing else, so a window that stops at the citations is a correction scan
+ *     that cannot fire. Core refuses the one truncation it can see (a window
+ *     holding *nothing but* the citations) and cannot see a window that stops
+ *     one message later; distinguishing that from a room that genuinely ends
+ *     there needs the message table, which core does not have.
  *  3. **That a replay reconstructs the authority the live append had.** That
  *     needs the actor stored as immutable ledger columns and read back from
  *     them; core folds whatever the caller hands it. Replaying a payload under a

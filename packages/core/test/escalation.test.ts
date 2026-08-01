@@ -21,6 +21,7 @@ import {
   triggersForMessage,
   validateProposalProvenance,
 } from '../src/index.js';
+import { room } from './fixtures.js';
 import {
   DHLOLO,
   JORDAN,
@@ -494,23 +495,64 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     'line 6 (`this.bar()`) changes that, so TypeScript *should not* be so confident that ' +
     "`this.state` is still `'online'` after line 6.";
   /**
-   * The same sentence with the emphasis a model drops while quoting, **written
-   * out** rather than computed.
+   * The same sentence **with the `*…*` emphasis stripped** — the shape a model
+   * produces when it quotes correctly and drops the formatting.
    *
-   * r4's blind review, third occurrence of the derived-probe class in this
-   * ticket (after r3's θ probes and r4's `maxAlignedTokens + 1`): this constant
-   * used to read `normalizeForReceipt(DISPUTE_SENTENCE)` and was then used as the
-   * *expected* value below. Delete the emphasis rule from the normalizer and the
-   * fixture and the assertion move together — the test goes on passing while the
-   * behaviour it names is gone. A probe computed by the code under test cannot
-   * fail on that code.
+   * ## Two rounds of history, and r6 is the second
    *
-   * The backticks survive on purpose: since r5 a code span is content, not
-   * formatting, so a model that drops *those* has changed the sentence. What it
-   * may drop is the paired `*…*`, and that is the only difference between this
-   * string and the one above.
+   * r4's blind review found the derived-probe class here: this constant read
+   * `normalizeForReceipt(DISPUTE_SENTENCE)` and was then used as the *expected*
+   * value, so deleting the emphasis rule moved the fixture and the assertion
+   * together and the test went on passing while the behaviour it named was gone.
+   * A probe computed by the code under test cannot fail on that code.
+   *
+   * The repair wrote the plain form out — and then r5's fourth pass **retired the
+   * emphasis licence**, so the two strings became identical, and the repair
+   * became `const DISPUTE_SENTENCE_PLAIN = DISPUTE_SENTENCE`. Three assertions
+   * then compared a value with itself while this docblock went on describing a
+   * difference that was not there: the derived-probe defect again, with an alias
+   * standing in for the derivation.
+   *
+   * So it is written out, it is genuinely different, and the difference is
+   * asserted rather than described. The backticks stay: since r5 a code span is
+   * content, not formatting, so a model that drops *those* has changed the
+   * sentence.
    */
-  const DISPUTE_SENTENCE_PLAIN = DISPUTE_SENTENCE;
+  const DISPUTE_SENTENCE_PLAIN =
+    "While TypeScript is correct that `this.state` must be `'online'` immediately after line 5, " +
+    'line 6 (`this.bar()`) changes that, so TypeScript should not be so confident that ' +
+    "`this.state` is still `'online'` after line 6.";
+
+  it('has a plain form that really differs from the sentence as written', () => {
+    // The assertion the alias could not make. If the emphasis licence ever comes
+    // back, this stays true and the two tests below start failing, which is the
+    // right way round: the fixture is a fact about the string, not about the code.
+    expect(DISPUTE_SENTENCE_PLAIN).not.toBe(DISPUTE_SENTENCE);
+    expect(DISPUTE_SENTENCE).toContain('*should not*');
+    expect(DISPUTE_SENTENCE_PLAIN).toContain('should not');
+    expect(DISPUTE_SENTENCE_PLAIN).not.toContain('*');
+  });
+
+  it('refuses the quote a model produced by dropping the emphasis', () => {
+    // r5's fourth pass retired the emphasis licence, and this is what retiring it
+    // means for an input: the plain form is *not* the sentence that is in the
+    // message, so it is not found there at all.
+    expect(
+      problemKinds(
+        {
+          type: 'claim',
+          provenance: [messageDispute.id],
+          quote: DISPUTE_SENTENCE_PLAIN,
+          statement: DISPUTE_SENTENCE_PLAIN,
+          proposer: { kind: 'model' },
+          attributedTo: JORDAN,
+        },
+        messages,
+      ),
+      // Two findings: the quote is nowhere, and with no bearing message the
+      // attribution is unsupported. (`problemKinds` sorts.)
+    ).toEqual(['attributed_person_not_author', 'quote_not_found']);
+  });
 
   const problemKinds = (...args: Parameters<typeof validateProposalProvenance>) =>
     validateProposalProvenance(...args)
@@ -582,7 +624,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
-        [{ id: 'm_short', authorId: JORDAN, body: sentence }],
+        room({ id: 'm_short', authorId: JORDAN, body: sentence }),
       ),
     ).toEqual([]);
   });
@@ -597,8 +639,8 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
         {
           type: 'claim',
           provenance: [messageDispute.id],
-          quote: DISPUTE_SENTENCE_PLAIN,
-          statement: DISPUTE_SENTENCE_PLAIN,
+          quote: DISPUTE_SENTENCE,
+          statement: DISPUTE_SENTENCE,
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
@@ -624,7 +666,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           proposer: { kind: 'model' },
           attributedTo: JORDAN,
         },
-        [{ id: 'm_code', authorId: JORDAN, body }],
+        room({ id: 'm_code', authorId: JORDAN, body }),
       ),
     ).not.toEqual([]);
   });
@@ -716,10 +758,10 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
      * The finding is bound to the message bearing the sentence now, so the
      * padding is inert.
      */
-    const window = [
+    const window = room(
       { id: 'm_pad', authorId: DHLOLO, body: 'Morning all, the CI is green again.' },
       { id: 'm_commit', authorId: JORDAN, body: '@dhlolo will land the narrowing fix on Friday.' },
-    ];
+    );
     const subject = {
       type: 'commitment' as const,
       provenance: ['m_pad', 'm_commit'],
@@ -791,7 +833,7 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
     // names nobody has no attribution to police and still has a sentence, and
     // r3's gauntlet minted a model objective through the version of this rule
     // that read "no name, no receipt".
-    const quoted = DISPUTE_SENTENCE_PLAIN;
+    const quoted = DISPUTE_SENTENCE;
     expect(
       problemKinds(
         {
@@ -1020,6 +1062,22 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           attributedTo: DHLOLO,
         },
         messages,
+      ],
+      // statement_respaces_the_quote — r6. Every mark of the quote, in order,
+      // spaced differently, and the difference is inside a code literal.
+      [
+        {
+          type: 'claim',
+          provenance: ['m_cmd'],
+          quote: 'Run `rm -rf / tmp/cache` on the box tonight, everyone.',
+          statement: 'Run `rm -rf /tmp/cache` on the box tonight, everyone.',
+          proposer: { kind: 'model' },
+        },
+        room({
+          id: 'm_cmd',
+          authorId: JORDAN,
+          body: 'Run `rm -rf / tmp/cache` on the box tonight, everyone.',
+        }),
       ],
     ];
     for (const args of cases) {

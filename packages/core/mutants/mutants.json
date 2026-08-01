@@ -479,7 +479,7 @@
       "id": "bearing_forgives_interposed_words",
       "why": "r3 gauntlet, major 1, exactly: a word the quote carries and the statement drops stops being reported, so `Bob will not deploy production Friday` supports `Bob will deploy production Friday`.",
       "file": "src/matching.ts",
-      "find": "      if (qt !== undefined) unmatchedInQuote.push(qt);\n      i += 1;",
+      "find": "      if (qt !== undefined) unaccounted(qt, unmatchedInQuote);\n      i += 1;",
       "replace": "      i += 1;",
       "catches": [
         "refuses the exact pair from the gauntlet at the acceptance engine",
@@ -492,7 +492,7 @@
       "id": "bearing_forgives_missing_statement_words",
       "why": "The other direction: the statement may assert words the quote does not contain, which is the quantifier flip (all -> some) and the invented sentence.",
       "file": "src/matching.ts",
-      "find": "      if (st !== undefined) unmatchedInStatement.push(st);\n      j += 1;",
+      "find": "      if (st !== undefined) unaccounted(st, unmatchedInStatement);\n      j += 1;",
       "replace": "      j += 1;",
       "catches": [
         "refuses a statement that inserts a word the quote does not contain",
@@ -503,8 +503,8 @@
       "id": "bearing_forgives_the_tail",
       "why": "Only the covering span of the statement is checked, so a trailing `unless the migration is still red` is invisible.",
       "file": "src/matching.ts",
-      "find": "  for (; i < q.length; i += 1) {\n    const token = q[i];\n    if (!droppable(token) && token !== undefined) unmatchedInQuote.push(token);\n  }",
-      "replace": "  i = q.length;",
+      "find": "  for (; i < quote.length; i += 1) {\n    const leftover = quote[i];\n    if (leftover !== undefined) unaccounted(leftover, unmatchedInQuote);\n  }",
+      "replace": "  i = quote.length;",
       "catches": [
         "refuses a trailing \"unless\"",
         "refuses a trailing \"except\"",
@@ -515,8 +515,8 @@
       "id": "bearing_forgives_the_statement_tail",
       "why": "The statement may run past the end of the quote and assert whatever it likes there.",
       "file": "src/matching.ts",
-      "find": "  for (; j < s.length; j += 1) {\n    const token = s[j];\n    if (!droppable(token) && token !== undefined) unmatchedInStatement.push(token);\n  }",
-      "replace": "  j = s.length;",
+      "find": "  for (; j < statement.length; j += 1) {\n    const leftover = statement[j];\n    if (leftover !== undefined) unaccounted(leftover, unmatchedInStatement);\n  }",
+      "replace": "  j = statement.length;",
       "catches": ["refuses a statement that runs past the end of its quote"]
     },
     {
@@ -555,7 +555,7 @@
       "id": "receipt_policy_align_cap_raised",
       "why": "The bound on the O(n*m) alignment is lifted, so the cost of a receipt check is chosen by whoever writes the quote.",
       "file": "src/policy.ts",
-      "find": "  maxAlignedTokens: 400,",
+      "find": "  maxAlignedTokens: 800,",
       "replace": "  maxAlignedTokens: 4000000,",
       "catches": [
         "refuses an input too large to align rather than approximating it",
@@ -564,14 +564,11 @@
     },
     {
       "id": "statement_uncheckable_skipped",
-      "why": "A model reading with no statement to check the quote against goes back to being honest silence — a check that did not run, reading exactly like a check that passed.",
+      "why": "Skips the `undecidable` branch entirely, so the bearing check's three refusals-to-run stop being reported as themselves. Since r6 the branch below it — `!borne`, with a named case for every way the diff can end — catches the empty quote and the empty statement and refuses them anyway, which is the second line working. What the mutation still destroys is the split the branch exists for: `too_long` loses its `refer` and is discarded as a malformed reading.",
       "file": "src/escalation.ts",
       "find": "      if (bearingResult.undecidable !== null) {",
       "replace": "      if (false) {",
-      "catches": [
-        "refuses a model reading with a real quote and no statement to check it against",
-        "covers every problem kind it declares"
-      ]
+      "catches": ["refers it rather than rejecting it"]
     },
     {
       "id": "refer_severity_ignored_reducer",
@@ -596,8 +593,8 @@
       "id": "refer_collapsed_into_reject",
       "why": "The two negative answers are collapsed: a reading the check cannot rule on is discarded instead of referred, which hides the discrepancy a person needs to see.",
       "file": "src/escalation.ts",
-      "find": "          kind: 'quote_carries_more_than_statement',\n          severity: 'refer',",
-      "replace": "          kind: 'quote_carries_more_than_statement',\n          severity: 'reject',",
+      "find": "            kind: 'quote_carries_more_than_statement',\n            severity: 'refer',",
+      "replace": "            kind: 'quote_carries_more_than_statement',\n            severity: 'reject',",
       "catches": [
         "leaves the reading staged rather than deleting it, so a person sees the discrepancy",
         "refers a paraphrase of the quote to a person instead of accepting it"
@@ -634,9 +631,9 @@
     },
     {
       "id": "ordered_tokens_ascii_only",
-      "why": "r4's own blind review: the tokenizer split on /[^a-z0-9']+/, which is a denylist of the characters that may carry meaning. Cyrillic and fullwidth negations were deleted as separators and bore their own affirmative; a Russian sentence tokenized to nothing and was refused as empty.",
+      "why": "r4's own blind review: the tokenizer split on /[^a-z0-9']+/, which is a denylist of the characters that may carry meaning. Cyrillic and fullwidth negations were deleted as separators and bore their own affirmative; a Russian sentence tokenized to nothing and was refused as empty. Mutates the whole token rule rather than only the word class, because since r6 an ASCII-only word class alone leaves every other script matching the code-point alternative — the same evasion has to be applied to the rule that replaced it.",
       "file": "src/matching.ts",
-      "find": "const TOKEN = /[\\p{L}\\p{N}\\p{M}]+(?:'[\\p{L}\\p{N}\\p{M}]+)*|[^\\s']/gu;",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
       "replace": "const TOKEN = /[a-z0-9]+(?:'[a-z0-9]+)*/gu;",
       "catches": [
         "refuses a negation written in another script or another width",
@@ -645,14 +642,15 @@
     },
     {
       "id": "ordered_tokens_drops_punctuation",
-      "why": "The other half of the same denylist: a visible mark stops being a token, so `Bob will deploy Friday?` bears the assertion and a leading ❌ or 🚫 vanishes.",
+      "why": "The other half of r4's denylist: a visible mark stops being a token, so `Bob will deploy Friday?` bears the assertion and a leading ❌ or 🚫 vanishes. Since r6 the same edit also deletes every space and every standalone apostrophe, so the token stream stops reassembling the text it came from — which is the property the whole receipt rests on.",
       "file": "src/matching.ts",
-      "find": "|[^\\s']/gu;",
-      "replace": "/gu;",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "replace": "const TOKEN = new RegExp(String.raw`${WORD}`, 'gu');",
       "catches": [
         "refuses a question minted as an assertion",
         "refuses a symbol that carries the negation",
-        "lets nothing but a full stop differ between a quote and its statement"
+        "lets nothing but a full stop differ between a quote and its statement",
+        "reassembles the normalized text exactly, for every text"
       ]
     },
     {
@@ -801,8 +799,8 @@
       "id": "later_correction_cap_fails_open",
       "why": "Makes the later-correction scan return 'nothing found' when the window is longer than it will read, instead of refusing. This round's own first draft did exactly that and defended it in a comment — a limit written down with an auto-accept under it, which is the shape the whole round exists to delete.",
       "file": "src/escalation.ts",
-      "find": "  if (later.length > policy.maxLaterMessagesScanned) return 'unscanned';",
-      "replace": "  if (later.length > policy.maxLaterMessagesScanned) return null;",
+      "find": "  if (later.length > policy.maxLaterMessagesScanned) return unscanned('too_many_messages');",
+      "replace": "  if (later.length > policy.maxLaterMessagesScanned) return scanned(later.length);",
       "catches": ["refuses when the window is longer than the scan will read"]
     },
     {
@@ -819,7 +817,7 @@
       "file": "src/matching.ts",
       "find": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').trim();",
       "replace": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').replace(/\\s+/g, ' ').trim();",
-      "catches": ["does not collapse whitespace inside a code literal"]
+      "catches": ["refuses to mint a code literal the author did not write, at every layer"]
     },
     {
       "id": "dedup_destroys_a_referral",
@@ -833,9 +831,12 @@
       "id": "bidi_controls_deleted",
       "why": "Folds every `\\p{Cf}` away again — the bidi overrides, the soft hyphen and the zero-width joiner with the genuinely invisible characters. `Bob will \\u202Eton\\u202C deploy production Friday.` renders as \"Bob will not deploy production Friday.\"; `re\\u00ADsign` renders as \"re-sign\"; and `\\u{1F469}\\u200D\\u{1F4BB}` is one glyph where `\\u{1F469}\\u{1F4BB}` is two.",
       "file": "src/matching.ts",
-      "find": "const DELETABLE = /[​⁠-⁤﻿]|(?!\\s)\\p{Cc}/gu;",
+      "find": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]/gu;",
       "replace": "const DELETABLE = /[\\p{Cf}\\p{Cc}]/gu;",
-      "catches": ["does not delete a bidi override, which decides what the reader sees"]
+      "catches": [
+        "does not delete a bidi override, which decides what the reader sees",
+        "deletes exactly this set of code points, and fuses two words with none of them"
+      ]
     },
     {
       "id": "later_scan_starts_after_last_citation",
@@ -887,11 +888,125 @@
     },
     {
       "id": "whitespace_controls_deleted",
-      "why": "Deletes the whitespace controls along with the invisible ones, so `Bob will deploy\\tproduction Friday.` normalizes to `deployproduction` and a quote of `Bob will deployproduction Friday.` matches it — the record minting a word its author never wrote. The whitespace rule already owns tab, newline and carriage return; the two clauses partition the controls rather than one excepting the other.",
+      "why": "Puts the control-character clause back: `(?!\\s)\\p{Cc}` alongside the enumeration. Its docblock argued the clause could not fuse two words because \"tab, newline, vertical tab, form feed, carriage return and NEL are `\\s`\" — and JavaScript's `\\s` does not contain U+0085 NEL, U+007F, or U+0080–U+009F. The clause therefore deleted them, and `Bob will deploy<NEL>production Friday.` normalized to `deployproduction`, which a quote of the fused text matched. NEL is a Unicode mandatory line break, so deleting it changes what a reader sees. The mutant's own `why` said the opposite until r6.",
       "file": "src/matching.ts",
-      "find": "const DELETABLE = /[​⁠-⁤﻿]|(?!\\s)\\p{Cc}/gu;",
-      "replace": "const DELETABLE = /[\\u200B\\u2060-\\u2064\\uFEFF\\p{Cc}]/gu;",
-      "catches": ["does not fuse two words by deleting the tab between them"]
+      "find": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]/gu;\n\n/**\n * **What counts as whitespace**",
+      "replace": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]|(?!\\s)\\p{Cc}/gu;\n\n/**\n * **What counts as whitespace**",
+      "catches": ["deletes exactly this set of code points, and fuses two words with none of them"]
+    },
+    {
+      "id": "whitespace_run_uses_js_s",
+      "why": "Reads the whitespace run as JavaScript's `\\s` instead of Unicode's `\\p{White_Space}`. The two differ on U+0085 NEL — a mandatory line break that `\\s` does not contain — so a NEL between two words stops collapsing to a space, and the fold that was supposed to own it does not.",
+      "file": "src/matching.ts",
+      "find": "const WHITESPACE_RUN = /\\p{White_Space}+/gu;",
+      "replace": "const WHITESPACE_RUN = /\\s+/gu;",
+      "catches": ["deletes exactly this set of code points, and fuses two words with none of them"]
+    },
+    {
+      "id": "ordered_tokens_drops_spaces",
+      "why": "r6's finding, exactly: the tokenizer discards whitespace, so the token comparison proves word equality and the receipt claims text equality. ``Run `rm -rf / tmp/cache` …`` then bears ``Run `rm -rf /tmp/cache` …`` and a doubled space in a password is invisible — the case `normalizeForReceipt` passes code spans through byte for byte to prevent.",
+      "file": "src/matching.ts",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "replace": "const TOKEN = new RegExp(String.raw`${WORD}|\\S`, 'gu');",
+      "catches": [
+        "reassembles the normalized text exactly, for every text",
+        "refuses every one of the four at the engine",
+        "refuses every one of the four at the reducer, where it is a boundary",
+        "refuses to mint a code literal the author did not write, at every layer"
+      ]
+    },
+    {
+      "id": "ordered_tokens_drops_apostrophes",
+      "why": "The other half of r6's finding: a standalone ASCII apostrophe stops being a token, so `'We will deploy production Friday.'` — a displayed sentence — bears the bare assertion. Backticks and double quotes are content for exactly this reason; the apostrophe was the one spelling of mention-versus-use nothing could see.",
+      "file": "src/matching.ts",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "replace": "const TOKEN = new RegExp(String.raw`${WORD}|[^']`, 'gu');",
+      "catches": [
+        "reads an edge apostrophe as a mark of its own, not as part of the word",
+        "refuses every one of the four at the engine",
+        "refuses every one of the four at the reducer, where it is a boundary"
+      ]
+    },
+    {
+      "id": "routing_tokens_keep_spaces",
+      "why": "Gives the detector the receipt's exhaustive stream. The routing fold has already collapsed every whitespace run, so a space token carries no information there and only confuses the resynchronising diff: an inserted word arrives with an inserted space, and the correction scan reads a plain contradiction as an unrelated sentence.",
+      "file": "src/matching.ts",
+      "find": "const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|\\S`, 'gu');",
+      "replace": "const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "catches": ["drops whitespace from the detector\"s tokens and only from the detector\"s"]
+    },
+    {
+      "id": "align_borne_read_off_the_diff",
+      "why": "Computes `borne` from the resynchronising diff again instead of from `sameRun`. The diff is a judgement about which tokens correspond and it does not name a whitespace difference, so a re-spaced code literal comes back borne — the r6 defect, reintroduced one layer in from the tokenizer.",
+      "file": "src/matching.ts",
+      "find": "    borne: sameRun(quote, statement),",
+      "replace": "    borne: unmatchedInQuote.length === 0 && unmatchedInStatement.length === 0,",
+      "catches": [
+        "refuses to mint a code literal the author did not write, at every layer",
+        "lets nothing but a full stop differ between a quote and its statement",
+        "refuses every one of the four at the engine"
+      ]
+    },
+    {
+      "id": "strip_droppable_leaves_the_spacing",
+      "why": "Removes the droppable tokens without closing the gap they leave, so an ellipsis dropped as three full stops leaves the space it was sitting in unpaired. The refusal is then a true finding with a false reason — `statement_respaces_the_quote` on a sentence with no code span in it.",
+      "file": "src/matching.ts",
+      "find": "    if (closesAGap) continue;",
+      "replace": "    if (false && closesAGap) continue;",
+      "catches": ["rejects a quote elided with an ellipsis that is not verbatim anywhere"]
+    },
+    {
+      "id": "respacing_not_reported",
+      "why": "Drops the whitespace branch, so a statement that re-spaces a code literal falls through to the catch-all. The catch-all still refuses — that is what it is for — but the receipt stops saying what it found, and a refusal nobody can act on is the failure this file spends its length on.",
+      "file": "src/escalation.ts",
+      "find": "        } else if (bearingResult.whitespaceDiffers) {",
+      "replace": "        } else if (false && bearingResult.whitespaceDiffers) {",
+      "catches": [
+        "refuses to mint a code literal the author did not write, at every layer",
+        "names the difference in a form a reader can act on",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "uncheckable_too_long_rejected",
+      "why": "Collapses the two reasons the bearing check declines back into one severity. `too_long` then rejects, `acceptance.ts` turns a reject into a discard, and a 421-token design comment quoted whole and correctly attributed is destroyed — while the room is told its citation failed, which is not what happened. `refer` is defined as never auto-accepted and never discarded.",
+      "file": "src/escalation.ts",
+      "find": "          severity: tooLong ? 'refer' : 'reject',",
+      "replace": "          severity: 'reject',",
+      "catches": ["refers it rather than rejecting it"]
+    },
+    {
+      "id": "later_revision_window_gate_removed",
+      "why": "Removes the check that the window holds something the proposal did not cite. A caller supplying \"the messages this receipt cites\" — the natural reading of the field — then turns the correction scan off in silence: whole room refuses, cited-only auto-accepts. Same fail-open as `messages: []` and `[{ body: '' }]`, one level out.",
+      "file": "src/escalation.ts",
+      "find": "  if (messages.every((message) => cited.has(message.id))) {\n    return unscanned('window_is_only_the_citations');\n  }",
+      "replace": "  // window gate removed",
+      "catches": [
+        "refuses a window that is nothing but the messages the proposal cites",
+        "says how far it read, so \"found nothing\" is not \"read nothing\""
+      ]
+    },
+    {
+      "id": "token_rendered_raw",
+      "why": "Interpolates an unmatched token straight into the refusal. `orderedTokens` is exhaustive since r6, so a token can be a control character with no glyph, and the receipt then reports `the quote says \"\"` — a check that ran, found something, and said nothing a reader can use.",
+      "file": "src/escalation.ts",
+      "find": "  const printable = /^[\\p{L}\\p{N}\\p{M}\\p{P}\\p{S}]+$/u.test(value);",
+      "replace": "  const printable = true;",
+      "catches": ["names the difference in a form a reader can act on"]
+    },
+    {
+      "id": "bearing_result_ignored",
+      "why": "Drops the whole `!borne` branch, so a bearing check that ran and refused reports nothing at all — the fail-open shape this ticket has found in six different places, at the one comparison the acceptance path makes between the quote and the statement. It is the mutation `statement_uncheckable_skipped` used to stand in for before r6 gave the branch a named case for every way the diff can end.",
+      "file": "src/escalation.ts",
+      "find": "      } else if (!bearingResult.borne) {",
+      "replace": "      } else if (false) {",
+      "catches": [
+        "refuses the exact pair from the gauntlet at the acceptance engine",
+        "refuses the exact pair from the gauntlet at the reducer, where it is a boundary",
+        "covers every problem kind it declares",
+        "refuses every one of the four at the engine",
+        "refuses to mint a code literal the author did not write, at every layer"
+      ]
     }
   ]
 }

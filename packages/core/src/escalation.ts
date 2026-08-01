@@ -255,9 +255,23 @@ export const RETRACTION_MARKERS: readonly string[] = Object.freeze([
 /**
  * `s/wrong/right/` — the terse form, which no word list catches.
  *
- * The closing slash is required and `s` must start a word, so a path (`docs/api/
- * v1/`) and a URL (`https://…`) cannot fire it: in both, the `s` is preceded by
- * a word character and `\b` fails.
+ * The closing slash is required and `s` must start a word.
+ *
+ * **It fires on some URLs, and the comment here used to say it could not.** The
+ * old claim was that in `https://…` and `docs/api/v1/` the `s` is preceded by a
+ * word character so `\b` fails. That is true of the `s` in `https` and says
+ * nothing about a *path segment* named `s`: `https://x.example/s/abc/def/` has
+ * an `s` preceded by `/`, which is a word boundary, and it matches. So does any
+ * `…/s/…/…/` path.
+ *
+ * The disposition is unchanged and the residue is stated rather than fixed,
+ * because this marker is admissible **only** on the direction it can be wrong
+ * in: a hit adds a `refer` and can never add an acceptance, so a URL that reads
+ * as a retraction costs one person one glance. Narrowing the pattern to exclude
+ * URLs would be a denylist of the URL shapes somebody has thought of, which is
+ * the move this package has now paid for three times. What is fixed is the
+ * comment: a stated limit that is false is worse than no stated limit, because
+ * the next reader builds on it.
  */
 export const SED_CORRECTION = /\bs\/[^/\n]+\/[^/\n]*\//;
 
@@ -621,6 +635,24 @@ function clip(text: string, limit = 120): string {
   return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
 }
 
+/**
+ * One token, as a refusal should show it.
+ *
+ * r6 made `orderedTokens` exhaustive, so a token can now be a character with no
+ * glyph — a C0 control, a bidi override, a soft hyphen. Interpolating one raw
+ * produces a refusal that reads `the quote says ""` and tells a reader nothing,
+ * which is a receipt failing to say what it found: the same class of defect as a
+ * check that does not run, one layer out into the prose. Anything without a
+ * rendering is named by its code point instead.
+ */
+function token(value: string): string {
+  const printable = /^[\p{L}\p{N}\p{M}\p{P}\p{S}]+$/u.test(value);
+  if (printable) return `"${value}"`;
+  return [...value]
+    .map((char) => `U+${(char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}`)
+    .join('+');
+}
+
 /* ─────────────────────────────────────────────────────────────────────────
  * Proposal validation — the checks that run *after* the model call
  * ───────────────────────────────────────────────────────────────────────── */
@@ -670,6 +702,15 @@ export interface ProvenanceMessage {
  *    **not** deploy production Friday", mint the affirmative. The dropped word
  *    may be decorative or it may invert the sentence, and nothing here can tell
  *    which.
+ *  - `statement_respaces_the_quote` — **r6.** The two texts hold the same marks
+ *    in the same order and space them differently. Prose whitespace is collapsed
+ *    to one space on both sides before anything is compared, so the difference
+ *    can only be inside a code span — a different literal, not a different line
+ *    wrap. `normalizeForReceipt` has passed code segments through byte for byte
+ *    since r5 on exactly that argument ("two spaces in a password are a
+ *    different password") and nothing at the comparison consulted it, because
+ *    the tokenizer threw the spaces away: ``Run `rm -rf / tmp/cache` …`` bore
+ *    ``Run `rm -rf /tmp/cache` …`` and auto-accepted.
  *  - `quote_is_a_fragment` — a span cut out of the middle of a sentence rather
  *    than a run of whole ones. r4's own blind review.
  *  - `quote_omits_surrounding_text` — **r5.** The quote is whole sentences and
@@ -686,7 +727,14 @@ export interface ProvenanceMessage {
  *    question quoted verbatim is an OpenQuestion or a referral, never a Claim.
  *  - `statement_uncheckable` — the bearing check could not run: no quote, no
  *    statement, or an input too large to align. Fails closed, because an
- *    unchecked receipt is not a passed one.
+ *    unchecked receipt is not a passed one — and **the two cases are not the
+ *    same severity since r6.** An empty quote or an empty statement is a
+ *    malformed reading and is rejected. An input too large to align is an
+ *    ordinary long message that nothing has judged, and `refer` is defined as
+ *    *"the check cannot judge this, so a person must — never auto-accepted,
+ *    never discarded"*. r5 rejected it, so a 421-token design comment, quoted
+ *    whole and correctly attributed, was **destroyed**, and the room was told its
+ *    citation had failed when it had not.
  *  - `ambiguous_quote` — two or more cited messages, by different people,
  *    contain the quote. Taking the first in window order picks an author by
  *    accident, and the author is the whole answer to "who said this".
@@ -703,6 +751,7 @@ export const PROVENANCE_PROBLEM_KINDS = [
   'quote_too_short',
   'quote_does_not_bear_statement',
   'quote_carries_more_than_statement',
+  'statement_respaces_the_quote',
   'quote_is_a_fragment',
   'quote_omits_surrounding_text',
   'superseded_by_later_message',
@@ -1012,18 +1061,21 @@ export function validateProposalProvenance(
         messages,
         policy,
       );
-      if (revisited === 'unscanned') {
+      if (revisited.kind === 'unscanned') {
         problems.push({
           kind: 'superseded_by_later_message',
           severity: 'refer',
-          detail: `the window carries more after this citation than this check will read (${policy.maxLaterMessagesScanned} messages, ${policy.maxScannedSentences} sentences each, ${policy.maxAlignedTokens} tokens a sentence), so whether one of them corrects the quoted sentence was never established — an unread window is not a clean one, and a check that declined to run is not a check that passed`,
+          detail:
+            revisited.why === 'window_is_only_the_citations'
+              ? `the window supplied is nothing but the ${cited.length} message${cited.length === 1 ? '' : 's'} this proposal cites, so the correction scan had nothing to read that the proposal did not choose — whether a later message takes the quoted sentence back was never established, and a window the proposal selects is not a window (see \`AcceptanceContext.messages\`)`
+              : `the window carries more after this citation than this check will read (${policy.maxLaterMessagesScanned} messages, ${policy.maxScannedSentences} sentences each, ${policy.maxAlignedTokens} tokens a sentence), so whether one of them corrects the quoted sentence was never established — an unread window is not a clean one, and a check that declined to run is not a check that passed`,
           messageId: null,
         });
-      } else if (revisited) {
+      } else if (revisited.kind === 'revision') {
         problems.push({
           kind: 'superseded_by_later_message',
           severity: 'refer',
-          detail: `message "${revisited.message.id}" comes after the messages this cites and carries ${revisited.added.map((token) => `"${token}"`).join(', ')} — a later message restates the quoted sentence with something changed, takes something back, or is the same author returning to this subject, and whether that reverses this reading, narrows it or leaves it alone is not something a machine may decide from the words`,
+          detail: `message "${revisited.message.id}" comes after the messages this cites and carries ${revisited.added.map(token).join(', ')} — a later message restates the quoted sentence with something changed, takes something back, or is the same author returning to this subject, and whether that reverses this reading, narrows it or leaves it alone is not something a machine may decide from the words`,
           messageId: revisited.message.id,
         });
       }
@@ -1059,41 +1111,89 @@ export function validateProposalProvenance(
     if (fromModel) {
       const statement = subject.statement ?? '';
       const bearingResult = statementBearing(quote, statement, policy);
+      const where = bearing?.id ?? null;
       if (bearingResult.undecidable !== null) {
         // Not "no problem found" — no check performed. The two are the same
         // shape in the code and opposite facts about the world, and every finding
         // in this campaign has been one of them wearing the other's clothes.
+        //
+        // **Two severities, since r6.** `empty_quote` and `empty_statement` are
+        // malformed readings: there is no sentence, so there is nothing a person
+        // could be shown either. `too_long` is an ordinary long message that
+        // nothing has judged — `refer` is defined as "the check cannot judge
+        // this, so a person must; never auto-accepted, **never discarded**", and
+        // r5 rejected it, which `acceptance.ts` turns into `discard`. A 421-token
+        // design comment, quoted whole and correctly attributed, was destroyed,
+        // and the reason shown to the room said its citation had failed when it
+        // had not. The sibling condition — `laterRevision` returning `unscanned`,
+        // which is the same "could not read it all" fact — has been `refer` since
+        // r5; both fired on that input and the reject won.
+        const tooLong = bearingResult.undecidable === 'too_long';
         problems.push({
           kind: 'statement_uncheckable',
-          severity: 'reject',
+          severity: tooLong ? 'refer' : 'reject',
           detail:
             bearingResult.undecidable === 'empty_statement'
               ? `the ${subject.type} asserts nothing that can be checked against its quote — with no statement there is no sentence for the receipt to bear, and an unchecked receipt is not a passed one`
-              : bearingResult.undecidable === 'too_long'
-                ? `the quote or the statement is longer than the ${policy.maxAlignedTokens} words this check will align, so it was not checked — an input too large to verify is refused rather than approximated`
+              : tooLong
+                ? `the quote or the statement runs past the ${policy.maxAlignedTokens} tokens this check will align, so it was never checked — not accepted on a machine's word, and not thrown away either: a person can read a long message, and this one may be perfectly quoted`
                 : 'the quote carries no words at all, so nothing could be checked against the statement',
-          messageId: bearing?.id ?? null,
+          messageId: where,
         });
-      } else if (bearingResult.unmatchedInStatement.length > 0) {
-        // The reading asserts words that are not in the record. This is a
-        // verdict, not a hesitation: the citation leads a reader to a sentence
-        // that does not say this.
-        problems.push({
-          kind: 'quote_does_not_bear_statement',
-          severity: 'reject',
-          detail: `"${clip(statement, 60)}" asserts ${bearingResult.unmatchedInStatement.map((token) => `"${token}"`).join(', ')}, which the quote does not say — the quoted span is from a cited message but it is not this sentence, so the citation leads a reader somewhere that does not say this`,
-          messageId: bearing?.id ?? null,
-        });
-      } else if (bearingResult.unmatchedInQuote.length > 0) {
-        // Every word of the statement is in the quote, in order, and the quote
-        // says more. `not` is this case. So is `unless CI is red`. So is a
-        // harmless "I think". The check declines rather than guessing.
-        problems.push({
-          kind: 'quote_carries_more_than_statement',
-          severity: 'refer',
-          detail: `the quote says ${bearingResult.unmatchedInQuote.map((token) => `"${token}"`).join(', ')} and "${clip(statement, 60)}" drops ${bearingResult.unmatchedInQuote.length === 1 ? 'it' : 'them'} — those words may be an aside or may reverse the sentence, and nothing here can tell which, so this reading is not accepted on a machine's word; a person has to read the quote`,
-          messageId: bearing?.id ?? null,
-        });
+      } else if (!bearingResult.borne) {
+        // **Branching on `borne` and then naming every way it can be false.**
+        // r6: the three fields below used to be read directly, so a result that
+        // was not borne for a reason none of the first two named produced *no
+        // problem at all* — a check that ran, failed, and reported nothing. The
+        // shape is the one this whole ticket keeps finding, and the fix is not to
+        // enumerate more carefully but to make the enumeration structural: the
+        // outer condition is the refusal, and the branches only decide what it
+        // says. The final `else` is unreachable by `alignTokens`' own invariant
+        // and is written out anyway, because "unreachable" is a claim about code
+        // that changes.
+        if (bearingResult.unmatchedInStatement.length > 0) {
+          // The reading asserts words that are not in the record. This is a
+          // verdict, not a hesitation: the citation leads a reader to a sentence
+          // that does not say this.
+          problems.push({
+            kind: 'quote_does_not_bear_statement',
+            severity: 'reject',
+            detail: `"${clip(statement, 60)}" asserts ${bearingResult.unmatchedInStatement.map(token).join(', ')}, which the quote does not say — the quoted span is from a cited message but it is not this sentence, so the citation leads a reader somewhere that does not say this`,
+            messageId: where,
+          });
+        } else if (bearingResult.unmatchedInQuote.length > 0) {
+          // Every word of the statement is in the quote, in order, and the quote
+          // says more. `not` is this case. So is `unless CI is red`. So is a
+          // harmless "I think". The check declines rather than guessing.
+          problems.push({
+            kind: 'quote_carries_more_than_statement',
+            severity: 'refer',
+            detail: `the quote says ${bearingResult.unmatchedInQuote.map(token).join(', ')} and "${clip(statement, 60)}" drops ${bearingResult.unmatchedInQuote.length === 1 ? 'it' : 'them'} — those words may be an aside or may reverse the sentence, and nothing here can tell which, so this reading is not accepted on a machine's word; a person has to read the quote`,
+            messageId: where,
+          });
+        } else if (bearingResult.whitespaceDiffers) {
+          // Same marks, same order, different spacing. Prose whitespace is
+          // collapsed to one space on both sides before this runs, so the only
+          // place a difference can survive is inside a code span — which
+          // `normalizeForReceipt` passes through byte for byte because *two
+          // spaces in a password are a different password*. `reject` and not
+          // `refer`: this is a verdict, not a hesitation. The statement carries a
+          // literal its author did not write, and no reading of the neighbouring
+          // words can make it the one that is in the message.
+          problems.push({
+            kind: 'statement_respaces_the_quote',
+            severity: 'reject',
+            detail: `"${clip(statement, 60)}" holds every mark of the quote in order and spaces them differently — prose spacing is folded away before this comparison, so what differs is inside a code span, and a literal respaced is a literal changed (\`rm -rf / tmp/cache\` is not \`rm -rf /tmp/cache\`)`,
+            messageId: where,
+          });
+        } else {
+          problems.push({
+            kind: 'statement_uncheckable',
+            severity: 'reject',
+            detail: `the bearing check refused "${clip(statement, 60)}" against its quote and named no difference — that is a contradiction in this package, not a finding about the reading, and an answer nothing can explain is not an answer a machine may act on`,
+            messageId: where,
+          });
+        }
       }
     }
   }
@@ -1155,6 +1255,53 @@ export function validateProposalProvenance(
 }
 
 /**
+ * What the later-correction scan found — **a tagged union, and `RETRO.md` is
+ * why**: "validate a union by its tag, not by key presence".
+ *
+ * Until r6 this was `{…} | 'unscanned' | null`, and every caller distinguished
+ * the three by truthiness. Three states told apart by falsiness is two states
+ * one refactor away from being one, and the two that must never merge here are
+ * *nothing corrects this* and *nothing read the window*.
+ */
+export type LaterRevision =
+  /** A later message restates the sentence with something changed. */
+  | { kind: 'revision'; message: ProvenanceMessage; added: string[] }
+  /**
+   * The scan declined. `why` is reported to the room, because "we did not check"
+   * and "we checked and it was fine" must not read alike.
+   */
+  | {
+      kind: 'unscanned';
+      why:
+        | 'statement_too_long'
+        | 'window_is_only_the_citations'
+        | 'too_many_messages'
+        | 'too_many_sentences'
+        | 'too_many_tokens_in_a_sentence';
+    }
+  /**
+   * The scan ran to the end of the window and found nothing.
+   *
+   * `scannedAfterCitations` records **how far it read** — the count nothing kept
+   * before r6, which is half of why a truncated window was invisible.
+   */
+  | { kind: 'none'; scannedAfterCitations: number };
+
+const revision = (message: ProvenanceMessage, added: string[]): LaterRevision => ({
+  kind: 'revision',
+  message,
+  added,
+});
+const unscanned = (why: Extract<LaterRevision, { kind: 'unscanned' }>['why']): LaterRevision => ({
+  kind: 'unscanned',
+  why,
+});
+const scanned = (scannedAfterCitations: number): LaterRevision => ({
+  kind: 'none',
+  scannedAfterCitations,
+});
+
+/**
  * **Does a message later in this window say the quoted sentence again, with
  * something added?**
  *
@@ -1173,6 +1320,37 @@ export function validateProposalProvenance(
  *
  * Returns the tokens the later message added, because a refusal that does not
  * say what changed is a dead end.
+ *
+ * ## The window is the contract, and r6 made it one
+ *
+ * This scan reads `messages` and nothing else. Until r6 nothing said how far
+ * that had to reach and nothing checked, so the *natural* caller — one that
+ * supplies "the messages this receipt cites", which is what
+ * `commitmentAttribution` does one function over — turned the whole check off in
+ * silence:
+ *
+ * | window                | verdict                    |
+ * | --------------------- | -------------------------- |
+ * | the whole room        | `receipt_not_certifiable`  |
+ * | the cited messages    | `auto_accept`              |
+ *
+ * That is r2's and r3's fail-open (`messages: []`, `[{ body: '' }]`) one level
+ * out: absence and emptiness were made one fact and **truncation was left
+ * invisible**. The contract is now written on `AcceptanceContext.messages` and
+ * `TrustedContextInput.messages` — *the room's window in room order, continuing
+ * past the citations* — and the half of it that is observable from in here is
+ * enforced: **a window holding nothing but the messages the proposal cites is
+ * `unscanned`**, because the proposal chose every message the check was allowed
+ * to read, and a boundary the proposal controls is the shape of every padding
+ * attack this file has been through.
+ *
+ * What that check cannot see is a window that reaches past the citations and
+ * stops short of the room's end — one extra message satisfies it. Core cannot
+ * distinguish that from a room that genuinely ends there; it has no message
+ * table and no clock. It is recorded beside the two other things `TrustedContext`
+ * says core cannot check, and `scannedAfterCitations` on the `none` result
+ * reports how far this call actually read, so a caller that wants to assert
+ * more has the number to assert it against.
  *
  * ## What this does **not** catch, and what the code does with it
  *
@@ -1228,17 +1406,20 @@ export function laterRevision(
   citedIds: readonly string[],
   messages: readonly ProvenanceMessage[],
   policy: ReceiptPolicy = RECEIPT_POLICY,
-): { message: ProvenanceMessage; added: string[] } | 'unscanned' | null {
-  if (isBlank(statement)) return null;
+): LaterRevision {
+  if (isBlank(statement)) return scanned(0);
   const wanted = routingTokens(statement);
-  if (wanted.length === 0) return null;
+  if (wanted.length === 0) return scanned(0);
   // Too long to align against anything is the same answer the bearing check
   // gives: not checked, therefore not passed.
-  if (wanted.length > policy.maxAlignedTokens) return 'unscanned';
+  if (wanted.length > policy.maxAlignedTokens) return unscanned('statement_too_long');
 
   // ── What counts as "later", and the padding attack that decided it ────────
   //
-  // **After the *earliest* cited message, skipping the cited ones.** The first
+  // **After the *earliest* cited message, and the cited ones are scanned too**
+  // (the paragraph below says why; this sentence read "skipping the cited ones"
+  // until r6 and was contradicted seventeen lines later by the code and by its
+  // own next comment). The first
   // draft scanned after the *last* citation, and this round's own blind review
   // walked through it: cite `m1` — where the sentence is — **and** an unrelated
   // later `m3`, and the correction sitting in `m2` is behind the scan's start.
@@ -1253,7 +1434,23 @@ export function laterRevision(
   for (const [index, message] of messages.entries()) {
     if (cited.has(message.id) && firstCited === -1) firstCited = index;
   }
-  if (firstCited === -1) return null;
+  if (firstCited === -1) return scanned(0);
+
+  // ── The window has to be the room's, and this is the half that is checkable ─
+  //
+  // r6. Nothing required `messages` to reach past the citations, so a caller
+  // supplying "the messages this receipt cites" — the natural reading, and what
+  // `commitmentAttribution` does one function over — silently turned this whole
+  // scan off: whole room ⇒ `receipt_not_certifiable`, cited only ⇒
+  // `auto_accept`. The contract is written on `AcceptanceContext.messages`; this
+  // is the part of it a pure function can enforce. A window whose every message
+  // the proposal chose is a window the proposal controls, which is the shape of
+  // every padding attack this file has been through, and the answer to a scan
+  // that could not read anything is the one it gives everywhere else: not
+  // checked, therefore not passed.
+  if (messages.every((message) => cited.has(message.id))) {
+    return unscanned('window_is_only_the_citations');
+  }
 
   // **Cited messages are scanned, not skipped.** The first repair filtered them
   // out, and the next review pass used that: put the correction in a message the
@@ -1274,7 +1471,7 @@ export function laterRevision(
   // is a window this function did not read, and an unread window is not a clean
   // one. `maxAlignedTokens` and `maxScannedSentences` already answer their own
   // version of this question with a refusal; this one now does too.
-  if (later.length > policy.maxLaterMessagesScanned) return 'unscanned';
+  if (later.length > policy.maxLaterMessagesScanned) return unscanned('too_many_messages');
 
   for (const message of later) {
     const own = stripReplyBlockquotes(message.body);
@@ -1299,15 +1496,15 @@ export function laterRevision(
     // referral is cheap and free is cheaper.
     const normalized = normalizeForRouting(own);
     for (const marker of RETRACTION_MARKERS) {
-      if (containsPhrase(normalized, marker)) return { message, added: [marker] };
+      if (containsPhrase(normalized, marker)) return revision(message, [marker]);
     }
-    if (SED_CORRECTION.test(own)) return { message, added: ['s/…/…/'] };
+    if (SED_CORRECTION.test(own)) return revision(message, ['s/…/…/']);
 
     const sentences = sentencesOf(own);
-    if (sentences.length > policy.maxScannedSentences) return 'unscanned';
+    if (sentences.length > policy.maxScannedSentences) return unscanned('too_many_sentences');
     for (const sentence of sentences) {
       const aligned = alignTokens(routingTokens(sentence), wanted, policy);
-      if (aligned.undecidable === 'too_long') return 'unscanned';
+      if (aligned.undecidable === 'too_long') return unscanned('too_many_tokens_in_a_sentence');
       if (aligned.undecidable !== null) continue;
       // **One side is contained in the other, and they are not the same.**
       //
@@ -1331,11 +1528,16 @@ export function laterRevision(
           aligned.unmatchedInQuote.length > 0
             ? aligned.unmatchedInQuote
             : aligned.unmatchedInStatement;
-        return { message, added: changed };
+        // `changed` is empty only when the two sentences differ in spacing
+        // alone, which `normalizeForRouting` collapses away and so should be
+        // unreachable here. Reported rather than skipped, because "unreachable"
+        // is a claim about code that changes, and skipping would be this file's
+        // own fail-open shape: a difference found and nothing said about it.
+        return revision(message, changed.length > 0 ? changed : ['whitespace']);
       }
     }
   }
-  return null;
+  return scanned(later.length);
 }
 
 /**

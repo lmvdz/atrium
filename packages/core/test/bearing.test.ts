@@ -17,7 +17,7 @@ import {
   statementBearing,
   validateProposalProvenance,
 } from '../src/index.js';
-import { ALICE, at, BOB, event, model, ROOM } from './fixtures.js';
+import { ALICE, at, BOB, event, model, ROOM, room } from './fixtures.js';
 
 /**
  * **Round 3's gauntlet, major 1: the receipt accepted the negation of what it
@@ -45,7 +45,7 @@ import { ALICE, at, BOB, event, model, ROOM } from './fixtures.js';
 const TRUTH = 'Bob will not deploy production Friday';
 const INVERSION = 'Bob will deploy production Friday';
 
-const window: ProvenanceMessage[] = [{ id: 'msg_1', authorId: BOB, body: TRUTH }];
+const window: ProvenanceMessage[] = room({ id: 'msg_1', authorId: BOB, body: TRUTH });
 
 function modelProposal(overrides: {
   type?: AcceptedObjectType;
@@ -343,14 +343,14 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     // Catches: `ordered_tokens_dedup`. `contentTokens` returns a Set, which is
     // why r3 could not have told these apart even with `not` off the stopword
     // list — the second `not` would have collapsed into the first.
-    expect(orderedTokens('not not deploy')).toEqual(['not', 'not', 'deploy']);
+    expect(orderedTokens('not not deploy')).toEqual(['not', ' ', 'not', ' ', 'deploy']);
     expect(statementBearing('bob will not not deploy', 'bob will not deploy').borne).toBe(false);
   });
 
   it('keeps two-letter words, because "no" inverts a sentence', () => {
     // Catches: `bearing_drops_short_tokens`. `contentTokens` drops anything under
     // three characters, which is correct for topic routing and fatal here.
-    expect(orderedTokens('there is no flag')).toEqual(['there', 'is', 'no', 'flag']);
+    expect(orderedTokens('there is no flag')).toEqual(['there', ' ', 'is', ' ', 'no', ' ', 'flag']);
     expect(statementBearing('there is no flag left', 'there is flag left').borne).toBe(false);
   });
 
@@ -358,17 +358,29 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     // Catches: splitting on the apostrophe, which would turn `won't` into
     // `won` + `t` and `I'll` into `i` + `ll` — and make "won't" and "will" argue
     // about tokens that are not words.
-    expect(orderedTokens("bob won't deploy")).toEqual(['bob', "won't", 'deploy']);
+    expect(orderedTokens("bob won't deploy")).toEqual(['bob', ' ', "won't", ' ', 'deploy']);
     expect(statementBearing("bob won't deploy", 'bob will deploy').borne).toBe(false);
   });
 
-  it('reads an edge apostrophe as a quotation mark, not a letter', () => {
-    // The other direction of the same rule: `'online'` is the word `online`, so
-    // a model quoting a term does not fail for punctuation. The backticks *are*
-    // tokens since r5 — a code span is mention rather than use — so this asks
-    // the apostrophe question without them.
-    expect(orderedTokens("'online' state")).toEqual(['online', 'state']);
-    expect(orderedTokens("`'online'` state")).toEqual(['`', 'online', '`', 'state']);
+  it('reads an edge apostrophe as a mark of its own, not as part of the word', () => {
+    // **r6, and this test asserted the opposite until it.** It was titled "reads
+    // an edge apostrophe as a quotation mark, not a letter" and pinned
+    // `orderedTokens("'online' state") === ['online','state']` — the tokenizer
+    // *discarding* the marks. Backticks and double quotes are content precisely
+    // because a displayed sentence is not an asserted one, and the plain
+    // apostrophe was the one spelling of that distinction nothing could see:
+    // `'We will deploy production Friday.'` bore the bare assertion, and `‘…’`
+    // failed closed only because `’` folds to `'` and vanished while `‘` did not.
+    // Failing closed by luck is not a rule.
+    expect(orderedTokens("'online' state")).toEqual(["'", 'online', "'", ' ', 'state']);
+    expect(orderedTokens("`'online'` state")).toEqual(['`', "'", 'online', "'", '`', ' ', 'state']);
+    // …and the whole point of it: a sentence in quotation marks is not that
+    // sentence asserted, in either the ASCII or the typographic spelling.
+    refuses("'We will deploy production Friday.'", 'We will deploy production Friday.');
+    refuses('‘We will deploy production Friday.’', 'We will deploy production Friday.');
+    // …while an apostrophe *inside* a word is still part of it, so a faithful
+    // quote is not refused for punctuation.
+    expect(statementBearing("bob won't deploy", "bob won't deploy").borne).toBe(true);
   });
 
   it('refuses an article substitution, which laundered an indefinite reference', () => {
@@ -437,7 +449,17 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     const russian = 'Боб развернёт продакшен в пятницу';
     // Case is not folded since r5 — `US` and `us` are different words and a
     // quote is supposed to be verbatim — so the tokens carry the capital.
-    expect(orderedTokens(russian)).toEqual(['Боб', 'развернёт', 'продакшен', 'в', 'пятницу']);
+    expect(orderedTokens(russian)).toEqual([
+      'Боб',
+      ' ',
+      'развернёт',
+      ' ',
+      'продакшен',
+      ' ',
+      'в',
+      ' ',
+      'пятницу',
+    ]);
     expect(statementBearing(russian, russian).borne).toBe(true);
     expect(statementBearing(`Боб не развернёт продакшен в пятницу`, russian).borne).toBe(false);
   });
@@ -446,7 +468,7 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     // Catches: dropping the `’` fold from `normalizeForReceipt`. Without it
     // `won’t` tokenizes as `won` + `t` and refuses a faithful quote for a reason
     // that has nothing to do with what was said.
-    expect(orderedTokens('bob won’t deploy')).toEqual(['bob', "won't", 'deploy']);
+    expect(orderedTokens('bob won’t deploy')).toEqual(['bob', ' ', "won't", ' ', 'deploy']);
     expect(statementBearing('bob won’t deploy', "bob won't deploy").borne).toBe(true);
   });
 
@@ -486,10 +508,17 @@ describe('statementBearing — the evasions a stopword list cannot enumerate', (
     // its author displayed, not a sentence its author asserted, so the two
     // characters that carry that distinction are content. r4 deleted them, which
     // turned `` `Deploy production Friday.` `` into its author's assertion.
+    //
+    // **The pair carries nothing but the backticks, and r6's ledger is why.**
+    // It used to read `` `'online'` `` against `online`, so once r6 made a
+    // standalone apostrophe a token the pair differed in two ways at once and
+    // the `normalize_deletes_backticks` mutant escaped: the refusal stayed, for
+    // the other reason, and a test that refuses for the wrong reason pins
+    // nothing. One difference per assertion.
     expect(
       statementBearing(
-        "so TypeScript should not be so confident that `this.state` is still `'online'`",
-        'so TypeScript should not be so confident that this.state is still online',
+        'so TypeScript should not be so confident that `this.state` is narrowed',
+        'so TypeScript should not be so confident that this.state is narrowed',
       ).borne,
     ).toBe(false);
   });
@@ -542,7 +571,7 @@ describe('the quote must be whole sentences, not a span cut out of one', () => {
    * — because the words that reverse it are on the other side of the scissors.
    */
   const mined = (body: string, span: string) => {
-    const window: ProvenanceMessage[] = [{ id: 'msg_m', authorId: BOB, body }];
+    const window: ProvenanceMessage[] = room({ id: 'msg_m', authorId: BOB, body });
     expect(statementBearing(span, span).borne, 'the span must bear itself').toBe(true);
     expect(quoteSpansWholeSentences(span, body)).toBe(false);
 
@@ -608,7 +637,7 @@ describe('the quote must be whole sentences, not a span cut out of one', () => {
     // form is quoting the sentence — including the part that reverses it, which
     // the bearing check then refuses on its own.
     const body = 'Bob will deploy production Friday under any circumstances.';
-    const window: ProvenanceMessage[] = [{ id: 'msg_m', authorId: BOB, body }];
+    const window: ProvenanceMessage[] = room({ id: 'msg_m', authorId: BOB, body });
     const whole = 'Bob will deploy production Friday under any circumstances';
     expect(quoteSpansWholeSentences(whole, body)).toBe(true);
     expect(
@@ -644,7 +673,7 @@ describe('the quote must be whole sentences, not a span cut out of one', () => {
     // supply the sentence — the same rule `bearingMessages` enforces, applied to
     // the span check that runs after it.
     const body = '> Bob will deploy production Friday.\n\nI disagree with all of that.';
-    const window: ProvenanceMessage[] = [{ id: 'msg_m', authorId: ALICE, body }];
+    const window: ProvenanceMessage[] = room({ id: 'msg_m', authorId: ALICE, body });
     const decision = decideAcceptance(
       modelProposal({
         statement: 'Bob will deploy production Friday',
@@ -673,14 +702,23 @@ describe('the bearing check refuses what it cannot judge', () => {
     // derived version: a probe computed from the table it is testing moves with
     // the table, so raising the cap to four million left this passing. Same
     // vacuity r3's gauntlet found in the θ probes, one file over.
+    //
+    // **The cap is 800 tokens since r6 and the reach in words is unchanged.**
+    // `orderedTokens` is exhaustive now, so 401 words carry 400 spaces with them
+    // — 801 tokens — and 400 words carry 399, which is 799. The pair of probes
+    // below still straddles the bound for exactly the same *sentences* they
+    // straddled it for in r5, which is the property this cap is for; the number
+    // moved to keep that true.
     const huge = Array.from({ length: 401 }, (_, i) => `w${i}`).join(' ');
     const result = statementBearing(huge, huge);
-    expect(RECEIPT_POLICY.maxAlignedTokens).toBe(400);
+    expect(RECEIPT_POLICY.maxAlignedTokens).toBe(800);
+    expect(orderedTokens(huge).length).toBe(801);
     expect(result.borne).toBe(false);
     expect(result.undecidable).toBe('too_long');
     // …and 400 is inside the cap, so the refusal is the bound and not the check
     // giving up on anything long.
     const fits = Array.from({ length: 400 }, (_, i) => `w${i}`).join(' ');
+    expect(orderedTokens(fits).length).toBe(799);
     expect(statementBearing(fits, fits).borne).toBe(true);
   });
 

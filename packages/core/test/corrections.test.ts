@@ -16,7 +16,7 @@ import {
   serializeState,
   tombstoned,
 } from '../src/index.js';
-import { ALICE, at, BOB, event, human, model, ROOM, sampleLog, shuffle } from './fixtures.js';
+import { ALICE, at, BOB, event, human, model, ROOM, room, sampleLog, shuffle } from './fixtures.js';
 
 /**
  * #5's correction verbs, on top of the scaffold's three.
@@ -43,7 +43,7 @@ const corrected = (
 
 /** A claim accepted by a model, through its own proposal — so it starts at `~`. */
 function modelAcceptedClaim(): AuthoredEvent[] {
-  const messages = [{ id: 'msg_1', authorId: BOB, body: 'the build is green on main' }];
+  const messages = room({ id: 'msg_1', authorId: BOB, body: 'the build is green on main' });
   return [
     event({
       id: 'ev_mp',

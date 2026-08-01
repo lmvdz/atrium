@@ -12,6 +12,7 @@ import {
   emptyState,
   findDuplicate,
   foldEvents,
+  orderedTokens,
   type Proposal,
   type ProvenanceMessage,
   projectAttention,
@@ -23,7 +24,7 @@ import {
   validateProposalProvenance,
   wasConsumed,
 } from '../src/index.js';
-import { ALICE, append, at, BOB, event, human, model, ROOM, rawEvent } from './fixtures.js';
+import { ALICE, append, at, BOB, event, human, model, ROOM, rawEvent, room } from './fixtures.js';
 
 /**
  * Round 2's gauntlet found one defect twice, and this file is the whole answer
@@ -50,7 +51,7 @@ import { ALICE, append, at, BOB, event, human, model, ROOM, rawEvent } from './f
  */
 
 const CLAIM = 'the migration is reversible and can be rolled back';
-const WINDOW: ProvenanceMessage[] = [{ id: 'msg_1', authorId: ALICE, body: CLAIM }];
+const WINDOW: ProvenanceMessage[] = room({ id: 'msg_1', authorId: ALICE, body: CLAIM });
 
 /** A model claim proposal, as an untyped caller would hand it over. */
 function rawClaimProposal(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -576,7 +577,7 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
         quote: promise,
         provenance: ['msg_p'],
       }),
-      { messages: [{ id: 'msg_p', authorId: BOB, body: promise }] },
+      { messages: room({ id: 'msg_p', authorId: BOB, body: promise }) },
     );
     expect(decision.verdict).toBe('auto_accept');
   });
@@ -596,7 +597,7 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
         quote: promise,
         provenance: ['msg_p'],
       }),
-      { messages: [{ id: 'msg_p', authorId: BOB, body: promise }] },
+      { messages: room({ id: 'msg_p', authorId: BOB, body: promise }) },
     );
     expect(decision.verdict).toBe('pending');
     expect(decision.visibility).toBe('quiet');
@@ -641,10 +642,10 @@ describe('the quote is bound to the sentence it is a receipt for', () => {
 
   it('does not refuse the same person saying it twice — the answer is determined', () => {
     const said = 'we should reset narrowing on mutating method calls';
-    const twice: ProvenanceMessage[] = [
+    const twice: ProvenanceMessage[] = room(
       { id: 'm_a', authorId: ALICE, body: said },
       { id: 'm_a2', authorId: ALICE, body: said },
-    ];
+    );
     const decision = decideAcceptance(
       modelProposal({ statement: said, claimant: ALICE, quote: said, provenance: ['m_a', 'm_a2'] }),
       { messages: twice },
@@ -712,36 +713,81 @@ describe('the receipt minima are policy, and are pinned by value', () => {
     expect(RECEIPT_POLICY).toEqual({
       minQuoteLength: 24,
       droppableTokens: new Set(['.']),
-      maxAlignedTokens: 400,
+      maxAlignedTokens: 800,
       maxScannedSentences: 200,
       maxLaterMessagesScanned: 200,
     });
   });
 
   it('lets nothing but a full stop differ between a quote and its statement', () => {
-    // Catches: `receipt_policy_droppable_widened`. Every entry in this set is a
-    // licence for a model to drop something from the sentence it is quoting, so
-    // it is pinned by value and by behaviour.
+    // Catches: `receipt_policy_droppable_widened`, `ordered_tokens_drops_spaces`.
     //
-    // It held `a`, `an` and `the` until r4's own blind review broke the argument
-    // for them — an article carries reference ("**a** maintainer" laundered into
-    // "**the** maintainer") and a one-letter name is spelled like one ("**A**
-    // will deploy" bearing "will deploy"). The words went; the guarantee is now
-    // the sentence that needed no argument.
+    // **The title says "nothing but", and until r6 this test checked nine words
+    // somebody typed out.** A hand-written list is exactly the instrument this
+    // whole file exists to refuse — it pins the evasions somebody thought of, and
+    // the property in the title is a statement about *every* token. It was false
+    // in both directions while this test passed: the tokenizer discarded spaces
+    // and standalone apostrophes, so `We will 'deploy' production 'Friday'.` and
+    // ``rm -rf /tmp/cache`` for ``rm -rf / tmp/cache`` were borne, and no word on
+    // anybody's list would have found either.
+    //
+    // So the property is checked over the tokens themselves: take one apart, put
+    // it back a token at a time, and the *only* difference `borne` forgives must
+    // be a member of the set. The sentence carries a negation, a quantifier, an
+    // article, a one-letter name, a contraction, a code literal with a double
+    // space in it, a comma, an apostrophe-quoted term and a full stop, so the
+    // loop covers every class the round has argued about — but the assertion
+    // does not depend on that: it is *every* token, whatever they turn out to be.
     expect([...RECEIPT_POLICY.droppableTokens].sort()).toEqual(['.']);
-    for (const word of ['not', 'no', 'never', 'all', 'some', 'will', 'might', 'only', 'unless']) {
+
+    const quote =
+      "A maintainer will not deploy 2 of the 'production' boxes on Friday, and `a  b` won't change that.";
+    const tokens = orderedTokens(quote);
+    expect(tokens.length).toBeGreaterThan(30);
+
+    for (const [index, token] of tokens.entries()) {
+      const dropped = [...tokens.slice(0, index), ...tokens.slice(index + 1)].join('');
+      const droppable = RECEIPT_POLICY.droppableTokens.has(token);
       expect(
-        statementBearing(`bob ${word} deploys production`, 'bob deploys production').borne,
-        `"${word}" must not be droppable`,
-      ).toBe(false);
+        statementBearing(quote, dropped).borne,
+        `dropping ${JSON.stringify(token)} at ${index} must ${droppable ? 'be forgiven' : 'be refused'}`,
+      ).toBe(droppable);
+      // …and the same licence in the other direction: what may be dropped from
+      // the statement may be dropped from the quote.
+      expect(
+        statementBearing(dropped, quote).borne,
+        `dropping ${JSON.stringify(token)} from the quote must ${droppable ? 'be forgiven' : 'be refused'}`,
+      ).toBe(droppable);
     }
-    expect(statementBearing('a maintainer will deploy', 'the maintainer will deploy').borne).toBe(
-      false,
-    );
-    expect(statementBearing('A will deploy production', 'will deploy production').borne).toBe(
-      false,
-    );
-    // …and the one that is, in both directions.
+
+    // Insertion is the mirror image, and it is not symmetrical with deletion:
+    // a token added to the statement is a word the record does not carry.
+    // The licence is symmetric — `.` is forgiven whichever side carries it — so
+    // the expectation is the same membership test rather than a flat `false`.
+    for (const inserted of ['not', "'", '?', '`', '.']) {
+      const statement = [...tokens.slice(0, 6), inserted, ...tokens.slice(6)].join('');
+      const droppable = RECEIPT_POLICY.droppableTokens.has(inserted);
+      expect(
+        statementBearing(quote, statement).borne,
+        `inserting ${JSON.stringify(inserted)} must ${droppable ? 'be forgiven' : 'be refused'}`,
+      ).toBe(droppable);
+    }
+
+    // A *second* space is the one insertion the allowlist admits, and only in
+    // prose: "a client wraps a message and a quote copied out of it carries
+    // different line breaks". Inside a code literal it is admitted by nothing,
+    // and that asymmetry is the whole of `normalizeForReceipt`'s code-span rule —
+    // which nothing at this comparison consulted until r6.
+    expect(statementBearing(quote, quote.replace('will not', 'will  not')).borne).toBe(true);
+    expect(statementBearing(quote, quote.replace('`a  b`', '`a b`')).borne).toBe(false);
+    // The other two entries of that allowlist, for the same reason: a character
+    // with no rendering and a typographic apostrophe are admitted by
+    // `normalizeForReceipt` before any of this runs, so they are not differences
+    // this set is being asked about.
+    expect(statementBearing(quote, quote.replace('will', 'wi​ll')).borne).toBe(true);
+    expect(statementBearing(quote, quote.replace("won't", 'won’t')).borne).toBe(true);
+
+    // …and the one that is forgiven, at the end of a sentence, where it lives.
     expect(statementBearing('ship the flag.', 'ship the flag').borne).toBe(true);
     expect(statementBearing('ship the flag', 'ship the flag.').borne).toBe(true);
     // A question mark is not a full stop: an interrogative is not an assertion.

@@ -195,6 +195,27 @@ export interface AcceptanceContext {
    * A human-staged proposal does not go through θ at all, so it survives an
    * empty window; there is nothing to check when the person staging the reading
    * is the receipt.
+   *
+   * ## What this window has to *be* — r6, and it is a contract
+   *
+   * **The room's messages, in room order, continuing past the ones the proposal
+   * cites.** Not "the messages this receipt cites", which is the natural reading
+   * and is what `commitmentAttribution` narrows to one function below — and
+   * which silently turns the later-correction scan off:
+   *
+   * | window supplied     | verdict for the same proposal |
+   * | ------------------- | ----------------------------- |
+   * | the whole room      | `receipt_not_certifiable`     |
+   * | the cited messages  | `auto_accept`                 |
+   *
+   * That is r2's `messages: []` and r3's `[{ body: '' }]` one level out: absence
+   * and emptiness were made one fact, and **truncation was left invisible**.
+   * `laterRevision` now refuses a window that holds nothing but the citations —
+   * a window the proposal chose is not a window — and reports how far it read on
+   * the way past. What core still cannot see is a window that reaches one
+   * message past the citations and stops short of the room's end; that is
+   * recorded beside the other things `TrustedContext` says core cannot check,
+   * and it is the caller's to honour.
    */
   messages: readonly ProvenanceMessage[];
   /**

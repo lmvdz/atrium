@@ -360,7 +360,10 @@ export interface AcceptanceReceiptRefusal {
  *  5. **The receipt itself** — the quote is long enough to identify a sentence,
  *     it is in a cited message, it is that author's own text rather than
  *     something they were quoting, exactly one author carries it, and the
- *     statement being minted is that quote with nothing dropped but articles.
+ *     statement being minted **is that quote**, with nothing dropped but the
+ *     full stop in `RECEIPT_POLICY.droppableTokens`. (This read "nothing dropped
+ *     but articles" until r6, describing a set that lost `a`, `an` and `the` in
+ *     r4 — the licence it named had been gone for two rounds.)
  *  6. **Certifiability.** A quote that says *more* than the statement is not
  *     refused as wrong and is not accepted as right: nothing here can tell an
  *     aside from a "not", so a machine may not act on it and a person must.

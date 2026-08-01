@@ -12,7 +12,7 @@ import {
   serializeState,
   wasConsumed,
 } from '../src/index.js';
-import { ALICE, BOB, shuffle } from './fixtures.js';
+import { ALICE, BOB, shuffle, UNCITED_TAIL } from './fixtures.js';
 
 /**
  * The live≡replay invariant, checked property-style rather than by example.
@@ -487,9 +487,17 @@ function gateProbes(seed: number): AuthoredEvent[] {
    * `receipt_not_certifiable` and left `confidence_floor` unreached, which the
    * gate-coverage assertion caught. The referral shape has its own case at
    * `${tag}_41`.
+   *
+   * **And the window carries a message the proposal does not cite, which is r6.**
+   * `laterRevision` refuses a window holding nothing but the citations — the
+   * correction scan then has nothing to read that the proposal did not choose —
+   * so a one-message window routed every claim acceptance to
+   * `receipt_not_certifiable` again, and the same coverage assertion caught it
+   * again. That is the assertion earning its keep twice.
    */
   const claimWindow = (text: string): ProvenanceMessage[] => [
     { id: `msg_${tag}`, authorId: BOB, body: `${text}.` },
+    UNCITED_TAIL,
   ];
 
   const object = (
