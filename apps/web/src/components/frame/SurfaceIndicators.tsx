@@ -31,6 +31,16 @@ export function SurfaceIndicators({ surfaces, focused, onFocus }: SurfaceIndicat
         const empty = surface.count !== null && surface.count === 0;
         return (
           <button
+            /* The label and the count are two adjacent elements with no text
+               node between them, so the computed name concatenated to
+               "NEEDS YOU0" — a label welded to a number, and worst on the
+               disabled chip where the number is the reason it is disabled.
+               Stating the name rather than relying on how the platform joins
+               two spans: the visible text is unchanged, and the count is said
+               as a count. */
+            aria-label={
+              surface.count === null ? surface.label : `${surface.label} — ${surface.count}`
+            }
             aria-pressed={surface.id === focused}
             className={[styles.surf, surface.warn ? styles.surfWarn : null]
               .filter(Boolean)

@@ -14,12 +14,14 @@
  * a session); `/` drives the same component through `RoomSession`.
  * ------------------------------------------------------------------------- */
 
+import type { KeyboardEvent, Ref } from 'react';
 import { Fragment } from 'react';
 import type { Arming } from '../../src/components';
 import {
   AppFrame,
   Composer,
   CrossRoomJump,
+  initials,
   Pin,
   Rail,
   RoomHead,
@@ -69,6 +71,15 @@ export interface RoomFrameHandlers {
   readonly onFoldPin?: (folded: boolean) => void;
   readonly composerValue?: string;
   readonly onComposerChange?: (draft: string) => void;
+  /* The composer exposes four seams and this record used to forward two. No
+     consumer was forced to fork — the props are on <Composer> — but the demo
+     whose whole job is to show the library working showed a narrower library
+     than the one that shipped. `onKeyDown` is the seam a consumer uses to take
+     the Enter key over, and `textareaRef` is how it puts focus back after a
+     send; a "here is everything the library offers" frame that omits them is
+     wrong about the library. */
+  readonly onComposerKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  readonly composerRef?: Ref<HTMLTextAreaElement>;
   readonly onSend?: (draft: string) => void;
   readonly onCancelBinding?: () => void;
 }
@@ -133,7 +144,17 @@ export function RoomFrame(props: RoomFrameProps) {
         <WorkspaceTile code="AT" key="tile" title="Atrium — this workspace" />,
         <WorkspaceSpacer key="spacer" />,
         <ThemeToggle key="theme" />,
-        <WorkspaceYou initials="LV" key="you" title="lars — you" />,
+        /* Derived from the viewer, not typed in beside them. "LV" was hardcoded
+           here while the viewer's name came from `props.viewer`, so a frame
+           rendered for anybody else printed lars's monogram over their tile —
+           the same species as every other free string this ticket has removed,
+           at the smallest possible scale. `initials()` already existed and was
+           already used by the rail and the room head. */
+        <WorkspaceYou
+          initials={initials(props.viewer.name)}
+          key="you"
+          title={`${props.viewer.name} — you`}
+        />,
       ])}
       workspace={slot([
         <Fragment key="workspace">
@@ -177,8 +198,10 @@ export function RoomFrame(props: RoomFrameProps) {
             footNote={props.composerNote}
             onCancelBinding={on.onCancelBinding}
             onChange={on.onComposerChange}
+            onKeyDown={on.onComposerKeyDown}
             onSend={on.onSend}
             roomName={props.room.name}
+            textareaRef={on.composerRef}
             value={on.composerValue}
           />
         </Fragment>,

@@ -145,6 +145,25 @@
   position: relative;
 }
 
+/* Present to assistive technology, absent from layout and from the page.
+
+   NOT `display: none` and NOT `hidden`: both are also absent from the
+   accessibility tree, and these two elements are the button's `aria-describedby`
+   targets — hiding them that way would delete the description rather than
+   relocate it. Taken out of flow so a flex row of actions measures the same
+   with them as without. */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
 /* armed: --bg3 on --red, 5.36:1 light / 5.10:1 dark — see the note above */
 .hold[data-armed='true'] {
   background: var(--red);

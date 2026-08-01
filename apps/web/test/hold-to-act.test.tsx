@@ -193,9 +193,40 @@ describe('press and hold', () => {
     const half = Number(button.getAttribute('data-hold-progress'));
     expect(half).toBeGreaterThan(0.4);
     expect(half).toBeLessThan(0.6);
-    expect(button.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe(
+    /* The meter is a SIBLING of the button, not a descendant — see the
+       accessible-name test below for why. Same clock either way. */
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe(
       String(Math.round(half * 100)),
     );
+  });
+
+  /* CATCHES: the progress indicator going back inside the button.
+     `role="progressbar"` on a descendant contributes its value to the ancestor's
+     computed accessible name, so the control announced as "0 Authorise the drop
+     — hold" with a leading number that changed while the hold ran. Round 3's
+     gauntlet found it; this asserts the NAME rather than the markup, so it stays
+     true through a restructure that keeps the property. */
+  it('the accessible name is the label, with no progress value welded to it', () => {
+    render(
+      <HoldToAct
+        actionId="drop"
+        actor="lars"
+        describe="Authorise the drop"
+        label="Authorise the drop"
+      />,
+    );
+    expect(screen.getByRole('button').textContent).toBe('Authorise the drop — hold');
+    expect(
+      screen.getByRole('button', { name: 'Authorise the drop — hold' }),
+      'the hold control announces its progress value as part of its name',
+    ).toBeTruthy();
+    // the fill is decoration and says so
+    const fill = document.querySelector('[aria-hidden="true"]');
+    expect(fill, 'the progress fill is not hidden from assistive technology').not.toBeNull();
+    // and the progress is still exposed — moved, not deleted
+    const meter = screen.getByRole('progressbar');
+    expect(meter.getAttribute('aria-valuenow')).toBe('0');
+    expect(screen.getByRole('button').getAttribute('aria-describedby')).toContain(meter.id);
   });
 });
 

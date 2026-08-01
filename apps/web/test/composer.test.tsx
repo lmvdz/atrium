@@ -13,13 +13,37 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createRef } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
+import * as f from '../app/gallery/fixtures';
+import type { RoomFrameProps } from '../app/gallery/RoomFrame';
+import { RoomFrame } from '../app/gallery/RoomFrame';
 import { Composer } from '../src/components';
 import type { ComposerBinding } from '../src/components/model';
+import { initials } from '../src/components/model';
 
 afterEach(cleanup);
 
 const FREE: ComposerBinding = { mode: 'free' };
 const FOOT = '↵ send · ⇧↵ newline';
+
+/** The gallery's own base frame, so the demo under test is the demo that ships. */
+const FRAME: RoomFrameProps = {
+  room: f.ROOM,
+  rooms: f.ROOMS,
+  humans: f.HUMANS,
+  viewer: f.VIEWER,
+  viewerNote: 'here · 4 owed to you',
+  focused: 'conversation',
+  attention: f.ATTENTION,
+  trailer: f.TRAILER,
+  lastCheck: '12:29',
+  entries: f.FRESH_TIMELINE,
+  filtered: false,
+  objectives: f.OBJECTIVES,
+  objects: f.OBJECTS,
+  updatedAt: '13:41',
+  binding: f.FREE,
+  composerNote: 'nothing is inferred from a message unless you bind it',
+};
 
 function box(): HTMLTextAreaElement {
   return screen.getByRole('textbox') as HTMLTextAreaElement;
@@ -171,5 +195,52 @@ describe('the composer keeps the promise its footer prints', () => {
   it('the footer still prints the contract these tests hold it to', () => {
     render(<Composer binding={FREE} footNote="x" roomName="r" />);
     expect(screen.getByText(/send/).textContent?.replace(/\s+/g, ' ')).toContain('↵ send · ⇧↵');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE DEMO SHOWS THE WHOLE SEAM, NOT MOST OF IT.
+ *
+ * Round 3's gauntlet: `RoomFrame` forwarded four of the composer's props and
+ * not `onKeyDown`/`textareaRef`. Nobody was forced to fork — the props are on
+ * <Composer> — but the frame whose entire job is "here is the library working"
+ * showed a narrower library than the one that shipped, which is the same defect
+ * as round 2's dead demo at a smaller scale.
+ * ------------------------------------------------------------------------- */
+describe('the gallery frame forwards every composer seam', () => {
+  /* CATCHES: dropping `onKeyDown` or `textareaRef` from RoomFrameHandlers or
+     from the <Composer> call. Asserted BEHAVIOURALLY through a rendered frame
+     rather than by reading the props table, because a prop that is declared and
+     not passed is exactly the shape of the defect. */
+  it('a consumer’s key handler and ref reach the textarea through RoomFrame', () => {
+    const keys: string[] = [];
+    const ref = createRef<HTMLTextAreaElement>();
+    render(
+      <RoomFrame
+        {...FRAME}
+        handlers={{
+          composerRef: ref,
+          onComposerKeyDown: (event) => keys.push(event.key),
+        }}
+      />,
+    );
+    const textarea = screen.getAllByRole('textbox')[0] as HTMLTextAreaElement;
+    fireEvent.keyDown(textarea, { key: 'Escape' });
+    expect(keys, 'RoomFrame drops onKeyDown on the way to the composer').toEqual(['Escape']);
+    expect(ref.current, 'RoomFrame drops textareaRef on the way to the composer').toBe(textarea);
+  });
+
+  /* CATCHES: the workspace monogram going back to a hardcoded "LV". It is a
+     free string beside a derived name — the smallest instance of the defect
+     class this whole ticket has been closing — and `initials()` already existed
+     and was already used by the rail and the room head. */
+  it('the workspace monogram is derived from the viewer, not typed in', () => {
+    const mateo = { ...FRAME.viewer, name: 'mateo alvarez' };
+    render(<RoomFrame {...FRAME} viewer={mateo} />);
+    const you = screen.getByTitle(/^mateo alvarez/);
+    expect(you.textContent, 'the monogram does not follow the viewer').toBe(
+      initials('mateo alvarez'),
+    );
+    expect(you.textContent).not.toBe('LV');
   });
 });

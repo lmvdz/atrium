@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AttentionCard, Pin } from '../src/components';
+import * as f from '../app/gallery/fixtures';
+import { AttentionCard, Pin, Rail, RoutineCollapse, SurfaceIndicators } from '../src/components';
 import type { AttentionItem, TrailerSummary } from '../src/components/model';
 import { hardestFirst, isRationale, rationale, trailerFor } from '../src/components/model';
 
@@ -240,5 +241,89 @@ describe('the trailer', () => {
       overdue: 3,
     });
     expect(summary.lead).toBe('1 failure outside your list');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE NAME A SCREEN READER HEARS IS A RENDERED STRING TOO.
+ *
+ * Round 3's gauntlet: the surface chip's label and its count are two adjacent
+ * elements with no text node between them, so the computed accessible name was
+ * "NEEDS YOU0" — worst on the disabled chip, where the number is the reason it
+ * is disabled and therefore the part the person most needs to hear.
+ * ------------------------------------------------------------------------- */
+describe('a surface indicator says its count as a count', () => {
+  const SURFACES = [
+    { id: 'conversation' as const, label: 'CONVERSATION', count: null, warn: false },
+    { id: 'needs-you' as const, label: 'NEEDS YOU', count: 0, warn: false },
+    { id: 'current-state' as const, label: 'CURRENT STATE', count: 12, warn: false },
+  ];
+
+  /* CATCHES: the label and the count welding back together. Asserted through
+     the accessible NAME rather than through the markup, so it stays true
+     however the two spans are arranged — the defect was never about which
+     elements exist. */
+  it('the disabled chip’s label is not welded to its number', () => {
+    render(<SurfaceIndicators focused="conversation" surfaces={SURFACES} />);
+    const chip = screen.getByRole('button', { name: 'NEEDS YOU — 0' });
+    expect(chip.hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByRole('button', { name: /NEEDS YOU0/ })).toBeNull();
+    // the visible text is unchanged — this is a naming fix, not a copy change
+    expect(chip.textContent).toBe('NEEDS YOU0');
+  });
+
+  /* CATCHES: over-applying it, so a countless surface announces a dangling
+     separator ("CONVERSATION — "). */
+  it('a surface with no count says only its label', () => {
+    render(<SurfaceIndicators focused="conversation" surfaces={SURFACES} />);
+    expect(screen.getByRole('button', { name: 'CONVERSATION' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'CURRENT STATE — 12' })).toBeTruthy();
+  });
+
+  /* CATCHES: the same weld on the rail's room rows, which a sweep of every
+     button's computed name found after the gauntlet named only the surface
+     chip. "#identity-service12" is a room and the number of things it owes you,
+     said as one word — and the number is the half that matters. */
+  it('a rail room chip says its badge as a badge', () => {
+    render(
+      <Rail
+        humans={f.HUMANS}
+        rooms={f.ROOMS}
+        viewer={f.VIEWER}
+        viewerNote="here"
+        workspaceName="atrium"
+        workspaceSub="4 rooms"
+      />,
+    );
+    const names = screen
+      .getAllByRole('button')
+      .map((el) => el.getAttribute('aria-label') ?? el.textContent ?? '');
+    expect(names.length).toBeGreaterThan(3);
+    expect(
+      names.filter((n) => /[A-Za-z]\d|\d[A-Za-z]/.test(n)),
+      'a rail chip welds its room name to its badge',
+    ).toEqual([]);
+    expect(names.some((n) => / — \d+ (owed to you|unseen)$/.test(n))).toBe(true);
+  });
+
+  /* CATCHES: the routine strip's parts running together. Its visible separators
+     are `aria-hidden` `·` spans, so removing the explicit name leaves the ONLY
+     whitespace inside a hidden element and the computed name reads
+     "8 routine11:50 – 11:57backfill, tests, deploys". A separator that is
+     decoration to the eye is not decoration to the name computation once it is
+     the only thing between two runs of text. */
+  it('the routine strip says its count, its window and its actors apart', () => {
+    render(
+      <RoutineCollapse
+        entry={
+          f
+            .timeline({ seen: false, filter: null, routineOpen: false })
+            .find((e) => e.type === 'routine') as never
+        }
+      />,
+    );
+    const name = screen.getByRole('button').getAttribute('aria-label') ?? '';
+    expect(name).toMatch(/^\d+ routine rows between \d\d:\d\d and \d\d:\d\d, from /);
+    expect(/[A-Za-z]\d/.test(name.replace(/\b\d+:\d+\b/g, '')), `welded: ${name}`).toBe(false);
   });
 });

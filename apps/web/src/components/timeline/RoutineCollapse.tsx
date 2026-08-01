@@ -31,6 +31,16 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
     <div className={styles.routine} data-row="routine" data-open={entry.open ? 'true' : 'false'}>
       <button
         aria-expanded={entry.open}
+        /* THE VISIBLE SEPARATORS ARE aria-hidden, WHICH REMOVED THE ONLY
+           WHITESPACE. The strip's parts are adjacent inline spans joined by
+           `<span aria-hidden> · </span>`, so the computed name ran together as
+           "8 routine11:50 – 11:57backfill, tests, deploys". Found by sweeping
+           every button's COMPUTED accessible name — the same sweep that showed
+           the composite lens rows are fine, because the accname algorithm does
+           insert a space for block-level parts. A `·` that is decoration to the
+           eye is not decoration to the name computation once it is the only
+           thing between two runs of text. */
+        aria-label={`${count} routine ${count === 1 ? 'row' : 'rows'} between ${entry.from} and ${entry.to}, from ${entry.actors.join(', ')} — ${entry.open ? 'click to hide' : 'click to peek'}`}
         className={styles.routineStrip}
         onClick={onTogglePeek}
         title="routine = no state change, no claim, nothing owed to anyone"

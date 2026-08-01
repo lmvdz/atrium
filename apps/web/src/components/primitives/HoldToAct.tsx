@@ -89,15 +89,19 @@ export function HoldToAct({
   const frameRef = useRef<number | null>(null);
   const startRef = useRef<number | null>(null);
 
+  const meterRef = useRef<HTMLSpanElement | null>(null);
+
   const paint = useCallback((progress: number) => {
     const node = buttonRef.current;
     if (node === null) return;
     const clamped = Math.max(0, Math.min(1, progress));
     node.style.setProperty('--hold-progress', `${(clamped * 100).toFixed(1)}%`);
     node.setAttribute('data-hold-progress', clamped.toFixed(3));
-    node
-      .querySelector('[role="progressbar"]')
-      ?.setAttribute('aria-valuenow', String(Math.round(clamped * 100)));
+    /* The meter is a SIBLING of the button now, so this cannot go looking for it
+       inside one. Held by ref rather than found by selector for the same reason:
+       a query that returns null degrades silently, and this is the indicator for
+       a safety mechanism. */
+    meterRef.current?.setAttribute('aria-valuenow', String(Math.round(clamped * 100)));
   }, []);
 
   const stop = useCallback(() => {
@@ -151,55 +155,83 @@ export function HoldToAct({
 
   useEffect(() => stop, [stop]);
 
+  /* THE ACCESSIBLE NAME IS THE LABEL, NOT THE LABEL WITH A NUMBER GLUED TO IT.
+     The progress indicator used to be a `role="progressbar"` DESCENDANT of the
+     button, and a progressbar contributes its value to its ancestor's computed
+     name — so the control announced as "0 Authorise the drop — hold", and the
+     leading number changed as the hold ran. The information is real and worth
+     announcing; it is just not part of the control's name.
+
+     The fill is now decoration (`aria-hidden`, no role), and the meter is a
+     visually-hidden sibling OUTSIDE the button, referenced by
+     `aria-describedby`. Outside rather than hidden-inside on purpose: an
+     `aria-hidden` element cannot be an describedby target, and a non-hidden
+     descendant would go straight back into the name. The description also
+     carries what the title says, so the hold contract reaches a screen reader
+     that never sees a tooltip. */
+  const meterId = `${actionId}-hold-progress`;
+  const describeId = `${actionId}-hold-describe`;
+  const contract = `${describe} — press and hold for ${(holdMs / 1000).toFixed(0)} seconds; the hold is the confirmation, and releasing early cancels it`;
+
   return (
-    <button
-      className={[styles.hold, className].filter(Boolean).join(' ')}
-      data-armed={phase === 'armed' ? 'true' : undefined}
-      data-hold={String(holdMs)}
-      data-hold-action={actionId}
-      data-hold-actor={actor}
-      data-hold-progress="0.000"
-      data-holding={phase === 'holding' ? 'true' : undefined}
-      onBlur={cancel}
-      onKeyDown={(event) => {
-        if (event.key !== ' ' && event.key !== 'Enter') return;
-        /* The browser fires a click for Space/Enter on a button. Suppressing the
+    <>
+      <button
+        aria-describedby={`${describeId} ${meterId}`}
+        className={[styles.hold, className].filter(Boolean).join(' ')}
+        data-armed={phase === 'armed' ? 'true' : undefined}
+        data-hold={String(holdMs)}
+        data-hold-action={actionId}
+        data-hold-actor={actor}
+        data-hold-progress="0.000"
+        data-holding={phase === 'holding' ? 'true' : undefined}
+        onBlur={cancel}
+        onKeyDown={(event) => {
+          if (event.key !== ' ' && event.key !== 'Enter') return;
+          /* The browser fires a click for Space/Enter on a button. Suppressing the
            default is what stops this control from ever acting on one press. */
-        event.preventDefault();
-        if (event.repeat) return;
-        begin();
-      }}
-      onKeyUp={(event) => {
-        if (event.key !== ' ' && event.key !== 'Enter') return;
-        event.preventDefault();
-        cancel();
-      }}
-      onPointerCancel={cancel}
-      onPointerDown={(event) => {
-        event.preventDefault();
-        event.currentTarget.setPointerCapture?.(event.pointerId);
-        begin();
-      }}
-      onPointerLeave={cancel}
-      onPointerUp={cancel}
-      ref={buttonRef}
-      title={`${describe} — press and hold for ${(holdMs / 1000).toFixed(0)} seconds; the hold is the confirmation, and releasing early cancels it`}
-      type="button"
-    >
-      {/* The progressbar role goes on the FILL, not on the button: a control
-          you press must keep its button semantics, and a progressbar is not
-          something a screen reader offers to activate. */}
+          event.preventDefault();
+          if (event.repeat) return;
+          begin();
+        }}
+        onKeyUp={(event) => {
+          if (event.key !== ' ' && event.key !== 'Enter') return;
+          event.preventDefault();
+          cancel();
+        }}
+        onPointerCancel={cancel}
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+          begin();
+        }}
+        onPointerLeave={cancel}
+        onPointerUp={cancel}
+        ref={buttonRef}
+        title={contract}
+        type="button"
+      >
+        {/* Decoration. It shows the same clock the meter announces, so a screen
+          reader hearing it twice would be hearing one fact told two ways. */}
+        <span aria-hidden="true" className={styles.holdFill} />
+        <span className={styles.holdLabel}>
+          {phase === 'armed' ? `${label} — armed` : `${label} — hold`}
+        </span>
+      </button>
+      <span className={styles.srOnly} id={describeId}>
+        {contract}
+      </span>
+      {/* A progressbar is not something a screen reader should offer to
+          activate, so it is not the button and it is not inside it. */}
       <span
         aria-label="hold progress"
         aria-valuemax={100}
         aria-valuemin={0}
         aria-valuenow={0}
-        className={styles.holdFill}
+        className={styles.srOnly}
+        id={meterId}
+        ref={meterRef}
         role="progressbar"
       />
-      <span className={styles.holdLabel}>
-        {phase === 'armed' ? `${label} — armed` : `${label} — hold`}
-      </span>
-    </button>
+    </>
   );
 }

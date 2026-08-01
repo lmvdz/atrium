@@ -93,9 +93,24 @@ function RoomRow({
     room.owed > 0
       ? `${room.owed} item${room.owed === 1 ? '' : 's'} in #${room.name} need you`
       : null;
+  /* THE SAME WELDED NAME AS THE SURFACE CHIP, two more times. The name and the
+     count are adjacent elements with no text node between them, so the room
+     announced as "identity-service12" — and the badge that says twelve things
+     are owed to you is the half that gets eaten. Round 3's gauntlet named the
+     surface chip; a sweep of every button's accessible name found these, which
+     is why the sweep is worth more than the instance. Stated rather than left
+     to how the platform joins two spans. */
+  const name = `#${room.name}${
+    room.owed > 0
+      ? ` — ${room.owed} owed to you`
+      : room.unseen > 0
+        ? ` — ${room.unseen} unseen`
+        : ''
+  }`;
   return (
     <button
       aria-current={room.current ? 'true' : undefined}
+      aria-label={name}
       className={[
         styles.rrow,
         room.current ? styles.rrowOn : null,
