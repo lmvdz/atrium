@@ -2330,20 +2330,68 @@ function say(views, phrase, owner) {
   try { said = phrase.apply(null, views); } finally { SAYING = outer; }
   /* THE MUTATION, at the moment of minting rather than in a checker, because
      the phrase is only in hand here. Skipped inside a replay (a nested say
-     would re-enter) and when the phrase asked nothing. */
-  if (DEV && !QSTUB && log.length) {
+     would re-enter). */
+  if (DEV && !QSTUB) {
     const base = normText(quantText(said));
-    log.forEach((q, k) => {
-      let alt;
-      QSTUB = { n: 0, k: k, flip: flipAnswer };
+    const replay = (stubViews) => {
       const keep = SAYING; SAYING = [];
-      try { alt = normText(quantText(phrase.apply(null, views))); }
-      catch (e) { alt = null; }
-      finally { QSTUB = null; SAYING = keep; }
+      try { return normText(quantText(phrase.apply(null, stubViews))); }
+      catch (e) { return null; }
+      finally { SAYING = keep; }
+    };
+    log.forEach((q, k) => {
+      QSTUB = { n: 0, k: k, flip: flipAnswer };
+      const alt = replay(views);
+      QSTUB = null;
       if (alt !== null && alt === base)
         console.error("[atrium invariant] a sentence asked this record's " + q.of + " history a question and would " +
           "have said exactly the same thing either way — the query is decoration and the words beside it are a " +
           "literal:", (owner || (views.length && views[0].owner) || {}).id, q.q + "(" + q.arg + ")", base);
+    });
+    /* AND A SENTENCE DECLARES ONLY THE READS IT USED (round 11 self-review,
+       second pass). Two of the seven forgeries walked straight through the
+       clauses above: `"the prior sign-off preserved on the record"` re-typed
+       into a branch of a sentence that ALSO reads the verification elsewhere,
+       and `"still unanswered"` re-typed into a sentence that still reads the
+       answer in a branch it no longer takes. The quantifier rule asks whether
+       the field was read; a literal sitting beside an unrelated read of the
+       same field satisfies it. What it cannot satisfy is this: move the value
+       the sentence says it read, and the sentence has to move. A read that
+       cannot change what is on screen is not what produced it — and `claims` is
+       what every checker on this page re-reads, so a claim the sentence did not
+       use is a claim the checkers are verifying on its behalf for nothing. */
+    views.forEach((v, j) => {
+      /* a view whose HISTORY this sentence questioned is already load-bearing —
+         the query mutation above is the test for it, and moving the value at
+         one point would not move a sentence about the whole of it */
+      if (log.some(q => q.of === v.of && q.at === v.at)) return;
+      /* AND THE QUESTION IS ASKED WHERE IT MEANS SOMETHING: only of a field
+         whose own words are IN the sentence. A sentence branches, and a
+         `receiptState` that reads four fields to serve six branches genuinely
+         uses one of them per branch — firing on the other three would be an
+         audit firing on cases its rule does not cover, which this file's own
+         doctrine now forbids in as many words. What the rule is actually about
+         is a sentence that TALKS about a field and does not listen to it. */
+      if (!(RECORDED[v.of].words || []).some(w => hasToken(base, w))) return;
+      /* THE STUBS HAVE TO INCLUDE THE ONE THAT MATTERS. Half the sentences on
+         this page are a COMPARISON of two views of one field — "now settled"
+         against "already settled" — and moving one end to a value nothing holds
+         leaves the two ends unequal, so the branch does not move and an honest
+         read looks like decoration. The third stub is the other end's own
+         value: it is the only mutation that makes a comparison flip. */
+      const alts = [{ value: "\u0001a value this record does not hold\u0001" }, { value: null }]
+        .concat(views.filter(x => x !== v && x.of === v.of).map(x => ({ value: x.value })));
+      const moved = alts
+        .some(alt => {
+          const stub = views.slice();
+          stub[j] = Object.create(v, { value: { value: alt.value, enumerable: true } });
+          const out = replay(stub);
+          return out !== null && out !== base;
+        });
+      if (!moved)
+        console.error("[atrium invariant] a sentence declares that it read this record's " + v.of + " and would have " +
+          "said exactly the same thing whatever it held — the read is decoration and the words beside it are a " +
+          "literal:", (owner || v.owner || {}).id, v.of + "@" + v.at, base);
     });
   }
   const box = { said: said,
@@ -3528,6 +3576,23 @@ function checkToastInvariant(m) {
       console.error("[atrium invariant] a transition raised a toast that was not read out of the record — the loudest " +
         "sentence this page writes about an amendment, composed beside the object it describes:",
         pending.id, node ? node.textContent.trim() : String(m));
+    /* AND PAGE COPY MAY NOT QUANTIFY EITHER (round 11 self-review, raised by
+       the grok reviewer). A toast raised with no write pending is copy about an
+       ACTION — "sent", "nobody is named on this question to hand it to" — and
+       asserts nothing about a record, so it needs no mint. What it may not do
+       is quantify over a field history anyway: that would be the one surface on
+       the page where a literal about the record is reachable, and it is the
+       loudest one. There is no object in scope to check it against, so the
+       obligation is simply that it does not make the claim. */
+    clausesOf(String(voicedText(m)).replace(/\s+/g, " ").trim()).forEach(text => {
+      const q = WHOLE_QUANT.concat(PAST_QUANT, CONTINUITY_QUANT).filter(w => hasToken(text, w));
+      if (!q.length) return;
+      Object.keys(RECORDED).forEach(f => {
+        if (!(RECORDED[f].words || []).some(w => hasToken(text, w))) return;
+        console.error("[atrium invariant] a toast raised with no write behind it is quantifying over a " + f +
+          " history — page copy about an action may not make a claim about a record:", JSON.stringify(text), q[0]);
+      });
+    });
     return;
   }
   if (m.minted !== MINTED)
@@ -4411,13 +4476,18 @@ function objectTag(r, m, o) {
        away. Both come out of the record now. */
     if (current && o.reopenedAt && RECORDED.settlement.get(o) === "pending")
       return `<button class="tag amber" ${rc}>` +
-        voiced(stated(o, ["answer", "statement", "settlement"], (a, st, s) =>
+        /* the field that CARRIES the answer of record differs by kind — a
+           question keeps it in `answer`, a decision in `statement` — so the
+           sentence reads THAT field and no other. Reading both and or-ing them
+           made the first query decoration, because the second can never be
+           false, and declaring the unused one made the checkers verify a claim
+           the sentence never consulted. */
+        voiced(stated(o, [o.kind === "question" ? "answer" : "statement", "settlement"], (c, s) =>
           `answer reopened ${fieldOr(o.reopenedAt, "· time not recorded")} · ` +
-          /* the field that CARRIES the answer of record differs by kind — a
-             question keeps it in `answer`, a decision in `statement`. Asking
-             both and or-ing them made the first query decoration, because the
-             second can never be false. */
-          ((o.kind === "question" ? a : st).everSet() ? "still the answer on the record · " : "nothing is recorded as its answer · ") +
+          /* and it calls the field by ITS name: a decision's answer of record is
+             its statement, and saying "answer" about a read of `statement` is
+             CONVENTIONS line 230 in one word (round 11 self-review) */
+          (c.everSet() ? `still the ${c.of} on the record · ` : `nothing is recorded as its ${c.of} · `) +
           `${o.kind} ${enumText(s.value)}${s.before(s.value) ? " again" : ""}`)) +
         `${where}</button>`;
     /* SETTLED WITHOUT BEING ACCEPTED (round 5 D2). An answered question is not
@@ -4780,7 +4850,9 @@ function receiptState(o) {
     const st = v.value;
   if (st === "accepted") return ["ACCEPTED", o.kind, `by ${fieldOr(o.acceptedBy, "nobody on record")} · ${fieldOr(o.acceptedAt, "time not recorded")}`];
   if (st === "verified") return ["VERIFIED", o.kind, `checked by ${fieldOr(o.verifiedBy, "nobody on record")} · ${fieldOr(o.verifiedAt, "time not recorded")}`];
-  if (st === "proposed") return ["PROPOSED", "not accepted", `confidence ${fieldOr(o.confidence, "—")}`, "renders as a claim until a human answers"];
+  /* "until a human answers" named the `answer` field in a sentence that reads
+     the verification — the noun is about acceptance, and that is what it says */
+  if (st === "proposed") return ["PROPOSED", "not accepted", `confidence ${fieldOr(o.confidence, "—")}`, "renders as a claim until a human accepts it"];
   /* `openFor` is how long it had been open when the record was loaded. Once a
      question has been reopened that number is about the original ask, not about
      the state on screen, so the reopened case reports the reopen instead. */
@@ -5236,49 +5308,60 @@ function answerDecision(objectId, answer, provenanceNote) {
       /* one END of the record per operand: a `was` asserts the value before and
          an `after` asserts the value now, so checkStatedOperand() can hold each
          to its own side of the minted change. Whether the two ends DIFFER is a
-         comparison of two record reads (`stMoved`, above), not a flag. */
-      after: say([nowSt], v => stMoved
+         comparison of two record reads — and it is made HERE, from the values
+         handed in, rather than read off a flag computed twenty lines up. A
+         phrase that branches on a closed-over boolean is a phrase whose reads
+         could hold anything without a word on screen moving, which is what the
+         mutation at the bottom of say() now measures (round 11 self-review). */
+      after: say([nowSt], v => !sameValue(v.value, wasSt.value)
         ? [typed ? human(recordedLabel(v.value)) : recordedLabel(v.value),
            contradicts && !prior ? " — not what was proposed; your answer is the decision" : ""]
-        : "recorded again, verbatim — nothing about the statement changed"),
+        : ["recorded again, verbatim — ", recordedLabel(v.value), " is the sentence that was already there, so the statement itself was not amended"]),
       /* THE ENTRY CARRIES WHAT IT CLAIMS DIFFERS, and carries it only when it
          claims something differs — and it carries what amend() minted, which is
          the only before/after pair on this page that the record can vouch for.
          checkCorrectionInvariant() holds every entry to all three of those. */
       change: change,
-      fact: say([nowSt], () =>
-            (prior ? (stMoved ? `re-answered by ${S.me} at ${t}` : `re-recorded by ${S.me} at ${t}`)
-                   : (stMoved ? `answered by ${S.me} at ${t}` : `re-affirmed by ${S.me} at ${t}`)) +
+      fact: say([wasSt, nowSt], (ws, ns) => {
+            const moved = !sameValue(ws.value, ns.value);
+            return (prior ? (moved ? `re-answered by ${S.me} at ${t}` : `re-recorded by ${S.me} at ${t}`)
+                          : (moved ? `answered by ${S.me} at ${t}` : `re-affirmed by ${S.me} at ${t}`)) +
             (typed ? " · typed" : ` · chosen: ${answer.label} — the page wrote the sentence, ${S.me} chose it`) +
-            (stMoved ? "" : " · the statement on the record is unchanged, so the statement itself was not amended") +
-            (stMoved && !contradicts && !prior
+            (moved ? "" : " · the statement on the record is unchanged, so the statement itself was not amended") +
+            (moved && !contradicts && !prior
               ? " · the option agrees with the proposal, and its wording — the card's, not yours — is what is now on the record"
-              : "")),
+              : "");
+          }),
       msg: prior ? prior.id : (o.sourceMsg || null),
       room: prior ? null : sourceRoomOf(o),
       /* AND THE LABEL ON THE ROUTE IS A RECORD READ (round 11 minor). "the
          proposal it replaced" was unconditional, so a RE-AFFIRMED entry — the
          branch whose whole point is that nothing was replaced — routed the
          reader to a replacement that never happened. */
-      link: say([wasSt, nowSt], (ws, ns) => prior
-        ? "the superseded statement is still in the room →"
-        : (!sameValue(ws.value, ns.value) ? "the proposal it replaced is still in the room →"
-                                          : "the proposal it re-affirmed is still in the room →"))
+      link: say([wasSt, nowSt], (ws, ns) => !sameValue(ws.value, ns.value)
+        ? (prior ? "the statement it superseded is still in the room →"
+                 : "the proposal it replaced is still in the room →")
+        : (prior ? "the identical statement it re-recorded is still in the room →"
+                 : "the proposal it re-affirmed is still in the room →"))
     };
     /* only a prior answer the human TYPED may be quoted back at them. A prior
        CHOSEN answer is a page-authored row; quoting it would re-open exactly
        the loophole D3 closes, one step removed. */
     if (prior && prior.origin === "typed") c.quote = { text: plain(prior.body), by: S.me, src: "typed" };
-    else if (prior) c.fact = say([nowSt], () => [c.fact.said, ` · the superseded answer was chosen from the card, so there is nothing of ${S.me}'s to quote`]);
+    else if (prior) c.fact = say([wasSt, nowSt], (ws, ns) => [c.fact.said,
+      ` · the ${sameValue(ws.value, ns.value) ? "identical" : "superseded"} statement it replaces was chosen from the card, so there is nothing of ${S.me}'s to quote`]);
     o.corrections.push(c);
   }
 
-  o.note = say([nowSt], () => (typed
+  o.note = say([wasSt, nowSt], (ws, ns) => {
+    const moved = !sameValue(ws.value, ns.value);
+    return (typed
       ? "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. "
       : "You chose one of the statements the card offered. It is recorded verbatim as the decision, and the row that records it is in the system's voice — the page wrote that sentence, so it is not attributed to you as something you said. ") +
-           (stMoved && contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
-           (stMoved ? "" : "It is word for word the sentence already on the record, so the statement itself was not amended — the chain records that it was affirmed again, not that it changed. ") +
-           (prior ? "It replaces what you chose before, which is still on the record and still in the room." : ""));
+           (moved && contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
+           (moved ? "" : "It is word for word the sentence already on the record, so the statement itself was not amended — the chain records that it was affirmed again, not that it changed. ") +
+           (prior ? "It replaces what you chose before, which is still on the record and still in the room." : "");
+  });
 
   /* the arrow states the verification the record moved through — round 8 wrote
      `proposed → accepted` as a literal, which is a claim about the state this
@@ -5303,7 +5386,7 @@ function answerDecision(objectId, answer, provenanceNote) {
   scrollFeedToEnd();
   /* the toast says which kind of answer it was. Round 3 told you your wording
      was recorded verbatim even when the wording was the card's, not yours. */
-  toast(say([nowSt], () => !stMoved
+  toast(say([wasSt, nowSt], (ws, ns) => sameValue(ws.value, ns.value)
     ? "re-affirmed · the same sentence is on the record, recorded again — the statement itself was not amended"
     : prior
       ? "re-answered · the earlier answer is now marked superseded, not deleted"
@@ -5603,7 +5686,13 @@ function reopen(objectId, reason) {
      question "was anything ever settled here" is asked of the settlement
      history, and the answer names itself out of the verification standing at
      the time, with the moment and the person the settlement itself records. */
-  const wasContent = reads(o, [{ of: "answer", at: aAt }, { of: "statement", at: stAt }]);
+  /* the field this kind keeps its answer of record in — a question's `answer`,
+     a decision's `statement`. Round 11's first pass read BOTH so that whichever
+     noun `preservedName` produced would be backed by a read; the read mutation
+     then showed the unused one for what it was, a claim the checkers verify on
+     the sentence's behalf for nothing. One field, and it is used. */
+  const wasContent = o.kind === "question" ? fieldView(o, "answer", aAt)
+                   : o.kind === "decision" ? fieldView(o, "statement", stAt) : null;
   /* AND THE CLAUSE ABOUT WHAT IS PRESERVED LEAVES THE `after` OPERAND. An
      operand asserts ONE END of the amendment — that is what lets round 7's
      clause hold each side to the change it carries — so a sentence about the
@@ -5611,23 +5700,32 @@ function reopen(objectId, reason) {
      It belongs to the entry's prose line, which narrates the whole transition.
      Round 10 had it in the `after`, where it was constrained to say something
      about the after value while talking about the before one. */
-  const keptClause = (v, s) => {
+  const keptClause = (v, s, c) => {
     const at = s.last("settled");
-    return !at ? "nothing had settled it"
-      : "the " + preservedName(v.value) + (at.by ? " by " + at.by : "") + (at.tm ? " at " + at.tm : "") +
-        " stays on the record";
+    if (!at) return "nothing had settled it";
+    const name = preservedName(v.value);
+    /* where what is preserved is CONTENT the record holds — an answer, a
+       proposal — the sentence is about that content, so it reads it. Where it
+       is a STATE, the settlement's own entry is who and when. Naming content
+       from a verification value while reading the content field and using none
+       of it is the decorative read this round found in its own fix. */
+    return c && c.value != null
+      ? "the " + name + " on the record" + (c.tm ? ", recorded at " + c.tm + "," : "") + " stays on it"
+      : "the " + name + (at.by ? " by " + at.by : "") + (at.tm ? " at " + at.tm : "") + " stays on the record";
   };
-  const nowLabel = say([nowVr, nowSr].concat(wasContent), (v, s) => {
+  const nowLabel = say([nowVr, nowSr], (v, s) => {
     /* "pending again" is a claim that this record has stood pending BEFORE,
        and it is false the first time (round 11 D4). The query is asked in the
        branch that uses it — a table literal computes every arm, so asking it
        for all four kinds and discarding three answers is a query that could not
        have changed the sentence, which is the eighth door this round found in
        its own fix. */
+    /* and every head is produced by the state the record now holds, not by a
+       table keyed on the kind: "Awaiting sign-off" is a claim about the
+       verification, and a literal cannot be one (round 11 self-review) */
     const head = o.kind === "decision" ? "Pending" + (s.before("pending") ? " again" : "")
-               : o.kind === "question" ? "Open question"
-               : o.kind === "commitment" ? "Awaiting sign-off"
-               : "Claim — " + enumText(v.value);
+               : o.kind === "commitment" ? "Awaiting " + preservedName(v.value)
+               : enumText(v.value).replace(/^./, c => c.toUpperCase()) + " " + o.kind;
     return head + (owed && back !== S.me ? ` · back to ${back}, not to ${S.me}` : "");
   });
 
@@ -5684,14 +5782,15 @@ function reopen(objectId, reason) {
        not the record. The change is the enum the object actually moved through,
        or — when the enum did not move — the settlement it lost. */
     change: vChange || sChange,
-    fact: say([nowVr, wasVr, wasSr, nowSr].concat(wasContent), (v, wv, ws, ns) => `reopened by ${S.me} at ${t} · now ${enumText(v.value)}` +
+    fact: say([nowVr, wasVr, wasSr, nowSr].concat(wasContent ? [wasContent] : []),
+      (v, wv, ws, ns, c) => `reopened by ${S.me} at ${t} · now ${enumText(v.value)}` +
       (!sameValue(ws.value, ns.value) ? " and no longer settled" : "") +
-      " · " + keptClause(wv, ws) +
+      " · " + keptClause(wv, ws, c) +
       (reason ? "" : " · no reason given, and none was invented")),
     msg: o.answerMsg || o.sourceMsg || (o.provenance[0] && o.provenance[0].msg) || null,
     room: o.answerMsg ? null : sourceRoomOf(o),
-    link: say([wasContent[0]], a => o.answerMsg && a.everSet()
-      ? "the answer on the record is still in the room →" : "the source is still in the room →")
+    link: say(wasContent ? [wasContent] : [], c => o.answerMsg && c && c.everSet()
+      ? `the ${c.of} on the record is still in the room →` : "the source is still in the room →")
   };
   /* the ONLY quotation this transition can produce: words the human typed into
      the reason field a moment ago, registered in the human-speech register. */
@@ -5740,12 +5839,14 @@ function reopen(objectId, reason) {
      including, since round 4's D5, whose list it landed on when it is not yours */
   /* and "again" is a query, not a suffix, and "a"/"an" is decided by the word
      the record produced rather than typed in front of it (round 11 D4/minor) */
-  toast(say([wasVr, nowVr, wasSr], (wv, v, s) => needsYou(o)
-    ? `reopened · back in Needs you as ${an(enumText(v.value))} ${o.kind} · ` +
-      (s.ever("settled") ? preservedName(wv.value) + " kept on the record" : "nothing had settled it")
-    : owed
-      ? `reopened · back to ${back} as ${an(enumText(v.value))} ${o.kind} — it is not yours, so it did not join your list`
-      : `reopened · it is ${an(enumText(v.value))} ${o.kind}${v.before(v.value) ? " again" : ""} and owes nobody a reply — nothing was added to your list`), "warn");
+  toast(say([wasVr, nowVr, wasSr], (wv, v, s) => {
+    const kept = s.ever("settled") ? preservedName(wv.value) + " kept on the record" : "nothing had settled it";
+    return needsYou(o)
+      ? `reopened · back in Needs you as ${an(enumText(v.value))} ${o.kind} · ${kept}`
+      : owed
+        ? `reopened · back to ${back} as ${an(enumText(v.value))} ${o.kind} · ${kept} — it is not yours, so it did not join your list`
+        : `reopened · it is ${an(enumText(v.value))} ${o.kind}${v.before(v.value) ? " again" : ""} · ${kept} — it owes nobody a reply, so nothing was added to your list`;
+  }), "warn");
 }
 
 /* the optional reason prompt. Empty is fine and says so: a reason you did not
