@@ -4,7 +4,7 @@ import {
   rejectingProblems,
   validateProposalProvenance,
 } from './escalation.js';
-import type { AcceptedObject, AcceptedObjectType } from './objects.js';
+import { type AcceptedObject, type AcceptedObjectType, objectStatement } from './objects.js';
 import { decideSupersession, MODEL_ACCEPTANCE_FLOOR } from './policy.js';
 import type { Proposer, StoredProposal } from './proposal.js';
 import { canonicalJson } from './state.js';
@@ -221,8 +221,19 @@ export type AcceptanceReceiptGate =
   | 'payload_binding'
   /** The object's cited messages are not the proposal's. */
   | 'provenance_binding'
-  /** No message window was supplied, so the receipt cannot be checked at all. */
+  /**
+   * No message window — **absent or empty** — so the receipt cannot be checked
+   * at all. The two were one check away from each other in round 2 and are one
+   * check now: `messages: []` is not a window somebody supplied, it is the same
+   * absence spelled differently.
+   */
   | 'missing_receipt_context'
+  /**
+   * A machine reading that names somebody and quotes nothing. Re-required here
+   * rather than trusted from the schema a layer up — round 2's gauntlet found
+   * that layer was never reached.
+   */
+  | 'missing_quote'
   /** The receipt is wrong: the quote, or who is named in it. */
   | 'receipt_failed'
   /** A commitment somebody else's sentence put a name on. It needs their word. */
@@ -251,10 +262,21 @@ export interface AcceptanceReceiptRefusal {
  *  2. **Provenance binding.** Same argument, applied to the receipt: an
  *     acceptance may not add or drop cited messages on the way through, because
  *     the citation set is what the attribution rules below are computed over.
- *  3. **A window at all.** No messages, no auto-acceptance, ever.
- *  4. **The receipt itself** — the quote is in a cited message, and is that
- *     author's own text rather than something they were quoting.
- *  5. **Third-party attribution.** A commitment whose owner did not write the
+ *  3. **A window at all.** No messages, no auto-acceptance, ever — and `[]` is
+ *     no messages. Round 2's gauntlet found the `undefined`-only check: a caller
+ *     that passed an empty array got past the door marked "required" and every
+ *     check downstream found nothing wrong, because there was nothing to find
+ *     anything wrong in. Absent and empty are the same fact about the world.
+ *  4. **A quote at all**, for the two types that put a name on somebody. The
+ *     schema requires it; this re-requires it, because round 2's gauntlet found
+ *     the schema was never run on the fold path. An empty quote is the same
+ *     absence as a missing one, and it is the input the whole attribution rule
+ *     is computed from.
+ *  5. **The receipt itself** — the quote is long enough to identify a sentence,
+ *     it is in a cited message, it is that author's own text rather than
+ *     something they were quoting, exactly one author carries it, and it bears
+ *     the statement being minted.
+ *  6. **Third-party attribution.** A commitment whose owner did not write the
  *     message bearing it is not a self-statement, and #4 is unambiguous that
  *     nobody gets committed by someone else's sentence. It is a real reading and
  *     it goes to the named person to confirm — through a human acceptance, not
@@ -289,10 +311,22 @@ export function acceptanceReceiptRefusal(input: {
     };
   }
 
-  if (input.messages === undefined) {
+  if (input.messages === undefined || input.messages.length === 0) {
+    const how =
+      input.messages === undefined
+        ? 'no message window supplied'
+        : 'an empty message window supplied';
     return {
       gate: 'missing_receipt_context',
-      detail: `${who} accepted proposal "${proposalId}" with no message window supplied, so its receipt could not be checked — a reading whose citation cannot be verified is refused, never accepted on trust`,
+      detail: `${who} accepted proposal "${proposalId}" with ${how}, so its receipt could not be checked — a reading whose citation cannot be verified is refused, never accepted on trust; an empty window is not a window, it is the same absence written differently`,
+    };
+  }
+
+  const namesAPerson = object.type === 'claim' || object.type === 'commitment';
+  if (namesAPerson && (proposal.quote ?? '').trim().length === 0) {
+    return {
+      gate: 'missing_quote',
+      detail: `${who} accepted ${object.type} proposal "${proposalId}", which quotes nothing — attribution is decided from the message bearing the sentence and only the quote identifies it, so a ${object.type} with an absent or empty quote is refused rather than attributed to whoever happens to be in the citation list`,
     };
   }
 
@@ -310,6 +344,11 @@ export function acceptanceReceiptRefusal(input: {
       quote: proposal.quote,
       proposer: proposal.proposer,
       attributedTo,
+      // The sentence the object actually asserts — checked *from the object*
+      // rather than from the proposal on purpose. Payload binding above has
+      // already proved the two are identical, so reading it here says what this
+      // check is about: the quote has to bear the thing being minted.
+      statement: objectStatement(object),
     },
     input.messages,
   );

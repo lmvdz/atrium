@@ -2,7 +2,9 @@ import { z } from 'zod';
 import { AcceptedObjectType } from './objects.js';
 
 /**
- * The acceptance policy — **one table, read by everything**.
+ * **The acceptance policy: the floors a machine-made reading must clear, and the
+ * minima its receipt must meet.** One copy of each number, read by everything
+ * that decides whether a reading becomes a fact.
  *
  * r1's gauntlet found the same defect from two directions: the reducer's floor
  * and the acceptance engine's θ were two numbers for one rule (0.5 vs 0.7 on a
@@ -19,10 +21,28 @@ import { AcceptedObjectType } from './objects.js';
  *  - `acceptance.ts` decides what a worker should emit, using the same θ.
  *  - `attention.ts` asks `acceptance.ts`, so the panel and the engine cannot
  *    disagree about a proposal in the band.
+ *  - `escalation.ts` validates a receipt against `RECEIPT_POLICY` below, and
+ *    both the engine and the reducer run that validator.
  *
  * A config may make the engine **stricter**. Nothing can make it looser: the
  * reducer reads `MODEL_ACCEPTANCE_FLOOR`, which is derived from the defaults
  * below and is not configurable at all.
+ *
+ * ## What deliberately does *not* live here
+ *
+ * r2's write-up said "one θ table" in a way that read as "every tunable number
+ * in the package", and r2's gauntlet was right that this was overstated. The
+ * claim is scoped, and the scope is the sentence above: **acceptance floors and
+ * receipt minima**. The escalation *routing* knobs — `decisionOverlapThreshold`,
+ * `decisionOverlapMinTokens`, `maxScanChars`, `maxHistoryScanned`,
+ * `maxComparedDecisions` — stay in `escalation.ts`, because they decide which
+ * model reads a window, never whether a reading becomes a fact. Getting one
+ * wrong costs a model call; getting one of these wrong mints something false.
+ *
+ * The two that r2's gauntlet named as strays *were* acceptance policy and have
+ * moved here: the dedup similarity threshold (a duplicate is discarded, so the
+ * number decides what is never shown) and the minimum quote length (which is now
+ * enforced on the acceptance path, not only on blockquote detection).
  *
  * Pure: no clock, no I/O, no state.
  */
@@ -186,6 +206,56 @@ export function resolveAcceptanceConfig(
   }
   return AcceptanceConfig.parse(merged) as AcceptanceConfig;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * The receipt minima
+ * ───────────────────────────────────────────────────────────────────────── */
+
+export interface ReceiptPolicy {
+  /**
+   * Shortest quoted span (normalized) that can serve as a receipt.
+   *
+   * r2's gauntlet, major 1: "any normalized substring anywhere in a cited
+   * message satisfies it — cite Bob's unrelated 'yes' and mint 'Bob will
+   * deploy'". A one-word quote identifies nothing; it is a token that happens to
+   * occur, and the citation it produces is a permission slip rather than
+   * evidence. The number was already in `defaultEscalationConfig` for blockquote
+   * detection and is the same judgement — "below this, a quoted span is not
+   * quoting anything" — so it is one constant now, read by both.
+   */
+  minQuoteLength: number;
+  /**
+   * How much of the *asserted sentence*'s content the quote must carry, 0..1.
+   *
+   * The other half of major 1, and the half that matters more: a quote can be
+   * long, verbatim, and correctly attributed while having nothing to do with the
+   * statement being minted. The receipt has to bear the payload, not merely come
+   * from the same conversation. Containment relative to the statement, so a long
+   * quote carrying a short statement scores 1 — the direction that must be
+   * permissive is "quoted more than the sentence", never "asserted more than the
+   * quote".
+   *
+   * 0.6 rather than 1.0 because the statement is a *normalization* of the
+   * sentence, not a copy of it: the pass drops fillers, fixes tense, and expands
+   * a pronoun. Requiring every content word would reject correct readings; the
+   * measured failure this defends against scores 0.
+   */
+  minStatementSupport: number;
+  /**
+   * Fraction of content words two texts must share to be the same reading.
+   *
+   * Acceptance policy, not a formatting knob: a duplicate is *discarded*, so
+   * this number decides what the room never sees. It was a default argument on
+   * `findDuplicate` — r2's gauntlet counted it as a stray θ, correctly.
+   */
+  duplicateThreshold: number;
+}
+
+export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
+  minQuoteLength: 24,
+  minStatementSupport: 0.6,
+  duplicateThreshold: 0.8,
+});
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Supersession

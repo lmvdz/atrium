@@ -7,9 +7,14 @@ import {
   rejectingProblems,
   validateProposalProvenance,
 } from './escalation.js';
-import type { AuthoredEvent, CoreEvent } from './events.js';
-import type { AcceptedObjectType, ClaimPayload, DecisionPayload } from './objects.js';
-import { type AcceptanceConfig, defaultAcceptanceConfig } from './policy.js';
+import { type AuthoredEvent, authored, type CoreEvent, trustedContext } from './events.js';
+import {
+  type AcceptedObjectType,
+  type ClaimPayload,
+  type DecisionPayload,
+  payloadText,
+} from './objects.js';
+import { type AcceptanceConfig, defaultAcceptanceConfig, RECEIPT_POLICY } from './policy.js';
 import type { Proposal, StoredProposal } from './proposal.js';
 import { appendEvent, compareCursor } from './reduce.js';
 import type { CoreState } from './state.js';
@@ -27,11 +32,13 @@ import type { CoreState } from './state.js';
  * a reading is strong enough, and `AcceptanceConfig` refuses to be configured
  * below the floor, so the engine can only ever be the stricter of the two.
  *
- * **The receipt is not optional.** In round 1 `messages` was an optional field
- * whose absence produced an empty problem set, so the caller that forgot it got
- * auto-acceptance instead of a refusal — the exact fail-open shape a trust
- * boundary must not have. It is a required input now, and a model proposal
- * judged without one is discarded with `missing_message_context`.
+ * **The receipt is not optional, and an empty one is not a receipt.** In round 1
+ * `messages` was an optional field whose absence produced an empty problem set,
+ * so the caller that forgot it got auto-acceptance instead of a refusal — the
+ * exact fail-open shape a trust boundary must not have. Round 2 made it required
+ * and round 2's gauntlet walked through the door that was left: `messages: []`
+ * satisfies "required" and satisfies nothing else. A model proposal judged with
+ * no window *or an empty one* is discarded with `missing_message_context`.
  *
  * Everything here is pure. No clock: `answerBinding` takes its timestamp. No id
  * generation: it takes its ids. That is what makes an acceptance decision
@@ -119,11 +126,16 @@ export interface AcceptedObjectRef {
 export interface AcceptanceContext {
   config?: AcceptanceConfig;
   /**
-   * The window's messages — **required**, and the reason is the whole of round
-   * 1's second blocking finding. Commitment attribution and provenance
-   * validation cannot be done without them, and in round 1 that meant they
-   * silently were not done: no messages, no problems, auto-accept. A model
+   * The window's messages — **required, and non-empty**, and the reason is the
+   * whole of round 1's second blocking finding. Commitment attribution and
+   * provenance validation cannot be done without them, and in round 1 that meant
+   * they silently were not done: no messages, no problems, auto-accept. A model
    * proposal judged with no window is discarded now.
+   *
+   * The type cannot say "non-empty", so the check does: `[]` is refused with the
+   * same rule as `undefined`. Round 2's gauntlet found the version that only
+   * asked about `undefined`, and an empty array is not a smaller window — it is
+   * the same absence with a different spelling.
    *
    * A human-staged proposal does not go through θ at all, so it survives an
    * empty window; there is nothing to check when the person staging the reading
@@ -144,13 +156,6 @@ export interface AcceptanceContext {
   acceptedObjects?: readonly AcceptedObjectRef[];
   /** Fraction of content words two texts must share to be the same thing. */
   duplicateThreshold?: number;
-}
-
-/** The text field of a payload, whichever the type calls it. */
-export function payloadText(type: AcceptedObjectType, payload: Record<string, unknown>): string {
-  const key = type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';
-  const value = payload[key];
-  return typeof value === 'string' ? value : '';
 }
 
 /** The person a payload puts on the hook, if any. */
@@ -208,7 +213,7 @@ export function findDuplicate(
   text: string,
   messageIds: readonly Id[],
   accepted: readonly AcceptedObjectRef[],
-  threshold = 0.8,
+  threshold = RECEIPT_POLICY.duplicateThreshold,
 ): AcceptedObjectRef | null {
   const wanted = contentTokens(text);
   if (wanted.size === 0) return null;
@@ -287,14 +292,22 @@ export function decideAcceptance(
   //
   // Fail-closed, and loudly: this is a caller bug, not a reading defect. The
   // failure it replaces was silent in the other direction.
-  if (proposal.proposer.kind === 'model' && messages === undefined) {
+  //
+  // **Empty counts as absent.** Round 2's gauntlet found the `undefined`-only
+  // form of this check: `messages: []` walked past the door marked "required",
+  // and everything downstream then found nothing wrong because there was nothing
+  // to look in. The two spellings describe the same state of the world — nobody
+  // supplied the messages this reading cites — so they get the same answer.
+  if (proposal.proposer.kind === 'model' && (messages === undefined || messages.length === 0)) {
     return {
       ...base,
       verdict: 'discard',
       visibility: 'none',
       rule: 'missing_message_context',
       reason:
-        'no message window was supplied, so the receipt could not be checked — a model reading is never accepted on trust; supply the messages it cites',
+        messages === undefined
+          ? 'no message window was supplied, so the receipt could not be checked — a model reading is never accepted on trust; supply the messages it cites'
+          : 'an empty message window was supplied, so the receipt could not be checked — an empty window is not a window; a model reading is never accepted on trust',
     };
   }
 
@@ -309,18 +322,23 @@ export function decideAcceptance(
   // did not write the message bearing the sentence — is not a defect in the
   // reading, it *is* the third-party commitment case, and it routes below
   // rather than dying here.
-  const problems: readonly ProvenanceProblem[] = messages
-    ? validateProposalProvenance(
-        {
-          type: proposal.type,
-          provenance: proposal.provenance,
-          quote: proposal.quote,
-          proposer: proposal.proposer,
-          attributedTo,
-        },
-        messages,
-      )
-    : [];
+  const problems: readonly ProvenanceProblem[] =
+    messages && messages.length > 0
+      ? validateProposalProvenance(
+          {
+            type: proposal.type,
+            provenance: proposal.provenance,
+            quote: proposal.quote,
+            proposer: proposal.proposer,
+            attributedTo,
+            // The sentence being staged. Without it the quote can be verbatim,
+            // correctly attributed, and about something else entirely — r2's
+            // gauntlet, major 1.
+            statement: text,
+          },
+          messages,
+        )
+      : [];
   const rejecting = rejectingProblems(problems);
   if (rejecting.length > 0) {
     return {
@@ -588,7 +606,7 @@ export function answerBindingEvents(command: AnswerBindingCommand, actor: Actor)
     },
   ] as CoreEvent[];
 
-  return events.map((event) => ({ event, actor }));
+  return events.map((event) => authored(event, { actor }));
 }
 
 /** Refusal or events, in one call. */
@@ -628,10 +646,10 @@ export function applyAnswerBinding(
 
   let next = state;
   for (const entry of bound.events) {
-    const result = appendEvent(next, entry.event, { actor: entry.actor });
+    const result = appendEvent(next, entry.event, trustedContext({ actor: entry.actor }));
     if (result.outcome !== 'applied') {
       const why =
-        result.outcome === 'rejected'
+        result.outcome === 'rejected' || result.outcome === 'malformed'
           ? result.detail
           : result.issues.map((issue) => issue.reason).join('; ');
       return {

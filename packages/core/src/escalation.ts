@@ -1,4 +1,5 @@
 import type { AcceptedObjectType } from './objects.js';
+import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
 
 /**
  * Deterministic text triggers, computed *before* any model call, plus the
@@ -141,6 +142,10 @@ export interface EscalationConfig {
   /**
    * Shortest quoted span that counts as quoting something. Below this a `>` is
    * a shell prompt, a diff marker, or a one-word aside.
+   *
+   * The default is `RECEIPT_POLICY.minQuoteLength`, and it is the same number
+   * for the same reason: the acceptance path enforces it too, and "how short is
+   * too short to be quoting anything" cannot have two answers.
    */
   minQuoteLength: number;
   /** Fraction of a decision's content words a message must share to count. */
@@ -172,7 +177,7 @@ export interface EscalationConfig {
 }
 
 export const defaultEscalationConfig: EscalationConfig = Object.freeze({
-  minQuoteLength: 24,
+  minQuoteLength: RECEIPT_POLICY.minQuoteLength,
   decisionOverlapThreshold: 0.5,
   decisionOverlapMinTokens: 3,
   maxScanChars: 20000,
@@ -576,6 +581,16 @@ export type ProvenanceProblemKind =
   | 'no_provenance'
   /** Cites a message id that is not in the window. */
   | 'unknown_message'
+  /**
+   * A model reading that puts a name on somebody and quotes nothing.
+   *
+   * Schema-blocked on `Proposal`, and checked again here because r2's gauntlet
+   * found the schema was never reached: `appendEvent`/`reduce` folded whatever
+   * object they were handed. A check that only runs one layer up is not a
+   * check — this one runs inside the validator both the engine and the reducer
+   * call.
+   */
+  | 'missing_quote'
   /** The quote is in no cited message at all. */
   | 'quote_not_found'
   /**
@@ -585,6 +600,24 @@ export type ProvenanceProblemKind =
   | 'quote_only_in_reply_blockquote'
   /** The quote was silently shortened with `…` and does not appear verbatim. */
   | 'elided_quote'
+  /**
+   * Too short to identify anything. "yes", "ok", "+1" occur in every thread, so
+   * a citation resting on one is a citation to the conversation rather than to a
+   * sentence.
+   */
+  | 'quote_too_short'
+  /**
+   * The quote is real and correctly attributed, and it does not carry the
+   * sentence being minted. r2's gauntlet, major 1: cite Bob's unrelated "yes",
+   * mint "Bob will deploy". Every other check passes on that.
+   */
+  | 'quote_does_not_bear_statement'
+  /**
+   * Two or more cited messages, by different people, contain the quote. Taking
+   * the first in window order picks an author by accident, and the author is the
+   * whole answer to "who said this".
+   */
+  | 'ambiguous_quote'
   /** A Claim's claimant / Commitment's owner authored none of the cited messages. */
   | 'attributed_person_not_author';
 
@@ -629,6 +662,16 @@ export interface ProvenanceSubject {
   proposer?: { kind: 'model' | 'human' };
   /** `claimant` for a claim, `owner` for a commitment. */
   attributedTo?: string | null;
+  /**
+   * The sentence being asserted — `statement` / `question` / `title`, whichever
+   * the type carries. Supplied so the quote can be checked against *what is
+   * being minted* rather than only against the messages.
+   *
+   * Optional because a caller may not have it, and its absence is honest: with
+   * no statement the `quote_does_not_bear_statement` check cannot run and does
+   * not pretend to. Every caller inside this package supplies it.
+   */
+  statement?: string | null;
 }
 
 /**
@@ -645,12 +688,19 @@ export interface ProvenanceSubject {
 export function validateProposalProvenance(
   subject: ProvenanceSubject,
   messages: readonly ProvenanceMessage[],
+  policy: ReceiptPolicy = RECEIPT_POLICY,
 ): ProvenanceProblem[] {
   const problems: ProvenanceProblem[] = [];
   const byId = new Map(messages.map((message) => [message.id, message]));
 
+  // The strictness below is aimed at *machine* readings. A person staging their
+  // own reading is the receipt (#4) and is not asked to quote themselves, so the
+  // checks that would demand a quote of them are scoped rather than universal.
+  const fromModel = subject.proposer?.kind === 'model';
+  const namesAPerson = subject.type === 'claim' || subject.type === 'commitment';
+
   if (subject.provenance.length === 0) {
-    if (subject.proposer?.kind === 'model') {
+    if (fromModel) {
       problems.push({
         kind: 'no_provenance',
         severity: 'reject',
@@ -676,15 +726,36 @@ export function validateProposalProvenance(
     cited.push(message);
   }
 
-  const quote = subject.quote?.trim();
-  if (quote && cited.length > 0) {
-    const normalizedQuote = normalizeForMatch(quote);
+  const quote = subject.quote?.trim() ?? '';
+  const normalizedQuote = normalizeForMatch(quote);
+
+  // ── A model reading that names somebody must quote them ──────────────────
+  //
+  // `Proposal` already refuses this at parse time. It is checked again here
+  // because r2's gauntlet found the parse never happened: the reducer folded
+  // whatever object it was handed, so the schema was a manner and not a
+  // boundary. Both are fixed — `appendEvent`/`reduce` parse now — and this stays,
+  // because "absent or empty required receipt input is a refusal" has to be true
+  // in the layer that computes the receipt, not only in the layer above it.
+  if (fromModel && namesAPerson && normalizedQuote.length === 0) {
+    problems.push({
+      kind: 'missing_quote',
+      severity: 'reject',
+      detail: `a model ${subject.type} proposal must quote the message that carries it — with no quote nothing identifies which message named "${subject.attributedTo ?? 'them'}", and the honest reading of no answer is that nobody did`,
+      messageId: null,
+    });
+  }
+
+  /** The one cited message whose own words carry the quote, when there is one. */
+  let bearing: ProvenanceMessage | null = null;
+  /** Several cited authors carry it — nothing can be attributed. */
+  let ambiguous = false;
+
+  if (normalizedQuote.length > 0 && cited.length > 0) {
     const inFullText = cited.filter((message) =>
       normalizeForMatch(message.body).includes(normalizedQuote),
     );
-    const inOwnText = cited.filter((message) =>
-      normalizeForMatch(stripReplyBlockquotes(message.body)).includes(normalizedQuote),
-    );
+    const inOwnText = bearingMessages(quote, cited);
 
     if (inOwnText.length === 0 && inFullText.length > 0) {
       // The nastiest class: the quote is real, the attribution is real, and the
@@ -712,6 +783,67 @@ export function validateProposalProvenance(
             },
       );
     }
+
+    // ── Which message bears it, and is that answerable at all ──────────────
+    //
+    // r2's gauntlet: "when several cited messages match, refuse as ambiguous
+    // rather than picking the first in window order". Window order is an
+    // accident of ingestion, and picking an author by accident is exactly the
+    // failure the whole receipt exists to prevent.
+    //
+    // Several matches by *one* author is not that failure — "who wrote this" has
+    // a single answer, and refusing a repeated sentence would fire on every
+    // thread where somebody says the same thing twice. So the refusal is scoped
+    // to the case where the answer is genuinely undetermined: more than one
+    // author.
+    const authors = new Set(inOwnText.map((message) => message.authorId));
+    if (authors.size > 1) {
+      ambiguous = true;
+      problems.push({
+        kind: 'ambiguous_quote',
+        severity: 'reject',
+        detail: `the quote appears in the own text of ${inOwnText.length} cited messages written by different people (${[
+          ...authors,
+        ]
+          .sort()
+          .map((author) => `"${author}"`)
+          .join(
+            ', ',
+          )}) — nothing says which of them said it, and picking the first in window order would attribute it by accident`,
+        messageId: null,
+      });
+    } else {
+      bearing = inOwnText[0] ?? null;
+    }
+
+    // ── Long enough to be quoting something ───────────────────────────────
+    if (fromModel && normalizedQuote.length < policy.minQuoteLength) {
+      problems.push({
+        kind: 'quote_too_short',
+        severity: 'reject',
+        detail: `the quote "${clip(quote, 40)}" is ${normalizedQuote.length} characters, below the ${policy.minQuoteLength} a receipt needs — a span that short occurs in any thread, so it identifies the conversation rather than the sentence`,
+        messageId: bearing?.id ?? null,
+      });
+    }
+
+    // ── …and actually carrying the sentence being minted ──────────────────
+    //
+    // The check r2's gauntlet asked for by name. Everything above can pass on a
+    // quote that has nothing to do with the payload: cite the message where Bob
+    // wrote "yes, that works for me", quote it, and mint "Bob will deploy on
+    // Friday" — real quote, real author, real citation, invented commitment.
+    const statement = subject.statement?.trim();
+    if (fromModel && statement) {
+      const support = lexicalOverlap(quote, statement);
+      if (support < policy.minStatementSupport) {
+        problems.push({
+          kind: 'quote_does_not_bear_statement',
+          severity: 'reject',
+          detail: `the quote carries ${Math.round(support * 100)}% of the words in "${clip(statement, 60)}", below the ${Math.round(policy.minStatementSupport * 100)}% a receipt needs — the quoted span is from a cited message but it is not the sentence being asserted, so the citation leads a reader somewhere that does not say this`,
+          messageId: bearing?.id ?? null,
+        });
+      }
+    }
   }
 
   // #4's rule, mechanized: nobody gets committed — or quoted — by someone
@@ -726,24 +858,31 @@ export function validateProposalProvenance(
   // message carries the sentence; that message's author is the only one whose
   // authorship means anything here.
   //
-  // With no bearing message — no quote, or a quote that is nowhere (the quote
-  // problems above have already fired) — it falls back to the citation list.
-  // That fallback can only be *more* likely to report a problem, never less.
+  // **The citation-list fallback is gone for machine readings.** r2 kept it on
+  // the argument that it "can only be more likely to report a problem, never
+  // less", and that was wrong in one direction r2's gauntlet found: with an
+  // *empty* quote none of the quote checks above run, no bearing message is
+  // computed, and the fallback reads "somebody in the citation list wrote
+  // something" as support — the padding attack, reopened through the empty
+  // string. A model reading with no determinable bearing message is unsupported,
+  // full stop. A human's still falls back, because a person staging a reading is
+  // not quoting anyone.
   const attributed = subject.attributedTo;
-  if (
-    attributed &&
-    cited.length > 0 &&
-    (subject.type === 'claim' || subject.type === 'commitment')
-  ) {
-    const bearing = quote ? bearingMessage(quote, cited) : null;
+  if (attributed && cited.length > 0 && namesAPerson) {
     const supported = bearing
       ? bearing.authorId === attributed
-      : cited.some((message) => message.authorId === attributed);
+      : fromModel
+        ? false
+        : cited.some((message) => message.authorId === attributed);
     if (!supported) {
       const claim = subject.type === 'claim';
       const where = bearing
         ? `the message bearing it ("${bearing.id}") was written by "${bearing.authorId}"`
-        : `authored none of the cited messages (${cited.map((message) => `"${message.authorId}"`).join(', ')})`;
+        : ambiguous
+          ? 'more than one cited author carries the quote, so no message can be said to bear it'
+          : fromModel
+            ? 'no cited message bears the quote, so nothing identifies the message that named them'
+            : `authored none of the cited messages (${cited.map((message) => `"${message.authorId}"`).join(', ')})`;
       problems.push({
         kind: 'attributed_person_not_author',
         // The split the spike's "or force `attribution: third_party`" implies.
@@ -763,23 +902,46 @@ export function validateProposalProvenance(
 }
 
 /**
- * The cited message that actually carries a quoted span — the one whose *own*
- * text contains it once reply-blockquotes are stripped.
+ * Every cited message whose *own* text carries a quoted span — reply-blockquotes
+ * stripped, so a message that merely quoted the sentence back does not count.
+ *
+ * Returns all of them rather than the first, because "how many" is the question
+ * `ambiguous_quote` asks and a function that returns one answer cannot be asked
+ * it.
+ */
+export function bearingMessages(
+  quote: string,
+  messages: readonly ProvenanceMessage[],
+): ProvenanceMessage[] {
+  const normalized = normalizeForMatch(quote);
+  if (normalized.length === 0) return [];
+  return messages.filter((message) =>
+    normalizeForMatch(stripReplyBlockquotes(message.body)).includes(normalized),
+  );
+}
+
+/**
+ * The cited message that actually carries a quoted span, when exactly one person
+ * can be said to have written it.
  *
  * This is the function that makes attribution answerable. "Did the owner say
  * this?" is a question about one message, and every version of it that ranges
  * over the citation list instead is answerable by padding the list.
+ *
+ * `null` covers three cases that all mean the same thing here — no cited message
+ * carries it, the quote is empty, or several *different authors* carry it. All
+ * three leave "who said this" undetermined, and an undetermined author is not a
+ * cheaper kind of answer: `commitmentAttribution` reads `null` as third-party and
+ * `validateProposalProvenance` reports it.
  */
 export function bearingMessage(
   quote: string,
   messages: readonly ProvenanceMessage[],
 ): ProvenanceMessage | null {
-  const normalized = normalizeForMatch(quote);
-  if (normalized.length === 0) return null;
-  for (const message of messages) {
-    if (normalizeForMatch(stripReplyBlockquotes(message.body)).includes(normalized)) return message;
-  }
-  return null;
+  const borne = bearingMessages(quote, messages);
+  if (borne.length === 0) return null;
+  const authors = new Set(borne.map((message) => message.authorId));
+  return authors.size === 1 ? (borne[0] ?? null) : null;
 }
 
 /** True when nothing is wrong with the receipt. */
