@@ -174,7 +174,8 @@ invariant they all exist to serve:
 `apps/web` and `apps/server` both declare `@atrium/core` in their
 `package.json`; neither imports a symbol from it. `apps/server/src/index.ts`
 opens a database handle, starts a WebSocket server and registers a worker, and
-issues no query. The reducer the rest of this file describes is exercised by its
+never queries through that handle — the only SQL the process runs at boot is
+pg-boss creating and polling its own queue tables. The reducer the rest of this file describes is exercised by its
 own test suite and by nothing else: 129 tests across 4 files in
 `packages/core`, all passing, measuring something real about code that no user
 action can currently reach. The repository's whole unit suite is 315 tests
@@ -520,7 +521,7 @@ Three corpora are committed:
 
 | File | Source | Role | Why |
 | --- | --- | --- | --- |
-| `corpora/nextjs-isr.jsonl` | Next.js discussion #11552, *RFC: Incremental Static Regeneration* | **demo** | 454 messages, 368 reply edges, 184 participants. Not the biggest corpus, but the most deeply threaded — a two-year RFC-to-shipped-feature argument, which is what the replay UI has to render. |
+| `corpora/nextjs-isr.jsonl` | Next.js discussion #11552, *RFC: Incremental Static Regeneration* | **demo** | 454 messages, 368 reply edges, 184 participants. Not the biggest corpus, but the most deeply threaded — a nearly three-year RFC-to-shipped-feature argument (2020-04-01 to 2023-01-02), which is what the replay UI has to render. |
 | `corpora/ts9998.jsonl` | TypeScript #9998, *Trade-offs in Control Flow Analysis* | sample | 111 messages, 70 participants, and the only corpus on the REST path. Flat: GitHub *issues* carry no threading, so it has zero reply edges — which is why it is no longer the demo. |
 | `corpora/holdout-nextjs-rfc.jsonl` | Next.js discussion #37136, *RFC: Layouts* | eval holdout | 480 messages, 314 reply edges, 241 participants — the largest of the three. Held back for the interpretation-quality golden set so prompts are never tuned on the corpus they are scored against. Today that is a role string in the registry and a convention, not a guard: `pnpm ingest all` still fetches it. Making the exclusion structural belongs to [#24](https://github.com/lmvdz/atrium/issues/24). |
 
