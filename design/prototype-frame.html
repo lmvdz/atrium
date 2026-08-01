@@ -71,7 +71,29 @@ html.atr-dark {
 }
 
 /* ===========================================================================
- * BASE
+ * COLOR USAGE RULES (round 2)
+ *
+ *   TEXT never uses --tx3 or --tx4. Measured against every surface it lands
+ *   on, --tx3 tops out at 4.25:1 and --tx4 at 2.60:1 in the light theme — both
+ *   under AA for the 10–12.5px sizes this shell is built from. The whole page
+ *   therefore reads on --tx0 / --tx1 / --tx2 only (--tx2 is 5.61–7.22:1 light,
+ *   6.82–7.54:1 dark). --tx3 and --tx4 are consequently not referenced anywhere
+ *   below this block — grep them and you find their definitions and nothing
+ *   else. Quiet-but-legible is done with the mono/sans split and --line*,
+ *   not with a grey a third of readers cannot resolve.
+ *
+ *   Amber and green foregrounds use --amb2 / --grn2, not --amb / --grn: the
+ *   bare names measure 2.64–3.57:1 in light and cannot carry text. Amber text
+ *   is only ever placed on --bg1 / --bg3 / --bg7 / --ambbg / --ambbg5 (4.53+).
+ *   Green text on a green fill fails, so green chips carry --tx1 on --grnbg
+ *   with a --grnbd border — the hue rides the border, the contrast rides tx1.
+ *
+ *   The amber button is --amb2 fill (bg3-on-amb2 = 5.14 light / 10.96 dark),
+ *   which is also why it no longer needs a per-theme override.
+ *
+ *   TYPE FLOOR: nothing below 10px. LABEL IDIOM: exactly one — `.lbl`,
+ *   10px / .14em / uppercase / mono. `letter-spacing` appears nowhere else in
+ *   this stylesheet; that is greppable.
  * ======================================================================== */
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -94,16 +116,21 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 
 .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
 
-/* the single most-repeated idiom in the corpus: 10px / .14em / written uppercase */
+/* the single label idiom: 10px / .14em / written uppercase */
 .lbl {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 10px;
   letter-spacing: .14em;
-  color: var(--tx3);
+  color: var(--tx2);
   line-height: 1;
 }
+/* machine metadata — mono, 10px, no tracking (tracking belongs to labels only) */
+.meta {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
 
-/* scrollbars — thin, tokenized */
 .scroll { scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
 .scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .scroll::-webkit-scrollbar-track { background: transparent; }
@@ -111,14 +138,14 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .scroll::-webkit-scrollbar-thumb:hover { background: var(--line3); background-clip: content-box; }
 
 /* ===========================================================================
- * MOTION — three keyframes, per design/CONVENTIONS.md
+ * MOTION — three keyframes, per design/CONVENTIONS.md.
+ * JS-driven scrolling consults the same media query (see reduceMotion() ).
  * ======================================================================== */
 @keyframes gl-blink { 0%,49% { opacity: 1 } 50%,100% { opacity: 0 } }
 @keyframes gl-pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
 @keyframes gl-rise  { from { opacity: 0; transform: translateY(2px) } to { opacity: 1; transform: none } }
 .rise  { animation: gl-rise .2s ease both; }
 .rise-s { animation: gl-rise .15s ease both; }
-.rise-l { animation: gl-rise .25s ease both; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -134,6 +161,10 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   height: 100vh;
   min-width: 1120px;
 }
+/* grid and flex items default to min-width:auto, which lets a long mono line
+   push a column past its track and paint over its neighbour. Every track in
+   this shell is authoritative; content ellipsises or wraps inside it. */
+.app > *, .center > * { min-width: 0; }
 
 /* --- workspace strip ----------------------------------------------------- */
 .ws {
@@ -144,35 +175,20 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   gap: 8px;
 }
 .ws-tile {
-  position: relative;
   width: 30px; height: 30px;
   border-radius: 7px;
-  border: 1px solid var(--line2);
-  background: var(--bg3);
+  border: 1px solid var(--tx1);
+  background: var(--tx1); color: var(--bg1);
   display: grid; place-items: center;
   font-family: "IBM Plex Mono", monospace;
-  font-size: 11px; font-weight: 600; letter-spacing: .02em;
-  color: var(--tx2);
-  transition: background .12s ease, border-color .12s ease, color .12s ease;
+  font-size: 11px; font-weight: 600;
 }
-.ws-tile:hover { background: var(--bg7); color: var(--tx1); border-color: var(--line3); }
-.ws-tile.on { background: var(--tx1); color: var(--bg1); border-color: var(--tx1); }
-.ws-tile.on::before {
-  content: ""; position: absolute; left: -11px; top: 50%; transform: translateY(-50%);
-  width: 2px; height: 18px; border-radius: 2px; background: var(--tx1);
-}
-.ws-tile .dot {
-  position: absolute; right: -3px; top: -3px;
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--amb); border: 1.5px solid var(--bg5);
-}
-.ws-sep { width: 20px; height: 1px; background: var(--line2); margin: 3px 0; }
 .ws-spacer { flex: 1; }
 .ws-you {
   width: 26px; height: 26px; border-radius: 50%;
   background: var(--replybg); border: 1px solid var(--filebd);
   display: grid; place-items: center;
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; font-weight: 600; color: var(--blu2);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 600; color: var(--blu2);
 }
 
 /* --- rail ---------------------------------------------------------------- */
@@ -182,20 +198,11 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   display: grid; grid-template-rows: auto 1fr auto;
   min-height: 0;
 }
-.rail-head {
-  padding: 12px 12px 10px;
-  border-bottom: 1px solid var(--line);
-}
-.rail-head h1 { margin: 0; font-size: 13px; font-weight: 600; color: var(--tx0); letter-spacing: -.01em; }
-.rail-head .sub { margin-top: 3px; font-size: 10px; color: var(--tx3); }
+.rail-head { padding: 12px 12px 10px; border-bottom: 1px solid var(--line); }
+.rail-head h1 { margin: 0; font-size: 13px; font-weight: 600; color: var(--tx0); }
+.rail-head .sub { margin-top: 4px; }
 .rail-body { overflow-y: auto; padding: 4px 0 10px; min-height: 0; }
-.rail-sec { padding: 12px 12px 4px; display: flex; align-items: center; justify-content: space-between; }
-.rail-sec .add {
-  font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--tx4);
-  width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center;
-  transition: background .12s ease, color .12s ease;
-}
-.rail-sec .add:hover { background: var(--bg5); color: var(--tx2); }
+.rail-sec { padding: 12px 12px 5px; }
 
 .rrow {
   display: flex; align-items: center; gap: 7px;
@@ -207,56 +214,44 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 }
 .rrow:hover { background: var(--bg4); color: var(--tx1); }
 .rrow.on { background: var(--bg4); border-left-color: var(--tx1); color: var(--tx0); }
-.rrow .hash { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx4); width: 9px; }
-.rrow.on .hash { color: var(--tx2); }
+.rrow .hash { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx2); width: 9px; }
 .rrow .nm { font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rrow.unread .nm { font-weight: 600; color: var(--tx0); }
-.rrow .ct {
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx4);
-  letter-spacing: .02em;
-}
+.rrow .ct { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 .rrow .pill {
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; font-weight: 600; letter-spacing: .04em;
-  color: var(--amb2); background: var(--ambbg); border: 1px solid var(--ambbd2);
-  border-radius: 8px; padding: 1px 5px; line-height: 1.3;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 600;
+  color: var(--amb2); background: var(--ambbg); border: 1px solid var(--ambbd);
+  border-radius: 8px; padding: 0 5px 1px; line-height: 1.3;
   display: inline-flex; align-items: center; gap: 3px;
 }
-.rrow .pill .g { font-size: 8px; }
 
-.hrow { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left; padding: 3.5px 12px 3.5px 11px; border-left: 2px solid transparent; transition: background .12s ease; }
-.hrow:hover { background: var(--bg4); }
+/* humans are a roster, not navigation — non-interactive rows */
+.hrow { display: flex; align-items: center; gap: 7px; padding: 3.5px 12px 3.5px 13px; }
 /* presence uses BLUE (= human), never green: green is reserved for "verified". */
 .pres { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .pres.here { background: var(--blu); }
-.pres.idle { background: transparent; border: 1.5px solid var(--blu3); }
-.pres.away { background: transparent; border: 1.5px solid var(--tx4); }
+.pres.idle { background: transparent; border: 1.5px solid var(--blu2); }
+.pres.away { background: transparent; border: 1.5px solid var(--line3); }
 .hrow .nm { font-size: 11.5px; color: var(--tx2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hrow.me .nm { color: var(--tx1); font-weight: 500; }
-.hrow .meta { font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); letter-spacing: .02em; }
 
-.rail-foot {
-  border-top: 1px solid var(--line);
-  padding: 8px 12px;
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-}
-.rail-foot .who { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.rail-foot { border-top: 1px solid var(--line); padding: 8px 12px; display: flex; align-items: center; gap: 8px; }
 .rail-foot .av {
   width: 20px; height: 20px; border-radius: 50%;
   background: var(--replybg); border: 1px solid var(--filebd);
   display: grid; place-items: center;
-  font-family: "IBM Plex Mono", monospace; font-size: 8.5px; font-weight: 600; color: var(--blu2);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 600; color: var(--blu2);
 }
 .rail-foot .nm { font-size: 11.5px; color: var(--tx1); line-height: 1.25; }
-.rail-foot .sts { font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); letter-spacing: .02em; }
 
 .iconbtn {
   width: 22px; height: 22px; border-radius: 5px;
   display: grid; place-items: center;
   border: 1px solid transparent;
-  color: var(--tx3);
+  color: var(--tx2);
   transition: background .12s ease, color .12s ease, border-color .12s ease;
 }
-.iconbtn:hover { background: var(--bg5); color: var(--tx1); border-color: var(--line); }
+.iconbtn:hover { background: var(--bg7); color: var(--tx0); border-color: var(--line); }
 .iconbtn svg { width: 13px; height: 13px; display: block; }
 
 /* --- center -------------------------------------------------------------- */
@@ -267,129 +262,132 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   min-width: 0; min-height: 0;
 }
 
-.roomhead {
-  border-bottom: 1px solid var(--line);
-  padding: 9px 16px 0;
-  background: var(--bg1);
-}
-.roomhead .top { display: flex; align-items: baseline; gap: 10px; }
-.roomhead h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--tx0); letter-spacing: -.01em; }
-.roomhead h2 .hash { color: var(--tx4); font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 400; }
+.roomhead { border-bottom: 1px solid var(--line); padding: 8px 16px 0; background: var(--bg1); }
+.roomhead .top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.roomhead h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--tx0); flex: none; white-space: nowrap; }
+.roomhead h2 .hash { color: var(--tx2); font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 400; }
 .roomhead .topic {
-  font-size: 11.5px; color: var(--tx3); flex: 1; min-width: 0;
+  font-size: 11.5px; color: var(--tx2); flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   border-left: 1px solid var(--line); padding-left: 10px;
 }
-.roomhead .faces { display: flex; align-items: center; }
+.roomhead .faces { display: flex; align-items: center; flex: none; }
 .roomhead .faces .av {
-  width: 19px; height: 19px; border-radius: 50%;
+  width: 20px; height: 20px; border-radius: 50%;
   border: 1.5px solid var(--bg1); background: var(--bg5);
   display: grid; place-items: center; margin-left: -5px;
-  font-family: "IBM Plex Mono", monospace; font-size: 8px; font-weight: 600; color: var(--tx2);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 600; color: var(--tx2);
 }
 
-/* three-surface segmented control */
-.surfaces { display: flex; align-items: center; gap: 2px; margin-top: 8px; }
+/* the three surfaces are all on screen at once — these focus, they do not navigate */
+.surfaces { display: flex; align-items: center; gap: 3px; margin-top: 5px; min-width: 0; overflow: hidden; }
 .surf {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 9px 6px;
+  padding: 4px 9px 5px;
   border-bottom: 2px solid transparent;
   font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
-  color: var(--tx3);
-  transition: color .12s ease, border-color .12s ease;
+  color: var(--tx2);
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
 }
-.surf:hover { color: var(--tx1); }
-.surf.on { color: var(--tx0); border-bottom-color: var(--tx1); }
+.surf:hover { color: var(--tx0); background: var(--bg7); }
+.surf[aria-pressed="true"] { color: var(--tx0); border-bottom-color: var(--tx1); }
 .surf .n {
-  font-size: 9px; letter-spacing: .04em; color: var(--tx4);
-  background: var(--bg4); border: 1px solid var(--line); border-radius: 7px; padding: 0 4px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: normal; color: var(--tx2);
+  background: var(--bg7); border: 1px solid var(--line); border-radius: 7px; padding: 0 4px;
 }
-.surf.on .n { color: var(--tx2); }
-.surf.warn .n { color: var(--amb2); background: var(--ambbg); border-color: var(--ambbd2); }
+.surf.warn .n { color: var(--amb2); background: var(--ambbg); border-color: var(--ambbd); }
+.surf-note { margin-left: 8px; padding-bottom: 1px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* --- attention pin ------------------------------------------------------- */
-.pin {
-  background: var(--bg7);
-  border-bottom: 1px solid var(--line2);
-  padding: 9px 16px 10px;
-}
-.pin-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
-.pin-head .g { color: var(--amb); font-family: "IBM Plex Mono", monospace; font-size: 10px; }
+/* corpus turn 17: owed floats up and opens, clean compresses to a count,
+   the pin folds rather than scrolls. Budgeted to stay under ~240px at 820h. */
+.pin { background: var(--bg3); border-bottom: 1px solid var(--line2); padding: 6px 16px 5px; }
+.pin-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.pin-head .g { color: var(--amb2); font-family: "IBM Plex Mono", monospace; font-size: 11px; }
 .pin-head .lbl { color: var(--amb2); }
 .pin-head .rule { flex: 1; height: 1px; background: var(--line); }
-.pin-head .hint { font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx4); letter-spacing: .02em; }
 .pin-head .fold {
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; letter-spacing: .06em;
-  color: var(--tx3); padding: 2px 6px; border-radius: 4px; border: 1px solid transparent;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  color: var(--tx2); padding: 1px 6px 2px; border-radius: 4px; border: 1px solid transparent;
   transition: background .12s ease, color .12s ease, border-color .12s ease;
 }
-.pin-head .fold:hover { background: var(--bg4); color: var(--tx1); border-color: var(--line); }
-.pin-list { display: flex; flex-direction: column; gap: 6px; }
+.pin-head .fold:hover { background: var(--bg7); color: var(--tx0); border-color: var(--line); }
+.pin-list { display: flex; flex-direction: column; gap: 4px; }
 
 .acard {
   border: 1px solid var(--line);
   border-radius: 5px;
-  background: var(--bg3);
-  padding: 7px 10px 7px 9px;
-  display: grid; grid-template-columns: 14px 1fr; column-gap: 8px;
+  background: var(--bg1);
+  padding: 6px 10px 6px 9px;
+  display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 8px;
 }
-.acard .g { font-family: "IBM Plex Mono", monospace; font-size: 11px; line-height: 1.4; color: var(--tx3); }
-.acard.decide { background: var(--ambbg2); border-color: var(--ambbd); box-shadow: inset 0 1px 0 var(--ambbg5); padding: 9px 11px 10px 10px; }
-.acard.decide .g { color: var(--amb); }
-.acard .ttl { font-size: 12px; color: var(--tx0); font-weight: 500; line-height: 1.35; }
-.acard.decide .ttl { font-size: 13px; }
+.acard .g { font-family: "IBM Plex Mono", monospace; font-size: 11px; line-height: 1.4; color: var(--amb2); }
+.acard.gate { background: var(--ambbg5); border-color: var(--ambbd); box-shadow: inset 2px 0 0 var(--amb2); }
+.acard .ttl { font-size: 12.5px; color: var(--tx0); font-weight: 500; line-height: 1.3; }
 .acard .why {
-  margin-top: 2px; font-size: 10.5px; color: var(--tx2);
-  display: flex; gap: 6px; line-height: 1.45;
+  margin-top: 2px; font-size: 11px; color: var(--tx1);
+  display: flex; gap: 6px; line-height: 1.3;
+  max-height: 29px; overflow: hidden;
 }
 .acard .why::before {
   content: "WHY YOU"; flex: none;
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; letter-spacing: .14em;
-  color: var(--tx4); padding-top: 2px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  color: var(--amb2); padding-top: 1px;
 }
-.acard.decide .why { font-size: 11px; color: var(--amb2); }
-.acard.decide .why::before { color: var(--amb); opacity: .8; }
-.acard .foot {
-  margin-top: 5px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+.acard .foot { margin-top: 4px; display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
+.acard .mt {
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;
 }
-.acard .meta {
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; letter-spacing: .02em; color: var(--tx3);
-  display: flex; align-items: center; gap: 7px; flex-wrap: wrap; min-width: 0;
-}
-.acard.decide .meta { margin-top: 6px; color: var(--amb2); opacity: .85; }
-.acard .meta .lnk { color: inherit; text-decoration: none; border-bottom: 1px solid transparent; }
-.acard .meta .lnk:hover { color: var(--tx0); border-bottom-color: var(--line3); }
-.acard.decide .meta .lnk:hover { color: var(--amb2); border-bottom-color: var(--ambbd); }
+.acard .lnk { color: inherit; border-bottom: 1px solid var(--line2); }
+.acard .lnk:hover { color: var(--tx0); border-bottom-color: var(--line3); }
 .acard .acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; }
-.acard.decide .acts { margin-top: 8px; }
+.acard .acts .btn { padding: 2px 9px 3px; }
+
+/* compressed owed row — still visible, still actionable, never folded away */
+.acomp {
+  display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 8px; align-items: center;
+  border: 1px solid var(--line); border-radius: 5px; background: var(--bg1);
+  padding: 2px 5px 3px 9px; width: 100%; text-align: left;
+  transition: background .12s ease, border-color .12s ease;
+}
+.acomp:hover { background: var(--bg7); border-color: var(--line3); }
+.acomp .g { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--amb2); }
+.acomp .ct { font-size: 11.5px; color: var(--tx1); text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acomp .mt {
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); white-space: nowrap;
+  display: flex; align-items: center; gap: 8px;
+}
+.acomp .btn { font-size: 11px; padding: 1px 7px 2px; }
 
 .btn {
   font-size: 11.5px; font-weight: 500;
-  padding: 4px 10px 5px;
+  padding: 3px 9px 4px;
   border: 1px solid var(--line2); border-radius: 4px;
   background: var(--bg3); color: var(--tx1);
   transition: background .12s ease, border-color .12s ease, color .12s ease, transform .1s ease;
 }
 .btn:hover { background: var(--bg7); border-color: var(--line3); color: var(--tx0); }
 .btn:active { transform: translateY(1px); }
-.btn.amber { background: var(--amb); border-color: var(--amb2); color: var(--bg3); }
-.btn.amber:hover { background: var(--amb2); border-color: var(--amb2); color: var(--bg3); }
-.btn.ghost { background: transparent; border-color: transparent; color: var(--tx3); }
-.btn.ghost:hover { background: var(--bg4); color: var(--tx1); }
-.btn.sm { font-size: 11px; padding: 3px 8px 4px; }
-html.atr-dark .btn.amber { color: var(--bg0); }
+.btn.amber { background: var(--amb2); border-color: var(--amb2); color: var(--bg3); }
+.btn.amber:hover { background: var(--amb2); border-color: var(--tx1); color: var(--bg3); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--tx2); }
+.btn.ghost:hover { background: var(--bg7); color: var(--tx0); }
+.btn.sm { font-size: 11px; padding: 2px 7px 3px; }
 
 .pin-trailer {
-  margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--line);
+  margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--line);
   display: flex; align-items: center; gap: 8px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; letter-spacing: .02em; color: var(--tx3);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
+  white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
-.pin-trailer .g { color: var(--grn); }
-.pin-trailer b { color: var(--tx2); font-weight: 500; }
+.pin-trailer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pin-trailer .g { color: var(--grn2); }
+.pin-trailer b { color: var(--tx1); font-weight: 500; }
 
 /* --- feed ---------------------------------------------------------------- */
-.feed { position: relative; overflow-y: auto; padding: 10px 0 14px; min-height: 0; }
-.feed.filtered .mrow:not(.hit) { opacity: .26; }
+.feed { position: relative; overflow-y: auto; padding: 8px 0 14px; min-height: 0; }
+.feed.filtered .mrow:not(.hit) { opacity: .3; }
 .feed.filtered .mrow:not(.hit) .acts { display: none; }
 
 .mrow {
@@ -400,10 +398,10 @@ html.atr-dark .btn.amber { color: var(--bg0); }
   position: relative;
   transition: background .12s ease, opacity .15s ease;
 }
-.mrow:hover { background: var(--bg4); }
-.mrow.tgt { background: var(--ambbg5); box-shadow: inset 2px 0 0 var(--ambbd); }
-.mrow .t { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx4); text-align: right; padding-top: 2px; letter-spacing: -.01em; }
-.mrow .g { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx3); text-align: center; padding-top: 1px; }
+.mrow:hover { background: var(--bg3); }
+.mrow.tgt { background: var(--ambbg5); box-shadow: inset 2px 0 0 var(--amb2); }
+.mrow .t { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); text-align: right; padding-top: 2px; }
+.mrow .g { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx2); text-align: center; padding-top: 1px; }
 .mrow .a {
   font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx2);
   text-align: right; padding-top: 1px;
@@ -411,140 +409,153 @@ html.atr-dark .btn.amber { color: var(--bg0); }
 }
 .mrow .m { font-size: 12px; color: var(--tx1); min-width: 0; }
 
-.mrow.v .g { color: var(--grn); }
-.mrow.q .g { color: var(--amb); }
-.mrow.d .g { color: var(--amb); }
-.mrow.sys .a { color: var(--tx3); }
+.mrow.gv .g { color: var(--grn2); }
+.mrow.ga .g { color: var(--amb2); }
+.mrow.gr .g { color: var(--red2); }
 .mrow.sys .m { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx2); }
 .mrow.me .a { color: var(--blu2); font-weight: 600; }
-.mrow.dim .t, .mrow.dim .a { color: var(--tx4); }
 .mrow.dim .m { color: var(--tx2); }
 
 /* a claim never dresses as a fact */
 .claim { border-bottom: 1px dotted var(--line3); padding-bottom: 1px; }
-.mnote {
-  display: block; margin-top: 2px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; letter-spacing: .01em; color: var(--tx4);
+.mnote { display: block; margin-top: 2px; font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
+.mreply {
+  display: block; margin-bottom: 1px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--blu2);
+  border-left: 2px solid var(--filebd); padding-left: 6px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
 .mrow .m code {
   font-family: "IBM Plex Mono", monospace; font-size: 11px;
-  background: var(--bg4); border: 1px solid var(--line); border-radius: 3px; padding: 0 3px;
-  color: var(--tx2);
+  background: var(--bg7); border: 1px solid var(--line); border-radius: 3px; padding: 0 3px;
+  color: var(--tx1);
 }
-.mrow .m .at { color: var(--blu); font-weight: 500; }
+.mrow .m .at { color: var(--blu2); font-weight: 500; }
 
 .tag {
   display: inline-flex; align-items: center; gap: 4px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; letter-spacing: .04em;
-  border-radius: 3px; padding: 1px 5px 2px; margin-left: 6px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px;
+  border-radius: 3px; padding: 0 5px 1px; margin-left: 6px;
   vertical-align: 1px;
-  border: 1px solid var(--line); background: var(--bg4); color: var(--tx3);
+  border: 1px solid var(--line); background: var(--bg7); color: var(--tx2);
 }
-.tag.amber { border-color: var(--ambbd2); background: var(--ambbg); color: var(--amb2); }
-.tag.green { border-color: var(--grnbd); background: var(--grnbg); color: var(--grn2); }
-.tag.blue  { border-color: var(--filebd); background: var(--replybg); color: var(--blu2); }
-.tag.btnish { cursor: pointer; transition: border-color .12s ease, color .12s ease; }
-.tag.btnish:hover { border-color: var(--amb); color: var(--amb); }
+.tag.amber { border-color: var(--ambbd); background: var(--ambbg); color: var(--amb2); }
+.tag.green { border-color: var(--grnbd); background: var(--grnbg); color: var(--tx1); }
+button.tag { cursor: pointer; transition: border-color .12s ease, color .12s ease; }
+button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 
-/* row hover affordances */
+/* row hover affordances — every one of these is wired; unwired ones were deleted */
 .mrow .acts {
   position: absolute; right: 12px; top: -9px;
   display: flex; gap: 1px; opacity: 0;
-  background: var(--bg3); border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg3); border: 1px solid var(--line2); border-radius: 4px;
   padding: 1px; transition: opacity .12s ease;
   z-index: 3;
 }
-.mrow:hover .acts { opacity: 1; }
+.mrow:hover .acts, .mrow:focus-within .acts { opacity: 1; }
 .mrow .acts button {
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx3);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   padding: 2px 6px 3px; border-radius: 3px;
   transition: background .12s ease, color .12s ease;
 }
-.mrow .acts button:hover { background: var(--bg5); color: var(--tx0); }
+.mrow .acts button:hover { background: var(--bg7); color: var(--tx0); }
+
+/* inline verification prompt — the ~ → ✓ pair, exercisable */
+.vbox {
+  grid-column: 4; margin: 4px 0 6px;
+  border: 1px solid var(--grnbd); border-radius: 5px; background: var(--bg3);
+  padding: 7px 9px 8px;
+}
+.vbox .hd { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+.vbox .row { display: flex; align-items: center; gap: 7px; }
+.vbox input {
+  flex: 1; min-width: 0;
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx1);
+  background: var(--bg1); border: 1px solid var(--line2); border-radius: 4px;
+  padding: 5px 7px;
+}
+.vbox input::placeholder { color: var(--tx2); }
+.vbox input:focus { outline: none; border-color: var(--line3); }
+.vbox .hint { margin-top: 5px; font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 
 /* since-you-left divider */
-.syl { padding: 14px 16px 10px 12px; }
-.syl .bar { display: flex; align-items: center; gap: 9px; }
-.syl .rule { flex: 1; height: 1px; background: var(--ambbd2); }
+.syl { padding: 13px 16px 9px 12px; }
+.syl .bar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.syl .rule { flex: 1; min-width: 20px; height: 1px; background: var(--ambbd); }
 .syl.seen .rule { background: var(--line); }
 .syl .lbl { color: var(--amb2); flex: none; }
-.syl.seen .lbl { color: var(--tx4); }
-.syl .counts { display: flex; align-items: center; gap: 5px; }
+.syl.seen .lbl { color: var(--tx2); }
+.syl .counts { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .cnt {
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; letter-spacing: .1em;
-  border: 1px solid var(--line); background: var(--bg3); color: var(--tx3);
-  border-radius: 3px; padding: 2px 6px 3px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px;
+  border: 1px solid var(--line2); background: var(--bg3); color: var(--tx2);
+  border-radius: 3px; padding: 1px 6px 2px;
   transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
-.cnt:hover { border-color: var(--line3); color: var(--tx1); }
+.cnt:hover { border-color: var(--line3); color: var(--tx0); }
 .cnt.need { border-color: var(--ambbd); background: var(--ambbg); color: var(--amb2); }
-.cnt.need:hover { border-color: var(--amb); }
-.cnt.on { background: var(--tx1); border-color: var(--tx1); color: var(--bg1); }
+.cnt[aria-pressed="true"] { background: var(--tx1); border-color: var(--tx1); color: var(--bg1); }
 .syl .when {
-  margin: 5px 0 0 0; padding-left: 2px;
-  display: flex; align-items: center; gap: 8px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx4); letter-spacing: .02em;
+  margin-top: 5px; padding-left: 2px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
 }
-.syl .when .mark { color: var(--tx3); border-bottom: 1px solid var(--line2); }
+.syl .when .mark { color: var(--tx1); border-bottom: 1px solid var(--line2); }
 .syl .when .mark:hover { color: var(--tx0); border-bottom-color: var(--line3); }
 
-/* routine collapse */
+/* routine collapse — collapses legibly, never to a bare "N hidden" */
 .routine { padding: 4px 16px 4px 12px; }
 .routine .strip {
   width: 100%; text-align: left;
   display: flex; align-items: center; gap: 8px;
   border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line);
-  padding: 6px 4px 6px 46px;
-  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx3); letter-spacing: .01em;
+  padding: 5px 4px 5px 46px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx2);
   transition: background .12s ease, color .12s ease;
 }
-.routine .strip:hover { background: var(--bg4); color: var(--tx2); }
-.routine .strip .g { color: var(--tx3); }
-.routine .strip .peek { margin-left: auto; color: var(--tx4); border-bottom: 1px solid var(--line2); }
-.routine .strip:hover .peek { color: var(--tx2); border-bottom-color: var(--line3); }
-.routine .strip .sep { color: var(--tx4); }
-.peekbody { border-left: 1px solid var(--line); margin: 4px 0 4px 46px; padding: 2px 0; }
+.routine .strip:hover { background: var(--bg3); color: var(--tx0); }
+.routine .strip b { font-weight: 600; color: var(--tx1); }
+.routine .strip .peek { margin-left: auto; color: var(--tx1); border-bottom: 1px solid var(--line2); }
+.routine .strip:hover .peek { border-bottom-color: var(--line3); }
+.peekbody { border-left: 1px solid var(--line); margin: 4px 0 4px 46px; padding: 2px 0; max-height: 300px; overflow-y: auto; }
 .peekbody .mrow { grid-template-columns: 34px 14px 76px 1fr; padding-left: 6px; }
-.peekbody .more {
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx4);
-  padding: 4px 0 4px 62px;
-}
+.peekbody .more { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); padding: 4px 0 4px 62px; }
 
 /* --- composer ------------------------------------------------------------ */
-.composer { border-top: 1px solid var(--line); background: var(--bg1); padding: 10px 16px 9px; }
-.bindbar {
+.composer { border-top: 1px solid var(--line); background: var(--bg1); padding: 9px 16px 8px; }
+.ctxbar {
   display: flex; align-items: center; gap: 8px;
   border: 1px solid var(--ambbd); border-bottom: 0; border-radius: 5px 5px 0 0;
-  background: var(--ambbg3); color: var(--amb2);
-  padding: 6px 9px 6px 10px;
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .02em;
+  background: var(--ambbg); color: var(--amb2);
+  padding: 5px 9px 5px 10px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px;
 }
-.bindbar .g { color: var(--amb); }
-.bindbar b { color: var(--amb2); font-weight: 600; letter-spacing: .1em; font-size: 9.5px; }
-.bindbar .in { margin-left: auto; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
-.bindbar .x { color: var(--amb2); padding: 0 2px; opacity: .7; }
-.bindbar .x:hover { opacity: 1; }
+.ctxbar.reply { border-color: var(--filebd); background: var(--replybg); color: var(--blu2); }
+.ctxbar b { font-weight: 600; letter-spacing: .14em; font-size: 10px; }
+.ctxbar .in { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+.ctxbar .x { color: inherit; padding: 0 2px; }
 
 .cbox {
   border: 1px solid var(--line2); border-radius: 5px;
   background: var(--bg3);
-  display: grid; grid-template-columns: 1fr auto; align-items: end;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end;
   transition: border-color .12s ease;
 }
 .cbox:focus-within { border-color: var(--line3); }
 .composer.bound .cbox { border-color: var(--ambbd); border-radius: 0 0 5px 5px; }
+.composer.replying .cbox { border-color: var(--filebd); border-radius: 0 0 5px 5px; }
 .cbox textarea {
   border: 0; background: transparent; resize: none; outline: none;
   font-family: Inter, sans-serif; font-size: 12.5px; color: var(--tx1);
-  padding: 9px 10px 9px 11px; min-height: 38px; line-height: 1.45;
+  padding: 8px 10px 8px 11px; min-height: 36px; min-width: 0; width: 100%; line-height: 1.45;
 }
-.cbox textarea::placeholder { color: var(--tx4); }
-.cbox .right { display: flex; align-items: center; gap: 6px; padding: 0 8px 7px 0; }
+.cbox textarea::placeholder { color: var(--tx2); }
+.cbox .right { display: flex; align-items: center; gap: 6px; padding: 0 8px 6px 0; }
 .cfoot {
-  margin-top: 6px; display: flex; align-items: center; gap: 10px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx4); letter-spacing: .02em;
+  margin-top: 5px; display: flex; align-items: center; gap: 10px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
 }
-.cfoot .k { border: 1px solid var(--line); background: var(--bg4); border-radius: 3px; padding: 0 3px; color: var(--tx3); }
+.cfoot .k { border: 1px solid var(--line); background: var(--bg7); border-radius: 3px; padding: 0 3px; color: var(--tx1); }
 .cfoot .sp { flex: 1; }
 
 /* --- right pane: current state lens -------------------------------------- */
@@ -553,103 +564,97 @@ html.atr-dark .btn.amber { color: var(--bg0); }
   border-left: 1px solid var(--line);
   display: grid; grid-template-rows: auto minmax(0,1fr);
   min-height: 0;
+  transition: box-shadow .12s ease;
 }
-.lens-head { padding: 11px 14px 10px; border-bottom: 1px solid var(--line); background: var(--bg3); }
+.lens.focused { box-shadow: inset 0 0 0 2px var(--line3); }
+.lens-head { padding: 10px 14px 9px; border-bottom: 1px solid var(--line); background: var(--bg3); }
 .lens-head .top { display: flex; align-items: center; gap: 8px; }
-.lens-head .top .lbl { color: var(--tx2); }
 .lens-head .top .spacer { flex: 1; }
 .lens-head .sub {
   margin-top: 5px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx4); letter-spacing: .02em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }
-.lens-head .sub .live { width: 5px; height: 5px; border-radius: 50%; background: var(--grn3); animation: gl-pulse 1.6s infinite; }
+.lens-head .sub .live { width: 5px; height: 5px; border-radius: 50%; background: var(--grn2); animation: gl-pulse 1.6s infinite; }
 .lens-body { overflow-y: auto; overflow-x: hidden; min-height: 0; padding-bottom: 24px; }
 
 .obj { border-bottom: 1px solid var(--line); }
 .obj-head {
   width: 100%; text-align: left;
   display: grid; grid-template-columns: 12px 1fr auto; column-gap: 8px; align-items: start;
-  padding: 10px 14px 9px;
+  padding: 9px 14px 9px;
   transition: background .12s ease;
 }
-.obj-head:hover { background: var(--bg7); }
-.obj-head .tw { font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); padding-top: 3px; }
-.obj-head .ttl { display: block; font-size: 12px; font-weight: 600; color: var(--tx0); letter-spacing: -.005em; line-height: 1.35; }
-.obj-head .ct { display: block; margin-top: 3px; font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx3); letter-spacing: .02em; }
+.obj-head:hover { background: var(--bg1); }
+.obj-head .tw { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); padding-top: 2px; }
+.obj-head .ttl { display: block; font-size: 12px; font-weight: 600; color: var(--tx0); line-height: 1.35; }
+.obj-head .ct { display: block; margin-top: 3px; font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 .obj-head .ct .warn { color: var(--amb2); }
 .st {
-  font-family: "IBM Plex Mono", monospace; font-size: 8.5px; letter-spacing: .12em;
-  border: 1px solid var(--line); background: var(--bg4); color: var(--tx3);
-  border-radius: 3px; padding: 2px 5px 2px 6px; white-space: nowrap;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  border: 1px solid var(--line); background: var(--bg1); color: var(--tx2);
+  border-radius: 3px; padding: 1px 4px 1px 5px; white-space: nowrap;
 }
-.st.active { border-color: var(--grnbd); background: var(--grnbg); color: var(--grn2); }
-.st.blocked { border-color: var(--ambbd2); background: var(--ambbg); color: var(--amb2); }
+.st.active { border-color: var(--grnbd); background: var(--grnbg); color: var(--tx1); }
+.st.blocked { border-color: var(--ambbd); background: var(--ambbg); color: var(--amb2); }
 
 .grp { padding: 0 14px 4px; }
-.grp .glbl { display: flex; align-items: center; gap: 7px; padding: 8px 0 5px; }
+.grp .glbl { display: flex; align-items: center; gap: 7px; padding: 7px 0 4px; }
 .grp .glbl .rule { flex: 1; height: 1px; background: var(--line); }
-.grp .glbl .n { font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); }
+.grp .glbl .n { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
 
 .oitem {
   width: 100%; text-align: left;
   display: grid; grid-template-columns: 13px 1fr; column-gap: 7px;
-  padding: 5px 6px 6px 5px; border-radius: 4px;
+  padding: 4px 6px 5px 5px; border-radius: 4px;
   border: 1px solid transparent;
   transition: background .12s ease, border-color .12s ease;
 }
-.oitem:hover { background: var(--bg7); border-color: var(--line); }
-.oitem .g { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx3); padding-top: 1px; text-align: center; }
-.oitem.v .g { color: var(--grn); }
-.oitem.needs .g { color: var(--amb); }
-.oitem.bad .g { color: var(--red); }
+.oitem:hover { background: var(--bg1); border-color: var(--line); }
+.oitem .g { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx2); padding-top: 1px; text-align: center; }
+.oitem.gv .g { color: var(--grn2); }
+.oitem.ga .g { color: var(--amb2); }
+.oitem.gr .g { color: var(--red2); }
 .oitem .tt { font-size: 11.5px; color: var(--tx1); line-height: 1.4; }
-.oitem.v .tt { color: var(--tx0); }
+.oitem.gv .tt { color: var(--tx0); }
 .oitem .mt {
   margin-top: 2px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); letter-spacing: .02em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
 }
 .oitem .mt .warn { color: var(--amb2); }
-.oitem .mt .ok { color: var(--grn2); }
-.oitem .mt .dot { color: var(--tx4); }
 
 /* receipt */
 .receipt { padding: 0 0 30px; }
-.rc-top {
-  position: sticky; top: 0; z-index: 2;
-  background: var(--bg3); border-bottom: 1px solid var(--line);
-  padding: 9px 14px 10px;
-}
+.rc-top { position: sticky; top: 0; z-index: 2; background: var(--bg3); border-bottom: 1px solid var(--line); padding: 8px 14px 10px; }
 .rc-back {
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; letter-spacing: .1em; color: var(--tx3);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em; color: var(--tx2);
   display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px 3px 4px; border-radius: 4px;
   transition: background .12s ease, color .12s ease;
 }
-.rc-back:hover { background: var(--bg7); color: var(--tx0); }
+.rc-back:hover { background: var(--bg1); color: var(--tx0); }
 .rc-ttl { display: grid; grid-template-columns: 14px 1fr; column-gap: 8px; margin-top: 8px; }
-.rc-ttl .g { font-family: "IBM Plex Mono", monospace; font-size: 12px; padding-top: 1px; }
+.rc-ttl .g { font-family: "IBM Plex Mono", monospace; font-size: 12px; padding-top: 1px; color: var(--tx2); }
+.rc-ttl.gv .g { color: var(--grn2); }
+.rc-ttl.ga .g { color: var(--amb2); }
 .rc-ttl .h { font-size: 12.5px; font-weight: 600; color: var(--tx0); line-height: 1.35; }
-.rc-ttl.v .g { color: var(--grn); }
-.rc-ttl.claim2 .g { color: var(--tx3); }
-.rc-ttl.needs .g { color: var(--amb); }
 .rc-state {
   margin-top: 7px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  font-family: "IBM Plex Mono", monospace; font-size: 9.5px; color: var(--tx3); letter-spacing: .02em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
 }
-.rc-sec { padding: 11px 14px 3px; }
-.rc-sec .glbl { display: flex; align-items: center; gap: 7px; padding-bottom: 7px; }
+.rc-sec { padding: 10px 14px 3px; }
+.rc-sec .glbl { display: flex; align-items: center; gap: 7px; padding-bottom: 6px; }
 .rc-sec .glbl .rule { flex: 1; height: 1px; background: var(--line); }
 
-.hap { display: grid; grid-template-columns: 13px 1fr; column-gap: 7px; padding: 3.5px 0; }
-.hap .g { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; text-align: center; color: var(--tx3); padding-top: 1px; }
-.hap.v .g { color: var(--grn); }
-.hap.needs .g { color: var(--amb); }
+.hap { display: grid; grid-template-columns: 13px 1fr; column-gap: 7px; padding: 3px 0; }
+.hap .g { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; text-align: center; color: var(--tx2); padding-top: 1px; }
+.hap.gv .g { color: var(--grn2); }
+.hap.ga .g { color: var(--amb2); }
 .hap .tt { font-size: 11.5px; color: var(--tx1); }
 .hap .tt .who { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx2); }
-.hap .tt .tm { font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); margin-left: 5px; }
+.hap .tt .tm { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); margin-left: 5px; }
 
-/* provenance: truncated, hover reveals the source excerpt */
+/* provenance: truncated, hover/focus reveals the source excerpt */
 .prov {
   display: block; width: 100%; max-width: 100%; min-width: 0; text-align: left;
   border: 1px solid var(--line); border-radius: 4px; background: var(--bg1);
@@ -657,70 +662,63 @@ html.atr-dark .btn.amber { color: var(--bg0); }
   transition: border-color .12s ease, background .12s ease;
 }
 .prov:hover { border-color: var(--line3); background: var(--bg7); }
-.prov .hd {
-  display: flex; align-items: baseline; gap: 6px;
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); letter-spacing: .02em;
-}
-.prov .hd .who { color: var(--tx2); }
-.prov .hd .jump { margin-left: auto; opacity: 0; color: var(--blu); transition: opacity .12s ease; }
-.prov:hover .hd .jump { opacity: 1; }
+.prov .hd { display: flex; align-items: baseline; gap: 6px; font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
+.prov .hd .who { color: var(--tx1); }
+.prov .hd .jump { margin-left: auto; opacity: 0; color: var(--blu2); transition: opacity .12s ease; }
+.prov:hover .hd .jump, .prov:focus-visible .hd .jump { opacity: 1; }
 .prov .ex {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1;
   max-width: 100%; overflow: hidden;
-  margin-top: 2px; font-size: 11px; color: var(--tx2); line-height: 1.4;
+  margin-top: 2px; font-size: 11px; color: var(--tx1); line-height: 1.4;
 }
-.prov:hover .ex, .prov:focus-visible .ex { -webkit-line-clamp: 4; line-clamp: 4; color: var(--tx1); }
+.prov:hover .ex, .prov:focus-visible .ex { -webkit-line-clamp: 4; line-clamp: 4; }
 .prov .full {
   display: block; max-height: 0; overflow: hidden; opacity: 0;
   transition: max-height .15s ease, opacity .12s ease, margin .15s ease;
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); letter-spacing: .02em;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
 }
-.prov:hover .full, .prov:focus-visible .full { max-height: 40px; opacity: 1; margin-top: 4px; }
+.prov:hover .full, .prov:focus-visible .full { max-height: 44px; opacity: 1; margin-top: 4px; }
 
-.corr {
-  border-left: 2px solid var(--line2); padding: 2px 0 2px 9px; margin-bottom: 7px;
-}
-.corr .hd { font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx3); letter-spacing: .06em; }
-.corr .bd { font-size: 11px; color: var(--tx2); margin-top: 2px; }
-.corr .bd q { color: var(--tx1); font-style: italic; }
+.corr { border-left: 2px solid var(--line2); padding: 2px 0 2px 9px; margin-bottom: 7px; }
+.corr .hd { font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em; color: var(--tx2); }
+.corr .bd { font-size: 11px; color: var(--tx1); margin-top: 2px; }
+.corr .bd q { font-style: italic; }
+.corr .lnk { color: var(--blu2); border-bottom: 1px solid var(--filebd); font-family: "IBM Plex Mono", monospace; font-size: 10px; }
+.corr .lnk:hover { color: var(--tx0); border-bottom-color: var(--line3); }
 
-.rc-foot {
-  margin: 10px 14px 0; padding-top: 10px; border-top: 1px dashed var(--line);
-  display: flex; align-items: center; gap: 8px;
-}
-.rc-foot .note {
-  font-family: "IBM Plex Mono", monospace; font-size: 9px; color: var(--tx4); letter-spacing: .02em;
-  flex: 1; line-height: 1.4;
-}
+.rc-foot { margin: 10px 14px 0; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; align-items: center; gap: 8px; }
+.rc-foot .note { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); flex: 1; line-height: 1.4; }
 
 .empty {
-  padding: 14px; margin: 10px 14px; border: 1px dashed var(--line); border-radius: 5px;
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx4); letter-spacing: .02em; text-align: center;
+  padding: 12px; margin: 0; border: 1px dashed var(--line); border-radius: 5px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .14em;
+  color: var(--tx2); text-align: center;
 }
 
-/* --- toast --------------------------------------------------------------- */
+/* --- toast (live region: stays in the a11y tree, fades visually) --------- */
 .toast {
   position: fixed; right: 20px; bottom: 92px;
   background: var(--bg3); border: 1px solid var(--line3); border-radius: 5px;
-  padding: 7px 12px 8px; z-index: 40;
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx1); letter-spacing: .02em;
+  padding: 6px 12px 7px; z-index: 40;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx1);
   display: flex; align-items: center; gap: 8px;
   box-shadow: 0 2px 0 var(--bg0);
+  opacity: 0; pointer-events: none; transition: opacity .12s ease;
 }
-.toast .g { color: var(--grn); }
-.toast[hidden] { display: none; }
+.toast.show { opacity: 1; }
+.toast .g { color: var(--grn2); }
 
 /* --- responsive: laptop ------------------------------------------------- */
+/* the topic survives to the narrowest supported width — it is what the room
+   is for, and dropping it was a round-1 defect. */
 @media (max-width: 1439px) {
   .app { grid-template-columns: 48px 216px minmax(500px,1fr) 344px; }
-  .roomhead .topic { display: none; }
 }
 @media (max-width: 1279px) {
   .app { grid-template-columns: 44px 198px minmax(440px,1fr) 316px; }
-  .rail-head .sub { display: none; }
   .mrow { grid-template-columns: 40px 14px 68px 1fr; }
-  .pin { padding: 9px 12px 10px; }
-  .feed { padding-top: 8px; }
+  .pin { padding: 7px 12px 8px; }
+  .roomhead .faces { display: none; }
 }
 </style>
 </head>
@@ -730,14 +728,12 @@ html.atr-dark .btn.amber { color: var(--bg0); }
 
   <!-- ===================== WORKSPACE STRIP ===================== -->
   <aside class="ws">
-    <button class="ws-tile on" title="Atrium — this workspace">AT</button>
-    <button class="ws-tile" title="Northwind">NW<span class="dot"></span></button>
-    <button class="ws-tile" title="Hexi Labs">HX</button>
-    <div class="ws-sep"></div>
-    <button class="ws-tile" title="Join or create a workspace" style="font-size:13px;color:var(--tx4)">+</button>
+    <!-- one workspace, because switching workspaces is not wired. Round 1 shipped
+         two decoy tiles and a "+"; they are gone rather than left inert. -->
+    <div class="ws-tile" title="Atrium — this workspace">AT</div>
     <div class="ws-spacer"></div>
-    <button class="iconbtn" id="themeBtn" title="Toggle theme (light / dark)" aria-label="Toggle theme">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
+    <button class="iconbtn" id="themeBtn" title="Toggle theme (light / dark)" aria-label="Toggle light and dark theme">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true">
         <circle cx="8" cy="8" r="3.2"></circle>
         <path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1M12.9 12.9l-1.1-1.1M4.2 4.2L3.1 3.1"></path>
       </svg>
@@ -746,64 +742,25 @@ html.atr-dark .btn.amber { color: var(--bg0); }
   </aside>
 
   <!-- ===================== RAIL ===================== -->
-  <nav class="rail">
+  <nav class="rail" aria-label="Rooms and people">
     <div class="rail-head">
       <h1>Atrium</h1>
-      <div class="sub mono">5 people · 6 rooms</div>
+      <div class="sub meta" id="railSub"></div>
     </div>
 
     <div class="rail-body scroll">
-      <div class="rail-sec">
-        <span class="lbl">ROOMS</span>
-        <button class="add mono" title="New room">+</button>
-      </div>
-
-      <button class="rrow on unread">
-        <span class="hash">#</span>
-        <span class="nm">users-migration</span>
-        <span class="pill" id="railPill"><span class="g">◆</span><span id="railPillN">3</span></span>
-      </button>
-      <button class="rrow unread">
-        <span class="hash">#</span>
-        <span class="nm">identity-service</span>
-        <span class="ct">12</span>
-      </button>
-      <button class="rrow">
-        <span class="hash">#</span>
-        <span class="nm">mobile</span>
-        <span class="pill"><span class="g">◆</span>1</span>
-      </button>
-      <button class="rrow"><span class="hash">#</span><span class="nm">infra</span><span class="ct">4</span></button>
-      <button class="rrow"><span class="hash">#</span><span class="nm">design-review</span></button>
-      <button class="rrow"><span class="hash">#</span><span class="nm">general</span></button>
-
-      <div class="rail-sec">
-        <span class="lbl">HUMANS</span>
-        <button class="add mono" title="Invite">+</button>
-      </div>
-
-      <button class="hrow me"><span class="pres here"></span><span class="nm">lars</span><span class="meta">you</span></button>
-      <button class="hrow"><span class="pres here"></span><span class="nm">priya</span><span class="meta">now</span></button>
-      <button class="hrow"><span class="pres here"></span><span class="nm">justin</span><span class="meta">now</span></button>
-      <button class="hrow"><span class="pres idle"></span><span class="nm">dana</span><span class="meta">14m</span></button>
-      <button class="hrow"><span class="pres away"></span><span class="nm">mateo</span><span class="meta">2h</span></button>
+      <div class="rail-sec"><span class="lbl">ROOMS</span></div>
+      <div id="railRooms"></div>
+      <div class="rail-sec"><span class="lbl">HUMANS</span></div>
+      <div id="railHumans"></div>
     </div>
 
     <div class="rail-foot">
-      <div class="who">
-        <div class="av">LV</div>
-        <div>
-          <div class="nm">lars</div>
-          <div class="sts">back after 15h</div>
-        </div>
+      <div class="av">LV</div>
+      <div>
+        <div class="nm">lars</div>
+        <div class="meta" id="railAway"></div>
       </div>
-      <button class="iconbtn" title="Preferences" aria-label="Preferences">
-        <svg viewBox="0 0 16 16" fill="currentColor">
-          <circle cx="8" cy="3.2" r="1.25"></circle>
-          <circle cx="8" cy="8" r="1.25"></circle>
-          <circle cx="8" cy="12.8" r="1.25"></circle>
-        </svg>
-      </button>
     </div>
   </nav>
 
@@ -812,849 +769,1428 @@ html.atr-dark .btn.amber { color: var(--bg0); }
 
     <header class="roomhead">
       <div class="top">
-        <h2><span class="hash">#</span> users-migration</h2>
-        <div class="topic">Move every account onto the new identity service before the 14 Aug change freeze.</div>
-        <div class="faces">
-          <span class="av">PR</span><span class="av">JU</span><span class="av">DA</span><span class="av">MA</span><span class="av">LV</span>
-        </div>
+        <h2><span class="hash">#</span> <span id="roomName"></span></h2>
+        <div class="topic" id="roomTopic"></div>
+        <div class="faces" id="roomFaces"></div>
       </div>
-      <div class="surfaces">
-        <button class="surf on">CONVERSATION</button>
-        <button class="surf" id="surfState">CURRENT STATE <span class="n" id="surfStateN">12</span></button>
-        <button class="surf warn" id="surfNeeds">NEEDS YOU <span class="n" id="surfNeedsN">3</span></button>
+      <div class="surfaces" role="group" aria-label="Surface focus">
+        <button class="surf" id="surfConv" aria-pressed="true">CONVERSATION</button>
+        <button class="surf warn" id="surfNeeds" aria-pressed="false">NEEDS YOU <span class="n" id="surfNeedsN">0</span></button>
+        <button class="surf" id="surfState" aria-pressed="false">CURRENT STATE <span class="n" id="surfStateN">0</span></button>
+        <span class="surf-note meta">all three are on screen at once — these focus, they do not navigate</span>
       </div>
     </header>
 
     <!-- ---------- attention pin ---------- -->
-    <section class="pin" id="pin">
+    <section class="pin" id="pin" aria-label="Needs you">
       <div class="pin-head">
-        <span class="g">◆</span>
+        <span class="g" aria-hidden="true">◆</span>
         <span class="lbl">NEEDS YOU</span>
-        <span class="hint mono" id="pinCount">3 items · hardest first</span>
+        <span class="meta" id="pinCount"></span>
         <span class="rule"></span>
-        <button class="fold" id="pinFold">FOLD</button>
+        <button class="fold" id="pinFold" aria-pressed="false">FOLD</button>
       </div>
-
-      <div class="pin-list" id="pinList">
-
-        <!-- 1 · needs_decision -->
-        <article class="acard decide" id="a-decide" data-cls="need">
-          <div class="g">◆</div>
-          <div>
-            <div class="ttl">Keep dual-write through the 14 Aug freeze, or cut over Friday and drop legacy tokens?</div>
-            <div class="why">needs you specifically — you set the freeze date, and nobody else can trade $900/mo against the 4.7% of sessions still on legacy tokens.</div>
-            <div class="meta">
-              <span>asked by priya</span><span>·</span>
-              <button class="lnk" data-jump="m6">08:36 in this room</button><span>·</span>
-              <span>3 people waiting</span><span>·</span>
-              <span>blocks 1 objective</span>
-            </div>
-            <div class="acts">
-              <button class="btn amber" data-answer="keep">Keep dual-write through 14 Aug</button>
-              <button class="btn" data-answer="cutover">Cut over Friday</button>
-              <button class="btn ghost sm" id="replyDecide">Reply to decide →</button>
-            </div>
-          </div>
-        </article>
-
-        <!-- 2 · owned_commitment (overdue) -->
-        <article class="acard" id="a-commit" data-cls="need">
-          <div class="g" style="color:var(--amb)">◆</div>
-          <div>
-            <div class="ttl">Sign off the rollback runbook — due yesterday 17:00</div>
-            <div class="why">yours — you own it, and the cutover decision above cannot be executed until it is signed.</div>
-            <div class="foot">
-              <div class="meta">
-                <span style="color:var(--amb2)">overdue 16h</span><span>·</span>
-                <span>committed by you</span><span>·</span>
-                <button class="lnk" data-jump="m1">29 Jul in #infra</button>
-              </div>
-              <div class="acts">
-                <button class="btn sm" data-resolve="a-commit" data-effect="signed">Mark signed off</button>
-                <button class="btn ghost sm" data-resolve="a-commit" data-effect="resched">Reschedule</button>
-              </div>
-            </div>
-          </div>
-        </article>
-
-        <!-- 3 · blocking_question -->
-        <article class="acard" id="a-question" data-cls="need">
-          <div class="g" style="color:var(--amb)">?</div>
-          <div>
-            <div class="ttl">Did legal approve keeping <code style="font-family:'IBM Plex Mono',monospace;font-size:11px">users_legacy</code> for 90 days?</div>
-            <div class="why">blocking — the retention answer gates “Retire the legacy identity path,” the objective you own.</div>
-            <div class="foot">
-              <div class="meta">
-                <span>asked by priya</span><span>·</span>
-                <button class="lnk" data-jump="m11">09:11</button><span>·</span>
-                <span>open 3h</span><span>·</span>
-                <span>nobody assigned</span>
-              </div>
-              <div class="acts">
-                <button class="btn sm" data-resolve="a-question" data-effect="answered">Answer</button>
-                <button class="btn ghost sm" data-resolve="a-question" data-effect="reassign">Ask justin instead</button>
-              </div>
-            </div>
-          </div>
-        </article>
-      </div>
-
-      <div class="pin-trailer" id="pinTrailer">
-        <span class="g">✓</span>
-        <span>everything else is green — <b>3 objectives</b> on track · <b>9 commitments</b>, none overdue · <b>0 failures</b> · last verification 09:07</span>
-      </div>
+      <div class="pin-list" id="pinList"></div>
+      <div class="pin-trailer" id="pinTrailer"></div>
     </section>
 
     <!-- ---------- feed ---------- -->
-    <div class="feed scroll" id="feed">
-
-      <div class="mrow dim" data-msg="m1">
-        <div class="t">16:02</div><div class="g">·</div><div class="a">justin</div>
-        <div class="m">Shadow-write path is in behind <code>users.dualwrite</code> — off everywhere except staging.
-          <div class="acts"><button>Reply</button><button>Pin</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow dim" data-msg="m2">
-        <div class="t">16:31</div><div class="g">~</div><div class="a">priya</div>
-        <div class="m"><span class="claim">Staging backfill ran clean — 4.2M rows in 38 minutes.</span>
-          <div class="acts"><button>Reply</button><button>Verify</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow dim v sys" data-msg="m3">
-        <div class="t">16:44</div><div class="g">✓</div><div class="a">checks</div>
-        <div class="m">parity #402 passed — 4,218,904 / 4,218,904 rows, 0 checksum diffs
-          <div class="acts"><button>Open</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow dim" data-msg="m4">
-        <div class="t">17:41</div><div class="g">·</div><div class="a">dana</div>
-        <div class="m">Heading out — I'll pull the real iOS token numbers first thing.
-          <div class="acts"><button>Reply</button><button>···</button></div>
-        </div>
-      </div>
-
-      <!-- since you left -->
-      <div class="syl" id="syl">
-        <div class="bar">
-          <span class="lbl" id="sylLbl">SINCE YOU LEFT</span>
-          <div class="counts">
-            <button class="cnt need" data-filter="need" id="cntNeed">3 NEED YOU</button>
-            <button class="cnt" data-filter="change" id="cntChange">5 CHANGES</button>
-            <button class="cnt" data-filter="routine" id="cntRoutine">31 ROUTINE HIDDEN</button>
-          </div>
-          <span class="rule"></span>
-        </div>
-        <div class="when">
-          <span>17:41 yesterday → 09:12 today · 15h 31m away</span>
-          <span>·</span>
-          <button class="mark" id="markSeen">mark this group seen</button>
-        </div>
-      </div>
-
-      <div class="mrow hit" data-cls="change" data-msg="m5">
-        <div class="t">08:31</div><div class="g">~</div><div class="a">dana</div>
-        <div class="m"><span class="claim">4.7% of sessions still present legacy opaque tokens — almost all iOS 15.x holdouts.</span>
-          <span class="mnote">source: mobile auth dashboard, 7-day window · not cross-checked against server logs</span>
-          <div class="acts"><button>Reply</button><button>Verify</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow" data-msg="m5b">
-        <div class="t">08:33</div><div class="g">·</div><div class="a">justin</div>
-        <div class="m">Then a Friday cutover breaks 4.7% of logins. That is not a rounding error.
-          <div class="acts"><button>Reply</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow d hit" data-cls="need" data-msg="m6">
-        <div class="t">08:36</div><div class="g">◆</div><div class="a">priya</div>
-        <div class="m">Decide, please: keep dual-write through the 14 Aug freeze, or cut over Friday and drop legacy tokens? I can't schedule the drop until one of those is true.
-          <span class="tag amber btnish" data-jump-pin="1">◆ needs lars</span>
-          <div class="acts"><button>Reply</button><button>Pin</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow hit" data-cls="change" data-msg="m7">
-        <div class="t">08:41</div><div class="g">~</div><div class="a">mateo</div>
-        <div class="m"><span class="claim">Dual-write is running about $900/mo in extra write throughput.</span> Eyeballed off last week's bill — that's not a forecast.
-          <span class="tag" data-receipt="C1">claim · unverified</span>
-          <div class="acts"><button>Reply</button><button>Verify</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow" data-msg="m8">
-        <div class="t">08:44</div><div class="g">·</div><div class="a">justin</div>
-        <div class="m">Cost isn't the constraint. The freeze is.
-          <div class="acts"><button>Reply</button><button>···</button></div>
-        </div>
-      </div>
-
-      <!-- routine collapse -->
-      <div class="routine" id="routine">
-        <button class="strip" id="routineStrip">
-          <span class="g">·</span>
-          <span><b style="font-weight:500;color:var(--tx2)">31 routine</b></span>
-          <span class="sep">·</span><span>08:45–09:06</span>
-          <span class="sep">·</span><span>checks, justin, dana</span>
-          <span class="peek" id="routinePeek">click to peek</span>
-        </button>
-        <div class="peekbody" id="peekBody" hidden>
-          <div class="mrow dim sys"><div class="t">08:45</div><div class="g">·</div><div class="a">checks</div><div class="m">deploy 2f81c3 → staging · 41s</div></div>
-          <div class="mrow dim"><div class="t">08:47</div><div class="g">·</div><div class="a">justin</div><div class="m">flipped <code>users.dualwrite=on</code> in staging-2</div></div>
-          <div class="mrow dim sys"><div class="t">08:52</div><div class="g">·</div><div class="a">checks</div><div class="m">auth suite green · 1,204 tests · 2m11s</div></div>
-          <div class="mrow dim"><div class="t">08:58</div><div class="g">·</div><div class="a">dana</div><div class="m">rebased token-refresh onto main</div></div>
-          <div class="mrow dim sys"><div class="t">09:03</div><div class="g">·</div><div class="a">checks</div><div class="m">deploy 9ac10e → staging · 38s</div></div>
-          <div class="more">+ 26 more routine events · none owed you attention</div>
-        </div>
-      </div>
-
-      <div class="mrow v sys hit" data-cls="change" data-msg="m9">
-        <div class="t">09:07</div><div class="g">✓</div><div class="a">checks</div>
-        <div class="m">migration dry-run #418 on the prod snapshot — 0 constraint violations · 11m42s
-          <span class="tag green" data-receipt="V1">verified</span>
-          <div class="acts"><button>Open</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow hit" data-cls="change" data-msg="m10">
-        <div class="t">09:09</div><div class="g">·</div><div class="a">dana</div>
-        <div class="m">I'll have the token-refresh fix out Thursday, before the freeze.
-          <span class="tag">commitment · dana · Thu 31 Jul ~</span>
-          <div class="acts"><button>Reply</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow q hit" data-cls="need" data-msg="m11">
-        <div class="t">09:11</div><div class="g">?</div><div class="a">priya</div>
-        <div class="m">Nobody has confirmed whether legal is fine keeping <code>users_legacy</code> around for 90 days. That gates the drop.
-          <span class="tag amber">open question</span>
-          <div class="acts"><button>Reply</button><button>Answer</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div class="mrow" data-msg="m12">
-        <div class="t">09:12</div><div class="g">·</div><div class="a">justin</div>
-        <div class="m"><span class="at">@lars</span> you're back? The Friday call is yours.
-          <div class="acts"><button>Reply</button><button>···</button></div>
-        </div>
-      </div>
-
-      <div id="feedEnd"></div>
-    </div>
+    <!-- not role="log": the feed re-renders wholesale from state, so an implicit
+         live region would re-announce the room on every action. The toast at the
+         bottom of the document is the aria-live channel for state changes. -->
+    <div class="feed scroll" id="feed" aria-label="Conversation"></div>
 
     <!-- ---------- composer ---------- -->
     <div class="composer" id="composer">
-      <div class="bindbar" id="bindbar" hidden>
-        <span class="g">◆</span>
-        <b>ANSWER-BINDING</b>
-        <span>your next message resolves it — nothing is inferred</span>
-        <span class="in">in: Cut over to the new identity service</span>
-        <button class="x mono" id="unbind" title="Unbind">✕</button>
+      <div class="ctxbar" id="ctxbar" hidden>
+        <span class="g" id="ctxGlyph" aria-hidden="true">◆</span>
+        <b id="ctxLabel">ANSWER-BINDING</b>
+        <span id="ctxText"></span>
+        <span class="in" id="ctxIn"></span>
+        <button class="x mono" id="ctxCancel" aria-label="Cancel">✕</button>
       </div>
       <div class="cbox">
-        <textarea id="cinput" rows="1" placeholder="Message #users-migration"></textarea>
-        <div class="right">
-          <button class="btn ghost sm" title="Attach">Attach</button>
-          <button class="btn" id="sendBtn">Send</button>
-        </div>
+        <textarea id="cinput" rows="1" aria-label="Message" placeholder="Message"></textarea>
+        <div class="right"><button class="btn" id="sendBtn">Send</button></div>
       </div>
       <div class="cfoot">
         <span><span class="k">↵</span> send · <span class="k">⇧↵</span> newline</span>
         <span class="sp"></span>
-        <span id="cstate">interpretation runs on send · proposals land in Current state as ~ until accepted</span>
+        <span id="cstate"></span>
       </div>
     </div>
   </main>
 
   <!-- ===================== RIGHT — CURRENT STATE LENS ===================== -->
-  <aside class="lens">
+  <aside class="lens" id="lens" aria-label="Current state">
     <div class="lens-head">
       <div class="top">
         <span class="lbl">CURRENT STATE</span>
         <span class="spacer"></span>
-        <span class="lbl" style="color:var(--tx4)">#USERS-MIGRATION</span>
+        <span class="lbl" id="lensRoom"></span>
       </div>
       <div class="sub">
-        <span class="live"></span>
-        <span id="lensSummary">12 accepted · 1 awaiting you</span>
-        <span>·</span><span>updated 09:12</span>
+        <span class="live" aria-hidden="true"></span>
+        <span id="lensSummary"></span>
       </div>
     </div>
-
-    <div class="lens-body scroll" id="lensBody"><!-- rendered --></div>
+    <div class="lens-body scroll" id="lensBody"></div>
   </aside>
 </div>
 
-<div class="toast" id="toast" hidden><span class="g">✓</span><span id="toastMsg"></span></div>
+<div class="toast" id="toast" role="status" aria-live="polite"><span class="g" aria-hidden="true">✓</span><span id="toastMsg"></span></div>
 
 <script>
 "use strict";
 
 /* ===========================================================================
- * STATE — the lens and the pin are rendered from data so the answer flow can
- * move an object between them the way the real reducer would.
+ * ONE STATE OBJECT.
+ *
+ * Round 1's defect was architectural: the pin lived in the DOM, the lens lived
+ * in an OBJECTIVES array, receipts lived in a third dictionary, and the counts
+ * were typed in by hand. Nothing could stay in sync because there was nothing
+ * to be in sync *with*.
+ *
+ * Round 2 has exactly one source of truth — `S` — and every surface is a pure
+ * function of it: renderRail, renderPin, renderFeed, renderLens, renderReceipt,
+ * and every count. Nothing is stored in the DOM. No glyph is ever written by
+ * hand; `glyphOf()` derives it from the object's epistemic state, including for
+ * objects at rest. Changing state and re-rendering is the only way anything on
+ * this page moves.
  * ======================================================================== */
 
-const OBJECTIVES = [
-  {
-    id: "o1", title: "Cut over to the new identity service", status: "active", open: true,
-    objects: [
-      { kind: "decision", id: "D1", glyph: "✓", cls: "v", text: "Dual-write stays on until parity holds for 7 consecutive days",
-        meta: [{ t: "accepted by lars", c: "ok" }, { t: "29 Jul 11:20" }, { t: "4 sources" }], receipt: "D1" },
-      { kind: "decision", id: "P1", glyph: "~", cls: "", text: "Cut over Friday 1 Aug and drop legacy tokens", claim: true, proposed: true,
-        meta: [{ t: "proposed · not accepted", c: "warn" }, { t: "conf .71" }, { t: "from priya 08:36" }], receipt: "P1" },
-      { kind: "commitment", id: "K1", glyph: "·", cls: "", text: "Ship the token-refresh fix",
-        meta: [{ t: "dana" }, { t: "due Thu 31 Jul" }, { t: "self-stated ~" }] },
-      { kind: "commitment", id: "K2", glyph: "◆", cls: "needs", text: "Sign off the rollback runbook",
-        meta: [{ t: "lars" }, { t: "overdue 16h", c: "warn" }, { t: "blocks the cutover" }] },
-      { kind: "commitment", id: "K3", glyph: "·", cls: "", text: "Document the dualwrite flag in the runbook",
-        meta: [{ t: "justin" }, { t: "no due date" }] },
-      { kind: "question", id: "Q1", glyph: "?", cls: "needs", text: "Does legal approve 90-day retention of users_legacy?",
-        meta: [{ t: "open 3h", c: "warn" }, { t: "asked by priya" }, { t: "blocks o2" }] },
-      { kind: "claim", id: "C1", glyph: "~", cls: "", text: "Dual-write costs about $900/mo in extra write throughput", claim: true,
-        meta: [{ t: "mateo" }, { t: "unverified" }, { t: "eyeballed off one bill" }], receipt: "C1" },
-      { kind: "claim", id: "V1", glyph: "✓", cls: "v", text: "Backfill parity: 4,218,904 / 4,218,904 rows, 0 diffs",
-        meta: [{ t: "checks", c: "ok" }, { t: "verified 09:07" }, { t: "dry-run #418" }], receipt: "V1" }
-    ]
+const S = {
+  me: "lars",
+  now: "09:12",
+  roomId: "users-migration",
+  seq: 9200,
+  people: [
+    { id: "lars",   presence: "here", note: "you" },
+    { id: "priya",  presence: "here", note: "now" },
+    { id: "justin", presence: "here", note: "now" },
+    { id: "dana",   presence: "idle", note: "14m" },
+    { id: "mateo",  presence: "away", note: "2h" }
+  ],
+  ui: {
+    /* a filter carries its SCOPE as well as its class, because a count is only
+       honest next to the set it counts. The since-you-left chips filter the
+       since-you-left group (which is what they count); the NEEDS YOU surface
+       button filters the whole room (which is what the pin counts). Round 1
+       labelled one set and highlighted another. */
+    feedFilter: null,      // null | { k: 'need'|'change'|'discussion'|'routine', scope: 'since'|'room' }
+    routineOpen: false,
+    pinFolded: false,
+    pinOpen: null,         // which owed item is expanded (turn-17: one open, rest compressed)
+    lensFocus: false,
+    receiptId: null,
+    bound: null,           // object id the composer is answer-bound to
+    replyTo: null,         // message id being replied to
+    verifying: null,       // object id whose evidence prompt is open
+    jumpTo: null
   },
-  {
-    id: "o2", title: "Retire the legacy identity path", status: "blocked", open: false,
-    objects: [
-      { kind: "question", id: "Q1b", glyph: "?", cls: "needs", text: "Does legal approve 90-day retention of users_legacy?",
-        meta: [{ t: "the only thing blocking this objective", c: "warn" }] },
-      { kind: "decision", id: "D2", glyph: "✓", cls: "v", text: "Legacy opaque tokens are refused after the retention window closes",
-        meta: [{ t: "accepted by lars", c: "ok" }, { t: "22 Jul" }] },
-      { kind: "commitment", id: "K4", glyph: "·", cls: "", text: "Drop users_legacy once retention clears",
-        meta: [{ t: "priya" }, { t: "blocked" }] }
-    ]
-  },
-  {
-    id: "o3", title: "Keep mobile clients on supported auth", status: "active", open: false,
-    objects: [
-      { kind: "claim", id: "C2", glyph: "~", cls: "", text: "4.7% of sessions still present legacy opaque tokens", claim: true,
-        meta: [{ t: "dana" }, { t: "unverified" }, { t: "7-day dashboard window" }] },
-      { kind: "commitment", id: "K5", glyph: "·", cls: "", text: "Ship the token-refresh fix", meta: [{ t: "dana" }, { t: "due Thu 31 Jul" }] }
-    ]
+  rooms: {}
+};
+
+/* --- epistemic derivation ------------------------------------------------
+ * Precedence, applied in this order and nowhere else:
+ *   failed            → ✗
+ *   owed to you       → ◆   (a gate: a decision or sign-off waiting on you)
+ *   open question     → ?   (explicitly unverified, whether or not it is yours)
+ *   verified/accepted → ✓   (checked by someone other than the claimant)
+ *   proposed / unverified / self-reported → ~
+ *   otherwise         → ·
+ * `~` also drives the dotted underline, everywhere, via isClaim().
+ * ----------------------------------------------------------------------- */
+const GLYPH_CLASS = { "✓": "gv", "◆": "ga", "?": "ga", "✗": "gr", "~": "", "·": "" };
+
+function glyphOf(o) {
+  if (o.verification === "failed") return "✗";
+  if (o.owedTo === S.me && o.verification !== "accepted" && o.verification !== "verified") {
+    return o.kind === "question" ? "?" : "◆";
   }
+  if (o.verification === "open") return "?";
+  if (o.verification === "verified" || o.verification === "accepted") return "✓";
+  if (o.verification === "proposed" || o.verification === "unverified" || o.verification === "self_reported") return "~";
+  return "·";
+}
+function isClaim(o) { return glyphOf(o) === "~"; }
+function needsYou(o) { return o.owedTo === S.me && o.verification !== "accepted" && o.verification !== "verified" && o.verification !== "reassigned" && o.verification !== "rescheduled"; }
+function gclass(g) { return GLYPH_CLASS[g] || ""; }
+
+/* history entries carry a semantic kind; their glyph derives from it too */
+const HIST_GLYPH = { claim: "~", verified: "✓", accepted: "✓", gate: "◆", question: "?", routine: "·", failed: "✗" };
+function histGlyph(k) { return HIST_GLYPH[k] || "·"; }
+
+/* --- seed: 31 genuinely-present routine events, so "31 routine" is counted,
+ *     not asserted. The peek renders these same rows. -------------------- */
+const ROUTINE_SEED = [
+  ["08:45", "checks", "deploy 2f81c3 → staging · 41s"],
+  ["08:45", "checks", "container users-api:2f81c3 pushed · 84MB"],
+  ["08:46", "checks", "staging health green · 12/12 pods ready"],
+  ["08:47", "justin", "flipped users.dualwrite=on in staging-2"],
+  ["08:47", "checks", "flag users.dualwrite changed · staging-2 · by justin"],
+  ["08:48", "checks", "shadow-write lag 41ms p50 · 118ms p99"],
+  ["08:49", "checks", "backfill worker 3/8 idle"],
+  ["08:50", "dana", "pulled the iOS 15.x cohort into the dashboard"],
+  ["08:51", "checks", "lint clean · 0 warnings"],
+  ["08:52", "checks", "auth suite green · 1,204 tests · 2m11s"],
+  ["08:52", "checks", "coverage 87.4% · unchanged"],
+  ["08:53", "checks", "parity #414 passed · 0 diffs"],
+  ["08:54", "justin", "bumped the staging-2 pool to 6"],
+  ["08:54", "checks", "pool users-api scaled 4 → 6"],
+  ["08:55", "checks", "shadow-write lag 38ms p50 · 104ms p99"],
+  ["08:56", "checks", "parity #415 passed · 0 diffs"],
+  ["08:57", "dana", "rebased token-refresh onto main"],
+  ["08:57", "checks", "branch token-refresh · 0 conflicts"],
+  ["08:58", "checks", "build token-refresh #77 green · 3m02s"],
+  ["08:58", "checks", "deploy 6b21aa → staging-2 · 39s"],
+  ["08:59", "checks", "staging-2 health green · 6/6 pods ready"],
+  ["09:00", "checks", "parity #416 passed · 0 diffs"],
+  ["09:01", "justin", "cleared the stale staging-1 lock"],
+  ["09:01", "checks", "advisory lock 44120 released"],
+  ["09:02", "checks", "shadow-write lag 36ms p50 · 99ms p99"],
+  ["09:03", "checks", "deploy 9ac10e → staging · 38s"],
+  ["09:03", "checks", "cache warm 100% · 4 regions"],
+  ["09:04", "checks", "parity #417 passed · 0 diffs"],
+  ["09:05", "dana", "tagged the iOS cohort query for reuse"],
+  ["09:05", "checks", "query cohort_ios_legacy saved"],
+  ["09:06", "checks", "nightly snapshot restored to prod-snap-3 · 6m11s"]
 ];
+
+/* ===========================================================================
+ * ROOM A — #users-migration
+ * ======================================================================== */
+
+S.rooms["users-migration"] = {
+  id: "users-migration",
+  name: "users-migration",
+  topic: "Move every account onto the new identity service before the 14 Aug change freeze.",
+  members: ["priya", "justin", "dana", "mateo", "lars"],
+  away: { from: "17:41 yesterday", to: "09:12 today", len: "15h 31m" },
+  seenAfter: "m4",          // the seen cursor — per room, moved only by this room
+  lastVerified: "09:07",
+  objectives: [
+    { id: "o1", title: "Cut over to the new identity service", status: "active",  open: true },
+    { id: "o2", title: "Retire the legacy identity path",      status: "blocked", open: false },
+    { id: "o3", title: "Keep mobile clients on supported auth", status: "active", open: false }
+  ],
+  objects: [
+    {
+      id: "K0", kind: "commitment", objectives: ["o1"], text: "Land the shadow-write path behind users.dualwrite",
+      claimant: "justin", verification: "verified", verifiedBy: "checks", verifiedAt: "yesterday 16:10",
+      facts: ["justin", "verified by checks", "deploy 2f81c3"],
+      history: [
+        { k: "claim",    who: "justin", tm: "29 Jul 14:02", text: "said the shadow-write path was ready to land" },
+        { k: "verified", who: "checks", tm: "yest. 16:10",  text: "deploy 2f81c3 carried the flag into staging — checked by something other than the claimant" }
+      ],
+      provenance: [
+        { who: "justin", tm: "yest. 16:02", msg: "m1", ex: "Shadow-write path is in behind users.dualwrite — off everywhere except staging.", note: "message · seq 8901 · the commitment this settles" }
+      ],
+      corrections: [],
+      note: "Green because a deploy record confirmed it, not because justin said so."
+    },
+    {
+      id: "D1", kind: "decision", objectives: ["o1"], text: "Dual-write stays on until parity holds for 7 consecutive days",
+      claimant: "priya", verification: "accepted", acceptedBy: "lars", acceptedAt: "29 Jul 11:20",
+      facts: ["accepted by lars", "29 Jul 11:20", "3 sources"],
+      history: [
+        { k: "claim",    who: "priya",  tm: "29 Jul 09:41", text: "proposed keeping dual-write until parity was proven — self-reported, no check attached" },
+        { k: "verified", who: "checks", tm: "29 Jul 10:02", text: "parity had passed 3 consecutive days at the time of the proposal" },
+        { k: "claim",    who: "mateo",  tm: "29 Jul 10:55", text: "estimated the extra write cost at ~$900/mo — never checked against a bill" },
+        { k: "accepted", who: "lars",   tm: "29 Jul 11:20", text: "accepted by answer-binding — nothing about this line was inferred" }
+      ],
+      provenance: [
+        { who: "priya",  tm: "29 Jul 09:41", msg: "m0", ex: "Honestly I'd keep dual-write until we've had a full clean week of parity — one green run isn't a signal.", note: "message · seq 8812 · the proposal" },
+        { who: "checks", tm: "29 Jul 10:02", msg: "m3", ex: "parity #391 passed — 4,201,776 / 4,201,776 rows, 0 checksum diffs", note: "verified event · run #391 · no human in the loop" },
+        { who: "lars",   tm: "29 Jul 11:20", msg: "m0", ex: "Yes — keep it until we have a clean week. Don't drop anything before that.", note: "answer-bound reply · proposal pr_4419 · deterministic, not interpreted" }
+      ],
+      corrections: [
+        { hd: "RETYPED · CLAIM → DECISION", who: "lars", tm: "29 Jul 11:22", text: "This was an actual call, not priya thinking out loud.", after: "Decision (was: Claim by priya)" }
+      ],
+      note: "Correction chain is append-only. The original interpretation is retained; nothing here was erased."
+    },
+    {
+      id: "P1", kind: "decision", objectives: ["o1"], text: "Cut over Friday 1 Aug and drop legacy tokens",
+      question: "Keep dual-write through the 14 Aug freeze, or cut over Friday and drop legacy tokens?",
+      claimant: "priya", verification: "proposed", confidence: ".71",
+      owedTo: "lars", priority: 20, askedBy: "priya", askedAt: "08:36", sourceMsg: "m6",
+      waiting: 3, blocks: "1 objective",
+      why: "needs you specifically — you set the freeze date, and nobody else can trade $900/mo against the 4.7% of sessions still on legacy tokens.",
+      facts: ["proposed · not accepted", "conf .71", "from priya 08:36"],
+      options: [
+        { label: "Keep dual-write through 14 Aug", statement: "Dual-write runs through the 14 Aug freeze; legacy tokens stay accepted until then" },
+        { label: "Cut over Friday", statement: "Cut over Friday 1 Aug; legacy tokens are dropped and the 4.7% tail is force-re-authed" }
+      ],
+      history: [
+        { k: "claim",    who: "priya",  tm: "08:36", text: "asked for one of two options — the model read this as a decision proposal, not a decision" },
+        { k: "claim",    who: "dana",   tm: "08:31", text: "reported 4.7% of sessions still on legacy tokens — unverified" },
+        { k: "gate",     who: "atrium", tm: "08:36", text: "routed to lars: no one else can trade the freeze date against the legacy tail" }
+      ],
+      provenance: [
+        { who: "priya", tm: "08:36", msg: "m6", ex: "Decide, please: keep dual-write through the 14 Aug freeze, or cut over Friday and drop legacy tokens?", note: "message · seq 9104 · proposal pr_4471 · decisions never auto-accept" },
+        { who: "dana",  tm: "08:31", msg: "m5", ex: "4.7% of sessions still present legacy opaque tokens — almost all iOS 15.x holdouts.", note: "message · seq 9101 · cited as evidence, itself unverified" }
+      ],
+      corrections: [],
+      note: "Decisions never auto-accept. This stays ~ until you answer it in Needs you or bind an answer in the composer — and whatever you type is what gets recorded."
+    },
+    {
+      id: "K2", kind: "commitment", objectives: ["o1"], text: "Sign off the rollback runbook",
+      claimant: "lars", verification: "self_reported", owner: "lars", due: "yesterday 17:00", overdue: "16h",
+      owedTo: "lars", priority: 15, sourceMsg: "m0b",
+      why: "yours — you own it, and the cutover decision above cannot be executed until it is signed.",
+      facts: ["lars", "overdue 16h", "blocks the cutover"],
+      history: [
+        { k: "claim", who: "lars", tm: "29 Jul 09:52", text: "committed to signing the runbook before the cutover — self-stated, nothing has checked it" }
+      ],
+      provenance: [
+        { who: "lars", tm: "29 Jul 09:52", msg: "m0b", ex: "I'll sign off the rollback runbook before we cut over — give me the final version Monday.", note: "message · seq 8814 · self-stated commitment, extracted at θ .81" }
+      ],
+      corrections: [],
+      note: "A commitment you made about yourself is a claim until something other than you confirms it. Marking it done keeps it ~."
+    },
+    {
+      id: "K1", kind: "commitment", objectives: ["o1", "o3"], text: "Ship the token-refresh fix",
+      claimant: "dana", verification: "self_reported", owner: "dana", due: "Thu 31 Jul", sourceMsg: "m10",
+      facts: ["dana", "due Thu 31 Jul", "self-stated"],
+      history: [{ k: "claim", who: "dana", tm: "09:09", text: "said the fix lands Thursday — her own word, nothing verifies it yet" }],
+      provenance: [{ who: "dana", tm: "09:09", msg: "m10", ex: "I'll have the token-refresh fix out Thursday, before the freeze.", note: "message · seq 9109 · self-stated commitment, extracted at θ .77" }],
+      corrections: [],
+      note: "Self-stated, so it renders ~ even sitting still. Round 1 drew this as · — a promise dressed as a fact."
+    },
+    {
+      id: "K3", kind: "commitment", objectives: ["o1"], text: "Document the dualwrite flag in the runbook",
+      claimant: "justin", verification: "self_reported", owner: "justin", due: "no due date",
+      facts: ["justin", "no due date", "self-stated"],
+      history: [{ k: "claim", who: "justin", tm: "yest. 16:05", text: "offered to document the flag — no date, nothing checking it" }],
+      provenance: [{ who: "justin", tm: "yest. 16:05", msg: "m1", ex: "Shadow-write path is in behind users.dualwrite — off everywhere except staging.", note: "message · seq 8901 · follow-up commitment extracted at θ .64" }],
+      corrections: [],
+      note: "No due date and no verifier. It is on the record so it cannot quietly evaporate."
+    },
+    {
+      id: "Q1", kind: "question", objectives: ["o1", "o2"], text: "Does legal approve 90-day retention of users_legacy?",
+      claimant: "priya", verification: "open", askedBy: "priya", askedAt: "09:11", openFor: "3h", assignee: null,
+      owedTo: "lars", priority: 10, sourceMsg: "m11",
+      why: "blocking — the retention answer gates “Retire the legacy identity path,” the objective you own.",
+      facts: ["open 3h", "asked by priya", "blocks o2"],
+      history: [{ k: "question", who: "priya", tm: "09:11", text: "raised it as the one thing gating the drop — nobody has been assigned" }],
+      provenance: [{ who: "priya", tm: "09:11", msg: "m11", ex: "Nobody has confirmed whether legal is fine keeping users_legacy around for 90 days. That gates the drop.", note: "message · seq 9111 · open question, no assignee" }],
+      corrections: [],
+      note: "One object, two objectives. It renders in both places and there is only one of it — change it once and both move."
+    },
+    {
+      id: "C1", kind: "claim", objectives: ["o1"], text: "Dual-write costs about $900/mo in extra write throughput",
+      claimant: "mateo", verification: "unverified", sourceMsg: "m7",
+      facts: ["mateo", "unverified", "eyeballed off one bill"],
+      history: [
+        { k: "claim",   who: "mateo",  tm: "08:41", text: "stated the figure and flagged it himself as eyeballed, not forecast" },
+        { k: "routine", who: "atrium", tm: "08:41", text: "no billing source is linked, so verification state stays unverified" }
+      ],
+      provenance: [{ who: "mateo", tm: "08:41", msg: "m7", ex: "Dual-write is running about $900/mo in extra write throughput. Eyeballed off last week's bill — that's not a forecast.", note: "message · seq 9106 · auto-accepted as a Claim (θ .63)" }],
+      corrections: [],
+      note: "A claim is “X said Y”, kept separately from whether Y is true. Verify it from the row in the feed and it becomes ✓ — with your name and your evidence on it."
+    },
+    {
+      id: "C2", kind: "claim", objectives: ["o1", "o3"], text: "4.7% of sessions still present legacy opaque tokens",
+      claimant: "dana", verification: "unverified", sourceMsg: "m5",
+      facts: ["dana", "unverified", "7-day dashboard window"],
+      history: [{ k: "claim", who: "dana", tm: "08:31", text: "read it off the mobile auth dashboard — not cross-checked against server logs" }],
+      provenance: [{ who: "dana", tm: "08:31", msg: "m5", ex: "4.7% of sessions still present legacy opaque tokens — almost all iOS 15.x holdouts.", note: "message · seq 9101 · auto-accepted as a Claim (θ .69)" }],
+      corrections: [],
+      note: "The whole cutover argument rests on this number and nothing has checked it."
+    },
+    {
+      id: "C3", kind: "claim", objectives: ["o1"], text: "Staging backfill ran clean — 4.2M rows in 38 minutes",
+      claimant: "priya", verification: "unverified", sourceMsg: "m2",
+      facts: ["priya", "unverified", "said before any check ran"],
+      history: [{ k: "claim", who: "priya", tm: "yest. 16:31", text: "said the backfill ran clean before any check had run — that line stayed a claim" }],
+      provenance: [{ who: "priya", tm: "yest. 16:31", msg: "m2", ex: "Staging backfill ran clean — 4.2M rows in 38 minutes.", note: "message · seq 8990 · auto-accepted as a Claim (θ .58)" }],
+      corrections: [],
+      note: "The parity run below happens to agree with this. It still is not the same object: one is a person's word, the other is a check."
+    },
+    {
+      id: "V1", kind: "claim", objectives: ["o1"], text: "Backfill parity: 4,218,904 / 4,218,904 rows, 0 checksum diffs",
+      claimant: "checks", verification: "verified", verifiedBy: "the migration harness", verifiedAt: "09:07",
+      facts: ["checks", "verified 09:07", "dry-run #418"],
+      history: [
+        { k: "verified", who: "checks", tm: "09:07",       text: "dry-run #418 on the prod snapshot — 0 constraint violations, 11m42s" },
+        { k: "verified", who: "checks", tm: "yest. 16:44", text: "parity #402 — identical row counts on both sides" }
+      ],
+      provenance: [
+        { who: "checks", tm: "09:07", msg: "m9", ex: "migration dry-run #418 on the prod snapshot — 0 constraint violations · 11m42s", note: "verified event · run #418 · checked by something other than the claimant" },
+        { who: "checks", tm: "yest. 16:44", msg: "m3", ex: "parity #402 passed — 4,218,904 / 4,218,904 rows, 0 checksum diffs", note: "verified event · run #402" }
+      ],
+      corrections: [],
+      note: "Green means checked by something other than the claimant. priya's line above is still ~ and stays that way."
+    },
+    {
+      id: "D2", kind: "decision", objectives: ["o2"], text: "Legacy opaque tokens are refused after the retention window closes",
+      claimant: "lars", verification: "accepted", acceptedBy: "lars", acceptedAt: "22 Jul",
+      facts: ["accepted by lars", "22 Jul"],
+      history: [{ k: "accepted", who: "lars", tm: "22 Jul 15:40", text: "accepted directly in #identity-service — answer-bound" }],
+      provenance: [{ who: "lars", tm: "22 Jul 15:40", msg: null, ex: "Once retention is up, the gateway refuses opaque tokens outright. No grace period.", note: "answer-bound reply · #identity-service · seq 7710" }],
+      corrections: [],
+      note: "Accepted a week before this room's window opens; the source message is in another room."
+    },
+    {
+      id: "K4", kind: "commitment", objectives: ["o2"], text: "Drop users_legacy once retention clears",
+      claimant: "priya", verification: "self_reported", owner: "priya", due: "blocked on Q1",
+      facts: ["priya", "blocked on the legal question"],
+      history: [{ k: "claim", who: "priya", tm: "23 Jul", text: "took the drop — cannot start until the retention question is answered" }],
+      provenance: [{ who: "priya", tm: "23 Jul", msg: null, ex: "I'll do the drop the day retention clears.", note: "message · #identity-service · seq 7802" }],
+      corrections: [],
+      note: "Blocked, not forgotten. It sits at ~ because it is priya's own word."
+    }
+  ],
+  messages: [
+    { id: "m0",  t: "29 Jul", actor: "priya",  body: ["Honestly I'd keep dual-write until we've had a full clean week of parity — one green run isn't a signal."], objectId: "D1" },
+    { id: "m0b", t: "29 Jul", actor: "lars",   body: ["I'll sign off the rollback runbook before we cut over — give me the final version Monday."], objectId: "K2" },
+    { id: "m1",  t: "16:02",  actor: "justin", body: ["Shadow-write path is in behind ", { code: "users.dualwrite" }, " — off everywhere except staging."], objectId: "K0" },
+    { id: "m2",  t: "16:31",  actor: "priya",  body: ["Staging backfill ran clean — 4.2M rows in 38 minutes."], objectId: "C3" },
+    { id: "m3",  t: "16:44",  actor: "checks", system: true, body: ["parity #402 passed — 4,218,904 / 4,218,904 rows, 0 checksum diffs"], objectId: "V1" },
+    { id: "m4",  t: "17:41",  actor: "dana",   body: ["Heading out — I'll pull the real iOS token numbers first thing."] },
+    /* --- seen cursor sits here (room.seenAfter = "m4") --- */
+    { id: "m5",  t: "08:31",  actor: "dana",   body: ["4.7% of sessions still present legacy opaque tokens — almost all iOS 15.x holdouts."],
+      note: "source: mobile auth dashboard, 7-day window · not cross-checked against server logs", objectId: "C2" },
+    { id: "m5b", t: "08:33",  actor: "justin", body: ["Then a Friday cutover breaks 4.7% of logins. That is not a rounding error."] },
+    { id: "m6",  t: "08:36",  actor: "priya",  body: ["Decide, please: keep dual-write through the 14 Aug freeze, or cut over Friday and drop legacy tokens? I can't schedule the drop until one of those is true."], objectId: "P1" },
+    { id: "m7",  t: "08:41",  actor: "mateo",  body: ["Dual-write is running about $900/mo in extra write throughput. Eyeballed off last week's bill — that's not a forecast."], objectId: "C1" },
+    { id: "m8",  t: "08:44",  actor: "justin", body: ["Cost isn't the constraint. The freeze is."] },
+    { id: "__routine__" },
+    { id: "m9",  t: "09:07",  actor: "checks", system: true, body: ["migration dry-run #418 on the prod snapshot — 0 constraint violations · 11m42s"], objectId: "V1" },
+    { id: "m10", t: "09:09",  actor: "dana",   body: ["I'll have the token-refresh fix out Thursday, before the freeze."], objectId: "K1" },
+    { id: "m11", t: "09:11",  actor: "priya",  body: ["Nobody has confirmed whether legal is fine keeping ", { code: "users_legacy" }, " around for 90 days. That gates the drop."], objectId: "Q1" },
+    { id: "m12", t: "09:12",  actor: "justin", body: [{ at: "lars" }, " you're back? The Friday call is yours."] }
+  ]
+};
+
+/* splice the 31 routine events in where the placeholder sits */
+(function seedRoutine() {
+  const r = S.rooms["users-migration"];
+  const i = r.messages.findIndex(m => m.id === "__routine__");
+  const rows = ROUTINE_SEED.map((x, n) => ({
+    id: "r" + n, t: x[0], actor: x[1], system: x[1] === "checks", routine: true, body: [x[2]]
+  }));
+  r.messages.splice(i, 1, ...rows);
+})();
+
+/* ===========================================================================
+ * ROOM B — #identity-service. A second room with its own state, its own seen
+ * cursor and its own owed items, so per-room catch-up is demonstrable rather
+ * than asserted. Marking one room seen does nothing to the other.
+ * ======================================================================== */
+
+S.rooms["identity-service"] = {
+  id: "identity-service",
+  name: "identity-service",
+  topic: "Own the new identity service: issuance, refresh, revocation.",
+  members: ["priya", "justin", "lars"],
+  away: { from: "18:20 yesterday", to: "09:12 today", len: "14h 52m" },
+  seenAfter: "n2",
+  lastVerified: "08:22",
+  objectives: [
+    { id: "p1", title: "Ship refresh-token rotation", status: "active", open: true },
+    { id: "p2", title: "Retire opaque token issuance", status: "active", open: false }
+  ],
+  objects: [
+    {
+      id: "R1", kind: "decision", objectives: ["p1"], text: "Rotate refresh tokens on every use, not on a sliding window",
+      question: "Rotate refresh tokens on every use, or on a 24h sliding window?",
+      claimant: "justin", verification: "proposed", confidence: ".66",
+      owedTo: "lars", priority: 20, askedBy: "justin", askedAt: "08:14", sourceMsg: "n4",
+      waiting: 2, blocks: "1 objective",
+      why: "needs you specifically — strict rotation breaks any client that replays a refresh token, and you own the mobile compatibility call.",
+      facts: ["proposed · not accepted", "conf .66", "from justin 08:14"],
+      options: [
+        { label: "Rotate on every use", statement: "Refresh tokens rotate on every use; replayed tokens are refused outright" },
+        { label: "Sliding window", statement: "Refresh tokens rotate on a 24h sliding window so replays inside the window still succeed" }
+      ],
+      history: [
+        { k: "claim", who: "justin", tm: "08:14", text: "put both options up and asked for a call — read as a proposal, not a decision" },
+        { k: "gate",  who: "atrium", tm: "08:14", text: "routed to lars: mobile compatibility is yours" }
+      ],
+      provenance: [{ who: "justin", tm: "08:14", msg: "n4", ex: "Strict rotation or sliding window? Strict is safer but any client replaying a refresh token dies.", note: "message · seq 9052 · proposal pr_4468 · decisions never auto-accept" }],
+      corrections: [],
+      note: "Same machinery, different room. Answering here does not touch #users-migration."
+    },
+    {
+      id: "R2", kind: "claim", objectives: ["p1"], text: "Rotation load test: 12,000 req/s sustained, p99 41ms",
+      claimant: "checks", verification: "verified", verifiedBy: "the load harness", verifiedAt: "08:22", sourceMsg: "n5",
+      facts: ["checks", "verified 08:22", "run #91"],
+      history: [{ k: "verified", who: "checks", tm: "08:22", text: "load run #91 against staging — 12k req/s, p99 41ms" }],
+      provenance: [{ who: "checks", tm: "08:22", msg: "n5", ex: "rotation load #91 — 12,000 req/s sustained · p99 41ms · 0 errors", note: "verified event · run #91" }],
+      corrections: [],
+      note: "Verified by the harness, not by whoever wrote the code."
+    },
+    {
+      id: "R3", kind: "commitment", objectives: ["p2"], text: "Wire revocation into the gateway",
+      claimant: "justin", verification: "self_reported", owner: "justin", due: "Fri 1 Aug", sourceMsg: "n6",
+      facts: ["justin", "due Fri 1 Aug", "self-stated"],
+      history: [{ k: "claim", who: "justin", tm: "08:31", text: "took it for Friday — his own word" }],
+      provenance: [{ who: "justin", tm: "08:31", msg: "n6", ex: "I'll wire revocation into the gateway by Friday.", note: "message · seq 9061 · self-stated commitment, θ .74" }],
+      corrections: [],
+      note: "Self-stated, so ~."
+    }
+  ],
+  messages: [
+    { id: "n1", t: "17:55", actor: "priya",  body: ["Rotation branch is up for review."] },
+    { id: "n2", t: "18:20", actor: "justin", body: ["Looking at it in the morning."] },
+    /* --- seen cursor sits here (room.seenAfter = "n2") --- */
+    { id: "n3",  t: "08:09", actor: "checks", system: true, routine: true, body: ["deploy 71ce02 → staging · 44s"] },
+    { id: "n3b", t: "08:10", actor: "checks", system: true, routine: true, body: ["staging health green · 8/8 pods ready"] },
+    { id: "n3c", t: "08:11", actor: "checks", system: true, routine: true, body: ["lint clean · 0 warnings"] },
+    { id: "n4", t: "08:14", actor: "justin", body: ["Strict rotation or sliding window? Strict is safer but any client replaying a refresh token dies."], objectId: "R1" },
+    { id: "n5", t: "08:22", actor: "checks", system: true, body: ["rotation load #91 — 12,000 req/s sustained · p99 41ms · 0 errors"], objectId: "R2" },
+    { id: "n6", t: "08:31", actor: "justin", body: ["I'll wire revocation into the gateway by Friday."], objectId: "R3" },
+    { id: "n7",  t: "08:40", actor: "priya",  body: ["Either way the mobile SDK needs a release note."] },
+    { id: "n8",  t: "08:52", actor: "checks", system: true, routine: true, body: ["auth suite green · 903 tests · 1m48s"] },
+    { id: "n8b", t: "08:55", actor: "checks", system: true, routine: true, body: ["deploy 71ce02 → staging-2 · 40s"] }
+  ]
+};
+
+/* ===========================================================================
+ * DERIVED SELECTORS — every count on this page comes through one of these.
+ * ======================================================================== */
+
+function room(id) { return S.rooms[id || S.roomId]; }
+function obj(r, id) { return r.objects.find(o => o.id === id) || null; }
+function msg(r, id) { return r.messages.find(m => m.id === id) || null; }
+
+/* owed items for the pin, hardest first: failures > gates > overdue > questions */
+function owedItems(r) {
+  return r.objects.filter(needsYou).sort((a, b) => (b.priority || 0) - (a.priority || 0));
+}
+
+/* a message's glyph is derived from the object it carries — never written down.
+   When that object changes (accepted, reopened, verified), this row changes. */
+function msgGlyph(r, m) {
+  if (m.system && !m.objectId) return "·";
+  if (m.boundTo) {
+    const o = obj(r, m.boundTo);
+    return o && (o.verification === "accepted" || o.verification === "verified") ? "✓" : "~";
+  }
+  if (m.objectId) {
+    const o = obj(r, m.objectId);
+    if (o) return glyphOf(o);
+  }
+  return "·";
+}
+
+/* the four classes partition the group: they add up to the total, by construction */
+function msgClass(r, m) {
+  if (m.routine) return "routine";
+  if (m.system && m.sysFor) return "change";     // a recorded state transition IS a change
+  if (m.objectId || m.boundTo) {
+    const o = obj(r, m.boundTo || m.objectId);
+    if (o && needsYou(o)) return "need";
+    return "change";
+  }
+  return "discussion";
+}
+
+function sinceMessages(r) {
+  const i = r.messages.findIndex(m => m.id === r.seenAfter);
+  return i < 0 ? [] : r.messages.slice(i + 1);
+}
+function isSince(r, m) {
+  return r.messages.indexOf(m) > r.messages.findIndex(x => x.id === r.seenAfter);
+}
+/* one predicate, used by both the render and the count */
+function matchesFilter(r, m) {
+  const f = S.ui.feedFilter;
+  if (!f) return false;
+  if (msgClass(r, m) !== f.k) return false;
+  return f.scope === "room" ? true : isSince(r, m);
+}
+function sinceCounts(r) {
+  const c = { need: 0, change: 0, discussion: 0, routine: 0 };
+  sinceMessages(r).forEach(m => { c[msgClass(r, m)]++; });
+  c.total = c.need + c.change + c.discussion + c.routine;
+  return c;
+}
+function unseenCount(r) { return sinceMessages(r).length; }
+
+/* the "everything else is green" trailer — counted, not typed */
+function clearSummary(r) {
+  const owed = owedItems(r).map(o => o.id);
+  const objectivesOnTrack = r.objectives.filter(ob =>
+    !r.objects.some(o => o.objectives.includes(ob.id) && owed.includes(o.id))).length;
+  /* the trailer describes what is NOT in the pin — anything owed is above it */
+  const commitments = r.objects.filter(o => o.kind === "commitment" && !needsYou(o));
+  const overdue = commitments.filter(o => o.overdue).length;
+  const failures = r.objects.filter(o => o.verification === "failed").length;
+  return { objectivesOnTrack, objectivesTotal: r.objectives.length,
+           commitments: commitments.length, overdue, failures, lastVerified: r.lastVerified };
+}
+/* ===========================================================================
+ * RENDER HELPERS — all interpolation goes through esc(). Nothing typed by a
+ * human is ever concatenated into innerHTML unescaped. (Round-1 defect B1.)
+ * ======================================================================== */
+
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ESC[c]); }
+function bodyHtml(body) {
+  return body.map(seg => {
+    if (typeof seg === "string") return esc(seg);
+    if (seg.code) return `<code>${esc(seg.code)}</code>`;
+    if (seg.at) return `<span class="at">@${esc(seg.at)}</span>`;
+    return esc(seg.text || "");
+  }).join("");
+}
+function initials(name) { return name.slice(0, 2).toUpperCase(); }
+function reduceMotion() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
+function scrollBehavior() { return reduceMotion() ? "auto" : "smooth"; }
+function scrollIntoView(el, block) {
+  if (!el) return;
+  el.scrollIntoView({ behavior: scrollBehavior(), block: block || "center" });
+}
+
+const $ = id => document.getElementById(id);
+
+/* ===========================================================================
+ * RAIL
+ * ======================================================================== */
+
+function renderRail() {
+  const ids = Object.keys(S.rooms);
+  $("railSub").textContent = `${S.people.length} people · ${ids.length} rooms`;
+  const cur = room();
+  $("railAway").textContent = `back after ${cur.away.len}`;
+
+  const rooms = $("railRooms");
+  rooms.innerHTML = "";
+  ids.forEach(id => {
+    const r = S.rooms[id];
+    const owed = owedItems(r).length;
+    const unseen = unseenCount(r);
+    const b = document.createElement("button");
+    b.className = "rrow" + (id === S.roomId ? " on" : "") + (unseen ? " unread" : "");
+    if (id === S.roomId) b.setAttribute("aria-current", "true");
+    b.innerHTML =
+      `<span class="hash" aria-hidden="true">#</span><span class="nm">${esc(r.name)}</span>` +
+      (owed ? `<span class="pill"><span aria-hidden="true">◆</span>${owed}</span>`
+            : unseen ? `<span class="ct">${unseen}</span>` : "");
+    b.title = `#${r.name} — ${owed} needing you · ${unseen} unseen`;
+    b.addEventListener("click", () => switchRoom(id));
+    rooms.appendChild(b);
+  });
+
+  /* the humans list is a roster, not navigation — rendered as rows, not buttons */
+  const hs = $("railHumans");
+  hs.innerHTML = "";
+  S.people.forEach(p => {
+    const d = document.createElement("div");
+    d.className = "hrow" + (p.id === S.me ? " me" : "");
+    d.innerHTML = `<span class="pres ${p.presence}" aria-hidden="true"></span><span class="nm">${esc(p.id)}</span><span class="meta">${esc(p.note)}</span>`;
+    hs.appendChild(d);
+  });
+}
+
+/* ===========================================================================
+ * ROOM HEADER + SURFACE FOCUS
+ * ======================================================================== */
+
+function renderHead() {
+  const r = room();
+  $("roomName").textContent = r.name;
+  $("roomTopic").textContent = r.topic;
+  $("roomTopic").title = r.topic;
+  $("roomFaces").innerHTML = r.members.map(m => `<span class="av" title="${esc(m)}">${esc(initials(m))}</span>`).join("");
+
+  const owed = owedItems(r).length;
+  $("surfNeedsN").textContent = String(owed);
+  $("surfStateN").textContent = String(r.objects.length);
+  const f = S.ui.feedFilter;
+  $("surfConv").setAttribute("aria-pressed", String(f === null));
+  $("surfNeeds").setAttribute("aria-pressed", String(!!f && f.k === "need" && f.scope === "room"));
+  $("surfState").setAttribute("aria-pressed", String(S.ui.lensFocus));
+  $("lens").classList.toggle("focused", S.ui.lensFocus);
+  $("lensRoom").textContent = "#" + r.name.toUpperCase();
+}
+
+/* ===========================================================================
+ * PIN — corpus turn 17 under a 1340×820 budget:
+ *   owed floats up and the hardest one opens; the rest compress to one-line
+ *   rows that keep their glyph and their primary action; clean state
+ *   compresses to the counted trailer. The pin folds, it never scrolls.
+ * ======================================================================== */
+
+function renderPin() {
+  const r = room();
+  const items = owedItems(r);
+  const list = $("pinList"), trailer = $("pinTrailer");
+
+  $("pinCount").textContent = items.length
+    ? `${items.length} item${items.length > 1 ? "s" : ""} · hardest first`
+    : "nothing owed — this is the whole list";
+  $("pinFold").setAttribute("aria-pressed", String(S.ui.pinFolded));
+  $("pinFold").textContent = S.ui.pinFolded ? "UNFOLD" : "FOLD";
+  list.hidden = S.ui.pinFolded;
+  trailer.hidden = S.ui.pinFolded;
+
+  list.innerHTML = "";
+  if (!items.length) {
+    const e = document.createElement("div");
+    e.className = "empty rise";
+    e.textContent = "NOTHING NEEDS YOU IN THIS ROOM — THAT IS A RESULT, NOT AN ABSENCE";
+    list.appendChild(e);
+  }
+
+  const openId = items.some(o => o.id === S.ui.pinOpen) ? S.ui.pinOpen : (items[0] && items[0].id);
+  items.forEach(o => {
+    list.appendChild(o.id === openId ? pinCard(r, o) : pinCompact(r, o));
+  });
+
+  const c = clearSummary(r);
+  trailer.innerHTML =
+    `<span class="g" aria-hidden="true">✓</span>` +
+    `<span>everything else is green — <b>${c.objectivesOnTrack}/${c.objectivesTotal} objectives</b> clear of you · ` +
+    `<b>${c.commitments} commitment${c.commitments === 1 ? "" : "s"}</b>, ${c.overdue} overdue · ` +
+    `<b>${c.failures} failure${c.failures === 1 ? "" : "s"}</b> · last check ${esc(c.lastVerified)}</span>`;
+}
+
+function pinCard(r, o) {
+  const g = glyphOf(o);
+  const el = document.createElement("article");
+  el.className = "acard" + (g === "◆" ? " gate" : "") + (o.fresh ? " rise" : "");
+  const facts = (o.facts || []).map(esc).join(" · ");
+  const src = o.sourceMsg
+    ? `<span aria-hidden="true">·</span><button class="lnk" data-jump="${esc(o.sourceMsg)}">${esc(o.askedAt || o.due || "source")} · jump to source</button>`
+    : "";
+  el.innerHTML =
+    `<div class="g" aria-hidden="true">${g}</div>
+     <div>
+       <div class="ttl">${esc(o.question || o.text)}</div>
+       <div class="why">${esc(o.why || "")}</div>
+       <div class="foot">
+         <div class="mt">${facts}${src}</div>
+         <div class="acts">${pinActions(o)}</div>
+       </div>
+     </div>`;
+  wireActions(el, o);
+  return el;
+}
+
+/* turn-17 compression: still visible, still glyphed, still one click to act */
+function pinCompact(r, o) {
+  const g = glyphOf(o);
+  const el = document.createElement("div");
+  el.className = "acomp";
+  const primary = pinActions(o, true);
+  el.innerHTML =
+    `<span class="g" aria-hidden="true">${g}</span>
+     <button class="ct" data-open="${esc(o.id)}" title="Expand this item">${esc(o.question || o.text)}</button>
+     <span class="mt">${esc((o.facts || []).slice(0, 2).join(" · "))}${primary}</span>`;
+  el.querySelector("[data-open]").addEventListener("click", () => { S.ui.pinOpen = o.id; render(); });
+  wireActions(el, o);
+  return el;
+}
+
+function pinActions(o, primaryOnly) {
+  let acts = [];
+  if (o.kind === "decision" && o.options) {
+    acts = o.options.map((opt, i) => `<button class="btn ${i === 0 ? "amber" : ""}" data-opt="${i}">${esc(opt.label)}</button>`);
+    acts.push(`<button class="btn ghost sm" data-bind="1">Answer in your own words →</button>`);
+  } else if (o.kind === "commitment") {
+    acts = [`<button class="btn sm" data-fx="signed">Mark signed off</button>`,
+            `<button class="btn ghost sm" data-fx="resched">Reschedule</button>`];
+  } else if (o.kind === "question") {
+    acts = [`<button class="btn sm" data-fx="answered">Answer — retention is 90 days</button>`,
+            `<button class="btn ghost sm" data-fx="reassign">Ask justin instead</button>`];
+  }
+  return primaryOnly ? (acts[0] || "") : acts.join("");
+}
+
+function wireActions(el, o) {
+  el.querySelectorAll("[data-opt]").forEach(b => b.addEventListener("click", () => {
+    const opt = o.options[Number(b.dataset.opt)];
+    answerDecision(o.id, opt.statement, "one-click answer · reversible gate · the button's statement recorded verbatim · no model in the path");
+  }));
+  const bind = el.querySelector("[data-bind]");
+  if (bind) bind.addEventListener("click", () => bindComposer(o.id));
+  el.querySelectorAll("[data-fx]").forEach(b => b.addEventListener("click", () => applyEffect(o.id, b.dataset.fx)));
+  el.querySelectorAll("[data-jump]").forEach(b => b.addEventListener("click", () => jumpTo(b.dataset.jump)));
+}
+
+/* ===========================================================================
+ * FEED
+ * ======================================================================== */
+
+const FILTER_LABEL = { need: "NEED YOU", change: "CHANGES", discussion: "DISCUSSION", routine: "ROUTINE" };
+
+function renderFeed() {
+  const r = room();
+  const feed = $("feed");
+  const keepTop = feed.scrollTop;
+  feed.innerHTML = "";
+  feed.classList.toggle("filtered", !!S.ui.feedFilter);
+
+  const cursorIdx = r.messages.findIndex(m => m.id === r.seenAfter);
+  let routineBuffer = [];
+
+  const flushRoutine = () => {
+    if (!routineBuffer.length) return;
+    feed.appendChild(routineStrip(r, routineBuffer));
+    routineBuffer = [];
+  };
+
+  r.messages.forEach((m, i) => {
+    if (cursorIdx >= 0 && i === cursorIdx + 1) { flushRoutine(); feed.appendChild(sylDivider(r)); }
+    if (m.routine) { routineBuffer.push(m); return; }
+    flushRoutine();
+    feed.appendChild(messageRow(r, m));
+  });
+  flushRoutine();
+  if (cursorIdx === r.messages.length - 1) feed.appendChild(sylDivider(r));
+  feed.scrollTop = keepTop;
+}
+
+function messageRow(r, m) {
+  const g = msgGlyph(r, m);
+  const o = m.objectId || m.boundTo ? obj(r, m.boundTo || m.objectId) : null;
+  const cls = msgClass(r, m);
+  const seen = r.messages.findIndex(x => x.id === m.id) <= r.messages.findIndex(x => x.id === r.seenAfter);
+  const row = document.createElement("div");
+  row.className = ["mrow", gclass(g), m.system ? "sys" : "", m.actor === S.me ? "me" : "",
+                   seen ? "dim" : "", matchesFilter(r, m) ? "hit" : "",
+                   S.ui.jumpTo === m.id ? "tgt" : "", m.fresh ? "rise" : ""].filter(Boolean).join(" ");
+  row.dataset.msg = m.id;
+  row.dataset.cls = cls;
+
+  let inner = "";
+  if (m.replyTo) {
+    const t = msg(r, m.replyTo);
+    if (t) inner += `<span class="mreply">↩ ${esc(t.actor)} ${esc(t.t)} · ${esc(plain(t.body)).slice(0, 60)}</span>`;
+  }
+  const claimWrap = g === "~";
+  inner += claimWrap ? `<span class="claim">${bodyHtml(m.body)}</span>` : bodyHtml(m.body);
+  if (m.note) inner += `<span class="mnote">${esc(m.note)}</span>`;
+  if (o) inner += objectTag(r, m, o);
+
+  row.innerHTML =
+    `<div class="t">${esc(m.t)}</div><div class="g" aria-hidden="true">${g}</div><div class="a">${esc(m.actor)}</div>
+     <div class="m">${inner}<div class="acts">${rowActions(r, m, o)}</div></div>`;
+
+  row.querySelectorAll("[data-receipt]").forEach(b => b.addEventListener("click", () => openReceipt(b.dataset.receipt)));
+  row.querySelectorAll("[data-reply]").forEach(b => b.addEventListener("click", () => startReply(m.id)));
+  row.querySelectorAll("[data-verify]").forEach(b => b.addEventListener("click", () => { S.ui.verifying = b.dataset.verify; render(); focusVerify(); }));
+  row.querySelectorAll("[data-fx]").forEach(b => b.addEventListener("click", () => applyEffect(b.dataset.obj, b.dataset.fx)));
+  row.querySelectorAll("[data-pin]").forEach(b => b.addEventListener("click", () => { S.ui.pinOpen = b.dataset.pin; render(); scrollIntoView($("pin"), "nearest"); }));
+
+  if (o && S.ui.verifying === o.id) row.appendChild(verifyBox(o));
+  return row;
+}
+
+function plain(body) { return body.map(s => typeof s === "string" ? s : (s.code || s.at || s.text || "")).join(""); }
+
+/* the tag on a row is a render of the object's *current* state. Reopen an
+   object and the historical row that settled it re-renders here — glyph,
+   tag text and tone all downgrade together. (Round-1 defect B2.) */
+function objectTag(r, m, o) {
+  const g = glyphOf(o);
+  if (m.boundTo) {
+    const settled = o.verification === "accepted";
+    return settled
+      ? `<button class="tag green" data-receipt="${esc(o.id)}">resolves ◆ · answer-bound · nothing inferred</button>`
+      : `<button class="tag amber" data-receipt="${esc(o.id)}">answer superseded · reopened ${esc(o.reopenedAt || "")} · kept on the record</button>`;
+  }
+  if (needsYou(o)) return `<button class="tag amber" data-pin="${esc(o.id)}">${g === "?" ? "? open question · needs lars" : "◆ needs lars"}</button>`;
+  if (o.verification === "verified") return `<button class="tag green" data-receipt="${esc(o.id)}">verified · ${esc(o.verifiedBy)}</button>`;
+  if (o.verification === "accepted") return `<button class="tag green" data-receipt="${esc(o.id)}">accepted · ${esc(o.acceptedBy)}</button>`;
+  if (o.kind === "commitment") return `<button class="tag" data-receipt="${esc(o.id)}">commitment · ${esc(o.owner)} · ${esc(o.due)} ~</button>`;
+  if (o.kind === "claim") return `<button class="tag" data-receipt="${esc(o.id)}">claim · unverified</button>`;
+  return `<button class="tag" data-receipt="${esc(o.id)}">${esc(o.kind)} · ${esc(o.verification)}</button>`;
+}
+
+/* Only actions that do something are rendered. Round 1 shipped 32 inert
+   buttons; the rule now is wire it or delete it. */
+function rowActions(r, m, o) {
+  const acts = [];
+  if (!m.system) acts.push(`<button data-reply="1">Reply</button>`);
+  if (o && isClaim(o) && o.claimant !== S.me && o.kind !== "commitment") {
+    acts.push(`<button data-verify="${esc(o.id)}">Verify</button>`);
+  }
+  if (o && o.kind === "question" && o.verification === "open") {
+    acts.push(`<button data-obj="${esc(o.id)}" data-fx="answered">Answer</button>`);
+  }
+  return acts.join("");
+}
+
+/* the ~ → ✓ pair, exercisable: verifying asks for the evidence, and records it */
+function verifyBox(o) {
+  const box = document.createElement("div");
+  box.className = "vbox rise-s";
+  box.innerHTML =
+    `<div class="hd"><span class="lbl">VERIFY THIS CLAIM</span></div>
+     <div class="row">
+       <input id="vinput" type="text" aria-label="Evidence note" placeholder="what checked it? (e.g. “July AWS bill, write-throughput line: $912”)">
+       <button class="btn sm" id="vgo">Attach &amp; verify</button>
+       <button class="btn ghost sm" id="vcancel">Cancel</button>
+     </div>
+     <div class="hint">${esc(o.claimant)} said it, you are checking it — that is what makes it green. Verifying your own claim is not offered.</div>`;
+  box.querySelector("#vgo").addEventListener("click", () => doVerify(o.id, box.querySelector("#vinput").value.trim()));
+  box.querySelector("#vcancel").addEventListener("click", () => { S.ui.verifying = null; render(); });
+  box.querySelector("#vinput").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); doVerify(o.id, e.target.value.trim()); }
+    if (e.key === "Escape") { S.ui.verifying = null; render(); }
+  });
+  return box;
+}
+function focusVerify() { const i = $("vinput"); if (i) i.focus(); }
+
+/* --- since you left ------------------------------------------------------ */
+
+function sylDivider(r) {
+  const c = sinceCounts(r);
+  const seen = r.seenAfter === r.messages[r.messages.length - 1].id;
+  const el = document.createElement("div");
+  el.className = "syl" + (seen ? " seen" : "");
+  el.id = "syl";
+  const chips = seen ? "" : ["need", "change", "discussion", "routine"].map(k =>
+    `<button class="cnt${k === "need" && c[k] ? " need" : ""}" data-filter="${k}" aria-pressed="${!!S.ui.feedFilter && S.ui.feedFilter.k === k && S.ui.feedFilter.scope === "since"}">${c[k]} ${FILTER_LABEL[k]}</button>`).join("");
+  el.innerHTML =
+    `<div class="bar">
+       <span class="lbl">${seen ? "SEEN FROM HERE" : "SINCE YOU LEFT"}</span>
+       <div class="counts">${chips}</div>
+       <span class="rule"></span>
+     </div>
+     <div class="when">
+       ${seen
+         ? `<span>caught up — ${r.readGroup || 0} message${r.readGroup === 1 ? "" : "s"} read · ${esc(r.away.len)} away · seen cursor sits at the end of #${esc(r.name)}, and only this room's</span>`
+         : `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages</span>
+            <span aria-hidden="true">·</span>
+            <button class="mark" id="markSeen">mark this group seen</button>`}
+     </div>`;
+  el.querySelectorAll(".cnt").forEach(b => b.addEventListener("click", () => setFilter(b.dataset.filter)));
+  const mk = el.querySelector("#markSeen");
+  if (mk) mk.addEventListener("click", markSeen);
+  return el;
+}
+
+/* --- routine collapse: count, range and actors all derived from the rows --- */
+
+function routineStrip(r, rows) {
+  const wrap = document.createElement("div");
+  wrap.className = "routine";
+  const actors = [...new Set(rows.map(m => m.actor))];
+  const routineFilter = !!S.ui.feedFilter && S.ui.feedFilter.k === "routine";
+  const open = S.ui.routineOpen || routineFilter;
+  const showAll = routineFilter;
+  const shown = open ? (showAll ? rows : rows.slice(0, 6)) : [];
+
+  const strip = document.createElement("button");
+  strip.className = "strip";
+  strip.setAttribute("aria-expanded", String(open));
+  strip.innerHTML =
+    `<span aria-hidden="true">·</span><span><b>${rows.length} routine</b></span>
+     <span aria-hidden="true">·</span><span>${esc(rows[0].t)}–${esc(rows[rows.length - 1].t)}</span>
+     <span aria-hidden="true">·</span><span>${esc(actors.join(", "))}</span>
+     <span class="peek">${open ? "click to collapse" : "click to peek"}</span>`;
+  strip.addEventListener("click", () => { S.ui.routineOpen = !open; if (!S.ui.routineOpen && routineFilter) S.ui.feedFilter = null; render(); });
+  wrap.appendChild(strip);
+
+  if (open) {
+    const body = document.createElement("div");
+    body.className = "peekbody scroll rise-s";
+    shown.forEach(m => body.appendChild(messageRow(r, m)));
+    if (shown.length < rows.length) {
+      const more = document.createElement("div");
+      more.className = "more";
+      more.textContent = `+ ${rows.length - shown.length} more routine events · none owed you attention`;
+      body.appendChild(more);
+    }
+    wrap.appendChild(body);
+  }
+  return wrap;
+}
+
+/* ===========================================================================
+ * LENS + RECEIPT — both are renders of the same objects the pin and the feed
+ * read. There is no separate receipt store any more; a receipt IS an object,
+ * drawn with its history, provenance and correction chain.
+ * ======================================================================== */
 
 const KIND_LABEL = { decision: "DECISIONS", commitment: "COMMITMENTS", question: "OPEN QUESTIONS", claim: "CLAIMS" };
 const KIND_ORDER = ["decision", "commitment", "question", "claim"];
 
-const RECEIPTS = {
-  D1: {
-    glyph: "✓", cls: "v", title: "Dual-write stays on until parity holds for 7 consecutive days",
-    state: ["ACCEPTED", "decision", "by lars · 29 Jul 11:20", "objective: Cut over to the new identity service"],
-    happened: [
-      { g: "~", cls: "", who: "priya", tm: "29 Jul 09:41", text: "proposed keeping dual-write until parity was proven — self-reported, no check attached" },
-      { g: "✓", cls: "v", who: "checks", tm: "29 Jul 10:02", text: "parity had passed 3 consecutive days at the time of the proposal" },
-      { g: "~", cls: "", who: "mateo", tm: "29 Jul 10:55", text: "estimated the extra write cost at ~$900/mo — never checked against a bill" },
-      { g: "✓", cls: "v", who: "lars", tm: "29 Jul 11:20", text: "accepted by answer-binding — nothing about this line was inferred" }
-    ],
-    provenance: [
-      { who: "priya", tm: "29 Jul 09:41", msg: "m1", ex: "Honestly I'd keep dual-write until we've had a full clean week of parity — one green run isn't a signal.", note: "message · #users-migration · seq 8812" },
-      { who: "checks", tm: "29 Jul 10:02", msg: "m3", ex: "parity #391 passed — 4,201,776 / 4,201,776 rows, 0 checksum diffs", note: "verified event · run #391 · no human in the loop" },
-      { who: "lars", tm: "29 Jul 11:20", msg: "m1", ex: "Yes — keep it until we have a clean week. Don't drop anything before that.", note: "answer-bound reply · proposal pr_4419 · deterministic, not interpreted" }
-    ],
-    corrections: [
-      { hd: "RETYPED · CLAIM → DECISION", who: "lars", tm: "29 Jul 11:22", text: "This was an actual call, not priya thinking out loud.", after: "Decision (was: Claim by priya)" }
-    ],
-    reopen: true,
-    note: "Correction chain is append-only. The original interpretation is retained; nothing here was erased."
-  },
-  P1: {
-    glyph: "~", cls: "claim2", title: "Cut over Friday 1 Aug and drop legacy tokens",
-    state: ["PROPOSED", "not accepted", "confidence .71", "renders as a claim until a human answers"],
-    happened: [
-      { g: "~", cls: "", who: "priya", tm: "08:36", text: "asked for one of two options — the model read this as a decision proposal, not a decision" },
-      { g: "~", cls: "", who: "dana", tm: "08:31", text: "reported 4.7% of sessions still on legacy tokens — unverified" },
-      { g: "◆", cls: "needs", who: "atrium", tm: "08:36", text: "routed to lars: no one else can trade the freeze date against the legacy tail" }
-    ],
-    provenance: [
-      { who: "priya", tm: "08:36", msg: "m6", ex: "Decide, please: keep dual-write through the 14 Aug freeze, or cut over Friday and drop legacy tokens?", note: "message · seq 9104 · proposal pr_4471 · decisions never auto-accept" },
-      { who: "dana", tm: "08:31", msg: "m5", ex: "4.7% of sessions still present legacy opaque tokens — almost all iOS 15.x holdouts.", note: "message · seq 9101 · cited as evidence, itself unverified" }
-    ],
-    corrections: [],
-    reopen: false,
-    note: "Decisions never auto-accept (acceptance rules, #4). This stays ~ until you answer it in Needs you or bind an answer in the composer."
-  },
-  C1: {
-    glyph: "~", cls: "claim2", title: "Dual-write costs about $900/mo in extra write throughput",
-    state: ["CLAIM", "unverified", "claimant: mateo", "08:41 today"],
-    happened: [
-      { g: "~", cls: "", who: "mateo", tm: "08:41", text: "stated the figure and flagged it himself as eyeballed, not forecast" },
-      { g: "·", cls: "", who: "atrium", tm: "08:41", text: "no billing source is linked, so verification state stays unverified" }
-    ],
-    provenance: [
-      { who: "mateo", tm: "08:41", msg: "m7", ex: "Dual-write is running about $900/mo in extra write throughput. Eyeballed off last week's bill — that's not a forecast.", note: "message · seq 9106 · auto-accepted as a Claim (θ .63)" }
-    ],
-    corrections: [],
-    reopen: false,
-    note: "A claim is “X said Y”, kept separately from whether Y is true. Attaching a bill would move this to ✓."
-  },
-  V1: {
-    glyph: "✓", cls: "v", title: "Backfill parity: 4,218,904 / 4,218,904 rows, 0 checksum diffs",
-    state: ["VERIFIED", "claim", "checked by the migration harness", "09:07 today"],
-    happened: [
-      { g: "✓", cls: "v", who: "checks", tm: "09:07", text: "dry-run #418 on the prod snapshot — 0 constraint violations, 11m42s" },
-      { g: "✓", cls: "v", who: "checks", tm: "16:44 yest.", text: "parity #402 — identical row counts on both sides" },
-      { g: "~", cls: "", who: "priya", tm: "16:31 yest.", text: "said the backfill ran clean before any check had run — that line stayed a claim" }
-    ],
-    provenance: [
-      { who: "checks", tm: "09:07", msg: "m9", ex: "migration dry-run #418 on the prod snapshot — 0 constraint violations · 11m42s", note: "verified event · run #418 · checked by something other than the claimant" },
-      { who: "priya", tm: "16:31 yest.", msg: "m2", ex: "Staging backfill ran clean — 4.2M rows in 38 minutes.", note: "message · seq 8990 · the claim this run happens to confirm" }
-    ],
-    corrections: [],
-    reopen: false,
-    note: "Green means checked by something other than the claimant. priya's line above is still ~ and stays that way."
-  }
-};
+function renderLens() {
+  const r = room();
+  const body = $("lensBody");
 
-/* ===========================================================================
- * LENS RENDER
- * ======================================================================== */
+  const accepted = r.objects.filter(o => o.verification === "accepted" || o.verification === "verified").length;
+  const owed = owedItems(r).length;
+  const claims = r.objects.filter(isClaim).length;
+  $("lensSummary").textContent =
+    `${r.objects.length} objects · ${accepted} settled · ${claims} unverified · ${owed} awaiting you · updated ${S.now}`;
 
-const lensBody = document.getElementById("lensBody");
+  if (S.ui.receiptId && obj(r, S.ui.receiptId)) { renderReceipt(obj(r, S.ui.receiptId)); return; }
 
-function metaHtml(meta) {
-  return meta.map(m => `<span class="${m.c || ""}">${m.t}</span>`).join('<span class="dot">·</span>');
-}
-
-function renderLens(riseIds) {
-  riseIds = riseIds || [];
-  lensBody.innerHTML = "";
-  OBJECTIVES.forEach(o => {
+  body.innerHTML = "";
+  r.objectives.forEach(ob => {
+    const mine = r.objects.filter(o => o.objectives.includes(ob.id));
+    const owedHere = mine.filter(needsYou).length;
     const wrap = document.createElement("section");
     wrap.className = "obj";
 
-    const owed = o.objects.filter(x => x.cls === "needs" || x.proposed).length;
-    const counts = `${o.objects.length} objects · ` + (owed ? `<span class="warn">${owed} need you</span>` : "all clear");
-
     const head = document.createElement("button");
     head.className = "obj-head";
+    head.setAttribute("aria-expanded", String(!!ob.open));
     head.innerHTML =
-      `<span class="tw">${o.open ? "▾" : "▸"}</span>
-       <span><span class="ttl">${o.title}</span><span class="ct">${counts}</span></span>
-       <span class="st ${o.status}">${o.status.toUpperCase()}</span>`;
-    head.addEventListener("click", () => { o.open = !o.open; renderLens(); });
+      `<span class="tw" aria-hidden="true">${ob.open ? "▾" : "▸"}</span>
+       <span><span class="ttl">${esc(ob.title)}</span>
+         <span class="ct">${mine.length} objects · ${owedHere ? `<span class="warn">${owedHere} need you</span>` : "all clear"}</span></span>
+       <span class="st ${esc(ob.status)}">${esc(ob.status.toUpperCase())}</span>`;
+    head.addEventListener("click", () => { ob.open = !ob.open; render(); });
     wrap.appendChild(head);
 
-    if (o.open) {
+    if (ob.open) {
       KIND_ORDER.forEach(kind => {
-        const items = o.objects.filter(x => x.kind === kind);
+        const items = mine.filter(o => o.kind === kind);
         if (!items.length) return;
         const grp = document.createElement("div");
         grp.className = "grp";
         grp.innerHTML = `<div class="glbl"><span class="lbl">${KIND_LABEL[kind]}</span><span class="n">${items.length}</span><span class="rule"></span></div>`;
-        items.forEach(it => {
-          const b = document.createElement("button");
-          b.className = "oitem " + (it.cls || "") + (riseIds.includes(it.id) ? " rise" : "");
-          b.innerHTML =
-            `<span class="g">${it.glyph}</span>
-             <span><span class="tt ${it.claim ? "claim" : ""}">${it.text}</span><span class="mt">${metaHtml(it.meta)}</span></span>`;
-          if (it.receipt) b.addEventListener("click", () => openReceipt(it.receipt));
-          else b.addEventListener("click", () => toast("no receipt yet — this object has not settled"));
-          grp.appendChild(b);
-        });
+        items.forEach(o => grp.appendChild(lensItem(o)));
         wrap.appendChild(grp);
       });
     }
-    lensBody.appendChild(wrap);
+    body.appendChild(wrap);
   });
-
-  const n = OBJECTIVES.reduce((a, o) => a + o.objects.length, 0);
-  const un = OBJECTIVES.reduce((a, o) => a + o.objects.filter(x => x.proposed).length, 0);
-  document.getElementById("lensSummary").textContent =
-    `${n - un} accepted · ${un} awaiting you`;
-  document.getElementById("surfStateN").textContent = String(n);
 }
 
-/* ===========================================================================
- * RECEIPT VIEW
- * ======================================================================== */
+function lensItem(o) {
+  const g = glyphOf(o);
+  const b = document.createElement("button");
+  b.className = "oitem " + gclass(g) + (o.fresh ? " rise" : "");
+  const facts = (o.facts || []).map((f, i) =>
+    `<span class="${/overdue|not accepted|open |blocked|reopened/i.test(f) ? "warn" : ""}">${esc(f)}</span>`)
+    .join('<span aria-hidden="true">·</span>');
+  b.innerHTML =
+    `<span class="g" aria-hidden="true">${g}</span>
+     <span><span class="tt ${isClaim(o) ? "claim" : ""}">${esc(o.text)}</span><span class="mt">${facts}</span></span>`;
+  b.addEventListener("click", () => openReceipt(o.id));
+  return b;
+}
 
-function openReceipt(id) {
-  const r = RECEIPTS[id];
-  if (!r) return;
+function receiptState(o) {
+  if (o.verification === "accepted") return ["ACCEPTED", o.kind, `by ${o.acceptedBy} · ${o.acceptedAt}`];
+  if (o.verification === "verified") return ["VERIFIED", o.kind, `checked by ${o.verifiedBy} · ${o.verifiedAt}`];
+  if (o.verification === "proposed") return ["PROPOSED", "not accepted", `confidence ${o.confidence || "—"}`, "renders as a claim until a human answers"];
+  if (o.verification === "open") return ["OPEN", "question", `open ${o.openFor || "—"}`, o.assignee ? `assigned to ${o.assignee}` : "nobody assigned"];
+  if (o.verification === "self_reported") return ["SELF-REPORTED", o.kind, `${o.owner || o.claimant}`, "nothing other than the claimant has checked it"];
+  if (o.verification === "reassigned") return ["REASSIGNED", o.kind, `now ${o.assignee}'s`, "still open"];
+  return ["CLAIM", "unverified", `claimant: ${o.claimant}`];
+}
 
+function renderReceipt(o) {
+  const g = glyphOf(o);
   const el = document.createElement("div");
   el.className = "receipt rise";
+  const st = receiptState(o);
 
-  const happened = r.happened.map(h =>
-    `<div class="hap ${h.cls}"><span class="g">${h.g}</span>
-       <span class="tt"><span class="who">${h.who}</span> ${h.text}<span class="tm">${h.tm}</span></span></div>`).join("");
+  const happened = o.history.map(h => {
+    const hg = histGlyph(h.k);
+    return `<div class="hap ${gclass(hg)}"><span class="g" aria-hidden="true">${hg}</span>
+       <span class="tt"><span class="who">${esc(h.who)}</span> ${esc(h.text)}<span class="tm">${esc(h.tm)}</span></span></div>`;
+  }).join("");
 
-  const prov = r.provenance.map(p =>
-    `<button class="prov" data-jump="${p.msg}">
-       <span class="hd"><span class="who">${p.who}</span><span>${p.tm}</span><span class="jump">jump to source →</span></span>
-       <span class="ex">“${p.ex}”</span>
-       <span class="full">${p.note}</span>
+  const prov = o.provenance.map(p =>
+    `<button class="prov"${p.msg ? ` data-jump="${esc(p.msg)}"` : ""}>
+       <span class="hd"><span class="who">${esc(p.who)}</span><span>${esc(p.tm)}</span>${p.msg ? `<span class="jump">jump to source →</span>` : `<span class="jump">another room</span>`}</span>
+       <span class="ex">“${esc(p.ex)}”</span>
+       <span class="full">${esc(p.note)}</span>
      </button>`).join("");
 
-  const corr = r.corrections.length
-    ? r.corrections.map(c =>
-        `<div class="corr"><div class="hd">${c.hd} · ${c.who} · ${c.tm}</div>
-         <div class="bd"><q>${c.text}</q> → now: ${c.after}</div></div>`).join("")
-    : `<div class="corr" style="border-left-color:var(--line)"><div class="bd" style="color:var(--tx4)">no corrections — this object has never been amended</div></div>`;
+  const corr = o.corrections.length
+    ? o.corrections.map(c =>
+        `<div class="corr"><div class="hd">${esc(c.hd)} · ${esc(c.who)} · ${esc(c.tm)}</div>
+         <div class="bd"><q>${esc(c.text)}</q> → now: ${esc(c.after)}${c.msg ? ` · <button class="lnk" data-jump="${esc(c.msg)}">the prior answer is still in the room →</button>` : ""}</div></div>`).join("")
+    : `<div class="corr"><div class="bd">no corrections — this object has never been amended</div></div>`;
+
+  const canReopen = o.verification === "accepted" || o.verification === "verified";
 
   el.innerHTML =
     `<div class="rc-top">
        <button class="rc-back" id="rcBack">← BACK TO CURRENT STATE</button>
-       <div class="rc-ttl ${r.cls}"><span class="g">${r.glyph}</span><span class="h">${r.title}</span></div>
-       <div class="rc-state">${r.state.map((s, i) => i === 0
-          ? `<span class="st ${r.cls === "v" ? "active" : "blocked"}">${s}</span>` : `<span>${s}</span>`).join('<span style="color:var(--tx4)">·</span>')}</div>
+       <div class="rc-ttl ${gclass(g)}"><span class="g" aria-hidden="true">${g}</span><span class="h ${isClaim(o) ? "claim" : ""}">${esc(o.text)}</span></div>
+       <div class="rc-state">${st.map((s, i) => i === 0
+          ? `<span class="st ${g === "✓" ? "active" : "blocked"}">${esc(s)}</span>` : `<span>${esc(s)}</span>`).join('<span aria-hidden="true">·</span>')}
+          <span aria-hidden="true">·</span><span>in ${o.objectives.length} objective${o.objectives.length > 1 ? "s" : ""}</span></div>
      </div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">WHAT HAPPENED</span><span class="rule"></span></div>${happened}</div>
-     <div class="rc-sec"><div class="glbl"><span class="lbl">PROVENANCE</span><span class="lbl" style="color:var(--tx4)">${r.provenance.length} SOURCES · HOVER TO EXPAND</span><span class="rule"></span></div>${prov}</div>
+     <div class="rc-sec"><div class="glbl"><span class="lbl">PROVENANCE</span><span class="lbl">${o.provenance.length} SOURCES · HOVER TO EXPAND</span><span class="rule"></span></div>${prov}</div>
      <div class="rc-sec"><div class="glbl"><span class="lbl">CORRECTION CHAIN</span><span class="rule"></span></div>${corr}</div>
      <div class="rc-foot">
-       <span class="note">${r.note}</span>
-       ${r.reopen ? `<button class="btn sm" id="rcReopen" data-receipt="${id}">Reopen</button>` : ""}
+       <span class="note">${esc(o.note || "")}</span>
+       ${canReopen ? `<button class="btn sm" id="rcReopen">Reopen</button>` : ""}
      </div>`;
 
-  lensBody.innerHTML = "";
-  lensBody.appendChild(el);
-  lensBody.scrollTop = 0;
-
-  el.querySelector("#rcBack").addEventListener("click", () => renderLens());
+  const body = $("lensBody");
+  body.innerHTML = "";
+  body.appendChild(el);
+  body.scrollTop = 0;
+  el.querySelector("#rcBack").addEventListener("click", () => { S.ui.receiptId = null; render(); });
   const rb = el.querySelector("#rcReopen");
-  if (rb) rb.addEventListener("click", () => reopen(id));
-  el.querySelectorAll(".prov").forEach(p => p.addEventListener("click", () => jumpTo(p.dataset.jump)));
+  if (rb) rb.addEventListener("click", () => reopen(o.id));
+  el.querySelectorAll("[data-jump]").forEach(p => p.addEventListener("click", () => jumpTo(p.dataset.jump)));
+}
+
+function openReceipt(id) { S.ui.receiptId = id; render(); }
+
+/* ===========================================================================
+ * TRANSITIONS
+ *
+ * Every one of these does the same three things: mutate the object, append a
+ * system row to the conversation (the conversation is the record), re-render.
+ * Nothing writes to the DOM directly and nothing sets a glyph.
+ * ======================================================================== */
+
+let clock = 9 * 60 + 13;
+function tick() {
+  const t = clock++;
+  S.now = String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0");
+  return S.now;
+}
+function nextId(p) { return p + (++S.seq); }
+
+function appendMessage(r, m) { r.messages.push(m); return m; }
+function appendSystem(r, text, objectId) {
+  return appendMessage(r, { id: nextId("s"), t: S.now, actor: "atrium", system: true, fresh: true,
+                            body: [text], objectId: null, sysFor: objectId });
+}
+function clearFresh() {
+  Object.values(S.rooms).forEach(r => { r.messages.forEach(m => delete m.fresh); r.objects.forEach(o => delete o.fresh); });
+}
+
+/* --- B1: the answer IS the decision -------------------------------------
+ * `statement` is whatever the human produced — the label of the button they
+ * clicked, or the exact text they typed. It is recorded verbatim as the
+ * decision, quoted verbatim in the receipt, and escaped at every render.
+ * If it contradicts the proposal on the card, the contradiction is what gets
+ * recorded: the human's answer is the decision.
+ * ----------------------------------------------------------------------- */
+function answerDecision(objectId, statement, provenanceNote) {
+  const r = room();
+  const o = obj(r, objectId);
+  if (!o) return;
+  const t = tick();
+
+  const m = appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [statement], boundTo: o.id });
+
+  o.proposedText = o.proposedText || o.text;
+  o.text = statement;                       // the decision statement is the answer, verbatim
+  o.verification = "accepted";
+  o.acceptedBy = S.me;
+  o.acceptedAt = t + " today";
+  o.owedTo = null;
+  o.answerMsg = m.id;
+  o.facts = ["accepted by " + S.me, t + " today", "answer-bound"];
+  o.fresh = true;
+  o.history.push({ k: "accepted", who: S.me, tm: t,
+    text: "answered it directly — the resolution was recorded from the answer, not interpreted from it" });
+  o.provenance.unshift({ who: S.me, tm: t, msg: m.id, ex: statement, note: provenanceNote });
+  o.note = "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. " +
+           (o.proposedText !== statement ? "It is not the same as what was proposed — that is allowed. Your answer is the decision." : "");
+
+  appendSystem(r, `decision ${o.id} · proposed → accepted · recorded verbatim from lars' answer · nothing inferred`, o.id);
+  S.ui.bound = null; S.ui.replyTo = null; S.ui.pinOpen = null;
+  $("cinput").value = "";
+  render();
+  scrollFeedToEnd();
+  toast("recorded as a decision · answer-bound, your wording verbatim");
+}
+
+/* --- B2: reopen re-renders EVERYTHING, including the historical row ------ */
+function reopen(objectId) {
+  const r = room();
+  const o = obj(r, objectId);
+  if (!o) return;
+  const t = tick();
+  const wasDecision = o.kind === "decision";
+
+  o.verification = wasDecision ? "proposed" : "unverified";
+  o.reopenedAt = t;
+  o.fresh = true;
+  if (wasDecision) { o.owedTo = S.me; o.priority = 20; }
+  o.facts = ["reopened by " + S.me, "prior answer kept", "pending again"];
+  o.history.push({ k: "gate", who: S.me, tm: t,
+    text: "reopened it — the prior answer stays on the record and is still reachable from here" });
+  o.corrections.push({
+    hd: wasDecision ? "REOPENED · ACCEPTED → PENDING" : "REOPENED · VERIFIED → UNVERIFIED",
+    who: S.me, tm: t,
+    text: "Reopening — the evidence under this was never checked and the whole call rests on it.",
+    after: wasDecision ? "Proposal (prior answer preserved on the record)" : "Claim (prior verification preserved)",
+    msg: o.answerMsg || (o.provenance[0] && o.provenance[0].msg) || null
+  });
+  o.note = "Reopening is append-only. The answer at " + (o.acceptedAt || o.verifiedAt || "") +
+           " is still in the conversation, still in this history, and the row that carried it now renders as superseded rather than settled.";
+
+  appendSystem(r, `${o.kind} ${o.id} · ${wasDecision ? "accepted → proposed" : "verified → unverified"} · reopened by lars · prior answer kept`, o.id);
+  render();
+  toast("reopened · the item is back in Needs you, the prior answer is on record");
+}
+
+/* --- the ~ → ✓ pair ----------------------------------------------------- */
+function doVerify(objectId, evidence) {
+  const r = room();
+  const o = obj(r, objectId);
+  if (!o) return;
+  if (!evidence) { toast("verification needs a note — green means something checked it, and this records what"); focusVerify(); return; }
+  if (o.claimant === S.me) { toast("you cannot verify your own claim — that is what ~ is for"); return; }
+  const t = tick();
+  o.verification = "verified";
+  o.verifiedBy = S.me;
+  o.verifiedAt = t + " today";
+  o.evidence = evidence;
+  o.fresh = true;
+  o.facts = [o.claimant, "verified by " + S.me + " " + t, evidence];
+  o.history.push({ k: "verified", who: S.me, tm: t, text: "attached evidence: " + evidence });
+  o.provenance.unshift({ who: S.me, tm: t, msg: null, ex: evidence,
+    note: "verification note · attached by lars · the claimant did not check their own claim" });
+  o.note = "Verified by someone other than the claimant, which is the only thing that makes a line green. " +
+           "Reopening it puts the ~ back and keeps this note on the record.";
+  appendSystem(r, `claim ${o.id} · unverified → verified by lars · evidence: ${evidence}`, o.id);
+  S.ui.verifying = null;
+  render();
+  toast("verified · " + o.claimant + " said it, you checked it");
+}
+
+/* --- pin effects -------------------------------------------------------- */
+function applyEffect(objectId, fx) {
+  const r = room();
+  const o = obj(r, objectId);
+  if (!o) return;
+  const t = tick();
+  let line = "", msgText = "";
+
+  if (fx === "signed") {
+    o.verification = "self_reported"; o.owedTo = null; o.overdue = null;
+    o.facts = [S.me, "marked done " + t, "self-reported"];
+    o.history.push({ k: "claim", who: S.me, tm: t, text: "marked it signed off — your own word, nothing has checked it" });
+    o.note = "You signed your own sign-off. Nobody verifies their own commitment, so this stays ~.";
+    line = `commitment ${o.id} · marked signed off by lars · self-reported, not verified`;
+    msgText = "signed off · recorded as self-reported, not verified";
+  } else if (fx === "resched") {
+    o.verification = "self_reported"; o.owedTo = null; o.overdue = null; o.due = "today 17:00";
+    o.facts = [S.me, "due today 17:00", "rescheduled " + t];
+    o.history.push({ k: "claim", who: S.me, tm: t, text: "moved the due date to today 17:00 — the original date stays above" });
+    o.note = "Rescheduling never erases the original date; both are in the history.";
+    line = `commitment ${o.id} · due yesterday 17:00 → today 17:00 · rescheduled by lars`;
+    msgText = "rescheduled · the original due date stays on the record";
+  } else if (fx === "answered") {
+    o.verification = "unverified"; o.owedTo = null;
+    o.facts = ["answered by lars " + t, "legal sign-off not attached", "still blocks o2"];
+    o.history.push({ k: "claim", who: S.me, tm: t, text: "answered from memory — legal's written sign-off is not attached, so it stays a claim" });
+    o.note = "Answering a question is not the same as verifying the answer. It stays ~ until legal's sign-off is attached, which is why the objective it blocks is still blocked.";
+    line = `question ${o.id} · open → answered by lars · unverified (no sign-off attached) · o2 stays blocked`;
+    msgText = "answered · stays ~ until legal's sign-off is attached";
+  } else if (fx === "reassign") {
+    o.owedTo = null; o.assignee = "justin";
+    o.facts = ["asked by " + o.askedBy, "now justin's", "still open"];
+    o.history.push({ k: "question", who: S.me, tm: t, text: "reassigned it to justin — out of your list, unchanged in the record" });
+    o.note = "Reassigning moves it off your surface. It is still open and still blocking the objective it blocked.";
+    line = `question ${o.id} · reassigned to justin by lars · still open · still blocking o2`;
+    msgText = "reassigned to justin · out of your list, still in the record";
+  }
+  o.fresh = true;
+  appendSystem(r, line, o.id);
+  S.ui.pinOpen = null;
+  render();
+  toast(msgText);
 }
 
 /* ===========================================================================
- * ATTENTION → ANSWER FLOW
+ * COMPOSER
  * ======================================================================== */
 
-const pinList = document.getElementById("pinList");
-const feed = document.getElementById("feed");
-const stash = {};      // removed pin cards, kept so reopen can put them back
-let bound = null;      // the attention item the composer is bound to
+function renderComposer() {
+  const r = room();
+  const bar = $("ctxbar"), input = $("cinput"), comp = $("composer");
+  comp.classList.toggle("bound", !!S.ui.bound);
+  comp.classList.toggle("replying", !!S.ui.replyTo);
 
-function pinItems() { return Array.from(pinList.children).filter(el => el.id !== "pinEmpty"); }
-
-function syncCounts() {
-  const n = pinItems().length;
-  document.getElementById("pinCount").textContent = n ? `${n} item${n > 1 ? "s" : ""} · hardest first` : "nothing owed — this is the whole list";
-  document.getElementById("surfNeedsN").textContent = String(n);
-  document.getElementById("cntNeed").textContent = `${n} NEED YOU`;
-  document.getElementById("cntNeed").classList.toggle("need", n > 0);
-  const pill = document.getElementById("railPill");
-  if (n > 0) { pill.hidden = false; document.getElementById("railPillN").textContent = String(n); }
-  else pill.hidden = true;
-
-  const emptyEl = document.getElementById("pinEmpty");
-  if (!n && !emptyEl) {
-    const e = document.createElement("div");
-    e.id = "pinEmpty"; e.className = "empty rise"; e.style.margin = "0";
-    e.textContent = "NOTHING NEEDS YOU IN THIS ROOM — THAT IS A RESULT, NOT AN ABSENCE";
-    pinList.appendChild(e);
-  } else if (n && emptyEl) {
-    emptyEl.remove();
+  if (S.ui.bound) {
+    const o = obj(r, S.ui.bound);
+    bar.hidden = false; bar.className = "ctxbar rise-s";
+    $("ctxGlyph").textContent = "◆";
+    $("ctxLabel").textContent = "ANSWER-BINDING";
+    $("ctxText").textContent = "what you type is recorded as the decision, verbatim";
+    $("ctxIn").textContent = "in: " + (o ? o.text : "");
+    input.placeholder = "Answer in your own words — this text becomes the decision";
+    $("cstate").textContent = "bound to ◆ " + (o ? o.id : "") + " · your wording is the record · interpretation is skipped";
+  } else if (S.ui.replyTo) {
+    const m = msg(r, S.ui.replyTo);
+    bar.hidden = false; bar.className = "ctxbar reply rise-s";
+    $("ctxGlyph").textContent = "↩";
+    $("ctxLabel").textContent = "REPLYING";
+    $("ctxText").textContent = m ? m.actor + " · " + m.t : "";
+    $("ctxIn").textContent = m ? "“" + plain(m.body).slice(0, 70) + "”" : "";
+    input.placeholder = "Message #" + r.name;
+    $("cstate").textContent = "reply · interpretation runs on send · anything derived lands in Current state as ~";
+  } else {
+    bar.hidden = true;
+    input.placeholder = "Message #" + r.name;
+    $("cstate").textContent = "interpretation runs on send · proposals land in Current state as ~ until accepted";
   }
 }
 
-function removeItem(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  stash[id] = el.cloneNode(true);
-  el.remove();
-  syncCounts();
+function bindComposer(objectId) {
+  S.ui.bound = objectId; S.ui.replyTo = null;
+  render();
+  $("cinput").focus();
 }
-
-const ANSWERS = {
-  keep: {
-    text: "Keep dual-write through the 14 Aug freeze. We are not dropping legacy tokens while 4.7% of sessions still present them.",
-    decision: "Dual-write runs through the 14 Aug freeze; legacy tokens stay accepted until then"
-  },
-  cutover: {
-    text: "Cut over Friday. The 4.7% tail gets a forced re-auth — dana, that means the refresh fix has to land Thursday.",
-    decision: "Cut over Friday 1 Aug; legacy tokens are dropped and the 4.7% tail is force-re-authed"
-  }
-};
-
-function answerDecision(choice, typed) {
-  const a = ANSWERS[choice] || ANSWERS.keep;
-  const text = typed || a.text;
-
-  removeItem("a-decide");
-  unbindComposer();
-
-  // 1 · the answer lands in the timeline, marked as bound (nothing inferred)
-  const row = document.createElement("div");
-  row.className = "mrow v me rise hit";
-  row.dataset.cls = "need";
-  row.dataset.msg = "m13";
-  row.innerHTML =
-    `<div class="t">09:14</div><div class="g">✓</div><div class="a">lars</div>
-     <div class="m">${text}
-       <span class="tag green">resolves ◆ · answer-bound · nothing inferred</span>
-       <div class="acts"><button>Reply</button><button>···</button></div>
-     </div>`;
-  feed.insertBefore(row, document.getElementById("feedEnd"));
-  feed.scrollTop = feed.scrollHeight;
-
-  // 2 · the proposal it settles is replaced by an accepted, verified decision
-  const o1 = OBJECTIVES[0];
-  const idx = o1.objects.findIndex(x => x.id === "P1");
-  const accepted = {
-    kind: "decision", id: "DNEW", glyph: "✓", cls: "v", text: a.decision,
-    meta: [{ t: "accepted by lars", c: "ok" }, { t: "09:14 today" }, { t: "answer-bound", c: "ok" }],
-    receipt: "DNEW"
-  };
-  if (idx >= 0) o1.objects.splice(idx, 1, accepted); else o1.objects.unshift(accepted);
-
-  RECEIPTS.DNEW = {
-    glyph: "✓", cls: "v", title: a.decision,
-    state: ["ACCEPTED", "decision", "by lars · 09:14 today", "answer-bound — zero inference"],
-    happened: [
-      { g: "◆", cls: "needs", who: "priya", tm: "08:36", text: "asked for one of two options and blocked her own scheduling on it" },
-      { g: "~", cls: "", who: "dana", tm: "08:31", text: "reported the 4.7% legacy-token tail — unverified, still a claim" },
-      { g: "~", cls: "", who: "mateo", tm: "08:41", text: "estimated $900/mo of dual-write cost — unverified, still a claim" },
-      { g: "✓", cls: "v", who: "lars", tm: "09:14", text: "answered directly; the resolution was recorded from the answer, not interpreted from it" }
-    ],
-    provenance: [
-      { who: "lars", tm: "09:14", msg: "m13", ex: text, note: "answer-bound reply · proposal pr_4471 · deterministic command, no model in the path" },
-      { who: "priya", tm: "08:36", msg: "m6", ex: "Decide, please: keep dual-write through the 14 Aug freeze, or cut over Friday and drop legacy tokens?", note: "message · seq 9104 · the question this answers" },
-      { who: "dana", tm: "08:31", msg: "m5", ex: "4.7% of sessions still present legacy opaque tokens — almost all iOS 15.x holdouts.", note: "message · seq 9101 · evidence cited in the rationale, itself unverified" }
-    ],
-    corrections: [],
-    reopen: true,
-    note: "Answer-binding skips the proposal machinery entirely: the resolution came from your click, so there is nothing here for the model to have gotten wrong."
-  };
-
-  renderLens(["DNEW"]);
-  toast("recorded as a decision · answer-bound, nothing inferred");
+function startReply(msgId) {
+  const r = room();
+  const m = msg(r, msgId);
+  S.ui.replyTo = msgId; S.ui.bound = null;
+  const input = $("cinput");
+  if (m && m.actor !== S.me && !m.system) input.value = "@" + m.actor + " ";
+  render();
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
 }
-
-function reopen(id) {
-  const o1 = OBJECTIVES[0];
-  const idx = o1.objects.findIndex(x => x.id === (id === "DNEW" ? "DNEW" : "D1"));
-  if (id === "DNEW" && idx >= 0) {
-    // back to a proposal, with the prior answer preserved on the record
-    o1.objects.splice(idx, 1, {
-      kind: "decision", id: "P1", glyph: "~", cls: "", claim: true, proposed: true,
-      text: o1.objects[idx].text,
-      meta: [{ t: "reopened by lars", c: "warn" }, { t: "prior answer kept" }, { t: "pending again" }],
-      receipt: "P1"
-    });
-    RECEIPTS.P1.corrections = [{
-      hd: "REOPENED · ACCEPTED → PENDING", who: "lars", tm: "09:16",
-      text: "Reopening — dana's 4.7% number was never checked and the whole call rests on it.",
-      after: "Proposal (prior answer preserved on the record)"
-    }];
-    if (stash["a-decide"]) {
-      const back = stash["a-decide"];
-      back.classList.add("rise");
-      pinList.insertBefore(back, pinList.firstChild);
-      wirePinCard(back);
-      syncCounts();
-    }
-    renderLens(["P1"]);
-    toast("reopened · the item is back in Needs you, the prior answer is on record");
-  } else if (id === "D1") {
-    RECEIPTS.D1.corrections = RECEIPTS.D1.corrections.concat([{
-      hd: "REOPENED · ACCEPTED → PENDING", who: "lars", tm: "09:16",
-      text: "Reopening this — parity has only held for 4 days, not 7.",
-      after: "Pending (prior acceptance preserved on the record)"
-    }]);
-    const i2 = o1.objects.findIndex(x => x.id === "D1");
-    if (i2 >= 0) {
-      o1.objects[i2].glyph = "~"; o1.objects[i2].cls = ""; o1.objects[i2].claim = true;
-      o1.objects[i2].meta = [{ t: "reopened by lars", c: "warn" }, { t: "prior acceptance kept" }, { t: "pending again" }];
-    }
-    renderLens(["D1"]);
-    toast("reopened · prior acceptance preserved, correction recorded");
-  }
-}
-
-/* ===========================================================================
- * COMPOSER BINDING
- * ======================================================================== */
-
-const composer = document.getElementById("composer");
-const bindbar = document.getElementById("bindbar");
-const cinput = document.getElementById("cinput");
-const cstate = document.getElementById("cstate");
-
-function bindComposer() {
-  bound = "a-decide";
-  bindbar.hidden = false;
-  bindbar.classList.add("rise-s");
-  composer.classList.add("bound");
-  cinput.placeholder = "Answer priya — keep dual-write, or cut over Friday?";
-  cstate.textContent = "bound to ◆ pr_4471 · your answer is recorded verbatim — interpretation is skipped";
-  cinput.focus();
-}
-function unbindComposer() {
-  bound = null;
-  bindbar.hidden = true;
-  composer.classList.remove("bound");
-  cinput.placeholder = "Message #users-migration";
-  cstate.textContent = "interpretation runs on send · proposals land in Current state as ~ until accepted";
-}
+function cancelContext() { S.ui.bound = null; S.ui.replyTo = null; render(); }
 
 function send() {
-  const v = cinput.value.trim();
-  if (bound) { answerDecision("keep", v || null); cinput.value = ""; return; }
+  const r = room();
+  const input = $("cinput");
+  const v = input.value.trim();
+  if (S.ui.bound) {
+    if (!v) { toast("type your answer — the composer records what you write, not what the card suggested"); input.focus(); return; }
+    answerDecision(S.ui.bound, v, "answer-bound reply · typed by lars and recorded verbatim · no model in the path");
+    return;
+  }
   if (!v) return;
-  const row = document.createElement("div");
-  row.className = "mrow me rise";
-  row.innerHTML =
-    `<div class="t">09:15</div><div class="g">·</div><div class="a">lars</div>
-     <div class="m">${v.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}
-       <div class="acts"><button>Reply</button><button>···</button></div></div>`;
-  feed.insertBefore(row, document.getElementById("feedEnd"));
-  feed.scrollTop = feed.scrollHeight;
-  cinput.value = "";
+  const t = tick();
+  appendMessage(r, { id: nextId("m"), t, actor: S.me, fresh: true, body: [v], replyTo: S.ui.replyTo || null });
+  input.value = "";
+  S.ui.replyTo = null;
+  render();
+  scrollFeedToEnd();
   toast("sent · interpretation queued — anything derived lands as ~");
 }
 
 /* ===========================================================================
- * WIRING
+ * NAVIGATION / FILTERS / MISC WIRING
  * ======================================================================== */
 
-/* resolving an attention item is not a dismissal — it changes the object in the
-   record, and the epistemic state of that change is honest about who reported it. */
-function patchObject(id, patch) {
-  OBJECTIVES.forEach(o => o.objects.forEach(x => { if (x.id === id) Object.assign(x, patch); }));
+function setFilter(k) {
+  const f = S.ui.feedFilter;
+  S.ui.feedFilter = (f && f.k === k && f.scope === "since") ? null : { k, scope: "since" };
+  if (S.ui.feedFilter && S.ui.feedFilter.k === "routine") S.ui.routineOpen = true;
+  render();
+  const syl = $("syl");
+  if (syl) scrollIntoView(syl, "start");
 }
-const EFFECTS = {
-  signed: () => { patchObject("K2", { glyph: "~", cls: "", claim: true,
-      meta: [{ t: "lars" }, { t: "marked done 09:15" }, { t: "self-reported ~" }] });
-    return ["K2", "signed off · recorded as self-reported, not verified"]; },
-  resched: () => { patchObject("K2", { glyph: "·", cls: "",
-      meta: [{ t: "lars" }, { t: "due today 17:00" }, { t: "rescheduled 09:15" }] });
-    return ["K2", "rescheduled · the original due date stays on the record"]; },
-  answered: () => { patchObject("Q1", { glyph: "~", cls: "", claim: true,
-      meta: [{ t: "answered by lars 09:15" }, { t: "legal sign-off not attached" }] });
-    patchObject("Q1b", { glyph: "~", cls: "", claim: true,
-      meta: [{ t: "answered by lars — unverified, so o2 stays blocked" }] });
-    return ["Q1", "answered · stays ~ until legal's sign-off is attached"]; },
-  reassign: () => { patchObject("Q1", { glyph: "?", cls: "",
-      meta: [{ t: "asked by priya" }, { t: "now justin's" }, { t: "still open" }] });
-    patchObject("Q1b", { glyph: "?", cls: "", meta: [{ t: "reassigned to justin · still blocks this objective" }] });
-    return ["Q1", "reassigned to justin · out of your list, still in the record"]; }
-};
 
-function wirePinCard(card) {
-  card.querySelectorAll("[data-answer]").forEach(b =>
-    b.addEventListener("click", () => answerDecision(b.dataset.answer)));
-  card.querySelectorAll("[data-resolve]").forEach(b =>
-    b.addEventListener("click", () => {
-      removeItem(b.dataset.resolve);
-      const fx = EFFECTS[b.dataset.effect];
-      if (fx) { const [id, msg] = fx(); renderLens([id]); toast(msg); }
-      else toast("resolved · recorded in the room's history");
-    }));
-  card.querySelectorAll("[data-jump]").forEach(b =>
-    b.addEventListener("click", () => jumpTo(b.dataset.jump)));
-  const r = card.querySelector("#replyDecide");
-  if (r) r.addEventListener("click", bindComposer);
+function markSeen() {
+  const r = room();
+  r.readGroup = sinceCounts(r).total;            // what the cursor just swallowed
+  r.seenAfter = r.messages[r.messages.length - 1].id;
+  render();
+  toast("seen cursor moved for #" + r.name + " only — every other room keeps its own");
 }
-pinItems().forEach(wirePinCard);
 
-document.getElementById("unbind").addEventListener("click", unbindComposer);
-document.getElementById("sendBtn").addEventListener("click", send);
-cinput.addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-  if (e.key === "Escape" && bound) unbindComposer();
-});
-cinput.addEventListener("input", () => {
-  cinput.style.height = "auto";
-  cinput.style.height = Math.min(cinput.scrollHeight, 140) + "px";
-});
+function switchRoom(id) {
+  if (id === S.roomId) return;
+  S.roomId = id;
+  S.ui.feedFilter = null; S.ui.receiptId = null; S.ui.bound = null;
+  S.ui.replyTo = null; S.ui.verifying = null; S.ui.pinOpen = null; S.ui.routineOpen = false;
+  $("cinput").value = "";
+  render();
+  bootScroll();
+  const r = room();
+  toast("#" + r.name + " · " + unseenCount(r) + " unseen here · this room keeps its own cursor");
+}
 
-/* theme */
-const themeBtn = document.getElementById("themeBtn");
-themeBtn.addEventListener("click", () => {
-  document.documentElement.classList.toggle("atr-dark");
-  themeBtn.title = document.documentElement.classList.contains("atr-dark") ? "Switch to light" : "Switch to dark";
-});
-
-/* routine peek */
-const peekBody = document.getElementById("peekBody");
-document.getElementById("routineStrip").addEventListener("click", () => {
-  const open = peekBody.hidden;
-  peekBody.hidden = !open;
-  if (open) peekBody.classList.add("rise");
-  document.getElementById("routinePeek").textContent = open ? "click to collapse" : "click to peek";
-});
-
-/* since-you-left: count chips filter the feed instead of hiding it */
-let filter = null;
-document.querySelectorAll(".cnt").forEach(c => c.addEventListener("click", () => {
-  const f = c.dataset.filter;
-  if (f === "routine") {
-    peekBody.hidden = false;
-    document.getElementById("routinePeek").textContent = "click to collapse";
-    document.getElementById("routine").scrollIntoView({ behavior: "smooth", block: "center" });
-    return;
-  }
-  filter = filter === f ? null : f;
-  document.querySelectorAll(".cnt").forEach(x => x.classList.toggle("on", x.dataset.filter === filter));
-  feed.classList.toggle("filtered", !!filter);
-  feed.querySelectorAll(".mrow").forEach(r => r.classList.toggle("hit", !!filter && r.dataset.cls === filter));
-}));
-
-document.getElementById("markSeen").addEventListener("click", () => {
-  document.getElementById("syl").classList.add("seen");
-  document.getElementById("sylLbl").textContent = "SEEN FROM HERE";
-  toast("seen cursor moved for this room only — no global mark-all-read");
-});
-
-/* pin fold */
-let folded = false;
-document.getElementById("pinFold").addEventListener("click", e => {
-  folded = !folded;
-  pinList.style.display = folded ? "none" : "";
-  document.getElementById("pinTrailer").style.display = folded ? "none" : "";
-  e.target.textContent = folded ? "UNFOLD" : "FOLD";
-});
-
-/* surfaces */
-document.getElementById("surfNeeds").addEventListener("click", () =>
-  document.getElementById("pin").scrollIntoView({ behavior: "smooth", block: "nearest" }));
-document.getElementById("surfState").addEventListener("click", () => {
-  renderLens();
-  lensBody.scrollTop = 0;
-  toast("current state — the lens on the right is the same surface");
-});
-
-/* jump from a provenance link or an attention item to the source message */
 let tgtTimer = null;
 function jumpTo(msgId) {
-  const el = feed.querySelector(`[data-msg="${msgId}"]`);
-  if (!el) return;
-  el.scrollIntoView({ behavior: "smooth", block: "center" });
-  feed.querySelectorAll(".mrow.tgt").forEach(r => r.classList.remove("tgt"));
-  el.classList.add("tgt");
+  if (!msgId) { toast("that source is in another room — this prototype seeds two"); return; }
+  const r = room();
+  const m = msg(r, msgId);
+  if (!m) { toast("that message is outside the loaded window"); return; }
+  if (m.routine) S.ui.routineOpen = true;
+  S.ui.jumpTo = msgId;
+  render();
+  const el = $("feed").querySelector(`[data-msg="${msgId}"]`);
+  scrollIntoView(el, "center");
   clearTimeout(tgtTimer);
-  tgtTimer = setTimeout(() => el.classList.remove("tgt"), 2200);
+  tgtTimer = setTimeout(() => { S.ui.jumpTo = null; render(); }, 2200);
 }
-document.querySelectorAll("[data-receipt]").forEach(t =>
-  t.addEventListener("click", () => openReceipt(t.dataset.receipt)));
-document.querySelectorAll("[data-jump-pin]").forEach(t =>
-  t.addEventListener("click", () => document.getElementById("pin").scrollIntoView({ behavior: "smooth", block: "nearest" })));
 
-/* toast */
 let toastTimer = null;
-function toast(msg) {
-  const t = document.getElementById("toast");
-  document.getElementById("toastMsg").textContent = msg;
-  t.hidden = false;
+function toast(m) {
+  const t = $("toast");
+  $("toastMsg").textContent = m;
+  t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
 }
 
-/* boot — you have been away 15h, so the feed opens at the since-you-left divider
-   with a little of yesterday still visible above it. */
-renderLens();
-syncCounts();
-requestAnimationFrame(() => { feed.scrollTop = Math.max(0, document.getElementById("syl").offsetTop - 64); });
+function scrollFeedToEnd() {
+  const feed = $("feed");
+  if (reduceMotion()) { feed.scrollTop = feed.scrollHeight; return; }
+  feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
+}
+
+/* ===========================================================================
+ * RENDER — one call, every surface
+ * ======================================================================== */
+
+function render() {
+  renderRail();
+  renderHead();
+  renderPin();
+  renderFeed();
+  renderComposer();
+  renderLens();
+  setTimeout(clearFresh, 400);
+}
+
+/* --- static wiring ------------------------------------------------------- */
+$("themeBtn").addEventListener("click", () => {
+  const dark = document.documentElement.classList.toggle("atr-dark");
+  $("themeBtn").title = dark ? "Switch to light" : "Switch to dark";
+  toast(dark ? "dark theme" : "light theme");
+});
+$("pinFold").addEventListener("click", () => { S.ui.pinFolded = !S.ui.pinFolded; render(); });
+$("ctxCancel").addEventListener("click", cancelContext);
+$("sendBtn").addEventListener("click", send);
+$("cinput").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === "Escape" && (S.ui.bound || S.ui.replyTo)) cancelContext();
+});
+$("cinput").addEventListener("input", e => {
+  e.target.style.height = "auto";
+  e.target.style.height = Math.min(e.target.scrollHeight, 140) + "px";
+});
+$("surfConv").addEventListener("click", () => { S.ui.feedFilter = null; render(); scrollIntoView($("syl"), "start"); });
+$("surfNeeds").addEventListener("click", () => {
+  const f = S.ui.feedFilter;
+  S.ui.feedFilter = (f && f.k === "need" && f.scope === "room") ? null : { k: "need", scope: "room" };
+  render();
+  scrollIntoView($("pin"), "nearest");
+  toast(S.ui.feedFilter
+    ? "needs you · the feed is filtered to every row in this room that owes you something — same set the pin counts"
+    : "filter cleared");
+});
+$("surfState").addEventListener("click", () => {
+  S.ui.lensFocus = !S.ui.lensFocus;
+  S.ui.receiptId = null;
+  if (S.ui.lensFocus) room().objectives.forEach(o => o.open = true);
+  render();
+  $("lensBody").scrollTop = 0;
+  toast(S.ui.lensFocus ? "current state focused — every objective expanded, right-hand pane" : "lens focus released");
+});
+
+/* --- boot ---------------------------------------------------------------- */
+function bootScroll() {
+  requestAnimationFrame(() => {
+    const syl = $("syl");
+    $("feed").scrollTop = syl ? Math.max(0, syl.offsetTop - 60) : 0;
+  });
+}
+render();
+bootScroll();
 </script>
 </body>
 </html>
