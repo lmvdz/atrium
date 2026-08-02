@@ -452,6 +452,58 @@ describe('the proposal → acceptance boundary, over the wire', () => {
       .where(eq(acceptedObjects.id, questionId));
     expect((question2?.payload as { status: string } | undefined)?.status).toBe('answered');
   });
+
+  /**
+   * A human proposer is the session, not a parameter (#22 r8 self-review).
+   *
+   * The round's own adversarial pass — *what is this guard's input made of, and
+   * who wrote it?* — asked it of `acceptance.ts`'s #4 rule and got the wrong
+   * answer. That rule reads `proposal.proposer.userId` to decide whether a
+   * commitment is `self` or `third_party`, and therefore whether it waits for the
+   * named owner to confirm: **nobody gets committed by someone else's sentence.**
+   * Its input was a field the sentence's author wrote.
+   *
+   * So Alice stages a commitment owned by Bob and claims to *be* Bob. On r7 the
+   * proposal was stored with `proposer.userId = bob`, `staged === attributedTo`,
+   * the reading classified as `self`, and the confirmation the rule exists to
+   * demand was never asked for — Alice having committed Bob with Bob's name on
+   * both ends of the sentence. The trusted `actor` columns were always Alice's;
+   * this is the other identity in the row, the one nothing was deriving.
+   */
+  it('files a human proposal under the session, not under the name the client sent', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = room.people.bob as string;
+    const messageId = await citedMessage(alice, 'bob will write the migration');
+
+    const recorded = await alice.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'commitment',
+        payload: { statement: 'write the migration', owner: bob, due: null, status: 'open' },
+        confidence: 0.9,
+        // The forgery: Alice's socket, Bob's name on the staging.
+        proposer: { kind: 'human', userId: bob },
+        provenance: [messageId],
+        quote: 'bob will write the migration',
+        interpretationId: null,
+      },
+    });
+    expect(recorded.type).toBe('ack');
+
+    const proposal = (
+      await lastEvent<{ proposal: { id: string; proposer: { kind: string; userId: string } } }>(
+        room.roomId,
+      )
+    ).proposal;
+    // The ledger row, which is what a replay reads and what acceptance folds.
+    expect(proposal.proposer).toEqual({ kind: 'human', userId: room.people.alice });
+
+    // And the consequence, which is the reason it matters: the commitment names
+    // somebody other than its stager, so it is third-party and waits for Bob.
+    const [stored] = await handle.db.select().from(proposals).where(eq(proposals.id, proposal.id));
+    expect(stored?.proposerUserId).toBe(room.people.alice);
+  });
 });
 
 describe('resolve_attention', () => {

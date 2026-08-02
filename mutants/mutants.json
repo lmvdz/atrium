@@ -953,6 +953,16 @@
       "restoreFrom": ["COMMENT ON FUNCTION \"atrium_core_events_append_guard\"()"],
       "restoreMigration": "0009_the_guard_stops_claiming_an_author.sql",
       "catches": ["says in its own COMMENT that the guard is an accident check, not a boundary"]
+    },
+    {
+      "id": "proposer_taken_from_the_client",
+      "suite": "integration",
+      "kind": "file",
+      "why": "The proposer travels as the client sent it, which is r7's behaviour. acceptance.ts reads proposal.proposer.userId to decide whether a commitment is self or third_party, and therefore whether it waits for the named owner to confirm \u2014 #4's rule that nobody gets committed by someone else's sentence. Its input was the field the sentence's author wrote, so a member could stage a commitment owned by a victim while claiming to BE the victim: staged equals attributedTo, the reading classifies as self, and the confirmation the rule exists to demand is never asked for. Found by r8's own self-adversarial pass \u2014 what is this guard's input made of, and who wrote it.",
+      "file": "apps/server/src/commands.ts",
+      "find": "    proposer:\n      draft.proposer.kind === 'human' ? { kind: 'human', userId: session.userId } : draft.proposer,\n",
+      "replace": "    proposer: draft.proposer,\n",
+      "catches": ["files a human proposal under the session, not under the name the client sent"]
     }
   ]
 }

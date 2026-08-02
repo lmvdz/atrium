@@ -68,6 +68,15 @@ const AttachmentList = z.array(MessageAttachment).max(20).default([]);
 /** A proposal as a caller submits it: the reading, without a position or an id. */
 const draftBase = {
   confidence: z.number().min(0).max(1),
+  /**
+   * Who staged this reading.
+   *
+   * A **model** proposer is taken as given — that is what this field is for, and
+   * `record_proposal` is the seam #21's pipeline calls. A **human** proposer is
+   * overwritten with the session's own user in `draftToProposal`; whatever a
+   * client sends for it is discarded. See the note there for the rule that was
+   * reading it and the forgery that reached that rule.
+   */
   proposer: Proposer,
   /** Message ids this reading was drawn from. Non-empty for a model proposer. */
   provenance: z.array(Id).default([]),
@@ -291,7 +300,7 @@ export function createCommandService({
           id,
           at,
           type: 'proposal_recorded',
-          proposal: draftToProposal(command.proposal, command.roomId, at),
+          proposal: draftToProposal(command.proposal, command.roomId, at, session),
         }));
 
       case 'reject_proposal':
@@ -469,15 +478,46 @@ function describeCause(error: unknown): string {
  * not taken from the caller at all — the reducer would coerce it back to
  * `proposed` and record the coercion, and offering a field whose value is
  * always overridden invites someone to believe it.
+ *
+ * ## A *human* proposer is the session, not a parameter (#22 r8 self-review)
+ *
+ * `proposer` looked like part of "the reading", which the caller supplies. It is
+ * not: `acceptance.ts:381-399` reads `proposal.proposer.userId` to decide whether
+ * a commitment is `self` or `third_party`, and therefore whether it waits for the
+ * named owner to confirm. The rule that check exists for is #4's — *nobody gets
+ * committed by someone else's sentence* — and until r8 its input was a field the
+ * sentence's author wrote. A member could stage `proposer: {kind:'human', userId:
+ * <victim>}` on a commitment owned by that victim: `staged === attributedTo`, so
+ * it classified as `self`, and the confirmation the rule exists to demand was
+ * never asked for. Same class as the round's other defects — asked what the
+ * guard's input was made of and who wrote it, and the answer was "the caller".
+ *
+ * So a human proposer is overwritten with the session's own user, exactly as
+ * `actorOf` derives the trusted actor, rather than validated against it: there is
+ * no legitimate value for a client to send here, so there is nothing to refuse
+ * and nothing for a mismatch message to leak.
+ *
+ * A **model** proposer is untouched and is the reason this field exists at all —
+ * `record_proposal` is the seam #21's interpretation pipeline calls, and a model
+ * reading is not staged by the person whose socket carried it. That path is
+ * bounded elsewhere: `@atrium/core` requires non-empty `provenance` and a `quote`
+ * for a model claim or commitment, so a model reading still has to name the
+ * message it rests on.
  */
-function draftToProposal(draft: ProposalDraft, roomId: string, at: string): Proposal {
+function draftToProposal(
+  draft: ProposalDraft,
+  roomId: string,
+  at: string,
+  session: Session,
+): Proposal {
   return {
     id: randomUUID(),
     roomId,
     type: draft.type,
     payload: draft.payload,
     confidence: draft.confidence,
-    proposer: draft.proposer,
+    proposer:
+      draft.proposer.kind === 'human' ? { kind: 'human', userId: session.userId } : draft.proposer,
     provenance: draft.provenance,
     quote: draft.quote,
     interpretationId: draft.interpretationId,
