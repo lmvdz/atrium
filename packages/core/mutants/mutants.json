@@ -1157,7 +1157,7 @@
     },
     {
       "id": "cursor_compares_the_spelling",
-      "why": "r8. `'.'` sorts before `'Z'`, so `…00:00.500Z` compared earlier than `…00:00Z` — half a second later, rejected as out_of_order, unrecoverably.",
+      "why": "r8. `'.'` sorts before `'Z'`, so `…00:00.500Z` compared earlier than `…00:00Z` — half a second later, rejected as out_of_order, unrecoverably. Re-anchored on the merge: two of the five tests this named stopped bearing on it, and not because they weakened. `orders a log by when things happened` and `does not reject the later event as out of order` mint EVENTS, and the realtime lane's `Timestamp` narrowed to the one canonical spelling — so their inputs became `…00.000Z` against `…00.500Z`, which a lexical compare orders correctly and the mutation therefore survives. The defect is now unrepresentable in a log rather than merely handled in the comparator, which is a stronger position and a weaker mutant anchor. The three unit cases still call `compareCursor` directly with the spellings a log can no longer hold, and the fourth is the case the merge added to assert the schema refuses them.",
       "file": "src/reduce.ts",
       "find": "  const ka = instantKey(a.at);\n  const kb = instantKey(b.at);\n  return ka === kb ? compare(a.id, b.id) : compare(ka, kb);",
       "replace": "  return a.at === b.at ? compare(a.id, b.id) : compare(a.at, b.at);",
@@ -1165,8 +1165,7 @@
         "sorts half a second later after, not before",
         "reads every spelling `Timestamp` admits as one order",
         "keeps sub-millisecond precision rather than collapsing it onto the id",
-        "orders a log by when things happened",
-        "does not reject the later event as out of order, unrecoverably"
+        "refuses the spelling that made the two orders disagree, at the schema"
       ]
     },
     {
