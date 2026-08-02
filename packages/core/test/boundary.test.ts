@@ -860,8 +860,17 @@ describe('the receipt minima are policy, and are pinned by value', () => {
       },
     ];
     // The same sentence again, from the same message: a re-proposal.
+    //
+    // r9: this line read `'The migration is reversible and safe.'` against an
+    // accepted `'the migration is …'`, and passed on the dedup case fold rather
+    // than on the property it is named for. The fold is gone (see `matching.ts`),
+    // and the fixture now differs from the accepted text in nothing at all,
+    // which is what "the same sentence again" was always supposed to mean. The
+    // assertion's coverage is unchanged: it fails if `findDuplicate` stops
+    // matching an exact re-proposal, which is the mutation that would make the
+    // whole deduplicator dead code.
     expect(
-      findDuplicate('claim', 'The migration is reversible and safe.', ['msg_1'], accepted)
+      findDuplicate('claim', 'the migration is reversible and safe.', ['msg_1'], accepted)
         ?.objectId,
     ).toBe('obj_1');
     // One word added — an aside, or a qualifier, and nothing here can tell.

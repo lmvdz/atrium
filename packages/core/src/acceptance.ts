@@ -8,7 +8,7 @@ import {
   validateProposalProvenance,
 } from './escalation.js';
 import { type AuthoredEvent, authored, type CoreEvent, trustedContext } from './events.js';
-import { alignTokens, dedupTokens, hasContent, normalizeForReceipt } from './matching.js';
+import { alignTokens, hasContent, normalizeForReceipt, orderedTokens } from './matching.js';
 import {
   type AcceptedObjectType,
   type ClaimPayload,
@@ -340,10 +340,37 @@ export function commitmentAttribution(
  * see. That is the same shape as the `not` and `all`/`some` rows above it, one
  * fold further down.
  *
- * `dedupTokens` forgives case and nothing else beyond what the receipt already
- * forgives. A fullwidth or ligature spelling now costs one extra staged
- * re-proposal, which is the side of this trade the paragraph above already chose
- * once when it deleted `duplicateThreshold`.
+ * ## …and why there is no fold left at all, r9
+ *
+ * r8 kept one: `dedupTokens` lower-cased, on the ground that *"case is the one
+ * difference that cannot change what a sentence says"*. The same file's receipt
+ * policy already said the opposite, in the paragraph that refuses case folding
+ * because `US` / `us`, `Bill` / `bill` and `March` / `march` are different
+ * words. One more row, from the same corner of the product as the two above:
+ *
+ * | already accepted, from msg_1              | newly read, from msg_1 + msg_2            | r8 verdict |
+ * | ----------------------------------------- | ----------------------------------------- | ---------- |
+ * | Set the deploy password to `` `Hunter2` `` | Set the deploy password to `` `hunter2` `` | discarded  |
+ *
+ * The lower-casing ran straight through the code segment `normalizeForReceipt`
+ * had just preserved byte for byte, on the stated ground that a literal
+ * respaced is a literal changed — so the record kept the old password and the
+ * room was shown nothing else. Citing the earlier message alongside the one
+ * being read is ordinary; `sampleLog` does it.
+ *
+ * Restricting the fold to prose would not have saved it. The counterexamples the
+ * receipt policy lists are prose ones, and *"Send the bill to Acme"* is not a
+ * re-proposal of *"Send the Bill to Acme"*.
+ *
+ * So the tokens are `orderedTokens` — the receipt's own — and the rule is one
+ * line long: **a duplicate is the same text.** The trade barely has a cost side
+ * left, because `borne` makes an accepted object's text a verbatim message body:
+ * two readings of one message are already case-identical and still dedup, and a
+ * case difference means two different bodies, which is the correction case. What
+ * a fullwidth spelling and a re-cased literal cost now is one extra staged
+ * proposal apiece, which is the side of this trade the paragraphs above chose
+ * twice already — once when they deleted `duplicateThreshold`, once when they
+ * dropped NFKC.
  */
 export function findDuplicate(
   type: AcceptedObjectType,
@@ -351,13 +378,13 @@ export function findDuplicate(
   messageIds: readonly Id[],
   accepted: readonly AcceptedObjectRef[],
 ): AcceptedObjectRef | null {
-  const wanted = dedupTokens(text);
+  const wanted = orderedTokens(text);
   if (wanted.length === 0) return null;
   const cited = new Set(messageIds);
   for (const candidate of accepted) {
     if (candidate.type !== type) continue;
     if (!candidate.messageIds.some((id) => cited.has(id))) continue;
-    const have = dedupTokens(candidate.text);
+    const have = orderedTokens(candidate.text);
     if (have.length === 0) continue;
     // Symmetric by construction: `borne` requires both sides accounted for, so
     // neither "the new one restates the old" nor the reverse is enough alone.

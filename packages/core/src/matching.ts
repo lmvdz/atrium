@@ -44,6 +44,13 @@ import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
  *  - **Case folding.** `US` / `us`, `Bill` / `bill`, `March` / `march` are
  *    different words, and a quote is supposed to be verbatim. A model that
  *    re-cases a sentence has edited it, and an edited reading goes to a person.
+ *    **r9: and nothing else in this package folds case either.** `dedupTokens`
+ *    did, for `findDuplicate`, on the flatly contradictory ground that "case is
+ *    the one difference that cannot change what a sentence says" — with the
+ *    three counterexamples above sitting in this paragraph the whole time. The
+ *    deduplicator's mistakes destroy readings where the receipt's only refer
+ *    them, so it was the wrong half of the file to hold the wider rule. See
+ *    below `orderedTokens` for the whole argument.
  *  - **Underscore emphasis.** `_x_` is Markdown emphasis and `__init__` is an
  *    identifier, and no rule separates them.
  *  - **Asterisk emphasis**, which survived three drafts and two reviewers before
@@ -536,28 +543,52 @@ export function isWhitespaceToken(token: string): boolean {
   return WHITESPACE_TOKEN.test(token);
 }
 
-/** `orderedTokens` under the lossy fold — for detectors, never for a receipt. */
 /**
- * **Tokens for "is this the same reading again" — case-blind, and nothing else.**
+ * **There is no dedup tokenizer any more — r9, and this comment is the entry in
+ * the not-admitted list.**
  *
- * r8. `findDuplicate` ran on `routingTokens`, whose fold is NFKC, on the
- * argument that *"being lossy here means firing more often, which for a
- * re-proposal is the harmless direction"*. A duplicate is **discarded**, so
- * firing more often is not the harmless direction — it is silent destruction,
- * which is the failure that docblock's own table is about. NFKC maps `10²` onto
- * `102`, so a reading of *"the p99 settled at 10² ms"* was thrown away as a
- * duplicate of the accepted *"the p99 settled at 102 ms"*: 100 against 102, no
- * proposal left, no issue, no trace.
+ * r8 wrote one. `findDuplicate` had been running on `routingTokens`, whose fold
+ * is NFKC, on the argument that *"being lossy here means firing more often,
+ * which for a re-proposal is the harmless direction"* — and a duplicate is
+ * **discarded**, so firing more often was not the harmless direction but silent
+ * destruction. NFKC maps `10²` onto `102`, and a reading of *"the p99 settled at
+ * 10² ms"* was thrown away as a duplicate of the accepted *"the p99 settled at
+ * 102 ms"*: 100 against 102, no proposal, no issue, no trace. r8 narrowed the
+ * fold to case alone and kept it, on the ground that *"case is the one
+ * difference that cannot change what a sentence says"*.
  *
- * Case is the one difference that cannot change what a sentence says, so case is
- * the one difference this forgives on top of the receipt's own allowlist. A
- * fullwidth or ligature spelling is a *different* reading now and costs one
- * extra staged proposal, which is the cheap side of the trade the same docblock
- * already chose when it deleted the similarity threshold.
+ * **That ground is the one this file's header rejects by name, four hundred
+ * lines up**: `US` / `us`, `Bill` / `bill`, `March` / `march` are different
+ * words. Those are *prose* counterexamples, so no boundary inside the text
+ * rescues the claim — folding case only outside code segments would still read
+ * *"Send the bill to Acme"* as a re-proposal of *"Send the Bill to Acme"*. Both
+ * sentences cannot be true in one file, and the one with counterexamples
+ * attached is the one that stands.
+ *
+ * **What decides it is that the two errors point opposite ways.** The receipt
+ * erring strict *refuses* a reading, and a refused reading goes to a person. The
+ * dedup erring forgiving *discards* one, and a discarded reading goes nowhere —
+ * `verdict: 'discard'`, `visibility: 'none'`, never shown, never stored. A
+ * comparison whose failure mode is destruction may not have a **wider**
+ * allowlist than one whose failure mode is referral. `normalizeForReceipt` is
+ * this repo's answer to "which differences between two texts leave what was said
+ * intact", built to the bar of *an argument nobody can break*; the deduplicator
+ * asks that same question with more to lose, so it gets that same answer and not
+ * a looser one.
+ *
+ * The measured cost is close to nothing, because of what the receipt already
+ * requires. A machine reading only lands when `borne` holds — the statement *is*
+ * the quote — and `quoteCoversOwnText` requires the quote to be a cited author's
+ * whole message body. `normalizeForReceipt` does not fold case, so an accepted
+ * object's text carries the exact case of a real message body. Two readings of
+ * *the same* message are therefore case-identical and still dedup exactly; a
+ * case difference between two statements means they came from two **different
+ * bodies**, which is the correction case, not the re-proposal case. The fold
+ * could not fire on what it was for, and could only fire on what it destroyed.
+ *
+ * `findDuplicate` calls `orderedTokens`, so there is one tokenizer for "is this
+ * the same sentence" and no second allowlist to drift away from the first.
  */
-export function dedupTokens(text: string): string[] {
-  return normalizeForReceipt(text).toLowerCase().match(TOKEN) ?? [];
-}
 
 export function routingTokens(text: string): string[] {
   return normalizeForRouting(text).match(ROUTING_TOKEN) ?? [];

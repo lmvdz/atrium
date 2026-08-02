@@ -308,25 +308,216 @@ describe('r8 — the canonical order is over the instant, not its spelling', () 
 });
 
 describe('r8 — dedup may not destroy a distinct reading', () => {
+  const accepted = [
+    {
+      objectId: 'obj_1',
+      type: 'claim' as const,
+      text: 'the p99 settled at 102 ms after the index landed',
+      messageIds: ['m1'],
+    },
+  ];
+
   it('keeps `10² ms` and `102 ms` apart', () => {
     // NFKC folds the superscript onto a digit, so 100 was discarded as a
     // duplicate of 102 — no proposal, no issue, no trace, and the accepted
     // object it contradicted stayed on the record.
-    const accepted = [
+    expect(
+      findDuplicate('claim', 'the p99 settled at 10² ms after the index landed', ['m1'], accepted),
+    ).toBeNull();
+  });
+
+  /**
+   * **What replaced the pin, and what the pin was covering — r9.**
+   *
+   * The line under this one used to be its inverse:
+   *
+   * ```
+   * // The case dedup exists for still fires.
+   * expect(findDuplicate('claim', 'The p99 settled at 102 MS …', …)).not.toBeNull();
+   * ```
+   *
+   * — a deliberate pin, not an oversight, and r9 deletes the behaviour it pinned
+   * (`matching.ts` carries the argument: a comparison whose failure mode is
+   * *destruction* may not forgive more than one whose failure mode is
+   * *referral*, and `US`/`us`, `Bill`/`bill`, `March`/`march` are the receipt
+   * policy's own reasons for refusing the fold).
+   *
+   * That pin was doing two jobs. The first — *dedup still fires at all*, i.e.
+   * `findDuplicate` is not dead code and did not degenerate to "never a
+   * duplicate" while the NFKC fix went in — is real coverage and is kept, by the
+   * exact re-proposal below. It is strictly better at that job: it does not need
+   * a fold to be true, so it survives the next change to what dedup forgives.
+   *
+   * The second job — asserting the *fold itself* — is the one being deleted, and
+   * what it costs is stated rather than hidden: a room where somebody restates a
+   * measurement in different case now gets one extra staged proposal, one
+   * person's glance. That is the same price this file paid to delete
+   * `duplicateThreshold` and again to drop NFKC.
+   */
+  it('still fires on the same sentence proposed twice', () => {
+    expect(
+      findDuplicate('claim', 'the p99 settled at 102 ms after the index landed', ['m1'], accepted)
+        ?.objectId,
+    ).toBe('obj_1');
+  });
+
+  it('r9 — keeps a re-cased literal apart from the literal it is not', () => {
+    // The password case, at the unit. `normalizeForReceipt` preserves a code
+    // segment byte for byte on the ground that a literal respaced is a literal
+    // changed; the dedup fold lower-cased straight through it, so a correction
+    // from `Hunter2` to `hunter2` was destroyed and the record kept the old
+    // password.
+    const password = [
       {
-        objectId: 'obj_1',
+        objectId: 'obj_pw',
         type: 'claim' as const,
-        text: 'the p99 settled at 102 ms after the index landed',
+        text: 'Set the deploy password to `Hunter2` before you leave tonight.',
         messageIds: ['m1'],
       },
     ];
     expect(
-      findDuplicate('claim', 'the p99 settled at 10² ms after the index landed', ['m1'], accepted),
+      findDuplicate(
+        'claim',
+        'Set the deploy password to `hunter2` before you leave tonight.',
+        ['m1'],
+        password,
+      ),
     ).toBeNull();
-    // The case dedup exists for still fires.
-    expect(
-      findDuplicate('claim', 'The p99 settled at 102 MS after the index landed', ['m1'], accepted),
-    ).not.toBeNull();
+    // …and in prose, where restricting the fold to code segments would have
+    // left it: `Bill` is a person and a `bill` is an invoice.
+    const invoice = [
+      {
+        objectId: 'obj_b',
+        type: 'claim' as const,
+        text: 'Send the Bill to Acme',
+        messageIds: ['m1'],
+      },
+    ];
+    expect(findDuplicate('claim', 'Send the bill to Acme', ['m1'], invoice)).toBeNull();
+  });
+
+  /**
+   * **The whole chain, machine-produced — r9.**
+   *
+   * Not `findDuplicate` in isolation. A model reads ALICE's first message,
+   * the engine auto-accepts it, `appendEvent` puts it on the record as `~`.
+   * ALICE then corrects the password in a second message; the model reads that
+   * one and cites both, which is what the repo's own `sampleLog` does. On r8
+   * the second reading came back `duplicate_of_accepted / discard` —
+   * `visibility: 'none'`, documented as *"never shown, never stored as a live
+   * proposal"* — so the record kept `Hunter2` and the room was shown nothing at
+   * all.
+   *
+   * The assertion is what a person in that room would experience: the
+   * correction reaches accepted state and both readings are on the record for
+   * them to see.
+   */
+  it('a machine-accepted reading cannot be destroyed by a re-cased duplicate', () => {
+    const FIRST = 'Set the deploy password to `Hunter2` before you leave tonight.';
+    const SECOND = 'Set the deploy password to `hunter2` before you leave tonight.';
+    // Two windows, because the correction does not exist yet when the first
+    // reading is judged — the room is a log, not a snapshot.
+    const before: ProvenanceMessage[] = room({ id: 'msg_1', authorId: ALICE, body: FIRST });
+    const messages: ProvenanceMessage[] = room(
+      { id: 'msg_1', authorId: ALICE, body: FIRST },
+      { id: 'msg_2', authorId: ALICE, body: SECOND },
+    );
+
+    const stage = (
+      id: string,
+      text: string,
+      cites: string[],
+      minute: number,
+      window: ProvenanceMessage[] = messages,
+    ) =>
+      event({
+        id: `ev_${id}`,
+        at: at(minute),
+        actor: model(),
+        messages: window,
+        type: 'proposal_recorded',
+        proposal: {
+          id,
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: text, claimant: ALICE },
+          confidence: 0.95,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: cites,
+          quote: text,
+          createdAt: at(minute),
+        },
+      });
+    const accept = (
+      id: string,
+      proposalId: string,
+      text: string,
+      cites: string[],
+      minute: number,
+      window: ProvenanceMessage[] = messages,
+    ) =>
+      event({
+        id: `ev_${id}`,
+        at: at(minute),
+        actor: model(),
+        messages: window,
+        type: 'object_accepted',
+        object: {
+          id,
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: text, claimant: ALICE },
+          provenance: { messageIds: cites, proposalId },
+          createdAt: at(minute),
+          updatedAt: at(minute),
+        },
+      });
+
+    // ── The first reading, machine-accepted ────────────────────────────────
+    let state = reduce([stage('prop_a', FIRST, ['msg_1'], 1, before)]);
+    const first = state.proposals.prop_a?.proposal;
+    if (!first) throw new Error('unreachable');
+    expect(decideAcceptance(first, { messages: before }).verdict).toBe('auto_accept');
+    const landedA = appendEvent(
+      state,
+      accept('obj_a', 'prop_a', FIRST, ['msg_1'], 2, before).event,
+      { ...accept('obj_a', 'prop_a', FIRST, ['msg_1'], 2, before) },
+    );
+    expect(landedA.outcome).toBe('applied');
+    state = landedA.state;
+
+    // ── The correction, read out of the second message and citing both ─────
+    const stagedB = appendEvent(state, stage('prop_b', SECOND, ['msg_1', 'msg_2'], 3).event, {
+      ...stage('prop_b', SECOND, ['msg_1', 'msg_2'], 3),
+    });
+    expect(stagedB.outcome).toBe('applied');
+    state = stagedB.state;
+    const second = state.proposals.prop_b?.proposal;
+    if (!second) throw new Error('unreachable');
+
+    // What a caller judging against the room's accepted state actually asks.
+    const accepted = Object.values(state.objects).map((record) => ({
+      objectId: record.object.id,
+      type: record.object.type,
+      text: (record.object.payload as { statement: string }).statement,
+      messageIds: record.object.provenance.messageIds,
+    }));
+    const verdict = decideAcceptance(second, { messages, acceptedObjects: accepted });
+    expect(verdict.rule).not.toBe('duplicate_of_accepted');
+    expect(verdict.verdict).toBe('auto_accept');
+
+    // ── …and it lands, so the room has both and can see which is newer ─────
+    const landedB = appendEvent(
+      state,
+      accept('obj_b', 'prop_b', SECOND, ['msg_1', 'msg_2'], 4).event,
+      { ...accept('obj_b', 'prop_b', SECOND, ['msg_1', 'msg_2'], 4) },
+    );
+    expect(landedB.outcome).toBe('applied');
+    const statements = Object.values(landedB.state.objects).map(
+      (record) => (record.object.payload as { statement: string }).statement,
+    );
+    expect(statements).toContain(FIRST);
+    expect(statements).toContain(SECOND);
   });
 });
 
