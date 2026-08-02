@@ -2328,6 +2328,69 @@ describe('core_events — the receipt window is derived, not supplied', () => {
    * literal claims. A constraint that exists in a string but not in the database
    * is the #19 finding this whole suite answers.
    * ---------------------------------------------------------------------- */
+  it('is still one function after 0011 replaced it, with its grants intact', async () => {
+    /**
+     * `drizzle/0011` is the only migration in this chain that redefines a
+     * function with `CREATE OR REPLACE` instead of `DROP` + `CREATE`. Every
+     * other one uses DROP for the r2 reason `0005` states: Postgres cannot
+     * change a parameter list in place, so `CREATE OR REPLACE` with a different
+     * one creates an **overload** — a second door that satisfies every
+     * name-based guard while doing none of the work.
+     *
+     * 0011 changes the body and not the signature, so REPLACE rebinds the one
+     * function that exists, and it is the correct choice rather than merely a
+     * safe one: `DROP` takes the grants with it, and 0006 and 0008 both revoke
+     * PUBLIC and grant this function to the owner and to every app role. A DROP
+     * would silently reset that ACL to the default — EXECUTE to PUBLIC — unless
+     * every grant were restated.
+     *
+     * Both halves of that argument are asserted here rather than left in the
+     * migration's prose, because a prose argument about a door is the thing this
+     * suite exists to replace with the catalog.
+     *
+     * Catches: giving 0011's replacement a different parameter list (two
+     * functions, one of them the old narrow window, and every name-based guard
+     * still green), and swapping REPLACE for DROP + CREATE without restating the
+     * grants (EXECUTE to PUBLIC on the derivation, which is a read primitive
+     * over every room's message bodies).
+     */
+    const rows = await handle.db.execute<{ args: string; acl: string | null }>(
+      sql`SELECT pg_get_function_identity_arguments(oid) AS args, proacl::text AS acl
+          FROM pg_proc
+          WHERE proname = 'atrium_receipt_window'
+            AND pronamespace = 'public'::regnamespace`,
+    );
+    expect(rows, 'exactly one atrium_receipt_window — an overload is a second door').toHaveLength(
+      1,
+    );
+    expect(rows[0]?.args).toBe('p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb');
+    // A non-null ACL is half the claim: `proacl` is NULL only when the function
+    // carries the *default* privileges, which for a function is EXECUTE to
+    // PUBLIC. 0006 revoked that and granted explicitly; if 0011 had dropped and
+    // recreated without restating the grants, this comes back NULL.
+    const acl = rows[0]?.acl ?? null;
+    expect(acl, 'a NULL proacl is EXECUTE to PUBLIC — the door 0006 closed').not.toBeNull();
+
+    // The other half, and it is parsed rather than grepped. An aclitem is
+    // `grantee=privileges/grantor`, and **PUBLIC is spelled as the empty
+    // grantee** — `=X/owner`. The first draft of this line asserted the string
+    // did not contain `=X/`, which is a substring of every ordinary grant
+    // (`atrium_test=X/atrium_test`), so it failed on a correct database and
+    // would have been "fixed" by deleting it. Splitting on the delimiter is the
+    // difference between asking "is PUBLIC in this list" and "does this text
+    // have those three characters in it anywhere".
+    const grantees = (acl ?? '')
+      .replace(/^\{|\}$/g, '')
+      .split(',')
+      .filter((entry) => entry.length > 0)
+      .map((entry) => entry.slice(0, entry.indexOf('=')));
+    expect(grantees.length, 'the ACL must list somebody, or it is not an ACL').toBeGreaterThan(0);
+    expect(
+      grantees,
+      'an empty grantee is PUBLIC — EXECUTE on the derivation for anyone',
+    ).not.toContain('');
+  });
+
   it('carries what the room said after the newest citation, in the room’s order', async () => {
     /**
      * The headline of #86, and the smallest room that shows it: cite the
