@@ -114,8 +114,31 @@
  * the identifier `process` used as anything but the object of a member access,
  * which is what closes `const p = process; p.exit(0);`.
  *
+ * ── AND THE STATUS FOLLOWS ONE NAME (#40 round 9, D3) ───────────────────────
+ * The allowlist reads the expression handed to `process.exit` and stops at a
+ * call, because `main()` itself is out of reach. A blind critic read the
+ * stopping point as the door it is: `function statusOf() { return
+ * process.env.CI === undefined ? main() : 0; }` plus `process.exit(statusOf())`
+ * measured **0 problems**, and `deploy-mutation-ledger.mjs` was shipping exactly
+ * that shape under a comment conceding the rule could not read it. So the
+ * callee is followed when this file declares it, and what it returns is held to
+ * the same allowlist — with the difference the concession said was unreadable
+ * made readable by *provenance* rather than by a denylist: `return failed > 0 ?
+ * 1 : 0` conditions the status on a value the function computed, and `return
+ * process.env.CI === undefined ? main() : 0` conditions it on a name this file
+ * does not bind. The first is a derivation from the work; the second is a
+ * derivation from the machine. See `statusFunctionProblem` for what that still
+ * does not reach — a *branch* on the environment rather than a value.
+ *
  * ── AND WHERE *THAT* SENTENCE STOPS ─────────────────────────────────────────
- * It reads one directory. A script under `scripts/` that imports a module under
+ * `mainGuardProblems` reads one directory, and the one question that has the
+ * same right answer everywhere — *did you decide you were run by comparing a URL
+ * against a path?* — is asked of the whole repository by
+ * `entryDecisionProblems`, because round 9 found the round-4 comparison alive in
+ * a published CLI outside the scan root. The rest of the ruleset here is about
+ * entry points under `scripts/`, where the exit status *is* the gate; a server
+ * may register a `SIGTERM` listener and a vitest config may reach for
+ * `import.meta.dirname`. A script under `scripts/` that imports a module under
  * `packages/` inherits whatever that module does at load time, and nothing here
  * looks: `sharedModuleProblems` in checker-graph.mjs is what requires a shared
  * decision to have an outside witness, and it counts imports within `scripts/`.
@@ -129,7 +152,7 @@
  * means nobody has thought of.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 
@@ -549,10 +572,207 @@ function statusProblem(argument, bindings, sourceFile) {
     const problem = bindings.get(node.text);
     return problem === undefined ? undefined : say(`it ${problem}`);
   }
-  if (isWorkExpression(node)) return undefined;
+  if (isWorkExpression(node)) return statusFunctionProblem(node, sourceFile);
   return say(
     `it exits with \`${text(sourceFile, node)}\`, whose value is decided by something other than the work`,
   );
+}
+
+/**
+ * And what the work this exits with returns, when the work is written here.
+ *
+ * ── NAMING THE TERNARY WAS THE BYPASS (#40 round 9, D3) ─────────────────────
+ * `statusProblem` reads the expression handed to `process.exit` and stops at a
+ * call, because `main()` itself is out of reach by construction — this file has
+ * said so since round 7 and still does. A blind critic read the stopping point
+ * as the door it is and walked through, in the file that had *written the
+ * concession down*:
+ *
+ *     function statusOf() { return process.env.CI === undefined ? main() : 0; }
+ *     process.exit(statusOf());                                  → 0 problems
+ *
+ * Weaponised on `assert-vitest-report.mjs` — "assert the suite actually ran" —
+ * that is exit 0, silent, with `gate-selftest`, `wps`, `workflow-policy`,
+ * `ci-guard` and `lint` all clean.
+ *
+ * So the callee is followed *when this file declares it*, and the same
+ * allowlist is applied to what it returns: a numeric literal, another call, or a
+ * name bound to one. A conditional, a comparison, a logical operator or a member
+ * chain in a `return` that becomes the process's status is refused wherever it
+ * is written, and giving it a name no longer moves it out of view.
+ *
+ * ── WHERE THIS STOPS, STILL ────────────────────────────────────────────────
+ * `main() { if (process.env.CI) return 0; return work(); }` is two returns of
+ * two literals and is **accepted** — the branch, not the value, is where the
+ * decision went, and following branches is a data-flow analysis this file is
+ * not. `main` rewritten to `() => 0` is likewise out of reach, exactly as the
+ * scope sentence at the top says. The notch this closes is one spelling; the
+ * thing that closes the class is behavioural, and it is `positive-control.mjs`,
+ * whose subject set this round widened from the deploy job to every entry point
+ * any job runs — including the five that made this bypass worth writing.
+ *
+ * @param {ts.Node} node the call whose result becomes the exit status
+ * @param {ts.SourceFile} sourceFile
+ * @param {Set<string>} [seen] names already followed, so recursion terminates
+ * @returns {string|undefined}
+ */
+function statusFunctionProblem(node, sourceFile, seen = new Set()) {
+  const inner = unwrap(node);
+  if (ts.isAwaitExpression(inner)) return statusFunctionProblem(inner.expression, sourceFile, seen);
+  if (!ts.isCallExpression(inner) || !ts.isIdentifier(inner.expression)) return undefined;
+  const name = inner.expression.text;
+  if (seen.has(name)) return undefined;
+  seen.add(name);
+  const declared = functionNamed(sourceFile, name);
+  // Not declared here: an import, a parameter, a method. `sharedBindingProblems`
+  // and the module rules in checker-graph.mjs own what comes from elsewhere.
+  if (declared === undefined) return undefined;
+  const body = declared.body;
+  if (body === undefined) return undefined;
+  const say = (what, expression) =>
+    `it exits with \`${name}(…)\`, and \`${name}\` ${what} (\`return ${text(sourceFile, expression)}\`). A function whose returned value is decided by a condition is \`process.exit(cond ? main() : 0)\` with a name in front of it, which is the shape this rule refuses one line out. The status of an entry point is the result of the work: return the call, or a non-zero literal`;
+  if (!ts.isBlock(body)) {
+    // `const statusOf = (p) => p.length > 0 ? 1 : 0;` — one expression, no
+    // `return` keyword, and exactly the shape this is about.
+    const problem = returnedStatusProblem(body, body, sourceFile, seen);
+    return problem === undefined ? undefined : say(problem, body);
+  }
+  const bindings = topLevelBindings(body.statements);
+  for (const returned of returnExpressionsOf(body)) {
+    const problem = returnedStatusProblem(returned, body, sourceFile, seen, bindings);
+    if (problem !== undefined) return say(problem, returned);
+  }
+  return undefined;
+}
+
+/** One `return <expression>` judged as an exit status. */
+function returnedStatusProblem(expression, body, sourceFile, seen, bindings = new Map()) {
+  const node = unwrap(expression);
+  // Any literal, including `0`: inside the work, "nothing was wrong" is a real
+  // answer. It is `process.exit(0)` at the *top level* that is the fail-open,
+  // and `statusProblem` owns that.
+  if (ts.isNumericLiteral(node)) return undefined;
+  if (ts.isIdentifier(node)) {
+    if (!bindings.has(node.text)) {
+      return `returns \`${node.text}\`, which this rule cannot follow to any work`;
+    }
+    return bindings.get(node.text) === undefined
+      ? undefined
+      : `returns a name it ${bindings.get(node.text)}`;
+  }
+  if (isWorkExpression(node)) return statusFunctionProblem(node, sourceFile, seen);
+  // ── A CONDITION OVER THE WORK, OR A CONDITION OVER THE MACHINE ────────────
+  // `return failed > 0 ? 1 : 0` is the whole point of a `main()` — the status is
+  // a *derivation from what the work found*, and refusing it would refuse two of
+  // this repository's own entry points. `return process.env.CI === undefined ?
+  // main() : 0` is the round-9 bypass. The readable difference between them is
+  // **provenance**: every name in the first comes from somewhere this file
+  // binds, and `process` comes from the runtime. So the rule is an allowlist
+  // over where the names came from, which is the same move `sharedBindingProblems`
+  // makes about `isMainModule` — a name whose origin this file cannot point at
+  // is not a name a status may be conditioned on.
+  const foreign = [...freeIdentifiers(node)].filter((name) => !boundInFile(sourceFile).has(name));
+  if (foreign.length > 0) {
+    return `conditions its returned value on ${foreign.map((name) => `\`${name}\``).join(', ')}, which this file does not bind — so the status comes from the runtime rather than from the work`;
+  }
+  return undefined;
+}
+
+/** Every identifier this expression reads, excluding property and label names. */
+function freeIdentifiers(node, into = new Set()) {
+  if (ts.isPropertyAccessExpression(node)) {
+    freeIdentifiers(node.expression, into);
+    return into;
+  }
+  if (ts.isIdentifier(node)) {
+    into.add(node.text);
+    return into;
+  }
+  node.forEachChild((child) => freeIdentifiers(child, into));
+  return into;
+}
+
+const BOUND_IN_FILE = new WeakMap();
+
+/**
+ * Every name this file binds anywhere: imports, declarations, parameters.
+ *
+ * Deliberately the whole file rather than the enclosing scope. The question is
+ * not "is this name visible here" — TypeScript's checker would answer that and
+ * this file does not run one — it is "can this repository point at where the
+ * name came from". `process`, `globalThis` and `Deno` answer no; anything
+ * imported or declared answers yes, and a status conditioned on a value this
+ * file computed is a status derived from the work.
+ */
+function boundInFile(sourceFile) {
+  const cached = BOUND_IN_FILE.get(sourceFile);
+  if (cached !== undefined) return cached;
+  const names = new Set();
+  const visit = (node) => {
+    for (const { text } of boundNames(node)) names.add(text);
+    if (ts.isImportDeclaration(node)) {
+      const clause = node.importClause;
+      if (clause?.name !== undefined) names.add(clause.name.text);
+      const bindings = clause?.namedBindings;
+      if (bindings !== undefined) {
+        if (ts.isNamespaceImport(bindings)) names.add(bindings.name.text);
+        else for (const element of bindings.elements) names.add(element.name.text);
+      }
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  BOUND_IN_FILE.set(sourceFile, names);
+  return names;
+}
+
+/** Every `return <expression>` in this body, skipping nested functions. */
+function returnExpressionsOf(body) {
+  const found = [];
+  const visit = (node) => {
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return; // A nested function's returns are its own, not this one's status.
+    }
+    if (ts.isReturnStatement(node)) {
+      if (node.expression !== undefined) found.push(node.expression);
+      return;
+    }
+    node.forEachChild(visit);
+  };
+  body.forEachChild(visit);
+  return found;
+}
+
+/** The function this file declares under `name`, however it is spelled. */
+function functionNamed(sourceFile, name) {
+  let found;
+  const consider = (node) => {
+    if (found !== undefined) return;
+    if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
+      found = node;
+      return;
+    }
+    if (ts.isVariableStatement(node)) {
+      for (const declaration of node.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue;
+        const initializer =
+          declaration.initializer === undefined ? undefined : unwrap(declaration.initializer);
+        if (
+          initializer !== undefined &&
+          (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))
+        ) {
+          found = initializer;
+        }
+      }
+    }
+  };
+  for (const statement of sourceFile.statements) consider(statement);
+  return found;
 }
 
 /**
@@ -1133,21 +1353,158 @@ function text(sourceFile, node) {
  * @returns {string[]} human-readable problems; empty means every guard is sound
  */
 export function mainGuardProblems(directory, read = (path) => readFileSync(path, 'utf8')) {
+  return scan(directory, read, guardProblems);
+}
+
+/**
+ * The round-4 entry-point comparison, wherever in the repository it is written.
+ *
+ * ── THE SCAN ROOT WAS A CLAIM NOBODY MADE (#40 round 9, D7) ─────────────────
+ * `mainGuardProblems` is called as `mainGuardProblems(at('scripts'))` and
+ * nowhere else, so its subject is one directory of this repository — and a
+ * blind critic pointed the shipped scanner at `packages/ingest/src` and got
+ * **five problems**, including the exact round-4 comparison
+ * (`entry === fileURLToPath(import.meta.url)` over a resolved `process.argv[1]`)
+ * living in a published CLI. Reproduced: `node packages/ingest/dist/cli.js`
+ * prints usage; the same file **through a symlink prints nothing and exits 0**.
+ * The defect this whole scanner exists for was live in shipped code, outside the
+ * only directory anything looked at.
+ *
+ * The rest of `guardProblems` cannot simply be pointed at the product: it is a
+ * ruleset about *entry points under `scripts/`*, where the exit status is the
+ * gate. A server may register a `SIGTERM` listener and a vitest config may reach
+ * for `import.meta.dirname`; those rules would report seventeen problems in
+ * `apps/` that are not defects. What *is* universal is the one thing round 4 was
+ * about: **deciding whether you were run by comparing a URL against a path**.
+ * That question has exactly one right answer everywhere, so it is asked
+ * everywhere, and the rest of the ruleset keeps its narrower subject.
+ *
+ * @param {string} directory
+ * @param {(path: string) => string} [read]
+ * @returns {string[]}
+ */
+export function entryDecisionProblems(directory, read = (path) => readFileSync(path, 'utf8')) {
+  return scan(directory, read, entryDecisionOf);
+}
+
+/** Directories no scan of source descends into. */
+const NOT_SOURCE = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  '.next',
+  '.turbo',
+  '.git',
+  'coverage',
+  'test-results',
+  'playwright-report',
+]);
+
+/**
+ * Every file under `directory`, walked once, put through `check`.
+ *
+ * ── AND A SYMLINKED DIRECTORY IS A DIRECTORY (#40 round 9, D7) ──────────────
+ * `readdirSync(…, { withFileTypes: true })` reports a symlink as a symlink, not
+ * as whatever it points at, so `entry.isDirectory()` is false for a symlinked
+ * directory and round 8's walk **skipped the whole subtree in silence**. The
+ * extension rule two lines down was widened in round 6 for exactly this class of
+ * reasoning ("the only one today" is the assumption that made the original
+ * defect latent) and the directory test was left as it was. `scripts/x -> ../y`
+ * is one command.
+ *
+ * Resolved with `realpathSync` and remembered, so a link that points at an
+ * ancestor is walked once instead of forever, and a link to a file is read as
+ * the file it is.
+ */
+function scan(directory, read, check, seen = new Set()) {
   const problems = [];
-  // Recursive, because "the directory happens to be flat today" is the same kind
-  // of assumption as "the checkout path happens to have no space in it" — which
-  // is what made the original defect latent rather than absent.
+  let here;
+  try {
+    here = realpathSync(directory);
+  } catch (error) {
+    return [
+      `${directory} could not be resolved for the guard scan (${error.message}). A scanner that skips what it cannot resolve is a scanner with a hole shaped like a dangling symlink.`,
+    ];
+  }
+  if (seen.has(here)) return problems;
+  seen.add(here);
   for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
     a.name.localeCompare(b.name),
   )) {
     const full = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === 'node_modules') continue;
-      problems.push(...mainGuardProblems(full, read));
+    let directoryHere = entry.isDirectory();
+    if (entry.isSymbolicLink()) {
+      try {
+        directoryHere = statSync(full).isDirectory();
+      } catch {
+        continue; // A dangling link holds no source.
+      }
+    }
+    if (directoryHere) {
+      if (NOT_SOURCE.has(entry.name)) continue;
+      problems.push(...scan(full, read, check, seen));
       continue;
     }
     if (!SCANNED.test(entry.name)) continue;
-    problems.push(...guardProblems(full, read(full)));
+    problems.push(...check(full, read(full)));
   }
   return problems;
+}
+
+/**
+ * One file's answer to "was I run?", judged only on whether it is the round-4
+ * comparison. Everything else `guardProblems` says is out of scope here.
+ *
+ * @param {string} path
+ * @param {string} source
+ * @returns {string[]}
+ */
+function entryDecisionOf(path, source) {
+  let sourceFile;
+  try {
+    sourceFile = parse(path, source);
+  } catch (error) {
+    return [
+      `${path} could not be parsed (${error.message}), so its entry decision cannot be read.`,
+    ];
+  }
+  if (sourceFile.parseDiagnostics?.length > 0) {
+    const first = sourceFile.parseDiagnostics[0];
+    return [
+      `${path} does not parse (${ts.flattenDiagnosticMessageText(first.messageText, ' ')}), so nothing here can tell how it decides whether it was run.`,
+    ];
+  }
+  const problems = [];
+  const visit = (node) => {
+    if (ts.isBinaryExpression(node) && EQUALITY.has(node.operatorToken.kind)) {
+      const sides = [unwrap(node.left), unwrap(node.right)];
+      if (sides.some((side) => isEntryArgv(side, sourceFile))) {
+        problems.push(
+          `${path}:${line(sourceFile, node)} compares an \`argv\` element for equality (\`${text(sourceFile, node)}\`). Whatever it is compared against, that is the round-4 guard with the other half renamed. ${BROKEN_GUARD_ADVICE}`,
+        );
+      } else if (sides.some((side) => mentionsImportMetaUrl(side))) {
+        problems.push(
+          `${path}:${line(sourceFile, node)} decides whether it was run by comparing \`import.meta.url\` against a path (\`${text(sourceFile, node)}\`). ${BROKEN_GUARD_ADVICE}`,
+        );
+      }
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return problems;
+}
+
+/** `import.meta.url` anywhere inside this expression, however it is wrapped. */
+function mentionsImportMetaUrl(node) {
+  let found = false;
+  const visit = (child) => {
+    if (found) return;
+    if (isImportMetaUrl(child)) {
+      found = true;
+      return;
+    }
+    child.forEachChild(visit);
+  };
+  visit(node);
+  return found;
 }

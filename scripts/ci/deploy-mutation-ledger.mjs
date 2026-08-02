@@ -1262,25 +1262,45 @@ function requireStableTree(before) {
   return now;
 }
 
-const argv = process.argv.slice(2);
-if (argv.includes('--pipeline')) {
+/**
+ * Print the pipeline this ledger runs, and check it covers the job.
+ *
+ * ── THE HATCH THIS ROUND CLOSED, AND WHY IT WAS HERE (#40 round 9, D3) ──────
+ * Round 8 wrote this as `process.exit(statusOf(problems))` over
+ *
+ *     function statusOf(problems) { return problems.length > 0 ? 1 : 0; }
+ *
+ * with a comment conceding that `guard-scan.mjs` "cannot read the difference
+ * between a condition derived from the work and one derived from the machine".
+ * A blind critic read that as the instruction it was: `function statusOf() {
+ * return process.env.CI === undefined ? main() : 0; }` plus
+ * `process.exit(statusOf())` measured **0 problems** from the scanner, and
+ * weaponised on `assert-vitest-report.mjs` it turned "the suite actually ran"
+ * into a silent exit 0 with every gate green. The concession was the defect: a
+ * repository that ships the shape it says it cannot check has taught the shape.
+ *
+ * A function whose *whole body* is a conditional over a value handed to it is a
+ * ternary with a name, and `guard-scan.mjs` refuses that now. This function is
+ * not that: it does the work — prints the pipeline, runs `checkCoverage` — and
+ * its status is the result. That is the difference the rule can read, and this
+ * is what it looks like to be on the right side of it.
+ *
+ * @returns {number} exit status
+ */
+function describePipeline() {
   console.info(`The \`deploy\` job of ${WORKFLOW}, as this ledger runs it:\n`);
   for (const [index, stage] of PIPELINE.entries()) {
     console.info(`  ${String(index + 1).padStart(2)}. ${stage.id.padEnd(26)} ${stage.name}`);
   }
   const problems = checkCoverage();
   for (const problem of problems) console.error(`::error::deploy-mutation-ledger: ${problem}`);
-  // `process.exit(problems.length > 0 ? 1 : 0)` says the same thing and is
-  // refused by `guard-scan.mjs`: a ternary in an exit's argument is the shape
-  // `process.env.CI === undefined ? await main() : 0` takes, and the rule cannot
-  // read the difference between a condition derived from the work and one
-  // derived from the machine. So the derivation gets a name.
-  process.exit(statusOf(problems));
+  if (problems.length > 0) return 1;
+  return 0;
 }
 
-/** A problem list as an exit status: anything found is a failing run. */
-function statusOf(problems) {
-  return problems.length > 0 ? 1 : 0;
+const argv = process.argv.slice(2);
+if (argv.includes('--pipeline')) {
+  process.exit(describePipeline());
 }
 
 const coverage = checkCoverage();
