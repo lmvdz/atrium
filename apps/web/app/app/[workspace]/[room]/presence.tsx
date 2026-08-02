@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { systemText } from '@/src/components/model/quotation';
 import styles from '../../workspace.module.css';
 
 /**
@@ -101,7 +102,16 @@ export function Presence({ roomId, wsUrl }: { roomId: string; wsUrl: string }) {
       {members.map((member) => (
         <span className={styles.presenceMember} data-testid="presence-member" key={member.userId}>
           <span aria-hidden="true" className={styles.presenceDot} />
-          {member.displayName}
+          {/* A NAME OFF THE WIRE IS STILL A STRING THIS PAGE PRINTS.
+              `members` is client state fed by the realtime server's roster
+              frame, so the analysis in `test/printed.ts` correctly refuses to
+              trace it: nothing in this file says where those characters came
+              from. It goes through the same door `RoomHead` puts a member name
+              through — the page is STATING who is here, in its own voice, so
+              `systemText` is the check, and a roster frame carrying quotation
+              marks or a speech-report verb is refused loudly by `app/error.tsx`
+              rather than painted as somebody talking. */}
+          {systemText(member.displayName, 'Presence member')}
         </span>
       ))}
       {denial ? (

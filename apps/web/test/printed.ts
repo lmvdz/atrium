@@ -82,6 +82,38 @@ const REGISTER_DOORS: ReadonlySet<string> = new Set([
      knows both operands, and the register is where both live. */
   'sourceLocation',
   'useCitedLocation',
+  /* ---------------------------------------------------------------------------
+   * THE OTHER REGISTER — the durable one, added when the auth lane (#26) merged.
+   *
+   * This sweep was written against a page whose register is the in-memory record
+   * ledger above. `apps/web` now also serves workspace, membership and invitation
+   * routes whose register is POSTGRES, reached through the named loaders in
+   * `lib/workspaces.ts` and `lib/session.ts`. Same category, different store: each
+   * one runs a query and returns rows, and a row's `displayName`, `email`, `role`,
+   * `slug` or workspace name is not a string this page authored — it is what the
+   * record says, which is the exact thing the paragraph above licenses.
+   *
+   * They are named ONE BY ONE and not by module or by prefix. `lib/` also holds
+   * `authErrorMessage` (page-authored copy out of a literal table) and
+   * `safeNextPath` (a validator, not a lookup), and neither is a register door —
+   * a rule of the form "anything from lib/ is a record" would have laundered both.
+   * The four `authorize`/`slugify`-shaped helpers in the same files are absent
+   * for the same reason: nothing printed comes through them.
+   *
+   * WHAT THIS DOES NOT BUY: it says the VALUE came from the record. It says
+   * nothing about the record being true, and it does not exempt these files from
+   * anything else — a literal typed into one of those pages is still page-authored
+   * and still has to go through `systemText`.
+   * ------------------------------------------------------------------------- */
+  'requireSession',
+  'currentSession',
+  'listWorkspacesFor',
+  'loadWorkspace',
+  'listRoomsFor',
+  'loadRoom',
+  'listMembers',
+  'listPendingInvitations',
+  'loadInvitation',
 ]);
 
 /**
@@ -138,6 +170,13 @@ const SHAPE_METHODS: ReadonlySet<string> = new Set([
   'padEnd',
   'toString',
   'toFixed',
+  /* A Date's machine forms. The RECEIVER still has to be compliant — these only
+     say that turning a moment into digits adds no authored words — and the two
+     live sites are `invitation.expiresAt.toISOString().slice(0, 10)`, whose
+     receiver traces to the `loadInvitation` register door. Without this the
+     sweep reported a fixed-width date string as untraceable page copy. */
+  'toISOString',
+  'toJSON',
   'toLocaleString',
 ]);
 
@@ -444,6 +483,36 @@ class FileAnalysis {
     }
     if (ts.isPropertyAccessExpression(callee)) {
       const method = callee.name.getText(this.file);
+      /* `Promise.all([a, b, c])` — CONCURRENCY IS NOT PROVENANCE.
+         The auth lane's workspace page loads rooms, members and invitations in
+         one `Promise.all` and destructures the result, and every field printed
+         off those rows was reported as `.all() is not a shape this analysis can
+         trace`: true of the METHOD, and beside the point about the VALUES, which
+         came from three register doors named on the line above.
+
+         The rule stated conservatively, so it cannot launder anything: the
+         result is compliant only when EVERY element of the argument is. That is
+         stricter than tracing the destructured index to its own element — an
+         array literal with one untraceable member is reported even if the field
+         actually printed came from a traceable one — and strictness is the safe
+         direction for a sweep whose verdict is "I could not check this".
+
+         Anything other than a plain array literal argument (a spread, a variable,
+         a generator) falls through to the ordinary refusal below. */
+      if (
+        (method === 'all' || method === 'allSettled') &&
+        callee.expression.getText(this.file) === 'Promise'
+      ) {
+        const list = call.arguments[0];
+        if (list === undefined || !ts.isArrayLiteralExpression(list)) {
+          return `Promise.${method}() with an argument this analysis cannot read`;
+        }
+        for (const element of list.elements) {
+          const why = this.compliant(element, depth + 1, container);
+          if (why !== null) return why;
+        }
+        return null;
+      }
       if (SHAPE_METHODS.has(method)) {
         return (
           this.compliant(callee.expression, depth + 1, container) ??

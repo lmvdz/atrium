@@ -222,6 +222,11 @@ const EXEMPT: readonly { readonly file: string; readonly expr: string; readonly 
     expr: 'error.message',
     why: 'the same, at the root layout — the one boundary that has no boundary above it',
   },
+  {
+    file: 'app/(auth)/sign-in/page.tsx',
+    expr: 'target',
+    why: 'THE INSTRUMENT IS WIDER THAN ITS OWN RULE HERE, and this entry is the receipt for that. `model/printed-surface.ts` states the bound in its own words — "`input` is here for `type="button" | "submit" | "reset"`, where the value IS the button\'s face; on every other input type the value is what the person typed, which is their own words and not the page printing anything" — but `announcesText(attribute, tag)` is given the TAG and not the TYPE, so it answers `true` for `value` on every `<input>`. Both sites are `<input type="hidden" name="next" value={target} />`: never painted, never in the accessibility tree, never announced, and read only by the server action on submit. The value is not laundered either — `safeNextPath` is why it is safe to REDIRECT to (same-origin, no protocol-relative `//`, no `/\\`), and it is deliberately NOT in REGISTER_DOORS because it is a validator on a query parameter and not a lookup in a record. It is also not a candidate for `systemText`: a `next` parameter carrying a quotation mark is a URL, not a system-voice defect, and holding it to that rule would turn `/sign-in?next=%2Fapp%3Fq%3D%22x%22` into a thrown page. The durable fix is to give `announcesText` the input\'s `type` so both enforcers narrow together; doing that inside a merge would change the denominator of the whole sweep, so it is recorded here instead',
+  },
 ];
 
 function key(finding: { file: string; expr: string }): string {

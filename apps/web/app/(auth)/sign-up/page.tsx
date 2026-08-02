@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { oauthEnabled } from '@/lib/auth';
 import { authErrorMessage } from '@/lib/auth-errors';
 import { currentSession } from '@/lib/session';
+import { systemText } from '@/src/components/model/quotation';
 import { signInWithGitHubAction, signUpAction } from '../actions';
 import styles from '../auth.module.css';
 
@@ -30,7 +31,14 @@ export default async function SignUpPage({
 
         {message ? (
           <p className={styles.error} role="alert" data-testid="form-error">
-            {message}
+            {/* THE PAGE'S OWN COPY, THROUGH THE PAGE'S OWN DOOR. `message` is
+                one of the seven literals in `lib/auth-errors.ts`, which is
+                page-authored text in the system's voice — exactly what
+                `systemText` is for. It is not a formality: the check is what
+                stops the eighth entry being written with quotation marks or a
+                "we could not…" first person, which is how a refusal starts
+                reading as somebody speaking. */}
+            {systemText(message, 'sign-up form error')}
           </p>
         ) : null}
 
