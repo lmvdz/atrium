@@ -9,7 +9,6 @@ import { createHeadAcks } from './head-acks.js';
 import { createHub, type Hub } from './hub.js';
 import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
 import type { Logger } from './logger.js';
-import { toHeaders } from './ws-auth.js';
 import { ClientFrame, type EphemeralFrame, type ServerFrame, type WireEvent } from './protocol.js';
 import { createReconciler, DEFAULT_RECONCILE_INTERVAL_MS, type Reconciler } from './reconciler.js';
 import {
@@ -18,6 +17,7 @@ import {
   type Session,
   type SessionAuthenticator,
 } from './session.js';
+import { toHeaders } from './ws-auth.js';
 
 /**
  * How long a revoked member may still be receiving a room, in milliseconds.

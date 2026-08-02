@@ -426,12 +426,7 @@ export function createCommandService({
         // directly — the boundary `packages/auth/test/room-access.test.ts`
         // asserts and the merge re-opened. The clamp and the error mapping are
         // this command's business and stay here; the table is not.
-        const updated = await advanceSeenSeq(
-          db,
-          command.roomId,
-          session.userId,
-          command.roomSeq,
-        )
+        const updated = await advanceSeenSeq(db, command.roomId, session.userId, command.roomSeq)
           .then((row) => (row ? [row] : []))
           .catch((error: unknown) => {
             if (describeCause(error).includes('memberships_seen_seq_within_room_head')) {

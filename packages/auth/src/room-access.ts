@@ -326,7 +326,10 @@ export async function roomMembershipsHeld(
     .innerJoin(rooms, eq(memberships.roomId, rooms.id))
     .innerJoin(workspaceMembers, roomWorkspaceMemberJoin)
     .where(
-      and(sql`(${memberships.userId}, ${memberships.roomId}) IN (${tuples})`, isNull(rooms.archivedAt)),
+      and(
+        sql`(${memberships.userId}, ${memberships.roomId}) IN (${tuples})`,
+        isNull(rooms.archivedAt),
+      ),
     );
   for (const row of rows) {
     // Present in the join but with no readable authority is still "not a member".

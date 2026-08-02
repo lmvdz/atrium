@@ -81,6 +81,7 @@
       "includes": [
         "**/*.config.*",
         "**/scripts/**",
+        "design/*.mjs",
         "apps/server/src/**",
         "packages/core/mutants/**",
         "mutants/**"

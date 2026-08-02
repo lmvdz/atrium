@@ -46,7 +46,6 @@ async function main(): Promise<void> {
     logger,
   });
 
-
   /* ---------------------------------------------------------------------------
    * WHAT THE MERGE WIRED, AND THE ONE THING IT LEFT UNWIRED.
    *

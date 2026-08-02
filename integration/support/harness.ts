@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { createDatabase, type DatabaseHandle } from '@atrium/db';
 // `workspaceMembers` lives in `@atrium/db`'s auth-schema module, which the
 // `/schema` subpath does not re-export; the package root does.
-import { workspaceMembers } from '@atrium/db';
+import { createDatabase, type DatabaseHandle, workspaceMembers } from '@atrium/db';
 import { memberships, rooms, users, workspaces } from '@atrium/db/schema';
 import { sql } from 'drizzle-orm';
 import { WebSocket } from 'ws';

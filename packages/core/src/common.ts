@@ -104,7 +104,6 @@ declare const receiptTextBrand: unique symbol;
  */
 export type ReceiptText = string & { readonly [receiptTextBrand]: true };
 
-
 /* ---------------------------------------------------------------------------
  * THE TIMESTAMP TYPE BELOW IS THE REALTIME LANE'S, NOT THE CORE LANE'S, AND
  * THAT IS THE MERGE DECISION.
