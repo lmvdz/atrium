@@ -27,9 +27,7 @@
       "file": "src/reduce.ts",
       "find": "  const parsed = CoreEvent.safeParse(event);\n  if (!parsed.success) {\n    return {\n      outcome: 'malformed',\n      event,\n      actor: trusted.actor,\n      detail: parseFailureDetail(parsed.error),\n      state,\n    };\n  }\n  const entry: AuthoredEvent = { ...trusted, event: parsed.data };\n  const rejection = rejectionFor(state, parsed.data);\n  if (rejection) {\n    return { outcome: 'rejected', event: parsed.data, actor: trusted.actor, ...rejection, state };\n  }",
       "replace": "  const entry: AuthoredEvent = { ...trusted, event };\n  const rejection = rejectionFor(state, event);\n  if (rejection) {\n    return { outcome: 'rejected', event, actor: trusted.actor, ...rejection, state };\n  }",
-      "catches": [
-        "refuses a raw payload that smuggles an actor, naming the seam"
-      ]
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
     },
     {
       "id": "boundary_parse_dropped_fold",
@@ -49,9 +47,7 @@
       "file": "src/authority.ts",
       "find": "  if (window === undefined || window.length === 0 || !window.some((m) => hasContent(m.body))) {",
       "replace": "  if (window === undefined) {",
-      "catches": [
-        "refuses `messages: []` at the reducer, exactly as it refuses no messages"
-      ]
+      "catches": ["refuses `messages: []` at the reducer, exactly as it refuses no messages"]
     },
     {
       "id": "empty_window_engine",
@@ -162,9 +158,7 @@
       "file": "src/acceptance.ts",
       "find": "    if (alignTokens(have, wanted).borne) return candidate;",
       "replace": "    const shared = new Set(have).size === 0 ? 0 : wanted.filter((t) => have.includes(t)).length;\n    if (shared / Math.max(wanted.length, have.length) >= 0.8) return candidate;",
-      "catches": [
-        "does not discard a reading that says the opposite of the accepted one"
-      ]
+      "catches": ["does not discard a reading that says the opposite of the accepted one"]
     },
     {
       "id": "claim_theta_auto_lowered",
@@ -184,10 +178,7 @@
       "file": "src/policy.ts",
       "find": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),",
       "replace": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.3, autoAccept: true }),",
-      "catches": [
-        "is exactly this table",
-        "discards a hair under θ_min (0.4999)"
-      ]
+      "catches": ["is exactly this table", "discards a hair under θ_min (0.4999)"]
     },
     {
       "id": "floor_decoupled_from_theta",
@@ -240,9 +231,7 @@
       "file": "src/events.ts",
       "find": "    if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
       "replace": "    if (false && value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
-      "catches": [
-        "refuses a raw payload that smuggles an actor, naming the seam"
-      ]
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
     },
     {
       "id": "receipt_skipped_entirely",
@@ -262,9 +251,7 @@
       "file": "src/authority.ts",
       "find": "  if (canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
       "replace": "  if (false && canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
-      "catches": [
-        "refuses an acceptance whose payload is not the one that was staged"
-      ]
+      "catches": ["refuses an acceptance whose payload is not the one that was staged"]
     },
     {
       "id": "provenance_binding_disabled",
@@ -272,9 +259,7 @@
       "file": "src/authority.ts",
       "find": "  if (canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
       "replace": "  if (false && canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
-      "catches": [
-        "refuses an acceptance that pads or drops cited messages on the way through"
-      ]
+      "catches": ["refuses an acceptance that pads or drops cited messages on the way through"]
     },
     {
       "id": "proposer_binding_disabled",
@@ -315,9 +300,7 @@
       "file": "src/reduce.ts",
       "find": "  if (object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
       "replace": "  if (false && object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
-      "catches": [
-        "refuses a claim born verified on a model actor’s word"
-      ]
+      "catches": ["refuses a claim born verified on a model actor’s word"]
     },
     {
       "id": "direct_acceptance_gate_disabled",
@@ -336,9 +319,7 @@
       "file": "src/reduce.ts",
       "find": "    if (!isHuman(actor)) {\n      fail(\n        state,\n        event.id,\n        humanOnlyRefusal('answer_relation', actor, `relation \"${relation.id}\"`),\n      );\n      return false;\n    }",
       "replace": "    if (false) return false;",
-      "catches": [
-        "refuses a model answering an open question"
-      ]
+      "catches": ["refuses a model answering an open question"]
     },
     {
       "id": "supersession_policy_narrowed",
@@ -346,10 +327,7 @@
       "file": "src/reduce.ts",
       "find": "    if (decideSupersession(retired).authority === 'requires_human' && !isHuman(actor)) {",
       "replace": "    if (retired === 'decision' && !isHuman(actor)) {",
-      "catches": [
-        "refuses a model retiring a commitment",
-        "refuses a model retiring an objective"
-      ]
+      "catches": ["refuses a model retiring a commitment", "refuses a model retiring an objective"]
     },
     {
       "id": "corrections_human_gate_disabled",
@@ -357,9 +335,7 @@
       "file": "src/reduce.ts",
       "find": "  if (!isHuman(actor)) {\n    const verifying =",
       "replace": "  if (false) {\n    const verifying =",
-      "catches": [
-        "refuses a system actor correction as well"
-      ]
+      "catches": ["refuses a system actor correction as well"]
     },
     {
       "id": "blockquote_stripping_neutered",
@@ -367,9 +343,7 @@
       "file": "src/escalation.ts",
       "find": "    .filter((line) => !BLOCKQUOTE_LINE.test(line))\n    .join('\\n');",
       "replace": "    .join('\\n');",
-      "catches": [
-        "refuses one whose quote is only inside somebody else’s blockquote"
-      ]
+      "catches": ["refuses one whose quote is only inside somebody else’s blockquote"]
     },
     {
       "id": "answer_binding_order_check_dropped",
@@ -377,9 +351,7 @@
       "file": "src/acceptance.ts",
       "find": "  if (\n    compareCursor({ at: command.at, id: acceptEventId }, { at: command.at, id: relationEventId }) >=\n    0\n  ) {",
       "replace": "  if (false) {",
-      "catches": [
-        "refuses ids whose order would put the edge before the object"
-      ]
+      "catches": ["refuses ids whose order would put the edge before the object"]
     },
     {
       "id": "answer_binding_question_open_check_dropped",
@@ -387,9 +359,7 @@
       "file": "src/acceptance.ts",
       "find": "  if (record.object.payload.status !== 'open') {",
       "replace": "  if (false) {",
-      "catches": [
-        "refuses a question that is already answered"
-      ]
+      "catches": ["refuses a question that is already answered"]
     },
     {
       "id": "attention_reads_its_own_theta",
@@ -397,9 +367,7 @@
       "file": "src/attention.ts",
       "find": "    if (verdict.visibility !== 'needs_you') continue;",
       "replace": "    if (verdict.visibility === 'nowhere-at-all') continue;",
-      "catches": [
-        "stays quiet about a decision the engine would not surface"
-      ]
+      "catches": ["stays quiet about a decision the engine would not surface"]
     },
     {
       "id": "attention_priority_tiers_swapped",
@@ -407,9 +375,7 @@
       "file": "src/attention.ts",
       "find": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 0,",
       "replace": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 9,",
-      "catches": [
-        "gives every class a tier, and every tier a distinct rank"
-      ]
+      "catches": ["gives every class a tier, and every tier a distinct rank"]
     },
     {
       "id": "ordering_gate_loosened",
@@ -417,9 +383,7 @@
       "file": "src/reduce.ts",
       "find": "  if (state.cursor && compareCursor(cursor, state.cursor) <= 0) {",
       "replace": "  if (state.cursor && compareCursor(cursor, state.cursor) < 0) {",
-      "catches": [
-        "rejects an event that lands on exactly the cursor"
-      ]
+      "catches": ["rejects an event that lands on exactly the cursor"]
     },
     {
       "id": "consumed_ids_not_spent_on_failure",
@@ -427,9 +391,7 @@
       "file": "src/reduce.ts",
       "find": "  state.consumedEventIds.push(event.id);",
       "replace": "  if (applied) state.consumedEventIds.push(event.id);",
-      "catches": [
-        "spends the id of an event that was consumed but did not apply"
-      ]
+      "catches": ["spends the id of an event that was consumed but did not apply"]
     },
     {
       "id": "amend_may_touch_attribution",
@@ -437,9 +399,7 @@
       "file": "src/reduce.ts",
       "find": "  } else if (touchesAttribution) {",
       "replace": "  } else if (false && touchesAttribution) {",
-      "catches": [
-        "refuses an amend that would move the obligation instead"
-      ]
+      "catches": ["refuses an amend that would move the obligation instead"]
     },
     {
       "id": "noop_amend_silent_again",
@@ -458,9 +418,7 @@
       "file": "src/escalation.ts",
       "find": "  'i stand corrected',\n  'my mistake',\n",
       "replace": "  'my mistake',\n",
-      "catches": [
-        "is exactly this list"
-      ]
+      "catches": ["is exactly this list"]
     },
     {
       "id": "one_future_pattern_deleted",
@@ -468,10 +426,7 @@
       "file": "src/escalation.ts",
       "find": "  /\\bplease\\s+(?:can|could|take|handle|own|pick up|review|land|ship)\\b/i,\n",
       "replace": "",
-      "catches": [
-        "is exactly these five patterns",
-        "has a case for every pattern"
-      ]
+      "catches": ["is exactly these five patterns", "has a case for every pattern"]
     },
     {
       "id": "escalation_scan_cap_loosened",
@@ -479,9 +434,7 @@
       "file": "src/escalation.ts",
       "find": "  const body = message.body.slice(0, config.maxScanChars);",
       "replace": "  const body = message.body;",
-      "catches": [
-        "bounds the work per call, so content cannot choose the cost"
-      ]
+      "catches": ["bounds the work per call, so content cannot choose the cost"]
     },
     {
       "id": "rationale_accepts_a_bare_string",
@@ -489,9 +442,7 @@
       "file": "src/attention.ts",
       "find": "export const RationaleReason = z.discriminatedUnion('kind', [",
       "replace": "export const RationaleReason = z.union([z.string(), ...[]] as never) ?? z.discriminatedUnion('kind', [",
-      "catches": [
-        "requires a structured reason — no unexplained attention, and no free text"
-      ]
+      "catches": ["requires a structured reason — no unexplained attention, and no free text"]
     },
     {
       "id": "subject_kind_default_restored",
@@ -499,9 +450,7 @@
       "file": "src/attention.ts",
       "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal']);",
       "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal']).default('object');",
-      "catches": [
-        "has no default for subjectKind — the wrong value there is unfalsifiable"
-      ]
+      "catches": ["has no default for subjectKind — the wrong value there is unfalsifiable"]
     },
     {
       "id": "counterexample_voice_reverted",
@@ -509,9 +458,7 @@
       "file": "src/corrections.ts",
       "find": "correction note:",
       "replace": "the room said:",
-      "catches": [
-        "formats a block ready to inject, quoting the note as a note"
-      ]
+      "catches": ["formats a block ready to inject, quoting the note as a note"]
     },
     {
       "id": "blank_window_reducer",
@@ -519,9 +466,7 @@
       "file": "src/authority.ts",
       "find": "  if (window === undefined || window.length === 0 || !window.some((m) => hasContent(m.body))) {",
       "replace": "  if (window === undefined || window.length === 0) {",
-      "catches": [
-        "refuses a window of messages that exist and say nothing, at the reducer"
-      ]
+      "catches": ["refuses a window of messages that exist and say nothing, at the reducer"]
     },
     {
       "id": "blank_window_engine",
@@ -529,9 +474,7 @@
       "file": "src/acceptance.ts",
       "find": "    messages === undefined || messages.length === 0 || !messages.some((m) => hasContent(m.body));",
       "replace": "    messages === undefined || messages.length === 0;",
-      "catches": [
-        "refuses a window of messages that exist and say nothing, at the engine"
-      ]
+      "catches": ["refuses a window of messages that exist and say nothing, at the engine"]
     },
     {
       "id": "reducer_quote_gate_rescoped",
@@ -608,9 +551,7 @@
       "file": "src/matching.ts",
       "find": "  for (; j < statement.length; j += 1) {\n    const leftover = statement[j];\n    if (leftover !== undefined) unaccounted(leftover, unmatchedInStatement);\n  }",
       "replace": "  j = statement.length;",
-      "catches": [
-        "refuses a statement that runs past the end of its quote"
-      ]
+      "catches": ["refuses a statement that runs past the end of its quote"]
     },
     {
       "id": "ordered_tokens_dedup",
@@ -629,9 +570,7 @@
       "file": "src/matching.ts",
       "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForReceipt(text).match(TOKEN) ?? [];\n}",
       "replace": "export function orderedTokens(text: string): string[] {\n  return (normalizeForReceipt(text).match(TOKEN) ?? []).filter((token) => token.length > 2);\n}",
-      "catches": [
-        "keeps two-letter words, because \"no\" inverts a sentence"
-      ]
+      "catches": ["keeps two-letter words, because \"no\" inverts a sentence"]
     },
     {
       "id": "receipt_policy_droppable_restored",
@@ -663,9 +602,7 @@
       "file": "src/escalation.ts",
       "find": "      if (bearingResult.undecidable !== null) {",
       "replace": "      if (false) {",
-      "catches": [
-        "refers it rather than rejecting it"
-      ]
+      "catches": ["refers it rather than rejecting it"]
     },
     {
       "id": "refer_severity_ignored_reducer",
@@ -673,9 +610,7 @@
       "file": "src/authority.ts",
       "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
       "replace": "  const referring = referringProblems(problems);\n  if (false) {",
-      "catches": [
-        "refuses the exact pair from the gauntlet at the reducer, where it is a boundary"
-      ]
+      "catches": ["refuses the exact pair from the gauntlet at the reducer, where it is a boundary"]
     },
     {
       "id": "refer_severity_ignored_engine",
@@ -726,9 +661,7 @@
       "file": "src/matching.ts",
       "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
       "replace": "  const folded = text.replace(/[’ʼ]/g, \"'\");",
-      "catches": [
-        "matches a quote whose words a zero-width character was spliced into"
-      ]
+      "catches": ["matches a quote whose words a zero-width character was spliced into"]
     },
     {
       "id": "ordered_tokens_ascii_only",
@@ -760,9 +693,7 @@
       "file": "src/matching.ts",
       "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
       "replace": "  const folded = text.replace(/(\\*{1,3})(?=\\S)([\\s\\S]*?\\S)\\1/g, '$2').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
-      "catches": [
-        "does not fold an asterisk that is doing arithmetic or globbing"
-      ]
+      "catches": ["does not fold an asterisk that is doing arithmetic or globbing"]
     },
     {
       "id": "quote_anchoring_disabled",
@@ -783,9 +714,7 @@
       "file": "src/matching.ts",
       "find": "      if (run.length > wanted.length) break;\n      if (run.length === wanted.length && sameRun(run, wanted)) return true;",
       "replace": "      if (run.length > wanted.length + 40) break;\n      if (run.length >= wanted.length && wanted.every((token, index) => token === run[index])) return true;",
-      "catches": [
-        "refuses a quote that stops before the qualifier in its own sentence"
-      ]
+      "catches": ["refuses a quote that stops before the qualifier in its own sentence"]
     },
     {
       "id": "sentence_split_ignores_terminators",
@@ -793,9 +722,7 @@
       "file": "src/matching.ts",
       "find": "const SENTENCE_BREAK = /(?<=[.!?…。？！])\\p{White_Space}+|[\\n\\v\\f\\r\\u0085\\u2028\\u2029]+/u;",
       "replace": "const SENTENCE_BREAK = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]+/u;",
-      "catches": [
-        "accepts a run of several whole sentences, and refuses half of one"
-      ]
+      "catches": ["accepts a run of several whole sentences, and refuses half of one"]
     },
     {
       "id": "typographic_apostrophe_unfolded",
@@ -803,9 +730,7 @@
       "file": "src/matching.ts",
       "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
       "replace": "  const folded = text.replace(DELETABLE, '');",
-      "catches": [
-        "treats a typographic apostrophe as an apostrophe"
-      ]
+      "catches": ["treats a typographic apostrophe as an apostrophe"]
     },
     {
       "id": "quote_context_unchecked",
@@ -835,9 +760,7 @@
       "file": "src/escalation.ts",
       "find": "    if (\n      fromModel &&\n      subject.type !== 'open_question' &&\n      !isAssertion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
       "replace": "    if (\n      false &&\n      subject.type !== 'open_question' &&\n      !isAssertion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
-      "catches": [
-        "does not mint a question as a claim"
-      ]
+      "catches": ["does not mint a question as a claim"]
     },
     {
       "id": "refer_below_theta_again",
@@ -845,9 +768,7 @@
       "file": "src/acceptance.ts",
       "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
       "replace": "  const referring = referringProblems(problems);\n  if (referring.length > 0 && proposal.confidence >= rule.thetaMin) {",
-      "catches": [
-        "refers an inverted receipt that sits below theta_min"
-      ]
+      "catches": ["refers an inverted receipt that sits below theta_min"]
     },
     {
       "id": "commitment_model_mintable",
@@ -855,9 +776,7 @@
       "file": "src/authority.ts",
       "find": "    case 'commitment':\n      return 'commitment_acceptance';",
       "replace": "    case 'commitment':\n      return null;",
-      "catches": [
-        "refuses a model accepting a commitment before the receipt is even read"
-      ]
+      "catches": ["refuses a model accepting a commitment before the receipt is even read"]
     },
     {
       "id": "objective_model_mintable",
@@ -865,9 +784,7 @@
       "file": "src/authority.ts",
       "find": "    case 'objective':\n      return 'objective_acceptance';",
       "replace": "    case 'objective':\n      return null;",
-      "catches": [
-        "refuses a model accepting an objective — the heading everything is filed under"
-      ]
+      "catches": ["refuses a model accepting an objective — the heading everything is filed under"]
     },
     {
       "id": "normalize_deletes_backticks",
@@ -875,9 +792,7 @@
       "file": "src/matching.ts",
       "find": "const CODE_SPAN = /(```[\\s\\S]*?```|``[\\s\\S]*?``|`[^`\\n]*`)/;",
       "replace": "const CODE_SPAN = /()`+/;",
-      "catches": [
-        "does not accept a quote whose code delimiters the model dropped"
-      ]
+      "catches": ["does not accept a quote whose code delimiters the model dropped"]
     },
     {
       "id": "normalize_drops_link_destination",
@@ -896,9 +811,7 @@
       "file": "src/matching.ts",
       "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
       "replace": "  const folded = text.normalize('NFKC').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
-      "catches": [
-        "does not fold a fullwidth or ligature spelling onto its ASCII form"
-      ]
+      "catches": ["does not fold a fullwidth or ligature spelling onto its ASCII form"]
     },
     {
       "id": "content_excludes_pictographs",
@@ -917,9 +830,7 @@
       "file": "src/reduce.ts",
       "find": "      const refusal = acceptanceReceiptRefusal({",
       "replace": "      const floorFirst = MODEL_ACCEPTANCE_FLOOR[object.type];\n      if (proposal.proposal.confidence < floorFirst) {\n        fail(\n          state,\n          event.id,\n          confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),\n        );\n        return false;\n      }\n      const refusal = acceptanceReceiptRefusal({",
-      "catches": [
-        "reports the receipt fault rather than the confidence, when both hold"
-      ]
+      "catches": ["reports the receipt fault rather than the confidence, when both hold"]
     },
     {
       "id": "later_correction_cap_fails_open",
@@ -927,9 +838,7 @@
       "file": "src/escalation.ts",
       "find": "  if (later.length > policy.maxLaterMessagesScanned) return unscanned('too_many_messages');",
       "replace": "  if (later.length > policy.maxLaterMessagesScanned) return scanned(later.length);",
-      "catches": [
-        "refuses when the window is longer than the scan will read"
-      ]
+      "catches": ["refuses when the window is longer than the scan will read"]
     },
     {
       "id": "question_mark_folded_first",
@@ -937,9 +846,7 @@
       "file": "src/matching.ts",
       "find": "  return !QUESTION_SHAPED.test(text);",
       "replace": "  return !QUESTION_SHAPED.test(text.normalize('NFKC'));",
-      "catches": [
-        "reads a mark a canonical decomposition would destroy"
-      ]
+      "catches": ["reads a mark a canonical decomposition would destroy"]
     },
     {
       "id": "code_span_whitespace_collapsed",
@@ -947,9 +854,7 @@
       "file": "src/matching.ts",
       "find": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').trim() as ReceiptText;",
       "replace": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').replace(/\\s+/g, ' ').trim() as ReceiptText;",
-      "catches": [
-        "refuses to mint a code literal the author did not write, at every layer"
-      ]
+      "catches": ["refuses to mint a code literal the author did not write, at every layer"]
     },
     {
       "id": "dedup_destroys_a_referral",
@@ -957,9 +862,7 @@
       "file": "src/acceptance.ts",
       "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
       "replace": "  const dupFirst = context.acceptedObjects\n    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)\n    : null;\n  if (dupFirst) {\n    return {\n      ...base,\n      verdict: 'discard',\n      visibility: 'none',\n      rule: 'duplicate_of_accepted',\n      duplicateOf: dupFirst.objectId,\n      reason: `the room already accepted \"${dupFirst.objectId}\"`,\n    };\n  }\n  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
-      "catches": [
-        "does not let deduplication destroy a discrepancy nobody has seen"
-      ]
+      "catches": ["does not let deduplication destroy a discrepancy nobody has seen"]
     },
     {
       "id": "bidi_controls_deleted",
@@ -978,9 +881,7 @@
       "file": "src/escalation.ts",
       "find": "  const scanFloor = earliestBearing === -1 ? firstCited : Math.min(firstCited, earliestBearing);",
       "replace": "  const scanFloor = lastCited;",
-      "catches": [
-        "cannot be skipped by padding the citation list"
-      ]
+      "catches": ["cannot be skipped by padding the citation list"]
     },
     {
       "id": "question_mark_set_narrowed",
@@ -988,9 +889,7 @@
       "file": "src/matching.ts",
       "find": "  '\\u00BF', // INVERTED QUESTION MARK — a Spanish interrogative opens with one\n",
       "replace": "",
-      "catches": [
-        "reads a mark that opens the sentence instead of closing it"
-      ]
+      "catches": ["reads a mark that opens the sentence instead of closing it"]
     },
     {
       "id": "coverage_reads_the_stripped_text",
@@ -998,9 +897,7 @@
       "file": "src/escalation.ts",
       "find": "      } else if (!quoteCoversOwnText(quote, bearing.body)) {",
       "replace": "      } else if (!quoteCoversOwnText(quote, ownText)) {",
-      "catches": [
-        "refers a quote whose author put the inverter in their own blockquote"
-      ]
+      "catches": ["refers a quote whose author put the inverter in their own blockquote"]
     },
     {
       "id": "later_revision_addition_only",
@@ -1008,9 +905,7 @@
       "file": "src/escalation.ts",
       "find": "      const contained =\n        aligned.unmatchedInStatement.length === 0 || aligned.unmatchedInQuote.length === 0;",
       "replace": "      const contained =\n        aligned.unmatchedInStatement.length === 0 && aligned.unmatchedInQuote.length > 0;",
-      "catches": [
-        "refuses to certify when a later message drops a word from the sentence"
-      ]
+      "catches": ["refuses to certify when a later message drops a word from the sentence"]
     },
     {
       "id": "later_scan_skips_cited_messages",
@@ -1018,9 +913,7 @@
       "file": "src/escalation.ts",
       "find": "  const later = messages.slice(scanFloor + 1);",
       "replace": "  const later = messages.slice(scanFloor + 1).filter((m) => !cited.has(m.id));",
-      "catches": [
-        "cannot be skipped by citing the correction itself"
-      ]
+      "catches": ["cannot be skipped by citing the correction itself"]
     },
     {
       "id": "whitespace_controls_deleted",
@@ -1028,9 +921,7 @@
       "file": "src/matching.ts",
       "find": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]/gu;\n\n/**\n * **What counts as whitespace**",
       "replace": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]|(?!\\s)\\p{Cc}/gu;\n\n/**\n * **What counts as whitespace**",
-      "catches": [
-        "deletes exactly this set of code points, and fuses two words with none of them"
-      ]
+      "catches": ["deletes exactly this set of code points, and fuses two words with none of them"]
     },
     {
       "id": "whitespace_run_uses_js_s",
@@ -1038,9 +929,7 @@
       "file": "src/matching.ts",
       "find": "const WHITESPACE_RUN = /\\p{White_Space}+/gu;",
       "replace": "const WHITESPACE_RUN = /\\s+/gu;",
-      "catches": [
-        "deletes exactly this set of code points, and fuses two words with none of them"
-      ]
+      "catches": ["deletes exactly this set of code points, and fuses two words with none of them"]
     },
     {
       "id": "ordered_tokens_drops_spaces",
@@ -1073,9 +962,7 @@
       "file": "src/matching.ts",
       "find": "const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|\\S`, 'gu');",
       "replace": "const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
-      "catches": [
-        "drops whitespace from the detector\"s tokens and only from the detector\"s"
-      ]
+      "catches": ["drops whitespace from the detector\"s tokens and only from the detector\"s"]
     },
     {
       "id": "align_borne_read_off_the_diff",
@@ -1107,9 +994,7 @@
       "file": "src/escalation.ts",
       "find": "          severity: tooLong ? 'refer' : 'reject',",
       "replace": "          severity: 'reject',",
-      "catches": [
-        "refers it rather than rejecting it"
-      ]
+      "catches": ["refers it rather than rejecting it"]
     },
     {
       "id": "later_revision_window_gate_removed",
@@ -1141,9 +1026,7 @@
       "file": "src/escalation.ts",
       "find": "  const printable = /^[\\p{L}\\p{N}\\p{M}\\p{P}\\p{S}]+$/u.test(value);",
       "replace": "  const printable = true;",
-      "catches": [
-        "names the difference in a form a reader can act on"
-      ]
+      "catches": ["names the difference in a form a reader can act on"]
     },
     {
       "id": "bearing_result_ignored",
@@ -1165,9 +1048,7 @@
       "file": "src/matching.ts",
       "find": "export const LINE_BREAK = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]/u;",
       "replace": "export const LINE_BREAK = /[\\n]/u;",
-      "catches": [
-        "reads a line break the way every renderer does, not the way a newline does"
-      ]
+      "catches": ["reads a line break the way every renderer does, not the way a newline does"]
     },
     {
       "id": "fragment_scan_cap_reports_a_fragment",
@@ -1175,9 +1056,7 @@
       "file": "src/escalation.ts",
       "find": "      if (sentencesOf(ownText).length > policy.maxScannedSentences) {",
       "replace": "      if (false) {",
-      "catches": [
-        "says the check declined rather than calling a whole body a fragment"
-      ]
+      "catches": ["says the check declined rather than calling a whole body a fragment"]
     },
     {
       "id": "link_title_discarded",
@@ -1185,9 +1064,7 @@
       "file": "src/matching.ts",
       "find": "  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;",
       "replace": "  return `${bang}${linked}`;",
-      "catches": [
-        "keeps a link title, which is text the author wrote"
-      ]
+      "catches": ["keeps a link title, which is text the author wrote"]
     },
     {
       "id": "image_marker_discarded",
@@ -1195,9 +1072,7 @@
       "file": "src/matching.ts",
       "find": "  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;",
       "replace": "  return caption.length === 0 ? linked : `${linked} ${caption}`;",
-      "catches": [
-        "keeps the image marker, so an embed is not a link"
-      ]
+      "catches": ["keeps the image marker, so an embed is not a link"]
     },
     {
       "id": "later_revision_no_citation_reads_clean",
@@ -1205,9 +1080,7 @@
       "file": "src/escalation.ts",
       "find": "  if (firstCited === -1) return unscanned('no_citation_in_the_window');",
       "replace": "  if (firstCited === -1) return scanned(0);",
-      "catches": [
-        "says it read nothing, rather than reporting a clean scan of nothing"
-      ]
+      "catches": ["says it read nothing, rather than reporting a clean scan of nothing"]
     },
     {
       "id": "later_revision_blank_statement_reads_clean",
@@ -1215,9 +1088,7 @@
       "file": "src/escalation.ts",
       "find": "  if (isBlank(statement)) return unscanned('no_statement_to_scan_for');",
       "replace": "  if (isBlank(statement)) return scanned(0);",
-      "catches": [
-        "says it read nothing, rather than reporting a clean scan of nothing"
-      ]
+      "catches": ["says it read nothing, rather than reporting a clean scan of nothing"]
     },
     {
       "id": "reducer_type_certification_removed",
@@ -1236,9 +1107,7 @@
       "file": "src/policy.ts",
       "find": "  /\\bwill\\b/i,",
       "replace": "  /(?!)/,",
-      "catches": [
-        "refers a claim whose words are equally an undertaking"
-      ]
+      "catches": ["refers a claim whose words are equally an undertaking"]
     },
     {
       "id": "certification_reads_raw_statement_engine",
@@ -1257,9 +1126,7 @@
       "file": "src/reduce.ts",
       "find": "          normalizeForReceipt(payloadText(object.type, object.payload)),",
       "replace": "          payloadText(object.type, object.payload),",
-      "catches": [
-        "refuses it at the reducer too, so neither backstops the other by accident"
-      ]
+      "catches": ["refuses it at the reducer too, so neither backstops the other by accident"]
     },
     {
       "id": "scan_floor_from_citations",
@@ -1278,9 +1145,7 @@
       "file": "src/escalation.ts",
       "find": "    if (restated && !quoteCoversOwnText(statement, own)) {",
       "replace": "    if (false && restated && !quoteCoversOwnText(statement, own)) {",
-      "catches": [
-        "sees a correction in the sentence next to the restatement"
-      ]
+      "catches": ["sees a correction in the sentence next to the restatement"]
     },
     {
       "id": "sed_marker_reads_raw_body",
@@ -1288,9 +1153,7 @@
       "file": "src/escalation.ts",
       "find": "    if (SED_CORRECTION.test(normalized)) return revision(message, ['s/…/…/']);",
       "replace": "    if (SED_CORRECTION.test(own)) return revision(message, ['s/…/…/']);",
-      "catches": [
-        "reads the sed marker through the fold its neighbours read through"
-      ]
+      "catches": ["reads the sed marker through the fold its neighbours read through"]
     },
     {
       "id": "cursor_compares_the_spelling",
@@ -1312,9 +1175,7 @@
       "file": "src/common.ts",
       "find": "  const sub = (fraction ?? '').padEnd(9, '0');",
       "replace": "  const sub = (fraction ?? '').padEnd(3, '0').slice(0, 3);",
-      "catches": [
-        "keeps sub-millisecond precision rather than collapsing it onto the id"
-      ]
+      "catches": ["keeps sub-millisecond precision rather than collapsing it onto the id"]
     },
     {
       "id": "retype_skips_structural_invariants",
@@ -1344,9 +1205,7 @@
       "file": "src/reduce.ts",
       "find": "    if (from.retractedAt !== null) {\n      fail(\n        state,\n        event.id,\n        `open question \"${from.object.id}\" is retracted",
       "replace": "    if (false) {\n      fail(\n        state,\n        event.id,\n        `open question \"${from.object.id}\" is retracted",
-      "catches": [
-        "refuses an edge that would settle a retracted question"
-      ]
+      "catches": ["refuses an edge that would settle a retracted question"]
     },
     {
       "id": "answers_edge_ignores_already_answered",
@@ -1354,9 +1213,7 @@
       "file": "src/reduce.ts",
       "find": "    if (from.object.type === 'open_question' && from.object.payload.status !== 'open') {",
       "replace": "    if (false) {",
-      "catches": [
-        "refuses a second answer onto one question — round 1’s finding, at the fold"
-      ]
+      "catches": ["refuses a second answer onto one question — round 1’s finding, at the fold"]
     },
     {
       "id": "supersession_is_irreversible",
@@ -1364,18 +1221,63 @@
       "file": "src/reduce.ts",
       "find": "    releaseSupersessions(state, record.object.id, event.at);",
       "replace": "    void releaseSupersessions;",
-      "catches": [
-        "un-retires the replaced decision when the replacement is retracted"
-      ]
+      "catches": ["un-retires the replaced decision when the replacement is retracted"]
     },
     {
       "id": "panel_skips_uncertified_readings",
       "why": "r8. `acceptance.ts` promises a laundered reading 'goes to Needs-you with its quote'; `projectAttention` dropped every proposal that was not a decision or a commitment, and returned zero items and zero refusals.",
       "file": "src/attention.ts",
-      "find": "    const statement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);\n    if (statement.length === 0) continue;",
-      "replace": "    const statement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);\n    if (statement.length >= 0) continue;",
+      "find": "  const statement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);",
+      "replace": "  const statement = '';",
       "catches": [
-        "renders the laundered reading the engine sent to Needs-you"
+        "renders the laundered reading the engine sent to Needs-you",
+        "refuses a laundered reading it has nobody to show, rather than dropping it"
+      ]
+    },
+    {
+      "id": "panel_continues_before_the_invariant",
+      "why": "r9. The defect class in one line: a branch added to the proposal loop that `continue`s before anything counts what it produced. Three rounds shipped one; this is what the invariant test is for.",
+      "file": "src/attention.ts",
+      "find": "    const outcome = needsYouOutcome(proposal, verdict, ctx);",
+      "replace": "    if (proposal.type === 'commitment') continue;\n    const outcome = needsYouOutcome(proposal, verdict, ctx);",
+      "catches": [
+        "raises an item or refuses, for every one of them — with a member list",
+        "raises an item or refuses, for every one of them — without a member list",
+        "sends a self-stated commitment to its owner whether or not a roster exists"
+      ]
+    },
+    {
+      "id": "panel_drops_self_stated_commitment",
+      "why": "r9. `awaitingConfirmFrom` is null for a commitment somebody made about themselves, and the branch used it as the whole audience — so every self-stated commitment the engine sent to Needs-you reached nobody, in a rule whose own reason text says it 'goes to Needs-you for a person to accept or decline'.",
+      "file": "src/attention.ts",
+      "find": "    const owner = verdict.awaitingConfirmFrom ?? proposal.payload.owner;",
+      "replace": "    const owner = verdict.awaitingConfirmFrom ?? '';",
+      "catches": [
+        "sends a self-stated commitment to its owner whether or not a roster exists",
+        "asks the owner of a self-stated commitment, and not with the third-party sentence"
+      ]
+    },
+    {
+      "id": "panel_tells_you_a_colleague_committed_you",
+      "why": "r9. `commitment_confirm` renders 'somebody else's message named you as the owner of this' — false of a commitment you wrote yourself, and false in the direction that misrepresents the room to the person being asked.",
+      "file": "src/attention.ts",
+      "find": "      verdict.awaitingConfirmFrom !== null\n        ? { kind: 'commitment_confirm', statement }\n        : { kind: 'commitment_self_stated', statement };",
+      "replace": "      verdict.awaitingConfirmFrom !== null\n        ? { kind: 'commitment_confirm', statement }\n        : { kind: 'commitment_confirm', statement };",
+      "catches": [
+        "asks the owner of a self-stated commitment, and not with the third-party sentence",
+        "sends a self-stated commitment to its owner whether or not a roster exists"
+      ]
+    },
+    {
+      "id": "panel_silences_an_empty_audience",
+      "why": "r9. `raiseOrRefuse` is the only thing standing between an empty fanout and silence: with no roster and no `decidedBy`, an unassigned decision produced no item and said nothing about it.",
+      "file": "src/attention.ts",
+      "find": "  return first === undefined\n    ? { kind: 'refuse', reason: reasonIfNobody }\n    : { kind: 'raise', items: [first, ...rest] };",
+      "replace": "  return first === undefined\n    ? { kind: 'raise', items: [] as unknown as [ComputedAttentionItem] }\n    : { kind: 'raise', items: [first, ...rest] };",
+      "catches": [
+        "refuses an unassigned decision it has nobody to show, and names the room",
+        "refuses a laundered reading it has nobody to show, rather than dropping it",
+        "raises an item or refuses, for every one of them — without a member list"
       ]
     },
     {
@@ -1396,9 +1298,7 @@
       "file": "src/attention.ts",
       "find": "    default:\n      return Number.MAX_SAFE_INTEGER;\n  }\n}",
       "replace": "    default: {\n      const exhaustive = attentionClass as never;\n      return Number.MAX_SAFE_INTEGER + (exhaustive as unknown as number);\n    }\n  }\n}",
-      "catches": [
-        "sorts an out-of-enum class last instead of above everything"
-      ]
+      "catches": ["sorts an out-of-enum class last instead of above everything"]
     },
     {
       "id": "mention_items_undeduped",
@@ -1406,9 +1306,7 @@
       "file": "src/attention.ts",
       "find": "    if (seen.has(id)) continue;\n    seen.add(id);\n    out.push(\n      item({\n        id,\n        roomId: signal.roomId,",
       "replace": "    seen.add(id);\n    out.push(\n      item({\n        id,\n        roomId: signal.roomId,",
-      "catches": [
-        "is byte-identical whichever order the mentions arrive in"
-      ]
+      "catches": ["is byte-identical whichever order the mentions arrive in"]
     },
     {
       "id": "item_id_unescaped",
@@ -1416,18 +1314,25 @@
       "file": "src/attention.ts",
       "find": "  const part = (value: string): string => value.replace(/%/g, '%25').replace(/:/g, '%3A');\n  return `attn:${part(userId)}:${subjectKind}:${part(subjectId)}:${cls}`;",
       "replace": "  return `attn:${userId}:${subjectId}:${cls}`;",
-      "catches": [
-        "cannot be made to collide across the proposal and object namespaces"
-      ]
+      "catches": ["cannot be made to collide across the proposal and object namespaces"]
     },
     {
       "id": "dedup_folds_compatibility_forms",
       "why": "r8. NFKC maps `10²` onto `102`, so a reading of 100 was discarded as a duplicate of 102 — silently, on the one path in the engine that destroys a reading.",
-      "file": "src/matching.ts",
-      "find": "  return normalizeForReceipt(text).toLowerCase().match(TOKEN) ?? [];",
-      "replace": "  return normalizeForRouting(text).match(TOKEN) ?? [];",
+      "file": "src/acceptance.ts",
+      "find": "  const wanted = orderedTokens(text);\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = orderedTokens(candidate.text);",
+      "replace": "  const wanted = routingTokens(text);\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = routingTokens(candidate.text);",
+      "catches": ["keeps `10² ms` and `102 ms` apart"]
+    },
+    {
+      "id": "dedup_folds_case",
+      "why": "r9. r8's surviving fold. The lower-casing ran through the code segment `normalizeForReceipt` preserves byte for byte, so a correction from `Hunter2` to `hunter2` was discarded and the record kept the old password — no proposal, no issue, no trace.",
+      "file": "src/acceptance.ts",
+      "find": "  const wanted = orderedTokens(text);\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = orderedTokens(candidate.text);\n",
+      "replace": "  const wanted = orderedTokens(text.toLowerCase());\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = orderedTokens(candidate.text.toLowerCase());\n",
       "catches": [
-        "keeps `10² ms` and `102 ms` apart"
+        "r9 — keeps a re-cased literal apart from the literal it is not",
+        "a machine-accepted reading cannot be destroyed by a re-cased duplicate"
       ]
     },
     {
@@ -1436,9 +1341,7 @@
       "file": "src/matching.ts",
       "find": "  '\\u2753', // BLACK QUESTION MARK ORNAMENT — r8; what a phone keyboard emits\n  '\\u2754', // WHITE QUESTION MARK ORNAMENT — r8\n",
       "replace": "",
-      "catches": [
-        "refuses an ornament question mark minted as a claim — r5’s defect, reopened"
-      ]
+      "catches": ["refuses an ornament question mark minted as a claim — r5’s defect, reopened"]
     },
     {
       "id": "question_certification_is_the_negation",
@@ -1446,9 +1349,7 @@
       "file": "src/escalation.ts",
       "find": "      !readsAsQuestion(normalizeForReceipt(subject.statement ?? ''))",
       "replace": "      isAssertion(normalizeForReceipt(subject.statement ?? ''))",
-      "catches": [
-        "refuses an assertion on an unverifiable mark without certifying a question"
-      ]
+      "catches": ["refuses an assertion on an unverifiable mark without certifying a question"]
     },
     {
       "id": "payload_text_reads_the_wrong_key",
@@ -1456,9 +1357,7 @@
       "file": "src/objects.ts",
       "find": "  const key = type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';",
       "replace": "  const key = type === 'open_question' ? 'question' : 'statement';",
-      "catches": [
-        "places fixed confidences in the cells the table implies"
-      ]
+      "catches": ["places fixed confidences in the cells the table implies"]
     },
     {
       "id": "correction_rate_counts_every_correction",
@@ -1466,9 +1365,7 @@
       "file": "src/corrections.ts",
       "find": "  for (const type of correctedByType.values()) {\n    out[type].corrected += 1;\n  }",
       "replace": "  for (const correction of state.corrections) {\n    out[correction.objectType].corrected += 1;\n  }",
-      "catches": [
-        "counts objects corrected, not corrections"
-      ]
+      "catches": ["counts objects corrected, not corrections"]
     },
     {
       "id": "watermark_never_advances",
@@ -1488,9 +1385,7 @@
       "file": "src/state.ts",
       "find": "    for (const key of Object.keys(source).sort()) {",
       "replace": "    for (const key of Object.keys(source)) {",
-      "catches": [
-        "serializes a state with its keys sorted, whatever order they were built in"
-      ]
+      "catches": ["serializes a state with its keys sorted, whatever order they were built in"]
     },
     {
       "id": "engine_always_auto_accepts",

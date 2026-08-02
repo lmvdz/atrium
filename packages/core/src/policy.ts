@@ -400,9 +400,25 @@ export function typeCertifiableFromText(type: AcceptedObjectType, text: ReceiptT
     case 'objective':
       return false;
     default: {
+      // A type nobody has classified is not a type whose kind a machine may
+      // assert. The assignment is the exhaustiveness check — `tsc` fails here
+      // the moment a sixth type joins the enum — and `void` is how the value is
+      // spent without letting it near the return.
+      //
+      // r9: this read `JSON.stringify(exhaustive) === '' ? false : false`, a
+      // ternary with one answer, which `noUselessTernary` was right about. The
+      // shape it was reaching for is the one `attention.ts` records a scar over:
+      // `fallbackPriority` did arithmetic on `exhaustive` for the same reason —
+      // to *use* it — and the arithmetic was `MAX_SAFE_INTEGER + NaN`, which
+      // sorted an unknown class to the top of somebody's Needs-you. Making an
+      // unreachable branch consume its witness must not give the branch a
+      // second behaviour. `return exhaustive` would typecheck (`never` is
+      // assignable to `boolean`) and would return the unrecognised *type name*
+      // at runtime — a truthy string, i.e. "certifiable", failing open in the
+      // one branch that exists to fail closed.
       const exhaustive: never = type;
-      // A type nobody has classified is not a type whose kind a machine may assert.
-      return JSON.stringify(exhaustive) === '' ? false : false;
+      void exhaustive;
+      return false;
     }
   }
 }
