@@ -7,6 +7,7 @@ import {
   isHuman,
   modelMintingGate,
   proposalBindingRefusal,
+  uncertifiedTypeRefusal,
 } from './authority.js';
 import type { Actor } from './common.js';
 import { ATTRIBUTION_FIELD, retypeCarryOver } from './corrections.js';
@@ -19,8 +20,9 @@ import {
   DecisionPayload,
   ObjectivePayload,
   OpenQuestionPayload,
+  payloadText,
 } from './objects.js';
-import { decideSupersession, MODEL_ACCEPTANCE_FLOOR } from './policy.js';
+import { decideSupersession, MODEL_ACCEPTANCE_FLOOR, typeCertifiableFromText } from './policy.js';
 import { storeProposal } from './proposal.js';
 import { relationShapeError } from './relations.js';
 import {
@@ -805,6 +807,23 @@ function applyObjectAccepted(
           event.id,
           confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),
         );
+        return false;
+      }
+
+      // ── …and the one thing the receipt cannot settle, r7 ──────────────────
+      //
+      // The engine's twin is `acceptance.ts`'s `type_not_certified` row and the
+      // predicate is the same function, because a rule applied at one site is
+      // not a rule and `#21`'s whole history is the two drifting. `type` is
+      // supplied by the proposal and it selected which rule judged the proposal:
+      // one body, one quote, one author, `pending` as a commitment and
+      // `auto_accept` as a claim.
+      //
+      // Read over the **object's own payload text**, not the proposal's — those
+      // are checked equal three screens up (`payload_binding`), and reading the
+      // thing being minted is the honest place to ask what is being minted.
+      if (!typeCertifiableFromText(object.type, payloadText(object.type, object.payload))) {
+        fail(state, event.id, uncertifiedTypeRefusal(actor, object.type, subject));
         return false;
       }
     }

@@ -657,7 +657,7 @@ export function decideAcceptance(
     };
   }
 
-  // ── …and above θ_auto for a type nothing in the text certifies ───────────
+  // ── …and above θ_auto for text that could be an undertaking ──────────────
   //
   // **r7, and the last place a proposal chose the rule that judged it.** Every
   // check above this line reads the *message bodies* and asks whether the
@@ -680,28 +680,36 @@ export function decideAcceptance(
   // `receipt_not_certifiable`. That empties the discard cell into Needs-you. The
   // gap was that the type picked the rule, so the repair belongs where the rule
   // is picked: below θ_min still discards, the band still bands, and only this
-  // one cell changes.
+  // one cell moves.
   //
-  // The floor twin is `MODEL_ACCEPTANCE_FLOOR`, derived from the same
-  // `modelMayMint`, so this row and the reducer's refusal come from one
-  // predicate — a rule applied at one site is not a rule. The reducer says it in
-  // words rather than through a named human-only gate, and `modelMintingGate`
-  // records why: a gate there runs before the verified-claim check and would
-  // shadow `claim_verification` into unreachability.
+  // **And why it reads the text rather than the type, measured too.** The second
+  // implementation asked whether the *type* was certifiable and answered no for
+  // every claim, on the correct ground that claim, commitment, decision and
+  // objective are the same characters. Run against a plain declarative genuinely
+  // in the record — *"The migration is reversible and can be rolled back
+  // cleanly."*, quoted verbatim, clean receipt, window extending past it — it
+  // moved `auto_accept` to `pending` at **every** confidence at or above θ_auto.
+  // That is not closing a laundering hole, it is deleting the auto-accept path:
+  // θ_auto exists so a reading genuinely in the record lands without a person's
+  // turn. The hole it bought is bounded and visible — a commitment filed as a
+  // claim renders as `~` with its quote, not asserted as fact and in nobody's
+  // Needs-you — and an empty Current-state pane is neither.
   //
-  // (That sentence read "the reducer's named refusal is `claim_acceptance`"
-  // until this round's own sweep caught it — the gate was built, measured,
-  // reverted, and the comment justifying it stayed. Third instance in this file
-  // family of a live comment describing a mechanism that no longer exists, and
-  // the first one written by the same commit as the code it describes.)
-  if (!typeCertifiableFromText(proposal.type)) {
+  // So the question is *"could these words be an undertaking"* rather than *"is
+  // this type provable"*, and `readsAsCommitment` is read over the statement,
+  // which the receipt above has already proved is the author's own words. The
+  // reducer reads the same predicate over the same text; the floor stays keyed
+  // to `autoAccept`, because a rule about the text cannot live in a table keyed
+  // by type.
+  const statement = payloadText(proposal.type, payload);
+  if (!typeCertifiableFromText(proposal.type, statement)) {
     return {
       ...base,
       attribution,
       verdict: 'pending',
       visibility: 'needs_you',
       rule: 'type_not_certified',
-      reason: `the receipt certifies that these words are in the record and who wrote them, and nothing in the words says whether they were a ${proposal.type}, a commitment, a decision or an objective — at ${proposal.confidence} the reading is confident and its *kind* is the proposal's own word, so it goes to Needs-you for a person to accept or decline rather than being accepted on the strength of a field the proposal filled in`,
+      reason: `the quoted words read as something somebody is undertaking to do as easily as something they are asserting, and a receipt proves who wrote a sentence rather than what kind of act it was — filed as a ${proposal.type} it would be accepted on the proposal's own word for the one thing the record cannot settle, so at ${proposal.confidence} it goes to Needs-you with its quote for a person to accept or decline`,
     };
   }
 

@@ -17,16 +17,27 @@ import {
   defaultAcceptanceConfig,
   findDuplicate,
   MODEL_ACCEPTANCE_FLOOR,
-  modelMayMint,
   modelMintingGate,
   type Proposal,
   Proposal as ProposalSchema,
   type ProvenanceMessage,
+  readsAsCommitment,
   reduce,
   resolveAcceptanceConfig,
   serializeState,
 } from '../src/index.js';
-import { ALICE, at, BOB, event, human, model, ROOM, room, sampleLog } from './fixtures.js';
+import {
+  ALICE,
+  at,
+  BOB,
+  event,
+  human,
+  model,
+  ROOM,
+  room,
+  sampleLog,
+  UNCITED_TAIL,
+} from './fixtures.js';
 
 /**
  * #4's acceptance matrix, one test per cell.
@@ -193,32 +204,23 @@ for (const type of ['claim', 'open_question'] as const) {
       visibility: 'quiet',
       rule: 'theta_band',
     },
-    // **r7 splits this cell by type, and the split is the round's finding.**
-    // `type` is model-supplied and it used to select the rule that judged the
-    // proposal: one body, one quote, one author, confidence 0.95, minted as a
-    // `commitment` → `pending / never_auto_accepts`, minted as a `claim` →
-    // `auto_accept`. An `open_question` is certifiable from the text — an
-    // interrogative carries a question mark and `escalation.ts` now refuses both
-    // directions — so it keeps the cell. A `claim` is not: claim, commitment,
-    // decision and objective are all assertions and nothing in the characters
-    // says which, so at θ_auto it goes to Needs-you for a person instead.
-    type === 'open_question'
-      ? {
-          label: `${type} at θ_auto`,
-          type,
-          band: 'above',
-          verdict: 'auto_accept',
-          visibility: 'accepted',
-          rule: 'auto_accept',
-        }
-      : {
-          label: `${type} at θ_auto`,
-          type,
-          band: 'above',
-          verdict: 'pending',
-          visibility: 'needs_you',
-          rule: 'type_not_certified',
-        },
+    // **r7 keeps this cell, and the round's second implementation is why that
+    // needs saying.** That draft refused `auto_accept` for every claim, on the
+    // ground that nothing in a message's words proves they were a claim rather
+    // than a commitment. True of the *type*, and it took the auto-accept path
+    // with it: `QUOTE.claim` is "The migration is reversible.", an unambiguous
+    // assertion quoted verbatim, and it landed in Needs-you at every confidence
+    // at or above θ_auto. The rule reads the text now (`readsAsCommitment`) and
+    // this cell is refused only when the words could be an undertaking — both
+    // sides of that are pinned in the r7 block at the foot of this file.
+    {
+      label: `${type} at θ_auto`,
+      type,
+      band: 'above',
+      verdict: 'auto_accept',
+      visibility: 'accepted',
+      rule: 'auto_accept',
+    },
   );
 }
 for (const band of ['below', 'between', 'above'] as const) {
@@ -381,22 +383,17 @@ describe('#4 acceptance matrix — one test per cell', () => {
     // checked it. A `switch` is not a derivation; this is what makes the claim
     // true.
     //
-    // **r7 splits the two, and the split is the finding.** They used to be the
-    // same set because there was one reason to refuse a machine: *this act is a
-    // person's to perform*. There is a second reason now — *nothing proves this
-    // was that act* — and it lands on `claim`, which a machine may perform and
-    // cannot certify. So the gate tracks `autoAcceptable` and the floor tracks
-    // `modelMayMint`, and the two disagree on exactly one type. Asserted as two
-    // derivations rather than one, because collapsing them again is how the
-    // certification rule would silently disappear.
+    // **r7's second implementation made these two sets differ and its third put
+    // them back.** The middle draft floored `claim` at `+Infinity` on the ground
+    // that nothing proves a claim was a claim; that is true of the *type* and it
+    // took `auto_accept` away from every claim, including an unambiguous
+    // assertion quoted verbatim. The rule reads the *text* now
+    // (`typeCertifiableFromText`), which is not a thing a table keyed by type
+    // can hold, so the gate and the floor are one question again.
     for (const type of OBJECT_TYPES) {
       expect(modelMintingGate(type) === null, type).toBe(autoAcceptable(type));
-      expect(Number.isFinite(MODEL_ACCEPTANCE_FLOOR[type]), type).toBe(modelMayMint(type));
+      expect(Number.isFinite(MODEL_ACCEPTANCE_FLOOR[type]), type).toBe(autoAcceptable(type));
     }
-    // …and they differ, so this is not one rule asserted twice.
-    expect(OBJECT_TYPES.filter((type) => autoAcceptable(type) !== modelMayMint(type))).toEqual([
-      'claim',
-    ]);
   });
 
   it('probes the band each literal claims to be in', () => {
@@ -439,6 +436,25 @@ describe('#4 acceptance matrix — one test per cell', () => {
           messages: [
             { id: MESSAGE_ID.claim, authorId: BOB, body: 'The migration is not reversible.' },
           ],
+        },
+      ).rule,
+    );
+    // type_not_certified — r7: an unimpeachable receipt on words that read as an
+    // undertaking as easily as an assertion. Nothing is wrong with the citation;
+    // what is missing is any evidence that the words were a *claim*.
+    seen.add(
+      decideAcceptance(
+        proposal({
+          type: 'claim',
+          confidence: 0.9,
+          payload: { statement: 'We will deploy production Friday.', claimant: ALICE },
+          quote: 'We will deploy production Friday.',
+        }),
+        {
+          messages: room(
+            { id: MESSAGE_ID.claim, authorId: ALICE, body: 'We will deploy production Friday.' },
+            UNCITED_TAIL,
+          ),
         },
       ).rule,
     );
@@ -577,9 +593,25 @@ describe('the θ table itself — pinned by value, not derived', () => {
 
     expect(verdictAt('claim', 0.45)).toBe('none'); // under θ_min 0.5
     expect(verdictAt('claim', 0.6)).toBe('quiet'); // in the band
-    // r7: over θ_auto and still Needs-you — a claim's *kind* is the proposal's
-    // own word, so the band still bands and only this cell moved.
-    expect(verdictAt('claim', 0.75)).toBe('needs_you'); // over θ_auto 0.7
+    expect(verdictAt('claim', 0.75)).toBe('accepted'); // over θ_auto 0.7
+    // …and the r7 rule, on the same probe: the same confidence, text that could
+    // be an undertaking, refused. `PROBE.claim` is an assertion; this is not.
+    expect(
+      decideAcceptance(
+        proposal({
+          type: 'claim',
+          confidence: 0.75,
+          payload: { statement: 'We will deploy production Friday.', claimant: ALICE },
+          quote: 'We will deploy production Friday.',
+        }),
+        {
+          messages: room(
+            { id: MESSAGE_ID.claim, authorId: ALICE, body: 'We will deploy production Friday.' },
+            UNCITED_TAIL,
+          ),
+        },
+      ).rule,
+    ).toBe('type_not_certified');
 
     expect(verdictAt('open_question', 0.35)).toBe('none');
     expect(verdictAt('open_question', 0.5)).toBe('quiet');
@@ -606,14 +638,16 @@ describe('the θ table itself — pinned by value, not derived', () => {
       decision: Number.POSITIVE_INFINITY,
       commitment: Number.POSITIVE_INFINITY,
       open_question: 0.6,
-      // r7: unreachable, and for a reason the other three do not share — a
-      // machine may perform this act and cannot certify that it *was* this act.
-      claim: Number.POSITIVE_INFINITY,
+      // r7's middle draft made this `+Infinity` and its third put it back: the
+      // rule is about the words, not the type, and a table keyed by type cannot
+      // hold one. `reduce.ts` reads `typeCertifiableFromText` over the payload
+      // text instead, beside this floor rather than through it.
+      claim: 0.7,
       objective: Number.POSITIVE_INFINITY,
     });
     for (const type of OBJECT_TYPES) {
       expect(MODEL_ACCEPTANCE_FLOOR[type], type).toBe(
-        modelMayMint(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,
+        autoAcceptable(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,
       );
     }
   });
@@ -629,19 +663,10 @@ describe('the θ boundaries are inclusive at θ_auto and exclusive at θ_min', (
    * run time, and would have gone on passing at any θ whatsoever. A claim's
    * θ_auto is 0.7 and its θ_min is 0.5, and this suite now says so out loud.
    */
-  it('crosses θ_auto exactly at 0.7 for a claim', () => {
-    // **The inclusivity is asserted on the `rule`, not the verdict, since r7.**
-    // A claim at or above θ_auto is `type_not_certified` rather than
-    // `auto_accept` — its *kind* is the proposal's own word — so the verdict is
-    // `pending` on both sides of the line and would pin nothing. The rule name
-    // still moves exactly at 0.7, which is what this test is about.
-    const at = decideAcceptance(proposal({ type: 'claim', confidence: 0.7 }), context);
-    expect(at.rule).toBe('type_not_certified');
-    expect(at.visibility).toBe('needs_you');
-    // …and the type whose kind the text does certify still accepts there.
-    expect(
-      decideAcceptance(proposal({ type: 'open_question', confidence: 0.6 }), context).verdict,
-    ).toBe('auto_accept');
+  it('accepts exactly at θ_auto (0.7 for a claim)', () => {
+    expect(decideAcceptance(proposal({ type: 'claim', confidence: 0.7 }), context).verdict).toBe(
+      'auto_accept',
+    );
   });
 
   it('does not accept a hair under θ_auto (0.6999)', () => {
@@ -1045,5 +1070,202 @@ describe('answer-binding — the one path to an accepted decision with no model 
     expect(result.state).toBe(withQuestion);
     expect(serializeState(result.state)).toBe(before);
     expect(result.state.objects.obj_bound_answer).toBeUndefined();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * r7 — the type was the proposal's own word, and the fix reads the text
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * **What a receipt proves, and the one thing it cannot.**
+ *
+ * Everything above certifies *provenance*: these words are in the record, this
+ * person wrote them, nothing later took them back. `proposal.type` is in none of
+ * that — the model supplies it — and until r7 it **selected the rule that judged
+ * the proposal**. One body, one quote, one author, confidence 0.95: as a
+ * `commitment`, `pending / never_auto_accepts`; as a `claim`, `auto_accept`. A
+ * commitment nobody confirmed, filed as a machine-accepted claim.
+ *
+ * Two implementations were measured and discarded before this one — a
+ * `refer`-severity receipt problem (which outranks θ and emptied the discard
+ * cell into Needs-you, 78 tests) and a type-level predicate (which refused every
+ * claim, including unambiguous assertions, and deleted the auto-accept path).
+ * `policy.ts` carries both measurements. The shape that survived asks about the
+ * **words**, not the type, and the three cases below are the specification.
+ */
+describe('r7 — a claim whose words could be an undertaking is referred, not accepted', () => {
+  const room = (body: string): ProvenanceMessage[] => [
+    { id: 'm1', authorId: BOB, body },
+    { id: 'm2', authorId: ALICE, body: 'noted, thanks for the update' },
+  ];
+  const claimOf = (statement: string, confidence = 0.95): Proposal =>
+    ProposalSchema.parse({
+      id: 'prop_type',
+      roomId: ROOM,
+      type: 'claim',
+      payload: { statement, claimant: BOB },
+      confidence,
+      proposer: { kind: 'model', model: 'test-model' },
+      provenance: ['m1'],
+      quote: statement,
+      createdAt: at(1),
+    }) as Proposal;
+
+  /** Assertions and nothing else. These must keep auto-accepting: they are the product. */
+  const ASSERTIONS = [
+    'The backfill completed with 4,218,904 rows and no retries.',
+    'The migration is reversible and can be rolled back cleanly.',
+    'The build is green on main and the staging cluster is healthy.',
+    'The p99 latency dropped to 41 milliseconds after the index landed.',
+    // `should` is deliberately not a marker: this is a claim about how things
+    // ought to work far more often than it is somebody taking something on.
+    'Deployments should be reversible in principle for every service.',
+    // …and `can` is capability, not undertaking.
+    'The rollback can be run from the runbook without a deploy.',
+  ];
+
+  /** Equally an undertaking. These must refer, carrying their quote. */
+  const UNDERTAKINGS = [
+    'We will deploy production Friday afternoon as planned.',
+    '@dhlolo will land the narrowing fix on Friday morning.',
+    "I'll take the migration review before the end of the week.",
+    'We need to cut the release branch before the end of the quarter.',
+    'The team is going to rerun the backfill over the weekend.',
+    'Everyone must update their local schema before Thursday.',
+  ];
+
+  it('keeps auto-accepting an unambiguous assertion — this is the path, not a cost', () => {
+    // **The half r7's middle implementation deleted.** θ_auto exists so a
+    // reading genuinely in the record lands without a person's turn; a
+    // Current-state pane with no machine-read claims in it is a manual tool with
+    // an unused engine.
+    for (const statement of ASSERTIONS) {
+      const decision = decideAcceptance(claimOf(statement), { messages: room(statement) });
+      expect(decision.verdict, statement).toBe('auto_accept');
+      expect(decision.rule, statement).toBe('auto_accept');
+    }
+  });
+
+  it('refers a claim whose words are equally an undertaking', () => {
+    for (const statement of UNDERTAKINGS) {
+      const decision = decideAcceptance(claimOf(statement), { messages: room(statement) });
+      expect(decision.verdict, statement).toBe('pending');
+      expect(decision.rule, statement).toBe('type_not_certified');
+      expect(decision.visibility, statement).toBe('needs_you');
+      // Referred, not destroyed: the reading is staged with its quote for a
+      // person to file as a claim or as a commitment.
+      expect(decision.reason, statement).toContain('undertaking');
+    }
+  });
+
+  it('leaves the θ table alone below θ_auto, which the first implementation did not', () => {
+    // The measurement that moved this rule out of the receipt: as a `refer`
+    // severity it outranked θ, so a reading the table says to *discard* came
+    // back `pending` and the whole band came back `receipt_not_certifiable`.
+    const undertaking = UNDERTAKINGS[0] as string;
+    const messages = room(undertaking);
+    expect(decideAcceptance(claimOf(undertaking, 0.4999), { messages }).rule).toBe(
+      'below_theta_min',
+    );
+    expect(decideAcceptance(claimOf(undertaking, 0.4999), { messages }).verdict).toBe('discard');
+    expect(decideAcceptance(claimOf(undertaking, 0.6), { messages }).rule).toBe('theta_band');
+    expect(decideAcceptance(claimOf(undertaking, 0.7), { messages }).rule).toBe(
+      'type_not_certified',
+    );
+  });
+
+  it('refuses the laundered commitment at the engine and at the reducer', () => {
+    // r5's lesson, run over r7's rule: the engine is advice and `appendEvent` is
+    // the trust boundary. Both read `typeCertifiableFromText` over the same
+    // text, so a proposal the engine refuses cannot be folded behind its back.
+    const statement = 'We will deploy production Friday afternoon as planned.';
+    const messages = room(statement);
+    const state = reduce([
+      event({
+        id: 'ev_p',
+        at: at(1),
+        actor: model(),
+        type: 'proposal_recorded',
+        proposal: {
+          id: 'prop_1',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement, claimant: BOB },
+          confidence: 0.95,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['m1'],
+          quote: statement,
+          createdAt: at(1),
+        },
+      }),
+      event({
+        id: 'ev_a',
+        at: at(2),
+        actor: model(),
+        messages,
+        type: 'object_accepted',
+        object: {
+          id: 'obj_1',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement, claimant: BOB },
+          provenance: { messageIds: ['m1'], proposalId: 'prop_1' },
+          createdAt: at(2),
+          updatedAt: at(2),
+        },
+      }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain('undertaking');
+  });
+
+  it('names the residue rather than implying it is covered', () => {
+    // **A commitment with no word of undertaking in it is certified as a
+    // claim.** No lexical rule sees "I'm on it."; this one does not pretend to.
+    // It renders as `~` with its quote, in nobody's Needs-you — the bounded,
+    // visible failure the disposition is willing to keep, and it is written into
+    // `COMMITMENT_SHAPES` too so nobody discovers it as a surprise.
+    const statement = "I'm on it, starting the migration review right now.";
+    expect(readsAsCommitment(statement)).toBe(false);
+    expect(decideAcceptance(claimOf(statement), { messages: room(statement) }).verdict).toBe(
+      'auto_accept',
+    );
+  });
+
+  it(`reads a value the proposer does not control, which is the round's rule`, () => {
+    // The organizing instruction of r7: name who supplies each value a check
+    // reads. `type` is the model's; `statement` is the **author's**, proved
+    // verbatim by the receipt above (`statementBearing`, `quoteCoversOwnText`).
+    // So a marker list here is not a denylist of evasions — a proposer cannot
+    // rephrase around it without breaking the receipt that got it here.
+    const statement = 'We will deploy production Friday afternoon as planned.';
+    const messages = room(statement);
+    // Every type the proposal could pick for these words, and not one of them
+    // auto-accepts.
+    for (const type of ['claim', 'commitment', 'decision', 'objective'] as const) {
+      const decision = decideAcceptance(
+        ProposalSchema.parse({
+          id: 'prop_any',
+          roomId: ROOM,
+          type,
+          payload:
+            type === 'claim'
+              ? { statement, claimant: BOB }
+              : type === 'commitment'
+                ? { statement, owner: BOB }
+                : type === 'decision'
+                  ? { statement, decidedBy: BOB }
+                  : { title: statement },
+          confidence: 0.95,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['m1'],
+          quote: statement,
+          createdAt: at(1),
+        }) as Proposal,
+        { messages },
+      );
+      expect(decision.verdict, type).not.toBe('auto_accept');
+    }
   });
 });

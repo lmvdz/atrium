@@ -146,15 +146,22 @@ export const DEFAULT_ACCEPTANCE_RULES: Readonly<Record<AcceptedObjectType, Accep
  * so the table stays total over the five types and cannot silently acquire a
  * hole if the human-only gate above it is ever moved.
  *
- * **Since r7 that is `modelMayMint`, not `autoAccept`** — a type whose *kind of
- * act* the text cannot certify is one the proposal named for itself, and the
- * floor is the reducer's half of refusing that. See `typeCertifiableFromText`.
+ * **This stayed derived from `autoAccept` through r7, and the round's second
+ * implementation is why that is worth a sentence.** That draft made the floor
+ * `+Infinity` for `claim` too, on the ground that nothing in a message's words
+ * says they were a claim rather than a commitment. True of the *type* and far
+ * too coarse for the *reading*: it took `auto_accept` away from every claim,
+ * including an unambiguous assertion quoted verbatim, which is the path the
+ * product is built on. The rule is about the text now, not the type
+ * (`typeCertifiableFromText`), so it cannot live in a table keyed by type —
+ * `reduce.ts` reads the same predicate over the same statement, and the two
+ * enforcement points still come from one function.
  */
 export const MODEL_ACCEPTANCE_FLOOR: Readonly<Record<AcceptedObjectType, number>> = Object.freeze(
   Object.fromEntries(
     AcceptedObjectType.options.map((type) => [
       type,
-      modelMayMint(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,
+      autoAcceptable(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,
     ]),
   ) as Record<AcceptedObjectType, number>,
 );
@@ -165,58 +172,143 @@ export function autoAcceptable(type: AcceptedObjectType): boolean {
 }
 
 /**
+ * **Text that is ambiguous between a claim and a commitment.**
+ *
+ * r7, third implementation, and the first two are the argument for this one.
+ *
+ * ## The gap
+ *
+ * `type` is supplied by the proposal and it selected the rule that judged the
+ * proposal. One body, one quote, one author, confidence 0.95: as a `commitment`
+ * the verdict was `pending / never_auto_accepts`, as a `claim` it was
+ * `auto_accept`. A receipt certifies *provenance* — these words are in the
+ * record, this person wrote them, nothing later took them back — and says
+ * nothing about what kind of act they were. So a commitment nobody confirmed
+ * could be filed as a machine-accepted claim by the value of one model-supplied
+ * field.
+ *
+ * ## Two implementations measured and discarded
+ *
+ *  1. **A `refer`-severity receipt problem on every uncertified type**, which is
+ *     where the adjudication's words point. 78 of 1027 tests fell and the shape
+ *     of the fall refused it: a `refer` outranks θ, so a claim at 0.4999 — a
+ *     reading the table says to *discard* — came back `pending`, and the whole θ
+ *     band came back `receipt_not_certifiable`. That empties the discard cell
+ *     into Needs-you.
+ *  2. **A type-level predicate**: no claim is certifiable, because claim,
+ *     commitment, decision and objective are the same characters. Correct about
+ *     the four types and far too coarse about the product. Measured on a plain
+ *     declarative genuinely in the record — *"The migration is reversible and
+ *     can be rolled back cleanly."*, quoted verbatim, clean receipt — it moved
+ *     `auto_accept` to `pending / needs_you` at every confidence at or above
+ *     θ_auto. **That is not closing a laundering hole; it is deleting the
+ *     auto-accept path.** θ_auto exists so a reading genuinely in the record
+ *     lands without a person's turn, and `~` on a claim is the ordinary case the
+ *     product is built around. Killing it is unbounded and invisible — nothing
+ *     appears at all — where the laundering it prevents is bounded and visible:
+ *     a mislabelled commitment renders as `~` with its quote, not asserted as
+ *     fact and not placed in anyone's Needs-you. **Misclassification, not false
+ *     certification.**
+ *
+ * ## What this asks instead
+ *
+ * The two are not the only options, and the case that makes it hard is the one
+ * between them: *"We will deploy production Friday"* is genuinely ambiguous
+ * between a claim about a schedule and a commitment somebody made. A predicate
+ * strict enough to refuse the laundered commitment refuses the honest claim too
+ * — which is exactly what produced (2). So the question is not *"is this a
+ * claim"* but **"could these words be either"**:
+ *
+ * | text                                            | shape        | verdict at 0.95 |
+ * | ----------------------------------------------- | ------------ | --------------- |
+ * | `the backfill completed with 4,218,904 rows`    | assertion    | `auto_accept`   |
+ * | `The migration is reversible…`                  | assertion    | `auto_accept`   |
+ * | `We will deploy production Friday`              | **ambiguous**| `pending`, referred with its quote |
+ * | `@dhlolo will land the narrowing fix`           | **ambiguous**| `pending`       |
+ *
+ * ## Why a marker list is admissible here, when this file refuses them elsewhere
+ *
+ * Two reasons, and the first is the one that matters.
+ *
+ * **The proposer does not control the input.** `RETRO.md`'s standing lesson is
+ * that a denylist of *evasions* is unbounded, because whoever is evading writes
+ * the next spelling. Here the input is `statement`, and the receipt has already
+ * proved `statement` is the author's own words, verbatim, whole sentences of the
+ * bearing message (`statementBearing`, `quoteSpansWholeSentences`,
+ * `quoteCoversOwnText`). A proposer cannot rephrase around this list without
+ * breaking the receipt that got it here. Evading it requires the **author** to
+ * have written a commitment without any word of undertaking in it — in which
+ * case there is nothing lexical for anyone to find, and the residue below says
+ * so out loud.
+ *
+ * **And the direction of error is free.** A hit adds a referral and can never
+ * add an acceptance, which is the same admissibility argument r5 made for
+ * `RETRACTION_MARKERS` and the only condition under which a word list belongs
+ * near an acceptance path. An over-firing entry costs one glance at a reading
+ * that stays staged with its quote; a missing entry costs a `~` on a
+ * misclassified reading, which is where r6 already was.
+ *
+ * ## Residue, stated rather than implied
+ *
+ * A commitment with no word of undertaking in it — *"I'm on it."*, *"Taking
+ * this."* — is certified as a claim and may auto-accept. This list does not see
+ * it and no lexical rule does. It renders as `~` with its quote, which is the
+ * bounded, visible failure the argument above is willing to keep.
+ *
+ * `can`, `could` and `may` are deliberately **out**: they are capability and
+ * permission, not undertaking, and *"the migration can be rolled back"* is the
+ * product's ordinary claim. `should` is out for the same reason —
+ * *"deployments should be reversible"* is a claim about how things ought to
+ * work far more often than it is somebody taking something on.
+ */
+export const COMMITMENT_SHAPES: readonly RegExp[] = Object.freeze([
+  /\bwill\b/i,
+  /\bwon't\b/i,
+  /\bshall\b/i,
+  /\b(?:'ll|’ll)\b/i,
+  /\bgoing to\b/i,
+  /\bgonna\b/i,
+  /\b(?:plan|plans|planning|intend|intends|aim|aims)\s+to\b/i,
+  /\b(?:need|needs|has|have)\s+to\b/i,
+  /\bmust\b/i,
+  /\b(?:i|we|i'll|we'll)\s+(?:can|could)\s+(?:do|take|handle|own|land|ship)\b/i,
+]);
+
+/**
+ * True when the words could be an undertaking as easily as an assertion.
+ *
+ * Read over the *statement*, which the receipt has already proved is the
+ * author's own text. See `COMMITMENT_SHAPES` for why a list is admissible over
+ * an input the proposer cannot choose.
+ */
+export function readsAsCommitment(text: string): boolean {
+  return COMMITMENT_SHAPES.some((pattern) => pattern.test(text));
+}
+
+/**
  * **Can the text certify that it was this kind of act?**
  *
- * r7, and it is the axis this package did not have. Everything the receipt
- * proves is about *provenance*: these words are in the record, this person wrote
- * them, nothing later took them back. `type` is not in that set — it is supplied
- * by the proposal, and until r7 **it selected the rule that judged the
- * proposal**. One body, one quote, one author, and the verdict moved with a
- * field the model filled in:
- *
- * | minted as                             | verdict                         |
- * | ------------------------------------- | ------------------------------- |
- * | `commitment`, owner Bob, conf 0.95    | `pending / never_auto_accepts`  |
- * | `claim`, claimant Bob, conf 0.95      | **`auto_accept`**               |
- * | `claim`, conf 0.65                    | `pending / theta_band`          |
- * | `open_question`, conf 0.65            | **`auto_accept`** (θ_auto 0.6)  |
- *
- * So the question a type has to answer before its rule is applied: **is being
- * this type a property of the text, or of the proposal?**
+ * The axis this package did not have, and the one place `type` stops being a
+ * field the proposal fills in for itself.
  *
  *  - `open_question` — a property of the text. An interrogative carries a
  *    question mark, `QUESTION_MARKS` enumerates every mark that makes one in
- *    every script, and `escalation.ts` refuses both directions: a question minted
- *    as an assertion, and a declarative minted as an open question. Certified.
- *  - `claim`, `commitment`, `decision`, `objective` — **not**. All four are
- *    assertions. "Bob will land the fix Friday" is a claim about the world, a
- *    commitment Bob made, a decision the room took, or an objective, and nothing
- *    in the characters says which. Telling them apart is reading intent, which is
- *    what a model is for and what `#8`'s escalation tier is where a model belongs.
- *
- * The three uncertified types that never auto-accept lose nothing by this,
- * because a person was already deciding. `claim` is the one where it bites, and
- * that is exactly where the laundering paid: a commitment nobody confirmed,
- * filed as a claim, machine-accepted.
- *
- * ## Why this is the axis and not a receipt problem, measured
- *
- * The first implementation put it in `validateProposalProvenance` as a
- * `refer`-severity problem, which is where the adjudication's words point. It
- * was run: **78 of 1027 tests fell, and the shape of the fall is the argument
- * against it.** A `refer` outranks θ, so a claim at 0.4999 — a reading the table
- * says to *discard* — came back `pending`, and the θ band came back
- * `receipt_not_certifiable`. That does not stage uncertified readings for a
- * person; it empties the discard cell into Needs-you and makes the whole θ table
- * unreachable for claims. The gap is that the type picked the rule, so the
- * repair belongs where the rule is picked: **below θ_min still discards, the
- * band still bands, and only the auto-accept cell is refused.**
+ *    every script, and `escalation.ts` refuses both directions: a question
+ *    minted as an assertion, and a declarative minted as an open question.
+ *  - `claim` — certifiable **when the words are not also an undertaking**. An
+ *    unambiguous assertion is a claim and nothing else; text that reads as a
+ *    commitment is referred, because deciding which one it was is reading intent
+ *    and `#8`'s escalation tier is where a model belongs.
+ *  - `commitment`, `decision`, `objective` — not certifiable, and it costs
+ *    nothing to say so: none of the three auto-accepts at any confidence, so a
+ *    person was already deciding.
  */
-export function typeCertifiableFromText(type: AcceptedObjectType): boolean {
+export function typeCertifiableFromText(type: AcceptedObjectType, text: string): boolean {
   switch (type) {
     case 'open_question':
       return true;
     case 'claim':
+      return !readsAsCommitment(text);
     case 'commitment':
     case 'decision':
     case 'objective':
@@ -227,18 +319,6 @@ export function typeCertifiableFromText(type: AcceptedObjectType): boolean {
       return JSON.stringify(exhaustive) === '' ? false : false;
     }
   }
-}
-
-/**
- * The one predicate both enforcement points read: a machine may mint this type
- * only if the table lets it **and** the text can certify the type is what the
- * proposal says it is.
- *
- * Derived rather than restated, because the whole D1/#1 class in this package is
- * one rule written at two sites drifting apart.
- */
-export function modelMayMint(type: AcceptedObjectType): boolean {
-  return autoAcceptable(type) && typeCertifiableFromText(type);
 }
 
 /**

@@ -695,24 +695,19 @@ function gateProbes(seed: number): AuthoredEvent[] {
       claimWindow(`${tag} is unsure about the migration plan?`),
     ),
     // r7. A well-founded *claim*, staged by MODEL and accepted by MODEL, with a
-    // receipt nothing is wrong with. It is refused anyway: the receipt certifies
-    // that these words are in the record and who wrote them, and `type` is the
-    // one field the proposal fills in for itself. This is the round's finding as
-    // a corpus row, and it is the only thing in the corpus that reaches
-    // `certification_floor`.
-    modelClaimProposal(
-      36,
-      `pprop_cert_${seed}`,
-      `${tag} is certain about the migration plan`,
-      0.95,
-    ),
+    // receipt nothing is wrong with — and words that are an undertaking as
+    // easily as an assertion. Refused anyway: a receipt settles who wrote a
+    // sentence, not what kind of act it was, and `type` is the one field the
+    // proposal fills in for itself. This is the round's finding as a corpus row,
+    // and it is the only thing in the corpus that reaches `uncertified_type`.
+    modelClaimProposal(36, `pprop_cert_${seed}`, `${tag} will rerun the migration plan`, 0.95),
     object(
       37,
       'claim',
-      { statement: `${tag} is certain about the migration plan`, claimant: BOB },
+      { statement: `${tag} will rerun the migration plan`, claimant: BOB },
       MODEL,
       `pprop_cert_${seed}`,
-      claimWindow(`${tag} is certain about the migration plan`),
+      claimWindow(`${tag} will rerun the migration plan`),
     ),
     // A well-founded proposal, staged by MODEL…
     modelClaimProposal(
@@ -1159,10 +1154,10 @@ const GATE_MARKERS = {
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
   confidence_floor: 'below the floor',
-  // r7. A claim's floor is unreachable, so its refusal names the reason instead
-  // of reporting `Infinity` — a different message and a different fact, so a
-  // different marker. See `confidenceFloorRefusal`.
-  certification_floor: 'nothing in the words says whether they were a',
+  // r7. Not a threshold and not an authority row: the words could be an
+  // undertaking as easily as an assertion, and a receipt settles who wrote a
+  // sentence rather than what kind of act it was.
+  uncertified_type: 'read as something somebody is undertaking to do',
   dangling_objective: 'which does not exist',
   payload_binding: 'does not carry its payload',
   provenance_binding: 'the receipt may not change on the way through',

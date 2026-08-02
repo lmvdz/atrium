@@ -182,37 +182,35 @@
     },
     {
       "id": "floor_decoupled_from_theta",
-      "why": "The reducer's floor stops asking whether the *type* can be certified and goes back to asking only whether the table lets a machine mint it — which is r7's defect exactly: `type` is model-supplied, so a commitment filed as a claim clears a floor a commitment never could.",
+      "why": "The reducer's floor goes back to being a second, lower set of numbers than the engine's θ.",
       "file": "src/policy.ts",
-      "find": "      modelMayMint(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,",
-      "replace": "      autoAcceptable(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,",
+      "find": "      autoAcceptable(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,",
+      "replace": "      autoAcceptable(type) ? 0.5 : Number.POSITIVE_INFINITY,",
       "catches": [
         "is the same number the reducer folds against — one table, not two",
-        "refuses a claim at any confidence, and says so differently",
-        "gates exactly the types a machine may not perform, and floors the ones it cannot certify"
+        "is the engine’s θ, not a second number under it"
       ]
     },
     {
       "id": "type_certification_removed",
-      "why": "r7. Deletes the engine's refusal to auto-accept a type nothing in the text certifies, so `type` — a model-supplied field — again selects the rule that judges the proposal. One body, one quote, one author, confidence 0.95: as a `commitment` it is `pending / never_auto_accepts`, as a `claim` it is `auto_accept`.",
+      "why": "r7. Deletes the engine's refusal to auto-accept a reading whose words are an undertaking as easily as an assertion, so `type` — a model-supplied field — again selects the rule that judges the proposal. One body, one quote, one author, confidence 0.95: as a `commitment` it is `pending / never_auto_accepts`, as a `claim` it is `auto_accept`.",
       "file": "src/acceptance.ts",
-      "find": "  if (!typeCertifiableFromText(proposal.type)) {",
+      "find": "  if (!typeCertifiableFromText(proposal.type, statement)) {",
       "replace": "  if (false) {",
       "catches": [
-        "crosses θ_auto exactly at 0.7 for a claim",
-        "crosses θ_auto exactly at 0.7 for a claim",
-        "places fixed confidences in the cells the table implies"
+        "refers a claim whose words are equally an undertaking",
+        "refuses the laundered commitment at the engine and at the reducer"
       ]
     },
     {
-      "id": "open_question_certification_inverted",
-      "why": "r7. Says every type is certifiable from its text, which is the claim `open_question` earns by carrying a question mark and the four assertion types cannot: a claim, a commitment, a decision and an objective are the same characters.",
+      "id": "claim_certification_always_true",
+      "why": "r7. Says every claim is certifiable whatever its words, which is r6 exactly: the laundered commitment goes back to auto-accepting as a claim.",
       "file": "src/policy.ts",
-      "find": "    case 'open_question':\n      return true;\n    case 'claim':",
-      "replace": "    case 'open_question':\n      return true;\n    // @ts-expect-error mutant\n    case 'claim':\n      return true;\n    case 'commitment2':",
+      "find": "    case 'claim':\n      return !readsAsCommitment(text);",
+      "replace": "    case 'claim':\n      return true;",
       "catches": [
-        "crosses θ_auto exactly at 0.7 for a claim",
-        "gates exactly the types a machine may not perform, and floors the ones it cannot certify"
+        "refers a claim whose words are equally an undertaking",
+        "refuses the laundered commitment at the engine and at the reducer"
       ]
     },
     {
@@ -280,7 +278,7 @@
       "find": "      if (proposal.proposal.confidence < floor) {",
       "replace": "      if (false && proposal.proposal.confidence < floor) {",
       "catches": [
-        "refuses a model accepting its own near-zero-confidence open question",
+        "refuses a model accepting its own near-zero-confidence claim",
         "is the engine’s θ, not a second number under it"
       ]
     },
@@ -1090,6 +1088,25 @@
       "find": "  if (isBlank(statement)) return unscanned('no_statement_to_scan_for');",
       "replace": "  if (isBlank(statement)) return scanned(0);",
       "catches": ["says it read nothing, rather than reporting a clean scan of nothing"]
+    },
+    {
+      "id": "reducer_type_certification_removed",
+      "why": "r7's reducer twin. The engine is advice and `appendEvent` is the trust boundary — r5's lesson — so deleting this lets a laundered commitment land as an accepted claim even while the engine refuses to emit one.",
+      "file": "src/reduce.ts",
+      "find": "      if (!typeCertifiableFromText(object.type, payloadText(object.type, object.payload))) {",
+      "replace": "      if (false) {",
+      "catches": [
+        "refuses the laundered commitment at the engine and at the reducer",
+        "refuses a model landing a claim whose words could be an undertaking"
+      ]
+    },
+    {
+      "id": "commitment_shapes_emptied",
+      "why": "r7. Empties the marker list, so nothing reads as an undertaking and every claim certifies itself again. The list is admissible only because the proposer cannot choose its input — the statement is the author's own words, proved verbatim by the receipt — and because a hit only ever adds a referral.",
+      "file": "src/policy.ts",
+      "find": "  /\\bwill\\b/i,",
+      "replace": "  /(?!)/,",
+      "catches": ["refers a claim whose words are equally an undertaking"]
     }
   ]
 }

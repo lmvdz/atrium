@@ -101,11 +101,12 @@ const GATES = {
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
   confidence_floor: 'below the floor',
-  // r7. A claim's floor is unreachable — nothing in the words establishes that
-  // they were a claim rather than a commitment — so it refuses in words rather
-  // than reporting an unreachable number. Its own row, because 'refused for a
-  // reason' and 'refused by a threshold' are different facts about a reading.
-  certification_floor: 'nothing in the words says whether they were a',
+  // r7. Not a threshold and not an authority row: the words could be an
+  // undertaking as easily as an assertion, and a receipt cannot settle which.
+  // The matrix's claim text is an assertion, so this fires only on the probe
+  // below — a gate reachable by exactly one row is still a gate, and the
+  // coverage assertion is what keeps it honest.
+  uncertified_type: 'read as something somebody is undertaking to do',
   payload_binding: 'does not carry its payload',
   provenance_binding: 'the receipt may not change on the way through',
   missing_receipt_context: 'no message window supplied',
@@ -126,9 +127,7 @@ const FLOOR: Record<AcceptedObjectType, number> = {
   // is what everything else is filed under. Neither is a machine's to mint.
   commitment: Number.POSITIVE_INFINITY,
   open_question: 0.6,
-  // r7: a machine may perform this act and cannot certify that it *was* this
-  // act, so no confidence clears it. See `typeCertifiableFromText`.
-  claim: Number.POSITIVE_INFINITY,
+  claim: 0.7,
   objective: Number.POSITIVE_INFINITY,
 };
 
@@ -179,12 +178,8 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   if (testCase.cited !== 'none' && !ownsProposal(testCase.actor, testCase.cited)) {
     return 'acceptance_binding';
   }
-  if (testCase.cited !== 'none' && !human) {
-    // r7. An unreachable floor and a missed threshold are refused at the same
-    // point and say different things, so the oracle splits them the way the
-    // reducer does.
-    if (!Number.isFinite(FLOOR[testCase.type])) return 'certification_floor';
-    if (testCase.confidence === 'below') return 'confidence_floor';
+  if (testCase.cited !== 'none' && !human && testCase.confidence === 'below') {
+    return 'confidence_floor';
   }
   return 'allowed';
 }
@@ -192,6 +187,10 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
 /** The shapes a receipt can take on the way through acceptance. */
 type ReceiptShape =
   | 'faithful'
+  // r7: the receipt is perfect and the words could be an undertaking. Nothing
+  // about the citation is wrong; what is missing is any evidence of the *kind*
+  // of act, which is the one field the proposal supplies.
+  | 'uncertified_type'
   | 'payload'
   | 'citations'
   | 'no_window'
@@ -199,6 +198,7 @@ type ReceiptShape =
   | 'uncertifiable';
 const RECEIPT_SHAPES: ReceiptShape[] = [
   'faithful',
+  'uncertified_type',
   'payload',
   'citations',
   'no_window',
@@ -230,15 +230,10 @@ function expectedForReceipt(actor: ActorKind, shape: ReceiptShape): Gate | 'allo
       return 'receipt_failed';
     case 'uncertifiable':
       return 'receipt_not_certifiable';
-    // r7. A model with a *perfect* receipt still does not land a claim: the
-    // receipt certifies that these words are in the record and who wrote them,
-    // and says nothing about whether they were a claim rather than a commitment,
-    // which is the one field the proposal supplies. The receipt row of this
-    // matrix runs on claims, so this cell is the whole finding in one line —
-    // "faithful" used to mean "allowed", and faithfulness was never the question
-    // the type was answering.
+    case 'uncertified_type':
+      return 'uncertified_type';
     case 'faithful':
-      return 'certification_floor';
+      return 'allowed';
   }
 }
 
@@ -325,8 +320,9 @@ const MSG_FOR: Record<AcceptedObjectType, string> = {
   objective: 'msg_objective',
 };
 
-const windowWrittenBy = (authorId: string): ProvenanceMessage[] =>
-  (Object.keys(TEXT) as AcceptedObjectType[]).map((type) => ({
+const windowWrittenBy = (authorId: string): ProvenanceMessage[] => [
+  { id: UNDERTAKING_MSG, authorId, body: UNDERTAKING_CLAIM },
+  ...(Object.keys(TEXT) as AcceptedObjectType[]).map((type) => ({
     id: MSG_FOR[type],
     authorId,
     // **The body is the sentence, with no terminator added.** It used to append
@@ -335,7 +331,8 @@ const windowWrittenBy = (authorId: string): ProvenanceMessage[] =>
     // `droppableTokens`, whose last entry r6's cross-lineage pass broke. The
     // authority rules are what this file is about; the receipt has its own.
     body: TEXT[type],
-  }));
+  })),
+];
 
 /**
  * The claim's sentence with one word dropped: every word of it is in the quote,
@@ -343,6 +340,13 @@ const windowWrittenBy = (authorId: string): ProvenanceMessage[] =>
  * "not", which is what `receipt_not_certifiable` is for.
  */
 const REDUCED_CLAIM = 'the build is green on main';
+
+/**
+ * r7: a claim whose words are equally an undertaking. It gets its own message,
+ * because the quote must be the whole of what its author wrote.
+ */
+const UNDERTAKING_CLAIM = 'we will deploy the narrowing fix on friday';
+const UNDERTAKING_MSG = 'msg_undertaking';
 
 /** BOB wrote all of it, and BOB is the claimant and the owner. */
 const WINDOW: ProvenanceMessage[] = windowWrittenBy(BOB);
@@ -378,9 +382,12 @@ function proposalEvent(input: {
   statement?: string;
   /** Who recorded it — drawn independently of who it names as proposer. */
   recordedBy: ActorKind;
+  /** r7: stage a different sentence, from a different message, verbatim. */
+  quoting?: { text: string; messageId: string };
 }): AuthoredEvent {
   const at = nextAt();
   const payload = payloadFor(input.type, input.verified);
+  if (input.quoting !== undefined) payload.statement = input.quoting.text;
   if (input.statement !== undefined) payload.statement = input.statement;
   return row(
     {
@@ -397,8 +404,8 @@ function proposalEvent(input: {
           input.proposer === 'model_a'
             ? { kind: 'model', model: MODEL_A }
             : { kind: 'human', userId: ALICE },
-        provenance: [MSG_FOR[input.type]],
-        quote: TEXT[input.type],
+        provenance: [input.quoting?.messageId ?? MSG_FOR[input.type]],
+        quote: input.quoting?.text ?? TEXT[input.type],
         createdAt: at,
       },
     },
@@ -582,6 +589,9 @@ describe('authority matrix — the receipt, every actor × shape', () => {
             confidence: 0.95,
             recordedBy: 'model_proposer',
             ...(shape === 'uncertifiable' ? { statement: REDUCED_CLAIM } : {}),
+            ...(shape === 'uncertified_type'
+              ? { quoting: { text: UNDERTAKING_CLAIM, messageId: UNDERTAKING_MSG } }
+              : {}),
           }),
           acceptEvent({
             id: `acc_r_${suffix}`,
@@ -590,6 +600,9 @@ describe('authority matrix — the receipt, every actor × shape', () => {
             actor,
             proposalId,
             ...(shape === 'uncertifiable' ? { statement: REDUCED_CLAIM } : {}),
+            ...(shape === 'uncertified_type'
+              ? { statement: UNDERTAKING_CLAIM, citing: [UNDERTAKING_MSG] }
+              : {}),
             ...(shape === 'payload' ? { statement: 'something else entirely' } : {}),
             ...(shape === 'citations' ? { citing: [MSG_FOR.claim, MSG_FOR.objective] } : {}),
             ...(shape === 'no_window' ? { messages: undefined } : {}),

@@ -148,17 +148,29 @@ describe('the receipt refuses the negation of the sentence it validates', () => 
     // Catches: any mutation that makes `statementBearing` always false — the
     // refusals above have to be about the negation, not about the check being
     // broken.
-    // **r7: `type_not_certified`, not `auto_accept`.** A model claim no longer
-    // auto-accepts — its *kind* is the one field the proposal supplies and
-    // nothing in the words certifies it (`typeCertifiableFromText`) — so the
-    // anti-vacuity assertion is that the receipt found **nothing wrong**, which
-    // is what this test was ever about. A broken check lands on a receipt rule
-    // (`provenance_failed`, `receipt_not_certifiable`) and this catches it.
+    // **The assertion is on `rule`, and `TRUTH` is why.** It reads *"Bob will
+    // not deploy production Friday"* — an undertaking as easily as an assertion,
+    // so r7's type row stops it at Needs-you whatever the receipt says. What
+    // this test is about is that the *receipt* found nothing: a mutation that
+    // makes `statementBearing` always false lands on `provenance_failed` or
+    // `receipt_not_certifiable`, and those are what this catches.
     const decision = decideAcceptance(modelProposal({ statement: TRUTH, quote: TRUTH }), {
       messages: window,
     });
     expect(decision.rule).toBe('type_not_certified');
-    expect(decision.verdict).toBe('pending');
+    expect(
+      validateProposalProvenance(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: TRUTH,
+          statement: TRUTH,
+          proposer: { kind: 'model' },
+          attributedTo: BOB,
+        },
+        window,
+      ),
+    ).toEqual([]);
   });
 
   it('leaves the reading staged rather than deleting it, so a person sees the discrepancy', () => {
@@ -661,12 +673,9 @@ describe('the quote must be whole sentences, not a span cut out of one', () => {
     // droppable, so "the whole sentence" means all of it.
     const whole = 'Bob will deploy production Friday under any circumstances.';
     expect(quoteSpansWholeSentences(whole, body)).toBe(true);
-    // **r7: `type_not_certified`, not `auto_accept`.** A model claim no longer
-    // auto-accepts — its *kind* is the one field the proposal supplies and
-    // nothing in the words certifies it (`typeCertifiableFromText`) — so the
-    // anti-vacuity assertion is that the receipt found **nothing wrong**, which
-    // is what this test was ever about. A broken check lands on a receipt rule
-    // (`provenance_failed`, `receipt_not_certifiable`) and this catches it.
+    // `rule`, not `verdict`, for the reason given above: this sentence also
+    // carries "will", so r7's type row is what it lands on once the receipt is
+    // clean. The compliant form is still reachable, which is the claim.
     expect(
       decideAcceptance(modelProposal({ statement: whole, quote: whole, provenance: ['msg_m'] }), {
         messages: window,

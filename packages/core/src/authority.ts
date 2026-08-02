@@ -317,19 +317,31 @@ export function confidenceFloorRefusal(
   confidence: number,
 ): string {
   const floor = MODEL_ACCEPTANCE_FLOOR[type];
-  // ── An unreachable floor says *why* it is unreachable, r7 ────────────────
-  //
-  // "below the floor of Infinity" is a number a room cannot act on, and the
-  // docblock on `modelMintingGate` says so. Every type whose floor is unreachable
-  // for the *authority* reason has a named gate up there and never reaches this
-  // line; `claim` reaches it, because its floor is unreachable for a different
-  // reason — nothing in the words establishes that they were a claim rather than
-  // a commitment, a decision or an objective, so the type is the proposal's own
-  // word. See `typeCertifiableFromText`.
-  if (!Number.isFinite(floor)) {
-    return `${actorName(actor)} accepted ${type} proposal "${proposalId}" at confidence ${confidence}, and no confidence clears the floor for a ${type} — the receipt certifies that these words are in the record and who wrote them, and nothing in the words says whether they were a ${type}, a commitment, a decision or an objective, so accepting one on the proposal's own word lets the proposal pick the rule that judges it; propose it and let a human accept`;
-  }
   return `${actorName(actor)} accepted ${type} proposal "${proposalId}" at confidence ${confidence}, below the floor of ${floor} for that type — a non-human actor may not mint an object from a reading it does not stand behind; propose it and let a human accept`;
+}
+
+/**
+ * The refusal text for a reading whose *kind of act* the record cannot settle.
+ *
+ * r7. The receipt proves who wrote a sentence and that nothing later took it
+ * back; it cannot prove the sentence was a claim rather than a commitment, and
+ * `type` is supplied by the proposal. This is the reducer's half — the engine's
+ * is `acceptance.ts`'s `type_not_certified` row — and both call
+ * `typeCertifiableFromText`, so the two cannot drift.
+ *
+ * Not a `HumanOnlyGate`, deliberately: those rows say *a machine may not perform
+ * this act*, and a machine reading a room and recording what it found is the
+ * whole product. This says *nothing proves this was that act*, which is a fact
+ * about the reading. It also has to sit below the verified-claim check rather
+ * than in that switch, which runs first and would shadow `claim_verification`
+ * into unreachability — built that way once and reverted.
+ */
+export function uncertifiedTypeRefusal(
+  actor: Actor,
+  type: AcceptedObjectType,
+  subject: string,
+): string {
+  return `${subject} was accepted as a ${type} by a ${actor.kind} actor, and the quoted words read as something somebody is undertaking to do as easily as something they are asserting — a receipt proves who wrote a sentence, not what kind of act it was, so which of the two this is is the proposal's own word; a ${actor.kind} actor may propose it and let a person accept it as a ${type} or as a commitment`;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
