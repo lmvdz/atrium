@@ -518,8 +518,22 @@ export function stateForHappened(kind: HappenedKind): EpistemicState {
 export interface HappenedLine {
   readonly id: string;
   readonly kind: HappenedKind;
-  /** the event's clock — a time, never words; painted through a door */
-  readonly at: string;
+  /**
+   * The event's clock — a time, never words; painted through a door.
+   *
+   * OPTIONAL, BECAUSE A LINE WITH NO RECORDED CLOCK HAS NO CLOCK. It was
+   * required, and `receiptFromObject` — which builds nine of the ten receipts in
+   * the gallery — filled it with `'—'`, so every derived history line rendered
+   * "proposed by justin —": an em dash sitting in the column where a time goes,
+   * saying nothing and looking like a value. Found by the r8 blind review.
+   *
+   * This is `HappenedLine.who` again in the field next door. Round 6 deleted
+   * `who` because a field beside the words does a job the words should do; the
+   * same argument applies to a field holding a placeholder, one step weaker: a
+   * required field with nothing to put in it gets filled with a glyph, and a
+   * glyph in a data column is a fact the reader has to know to discount.
+   */
+  readonly at?: string;
   readonly statement: SystemStatement;
 }
 

@@ -44,7 +44,14 @@ import styles from './frame.module.css';
 export interface ComposerProps {
   readonly roomName: string;
   readonly binding: ComposerBinding;
-  readonly footNote: string;
+  /**
+   * The last thing the page did, in words. OPTIONAL, because a status line with
+   * nothing to report should report nothing: `/` used to seed it with "every
+   * control on this page is wired — click one and this line reports what it
+   * did", which is demo scaffolding standing in the product chrome of the route
+   * this round calls the actual product. Found by the r8 blind review.
+   */
+  readonly footNote?: string;
   readonly onCancelBinding?: () => void;
   /** the draft, when the consumer owns it. Omit for an uncontrolled composer. */
   readonly value?: string;
@@ -160,7 +167,7 @@ export function Composer({
      note is a whole page-authored sentence the consumer supplies — it is what
      `/` writes every handler's outcome into — and it printed raw. */
   const room = systemText(roomName, 'Composer roomName');
-  const foot = systemText(footNote, 'Composer footNote');
+  const foot = footNote === undefined ? null : systemText(footNote, 'Composer footNote');
   const boundLabel =
     binding.mode === 'bound' ? systemText(binding.itemLabel, 'Composer binding') : '';
   const boundObjective =
@@ -292,7 +299,7 @@ export function Composer({
           )}
         </span>
         <span className={styles.cfootSpacer} />
-        <span data-composer-note="true">{foot}</span>
+        {foot === null ? null : <span data-composer-note="true">{foot}</span>}
       </div>
     </div>
   );

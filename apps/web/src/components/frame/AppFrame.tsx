@@ -31,19 +31,42 @@ export interface AppFrameProps {
   readonly label?: string;
 }
 
+/**
+ * The narrowest window this shell fits in, in CSS pixels.
+ *
+ * ONE NUMBER, IN TWO PLACES THAT ARE CHECKED AGAINST EACH OTHER. `.app` declares
+ * `min-width: 1024px`; this states it to the reader. `test/viewport.test.tsx`
+ * reads both out of the sources and asserts they agree, and that the media query
+ * which reveals the notice sits exactly one pixel below — a floor that moves
+ * while the sentence stays put is a sentence that lies.
+ */
+export const MINIMUM_WIDTH = 1024;
+
 export function AppFrame({ strip, rail, workspace, lens, boxed = false, label }: AppFrameProps) {
   return (
-    <div
-      className={[styles.app, boxed ? styles.boxed : null].filter(Boolean).join(' ')}
-      data-frame={label ?? 'atrium'}
-    >
-      <aside className={styles.ws} aria-label="Workspace">
-        {strip.node}
-      </aside>
-      {rail.node}
-      <main className={styles.center}>{workspace.node}</main>
-      {lens.node}
-    </div>
+    <>
+      {/* THE FLOOR, STATED — r8 D10. Below 1024px the four columns are wider
+          than the window and the page scrolls sideways; that was true before
+          this notice and nothing said it. The page still works and still
+          scrolls: this is the shell declaring its own bound, the same way every
+          refusal in this codebase says what it could not do rather than going
+          quiet. See frame.module.css, `.belowMin`. */}
+      <div className={styles.belowMin} data-below-minimum-width={String(MINIMUM_WIDTH)}>
+        this layout needs a window at least {MINIMUM_WIDTH} pixels wide — the four columns are wider
+        than this one, so the page scrolls sideways
+      </div>
+      <div
+        className={[styles.app, boxed ? styles.boxed : null].filter(Boolean).join(' ')}
+        data-frame={label ?? 'atrium'}
+      >
+        <aside className={styles.ws} aria-label="Workspace">
+          {strip.node}
+        </aside>
+        {rail.node}
+        <main className={styles.center}>{workspace.node}</main>
+        {lens.node}
+      </div>
+    </>
   );
 }
 

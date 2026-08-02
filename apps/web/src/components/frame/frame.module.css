@@ -26,6 +26,51 @@
   height: 100%;
 }
 
+/* ---------------------------------------------------------------------------
+   THE MINIMUM IS STATED, NOT DISCOVERED — r8 D10.
+
+   `.app` has declared `min-width: 1024px` since round 3 and nothing said so to
+   a reader. Below it the four-column shell is wider than the window, `<body>`
+   overflows sideways, and the page just… goes off the edge: the r8 review
+   measured 664px of overflow at a 360px viewport and 304px at 720, with no
+   breakpoint anywhere below 1279 and nothing on screen explaining it. 1024,
+   1440 and 1920 are clean, so this is exactly the shape every other defect this
+   round has: correct behaviour over an input range nobody stated.
+
+   Making the shell reflow into fewer columns is a design change this round
+   cannot verify — touch, coarse pointer, zoom and every non-Chromium engine are
+   outside what has been reviewed, and shipping an unmeasured mobile layout is
+   how "compliant but unusable" gets built. So the honest move is the one this
+   codebase makes everywhere else: SAY SO. The page keeps working and scrolls;
+   the notice states the floor and why, in the system's own voice.
+
+   The number here is the same number `.app` declares, and `test/viewport.test.tsx`
+   reads BOTH out of this stylesheet and out of the component's copy and asserts
+   they are one number — so a floor that moves and a sentence that does not is a
+   failure rather than a lie.
+   ------------------------------------------------------------------------- */
+.belowMin {
+  display: none;
+}
+
+@media (max-width: 1023px) {
+  .belowMin {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 40;
+    padding: 7px 12px;
+    background: var(--bg1);
+    border-bottom: 1px solid var(--line);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--tx1);
+  }
+}
+
 /* --- workspace strip ----------------------------------------------------- */
 
 .ws {

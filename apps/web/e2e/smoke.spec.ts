@@ -607,6 +607,49 @@ test.describe('shell', () => {
     });
   }
 
+  /* ---------------------------------------------------------------------------
+   * BELOW THE FLOOR — r8 D10, in a real engine at a real width.
+   *
+   * Every width this suite has ever measured is 1124 or above, which is above
+   * the shell's declared `min-width: 1024px`. The r8 blind review went below it
+   * and found 664px of horizontal overflow at 360 and 304px at 720, with nothing
+   * on screen stating or refusing a minimum — correct behaviour over an input
+   * range nobody had stated, which is this round's shape everywhere else.
+   *
+   * `test/viewport.test.tsx` proves the rule exists and states the right number.
+   * JSDOM does not evaluate media queries, so THIS is where a browser proves the
+   * notice actually appears below the floor and actually does not above it.
+   * ------------------------------------------------------------------------- */
+  for (const width of [360, 720, 1023] as const) {
+    test(`the shell states its minimum width @ ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('/');
+      const notice = page.locator('[data-below-minimum-width]');
+      await expect(notice).toBeVisible();
+      const floor = await notice.getAttribute('data-below-minimum-width');
+      expect(Number(floor), 'the notice states no floor').toBeGreaterThan(320);
+      await expect(notice).toContainText(String(floor));
+      /* AND THE PAGE STILL WORKS. Stating a bound is not the same as refusing to
+         run, and a notice over a dead page would be the compliant-but-unusable
+         failure with a sentence on it. */
+      await expect(page.locator('[data-region="needs-you"]')).toBeAttached();
+    });
+  }
+
+  test('the minimum-width notice is absent above the floor', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
+    /* BOTH DIRECTIONS: a notice that is always on is a notice nobody reads, and
+       it would be indistinguishable from one that works. */
+    await expect(page.locator('[data-below-minimum-width]')).toBeHidden();
+    /* …and above the floor the page does not scroll sideways at all. */
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow, 'the page overflows horizontally at a width it claims to support').toBe(0);
+  });
+
   test('toggles dark mode via the atr-dark class', async ({ page }) => {
     await page.goto('/');
     const html = page.locator('html');

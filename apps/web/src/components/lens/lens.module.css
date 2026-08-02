@@ -403,6 +403,13 @@
   margin-top: 2px;
 }
 
+/* the empty state for PROVENANCE — the same weight the correction chain's
+   already had. Nine of the ten receipts in the gallery reach it. */
+.provEmpty {
+  font-size: 11px;
+  color: var(--tx1);
+}
+
 /* SYSTEM voice: mono, muted, no quotation marks, no first person */
 .corrWas,
 .corrNow,

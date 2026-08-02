@@ -89,9 +89,16 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
             />
             <span className={styles.happenedText}>
               <SystemVoice className={styles.happenedVoice} inline statement={line.statement} />
-              <span className={styles.happenedAt}>
-                {systemText(line.at, 'ReceiptView happened at')}
-              </span>
+              {/* A LINE WITH NO CLOCK PRINTS NO CLOCK. `receiptFromObject` used
+                  to pass `at: '—'` and this span painted it, so every derived
+                  history line read "proposed by justin —" — a glyph standing
+                  where a time goes, which the reader has to learn to discount.
+                  The field is optional now; see `HappenedLine.at`. */}
+              {line.at === undefined ? null : (
+                <span className={styles.happenedAt}>
+                  {systemText(line.at, 'ReceiptView happened at')}
+                </span>
+              )}
             </span>
           </div>
         ))}
@@ -102,9 +109,25 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
       </Section>
 
       <Section label="PROVENANCE">
-        {receipt.provenance.map((entry) => (
-          <ProvenanceRow entry={entry} key={entry.id} onJump={onJump} />
-        ))}
+        {/* AN EMPTY SECTION IS A HEADING THAT TELLS THE READER NOTHING, and nine
+            of the ten receipts in this gallery have empty provenance — every one
+            built by `receiptFromObject`, which carries no excerpts because
+            nothing on the object cites a message. The reader got a bare word and
+            found the explanation three sections down in `reopenNote`, while the
+            CORRECTION CHAIN immediately below already had an empty state. Same
+            treatment, same sentence shape, said where the question is asked.
+            Found by the r8 blind review. */}
+        {receipt.provenance.length === 0 ? (
+          <div className={styles.prov}>
+            <div className={styles.provEmpty}>
+              no excerpts — nothing on this object cites a message
+            </div>
+          </div>
+        ) : (
+          receipt.provenance.map((entry) => (
+            <ProvenanceRow entry={entry} key={entry.id} onJump={onJump} />
+          ))
+        )}
       </Section>
 
       <Section label="CORRECTION CHAIN">

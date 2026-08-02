@@ -860,11 +860,15 @@ export function receiptFromObject(
     status: [object.kind.toUpperCase(), object.state.verification.replace('_', ' ')],
     /* One line per fact the row already shows, each tagged with the object's own
        epistemic kind. Nothing here is invented: the words are the words on the
-       object, in system voice, and there is no actor field to fill. */
+       object, in system voice, and there is no actor field to fill.
+       AND NO CLOCK, because there is no clock. This used to pass `at: '—'`, and
+       since nine of the gallery's ten receipts are built here, every derived
+       history line read "proposed by justin —" — an em dash standing in the
+       column where a time goes. `HappenedLine.at` is optional now; a field with
+       nothing to put in it is a field the row does not have. */
     happened: object.facts.map((fact, index) => ({
       id: `${object.id}-h${index}`,
       kind,
-      at: '—',
       statement: systemStatement(fact),
     })),
     provenance: [],

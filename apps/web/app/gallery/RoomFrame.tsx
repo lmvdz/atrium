@@ -150,7 +150,7 @@ export interface RoomFrameProps {
   readonly objects: readonly StateObject[];
   readonly updatedAt: string;
   readonly binding: ComposerBinding;
-  readonly composerNote: string;
+  readonly composerNote?: string;
   readonly jump?: CrossRoomJumpRecord;
   /**
    * The receipt to show in the lens, as a RECORD rather than as pre-built

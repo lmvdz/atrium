@@ -60,13 +60,14 @@ export function RoomSession() {
   /* The last thing the page did, in words, shown under the composer. Every
      handler writes here, so a control that fires nothing is visible as a
      control that says nothing — which is the failure this page exists to make
-     impossible to ship again. */
-  /* The banner above the composer already says "nothing is inferred" whenever a
-     binding is live; round 7 measured that clause three times on one screen.
-     This line says what the page IS, once. */
-  const [note, setNote] = useState(
-    'every control on this page is wired — click one and this line reports what it did',
-  );
+     impossible to ship again.
+     IT STARTS EMPTY. It used to be seeded with "every control on this page is
+     wired — click one and this line reports what it did", which is an
+     instruction to a reviewer sitting in the product chrome of the route this
+     round calls the actual product; the r8 review named it as the one piece of
+     demo scaffolding on `/`. A status line with nothing to report reports
+     nothing, and `Composer` renders no element for it. */
+  const [note, setNote] = useState<string | undefined>(undefined);
   /* THE STATE BEHIND THE THREE HANDLERS THE FRAME NEVER FORWARDED. Round 6's
      critic clicked all four rail room chips, both objective triangles and all
      ten object rows and measured no change to `documentElement.className`, to
