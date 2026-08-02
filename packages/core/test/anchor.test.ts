@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  addedBlockStructure,
   type AttentionItem,
+  addedBlockStructure,
   appendEvent,
   blockStructures,
   breakStructures,
@@ -112,7 +112,11 @@ function drive(input: { body: string; quote: string; statement: string }) {
     { id: 'm1', authorId: ALICE, body: input.body },
     { id: 'm2', authorId: BOB, body: 'Got it, thanks for the heads-up.' },
   ];
-  const payload = { statement: input.statement, claimant: ALICE, verification: 'unverified' as const };
+  const payload = {
+    statement: input.statement,
+    claimant: ALICE,
+    verification: 'unverified' as const,
+  };
   const staged = proposalEvent({
     id: 'p1',
     type: 'claim',
@@ -141,9 +145,7 @@ function drive(input: { body: string; quote: string; statement: string }) {
     verdict: decideAcceptance(proposal, { messages }),
     stored: landed.state.objects.o1 ? objectStatement(landed.state.objects.o1.object) : null,
     replayed: replayed.objects.o1 ? objectStatement(replayed.objects.o1.object) : null,
-    statements: Object.values(landed.state.objects).map((record) =>
-      objectStatement(record.object),
-    ),
+    statements: Object.values(landed.state.objects).map((record) => objectStatement(record.object)),
   };
 }
 
@@ -297,7 +299,11 @@ describe('r12 — the structure guards are anchored to the message, not to the q
       'statement_adds_block_structure',
     );
     expect(
-      kinds({ body, quote: body, statement: `${body} Also [the dashboard](https://evil.example).` }),
+      kinds({
+        body,
+        quote: body,
+        statement: `${body} Also [the dashboard](https://evil.example).`,
+      }),
     ).toContain('statement_adds_link_structure');
   });
 
@@ -397,9 +403,9 @@ describe('r12 — a break with no marker on it is still structure the author did
     ).not.toContain('statement_adds_block_structure');
     // The author's own paragraph break, reproduced.
     const paragraphed = 'Do not deploy on Friday.\n\nBob agreed to the rollback plan.';
-    expect(
-      kinds({ body: paragraphed, quote: paragraphed, statement: paragraphed }),
-    ).not.toContain('statement_adds_block_structure');
+    expect(kinds({ body: paragraphed, quote: paragraphed, statement: paragraphed })).not.toContain(
+      'statement_adds_block_structure',
+    );
     // …and flattened, which drops no word the author wrote.
     expect(kinds({ body: paragraphed, quote: paragraphed, statement: BODY })).not.toContain(
       'statement_adds_block_structure',
@@ -488,7 +494,10 @@ describe('r12 — a mention is finished by the person, not by a cycle that named
     // and alice's item never returned.
     const cycle3 = projectAttention(state, {
       now: at(3),
-      mentions: [mention(ALICE, 'please confirm the rollback plan'), mention(BOB, 'and can you review it')],
+      mentions: [
+        mention(ALICE, 'please confirm the rollback plan'),
+        mention(BOB, 'and can you review it'),
+      ],
     });
     const stored3 = reconcileAttention(stored2, cycle3) as AttentionItem[];
     expect(statuses(stored3)).toEqual([`${ALICE}:pending`, `${BOB}:pending`]);
