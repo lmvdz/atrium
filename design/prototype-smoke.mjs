@@ -3,9 +3,16 @@
 import { chromium } from "/home/lars/atrium/node_modules/.pnpm/playwright@1.62.1/node_modules/playwright/index.mjs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
-const FILE = path.resolve(process.argv[2] || path.join(path.dirname(new URL(import.meta.url).pathname), "prototype-frame.html"));
+/* THE VIEWPORT IS AN ARGUMENT (round 14, D2): `--w 1279` reproduces a class of
+   defect that every harness here was blind to for thirteen rounds because all
+   four of them opened at 1440×900 and nothing said so. */
+const argv = process.argv.slice(2);
+const take = (k, d) => { const i = argv.indexOf(k); if (i < 0) return d; const v = argv[i + 1]; argv.splice(i, 2); return v; };
+const W = Number(take("--w", "1440"));
+const H = Number(take("--h", "900"));
+const FILE = path.resolve(argv[0] || path.join(path.dirname(new URL(import.meta.url).pathname), "prototype-frame.html"));
 const browser = await chromium.launch();
-const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+const ctx = await browser.newContext({ viewport: { width: W, height: H } });
 const page = await ctx.newPage();
 const errs = [];
 page.on("console", m => { if (m.type() === "error") errs.push(m.text()); });
@@ -26,9 +33,9 @@ const click = async (t, n) => {
   if (!ok) errs.push("[driver] control not found: " + t);
   return ok;
 };
-for (const step of (process.argv.slice(3).length ? process.argv.slice(3) : [])) await click(step);
+for (const step of argv.slice(1)) await click(step);
 await page.waitForTimeout(200);
 const seen = new Set();
 errs.forEach(e => { const k = e.slice(0, 150); if (!seen.has(k)) { seen.add(k); console.log(e.slice(0, 320)); } });
-console.log("--- " + errs.length + " error line(s), " + seen.size + " distinct");
+console.log("--- " + errs.length + " error line(s), " + seen.size + " distinct  [" + W + "x" + H + "]");
 await browser.close();

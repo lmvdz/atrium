@@ -175,6 +175,19 @@ with nothing unseen says what is in it in one clause instead of four zeros and a
 apology for them. When a round writes a doctrine, its first job is to run the
 doctrine over the whole page.
 
+**And r13 did not sweep it either — the same divider, one clause over.** On the first
+screen, under the chips: `chips count rows · NEEDS YOU counts the items behind them`. A
+two-clause reconciliation whose entire job was to tell a reader that `2 NEED YOU` on the
+divider and `NEEDS YOU 3` on the tab count different things. That is the trap named at the
+top of this section — *a count that needs a sentence beside it to be read correctly is the
+wrong count to show* — written by the round that shipped it. **A count names its own
+unit and then nothing has to reconcile it**: the chips read `2 NEED-YOU ROWS`, `4 CHANGE
+ROWS`, `31 ROUTINE ROWS`, and the sentence explaining the collision is gone because the
+collision is. The same move fixed the other pair on that screen: the lens said `13 objects
+· 9 unverified` while the pin trailer said `~ 6 of 10 unverified` — two true counts of one
+word over two scopes, arithmetically consistent and unexplained. Both read `N of M` now,
+which is one number fewer and puts the difference in the count instead of in prose about it.
+
 **And when you delete an explanation, re-verify the thing it explained is still
 true.** r11 counted "unverified" with one predicate on both sides of the screen and
 printed the scope. r12 widened the lens predicate to include open questions — the
@@ -185,6 +198,26 @@ the sentence that would have made a reader ask was gone. **One predicate, named
 once, called by every surface that counts it** — and a number in a minted sentence
 is re-derived from the records the sentence declares it read, on every paint, so
 two honest counts of the same thing cannot disagree on one screen.
+
+**And that sentence was unqualified for a round, which is how the largest hole on
+the page stayed open.** r13 shipped it as written above while the code beside
+`COUNTED_CLAIMS` was honest that the re-derivation only reached eight *phrasings*.
+The rail's owed badge minted thirteen verification reads and its entire sentence
+was the characters `3` — no phrasing to match, no field word for `checkVocabulary`
+or `checkQuantifiers`, and `say()`'s own point-read mutation gated on a field word
+appearing in the sentence, so all thirteen read-mutations were skipped as well.
+Four instruments, one sentence, silence: patch that badge to return `7` over a room
+holding two and five surfaces on one screen contradict each other with a clean
+console. **A denylist of phrasings is unbounded — enumerate the compliant forms
+instead and report what matches none of them.** Every numeral in a minted sentence
+is now read by one of four: a phrasing pattern, a predicate the sentence *declares*
+(`say(views, phrase, owner, ["needsYou"])`, re-derived from those same records), a
+number the record itself holds, or a declared non-count shape (clock, date,
+duration, money, percentage). Anything else is reported on the paint that renders
+it. **And the reach is generated, not described**: `design/prototype-counts.txt` is
+every numeral on screen with what read it, digits normalised to `#`, produced by
+the same function the checker calls and compared against the live walk on every
+driver run. This paragraph may not describe that file's contents; it cites it.
 
 **A caveat is conditioned on the thing it is about.** r12 moved the objective-overlap
 explanation into the header's `title` and gated it on whether anything under that
@@ -329,6 +362,25 @@ and revealed on row hover over ~.12s. The row stays quiet until you are pointing
 at it. Anything that must be discoverable without hovering — anything that owes
 the user attention — is not a hover affordance.
 
+**And a control you cannot see must not take the pointer.** `.mrow .acts` is
+`position: absolute; z-index: 3` and was hit-testable at `opacity: 0`, clearing
+`#unmarkSeen` by **1.4px** at 1440. A blind reviewer drove 18 randomised sessions of 40
+real mouse clicks with pointer moves at three widths, plus a 12-width probe of all nine
+hit-test points, and could not steal a single click — and measured the mechanism anyway.
+It is environmental today and a row-spacing change makes it a repro. **Delete the
+reachability, not the margin.** The rule is a pair, and both halves are checked:
+
+- a control a reader **can** see must have a point that hit-tests to itself;
+- a control a reader **cannot** see must have no such point;
+- and a control that refuses the pointer while *visible* is its own defect — painted, in
+  the tab order, and a click passes through it.
+
+The one thing this rule may not do is ask either question of a control mid-transition: a
+strip fading in is transparent for 120ms and is not a strip nobody can see. `effOpacity()`
+returns `null` while any ancestor has a running animation, and an unsettled control is
+skipped rather than reported. That caveat exists because the first cut of the rule fired
+on eleven honest controls before it fired on the real one.
+
 ## What is deliberately not here
 
 The call-era tokens (`--live`, `--strip`, `--stile`, `--stileac`, `--stbd`,
@@ -390,7 +442,9 @@ So the reader is a property of the TRANSITION, not of one surface: a write path 
 
   **And what it does not cover is a function, not a sentence.** `uncoveredRecordWords()` returns every page-authored text node that uses a recorded field's own vocabulary while sitting inside no declared subject and no mint — computed on the live DOM on demand, instead of recalled. **One example from it, so the shape is concrete: the control label `Mark signed off`.** It uses `verification`'s vocabulary, declares no record, and is correct: it names an *action*, not a state, and the rule that governs it is the reversibility audit, not this one. Section labels, empty states and refusal sentences are in the list for the same reason: they use a field's word and speak for no record.
 
-  **And be exact about the function's reach, because a blind reviewer was.** It finds text that uses a field's *vocabulary*. The row/message counters — rail badges, surface tabs, `pinCount`, SINCE-YOU chips, the routine strip, the kind-group counts — carry bare numbers and no field word, so they can never appear in it. They are uncovered by every clause here, deliberately: they count messages and rows rather than speaking for a record. Attributes are outside it too, including the objective header's `title`. That is the honest boundary — a function for what uses the vocabulary, and a sentence for the counters that do not. **A claim in a doctrine file is subject to the same evidence rule as a claim in code — including the claim about how far a check reaches.**
+  **And be exact about the function's reach, because a blind reviewer was.** It finds text that uses a field's *vocabulary*, so a counter carrying a bare number and no field word can never appear in it. Attributes are outside it too, including the objective header's `title`. **A claim in a doctrine file is subject to the same evidence rule as a claim in code — including the claim about how far a check reaches.**
+
+  **And the sentence that made that boundary concrete was itself a remembered list, and it was wrong.** It named six surfaces — *rail badges, surface tabs, `pinCount`, SINCE-YOU chips, the routine strip, the kind-group counts* — as "uncovered by every clause here, deliberately: they count messages and rows rather than speaking for a record". Two of the six had been covered for a round by the time a reviewer read it, and one of the remaining four was never true of itself: `pinCount` paints `3 items · hardest first` out of `attention(r).length`, which is `owedTo` AND a verification over every object in the room. It is the most prominent surface on the page and it was on a list of things that speak for no record, in a doctrine file, while a repro requiring exactly that coverage shipped in the same commit. **The uncovered counters are `design/prototype-counts.txt` now** — the `page` rows of a generated file, enumerated off the live DOM in every state the driver reaches, regenerated by the driver and compared against it on every run. A six-item list in prose could disagree with the code for a round; a generated file fails the run on the first render that changes it. **The rule this round earned: when a doctrine paragraph enumerates surfaces, the enumeration belongs in a file the mechanism writes, and the paragraph cites it.**
 
   **And an aggregate is a sentence about many records, so it is minted from all of them.** A blind reviewer found the one surface that escaped both instruments: the pin trailer, which speaks for ten objects at once — `6 of 10 still unverified` — was a literal composed beside them, outside `paintSaid` and outside a walk scoped to elements that render *one* object. It was the exact escape the paragraph above said could not exist. So a claim and a query each carry **the record they were read out of**, rather than a box carrying one owner for all of them; the aggregate reads every object it counts, computes the counts inside the phrase, and the checkers re-read ten records instead of one. A sentence that speaks for a set is not exempt from speaking for each of them.
 
@@ -475,6 +529,8 @@ The rule that replaced it was **"a control whose label is being truncated must b
 **The rule: a minted sentence is painted whole. A control's own label is painted whole. Not wide enough to guess at — whole.** And it is *measured*, not declared: `scrollWidth > clientWidth` and `scrollHeight > clientHeight` are what the browser knows about characters it did not draw. This matters because **`text-overflow: ellipsis` does not change `textContent`**, and every painted-equals-minted rule on this page compares `textContent` — so the entire apparatus that proves a chip says what the record minted passes on a chip that says nothing. A guarantee about the string is not a guarantee about the reader.
 
 The mechanism is `checkLegibilityInvariant()`, over `[data-said]`, the parts of `[data-said-parts]`, and every `button` and its leaf children, walking up to the ancestor that does the clipping. **What it does not cover, named here rather than discovered later:** `.prov .ex`, the provenance excerpt — a person's quoted words, line-clamped to one line, expanded by hover *and* focus, with the full note beneath. Human speech rather than a minted claim, and its truncation has an affordance a keyboard can reach. It is the one deliberate clip on the page, and it is one, not a category.
+
+**That sentence was false for six rounds and the second clip was the room's own purpose line.** `.roomhead .topic` ellipsised at *every* supported width — 468px of characters into 419px at 1280 and into 394px below it — and the CSS comment directly above it said the topic "survives to the narrowest supported width — dropping it was a round-1 defect". Neither the mechanism nor the doctrine saw it: it is not minted and not a control, so no clause reached it, and the count of deliberate clips was written from memory rather than measured. It wraps now, which is r7's own answer for the compact row, and the count is checked rather than asserted — `R14-D7-the-topic-is-painted-whole` measures `scrollWidth` and `scrollHeight` against the box at every declared width. **A count of exceptions is a claim, and it answers to the evidence rule like any other.**
 
 **And the layout stops asking a row to fit.** The cause of r7's defect was a track template mixing `auto` and `1fr`: grid sizes auto tracks before it distributes free space, so `nowrap` metadata and buttons took their full max-content width and the title absorbed the entire shortfall. r7's fix made every flexible track `fr` so they *share* the shortfall — a ratio, not a floor, and every one of them still ended in an ellipsis. The compact row wraps now: title on the first line, meta on its own line under it, nothing cut at any width. **A row two lines tall is a cost; a chip reading `answer ke…` is not a cost, it is a defect.**
 
@@ -610,6 +666,102 @@ Each round apologised. **An apology is not a mechanism.**
 - **The driver fails when the comment names an example the mechanism does not produce.**
   Any hand-written "for example, this now catches X" is a claim awaiting falsification,
   and here it has been falsified three times running.
+
+**And it happened a fourth time, in the round that wrote the three rules above.** r13's
+page comment beside `COUNTED_CLAIMS` was honest that only eight *phrasings* were read;
+`CONVENTIONS.md` said, unqualified, that "a number in a minted sentence is re-derived
+from the records the sentence declares it read, on every paint". The gap between those
+two sentences was the rail's owed badge, whose entire minted sentence was `3`. The fix
+is the same one, applied to the second mechanism: `design/prototype-counts.txt` is every
+numeral on screen with what read it, produced by the same function the checker calls,
+regenerated by the driver and compared on every run. **Two mechanisms now, two generated
+files, and the doctrine cites both rather than describing either.** The rule generalises:
+*if a paragraph in this file would need editing when the code's reach changes, it is the
+wrong place for the claim — put the claim in a file the mechanism writes.*
+
+## A search that ranks its frontier reports whether the ranking chose anything
+
+#10 r13's sequence enumerator ranked frontier states by how many control keys they
+painted that no state had painted yet, and its comment called the alternative — "the
+first N by signature" — *the weakest thing a bounded search can do*. Measured: frontier
+novelty was **zero for 70 of 83 states at depth 3, 81 of 92 at depth 4 and 83 of 88 at
+depth 5**. Past depth 2, where the budget does not yet bind, the tie-break *was* the
+policy. The weakest thing a bounded search can do, arriving inside the fix for it.
+
+r14 added a second key — offered-step novelty, since every control key exists by depth 3
+but the set of `(object, action)` pairs the page offers keeps growing — and then measured
+it: **117 of 184 states tied on controls at depth 3, and 117 still tied after steps.** The
+key did not help. It is kept because it costs nothing and separates at shallower levels,
+and **the honest artifact is the report line, not the key.**
+
+- **Report whether the ranking separated the states either side of the CUT**, not whether
+  it separated some states. The first version of this line asked whether *every* state on
+  the level tied, printed "the ranking discriminates at every truncated level", and was
+  false on the round's own first depth-3 run — the budget boundary sat in the middle of a
+  117-state block the ranking could not tell apart, so signature order picked 83 of them.
+- The rule generalises past search: **a tie-break that decides the outcome is the policy**,
+  whatever the comment above it says, and the only way to know which one you have is to
+  print how many candidates the ranking could still tell apart at the point it had to
+  choose.
+
+## The viewport is part of the denominator
+
+#10 r13 reported controls enumerated, controls driven and states reached at a stated
+depth — three numbers, three facts, and every one of them a fact about **1440×900**,
+because `newPage()` in `prototype-drive.mjs` hard-coded it, as did `prototype-shot.mjs`,
+`prototype-probe.mjs` and `prototype-smoke.mjs`. Thirteen rounds and six reviewers driving
+the page never opened it anywhere else.
+
+Live at 1279 and at every supported width below it: the rail painting `# users-migra…` —
+a control's own label in an ellipsis, on the room you are standing in, and it truncates
+**because you cleared your work**, since `· 40 unread` is wider than `◆3` and the name
+was the only flexible track. The page's own legibility invariant caught it instantly at
+1279. Nothing ever asked it at 1279.
+
+- **Every environmental constant a harness fixes is part of what its numbers are about.**
+  A viewport, a locale, a clock, a random seed, a colour scheme. Name them or vary them;
+  a constant nobody named is a denominator nobody stated.
+- **Vary the cheap ones.** The width set is declared (`--widths`, defaulting to a member
+  on each side of each of the page's two breakpoints plus the narrowest supported width),
+  the deliberate enumeration rotates through it, the random drive rotates through it, and
+  **every scripted repro runs at every width and reports which ones it fired at**.
+- **And "the narrowest supported width" was itself a phrase nobody had measured.** The CSS
+  comment above the breakpoints uses it; the number is **1120**. Below that the grid stops
+  shrinking and pushes the lens off the right edge — `documentElement.scrollWidth` stays at
+  1120 in a 1024px window, on r13 and r12 too. Driving 1024 would be driving a viewport the
+  page has never fitted. `checkViewportFitInvariant()` makes the floor a fact the page
+  asserts on every paint, so raising it costs a console error rather than a screenshot
+  three rounds later.
+- **Declare the expensive ones.** The state enumeration still runs at one width, because
+  a state walk at N widths is N times the work for the same states — so the report says
+  which width, in the same line as the number it qualifies.
+
+## Something reads the English
+
+Every rule in this file governs where a string **came from**: minted, read, queried,
+re-derived, measured for width. None of them reads what it **says**. A permanent divider
+on the first screen ended mid-sentence — *"…the seen cursor sits at the end of
+#users-migration, and only this room's"* — a dangling possessive introduced in **round 2**
+and painted, unchanged, through twelve review rounds, six of them with a reviewer driving
+the page. A sentence can be minted from thirteen honest reads and still not be a sentence.
+
+`checkProseInvariant()` reads the last word of every page-authored run. **It is not a
+denylist of ways to write badly** — that would be unbounded, which this file forbids two
+sections down. English function words are a *closed* class, and the compliant form is
+stated positively: a rendered run ends on a word that carries content.
+
+- **Only the part of the class that cannot end a clause in any register**: determiners,
+  coordinators, subordinators, and a possessive clitic with nothing possessed after it.
+- **Prepositions and auxiliaries are deliberately out.** English strands them — *"not the
+  clean week the proposal asked for"* is correct — and the first draft of this rule, which
+  included them, cried wolf on a receipt line on its first run. That is the "a wrong
+  instrument invents defects" failure arriving inside the fix for something else, caught
+  by running the instrument before believing it.
+- **What it does not cover**: it reads the last word and nothing else, so a run that is
+  ungrammatical in the middle, or grammatical and false, is invisible to it. Human-authored
+  text is exempt.
+
+It found two more on its first run, on this round's own build.
 
 ## Focus goes somewhere usable after every interaction, not only after a write
 

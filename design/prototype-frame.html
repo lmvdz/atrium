@@ -227,8 +227,19 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .rail-body { overflow-y: auto; padding: 4px 0 10px; min-height: 0; }
 .rail-sec { padding: 12px 12px 5px; }
 
+/* THE NAME IS NOT THE TRACK THAT ABSORBS THE SHORTFALL (round 14, D2). At every
+   supported width at or below 1279 the rail is 198px wide, `· 40 unread` is
+   wider than `◆3`, and `.nm` — the only flexible track — took the whole
+   difference: `# users-migra…`, a control's own label painted into an ellipsis,
+   on the room you are standing in, BECAUSE you cleared your work. This is r7's
+   defect exactly, in the one column r7's fix did not reach, and thirteen rounds
+   of instruments never saw it because every one of them opened at 1440.
+   The fix is r7's: the row wraps rather than clipping. `min-width: max-content`
+   is what stops the name shrinking, and `flex-wrap` is what gives the count
+   somewhere to go — a rail row two lines tall is a cost, a room name cut in
+   half is a defect. */
 .rrow {
-  display: flex; align-items: center; gap: 7px;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
   width: 100%; text-align: left;
   padding: 4px 12px 4px 11px;
   border-left: 2px solid transparent;
@@ -238,7 +249,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .rrow:hover { background: var(--bg4); color: var(--tx1); }
 .rrow.on { background: var(--bg4); border-left-color: var(--tx1); color: var(--tx0); }
 .rrow .hash { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx2); width: 9px; }
-.rrow .nm { font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rrow .nm { font-size: 12px; flex: 1 1 auto; min-width: max-content; white-space: nowrap; }
 .rrow.unread .nm { font-weight: 600; color: var(--tx0); }
 /* the unread count is LABELLED and glyphed, and it never wears the pill (round
    12 D5) — it must not be mistakable for the owed badge it replaces in the
@@ -320,9 +331,16 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .roomhead .top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .roomhead h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--tx0); flex: none; white-space: nowrap; }
 .roomhead h2 .hash { color: var(--tx2); font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 400; }
+/* AND THE TOPIC IS PAINTED WHOLE (round 14, D7). The note above says the topic
+   survives to the narrowest supported width; the rule three sections into
+   CONVENTIONS says a claim is painted whole, not wide enough to guess at; and
+   this ellipsised it at EVERY supported width — 468px of characters into 419px
+   at 1280 and into 394px below it. The doctrine said there was one deliberate
+   clip on the page and there were two, the second one sitting under a comment
+   calling its own removal a round-1 defect. It wraps now, which is the same
+   answer r7 gave for the compact row. */
 .roomhead .topic {
   font-size: 11.5px; color: var(--tx2); flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   border-left: 1px solid var(--line); padding-left: 10px;
 }
 .roomhead .faces { display: flex; align-items: center; flex: none; }
@@ -648,14 +666,23 @@ button.tag { cursor: pointer; transition: border-color .12s ease, color .12s eas
 button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 
 /* row hover affordances — every one of these is wired; unwired ones were deleted */
+/* AN INVISIBLE CONTROL IS NOT HIT-TESTABLE (round 14, the unreproduced
+   observation, closed with its mechanism removed rather than its symptom).
+   A blind reviewer drove 18 randomised sessions of 40 real mouse clicks at
+   three widths and a 12-width probe of all nine hit-test points and got zero
+   reproductions — and then measured the mechanism anyway: this strip is
+   `position: absolute; z-index: 3` and, at `opacity: 0`, still takes the
+   pointer. At 1440 it clears `#unmarkSeen` by 1.4px. Nothing is wrong today and
+   a row-spacing change turns that into a repro, so the reachability is deleted
+   rather than the gap widened: what you cannot see cannot take your click. */
 .mrow .acts {
   position: absolute; right: 12px; top: -9px;
-  display: flex; gap: 1px; opacity: 0;
+  display: flex; gap: 1px; opacity: 0; pointer-events: none;
   background: var(--bg3); border: 1px solid var(--line2); border-radius: 4px;
   padding: 1px; transition: opacity .12s ease;
   z-index: 3;
 }
-.mrow:hover .acts, .mrow:focus-within .acts { opacity: 1; }
+.mrow:hover .acts, .mrow:focus-within .acts { opacity: 1; pointer-events: auto; }
 .mrow .acts button {
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   padding: 2px 6px 3px; border-radius: 3px;
@@ -1472,8 +1499,14 @@ S.rooms["users-migration"] = {
       provenance: [{ who: "dana", tm: "09:09", msg: "m10", ex: "I'll have the token-refresh fix out Thursday, before the freeze.", note: "message · seq 9109 · self-stated commitment, extracted at θ .77" }],
       corrections: [],
       note: { text: "Self-stated, so it renders ~ with nothing happening to it",
+              /* THE PRODUCT DOES NOT NARRATE ITS OWN DESIGN ROUNDS (round 14).
+                 This said "and round 1 drew this as · , a promise dressed as a
+                 fact" — a reference to a review round, on a receipt, where a
+                 reader has no idea what round 1 is. Found by this round's own
+                 number rule, which read the `1` and could not, so it said so;
+                 the rule was right for a reason it did not know about. */
               asks: { of: "verification", say: v => " — it is " + enumText(v.value) +
-                ", and round 1 drew this as · , a promise dressed as a fact." } }
+                ", and a quieter glyph here would dress a promise as a fact." } }
     },
     {
       id: "K3", kind: "commitment", objectives: ["o1"], text: "Document the dualwrite flag in the runbook",
@@ -2457,7 +2490,12 @@ function flipAnswer(got, arg) {
 }
 /* a sentence about the record, and the record facts it asserts. The ONLY way to
    produce one — a string written beside a correction entry is refused. */
-function say(views, phrase, owner) {
+/* `counted` (round 14, D1) — the predicates this sentence's own numerals are, in
+   the order the numerals appear, for the ones no phrasing pattern can read. See
+   COUNT_PREDICATES: a declaration is not an exemption, it is the other half of
+   the allowlist, and every declared number is re-derived from the records the
+   sentence declares it read on every paint, exactly as a pattern-read one is. */
+function say(views, phrase, owner, counted) {
   const outer = SAYING, log = (SAYING = []);
   let said;
   try { said = phrase.apply(null, views); } finally { SAYING = outer; }
@@ -2505,6 +2543,19 @@ function say(views, phrase, owner) {
          audit firing on cases its rule does not cover, which this file's own
          doctrine now forbids in as many words. What the rule is actually about
          is a sentence that TALKS about a field and does not listen to it. */
+      /* AND THIS GATE IS THIS MUTATION'S OWN BLIND SPOT, NAMED (round 14, D1).
+         The rule above needs a field WORD in the sentence. A sentence with no
+         words at all — the rail's owed badge, whose entire text was `3` — skips
+         every read-mutation it has, and skipped thirteen of them for a round.
+         The gate is right (a branching sentence genuinely uses one field per
+         branch, and firing on the others is the cry-wolf failure this file
+         forbids); what was missing is anything that notices a sentence the gate
+         can never reach. checkCountedClaims owns that now: every numeral in a
+         minted sentence must be read by an enumerated form, so a wordless
+         sentence answers to the number rules even though it answers to none of
+         the word rules. What is STILL not covered here: a wordless sentence
+         with no numeral in it either — those exist (a glyph), and the aggregate
+         and painted-equals-minted rules are what govern them. */
       if (!(RECORDED[v.of].words || []).some(w => hasToken(base, w))) return;
       /* THE STUBS HAVE TO INCLUDE THE ONE THAT MATTERS. Half the sentences on
          this page are a COMPARISON of two views of one field — "now settled"
@@ -2555,7 +2606,8 @@ function say(views, phrase, owner) {
                    (round 11). This is the half of a record read that round 10
                    did not keep: `ever("verified")` decided a whole clause and
                    left nothing behind for a checker to re-ask. */
-                queries: log };
+                queries: log,
+                counted: counted || null };
   Object.defineProperty(box, "minted", { value: MINTED, enumerable: false });
   Object.defineProperty(box, "owner", { value: owner || (views.length ? views[0].owner : null), enumerable: false });
   return box;
@@ -2764,7 +2816,10 @@ function clearSummary(r) {
     vs.forEach(v => { if (needsYouAt(v.owner, v.value)) v.owner.objectives.forEach(id => { blocked[id] = 1; }); });
     const clear = r.objectives.filter(ob => !blocked[ob.id]).length;
     return `${clear}/${r.objectives.length} objectives clear of you`;
-  }, r.objects[0]);
+    /* a slash-pair has no phrasing between its two numbers for a pattern to
+       match — `9/9` over a room with three objectives was silent on every
+       instrument here (round 14, D1) — so both ends name their predicate */
+  }, r.objects[0], ["objectivesClear", "objectivesTotal"]);
 
   /* `last check HH:MM` — the sixth statistic — was REMOVED in round 12. It was
      r2's, made honest in round 11 (616bb07) by reading the record for the most
@@ -3396,11 +3451,77 @@ function checkStatedBox(where, id, box) {
  * derivation is the page's own predicate, so this cannot become a second
  * definition of "unverified" that drifts from the first — it calls it.
  *
- * WHAT IT DOES NOT COVER, SAID PLAINLY. A number in a sentence whose phrasing is
- * not one of these patterns is not checked; the patterns are here, in one place,
- * and a new counting phrase has to be added to be covered. That is a real gap
- * and it is stated rather than discovered: the alternative — parsing every
- * integer on the page — is an instrument that would invent defects.
+ * AND A NUMBER NO PATTERN READS IS THE THING TO REPORT (round 14, D1). The
+ * paragraph that used to sit here said the pattern list was "a real gap, stated
+ * rather than discovered". It was neither: it was an unbounded escape, and it
+ * was measured. The rail's owed badge minted THIRTEEN verification reads and its
+ * entire sentence was the characters `3`. That one sentence defeated all four
+ * instruments at once — say()'s point-read mutation is gated on the field's own
+ * vocabulary appearing in the sentence, so all thirteen read-mutations were
+ * skipped; checkCountedClaims matched none of its eight patterns; checkVocabulary
+ * and checkQuantifiers both need a field word to have anything to say. Patch one
+ * line so the badge says `7` over a room holding two, and every surface on one
+ * screen contradicts it — and the console stays silent. Same for the objectives
+ * line saying `9/9` over a room with three.
+ *
+ * A denylist of phrasings is unbounded; this file's own doctrine says so in as
+ * many words two sections down. So the rule is inverted. EVERY numeral in a
+ * minted sentence must be read by something, and the compliant forms are
+ * enumerated here:
+ *
+ *   1. A PHRASING PATTERN reads it — COUNTED_CLAIMS, below, re-derived from the
+ *      records the sentence declares.
+ *   2. THE SENTENCE DECLARES WHAT IT COUNTS — `say(views, phrase, owner,
+ *      ["needsYou"])` — and the named predicate in COUNT_PREDICATES re-derives
+ *      it from those same records. This is the form for a number with no words
+ *      beside it to pattern-match: a badge, a tab, a slash-pair.
+ *   3. IT IS A NUMBER THE RECORD ITSELF HOLDS — it appears in a value this
+ *      sentence read or in an answer it was given. Derived from the data, so a
+ *      record containing a number next year needs no list entry.
+ *   3b. IT IS INSIDE A FRAGMENT THE SENTENCE QUOTES OUT OF THE RECORD — a
+ *      receipt reprinting `deploy 2f81c3 carried the flag into staging` or
+ *      `confidence .78` is reproducing characters the record holds, and the
+ *      digits in them are not a count of anything. The fragment has to be at
+ *      least three characters AND carry a non-digit, so a bare `7` can never be
+ *      laundered through a record that happens to contain a seven somewhere.
+ *   3c. THE SENTENCE READ NOTHING, so it computed nothing. A seeded fixture line
+ *      is transcribed into a mint with zero views so the record owns its
+ *      characters; there is no count in a sentence that opened no field.
+ *   4. IT IS ONE OF THE DECLARED NON-COUNT FORMS — a clock time, a calendar
+ *      date, a duration, an amount, a percentage. NUMBER_FORMS, short by design.
+ *
+ * A numeral matching none of these is reported. That is a bounded rule: the
+ * page cannot grow a new unreadable number without the console saying so on the
+ * first paint that renders it.
+ *
+ * WHAT SHAPE OF INPUT THIS CHECK CANNOT SEE — asked of itself, because the
+ * question round 13 did not ask is exactly what D1 was:
+ *   - A COUNT IN A SENTENCE THAT DECLARES NO READS (form 3c). A zero-view mint
+ *     is treated as transcription. Anything that computed a number and then
+ *     minted it with `stated(o, [], …)` is invisible here — and is caught, if at
+ *     all, by the rule that an aggregate is minted from every record it counts.
+ *   - A COUNT SPLICED INSIDE A QUOTED RECORD FRAGMENT (form 3b). The digits of a
+ *     span this sentence reproduces verbatim are not read. The span has to be at
+ *     least three characters and carry a non-digit, so a bare count cannot hide
+ *     in one, but a longer forgery built around a real fragment could.
+ *   - A COUNT OVER A SET THE SENTENCE DID NOT READ. Every predicate here is
+ *     re-derived over the sentence's own claim owners. A number that is honest
+ *     about a DIFFERENT set — the room next door, the messages rather than the
+ *     records — cannot be re-derived and is not checked; it is enumerated in the
+ *     artifact's `page` rows instead, which is a list, not a proof.
+ *   - EVERY NUMERAL OUTSIDE A MINT. Those are enumerated, never verified. The
+ *     artifact is what makes a new one visible; nothing makes it correct.
+ *   - A NUMBER THAT IS CORRECTLY DERIVED AND WRONGLY LABELLED. `needsYou`
+ *     re-derives to 3 whether the sentence calls it items, objects or apples.
+ *     checkVocabulary owns the label; this owns the arithmetic.
+ *
+ * AND THE REACH IS GENERATED, NOT DESCRIBED. design/prototype-counts.txt is
+ * numberReach()'s own output — every numeral-bearing sentence on screen, with
+ * digits normalised to `#` so the file is about FORMS, and how each numeral was
+ * read — unioned over every state the enumerator reaches and checked against the
+ * live walk on every run. The counters that speak for no record are in the same
+ * file, from the same walk, which is what replaced a six-item list in the
+ * doctrine that had been wrong about two of its six for a round.
  * ======================================================================== */
 /* the room a record lives in — a denominator like "11 of 13 objects" is a claim
    about this record's room, and the room is what knows how many it holds */
@@ -3412,46 +3533,261 @@ function roomHolding(o) {
    "8 of 13 unverified" is never also read as the one-number "8 unverified"
    against the wrong denominator. */
 const COUNTED_CLAIMS = [
-  { re: /(\d+)\s+of\s+(\d+)\s+unverified/,
+  { id: "unverified-of-read", re: /(\d+)\s+of\s+(\d+)\s+unverified/,
     n: os => [os.filter(o => isUnchecked(o.verification)).length, os.length],
     what: "records nothing outside the claimant has checked, of the records read" },
-  { re: /(\d+)\s+of\s+(\d+)\s+objects?(?![a-z])/,
+  { id: "read-of-room", re: /(\d+)\s+of\s+(\d+)\s+objects?(?![a-z])/,
     n: os => [os.length, (roomHolding(os[0]) || { objects: [] }).objects.length],
     what: "records read, of the records in the room" },
-  { re: /(\d+)\s+unverified/,
+  { id: "unverified", re: /(\d+)\s+unverified/,
     n: os => [os.filter(o => isUnchecked(o.verification)).length],
     what: "records nothing outside the claimant has checked" },
-  { re: /(\d+)\s+objects?(?![a-z])/,
+  { id: "read", re: /(\d+)\s+objects?(?![a-z])/,
     n: os => [os.length], what: "records read" },
-  { re: /(\d+)\s+awaiting you/,   n: os => [os.filter(needsYou).length], what: "records waiting on you" },
-  { re: /(\d+)\s+need(?:s)? you/, n: os => [os.filter(needsYou).length], what: "records waiting on you" },
+  { id: "awaiting-you", re: /(\d+)\s+awaiting you/,   n: os => [os.filter(needsYou).length], what: "records waiting on you" },
+  { id: "need-you", re: /(\d+)\s+need(?:s)? you/, n: os => [os.filter(needsYou).length], what: "records waiting on you" },
   /* the surface tabs put the label first and the number second — the same claim,
      read in the other direction, and a pattern that only matched "3 need you"
      would have left both of them unchecked (round 13, D6) */
-  { re: /needs? you\s*·\s*(\d+)/i,     n: os => [os.filter(needsYou).length], what: "records waiting on you" },
-  { re: /current state\s*·\s*(\d+)/i, n: os => [os.length], what: "records in this room" }
+  { id: "tab-needs-you", re: /needs? you\s*·\s*(\d+)/i,     n: os => [os.filter(needsYou).length], what: "records waiting on you" },
+  { id: "tab-current-state", re: /current state\s*·\s*(\d+)/i, n: os => [os.length], what: "records in this room" }
 ];
+
+/* FORM 2 — THE PREDICATES A SENTENCE MAY DECLARE ITS OWN NUMERALS TO BE.
+   Every one of them is derived from the records the sentence declares it read,
+   through the page's own predicates, so a declaration cannot become a second
+   definition of "needs you" that drifts from the first — it calls the same
+   function the render does. A name that is not in this table is refused, so a
+   declaration cannot be an escape hatch either. */
+const COUNT_PREDICATES = {
+  needsYou:   { n: os => os.filter(needsYou).length,                          what: "records waiting on you" },
+  unverified: { n: os => os.filter(o => isUnchecked(o.verification)).length,  what: "records nothing outside the claimant has checked" },
+  read:       { n: os => os.length,                                           what: "records this sentence read" },
+  roomHeld:   { n: os => (roomHolding(os[0]) || { objects: [] }).objects.length, what: "records the room holds" },
+  /* an objective is clear of you when nothing under it is waiting on you — the
+     same `needsYou` over the same reads, projected onto the room's objectives */
+  objectivesClear: {
+    n: os => {
+      const r = roomHolding(os[0]); if (!r) return null;
+      const blocked = {};
+      os.filter(needsYou).forEach(o => (o.objectives || []).forEach(x => { blocked[x] = 1; }));
+      return (r.objectives || []).filter(ob => !blocked[ob.id]).length;
+    }, what: "objectives with nothing under them waiting on you" },
+  objectivesTotal: {
+    n: os => { const r = roomHolding(os[0]); return r ? (r.objectives || []).length : null; },
+    what: "objectives in the room" },
+  /* "still blocks 2 objectives" — the objectives these records sit under. Found
+     by this round's own new rule on this round's own build, in a toast, which is
+     the answer to "what shape of input can your check not see": it saw one. */
+  objectivesUnder: {
+    n: os => { const s = {}; os.forEach(o => (o.objectives || []).forEach(x => { s[x] = 1; })); return Object.keys(s).length; },
+    what: "objectives these records sit under" }
+};
+
+/* FORM 4 — THE NON-COUNT NUMERALS, DECLARED. Short on purpose: every entry here
+   is a numeral this page prints that is not a claim about how many records
+   there are, and each one has to be a shape, not a value. */
+const NUMBER_FORMS = [
+  { id: "clock", re: /\b\d{1,2}:\d{2}\b/g,   what: "a clock time" },
+  { id: "date",  re: /\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b/gi, what: "a calendar date" },
+  { id: "duration", re: /\b\d+\s*(?:d|h|m|s|ms|day|days|hour|hours|min|mins|minute|minutes|week|weeks|month|months)\b/gi,
+    what: "a duration" },
+  /* a numeral welded to a unit is a MEASUREMENT, not a count of records — the
+     unit is what makes the shape bounded, and a count of records has none */
+  { id: "money",   re: /[$€£]\s?\d[\d,]*(?:\.\d+)?/g,  what: "an amount of money" },
+  { id: "percent", re: /\b\d+(?:\.\d+)?\s?%/g,         what: "a percentage" }
+];
+
+/* HOW EVERY NUMERAL IN ONE SENTENCE IS READ — one function, called by the
+   checker AND by the artifact generator, so the reach claim and the check cannot
+   drift apart. Returns one row per numeral, in the order the numerals appear.
+   `verify` is what makes it a check rather than a description: given the owner
+   records it re-derives each pattern-read and each declared number. */
+/* form 3b — the characters this sentence reproduces out of the record. Derived
+   from the owners' own data, so nothing is listed; bounded by "at least three
+   characters and not all digits", so a count can never hide in it. */
+function quotedRecordSpans(owners) {
+  const out = [];
+  const add = v => {
+    if (typeof v !== "string" || v.length < 3 || !/\D/.test(v) || !/\d/.test(v)) return;
+    if (out.indexOf(v) < 0) out.push(v);
+  };
+  /* THE RECORD, NOT WHATEVER THE PAGE HUNG ON THE OBJECT. The first cut of this
+     also swept `o.facts`, which is page-COMPOSED text — and `o.facts` contains
+     "still blocks 2 objectives", so the toast that declares that very count was
+     quietly credited with quoting it and the declaration went unused. Found by
+     this round's own DECLARED-NOTHING clause, on this round's own build: a form
+     that swallows the number it was meant to check is worse than no form. What
+     is left is the record's own fields and its own history values. */
+  (owners || []).forEach(o => {
+    if (!o || typeof o !== "object") return;
+    Object.keys(o).forEach(k => { if (typeof o[k] === "string" && k !== "id") add(o[k]); });
+    Object.keys(o.recorded || {}).forEach(f => (o.recorded[f] || []).forEach(e => add(e && e.value)));
+  });
+  return out.sort((a, b) => b.length - a.length);
+}
+function readNumbers(text, counted, owners, valueText, subjects) {
+  const rows = [];
+  const BLANK = " ";
+  let rest = String(text);
+  /* form 1 — the phrasings. A count over one record is not an aggregate, so the
+     patterns (whose predicates are all over a record SET) only speak when the
+     sentence declares two or more. */
+  if (owners && owners.length >= 2) COUNTED_CLAIMS.forEach(p => {
+    const m = rest.match(p.re);
+    if (!m) return;
+    const at = rest.indexOf(m[0]);
+    rest = rest.slice(0, at) + m[0].replace(/\d/g, BLANK) + rest.slice(at + m[0].length);
+    const want = p.n(owners);
+    for (let k = 1; k < m.length; k++)
+      rows.push({ how: "pattern:" + p.id, saw: Number(m[k]), want: want[k - 1],
+                  what: p.what, phrase: m[0] });
+  });
+  /* form 3c — A SENTENCE THAT READ NOTHING COMPUTED NOTHING. A seeded fixture
+     line is transcribed into a mint with zero views (`stated(o, [], () => text)`)
+     so that the record owns its characters; `parity run #391 passed with 0
+     checksum diffs` is what the record SAYS, and its digits are characters, not
+     a count of anything. Nothing here derives a count from no reads — an
+     aggregate that speaks for records is minted from all of them, which is a
+     rule two sections up — so a zero-read sentence cannot be hiding one. */
+  if (!owners || !owners.length) {
+    if (/\d/.test(rest)) rows.push({ how: "transcribed", saw: null, want: null,
+      what: "a sentence that declares no reads — the record's own characters", phrase: rest.slice(0, 40) });
+    return rows;
+  }
+  /* form 3b — a fragment reproduced verbatim out of the record */
+  quotedRecordSpans(subjects || owners).forEach(span => {
+    for (;;) {
+      const at = rest.indexOf(span);
+      if (at < 0) return;
+      rest = rest.slice(0, at) + span.replace(/\d/g, BLANK) + rest.slice(at + span.length);
+      rows.push({ how: "quoted", saw: null, want: null,
+                  what: "characters this sentence reproduces out of the record", phrase: span.slice(0, 40) });
+    }
+  });
+  /* form 4 — the declared non-count shapes, out of the way before anything is
+     counted positionally */
+  NUMBER_FORMS.forEach(f => {
+    rest = rest.replace(new RegExp(f.re.source, f.re.flags), s => {
+      rows.push({ how: "form:" + f.id, saw: null, want: null, what: f.what, phrase: s });
+      return s.replace(/\d/g, BLANK);
+    });
+  });
+  /* forms 2 and 3, over what is left, left to right */
+  const decls = (counted || []).slice();
+  const re = /\d[\d,]*(?:\.\d+)?/g;
+  let m;
+  while ((m = re.exec(rest))) {
+    const lit = m[0];
+    /* form 3 — a number the record itself holds. Derived from the values this
+       sentence declares it read and the answers it was given, not from a list. */
+    if (valueText && valueText.indexOf(lit) >= 0) {
+      rows.push({ how: "record", saw: null, want: null, what: "a number this sentence read out of the record", phrase: lit });
+      continue;
+    }
+    if (!decls.length) { rows.push({ how: "UNREAD", saw: Number(lit.replace(/,/g, "")), want: null, phrase: lit }); continue; }
+    const name = decls.shift();
+    const pred = COUNT_PREDICATES[name];
+    if (!pred) { rows.push({ how: "UNDECLARED:" + name, saw: Number(lit.replace(/,/g, "")), want: null, phrase: lit }); continue; }
+    rows.push({ how: "declared:" + name, saw: Number(lit.replace(/,/g, "")),
+                want: owners && owners.length ? pred.n(owners) : null, what: pred.what, phrase: lit });
+  }
+  decls.forEach(name => rows.push({ how: "DECLARED-NOTHING:" + name, saw: null, want: null, phrase: "" }));
+  return rows;
+}
 function checkCountedClaims(where, id, box) {
   const owners = [];
   (box.claims || []).concat(box.queries || []).forEach(c => {
     const o = c.owner || box.owner;
     if (o && owners.indexOf(o) < 0) owners.push(o);
   });
-  if (owners.length < 2) return;      // a count over one record is not an aggregate
-  let rest = normText(quantText(box.said));
-  COUNTED_CLAIMS.forEach(p => {
-    const m = rest.match(p.re);
-    if (!m) return;
-    rest = rest.replace(m[0], " ");
-    p.n(owners).forEach((n, k) => {
-      if (Number(m[k + 1]) === n) return;
-      console.error("[atrium invariant] " + where + " prints a count that is not what it counts — the number was minted " +
-        "from these records and does not equal the answer those records give, so two honest counts of the same thing " +
-        "can disagree on one screen:", id, JSON.stringify(m[0]), "says", m[k + 1], "· " + owners.length +
-        " records give", n, "(" + p.what + ")");
-    });
+  const text = normText(quantText(box.said));
+  if (!/\d/.test(text)) return;
+  const valueText = (box.claims || []).map(c => String(c.value))
+    .concat((box.queries || []).map(q => String(q.got && q.got.value != null ? q.got.value : q.got))).join("  ");
+  const subjects = owners.concat(box.owner && owners.indexOf(box.owner) < 0 ? [box.owner] : []);
+  readNumbers(text, box.counted, owners, valueText, subjects).forEach(r => {
+    if (r.how === "UNREAD")
+      return console.error("[atrium invariant] " + where + " prints a number no check on this page can read — no " +
+        "phrasing pattern matches it, the sentence declares no predicate for it, and it is neither a value the " +
+        "record holds nor a declared non-count form, so it can say anything at all and every instrument here stays " +
+        "silent:", id, JSON.stringify(text), "· the unread number is", JSON.stringify(r.phrase));
+    if (r.how.indexOf("UNDECLARED:") === 0)
+      return console.error("[atrium invariant] " + where + " declares its number is a predicate this page does not " +
+        "have, so nothing re-derived it:", id, r.how.slice(11), JSON.stringify(text));
+    if (r.how.indexOf("DECLARED-NOTHING:") === 0)
+      return console.error("[atrium invariant] " + where + " declares a count predicate for a numeral that is not in " +
+        "the sentence — the declaration and the sentence are out of step:", id, r.how.slice(17), JSON.stringify(text));
+    if (r.want == null || r.saw === r.want) return;
+    console.error("[atrium invariant] " + where + " prints a count that is not what it counts — the number was minted " +
+      "from these records and does not equal the answer those records give, so two honest counts of the same thing " +
+      "can disagree on one screen:", id, JSON.stringify(r.phrase), "says", r.saw, "· " + owners.length +
+      " records give", r.want, "(" + r.what + ")");
   });
 }
+
+/* ===========================================================================
+ * THE REACH CLAIM, GENERATED (round 14, D1)
+ *
+ * Every numeral on screen, and what read it. Mint rows come from readNumbers()
+ * — the same function the checker calls — so this cannot describe a reach the
+ * check does not have. Page rows are the counters that speak for no record:
+ * enumerated off the live DOM here rather than remembered as a list in a
+ * doctrine file, which is how that list came to be wrong about two of its six
+ * entries for a round. Digits are normalised to `#`: the claim is about FORMS.
+ * ======================================================================== */
+function digitless(s) { return String(s).replace(/\d/g, "#"); }
+function numberReach() {
+  const out = [];
+  const done = [];
+  document.querySelectorAll("[data-said], [data-said-parts]").forEach(el => {
+    const i = el.dataset.said != null ? el.dataset.said : el.dataset.saidParts;
+    const box = PAINTED[Number(i)];
+    if (!box || done.indexOf(box) >= 0) return;
+    done.push(box);
+    const text = normText(quantText(box.said));
+    if (!/\d/.test(text)) return;
+    const owners = [];
+    (box.claims || []).concat(box.queries || []).forEach(c => {
+      const o = c.owner || box.owner;
+      if (o && owners.indexOf(o) < 0) owners.push(o);
+    });
+    const valueText = (box.claims || []).map(c => String(c.value))
+      .concat((box.queries || []).map(q => String(q.got && q.got.value != null ? q.got.value : q.got))).join("  ");
+    const subjects = owners.concat(box.owner && owners.indexOf(box.owner) < 0 ? [box.owner] : []);
+    readNumbers(text, box.counted, owners, valueText, subjects).forEach(r => {
+      out.push("mint  " + r.how + "  " + JSON.stringify(digitless(text)));
+    });
+  });
+  /* and the numerals that are in no mint at all — page furniture, row counters,
+     message counters. Not an error list: a count of ROWS is not a claim about a
+     record, and this is where the page says which numbers those are. */
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      const p = n.parentElement;
+      if (!p || p.closest("script, style, template")) return NodeFilter.FILTER_REJECT;
+      if (p.closest("[data-said], [data-said-parts]")) return NodeFilter.FILTER_REJECT;
+      /* the toast IS a minted sentence — it is painted with textContent rather
+         than through paintSaid because it is raised after the render it belongs
+         to, and checkToastInvariant() runs checkPaintedSentence() on it. Listing
+         it among "numerals in no mint" would be this file's own defect class in
+         this file's own artifact. */
+      if (p.closest("#toast")) return NodeFilter.FILTER_REJECT;
+      if (p.closest(HUMAN_SEL)) return NodeFilter.FILTER_REJECT;
+      if (!shown(p)) return NodeFilter.FILTER_REJECT;
+      return /\d/.test(String(n.nodeValue)) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  let n;
+  while ((n = walker.nextNode())) {
+    const p = n.parentElement;
+    const host = p.closest("[id]");
+    out.push("page  " + ((host && host.id) || p.className || "?") + "  " +
+             JSON.stringify(digitless(String(n.nodeValue).replace(/\s+/g, " ").trim().slice(0, 76))));
+  }
+  return out;
+}
+window.__numberReach = numberReach;
 
 /* AND A SENTENCE MAY NOT BORROW A FIELD'S WORD FROM A READ OF ANOTHER FIELD,
  * QUANTIFIER OR NO QUANTIFIER (round 12, raised by the codex reviewer).
@@ -4142,6 +4478,20 @@ function shown(el) {
   }
   return true;
 }
+/* what a reader can actually SEE of this element — opacity multiplies down the
+   tree, so an ancestor at 0 makes a child at 1 invisible (round 14).
+   `null` means "not settled": a control fading in is transparent for 120ms and
+   is not a control nobody can see, and a rule that could not tell the two apart
+   would be an instrument that invents defects — which this file's own doctrine
+   forbids in as many words. */
+function effOpacity(el) {
+  let o = 1;
+  for (let p = el; p && p.nodeType === 1; p = p.parentElement) {
+    if (typeof p.getAnimations === "function" && p.getAnimations().some(a => a.playState === "running")) return null;
+    o *= Number(getComputedStyle(p).opacity);
+  }
+  return o;
+}
 /* the element's box intersected with every scroll/clip ancestor and the
    viewport — i.e. the part of it a pointer could actually reach */
 function visibleBox(el) {
@@ -4174,6 +4524,23 @@ function legibleWidth(el) {
   if (el.scrollWidth <= el.clientWidth + 1) return AIM_MIN;
   const fs = parseFloat(getComputedStyle(el).fontSize) || 12;
   return Math.max(24, Math.round(fs * 6));
+}
+
+/* THE NARROWEST SUPPORTED WIDTH IS MEASURED, NOT REMEMBERED (round 14, D2).
+   Once the harnesses stopped fixing the viewport at 1440, "the narrowest
+   supported width" — a phrase this file's own CSS comment uses — turned out to
+   be a number nobody had ever taken. It is 1120: the three-column grid bottoms
+   out at 1120px and everything below that pushes the lens off the right edge,
+   on r13 and r12 as well. So the floor is a fact the page asserts about itself
+   on every paint, and a change that raises it says so on the first render
+   instead of in a reviewer's screenshot three rounds later. */
+function checkViewportFitInvariant() {
+  if (!DEV) return;
+  const doc = document.documentElement;
+  if (doc.scrollWidth > window.innerWidth + 1)
+    console.error("[atrium invariant] the page is wider than the window it was given — a column is pushed off the " +
+      "right edge and nothing on this page scrolls sideways to bring it back:",
+      doc.scrollWidth + "px of layout in " + window.innerWidth + "px of viewport");
 }
 
 function checkLayoutInvariant() {
@@ -4233,6 +4600,36 @@ function checkLayoutInvariant() {
     let cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     if (cx < v.left || cx > v.right || cy < v.top || cy > v.bottom) {
       cx = (v.left + v.right) / 2; cy = (v.top + v.bottom) / 2;  // partially scrolled: test the reachable part
+    }
+    /* AND AN INVISIBLE CONTROL IS ASKED THE OPPOSITE QUESTION (round 14).
+       `.mrow .acts` is `position: absolute; z-index: 3` and was hit-testable at
+       `opacity: 0` — an element nobody can see, sitting in front of the ones
+       they can, clearing `#unmarkSeen` by 1.4px at 1440. A blind reviewer drove
+       18 randomised sessions of 40 real mouse clicks at three widths and a
+       12-width probe of all nine hit-test points and could not reproduce a
+       stolen click, and measured the mechanism anyway; a row-spacing change is
+       all it would take. So the pair is stated as a pair: a control you can see
+       must be reachable, and a control you cannot see must not be touchable.
+       The rule above cannot ask the first question of a transparent control —
+       it is not painted — and this asks the second one instead. */
+    const settledOpacity = effOpacity(el);
+    /* A CONTROL THAT DOES NOT TAKE THE POINTER CANNOT HIT-TEST TO ITSELF, so the
+       rule below would fire on every one of them. The question that is worth
+       asking of it is the other one: `pointer-events: none` is honest while the
+       control is invisible and a defect the moment it is not. */
+    if (getComputedStyle(el).pointerEvents === "none") {
+      if (settledOpacity !== null && settledOpacity >= 0.01)
+        console.error("[atrium invariant] a control a reader can see refuses the pointer — it is painted, it is in the " +
+          "tab order, and a click passes straight through it:", controlName(el), el);
+      return;
+    }
+    if (settledOpacity !== null && settledOpacity < 0.01) {
+      const h0 = document.elementFromPoint(cx, cy);
+      if (h0 === el || (h0 && el.contains(h0)))
+        console.error("[atrium invariant] a control painted at zero opacity still takes the pointer — something " +
+          "nobody can see is in front of the controls they can, and it swallows the click the moment a row moves " +
+          "under it:", controlName(el), el);
+      return;
     }
     let hit = document.elementFromPoint(cx, cy);
     if (hit === el || (hit && el.contains(hit))) return;
@@ -4315,6 +4712,89 @@ function clipped(el) {
   return (hidesX && el.scrollWidth > el.clientWidth + 1) ||
          (hidesY && el.scrollHeight > el.clientHeight + 1);
 }
+/* ===========================================================================
+ * SOMETHING HERE READS THE ENGLISH (round 14, D8)
+ *
+ * A permanent divider on the first screen ended mid-sentence — "…the seen cursor
+ * sits at the end of #users-migration, and only this room's" — a dangling
+ * possessive introduced in ROUND 2 and painted, unchanged, through twelve review
+ * rounds, six of them with a reviewer driving the page. Every instrument on this
+ * page reads where a string CAME FROM: minted, read, queried, re-derived,
+ * measured for width. Not one of them reads what it says. A sentence can be
+ * minted from thirteen honest reads and still not be a sentence.
+ *
+ * WHY THIS IS NOT AN UNBOUNDED DENYLIST, which this file's own doctrine forbids.
+ * It does not enumerate ways to write badly. English function words are a CLOSED
+ * class — articles, conjunctions, prepositions, auxiliaries, the possessive
+ * clitic — and the compliant form is stated positively: a rendered run ends on a
+ * word that carries content. A run ending on a function word has an argument
+ * missing, and the missing argument is what a reader trips over. The class is
+ * closed, so the list terminates; it is the same reason a union tag can be
+ * validated and a key list cannot.
+ *
+ * WHAT IT DOES NOT COVER, said plainly rather than discovered next round.
+ *   - It reads the LAST word of a run and nothing else, so a sentence that is
+ *     ungrammatical in the middle, or grammatical and false, is invisible to it.
+ *   - PREPOSITIONS AND AUXILIARIES ARE DELIBERATELY OUT. English strands
+ *     prepositions in relative clauses — "not the clean week the proposal asked
+ *     for" is correct — and ellipsis strands auxiliaries. The first draft of
+ *     this rule included both and cried wolf on a receipt line on its first run,
+ *     which is the "wrong instrument invents defects" failure this file names two
+ *     sections down, arriving inside the fix for something else. What is left is
+ *     the part of the closed class that CANNOT end a clause in any register:
+ *     determiners, coordinators, subordinators, and a possessive clitic with
+ *     nothing possessed after it — which is the shape that actually shipped.
+ *   - Human-authored text is exempt: holding a person's typed sentence to a
+ *     page-integrity rule is round 5's defect and this is a page-integrity rule.
+ * ======================================================================== */
+const DANGLING_TAIL = [
+  /* determiners — none of these can be the last word of a clause */
+  "a", "an", "the", "these", "those", "its", "their", "your", "our", "every", "each", "another",
+  /* coordinators */ "and", "or", "but", "nor",
+  /* subordinators */ "because", "although", "though", "whereas", "unless", "than", "whether"
+];
+function proseFindings() {
+  const out = [];
+  const seen = {};
+  document.querySelectorAll("body *").forEach(el => {
+    if (el.children.length) return;                      // leaves only — a run is what one element paints
+    if (el.closest("script, style, template")) return;
+    if (el.closest(HUMAN_SEL)) return;                   // a person's own words are not this rule's business
+    if (el.getAttribute("aria-hidden") === "true") return;
+    if (!shown(el)) return;
+    const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
+    if (!raw) return;
+    /* trailing punctuation, glyphs and arrows are not the last WORD */
+    const body = raw.replace(/[\s·—–\-→←↑↓:;,.!?'"“”‘’()\[\]…]+$/u, "");
+    if (!body) return;
+    /* A ONE-WORD RUN IS A LABEL, NOT A SENTENCE. `AT` is an avatar's initials
+       and `A` is a keyboard hint; neither has an argument to be missing. The
+       rule is about a run that stops mid-clause, and a clause needs two words. */
+    if (!/\s/.test(body)) return;
+    const last = (body.match(/[\w'’-]+$/u) || [""])[0];
+    if (!last) return;
+    /* a possessive with nothing possessed after it — the exact shape that shipped */
+    const possessive = /['’]s$/i.test(last) && /['’]s$/i.test(raw.replace(/[\s.]+$/, ""));
+    const dangling = DANGLING_TAIL.indexOf(last.toLowerCase()) >= 0;
+    if (!possessive && !dangling) return;
+    const key = raw.slice(-60);
+    if (seen[key]) return;
+    seen[key] = 1;
+    out.push({ why: possessive ? "a possessive with nothing possessed after it"
+                               : "a function word with its argument missing",
+               text: raw.length > 110 ? "…" + raw.slice(-105) : raw, el: el });
+  });
+  return out;
+}
+window.__proseFindings = () => proseFindings().map(f => f.why + "  " + JSON.stringify(f.text));
+function checkProseInvariant() {
+  if (!DEV) return;
+  proseFindings().forEach(f =>
+    console.error("[atrium invariant] a rendered line ends on " + f.why +
+      " — the page is painting an unfinished sentence, and every rule here about where words came from passes on it:",
+      JSON.stringify(f.text), f.el));
+}
+
 const CLIP_ALLOWED = "[data-clamp]";
 function checkLegibilityInvariant() {
   if (!DEV) return;
@@ -4968,11 +5448,19 @@ function renderRail() {
        instrument on the page could see it. The unread count beside it counts
        MESSAGES and stays a literal, which is the difference the two glyphs are
        there to make. */
+    /* AND ITS ENTIRE SENTENCE IS A NUMERAL, SO IT DECLARES WHAT THE NUMERAL IS
+       (round 14, D1). `◆3` minted thirteen verification reads and said the
+       characters `3` — no phrasing for a pattern to match, no field word for the
+       vocabulary or quantifier rules, and no word in the sentence for say()'s
+       own read-mutation to be gated on, so all thirteen mutations were skipped
+       too. Four instruments, one sentence, silent. `needsYou` here is the
+       predicate the badge IS, named, and checkCountedClaims re-derives it from
+       these same thirteen records on every paint. */
     const owedBadge = r.objects.length
       ? say(r.objects.map(o => fieldView(o, "verification")), function () {
           const vs = Array.prototype.slice.call(arguments);
           return String(vs.filter(v => needsYouAt(v.owner, v.value)).length);
-        }, r.objects[0])
+        }, r.objects[0], ["needsYou"])
       : null;
     b.innerHTML =
       `<span class="hash" aria-hidden="true">#</span><span class="nm">${esc(r.name)}</span>` +
@@ -5061,14 +5549,32 @@ function renderPin() {
      those items produced, because that is the other number on the screen. */
   const f = S.ui.feedFilter;
   const rows = f && f.k === "need" ? groupMessages(r, f.scope).filter(m => msgClass(r, m) === "need").length : 0;
-  $("pinCount").textContent = !items.length
-    ? "nothing owed — this is the whole list"
-    : (f && f.k === "need")
+  /* AND THE PIN'S OWN COUNT IS A SENTENCE ABOUT RECORDS (round 14, D6). `3 items
+     · hardest first` is `attention(r).length` — `owedTo` AND a verification,
+     over every object in the room — painted on the most prominent surface on the
+     page with no mint, no `data-obj` and no `data-agg`. Round 13 covered the
+     rail badge and the surface tabs and left this one, and the doctrine went on
+     listing it among the counters that "count messages and rows rather than
+     speaking for a record", which it never did. It is minted from the records it
+     counts and it declares which predicate the number is.
+     The ROW count beside it stays outside the mint on purpose: it counts feed
+     rows, not records, and a sentence about records may not carry a number about
+     something else inside its claims. */
+  const itemBox = r.objects.length
+    ? say(r.objects.map(o => fieldView(o, "verification")), function () {
+        const vs = Array.prototype.slice.call(arguments);
+        const n = vs.filter(v => needsYouAt(v.owner, v.value)).length;
+        return `${n} item${n === 1 ? "" : "s"}`;
+      }, r.objects[0], ["needsYou"])
+    : null;
+  $("pinCount").innerHTML = !items.length
+    ? esc("nothing owed — this is the whole list")
+    : voiced(itemBox) + esc((f && f.k === "need")
       /* "highlighted" is now literally what happens — round 6 said this while
          dropping every other row to 1.5:1, so the word was doing the work of
          hiding a legibility failure. It says what the other rows get, too. */
-      ? `${items.length} item${items.length > 1 ? "s" : ""} · ${rows} linked row${rows === 1 ? "" : "s"} highlighted below · nothing else dimmed`
-      : `${items.length} item${items.length > 1 ? "s" : ""} · hardest first`;
+      ? ` · ${rows} linked row${rows === 1 ? "" : "s"} highlighted below · nothing else dimmed`
+      : " · hardest first");
   $("pinFold").setAttribute("aria-pressed", String(S.ui.pinFolded));
   $("pinFold").textContent = S.ui.pinFolded ? "UNFOLD" : "FOLD";
   list.hidden = S.ui.pinFolded;
@@ -5631,7 +6137,17 @@ function wireActions(el, o) {
  * FEED
  * ======================================================================== */
 
-const FILTER_LABEL = { need: "NEED YOU", change: "CHANGES", discussion: "DISCUSSION", routine: "ROUTINE" };
+/* A COUNT NAMES ITS OWN UNIT, AND THEN NOTHING HAS TO RECONCILE IT (round 14,
+   D9 — the prune, swept as a class rather than applied where it was noticed).
+   `2 NEED YOU` on the divider counted feed ROWS; `NEEDS YOU 3` on the tab
+   counted ITEMS; and a two-clause sentence on the same divider, on the first
+   screen, existed only to tell the reader which was which — `chips count rows ·
+   NEEDS YOU counts the items behind them`. That is ¶118's own shape: a count
+   that needs a sentence beside it to be read correctly is the wrong count to
+   show, and round 12 wrote that rule while this line was two panes to the left.
+   The honest fix is fewer words, not more: the chip says ROWS, so there is
+   nothing left to reconcile and the reconciliation is gone. */
+const FILTER_LABEL = { need: "NEED-YOU", change: "CHANGE", discussion: "DISCUSSION", routine: "ROUTINE" };
 
 function renderFeed() {
   const r = room();
@@ -5948,7 +6464,7 @@ function sylDivider(r, mode) {
   if (mode === "seen") {
     el.innerHTML =
       `<div class="bar"><span class="lbl">SEEN FROM HERE</span><span class="rule"></span></div>
-       <div class="when"><span>caught up — ${r.readGroup || 0} message${r.readGroup === 1 ? "" : "s"} read · ${esc(r.away.len)} away · the seen cursor sits at the end of #${esc(r.name)}, and only this room's</span></div>`;
+       <div class="when"><span>caught up — ${r.readGroup || 0} message${r.readGroup === 1 ? "" : "s"} read · ${esc(r.away.len)} away · the seen cursor sits at the end of #${esc(r.name)} and moves for this room only</span></div>`;
     return el;
   }
 
@@ -5971,9 +6487,9 @@ function sylDivider(r, mode) {
      a disclaimer explaining them. */
   const chips = ["need", "change", "discussion", "routine"].filter(k => c[k]).map(k => {
     const n = c[k], on = !!S.ui.feedFilter && S.ui.feedFilter.k === k && S.ui.feedFilter.scope === scope;
-    const title = `${n} message${n === 1 ? "" : "s"} in this group are ${k === "need" ? "linked to something that needs you — the pin counts the items, this counts the rows" : FILTER_LABEL[k].toLowerCase()}`;
+    const title = `${n} message${n === 1 ? "" : "s"} in this group are ${k === "need" ? "linked to something that needs you" : FILTER_LABEL[k].toLowerCase()}`;
     return `<button class="cnt${k === "need" ? " need" : ""}" data-filter="${k}" data-scope="${scope}"` +
-           ` title="${esc(title)}" aria-pressed="${on}">${n} ${FILTER_LABEL[k]}</button>`;
+           ` title="${esc(title)}" aria-pressed="${on}">${n} ${FILTER_LABEL[k]} ROW${n === 1 ? "" : "S"}</button>`;
   }).join("");
 
   /* marking seen mutes this divider; it does not delete it. The window, the
@@ -5983,8 +6499,7 @@ function sylDivider(r, mode) {
     /* and the clause that tells the two numbers apart is printed only while
        there are two numbers to tell apart (round 13, D10 — same class) */
     ? `<span>${esc(r.away.from)} → ${esc(r.away.to)} · ${esc(r.away.len)} away · ${c.total} messages · frozen at return</span>` +
-      (c.need ? `<span aria-hidden="true">·</span>
-       <span>chips count rows · NEEDS YOU counts the items behind them</span>` : "") + filterNote(scope) + `
+      filterNote(scope) + `
        <span aria-hidden="true">·</span>` +
       (read
         ? `<span class="marked">marked seen ${esc(r.markedAt || "")} · the group stays here, muted</span>
@@ -6165,8 +6680,16 @@ function renderLens() {
        counting it outside the phrase would put a number about thirteen
        verifications next to thirteen reads it did not use. */
     const owedN = vs.filter(v => needsYouAt(v.owner, v.value)).length;
-    return `${vs.length} object${vs.length === 1 ? "" : "s"} · ${unver} unverified · ` +
-           `${owedN} awaiting you`;
+    /* AND THE COUNT CARRIES ITS OWN DENOMINATOR (round 14, D10). This said
+       `13 objects · 9 unverified` while the pin trailer, one pane left, said
+       `~ 6 of 10 unverified` — two true counts of "unverified" over two
+       different scopes, arithmetically consistent (10 = 13 − 3 in the pin) and
+       with nothing on screen saying so. The doctrine's own answer to that shape
+       is to make the difference visible in the count rather than to explain it
+       in a sentence beside it, so both lines read `N of M` now and the M is
+       where a reader sees the two scopes are not the same one. It is also one
+       number fewer: `9 of 13` says what `13 objects · 9` said. */
+    return `${unver} of ${vs.length} unverified · ${owedN} awaiting you`;
   }, r.objects[0]);
   $("lensSummary").innerHTML = voiced(sum) +
     `<span aria-hidden="true"> · </span><span class="upd">updated ${esc(S.now)}</span>`;
@@ -7031,7 +7554,8 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
        the page could see it. The card's words are its WORDING here. */
     ? (typed ? `answered · your wording is the answer of record · it stays ${enumText(nv.value)} with no sign-off, and still blocks ${blocks}`
              : `answered · the card's wording recorded verbatim in the system's voice · it stays ${enumText(nv.value)} with no sign-off, and still blocks ${blocks}`)
-    : `re-recorded · it is the answer already on the record, so the answer itself was not amended · still blocks ${blocks}`), "warn");
+    : `re-recorded · it is the answer already on the record, so the answer itself was not amended · still blocks ${blocks}`,
+    o, ["objectivesUnder"]), "warn");
 }
 
 /* --- B2: reopen re-renders EVERYTHING, including the historical row ------
@@ -7237,7 +7761,9 @@ function reopen(objectId, reason) {
              say([wasSr, keptView], keptShort),
              say([nowVr, nowSr], (v, s) => !owed
                ? enumText(v.value) + (v.before(v.value) ? " again" : "")
-               : enumText(s.value) + (s.before(s.value) ? " again" : "") + (back === S.me ? "" : " · " + back + "'s"))]
+               /* `pending again · justin's` ended on a possessive with nothing
+                  possessed after it — found by round 14's prose rule */
+               : enumText(s.value) + (s.before(s.value) ? " again" : "") + (back === S.me ? "" : " · on " + back))]
     .concat(sourceRoomOf(o) ? ["source in #" + o.sourceRoom] : []);
   /* system voice: what happened, not what anyone said about it — and what it
      says moved is read out of the record rather than asserted beside it, so the
@@ -7824,7 +8350,7 @@ function applyEffect(objectId, fx) {
       who: S.me, tm: t,
       was: say([rn[0]], n => recordedLabel(n.value, "Nobody was assigned to it")),
       after: say([rn[1], rn[3]], (n, v) => recordedLabel(n.value) + " — it is still " + enumText(v.value) +
-        ", and still blocking " + blocks),
+        ", and still blocking " + blocks, o, ["objectivesUnder"]),
       change: nc,
       fact: say(rn, (was, now, a) => (moved(was, now)
         ? `reassigned by ${S.me} at ${t}`
@@ -7837,7 +8363,9 @@ function applyEffect(objectId, fx) {
     /* "still open" is a claim about the verification, which is a recorded field —
        so it is read, not written down beside it (round 10 self-review) */
     o.facts = ["asked by " + fieldOr(o.askedBy, "nobody on the record"),
-               say([rn[1]], n => "now " + recordedLabel(n.value, "nobody") + "'s"),
+               /* "now justin's" — a possessive with nothing possessed after it,
+                  found by round 14's prose rule on round 14's own build */
+               say([rn[1]], n => n.value == null ? "assigned to nobody" : "assigned to " + recordedLabel(n.value)),
                say([rn[3]], v => "still " + enumText(v.value))];
     o.history.push({ k: "question", who: S.me, tm: t,
       /* "unchanged in the record" was inherited from round 9 and is false about
@@ -7867,7 +8395,7 @@ function applyEffect(objectId, fx) {
     msgText = say(rn, (was, now, a, v) => (moved(was, now)
       ? `reassigned to ${recordedLabel(now.value)} · out of your list`
       : `the assignee was not amended · it was already ${recordedLabel(now.value)}'s`) +
-      ` · still ${enumText(v.value)} · still blocking ${blocks}`);
+      ` · still ${enumText(v.value)} · still blocking ${blocks}`, o, ["objectivesUnder"]);
     kind = "warn";
   } else if (fx === "takeback") {
     /* THE CONTROL THAT MAKES HANDING A QUESTION ON REVERSIBLE IN FACT (round 12
@@ -8418,6 +8946,8 @@ function render() {
   checkActionEffectInvariant();
   checkLayoutInvariant();
   checkLegibilityInvariant();
+  checkProseInvariant();
+  checkViewportFitInvariant();
   setTimeout(clearFresh, 400);
 }
 

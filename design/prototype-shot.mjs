@@ -2,11 +2,17 @@ import { chromium } from "/home/lars/atrium/node_modules/.pnpm/playwright@1.62.1
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-const out = process.argv[2] || "/tmp/shot.png";
-const steps = process.argv.slice(3);
+/* the viewport is an argument, not a constant (round 14, D2) */
+const argv = process.argv.slice(2);
+const take = (k, d) => { const i = argv.indexOf(k); if (i < 0) return d; const v = argv[i + 1]; argv.splice(i, 2); return v; };
+const W = Number(take("--w", "1440"));
+const H = Number(take("--h", "900"));
+const FILE = path.resolve(take("--file", path.join(HERE, "prototype-frame.html")));
+const out = argv[0] || "/tmp/shot.png";
+const steps = argv.slice(1);
 const browser = await chromium.launch();
-const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
-await page.goto(pathToFileURL(path.join(HERE, "prototype-frame.html")).href);
+const page = await (await browser.newContext({ viewport: { width: W, height: H } })).newPage();
+await page.goto(pathToFileURL(FILE).href);
 await page.waitForTimeout(400);
 for (const t of steps) {
   await page.evaluate(t => {
@@ -22,4 +28,4 @@ for (const t of steps) {
 await page.waitForTimeout(300);
 await page.screenshot({ path: out });
 await browser.close();
-console.log("wrote " + out);
+console.log("wrote " + out + " at " + W + "x" + H);

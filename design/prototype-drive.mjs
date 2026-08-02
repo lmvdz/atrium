@@ -13,10 +13,19 @@
  *
  * It reports: how many controls exist, how many were driven, which were not and
  * why. Plus the scripted repros for this round's defects, each of which must
- * fire on fix/prototype-frame-r11 as committed and be silent after.
+ * fire on the PREVIOUS round as committed and be silent after.
+ *
+ * AND EVERY NUMBER IT REPORTS IS A NUMBER ABOUT A VIEWPORT (round 14, D2). It
+ * used to be one viewport, hard-coded, unnamed — see WIDTHS below.
  *
  * Usage:
- *   node design/prototype-drive.mjs [--file <path>] [--random N] [--json out]
+ *   node design/prototype-drive.mjs [--file <path>] [--depth N] [--random N]
+ *                                   [--widths 1440,1279,1024] [--height 900]
+ *                                   [--only repros] [--json out]
+ *                                   [--uncovered <path>] [--counts <path>]
+ *
+ * Point it at the previous round and quote the count:
+ *   node design/prototype-drive.mjs --only repros --file /tmp/r13.html
  * ========================================================================== */
 
 import { chromium } from "/home/lars/atrium/node_modules/.pnpm/playwright@1.62.1/node_modules/playwright/index.mjs";
@@ -32,6 +41,40 @@ const RANDOM_SESSIONS = Number(argOf("--random", "12"));
 const RANDOM_CLICKS = Number(argOf("--clicks", "60"));
 const JSON_OUT = argOf("--json", "");
 const URL = pathToFileURL(FILE).href;
+
+/* --- THE VIEWPORT IS PART OF THE DENOMINATOR (round 14, D2) ----------------
+ * Round 13 reported controls, states and depths and every one of those numbers
+ * was a number about 1440×900, because `newPage()` hard-coded it — as did
+ * prototype-shot.mjs, prototype-probe.mjs and prototype-smoke.mjs. A live
+ * invariant violation existed at every supported width at or below 1279 — the
+ * rail painting `# users-migra…`, a control's own label in an ellipsis, on the
+ * room you are standing in, BECAUSE you had cleared your work — and it survived
+ * thirteen rounds and six reviewers driving the page, silent from 1280 up.
+ *
+ * So the width is a declared set, not a constant. The enumeration still runs at
+ * one width (a state walk at N widths is N times the work for the same states),
+ * and every OTHER pass — the deliberate enumeration, the random drive and every
+ * scripted repro — runs at each width in this set, which is what makes the
+ * report's numbers say which viewports they are about.
+ *
+ * WHICH WIDTHS, AND WHY THE FLOOR IS 1120. The layout has two breakpoints, at
+ * 1440 and 1280, so the set has a member on each side of each of them. The last
+ * member is the narrowest width the page actually supports, and that number was
+ * MEASURED rather than assumed: below 1120 the three-column grid stops shrinking
+ * and pushes the lens off the right edge — `documentElement.scrollWidth` stays at
+ * 1120 in a 1024px window, on r13 and r12 as well as here. Driving 1024 would be
+ * driving a viewport the page has never fitted, and reporting numbers about it
+ * would be the same error as reporting numbers about 1440 alone. The page asserts
+ * the floor itself now (checkViewportFitInvariant), so it cannot rise in silence.
+ * ------------------------------------------------------------------------- */
+/* `--only repros` runs pass 3 alone, which is how a repro suite is pointed at the
+   PREVIOUS round's build without paying for a state walk of it. Every repro here
+   must fire on fix/prototype-frame-r13 as committed; that claim is only worth
+   something if re-running it is cheap. */
+const ONLY = argOf("--only", "");
+const WIDTHS = String(argOf("--widths", "1440,1366,1279,1160,1120")).split(",").map(Number).filter(Boolean);
+const HEIGHT = Number(argOf("--height", "900"));
+const SEQ_WIDTH = Number(argOf("--seq-width", String(WIDTHS[0])));
 
 /* --- the enumeration, installed before the page's script -------------------
    Every control on this page is an element the page called addEventListener
@@ -249,8 +292,8 @@ const INIT = `
 `;
 
 /* --- one browser session ---------------------------------------------------- */
-async function newPage(browser) {
-  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+async function newPage(browser, width) {
+  const ctx = await browser.newContext({ viewport: { width: Number(width) || SEQ_WIDTH, height: HEIGHT } });
   await ctx.addInitScript(INIT);
   const page = await ctx.newPage();
   const errors = [];
@@ -323,7 +366,10 @@ async function seqStep(page, errors, path) {
     uncovered: typeof window.__uncoveredRecordWords === "function"
       ? window.__uncoveredRecordWords().map(u => u.field + "  " + JSON.stringify(u.text) +
           "  [" + u.words.join(", ") + "]" + (u.control ? "  (inside a control)" : ""))
-      : []
+      : [],
+    /* and the same thing for NUMBERS (round 14, D1): every numeral on screen and
+       what read it, straight out of the mechanism that reads them */
+    numbers: typeof window.__numberReach === "function" ? window.__numberReach() : []
   }));
   out.failed = failed;
   out.violations = invariantsOnly(errors.slice(errAt));
@@ -347,7 +393,9 @@ async function passSequences(browser, log) {
   const offeredSteps = new Set();  // (object, action, driver) the page offered
   const unreachable = new Map();   // step -> why
   const ctlSeen = new Map();       // control key -> { visible, driven:false }
+  const stepSeen = new Set();      // every (object, action, driver) any state has ever OFFERED
   const uncovered = new Set();     // the walk's own "what I do not cover", unioned over states
+  const numbers = new Set();       // every numeral on screen and what read it, unioned over states
   const violations = [];
   const levels = [];
 
@@ -368,9 +416,12 @@ async function passSequences(browser, log) {
   const root = await seqStep(workers[0].page, workers[0].errors, []);
   noteCtls(root.ctls);
   root.uncovered.forEach(u => uncovered.add(u));
+  root.numbers.forEach(u => numbers.add(u));
   root.violations.forEach(t => violations.push({ text: t, path: [], where: "load" }));
   seen.set(root.sig, { depth: 0, path: [] });
-  let frontier = [{ sig: root.sig, path: [], steps: stepsOf(root.alphabet), fresh: root.ctls.length }];
+  const rootSteps = stepsOf(root.alphabet);
+  rootSteps.forEach(s => stepSeen.add(s));
+  let frontier = [{ sig: root.sig, path: [], steps: rootSteps, fresh: root.ctls.length, freshSteps: rootSteps.length }];
   levels.push({ depth: 0, states: 1, expanded: 1, truncated: 0, transitions: 0 });
   log(`  depth 0: 1 state · ${root.alphabet.length} (object, action) pairs offered`);
 
@@ -386,9 +437,27 @@ async function passSequences(browser, log) {
        state, because this level's noteCtls() has already marked them all seen —
        which is what the first version of this ranking did: an ordering that
        claimed to prefer novelty and did not. The round's own defect class, in
-       the round's own instrument, caught by reading its own diff. */
+       the round's own instrument, caught by reading its own diff.
+
+       AND ONE KEY IS NOT A RANKING WHERE IT MATTERS (round 14, D3). Measured on
+       round 13's own instrument: frontier novelty was zero for 70 of 83 states
+       at depth 3, 81 of 92 at depth 4 and 83 of 88 at depth 5 — so past depth 2,
+       where the budget does not yet bind, the tie-break WAS the policy and the
+       ranking this comment describes was signature order. That is exactly "an
+       arbitrary sample of a level", which the paragraph above calls the weakest
+       thing a bounded search can do, arriving inside the fix for it.
+       Every control key exists by depth 3; what does NOT is the set of (object,
+       action) pairs the page OFFERS, which keeps growing as records move. So the
+       second key is offered-step novelty, and the report prints how many states
+       each key could still tell apart at each level — a ranking that has gone
+       inert says so rather than being described as a preference it no longer
+       expresses. */
     const ordered = frontier.slice().sort((a, b) =>
-      ((b.fresh || 0) - (a.fresh || 0)) || (a.sig < b.sig ? -1 : 1));
+      ((b.fresh || 0) - (a.fresh || 0)) ||
+      ((b.freshSteps || 0) - (a.freshSteps || 0)) ||
+      (a.sig < b.sig ? -1 : 1));
+    const inertCtl = frontier.filter(s => !(s.fresh || 0)).length;
+    const inertBoth = frontier.filter(s => !(s.fresh || 0) && !(s.freshSteps || 0)).length;
     /* the levels the committed uncovered-set artifact is taken from are NEVER
        truncated, whatever the budget: a generated file whose contents depend on
        how far a particular run got cannot be compared against a later run, and
@@ -427,24 +496,30 @@ async function passSequences(browser, log) {
          committed file is reproducible by anyone who runs the driver with any
          --depth >= 2 — which is what makes "the committed file must match the
          live walk" a check rather than a coin toss. */
-      if (d <= UNCOVERED_DEPTH) r.uncovered.forEach(u => uncovered.add(u));
+      if (d <= UNCOVERED_DEPTH) { r.uncovered.forEach(u => uncovered.add(u)); r.numbers.forEach(u => numbers.add(u)); }
       if (r.failed.length) r.failed.forEach(f => unreachable.set(f.split(" (")[0], f));
       else drivenSteps.add(j.step);
       r.violations.forEach(t => violations.push({ text: t, path: j.path.slice(), where: "sequence d" + d }));
       if (seen.has(r.sig)) return;
       seen.set(r.sig, { depth: d, path: j.path });
-      nextFrontier.push({ sig: r.sig, path: j.path, steps: stepsOf(r.alphabet), fresh: r.fresh });
+      const steps = stepsOf(r.alphabet);
+      const freshSteps = steps.filter(s => !stepSeen.has(s)).length;
+      steps.forEach(s => stepSeen.add(s));
+      nextFrontier.push({ sig: r.sig, path: j.path, steps, fresh: r.fresh, freshSteps });
     });
     levels.push({ depth: d, states: nextFrontier.length, expanded: expand.length,
-                  truncated, transitions: jobs.length });
+                  truncated, transitions: jobs.length,
+                  frontier: frontier.length, inertCtl, inertBoth });
     log(`  depth ${d}: ${jobs.length} transitions driven from ${expand.length} state(s)` +
         (truncated ? ` (${truncated} state(s) left unexpanded — frontier budget ${BUDGET})` : " (complete breadth)") +
-        ` → ${nextFrontier.length} new state(s)`);
+        ` → ${nextFrontier.length} new state(s)` +
+        `  [ranking: ${inertCtl}/${frontier.length} states tied at zero on control novelty, ` +
+        `${inertBoth} still tied after step novelty]`);
     frontier = nextFrontier;
   }
 
   for (const w of workers) await w.ctx.close();
-  return { seen, levels, violations, drivenSteps, offeredSteps, unreachable, ctlSeen, uncovered,
+  return { seen, levels, violations, drivenSteps, offeredSteps, unreachable, ctlSeen, uncovered, numbers,
            depth: DEPTH, budget: BUDGET };
 }
 
@@ -491,7 +566,11 @@ async function passEnumerate(browser, log) {
     lap++;
     let discoveredThisLap = 0;
     for (let s = 0; s < SESSIONS_PER_LAP; s++) {
-      const { ctx, page, errors } = await newPage(browser);
+      /* AND EACH SESSION OPENS AT A DIFFERENT SUPPORTED WIDTH (round 14, D2) —
+         the layout has two breakpoints and thirteen rounds of enumeration only
+         ever saw the widest band */
+      const width = WIDTHS[sessions % WIDTHS.length];
+      const { ctx, page, errors } = await newPage(browser, width);
       sessions++;
       const path0 = [];
       for (let k = 0; k < STEPS; k++) {
@@ -527,7 +606,8 @@ async function passRandom(browser, log) {
   let rng = 20260801;
   const rand = () => ((rng = (rng * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
   for (let s = 0; s < RANDOM_SESSIONS; s++) {
-    const { ctx, page, errors } = await newPage(browser);
+    const width = WIDTHS[s % WIDTHS.length];
+    const { ctx, page, errors } = await newPage(browser, width);
     const path0 = [];
     for (let k = 0; k < RANDOM_CLICKS; k++) {
       const list = (await ctlList(page)).filter(c => c.visible && !c.disabled);
@@ -539,11 +619,11 @@ async function passRandom(browser, log) {
       await clickIndex(page, pick.i);
       clicks++;
       invariantsOnly(errors.slice(errAt)).forEach(t =>
-        violations.push({ text: t, path: path0.slice(), where: "random s" + s }));
+        violations.push({ text: t, path: path0.slice(), where: "random s" + s + " @" + width }));
     }
     await ctx.close();
   }
-  log(`  ${RANDOM_SESSIONS} sessions × up to ${RANDOM_CLICKS} clicks = ${clicks} clicks`);
+  log(`  ${RANDOM_SESSIONS} sessions × up to ${RANDOM_CLICKS} clicks = ${clicks} clicks, across widths ${WIDTHS.join(", ")}`);
   return { violations, clicks };
 }
 
@@ -577,6 +657,249 @@ async function clickText(page, text, opts = {}) {
  * them against the previous round with --file and quote the count.
  * ======================================================================== */
 const REPROS = [
+  {
+    /* ROUND 14, D1. The rail's owed badge mints thirteen verification reads and
+       its entire sentence is the characters `3`. No COUNTED_CLAIMS pattern
+       matches it, no field word is in it for checkVocabulary or
+       checkQuantifiers, and say()'s own read-mutation is gated on a field word
+       appearing in the sentence — so all thirteen read-mutations are skipped
+       too. Four instruments, one sentence, silence. Measured in the DOM against
+       the page's own tables, so it fires on r13 as committed. */
+    id: "R14-D1-every-number-in-a-mint-is-read",
+    what: "every numeral in a minted sentence is read by a pattern, a declared predicate, the record or a declared form",
+    async run() { return null; },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        if (typeof window.__numberReach === "function") {
+          window.__numberReach()
+            .filter(l => /^mint\s+(UNREAD|UNDECLARED|DECLARED-NOTHING)/.test(l))
+            .forEach(l => out.push("a number in a minted sentence is read by nothing: " + l));
+          return Array.from(new Set(out));
+        }
+        /* THE FALLBACK EXISTS ONLY FOR OLDER BUILDS, which is why it is allowed
+           to be a smaller rule than the page's: a minted sentence whose whole
+           text is a bare numeral cannot be matched by any phrasing pattern, by
+           construction, and needs no table to say so. */
+        out.push("this build cannot say how any number in a minted sentence was read — window.__numberReach is missing");
+        document.querySelectorAll("[data-said], [data-said-parts]").forEach(el => {
+          const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (!/^[\d\s/·,.-]*\d[\d\s/·,.-]*$/.test(t)) return;
+          const box = (window.PAINTED || [])[Number(el.dataset.said != null ? el.dataset.said : el.dataset.saidParts)];
+          const owners = box ? new Set((box.claims || []).map(c => c.of)) : null;
+          out.push("a minted sentence's entire text is a numeral, so no phrasing pattern can reach it: " +
+                   JSON.stringify(t) + (owners ? " (minted from " + (box.claims || []).length + " reads)" : ""));
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
+  {
+    /* ROUND 14, D2. Live at every supported width at or below 1279 and silent
+       from 1280 up — which is why thirteen rounds of harnesses, all four of them
+       pinned to 1440×900, never saw it. It truncates BECAUSE you cleared your
+       work: `· 40 unread` is wider than `◆3`, and the name was the only flexible
+       track. */
+    id: "R14-D2-rail-name-at-narrow-widths",
+    what: "no control's label is painted into an ellipsis at any supported width, after the writes that widen the badge",
+    async run(page) {
+      if (!await clickText(page, "Keep dual-write through 14 Aug")) return "P1's answer not offered";
+      if (!await clickText(page, "Mark signed off")) return "K2's sign-off not offered";
+      if (!await clickText(page, "Answer — retention is 90 days")) return "the one-click answer is not offered";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll(".rrow .nm, .rrow .ct, .rrow .pill").forEach(el => {
+          const cs = getComputedStyle(el);
+          const clips = cs.overflowX === "hidden" || cs.overflowX === "clip" || cs.textOverflow === "ellipsis";
+          if (clips && el.scrollWidth > el.clientWidth + 1)
+            out.push("a rail row is painting a room name into an ellipsis at " + window.innerWidth + "px: " +
+                     JSON.stringify((el.textContent || "").trim()) + " — scrollWidth " + el.scrollWidth +
+                     " > clientWidth " + el.clientWidth);
+        });
+        return out;
+      });
+    }
+  },
+  {
+    /* ROUND 14, D6. `#pinCount` paints `3 items · hardest first` from
+       attention(r).length — `owedTo` AND a verification, over every object in
+       the room — on the most prominent surface on the page, inside no mint and
+       no declared subject. This walks the DOM for the shape rather than naming
+       the surface: a numeral outside every mint, immediately followed by one of
+       the page's own nouns for a RECORD. Rows, messages, people and rooms are
+       not records and never trip it. */
+    id: "R14-D6-a-count-of-records-is-minted",
+    what: "no numeral outside a mint is followed by the page's own noun for a record",
+    async run() { return null; },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        const RECORD_NOUNS = /^(items?|objects?)$/i;
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+          acceptNode(n) {
+            const p = n.parentElement;
+            if (!p || p.closest("script, style, template")) return NodeFilter.FILTER_REJECT;
+            if (p.closest("[data-said], [data-said-parts]")) return NodeFilter.FILTER_REJECT;
+            const cs = getComputedStyle(p);
+            if (cs.display === "none" || cs.visibility === "hidden") return NodeFilter.FILTER_REJECT;
+            return /\d/.test(String(n.nodeValue)) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          }
+        });
+        let n;
+        while ((n = w.nextNode())) {
+          const text = String(n.nodeValue).replace(/\s+/g, " ").trim();
+          const m = text.match(/(\d+)\s+([A-Za-z]+)/);
+          if (!m || !RECORD_NOUNS.test(m[2])) continue;
+          const host = n.parentElement.closest("[id]");
+          out.push("a count of records sits inside no mint: " + ((host && host.id) || n.parentElement.className) +
+                   " · " + JSON.stringify(text.slice(0, 70)));
+        }
+        return Array.from(new Set(out));
+      });
+    }
+  },
+  {
+    /* ROUND 14, D7. CONVENTIONS ¶477 says there is one deliberate clip on this
+       page. There were two, and the second one is the room's own purpose line,
+       under a CSS comment calling its removal a round-1 defect. */
+    id: "R14-D7-the-topic-is-painted-whole",
+    what: "the room's topic is not truncated at any supported width",
+    async run() { return null; },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const el = document.getElementById("roomTopic");
+        if (!el) return ["the room has no topic element"];
+        return el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1
+          ? ["the room's topic is truncated at " + window.innerWidth + "px: " + el.scrollWidth + " > " + el.clientWidth +
+             " — " + JSON.stringify((el.textContent || "").trim().slice(0, 70))]
+          : [];
+      });
+    }
+  },
+  {
+    /* ROUND 14, D8. A permanent divider on the first screen ended mid-sentence
+       — a dangling possessive introduced in ROUND 2 and painted unchanged
+       through twelve review rounds, six with a reviewer driving the page.
+       Nothing here read the English. */
+    id: "R14-D8-no-unfinished-sentence",
+    what: "no rendered line ends on a function word or a possessive with nothing after it",
+    /* the SEEN FROM HERE divider — the one that ended mid-sentence — is painted
+       only once the group has been marked seen, which is why "it is on the first
+       screen" and "no run path" were both true and the line survived twelve
+       rounds. One click brings it into existence. */
+    async run(page) {
+      if (!await clickText(page, "mark this group seen")) return "nothing marks the group seen";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        if (typeof window.__proseFindings === "function")
+          return window.__proseFindings().map(f => "a rendered line is unfinished: " + f);
+        /* the same closed class, inlined, for a build that has no such rule.
+           Prepositions and auxiliaries are out for the same reason they are out
+           of the page's own list: English strands them legitimately. */
+        const TAIL = ["a","an","the","these","those","its","their","your","our","every","each","another",
+          "and","or","but","nor","because","although","though","whereas","unless","than","whether"];
+        const out = [];
+        document.querySelectorAll("body *").forEach(el => {
+          if (el.children.length) return;
+          if (el.closest("script, style, template, .htext, .hq, blockquote")) return;
+          if (el.getAttribute("aria-hidden") === "true") return;
+          const cs = getComputedStyle(el);
+          if (cs.display === "none" || cs.visibility === "hidden") return;
+          const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
+          const body = raw.replace(/[\s·—–\-→←↑↓:;,.!?'"“”‘’()\[\]…]+$/u, "");
+          if (!body || !/\s/.test(body)) return;
+          const last = (body.match(/[\w'’-]+$/u) || [""])[0];
+          if (!last) return;
+          if (/['’]s$/i.test(last) || TAIL.indexOf(last.toLowerCase()) >= 0)
+            out.push("a rendered line is unfinished: " + JSON.stringify(raw.length > 100 ? "…" + raw.slice(-95) : raw));
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
+  {
+    /* ROUND 14, D9. `chips count rows · NEEDS YOU counts the items behind them`
+       — a two-clause reconciliation on the first screen, existing only because
+       two surfaces printed the same words over different denominators. ¶118's
+       own shape, one column left of the pane round 12 pruned. */
+    id: "R14-D9-no-count-reconciliation-clause",
+    what: "no divider prints a sentence whose only job is to tell two counts apart",
+    async run(page) {
+      await clickText(page, "Keep dual-write through 14 Aug");
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll(".syl .when, .syl").forEach(el => {
+          const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (/count(s)? rows|counts the items behind|this counts the rows/i.test(t))
+            out.push("a divider reconciles two counts in prose instead of naming their units: " +
+                     JSON.stringify(t.slice(0, 120)));
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
+  {
+    /* ROUND 14, D10. `~ 6 of 10 unverified` in the pin trailer and `13 objects ·
+       9 unverified` in the lens: two true counts of the same word over two
+       scopes, and nothing on screen said the scopes differed. */
+    id: "R14-D10-unverified-counts-carry-their-denominator",
+    what: "every on-screen unverified count prints the set it is counting over",
+    async run() { return null; },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        [["lensSummary", "the lens"], ["pinTrailer", "the pin trailer"]].forEach(([id, who]) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+          const m = t.match(/(?:(\d+)\s+of\s+(\d+)|(\d+))\s+unverified/);
+          if (!m) return;
+          if (m[2] == null)
+            out.push(who + ' prints "' + m[0] + '" with no denominator, and another surface on the same screen ' +
+                     "counts the same word over a different set: " + JSON.stringify(t.slice(0, 80)));
+        });
+        return out;
+      });
+    }
+  },
+  {
+    /* ROUND 14, the unreproduced observation, closed by deleting the mechanism.
+       `.mrow .acts` is `position: absolute; z-index: 3; pointer-events: auto`
+       and was hit-testable at `opacity: 0`, clearing `#unmarkSeen` by 1.4px at
+       1440. Eighteen randomised sessions of 40 real mouse clicks could not steal
+       a click; a row-spacing change is all it would take. */
+    id: "R14-D11-invisible-controls-are-untouchable",
+    what: "no control a reader cannot see takes the pointer",
+    async run() { return null; },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll("button, a[href], [tabindex]:not([tabindex='-1'])").forEach(el => {
+          let o = 1;
+          for (let p = el; p && p.nodeType === 1; p = p.parentElement) {
+            if (typeof p.getAnimations === "function" && p.getAnimations().some(a => a.playState === "running")) return;
+            o *= Number(getComputedStyle(p).opacity);
+          }
+          if (o >= 0.01) return;
+          const r = el.getBoundingClientRect();
+          if (r.width < 1 || r.height < 1) return;
+          const h = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          if (h === el || (h && el.contains(h)))
+            out.push("a control at zero opacity still takes the pointer: " +
+                     JSON.stringify((el.textContent || "").trim().slice(0, 30)) + " in ." + el.parentElement.className);
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
   {
     /* ROUND 13, D1. Five deliberate clicks. The last control does not EXIST
        until the first two have cleared P1 and K2, because until then Q1 is a
@@ -649,7 +972,11 @@ const REPROS = [
         const out = [];
         const lens = (document.getElementById("lensSummary") || {}).textContent || "";
         const trail = (document.getElementById("pinTrailer") || {}).textContent || "";
-        const a = lens.match(/(\d+)\s+unverified/);
+        /* the lens carries its own denominator from round 14 (D10), so the
+           count is the first number when there are two and the only one when
+           there is one — the regression has to keep reading r12's phrasing */
+        const a0 = lens.match(/(?:(\d+)\s+of\s+)?(\d+)\s+unverified/);
+        const a = a0 && [a0[0], a0[1] != null ? a0[1] : a0[2]];
         const b = trail.match(/(\d+)\s+of\s+(\d+)\s+unverified/);
         const owed = (typeof attention === "function") ? attention(room()).length : null;
         if (!a || !b) return out;
@@ -689,7 +1016,18 @@ const REPROS = [
   },
   {
     /* ROUND 13, D6. A count that speaks for records, painted with no declared
-       subject and no mint, is a count no instrument on this page can see. */
+       subject and no mint, is a count no instrument on this page can see.
+
+       AND ITS OWN SHAPE IS THE DOCTRINE'S BANNED ONE (round 14, D6). This is
+       three remembered selectors — `surfNeedsN`, `surfStateN`, `#railRooms
+       .pill` — and `#pinCount`, the most prominent surface on the page, was not
+       among them for a whole round while painting `3 items · hardest first`
+       from attention(r).length. It is KEPT, unchanged, because a regression's
+       only value is that it still fires on the build it was written against, and
+       changing its body would silently retire it. What replaces it is
+       R14-D6-a-count-of-records-is-minted, which walks the DOM for the shape,
+       and design/prototype-counts.txt, which is every numeral on screen and what
+       read it, generated. A remembered list is now a regression, not a rule. */
     id: "R13-D6-aggregates-declare-a-subject",
     what: "every on-screen count of records is minted or declares whose records it counts",
     async run() { return null; },
@@ -896,21 +1234,36 @@ const REPROS = [
   }
 ];
 
+/* EVERY REPRO RUNS AT EVERY DECLARED WIDTH (round 14, D2). One of this round's
+   own defects is invisible at 1440 and live at every width below 1280; a repro
+   suite pinned to one viewport would have shipped it again. A repro that fires
+   at only some widths says which. */
 async function passRepros(browser, log) {
   const rows = [];
   for (const rp of REPROS) {
-    const { ctx, page, errors } = await newPage(browser);
-    const skip = await rp.run(page);
-    await page.waitForTimeout(60);
-    const inv = invariantsOnly(errors);
-    const asserts = rp.assert ? await rp.assert(page) : [];
-    await ctx.close();
-    const classes = Array.from(new Set(inv.map(classOf)));
-    rows.push({ id: rp.id, what: rp.what, skip, errors: inv, classes, asserts });
-    const bad = inv.length + asserts.length;
-    log(`  ${bad ? "FIRES" : "clean"}  ${rp.id} — ${inv.length} console error(s), ${classes.length} class(es), ${asserts.length} assertion(s)` + (skip ? ` [path incomplete: ${skip}]` : ""));
-    inv.slice(0, 6).forEach(t => log(`      ${t.slice(0, 200)}`));
-    asserts.slice(0, 6).forEach(t => log(`      ! ${t}`));
+    const widths = rp.widths || WIDTHS;
+    const merged = { id: rp.id, what: rp.what, skip: null, errors: [], classes: [], asserts: [], firedAt: [], ranAt: widths.slice() };
+    for (const width of widths) {
+      const { ctx, page, errors } = await newPage(browser, width);
+      const skip = await rp.run(page, width);
+      await page.waitForTimeout(60);
+      const inv = invariantsOnly(errors);
+      const asserts = rp.assert ? await rp.assert(page, width) : [];
+      await ctx.close();
+      if (skip && !merged.skip) merged.skip = skip + " @" + width;
+      inv.forEach(t => merged.errors.push("@" + width + "  " + t));
+      asserts.forEach(t => merged.asserts.push("@" + width + "  " + t));
+      if (inv.length + asserts.length) merged.firedAt.push(width);
+    }
+    merged.classes = Array.from(new Set(merged.errors.map(t => classOf(t.replace(/^@\d+\s+/, "")))));
+    rows.push(merged);
+    const bad = merged.errors.length + merged.asserts.length;
+    log(`  ${bad ? "FIRES" : "clean"}  ${rp.id} — ${merged.errors.length} console error(s), ${merged.classes.length} class(es), ` +
+        `${merged.asserts.length} assertion(s) over ${widths.length} width(s)` +
+        (bad ? ` [fires at ${merged.firedAt.join(", ")} of ${widths.join(", ")}]` : "") +
+        (merged.skip ? ` [path incomplete: ${merged.skip}]` : ""));
+    merged.errors.slice(0, 6).forEach(t => log(`      ${t.slice(0, 210)}`));
+    merged.asserts.slice(0, 6).forEach(t => log(`      ! ${t}`));
   }
   return rows;
 }
@@ -924,15 +1277,20 @@ const docFails = [];
 const browser = await chromium.launch();
 log(`driving ${FILE}`);
 
-log("\n[0] write-sequence enumeration over reachable states");
-const sq = await passSequences(browser, log);
-log(`  invariant violations during sequence enumeration: ${sq.violations.length}`);
-{
+const SKIP_WALK = ONLY === "repros";
+if (!SKIP_WALK) log("\n[0] write-sequence enumeration over reachable states");
+else log("\n[0] SKIPPED (--only repros): no state walk, so no denominator is reported for this run");
+const sq = SKIP_WALK
+  ? { seen: new Map(), levels: [], violations: [], drivenSteps: new Set(), offeredSteps: new Set(),
+      unreachable: new Map(), ctlSeen: new Map(), uncovered: new Set(), numbers: new Set(), depth: 0, budget: 0 }
+  : await passSequences(browser, log);
+if (!SKIP_WALK) log(`  invariant violations during sequence enumeration: ${sq.violations.length}`);
+if (!SKIP_WALK) {
   const cls = new Map();
   sq.violations.forEach(v => { const c = classOf(v.text); if (!cls.has(c)) cls.set(c, v); });
   cls.forEach((v, c) => { log(`     ${c}`); log(`        path: ${v.path.join("  →  ") || "(on load)"}`); });
 }
-{
+if (!SKIP_WALK) {
   const notDriven = Array.from(sq.offeredSteps).filter(s => !sq.drivenSteps.has(s)).sort();
   log(`  (object, action, driver) steps offered: ${sq.offeredSteps.size} · driven: ${sq.drivenSteps.size}`);
   if (notDriven.length) {
@@ -949,7 +1307,7 @@ log(`  invariant violations during sequence enumeration: ${sq.violations.length}
    this file and names no examples of its own. */
 const UNCOVERED_OUT = argOf("--uncovered", "");
 const uncoveredLines = Array.from(sq.uncovered).sort();
-{
+if (!SKIP_WALK) {
   const wanted = path.join(HERE, "prototype-uncovered.txt");
   const header =
     "# WHAT THE RECORD WALK DOES NOT COVER — generated, do not hand-edit.\n" +
@@ -1011,26 +1369,104 @@ const uncoveredLines = Array.from(sq.uncovered).sort();
   }
 }
 
-log("\n[1] deliberate enumeration");
-const en = await passEnumerate(browser, log);
+/* --- THE NUMBER-READING REACH, GENERATED (round 14, D1) --------------------
+   Round 13's page said, in a comment, that a number whose phrasing matched none
+   of eight patterns "is not checked; that is a real gap and it is stated rather
+   than discovered". It was neither stated accurately nor discovered: the rail's
+   owed badge minted thirteen reads and said the characters `3`, and every
+   instrument on the page was silent on it. So the reach of the number rules is
+   this file — every numeral on screen, digits normalised to `#`, with what read
+   it — produced by the same function the checker calls, unioned over the same
+   fixed set of states as the uncovered artifact, and compared on every run.
+   The `page` rows are the counters that speak for no record. That set used to
+   be a six-item list in CONVENTIONS.md, and it was wrong about two of its six
+   for a full round after the code moved. */
+const COUNTS_OUT = argOf("--counts", "");
+const numberLines = Array.from(sq.numbers).sort();
+if (!SKIP_WALK) {
+  const wanted = path.join(HERE, "prototype-counts.txt");
+  const unread = numberLines.filter(l => /^mint\s+(UNREAD|UNDECLARED|DECLARED-NOTHING)/.test(l));
+  const header =
+    "# EVERY NUMBER ON SCREEN, AND WHAT READ IT — generated, do not hand-edit.\n" +
+    "#\n" +
+    "# Produced by window.__numberReach() in design/prototype-frame.html, unioned over\n" +
+    "# every state design/prototype-drive.mjs reaches, and regenerated by\n" +
+    "#   node design/prototype-drive.mjs --counts design/prototype-counts.txt\n" +
+    "#\n" +
+    "# mint rows: a numeral inside a minted sentence, and the form that reads it —\n" +
+    "#   pattern:<id>   a COUNTED_CLAIMS phrasing, re-derived from the sentence's records\n" +
+    "#   declared:<id>  the sentence names its own predicate (COUNT_PREDICATES), re-derived\n" +
+    "#   record         a number the sentence read out of a value it declares\n" +
+    "#   quoted         a fragment the sentence reproduces verbatim out of the record\n" +
+    "#   transcribed    the sentence declares no reads at all, so it computed nothing —\n" +
+    "#                  a seeded fixture line, minted so the record owns its characters\n" +
+    "#   form:<id>      a declared non-count shape: a clock time, a date, a duration,\n" +
+    "#                  an amount of money, a percentage\n" +
+    "#   UNREAD         no check on this page can read it. This is a defect and the\n" +
+    "#                  page's console says so on the paint that renders it.\n" +
+    "# page rows: a numeral in no minted sentence — row counters, message counters,\n" +
+    "#   page furniture, and record text the page reprints outside a mint. Not an error\n" +
+    "#   list: a count of rows is not a claim about a record. This is the set\n" +
+    "#   CONVENTIONS.md used to name from memory, and was wrong about, for a round.\n" +
+    "#   The toast is excluded: it is minted, and painted with textContent because it\n" +
+    "#   is raised after its render — checkToastInvariant() re-reads it.\n" +
+    "#\n" +
+    "# Digits are normalised to `#`: the claim is about FORMS, not about values.\n" +
+    "# subject: the union over every state reachable in 0, 1 or 2 writes.\n" +
+    "#\n" +
+    `# rows: ${numberLines.length} · mint rows unread: ${unread.length}\n`;
+  const body = header + numberLines.map(l => l + "\n").join("");
+  if (COUNTS_OUT) { fs.writeFileSync(COUNTS_OUT, body); log(`\n  wrote ${COUNTS_OUT} (${numberLines.length} row(s))`); }
+  if (!numberLines.length) {
+    log(`\n  NUMBER-REACH ARTIFACT IS EMPTY: window.__numberReach() produced nothing — this build cannot say ` +
+        `how any number in a minted sentence was read, which is the exact shape of round 13's silent contradiction`);
+    docFails.push("the page reports no reading for any number");
+  }
+  if (unread.length) {
+    log(`\n  ${unread.length} NUMBER(S) IN MINTED SENTENCES THAT NO CHECK CAN READ:`);
+    unread.forEach(l => log(`     ${l}`));
+    docFails.push(`${unread.length} number(s) in minted sentences are read by nothing`);
+  }
+  const committed = fs.existsSync(wanted) ? fs.readFileSync(wanted, "utf8") : null;
+  if (committed == null) {
+    log(`\n  NUMBER-REACH ARTIFACT MISSING: ${wanted} does not exist — the reach of the number rules is claimed ` +
+        `in a comment and written down nowhere`);
+    docFails.push("the number-reach artifact is missing");
+  } else {
+    const live = numberLines.join("\n");
+    const have = committed.split("\n").filter(l => l && l[0] !== "#").join("\n");
+    if (live !== have) {
+      log(`\n  NUMBER-REACH ARTIFACT IS STALE: the committed file and the live walk disagree`);
+      const liveSet = new Set(numberLines), haveSet = new Set(have.split("\n").filter(Boolean));
+      numberLines.filter(l => !haveSet.has(l)).forEach(l => log(`     + live only: ${l}`));
+      Array.from(haveSet).filter(l => !liveSet.has(l)).forEach(l => log(`     - file only: ${l}`));
+      docFails.push("the number-reach artifact does not match the live walk");
+    } else {
+      log(`\n  number-reach artifact matches the live walk (${numberLines.length} row(s), ${unread.length} unread)`);
+    }
+  }
+}
+
+if (!SKIP_WALK) log("\n[1] deliberate enumeration");
+const en = SKIP_WALK ? { seen: new Map(), violations: [], sessions: 0 } : await passEnumerate(browser, log);
 const all = Array.from(en.seen.entries());
 const driven = all.filter(([, v]) => v.driven);
 const notDriven = all.filter(([, v]) => !v.driven);
-log(`  controls enumerated: ${all.length}`);
-log(`  controls driven:     ${driven.length}`);
-log(`  not driven:          ${notDriven.length}`);
-notDriven.forEach(([k, v]) => log(`     - ${k}   [${v.reason || "reachable but never selected"}]`));
-log(`  invariant violations during enumeration: ${en.violations.length}`);
-{
+if (!SKIP_WALK) {
+  log(`  controls enumerated: ${all.length}`);
+  log(`  controls driven:     ${driven.length}`);
+  log(`  not driven:          ${notDriven.length}`);
+  notDriven.forEach(([k, v]) => log(`     - ${k}   [${v.reason || "reachable but never selected"}]`));
+  log(`  invariant violations during enumeration: ${en.violations.length}`);
   const cls = new Map();
   en.violations.forEach(v => { const c = classOf(v.text); if (!cls.has(c)) cls.set(c, v); });
   cls.forEach((v, c) => { log(`     ${c}`); log(`        path: ${v.path.slice(-4).join("  →  ")}`); });
 }
 
-log("\n[2] randomised on top");
-const rn = await passRandom(browser, log);
-log(`  invariant violations during random drive: ${rn.violations.length}`);
-{
+if (!SKIP_WALK) log("\n[2] randomised on top");
+const rn = SKIP_WALK ? { violations: [], clicks: 0 } : await passRandom(browser, log);
+if (!SKIP_WALK) {
+  log(`  invariant violations during random drive: ${rn.violations.length}`);
   const cls = new Map();
   rn.violations.forEach(v => { const c = classOf(v.text); if (!cls.has(c)) cls.set(c, v); });
   cls.forEach((v, c) => { log(`     ${c}`); log(`        path: ${v.path.slice(-4).join("  →  ")}`); });
@@ -1064,12 +1500,46 @@ const statesReached = sq.seen.size;
 const truncatedLevels = sq.levels.filter(l => l.truncated);
 
 log(`\nSUMMARY`);
+if (SKIP_WALK) log(`  --only repros: no controls enumerated, no states walked, no artifact compared. This run reports ` +
+                   `the repro suite at ${WIDTHS.join(", ")} and NOTHING ELSE — it is not a denominator.`);
+if (!SKIP_WALK) {
 log(`  controls enumerated (union over every state reached): ${inventory.size}`);
 log(`  controls driven:                                      ${drivenKeys}`);
 log(`  states reached at depth ${sq.depth}:${" ".repeat(Math.max(1, 29 - String(sq.depth).length))}${statesReached}`);
 log(`  write steps offered / driven: ${sq.offeredSteps.size} / ${sq.drivenSteps.size}`);
+/* THE VIEWPORT IS PART OF THE DENOMINATOR AND THE REPORT SAYS SO (round 14, D2) */
+log(`  viewports: enumeration at ${SEQ_WIDTH}x${HEIGHT} · enumeration/random/repro passes at ${WIDTHS.join(", ")} (height ${HEIGHT})`);
 sq.levels.forEach(l => log(`     depth ${l.depth}: ${l.states} new state(s) from ${l.transitions} transition(s)` +
-  (l.truncated ? ` · ${l.truncated} state(s) LEFT UNEXPANDED (budget ${sq.budget})` : "")));
+  (l.truncated ? ` · ${l.truncated} state(s) LEFT UNEXPANDED (budget ${sq.budget})` : "") +
+  (l.frontier ? ` · ranking: ${l.inertCtl}/${l.frontier} tied at zero control novelty, ${l.inertBoth} still tied after step novelty` : "")));
+{
+  /* AND THE RANKING SAYS WHERE IT STOPS MEANING ANYTHING (round 14, D3).
+     THE FIRST VERSION OF THIS SENTENCE WAS FALSE, and the round's own first
+     depth-3 run is what said so: it asked whether EVERY state on the level ties,
+     and at depth 3 the answer was 117 of 184 — so it printed "the ranking
+     discriminates at every truncated level" while the budget cut fell in the
+     middle of a 117-state block the ranking cannot tell apart. What matters is
+     not whether the keys separate SOME states; it is whether they separate the
+     states either side of the cut. If the states the keys CAN rank all fit
+     inside the budget, then everything after them was chosen by signature, and
+     that is the arbitrary sample this round was told to stop calling a policy.
+     The second key (offered-step novelty) was added here and MEASURED NOT TO
+     HELP at depth 3: 117 tied on controls, 117 still tied after steps. It is
+     kept because it costs nothing and separates cheaply at shallower levels, and
+     the honest report is this line, not the key. */
+  const cut = sq.levels.filter(l => l.truncated && l.frontier && (l.frontier - l.inertBoth) <= l.expanded);
+  const partial = sq.levels.filter(l => l.truncated && l.frontier && l.inertBoth && (l.frontier - l.inertBoth) > l.expanded);
+  if (cut.length)
+    cut.forEach(l => log(`  THE FRONTIER RANKING DID NOT CHOOSE AT DEPTH ${l.depth} — ${l.inertBoth} of ${l.frontier} ` +
+      `states tie on both novelty keys and only ${l.frontier - l.inertBoth} could be ranked at all, so the budget ` +
+      `boundary (${l.expanded} expanded, ${l.truncated} dropped) fell inside the tied block and SIGNATURE ORDER picked ` +
+      `which of them to expand. That is an arbitrary sample of this level, not a covered one.`));
+  if (partial.length)
+    partial.forEach(l => log(`  the frontier ranking chose the expanded set at depth ${l.depth} (${l.inertBoth} of ` +
+      `${l.frontier} tied, but the cut falls above the tied block)`));
+  if (!cut.length && !partial.length)
+    log(`  no level was truncated, so the frontier ranking never had to choose`);
+}
 if (truncatedLevels.length)
   log(`  BREADTH IS NOT COMPLETE at depth ${truncatedLevels.map(l => l.depth).join(", ")} — ` +
       `${truncatedLevels.reduce((n, l) => n + l.truncated, 0)} state(s) were never expanded. ` +
@@ -1080,6 +1550,7 @@ else
   const undriven = Array.from(inventory.entries()).filter(([, v]) => !v.driven);
   log(`  THE UNEXERCISED SET (${undriven.length}):`);
   undriven.forEach(([k, v]) => log(`     - ${k}   [${v.visible ? "reachable, never selected" : "never on screen"}]`));
+}
 }
 if (docFails.length) log(`  DOCUMENTATION CHECKS FAILED (${docFails.length}): ${docFails.join(" · ")}`);
 log(`  violations — sequence ${sq.violations.length} · enumeration ${en.violations.length} · ` +
