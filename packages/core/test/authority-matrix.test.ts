@@ -850,7 +850,10 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
   function patchFor(verb: CorrectionAction): Record<string, unknown> {
     if (verb === 'amend') return { statement: 'reworded' };
     if (verb === 'reattribute') return { owner: ALICE };
-    if (verb === 'retype') return { claimant: ALICE };
+    // Empty since r8: `retypeCarryOver` moves the commitment's `owner` onto the
+    // claim's `claimant`, and a patch naming a *different* person is refused as
+    // an unlogged reattribution. This row is about authority, not attribution.
+    if (verb === 'retype') return {};
     return {};
   }
 

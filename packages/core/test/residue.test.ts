@@ -4,6 +4,7 @@ import {
   decideAcceptance,
   findDuplicate,
   hasContent,
+  isAssertion,
   normalizeForReceipt,
   normalizeForRouting,
   orderedTokens,
@@ -12,7 +13,9 @@ import {
   type ProvenanceMessage,
   type ProvenanceProblemKind,
   QUESTION_MARKS,
+  QUESTION_SHAPED_MARKS,
   RECEIPT_POLICY,
+  readsAsQuestion,
   statementBearing,
   validateProposalProvenance,
 } from '../src/index.js';
@@ -629,66 +632,153 @@ describe('r5 — speech-act fitness', () => {
   });
 
   /**
-   * Every mark a review pass has actually caught this code on, **written out**.
+   * **The completeness instrument, r8 — and the one it replaces is the finding.**
    *
-   * The fourth pass found the derived-probe class in this file — in the test
-   * about that very class. The loop below used to iterate `QUESTION_MARKS`, the
-   * inventory under test, so deleting `᥅` from the source deleted the case that
-   * would have failed. This list is maintained by hand, from Unicode, and it is
-   * the regression half; the assertion under it is the coverage half, and
-   * neither does the other's job.
+   * What stood here was a hand-written `MARKS_FOUND_BY_REVIEW` list plus an
+   * assertion that `QUESTION_MARKS` was a subset of it. Two hand lists, each
+   * maintained from the other, and the docblock above them said out loud that
+   * this was the "regression half" and the "coverage half". Neither half could
+   * see a mark that was in *neither* list, which is every mark r8's review
+   * found: the ornaments, the Coptic pair, the medieval mark, the inverted
+   * interrobang, the Adlam mark. The source called its list "Unicode's own
+   * inventory"; this test asserted it against a copy of itself; and *"Would we
+   * deploy production Friday❓"* minted as a claim auto-accepted.
+   *
+   * Unicode publishes no `Question_Mark` property, so completeness cannot be
+   * derived outright. What it *does* publish is `Sentence_Terminal`: every mark
+   * that ends a sentence in any script. Partitioning that into "a question mark"
+   * and "explicitly not one" is a total classification a machine can check — and
+   * any code point Unicode adds to it lands in neither half and fails this test
+   * until a person classifies it. That is the property two hand lists cannot
+   * have, however carefully either is maintained.
+   *
+   * It does not reach the marks outside `Sentence_Terminal` — `¿`, `՞`, `;` and
+   * the ornaments — so those are exercised one at a time below, and
+   * `matching.ts` says so rather than implying the sweep covers them.
    */
-  const MARKS_FOUND_BY_REVIEW = [
-    '\u003F', // QUESTION MARK
-    '\u00BF', // INVERTED — a Spanish interrogative opens with one (pass 2)
-    '\u037E', // GREEK — decomposes to `;`, so folding first destroys it (pass 3)
-    '\u055E', // ARMENIAN
-    '\u061F', // ARABIC
-    '\u1367', // ETHIOPIC
-    '\u1945', // LIMBU (pass 3)
-    '\u203D', // INTERROBANG (pass 3)
-    '\u2047', // DOUBLE
-    '\u2048', // QUESTION EXCLAMATION
-    '\u2049', // EXCLAMATION QUESTION
-    '\u2E2E', // REVERSED
-    '\uA60F', // VAI
-    '\uA6F7', // BAMUM
-    '\uAA5D', // CHAM (pass 3)
-    '\uFE16', // VERTICAL PRESENTATION FORM
-    '\uFE56', // SMALL
-    '\uFF1F', // FULLWIDTH (pass 1)
-    '\u{11143}', // CHAKMA
-  ];
+  const NOT_A_QUESTION_MARK = new Set([
+    // Full stops, in every script that has one.
+    0x2e, 0x589, 0x6d4, 0x700, 0x701, 0x702, 0x7f9, 0x837, 0x839, 0x83d, 0x83e, 0x964, 0x965,
+    0x104a, 0x104b, 0x1362, 0x1368, 0x166e, 0x1735, 0x1736, 0x17d4, 0x17d5, 0x1803, 0x1809, 0x1aa8,
+    0x1aa9, 0x1aaa, 0x1aab, 0x1b4e, 0x1b4f, 0x1b5a, 0x1b5b, 0x1b5e, 0x1b5f, 0x1b7d, 0x1b7e, 0x1b7f,
+    0x1c3b, 0x1c3c, 0x1c7e, 0x1c7f, 0x2024, 0x2cf9, 0x2e3c, 0x3002, 0xa4ff, 0xa60e, 0xa6f3, 0xa876,
+    0xa877, 0xa8ce, 0xa8cf, 0xa92f, 0xa9c8, 0xa9c9, 0xaaf0, 0xaaf1, 0xabeb, 0xfe12, 0xfe52, 0xff0e,
+    0xff61, 0x10a56, 0x10a57, 0x10f55, 0x10f56, 0x10f57, 0x10f58, 0x10f59, 0x10f86, 0x10f87,
+    0x10f88, 0x10f89, 0x11047, 0x11048, 0x110be, 0x110bf, 0x110c0, 0x110c1, 0x11141, 0x11142,
+    0x111c5, 0x111c6, 0x111cd, 0x111de, 0x111df, 0x11238, 0x11239, 0x1123b, 0x1123c, 0x112a9,
+    0x113d4, 0x113d5, 0x1144b, 0x1144c, 0x115c2, 0x115c3, 0x115c9, 0x115ca, 0x115cb, 0x115cc,
+    0x115cd, 0x115ce, 0x115cf, 0x115d0, 0x115d1, 0x115d2, 0x115d3, 0x115d4, 0x115d5, 0x115d6,
+    0x115d7, 0x11641, 0x11642, 0x1173c, 0x1173d, 0x1173e, 0x11944, 0x11946, 0x11a42, 0x11a43,
+    0x11a9b, 0x11a9c, 0x11c41, 0x11c42, 0x11ef7, 0x11ef8, 0x11f43, 0x11f44, 0x16a6e, 0x16a6f,
+    0x16af5, 0x16b37, 0x16b38, 0x16b44, 0x16d6e, 0x16d6f, 0x16e98, 0x1bc9f, 0x1da88,
+    // Exclamation marks and their script variants.
+    0x21, 0x61d, 0x61e, 0x1944, 0x203c, 0x2e53, 0xfe15, 0xfe57, 0xff01,
+    // The Cham danda and its double and triple forms. r7 listed U+AA5D as "CHAM
+    // QUESTION MARK"; it sits between the spiral and the double danda, and a
+    // question mark does not come in a triple form. Classified as a full stop
+    // here and carried in `QUESTION_SHAPED_MARKS` — see that constant for why an
+    // unverifiable mark refuses without certifying.
+    0xaa5d, 0xaa5e, 0xaa5f,
+  ]);
 
-  it('exercises every mark the source claims to know', () => {
-    // The coverage half: a mark added to `QUESTION_MARKS` without a regression
-    // case fails here, and the list above fails if one is quietly dropped.
-    for (const mark of QUESTION_MARKS) {
-      expect(MARKS_FOUND_BY_REVIEW.map((m) => m.normalize('NFKC'))).toContain(
-        mark.normalize('NFKC'),
-      );
+  it('classifies every sentence terminator Unicode publishes', () => {
+    const strict = new Set(QUESTION_MARKS.map((mark) => mark.codePointAt(0)));
+    const unclassified: string[] = [];
+    const both: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (!/\p{Sentence_Terminal}/u.test(String.fromCodePoint(cp))) continue;
+      const name = `U+${cp.toString(16).toUpperCase().padStart(4, '0')} ${String.fromCodePoint(cp)}`;
+      const isQuestion = strict.has(cp);
+      const isNot = NOT_A_QUESTION_MARK.has(cp);
+      if (!isQuestion && !isNot) unclassified.push(name);
+      if (isQuestion && isNot) both.push(name);
     }
+    // A sentence terminator in neither half is a mark nobody has looked at, and
+    // which half it belongs in decides whether a question auto-accepts as a
+    // claim. So this fails rather than guessing, and that is the whole
+    // difference from the pair of hand lists it replaces.
+    expect(unclassified, 'sentence terminators classified as neither').toEqual([]);
+    expect(both, 'sentence terminators classified as both').toEqual([]);
   });
 
-  it('reads every spelling of a question mark, not only the ASCII one', () => {
-    // Three review passes fed this list: `？` (U+FF1F) first, then `¿`, then the
-    // Limbu and Cham marks.
-    for (const mark of MARKS_FOUND_BY_REVIEW) {
-      const body = `Would we deploy production Friday${mark}`;
-      expect(
-        kinds(
-          {
-            type: 'claim',
-            provenance: ['msg_1'],
-            quote: body,
-            statement: body,
-            proposer: { kind: 'model' },
-            attributedTo: ALICE,
-          },
-          room({ id: 'msg_1', authorId: ALICE, body }),
-        ),
-      ).toContain('statement_is_not_an_assertion');
+  it('matches exactly the marks it enumerates, and no others', () => {
+    // The `DELETABLE` instrument, turned on this list: a malformed character
+    // class — a stray `-` forming a range, a lone surrogate — would silently
+    // widen or narrow the regex while the enumeration above still read
+    // correctly.
+    const strict = new Set(QUESTION_MARKS);
+    const shaped = new Set(QUESTION_SHAPED_MARKS);
+    const strayStrict: string[] = [];
+    const strayShaped: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const character = normalizeForReceipt(String.fromCodePoint(cp));
+      const name = `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+      if (readsAsQuestion(character) !== strict.has(String.fromCodePoint(cp))) {
+        strayStrict.push(name);
+      }
+      if (isAssertion(character) === shaped.has(String.fromCodePoint(cp))) strayShaped.push(name);
     }
+    expect(strayStrict).toEqual([]);
+    expect(strayShaped).toEqual([]);
+  });
+
+  it('refuses an ornament question mark minted as a claim — r5’s defect, reopened', () => {
+    // `❓` (U+2753) is what a phone keyboard and every chat client emit, and it
+    // was in neither the source list nor the test list that pinned the source
+    // list, so this exact input auto-accepted somebody's question as their
+    // position. Both directions: minted as a claim it is refused, and minted as
+    // the open question it actually is, it is not.
+    const body = 'Would we deploy production Friday❓';
+    expect(
+      kinds(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: body,
+          statement: body,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        room({ id: 'msg_1', authorId: ALICE, body }),
+      ),
+    ).toContain('statement_is_not_an_assertion');
+    expect(
+      kinds(
+        {
+          type: 'open_question',
+          provenance: ['msg_1'],
+          quote: body,
+          statement: body,
+          proposer: { kind: 'model' },
+        },
+        room({ id: 'msg_1', authorId: ALICE, body }),
+      ),
+    ).not.toContain('statement_is_not_a_question');
+  });
+
+  it('refuses an assertion on an unverifiable mark without certifying a question', () => {
+    // U+AA5D is in `QUESTION_SHAPED_MARKS` and not in `QUESTION_MARKS`, and the
+    // two checks are mirrors whose safe directions are opposite: minted as a
+    // claim it is refused (one glance), and minted as an open question it is
+    // *also* refused, because it certifies nothing. Nothing accepts on a mark
+    // nobody could check.
+    const body = 'Bob will deploy production Friday꩝';
+    const verdict = (type: 'claim' | 'open_question') =>
+      kinds(
+        {
+          type,
+          provenance: ['msg_1'],
+          quote: body,
+          statement: body,
+          proposer: { kind: 'model' },
+          ...(type === 'claim' ? { attributedTo: ALICE } : {}),
+        },
+        room({ id: 'msg_1', authorId: ALICE, body }),
+      );
+    expect(verdict('claim')).toContain('statement_is_not_an_assertion');
+    expect(verdict('open_question')).toContain('statement_is_not_a_question');
   });
 
   it('reads a mark a canonical decomposition would destroy', () => {

@@ -96,6 +96,24 @@ function modelAcceptedClaim(): AuthoredEvent[] {
 }
 
 describe('retype — #5’s canonical fix', () => {
+  /**
+   * `obj_decision_2` answers `obj_question_1` in the sample log, and since r8 a
+   * retype may not leave an `answers` edge pointing at a type that edge could
+   * never have been created against (`retypeStructuralRefusal`). Retyping to a
+   * `claim` is fine — a claim is a legal answer — and retyping to anything else
+   * needs the question reopened first, which is exactly what the refusal says to
+   * do and is what this event does. The edge stays on the record; `reopen` moves
+   * it onto `reopenedFromAnswers`, which is what makes it history rather than a
+   * live constraint.
+   */
+  const reopenTheQuestion = corrected({
+    id: 'ev_reopen_first',
+    at: at(8),
+    objectId: 'obj_question_1',
+    action: 'reopen',
+    note: 'not settled after all',
+  });
+
   const retypeToClaim = corrected({
     id: 'ev_retype',
     at: at(9),
@@ -151,6 +169,7 @@ describe('retype — #5’s canonical fix', () => {
   it('carries the text across differently-named fields', () => {
     const state = reduce([
       ...sampleLog(),
+      reopenTheQuestion,
       corrected({
         id: 'ev_retype_q',
         at: at(9),
@@ -167,13 +186,17 @@ describe('retype — #5’s canonical fix', () => {
   });
 
   it('refuses a retype that would produce an invalid object', () => {
-    // A commitment needs an owner and the decision never had one.
+    // A commitment needs an owner and an open question has nobody on it. (It
+    // used to be the decision here, which since r8 carries its `decidedBy` onto
+    // the commitment's `owner` and is therefore valid without a patch — see
+    // `retypeCarryOver`.)
     const state = reduce([
       ...sampleLog(),
+      reopenTheQuestion,
       corrected({
         id: 'ev_retype_bad',
         at: at(9),
-        objectId: 'obj_decision_2',
+        objectId: 'obj_question_1',
         action: 'retype',
         toType: 'commitment',
       }),
@@ -181,24 +204,25 @@ describe('retype — #5’s canonical fix', () => {
     expect(state.issues).toHaveLength(1);
     expect(state.issues[0]?.reason).toContain('cannot retype');
     expect(state.issues[0]?.reason).toContain('owner');
-    expect(state.objects.obj_decision_2?.object.type).toBe('decision');
+    expect(state.objects.obj_question_1?.object.type).toBe('open_question');
     expect(state.corrections.some((c) => c.action === 'retype')).toBe(false);
   });
 
   it('accepts the same retype once the patch supplies what the new type needs', () => {
     const state = reduce([
       ...sampleLog(),
+      reopenTheQuestion,
       corrected({
         id: 'ev_retype_ok',
         at: at(9),
-        objectId: 'obj_decision_2',
+        objectId: 'obj_question_1',
         action: 'retype',
         toType: 'commitment',
         patch: { owner: BOB },
       }),
     ]);
     expect(state.issues).toEqual([]);
-    const record = state.objects.obj_decision_2;
+    const record = state.objects.obj_question_1;
     expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(BOB);
   });
 

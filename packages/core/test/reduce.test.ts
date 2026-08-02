@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type AuthoredEvent,
   appendEvent,
   computeAttention,
   foldEvents,
   reduce,
   renderRationale,
   serializeState,
+  wasConsumed,
 } from '../src/index.js';
 import {
   ALICE,
@@ -50,6 +52,26 @@ describe('reduce — determinism', () => {
       reduce([]),
     );
     expect(serializeState(incremental)).toBe(serializeState(full));
+  });
+
+  it('folds an out-of-order arrival to a replay of what it consumed', () => {
+    // The half the test above cannot reach, r8. `sampleLog()` is already in
+    // canonical order, so folding it one at a time never puts an event at or
+    // before the cursor — delete the position gate entirely and that test stays
+    // green. Live≡replay is a claim about *arrival* order, and this is the only
+    // shape that measures it.
+    for (const seed of [1, 7, 42, 1337]) {
+      const arrival = shuffle(sampleLog(), seed);
+      const consumed: AuthoredEvent[] = [];
+      let live = reduce([]);
+      for (const next of arrival) {
+        const result = appendEvent(live, next.event, next);
+        if (wasConsumed(result)) consumed.push(next);
+        live = result.state;
+      }
+      expect(serializeState(live), `seed ${seed}`).toBe(serializeState(reduce(consumed)));
+      expect(consumed.length, `seed ${seed}`).toBeLessThan(arrival.length);
+    }
   });
 
   it('is idempotent per event id — a redelivery is rejected, not double-applied', () => {

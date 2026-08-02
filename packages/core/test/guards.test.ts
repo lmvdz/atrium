@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   type AuthoredEvent,
   DEFAULT_ACCEPTANCE_RULES,
+  decideAcceptance,
   foldEvents,
   MODEL_ACCEPTANCE_FLOOR,
+  Proposal,
   type ProvenanceMessage,
   proposalWithStatus,
   reduce,
   serializeState,
+  wasConsumed,
 } from '../src/index.js';
 import {
   ALICE,
@@ -20,6 +23,7 @@ import {
   ROOM,
   reminted,
   sampleLog,
+  shuffle,
 } from './fixtures.js';
 
 /**
@@ -445,6 +449,124 @@ describe('the actor floor — gate 1: an acceptance with no proposal is human-on
   });
 });
 
+describe('the guards can see the engine, which until r8 they could not', () => {
+  /**
+   * **r8's scoping finding.** Gutting `decideAcceptance` to an unconditional
+   * `auto_accept` left this file green, and `replay.test.ts` too. The wider
+   * suite caught it, so this was never a hole — but a file named *guards* that
+   * cannot see the engine boundary measures half of what its name claims, and
+   * the reducer half of every rule here has an engine twin whose disagreement is
+   * exactly what `policy.ts` exists to prevent.
+   *
+   * The property, stated once: **anything the reducer refuses to fold, the
+   * engine refuses to emit.** The engine may be stricter and may never be
+   * looser, and neither may quietly become a no-op.
+   */
+  it('never emits an acceptance the reducer would refuse to fold', () => {
+    const body = 'We will deploy production Friday afternoon as planned.';
+    const messages: ProvenanceMessage[] = [
+      { id: 'm1', authorId: ALICE, body },
+      { id: 'm2', authorId: BOB, body: 'noted' },
+      { id: 'm3', authorId: BOB, body: 'anything else for standup?' },
+    ];
+    // One body, and every type the proposal could pick for it. Not one may come
+    // back `auto_accept`: three never auto-accept at any confidence, and the
+    // fourth reads as an undertaking.
+    for (const type of ['decision', 'commitment', 'objective', 'claim'] as const) {
+      const payload =
+        type === 'claim'
+          ? { statement: body, claimant: ALICE }
+          : type === 'commitment'
+            ? { statement: body, owner: ALICE }
+            : type === 'decision'
+              ? { statement: body, decidedBy: ALICE }
+              : { title: body };
+      const decision = decideAcceptance(
+        Proposal.parse({
+          id: 'prop_guard',
+          roomId: ROOM,
+          type,
+          payload,
+          confidence: 0.99,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['m1'],
+          quote: body,
+          createdAt: at(1),
+        }),
+        { messages },
+      );
+      expect(decision.verdict, type).not.toBe('auto_accept');
+      // …and the reducer agrees, on the same input, at the same confidence.
+      const state = reduce([
+        event({
+          id: 'ev_gp',
+          at: at(1),
+          actor: model(),
+          type: 'proposal_recorded',
+          proposal: {
+            id: 'prop_guard',
+            roomId: ROOM,
+            type,
+            payload,
+            confidence: 0.99,
+            proposer: { kind: 'model', model: 'test-model' },
+            provenance: ['m1'],
+            quote: body,
+            createdAt: at(1),
+          },
+        } as Parameters<typeof event>[0]),
+        event({
+          id: 'ev_ga',
+          at: at(2),
+          actor: model(),
+          messages,
+          type: 'object_accepted',
+          object: {
+            id: 'obj_guard',
+            roomId: ROOM,
+            type,
+            payload,
+            provenance: { messageIds: ['m1'], proposalId: 'prop_guard' },
+            createdAt: at(2),
+            updatedAt: at(2),
+          },
+        } as Parameters<typeof event>[0]),
+      ]);
+      expect(state.objects, type).toEqual({});
+    }
+  });
+
+  it('discards a reading the table says to discard rather than surfacing it', () => {
+    // The other direction, and the one r7 measured a bad implementation by: a
+    // claim below θ_min is *discarded*, not referred. An engine collapsed to one
+    // verdict fails here whichever verdict it collapsed to.
+    const body = 'The backfill completed with 4,218,904 rows and no retries.';
+    const messages: ProvenanceMessage[] = [
+      { id: 'm1', authorId: ALICE, body },
+      { id: 'm2', authorId: BOB, body: 'thanks' },
+    ];
+    const claim = (confidence: number) =>
+      decideAcceptance(
+        Proposal.parse({
+          id: 'prop_band',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: body, claimant: ALICE },
+          confidence,
+          proposer: { kind: 'model', model: 'test-model' },
+          provenance: ['m1'],
+          quote: body,
+          createdAt: at(1),
+        }),
+        { messages },
+      );
+    expect(claim(0.4).verdict).toBe('discard');
+    expect(claim(0.6).verdict).toBe('pending');
+    expect(claim(0.6).visibility).toBe('quiet');
+    expect(claim(0.95).verdict).toBe('auto_accept');
+  });
+});
+
 describe('the actor floor — gate 2: a decision never auto-accepts', () => {
   /**
    * #4, verbatim: "Decisions — **never auto-accept.** Accepted only via (a)
@@ -466,9 +588,18 @@ describe('the actor floor — gate 2: a decision never auto-accepts', () => {
   });
 
   it('refuses a system actor accepting a decision too', () => {
+    // **Named, since r8.** This asserted only that the reason said "system
+    // actor", which is true of the *confidence floor* refusal as well — so
+    // deleting this gate left the test green while the room was told a decision
+    // was refused for being under-confident rather than for being a decision.
+    // Its sibling above pins the specific sentence and this one did not, which
+    // is the whole of r7's lesson about a test that spans two enforcement
+    // points measuring whichever is left.
     const state = reduce([proposalEvent(), acceptEvent({ actor: { kind: 'system' } })]);
     expect(state.objects).toEqual({});
     expect(state.issues[0]?.reason).toContain('system actor');
+    expect(state.issues[0]?.reason).toContain('a decision never auto-accepts');
+    expect(state.issues[0]?.reason).toContain('only a human may accept it');
   });
 
   it('allows a human to accept a decision through a proposal', () => {
@@ -702,7 +833,11 @@ describe('the actor floor — gate 5: every correction verb is human-only', () =
       expect(state.issues).toHaveLength(1);
       expect(state.issues[0]?.reason).toContain('corrections (amend, retract, restore)');
       expect(state.issues[0]?.reason).toContain('model actor');
-      expect(state.corrections).toEqual(reduce(base).corrections);
+      // **Literal, since r8.** This read `toEqual(reduce(base).corrections)` —
+      // the expected value computed by the code under test, so a reducer that
+      // recorded a correction for every refused verb would satisfy it on both
+      // sides. A refusal records nothing, and the number is written down.
+      expect(state.corrections.map((entry) => entry.eventId)).toEqual(['ev_03']);
       expect(state.objects.obj_decision_2?.revision).toBe(0);
       expect(state.objects.obj_decision_2?.retractedAt).toBeNull();
       // Consumed, though: the refusal is history, and a redelivery gets nothing.
@@ -1684,7 +1819,6 @@ describe('corrections — retraction is withdrawal, and a no-op is not history',
         note: 'bob was estimating',
       }),
     ];
-    const retracted = reduce(base);
     const state = reduce([
       ...base,
       event({
@@ -1705,15 +1839,18 @@ describe('corrections — retraction is withdrawal, and a no-op is not history',
       },
     ]);
     const record = state.objects.obj_commitment_1;
-    expect(record?.revision).toBe(retracted.objects.obj_commitment_1?.revision);
+    // The retract that precedes this is the object's only correction, so the
+    // revision is 1 and the log holds one entry. Written down rather than
+    // recomputed: `reduce(base).x` on the right of an assertion is the code
+    // under test grading its own paper.
+    expect(record?.revision).toBe(1);
     expect(record?.object.type === 'commitment' && record.object.payload.statement).toBe(
       'Wire the flag into the server',
     );
-    expect(state.corrections).toHaveLength(retracted.corrections.length);
+    expect(state.corrections).toHaveLength(2);
   });
 
   it('treats an empty amend patch as a no-op — and says so rather than reporting success', () => {
-    const before = reduce(sampleLog());
     const after = reduce([
       ...sampleLog(),
       event({
@@ -1726,10 +1863,12 @@ describe('corrections — retraction is withdrawal, and a no-op is not history',
       }),
     ]);
 
-    // Nothing about the object moves…
-    expect(after.objects.obj_decision_1?.revision).toBe(before.objects.obj_decision_1?.revision);
-    expect(after.objects.obj_decision_1?.updatedAt).toBe(before.objects.obj_decision_1?.updatedAt);
-    expect(after.corrections).toHaveLength(before.corrections.length);
+    // Nothing about the object moves… and the values are literal, r8: three of
+    // these read `before.<same path>`, which passes for any reducer that treats
+    // the two logs alike, including one that applies the no-op to both.
+    expect(after.objects.obj_decision_1?.revision).toBe(1);
+    expect(after.objects.obj_decision_1?.updatedAt).toBe(at(7));
+    expect(after.corrections).toHaveLength(1);
     expect(after.consumedEventIds).toContain('ev_empty');
     // …and the caller is told, because `applied` with nothing applied reads as
     // success to everything downstream of it.
@@ -1743,7 +1882,6 @@ describe('corrections — retraction is withdrawal, and a no-op is not history',
   });
 
   it('treats a patch that changes nothing as a no-op too', () => {
-    const before = reduce(sampleLog());
     const after = reduce([
       ...sampleLog(),
       event({
@@ -1759,8 +1897,8 @@ describe('corrections — retraction is withdrawal, and a no-op is not history',
 
     expect(after.issues.map((issue) => issue.eventId)).toEqual(['ev_same']);
     expect(after.issues[0]?.reason).toContain('changed nothing');
-    expect(after.objects.obj_decision_1?.revision).toBe(before.objects.obj_decision_1?.revision);
-    expect(after.corrections).toHaveLength(before.corrections.length);
+    expect(after.objects.obj_decision_1?.revision).toBe(1);
+    expect(after.corrections).toHaveLength(1);
   });
 
   it('records retract and restore in consumedEventIds like every other event', () => {
@@ -1919,6 +2057,20 @@ describe('relations — typed edges must actually type-check against their endpo
   it('allows an "answers" edge onto a claim', () => {
     const state = reduce([
       ...sampleLog(),
+      // `obj_question_1` is already answered by `obj_decision_2` in the sample
+      // log, and since r8 the reducer repeats `answerBindingRefusal`'s
+      // already-answered check — two `answers` edges on one question is round
+      // 1's gauntlet finding, and it was still reachable through a raw
+      // `relation_added`. Reopen it first: that is the route the refusal names.
+      event({
+        id: 'ev_reopen_q',
+        at: at(8),
+        actor: human(),
+        type: 'object_corrected',
+        objectId: 'obj_question_1',
+        action: 'reopen',
+        note: 'the decision was withdrawn; this is open again',
+      }),
       event({
         id: 'ev_claim',
         at: at(9),
@@ -2227,9 +2379,27 @@ describe('the ordering gate — an out-of-order event is rejected, not recorded'
     expect(byId.get('ev_late')).toBe('applied');
   });
 
-  it('still folds the sample log incrementally to the full-replay state', () => {
-    const events = sampleLog();
-    const incremental = events.reduce((state, next) => append(state, next).state, reduce([]));
-    expect(serializeState(incremental)).toBe(serializeState(reduce(events)));
+  it('folds an out-of-order arrival to a replay of what it consumed', () => {
+    // **r8: this used to fold `sampleLog()` in its own canonical order**, so the
+    // cursor gate it is named after never fired, and the ledger measured it
+    // killing none of 85 mutations. The contract in `appendEvent`'s docblock is
+    // about arrival order — *"whatever order those events arrived in,
+    // serializeState(state) === serializeState(reduce(L))"*, where `L` is the
+    // rows the state actually consumed — so the arrival order has to be wrong
+    // for the assertion to be about anything.
+    for (const seed of [1, 7, 42]) {
+      const arrival = shuffle(sampleLog(), seed);
+      const consumed: AuthoredEvent[] = [];
+      let live = reduce([]);
+      for (const next of arrival) {
+        const result = append(live, next);
+        if (wasConsumed(result)) consumed.push(next);
+        live = result.state;
+      }
+      expect(serializeState(live), `seed ${seed}`).toBe(serializeState(reduce(consumed)));
+      // …and the gate did something. A test whose premise is "some rows were
+      // refused" has to say so, or a gate that stopped refusing reads as a pass.
+      expect(consumed.length, `seed ${seed}`).toBeLessThan(arrival.length);
+    }
   });
 });

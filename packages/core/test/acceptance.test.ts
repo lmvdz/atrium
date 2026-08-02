@@ -18,6 +18,7 @@ import {
   findDuplicate,
   MODEL_ACCEPTANCE_FLOOR,
   modelMintingGate,
+  normalizeForReceipt,
   type Proposal,
   Proposal as ProposalSchema,
   type ProvenanceMessage,
@@ -1238,45 +1239,164 @@ describe('r7 — a claim whose words could be an undertaking is referred, not ac
     // visible failure the disposition is willing to keep, and it is written into
     // `COMMITMENT_SHAPES` too so nobody discovers it as a surprise.
     const statement = "I'm on it, starting the migration review right now.";
-    expect(readsAsCommitment(statement)).toBe(false);
+    expect(readsAsCommitment(normalizeForReceipt(statement))).toBe(false);
     expect(decideAcceptance(claimOf(statement), { messages: room(statement) }).verdict).toBe(
       'auto_accept',
     );
   });
 
-  it(`reads a value the proposer does not control, which is the round's rule`, () => {
-    // The organizing instruction of r7: name who supplies each value a check
-    // reads. `type` is the model's; `statement` is the **author's**, proved
-    // verbatim by the receipt above (`statementBearing`, `quoteCoversOwnText`).
-    // So a marker list here is not a denylist of evasions — a proposer cannot
-    // rephrase around it without breaking the receipt that got it here.
-    const statement = 'We will deploy production Friday afternoon as planned.';
-    const messages = room(statement);
-    // Every type the proposal could pick for these words, and not one of them
-    // auto-accepts.
-    for (const type of ['claim', 'commitment', 'decision', 'objective'] as const) {
-      const decision = decideAcceptance(
-        ProposalSchema.parse({
-          id: 'prop_any',
-          roomId: ROOM,
-          type,
-          payload:
-            type === 'claim'
-              ? { statement, claimant: BOB }
-              : type === 'commitment'
-                ? { statement, owner: BOB }
-                : type === 'decision'
-                  ? { statement, decidedBy: BOB }
-                  : { title: statement },
-          confidence: 0.95,
-          proposer: { kind: 'model', model: 'test-model' },
-          provenance: ['m1'],
-          quote: statement,
-          createdAt: at(1),
-        }) as Proposal,
-        { messages },
-      );
-      expect(decision.verdict, type).not.toBe('auto_accept');
+  it('reads a value the proposer does not control — over the form the receipt proved', () => {
+    // **This test was named after a false premise until r8, and it could not
+    // have caught the defect the premise hides.** Its title was "reads a value
+    // the proposer does not control, which is the round's rule", and its body
+    // varied only `type` while holding `statement === quote === body`. The
+    // receipt does not prove `statement === quote`. It proves
+    // `normalizeForReceipt(quote) === normalizeForReceipt(statement)` — so the
+    // proposer controls the statement freely *inside that equivalence class*,
+    // and a test that never moves inside the class is asserting the premise
+    // rather than testing it.
+    //
+    // So the loop below varies both axes: every type the proposal could pick,
+    // and every statement in the equivalence class of the author's sentence.
+    const body = 'We will deploy production Friday afternoon as planned.';
+    const messages = room(body);
+
+    /**
+     * Statements the receipt cannot tell apart from `body`. Every one is
+     * `normalizeForReceipt`-equal to it and byte-different from it, which is
+     * exactly the freedom the certification argument did not account for.
+     */
+    const INSIDE_THE_CLASS = [
+      body,
+      // The zero-width space, spliced into the one word every shape reads.
+      'We wi​ll deploy production Friday afternoon as planned.',
+      'We ⁠will deploy production Friday afternoon as planned.',
+      'We wil﻿l deploy production Friday afternoon as planned.',
+      'We wi⁤ll deploy production Friday afternoon as planned.',
+      // Whitespace runs and the ends, which the fold also forgives.
+      '  We  will   deploy production Friday afternoon as planned.  ',
+    ];
+
+    for (const statement of INSIDE_THE_CLASS) {
+      // The premise, asserted rather than assumed: the receipt really does
+      // certify each of these against the author's message.
+      expect(normalizeForReceipt(statement), statement).toBe(normalizeForReceipt(body));
+
+      for (const type of ['claim', 'commitment', 'decision', 'objective'] as const) {
+        const decision = decideAcceptance(
+          ProposalSchema.parse({
+            id: 'prop_any',
+            roomId: ROOM,
+            type,
+            payload:
+              type === 'claim'
+                ? { statement, claimant: BOB }
+                : type === 'commitment'
+                  ? { statement, owner: BOB }
+                  : type === 'decision'
+                    ? { statement, decidedBy: BOB }
+                    : { title: statement },
+            confidence: 0.95,
+            proposer: { kind: 'model', model: 'test-model' },
+            provenance: ['m1'],
+            quote: body,
+            createdAt: at(1),
+          }) as Proposal,
+          { messages },
+        );
+        expect(decision.verdict, `${type} / ${JSON.stringify(statement)}`).not.toBe('auto_accept');
+      }
+    }
+  });
+
+  it('sees the same words through every difference the receipt forgives', () => {
+    // The predicate itself, at the level the engine test above exercises it
+    // through. `readsAsCommitment` takes `ReceiptText` since r8, so this loop
+    // also documents what that brand buys: there is no way to write the r7 call
+    // — `readsAsCommitment(statement)` on a raw string — that compiles.
+    const shapes = [
+      'We will deploy production Friday.',
+      "I'll take the migration review.",
+      'The team is going to rerun the backfill.',
+      'We need to cut the release branch.',
+    ];
+    const splices = ['​', '⁠', '⁡', '⁢', '⁣', '⁤', '﻿'];
+    for (const shape of shapes) {
+      for (const splice of splices) {
+        // Splice the invisible into every position in the sentence, not a
+        // chosen one: "we picked the spot that works" is how a marker list
+        // passes a test it does not survive.
+        for (let cut = 1; cut < shape.length; cut++) {
+          const poisoned = `${shape.slice(0, cut)}${splice}${shape.slice(cut)}`;
+          expect(
+            readsAsCommitment(normalizeForReceipt(poisoned)),
+            `${JSON.stringify(poisoned)}`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('folds the typographic apostrophe, which needed no adversary at all', () => {
+    // `"The vendor won’t support the legacy API…"` with U+2019 — what every
+    // phone and every Slack autocorrect emits — auto-accepted at 0.95, because
+    // `/\bwon't\b/i` is ASCII-only while the `'ll` entry beside it carried both
+    // spellings. Nobody had to attack anything.
+    const statement = 'The vendor won’t support the legacy API after the migration.';
+    expect(readsAsCommitment(normalizeForReceipt(statement))).toBe(true);
+    expect(decideAcceptance(claimOf(statement), { messages: room(statement) }).rule).toBe(
+      'type_not_certified',
+    );
+  });
+
+  it('reads the plain ways of undertaking something, not only the hedged ones', () => {
+    // r8. Not one explicit performative was in `COMMITMENT_SHAPES`; every one of
+    // these is the author's verbatim words and every one auto-accepted as a
+    // claim at 0.95.
+    const PERFORMATIVES = [
+      'I promise the narrowing fix lands before the release goes out.',
+      'I commit to landing the narrowing fix this week.',
+      'I undertake to land the narrowing fix before Thursday.',
+      'Consider the narrowing fix handled by me.',
+      'Leave the narrowing fix with me.',
+      'I got this one, nobody else needs to pick it up.',
+      'Count on me for the narrowing fix and the release notes.',
+      'I owe you the narrowing fix from last week.',
+      'I am landing the narrowing fix right now.',
+      'I deploy production on Friday.',
+    ];
+    for (const statement of PERFORMATIVES) {
+      const decision = decideAcceptance(claimOf(statement), { messages: room(statement) });
+      expect(decision.rule, statement).toBe('type_not_certified');
+      expect(decision.verdict, statement).toBe('pending');
+    }
+  });
+
+  it('stops firing on four sentences that undertake nothing', () => {
+    // The other half of r8's finding, and the direction that costs the product
+    // rather than the record: `must`, `need(s) to` and `have to` are deontic
+    // necessity — a property of the world — and `going to` was matching a
+    // participle. All four are ordinary claims and all four were referred.
+    const NOT_UNDERTAKINGS = [
+      'The migration must be run before the release branch is cut.',
+      'The backfill needs to finish before the index rebuild starts.',
+      'You have to be an admin to run the rollback from the runbook.',
+      'Every deploy going to production is signed by CI.',
+    ];
+    for (const statement of NOT_UNDERTAKINGS) {
+      const decision = decideAcceptance(claimOf(statement), { messages: room(statement) });
+      expect(decision.rule, statement).toBe('auto_accept');
+    }
+    // …and the deontic sentences that *are* somebody taking something on still
+    // refer, so this is a narrowing and not a deletion.
+    for (const statement of [
+      'We need to cut the release branch before the end of the quarter.',
+      'Everyone must update their local schema before Thursday.',
+    ]) {
+      expect(
+        decideAcceptance(claimOf(statement), { messages: room(statement) }).rule,
+        statement,
+      ).toBe('type_not_certified');
     }
   });
 });
