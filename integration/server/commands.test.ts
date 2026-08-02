@@ -807,6 +807,49 @@ describe('live ≡ replay', () => {
    * (`catchUp`, `replayCoreEvents`), and not writing `trusted_messages` at
    * append.
    */
+  /* ------------------------------------------------------------------------
+   * KNOWN RED ON `merge/foundation`, AND IT IS A PRODUCT CONTRADICTION RATHER
+   * THAN A BROKEN TEST. Do not "fix" this by relaxing the assertion.
+   *
+   * The merge put two lanes' definitions of THE RECEIPT WINDOW in one tree, and
+   * they cannot both be satisfied:
+   *
+   *   · `fix/realtime-r11` — `atrium_receipt_window()` in
+   *     `0006_derived_receipt_snapshot.sql` snapshots the window at append into
+   *     an immutable column, and selects EXACTLY the cited messages
+   *     (`m.id IN (payload->object->provenance->messageIds)`). That is the r3
+   *     delta's blocking fix: a window re-derived from `messages` on every fold
+   *     is a deterministic function of mutable inputs, so deleting an author
+   *     rewrote history.
+   *
+   *   · `fix/core-engine-r12` — `laterRevision()` in `escalation.ts` refuses any
+   *     window that ends at the citations: "whether a later message takes it
+   *     back was never established". That is the r5 fix for a proposal citing
+   *     only "we will deploy Friday" while "Correction: we will not" sat
+   *     unread one row later.
+   *
+   * Neither rule exists on `main`, and each lane is internally consistent —
+   * `window_ends_at_the_citations` appears only on the core branch,
+   * cited-only `atrium_receipt_window` only on the realtime branch. Together
+   * the SQL cannot produce a window the TypeScript will certify, so EVERY
+   * non-human acceptance is refused `refer` and the model path is dead.
+   *
+   * The fix is one migration redefining the function to snapshot the cited
+   * messages PLUS the messages after the newest citation — which keeps the
+   * realtime lane's immutability (still a snapshot, still taken at append) and
+   * satisfies the core lane's evidence requirement. It is not done here because
+   * the bound has to agree with `RECEIPT_POLICY.maxLaterMessagesScanned` (200),
+   * a TypeScript constant a static migration cannot read, and deciding how the
+   * two are kept in step is a decision about the product's receipt semantics.
+   * The realtime lane solved the same coupling once, for
+   * `CANONICAL_TIMESTAMP`, by generating the CHECK from the regex's `.source`;
+   * a number owned by `policy.ts` needs the same treatment or an owner.
+   *
+   * The extra message this fixture now posts after the cited one is kept on
+   * purpose: it is necessary but not sufficient. Once the window widens, a room
+   * with nothing after the citation still cannot certify — so the fixture is
+   * already in the shape the fix needs.
+   * --------------------------------------------------------------------- */
   it('replays an accepted claim identically after its author is deleted', async () => {
     const alice = await connect(room.people.alice as string);
     await alice.subscribe(room.roomId);
@@ -814,6 +857,22 @@ describe('live ≡ replay', () => {
     const quote = 'the deploy pipeline is green';
     await alice.command(send(room.roomId, quote));
     const cited = (await lastEvent<{ messageId: string }>(room.roomId)).messageId;
+    /* ONE MESSAGE AFTER THE CITED ONE, BECAUSE #21's RECEIPT CHECK NOW ASKS FOR
+       ONE. The core lane tightened `receipt_not_certifiable`: a window that ends
+       at the newest cited message "read no evidence about what came after the
+       quoted sentence — whether a later message takes it back was never
+       established". This fixture posted exactly up to the citation, so on the
+       merged tree the model acceptance below was refused and the case failed
+       with an empty room rather than with the thing it is about.
+
+       It is a fixture change, not a weakening: the case is that a fold and a
+       replay agree after the author's row is deleted, and it needs an
+       acceptance that LANDS to have anything to compare. The extra message is
+       ordinary room traffic that does not mention the claim, which is the
+       cheapest shape that satisfies the rule — and it is Alice's too, so the
+       deletion below still removes the author of every message in the window. */
+    await alice.command(send(room.roomId, 'and the changelog is out'));
+    await lastEvent<{ messageId: string }>(room.roomId);
 
     /**
      * Staged by a **model**, through the ledger's own append — as of r9, the only

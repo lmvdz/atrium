@@ -1925,16 +1925,40 @@ describe('canonical order — the SQL gate and the reducer agree, and only insid
      * load-bearing if something outside them actually breaks.
      */
     const at = '2026-08-01T00:00:05.000Z';
+    /* WHY TWO KINDS NOW, AND WHY THAT IS STRONGER THAN ONE.
+     *
+     * This case was written when every witness diverged: SQL compared the
+     * instant and JavaScript compared the STRING, so two spellings of one
+     * moment tied in one and differed in the other. The core lane closed the
+     * JavaScript half independently — `compareCursor` reads `instantKey`, which
+     * parses the fields instead of the characters — so on the merged tree the
+     * first two witnesses AGREE. Two lanes fixed one defect class from two
+     * sides, which is a good outcome and a bad thing to discover by way of an
+     * assertion that quietly stopped meaning anything.
+     *
+     * So the witnesses declare which they are. `diverges: true` keeps the
+     * original claim exactly. `diverges: false` asserts the CONVERGENCE, which
+     * is the thing that would break if `instantKey` were reverted to a string
+     * compare — the old assertion could not tell "the two orderings agree" from
+     * "this witness rotted", and this one has to be right about which.
+     *
+     * The constraint half is unchanged for both: the CHECK is what stops the
+     * spelling entering the ledger at all, and it is still the only thing that
+     * does. A value type and a comparator agreeing about a string is not the
+     * same guarantee as the string never being written.
+     */
     const witnesses = [
       {
-        why: 'two spellings of one instant tie in SQL and differ as strings',
+        why: 'two spellings of one instant tie in SQL, and now tie in JS too',
+        diverges: false,
         a: { at, id: 'e1' },
         b: { at: '2026-08-01T00:00:05Z', id: 'e1' },
         constraint: 'core_events_payload_at_is_canonical_utc',
         offending: 'b' as const,
       },
       {
-        why: 'a numeric UTC offset is the same instant and a different string',
+        why: 'a numeric UTC offset is the same instant, and now the same order',
+        diverges: false,
         a: { at, id: 'e1' },
         b: { at: '2026-08-01T00:00:05.000+00:00', id: 'e1' },
         constraint: 'core_events_payload_at_is_canonical_utc',
@@ -1942,6 +1966,7 @@ describe('canonical order — the SQL gate and the reducer agree, and only insid
       },
       {
         why: 'an astral code point sorts before U+E000–U+FFFF in UTF-16 and after it in bytes',
+        diverges: true,
         a: { at, id: '\u{10000}' },
         b: { at, id: '' },
         constraint: 'core_events_id_is_safe_to_order',
@@ -1955,14 +1980,25 @@ describe('canonical order — the SQL gate and the reducer agree, and only insid
 
     witnesses.forEach((witness, index) => {
       const js = sign(compareCursor(witness.a, witness.b));
-      // The disagreement is real, and asserted rather than assumed — a "witness"
-      // that no longer diverges would otherwise leave the constraint below
-      // guarding nothing while this test stayed green.
-      expect({ why: witness.why, sql: fromSql[index], js }).not.toEqual({
-        why: witness.why,
-        sql: js,
-        js,
-      });
+      if (witness.diverges) {
+        // The disagreement is real, and asserted rather than assumed — a
+        // "witness" that no longer diverges would otherwise leave the constraint
+        // below guarding nothing while this test stayed green.
+        expect({ why: witness.why, sql: fromSql[index], js }).not.toEqual({
+          why: witness.why,
+          sql: js,
+          js,
+        });
+      } else {
+        // …and the agreement is asserted for the same reason, from the other
+        // side: this is the pair the core lane's `instantKey` converged, and if
+        // `compareCursor` goes back to comparing characters this fails here
+        // rather than silently reinstating the divergence.
+        expect({ why: witness.why, sql: fromSql[index] }).toEqual({
+          why: witness.why,
+          sql: js,
+        });
+      }
     });
 
     for (const witness of witnesses) {
@@ -3050,11 +3086,35 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
     const of = (action: string) =>
       rows.filter((row) => row.action === action).map((row) => row.name);
 
-    // `n` = SET NULL. Every one is a projection column written *from* the ledger's
-    // trusted actor columns and read back for display; the authority lives in
-    // `core_events.actor_kind`/`actor_id`, which have no FK to `users` at all.
+    /* THE AUDIT MOVED HERE, AND `0006`'s HEADER WAS DELIBERATELY NOT EDITED.
+     *
+     * `0006_derived_receipt_snapshot.sql` carries the prose version of this
+     * audit and says a schema change "fails that test, which is what makes the
+     * audit below true for longer than the day it was written". Merging
+     * `fix/auth-r11` added workspaces, workspace members, invitations and Better
+     * Auth's accounts/sessions, and with them five more foreign keys with a
+     * delete action — so the test failed on the merge commit, exactly as
+     * promised.
+     *
+     * The header was NOT updated to match, and that is the deliberate half:
+     * drizzle records an applied migration by a HASH OF THE FILE, so editing
+     * even a comment in a shipped migration makes it read as unapplied and
+     * re-run its DDL against a database that already has it. The audit's
+     * authority was always the catalog rather than the paragraph — that is this
+     * describe block's own title — so the paragraph stays frozen with its
+     * migration and the additions are recorded here, where the assertion is.
+     *
+     * `n` = SET NULL. Every one is a projection column written *from* the
+     * ledger's trusted actor columns and read back for display; the authority
+     * lives in `core_events.actor_kind`/`actor_id`, which have no FK to `users`
+     * at all. */
     expect(of('n')).toEqual([
       'accepted_objects_accepted_by_users_id_fk',
+      // #26's. A session pins an "active workspace" for convenience; deleting
+      // the workspace must not delete the session, and must not leave it
+      // pointing at a workspace that is gone. Exactly this list's own rule —
+      // a display column nulls, the authority is elsewhere — one table over.
+      'auth_sessions_active_organization_id_workspaces_id_fk',
       'corrections_by_user_id_users_id_fk',
       'messages_author_id_users_id_fk',
       'proposals_decided_by_users_id_fk',
@@ -3073,6 +3133,13 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'attention_items_proposal_same_room_fk',
       'attention_items_room_id_rooms_id_fk',
       'attention_items_user_id_users_id_fk',
+      // #26's four, and they are cascades for the reason the ones above are:
+      // each row is meaningless without its parent. A deleted user has no
+      // credentials and no sessions; a deleted workspace has no members and no
+      // outstanding invitations. None of them is authority the ledger reads —
+      // `core_events.actor_kind`/`actor_id` still have no FK to `users` at all.
+      'auth_accounts_user_id_users_id_fk',
+      'auth_sessions_user_id_users_id_fk',
       'core_events_room_id_rooms_id_fk',
       'corrections_object_same_room_fk',
       'corrections_room_id_rooms_id_fk',
@@ -3091,6 +3158,15 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'relations_room_id_rooms_id_fk',
       'relations_to_message_same_room_fk',
       'relations_to_object_same_room_fk',
+      // …and the rest of #26's. `rooms.workspace_id` is the one that changes
+      // the shape of the room table itself: a room now belongs to a workspace,
+      // and deleting the workspace takes its rooms — and, through the cascades
+      // above, everything filed under them.
+      'rooms_workspace_id_workspaces_id_fk',
+      'workspace_invitations_inviter_id_users_id_fk',
+      'workspace_invitations_organization_id_workspaces_id_fk',
+      'workspace_members_organization_id_workspaces_id_fk',
+      'workspace_members_user_id_users_id_fk',
     ]);
 
     // And the stale row, named so the correction cannot be quietly re-broken:

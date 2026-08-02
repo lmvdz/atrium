@@ -809,3 +809,120 @@ Finally, the product half, which stayed small because the review said the produc
 **Process note — committing while a mutation harness is running captures a mutant** (#39 r8, 2026-08-01). `RETRO` already records that an in-place mutation harness must be reaped explicitly and its tree diffed afterwards, because `TaskStop` does not kill it. Round 8 found the adjacent hazard, in a run that exited **cleanly**: `git add -A && git commit` fired while `mutations.mjs` was between `writeFileSync(path, mutated)` and its `finally`, and committed the mutant — `onSelect: undefined, unusedSelect:` in `Timeline.tsx`, which kills every row action. Nothing was wrong with the harness; it restored the file seconds later, and the *working tree* was correct from then on. The damage was entirely in the commit, and every gate ran green afterwards because every gate reads the working tree.
 
 Lesson kept: **a mutation harness makes `git add -A` unsafe for the duration of its run, and the window is invisible** — the tree is dirty for a few seconds per row across a twenty-minute run, so the odds are low per commit and near-certain across a round. Two mitigations, both cheap: never stage while the harness has a process alive (`pgrep` it first, and prefer explicit paths over `-A`), and **diff the branch's own commits against the restored tree afterwards** rather than trusting `git status` — status compares the working tree to `HEAD`, so it shows the *fix* as a change and the *defect* as nothing. That inversion is what makes it worth writing down: the one command everybody runs to check for this reports the corruption as if it were an edit you had not committed yet.
+
+---
+
+## Two lanes, one word, two meanings: the merge train's own retrospective (2026-08-02)
+
+Six foundation lanes merged onto `merge/foundation` in one pass —
+prototype-frame r19, auth r11, readme-vision r6, ui-components r10,
+core-engine r12, realtime r11 — least entangled first, committed after each.
+What follows is only what the merge itself taught, which is a different set of
+lessons from what the lanes taught.
+
+**A merge is where two correct fixes discover they disagree about a noun.** The
+train's most expensive finding is not a conflict at all — git merged both sides
+without a marker. `fix/realtime-r11` defines THE RECEIPT WINDOW as *exactly the
+cited messages, snapshotted into an immutable column at append*, which is its r3
+delta's blocking fix: a window re-derived from `messages` on every fold is a
+deterministic function of mutable inputs, so deleting an author rewrote history.
+`fix/core-engine-r12` defines THE RECEIPT WINDOW as *evidence that must extend
+past the citations*, which is its r5 fix: a proposal citing "we will deploy
+Friday" while "Correction: we will not" sits one row later is not a clean
+receipt. Neither rule is on `main`. Each lane is internally consistent. Together
+the SQL cannot produce a window the TypeScript will certify, and every non-human
+acceptance is refused `refer` — the model path is dead on the merged tree, with
+one integration test to show for it and no textual conflict anywhere.
+
+The general lesson, and it is the one worth carrying: **the conflicts a merge
+reports are the ones where two lanes edited the same line, and those are the
+cheap ones.** The expensive collision is two lanes editing different files in
+different languages while narrowing the same concept in incompatible
+directions. Nothing in `git merge` can see it and nothing in a per-lane gauntlet
+can either, because each lane's suite was green on its own branch. Only a suite
+that runs both halves against a real database finds it. `pnpm test` — 2907 unit
+tests — is green on this contradiction. `pnpm test:integration` is not.
+
+**Corollary: a lane that stubs another lane's seam should say which direction
+the graft goes, because two lanes will each say it and they will disagree.**
+`apps/server`'s realtime server carries `session: createStubSessionAuthenticator()`
+with the comment *"#26 replaces this and nothing else"*. The auth lane's server
+carries *"the real command/event contract (#22) slots into `handleCommand`
+without any of the authentication or authorization below changing"*. Both lanes
+wrote down how the other should integrate, and they specified opposite
+directions — two servers on a 180-line common ancestor with disjoint wire
+protocols, disjoint web clients and disjoint suites (57 tests against 15). The
+merge kept both files and grafted the trust boundary onto the product surface,
+which is not the same as deciding which protocol ships.
+
+**A key is a contract, and moving a query without its key fails in whichever
+direction you were not thinking about.** Moving the fan-out membership check
+into `@atrium/auth` took the query and left the key: the new home built
+`userId:roomId` while its one caller went on building `userId<NUL>roomId`. Every
+probe missed, so the revalidation pass revoked *every* subscriber on the
+instance — three integration tests red. That is the LUCKY failure. Two sides
+agreeing on a *wrong* key would have found every probe "still a member" and
+silently stopped revoking anybody, with the suite green. The mismatch was total,
+which is the only reason it was loud. `session.ts` had predicted it in as many
+words — *"one function so the two sides cannot spell it differently — a mismatch
+here reads as 'everybody was revoked'"* — and that sentence stopped being true
+the moment the query moved to another package and the key did not.
+
+Two mechanical notes from the same defect, both cheap and both real:
+
+- **A raw NUL in a source file makes `grep` skip it in silence.** `session.ts`
+  used an unescaped NUL as the separator, so `file(1)` reported `data` and a
+  search for `membershipKey` came back empty while the function was sitting in
+  it. That is how a read of both sides missed that they disagreed. Write the
+  escape.
+- **Two functions with one name in one package is the trap, even when only one
+  of them is live.** The auth lane's server suite declared its own
+  `membershipKey(room, user)` — same name, opposite argument order, different
+  separator, purely fixture-local and never wrong on its own. A reader checking
+  "is this key consistent?" finds a `membershipKey` and stops. There is now one
+  implementation in the repository and every caller passes `(userId, roomId)`.
+
+**An anchor is stale the moment the code around it moves, and a merge moves a
+lot of code.** Four repointed here: two mutants in `packages/core/mutants`
+(`supersession_is_irreversible` followed its call into the plan's `afterCommit`;
+`payload_text_reads_the_wrong_key` had its hand-written ladder deleted out from
+under it), one in the realtime ledger (`fk_delete_action_drifts` still named
+`0000_classy_shocker.sql`, which the auth lane's squash renamed), and the
+`0006` FK audit, which fires by design when a schema change adds a foreign key
+and which the auth lane's five new ones duly tripped. All four are the mechanism
+working. A stale anchor reads as ESCAPED, and ESCAPED reads as a gap in the
+suite that is not there.
+
+**Do not edit a shipped migration to update a comment.** The `0006` audit lives
+in a migration header *and* in an integration test that reads `pg_constraint`.
+Updating the header to match the merged catalog would have changed the file's
+bytes, and drizzle records an applied migration by a hash of the file — so the
+comment fix would make the migration read as unapplied and re-run its DDL
+against a database that already has it. The paragraph stays frozen with its
+migration; the addendum goes where the assertion is. The describe block's own
+title already said which one is the authority: *the audit is the catalog, not a
+paragraph*.
+
+**A denominator taken from the filesystem grows when another lane lands.** The
+UI lane's printed-string sweep enumerates "every file under `apps/web` that Next
+can compile", minus three named directories — deliberately, so a file type
+nobody has decided about cannot be dropped in silence. On the merged tree that
+denominator picked up the auth lane's 25 route and lib files for the first time
+and reported 38 untraced prints. Every one was real; none was a merge defect.
+The same property fired again in `packages/auth`'s fail-closed import analysis,
+which went red on `scripts/integration-test.sh` because nothing had decided
+whether `.sh` is executable. Both are the friction behaving as designed, and
+both cost real time on the merge — which is the trade those rules were written
+to make, and it is worth knowing that the bill arrives at the merge rather than
+at the lane.
+
+**Verify a lane's gate on the lane before assuming the merge broke it.**
+`pnpm lint` exits non-zero on `fix/prototype-frame-r19` alone — 63 errors, all
+in its four harness drivers, byte-identical to the branch. It would have been
+easy and wrong to record that as merge damage.
+
+**And check the artifact, not the argument.** The lint repair rewrote 37 arrow
+bodies in a 2,900-line enumeration driver. The proof that it changed nothing is
+not the diff: it is that `design/prototype-counts.txt` and
+`prototype-uncovered.txt`, generated by the driver *before* those edits, still
+compare byte-identical on a run of the driver *after* them.

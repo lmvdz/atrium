@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { AtriumSession, MembershipLike } from '@atrium/auth';
+import { roomMembershipKey } from '@atrium/auth';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { createLogger } from '../src/logger.js';
@@ -43,12 +44,23 @@ const appOrigin = 'http://localhost:3000';
 /** cookie value → session. Anything else is anonymous. */
 let sessions: Map<string, AtriumSession>;
 
-/** (roomId, userId) → role. Absent means "not a member". */
+/** keyed by `membershipKey(userId, roomId)`. Absent means "not a member". */
 let memberships: Map<string, string>;
 
-function membershipKey(room: string, user: string): string {
-  return `${room}:${user}`;
-}
+/**
+ * THE PRODUCTION KEY, NOT A SECOND ONE.
+ *
+ * This file used to declare its own `membershipKey(room, user)` — same name as
+ * `session.ts`'s, opposite argument order, different separator. It never crossed
+ * into production code (the map is this suite's own bookkeeping behind a fake
+ * `loadRoomMembership`), so it was not the defect. It was the trap that produced
+ * the defect one directory over: two functions with one name in one package, and
+ * a reader who checks "is the key consistent?" finds a `membershipKey` and stops.
+ *
+ * So there is now exactly one implementation in the repository, and every caller
+ * — production and fixture — passes `(userId, roomId)`.
+ */
+const membershipKey = roomMembershipKey;
 
 let server: ReturnType<typeof createRealtimeServer>;
 let port: number;
@@ -74,7 +86,7 @@ function startServer(
       return sessions.get(who) ?? null;
     },
     loadRoomMembership: async (room, user): Promise<MembershipLike | null> => {
-      const role = memberships.get(membershipKey(room, user));
+      const role = memberships.get(membershipKey(user, room));
       return role ? { role } : null;
     },
     ...overrides,
@@ -95,8 +107,8 @@ beforeEach(async () => {
     ['grace', grace],
   ]);
   memberships = new Map([
-    [membershipKey(roomId, ada.userId), 'member'],
-    [membershipKey(roomId, grace.userId), 'admin'],
+    [membershipKey(ada.userId, roomId), 'member'],
+    [membershipKey(grace.userId, roomId), 'admin'],
   ]);
 
   await listen(startServer());
@@ -435,7 +447,7 @@ describe('commands', () => {
   });
 
   it('rejects a workspace command even from a room owner', async () => {
-    memberships.set(membershipKey(roomId, ada.userId), 'owner');
+    memberships.set(membershipKey(ada.userId, roomId), 'owner');
     const socket = await connect('ada');
     send(socket, { type: 'command', command: 'workspace.delete', roomId });
     const error = await nextFrame(socket, 'command_error');
@@ -511,7 +523,7 @@ describe('revocation reaches a live connection', () => {
     await nextFrame(socket, 'joined');
 
     // What `beforeRemoveMember` does to the database, mid-connection.
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
 
     send(socket, { type: 'command', command: 'room.join', roomId });
     const error = await nextFrame(socket, 'command_error');
@@ -525,7 +537,7 @@ describe('revocation reaches a live connection', () => {
     // grace is an admin, so this is authorized (and unimplemented).
     expect((await nextFrame(socket, 'command_error')).reason).toBe('unknown_command');
 
-    memberships.set(membershipKey(roomId, grace.userId), 'member');
+    memberships.set(membershipKey(grace.userId, roomId), 'member');
 
     send(socket, { type: 'command', command: 'room.archive', roomId });
     expect((await nextFrame(socket, 'command_error')).reason).toBe('insufficient_role');
@@ -905,7 +917,7 @@ describe('revocation reaches a subscription, not only a command', () => {
 
     // What `beforeRemoveMember` does to the database, mid-connection. The
     // socket sends nothing at all from here on.
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
 
     const closed = new Promise<number>((resolve) => listener.once('close', resolve));
     expect(await closed).toBe(1008);
@@ -943,7 +955,7 @@ describe('revocation reaches a subscription, not only a command', () => {
     // From here the close can start but can never complete.
     pauseReads(removed);
     const framesBefore = (inbox.get(removed) ?? []).length;
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
 
     await vi.waitFor(() => {
       expect(server.presence(roomId)).toEqual([{ userId: grace.userId, displayName: 'grace' }]);
@@ -991,7 +1003,7 @@ describe('revocation reaches a subscription, not only a command', () => {
      * eviction and the close are the same turn.
      */
     const closed = new Promise<number>((resolve) => removed.once('close', resolve));
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
     expect(await closed).toBe(1008);
     await vi.waitFor(() => {
       expect(server.presence(roomId)).toEqual([{ userId: grace.userId, displayName: 'grace' }]);
@@ -1039,7 +1051,7 @@ describe('revocation reaches a subscription, not only a command', () => {
 
     // What `beforeRemoveMember` does to the database, mid-connection. This
     // socket sends nothing, so only the sweep could notice — and it will not.
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
 
     const staying = await connect('grace');
     send(staying, { type: 'command', command: 'room.join', roomId });
@@ -1103,7 +1115,7 @@ describe('revocation reaches a subscription, not only a command', () => {
 
     const closed = new Promise<number>((resolve) => removed.once('close', resolve));
     const removedAt = Date.now();
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
 
     expect(await closed).toBe(1008);
     const window = Date.now() - removedAt;
@@ -1156,7 +1168,7 @@ describe('revocation reaches a subscription, not only a command', () => {
               hung.push(() => resolve(null));
             });
           }
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1169,7 +1181,7 @@ describe('revocation reaches a subscription, not only a command', () => {
     const closed = new Promise<number>((resolve) => removed.once('close', resolve));
     const wedgedAt = Date.now();
     wedged = true;
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
 
     expect(await closed).toBe(1008);
     const window = Date.now() - wedgedAt;
@@ -1227,7 +1239,7 @@ describe('revocation reaches a subscription, not only a command', () => {
             });
           }
           if (user === grace.userId) graceLookups += 1;
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1274,7 +1286,7 @@ describe('revocation reaches a subscription, not only a command', () => {
     await nextFrame(removed, 'joined');
     expect((await nextFrame(staying, 'presence')).members).toHaveLength(2);
 
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
 
     const after = await nextFrame(staying, 'presence');
     expect(after.members.map((m) => m.displayName)).toEqual(['grace']);
@@ -1288,7 +1300,7 @@ describe('revocation reaches a subscription, not only a command', () => {
     send(removed, { type: 'command', command: 'room.join', roomId });
     await nextFrame(removed, 'joined');
 
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
     send(removed, { type: 'command', command: 'room.presence', roomId });
     expect((await nextFrame(removed, 'command_error')).reason).toBe('not_a_member');
 
@@ -1325,7 +1337,7 @@ describe('revocation reaches a subscription, not only a command', () => {
             lookups += 1;
             throw new Error('database is on fire');
           }
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1367,7 +1379,7 @@ describe('revocation reaches a subscription, not only a command', () => {
           if (room === roomId && user === ada.userId && joined) {
             throw new Error('database is on fire');
           }
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1403,7 +1415,7 @@ describe('revocation reaches a subscription, not only a command', () => {
           if (room === roomId && user === ada.userId && joined) {
             throw new Error('database is on fire');
           }
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1451,7 +1463,7 @@ describe('revocation reaches a subscription, not only a command', () => {
         },
         loadRoomMembership: async (room, user) => {
           if (user === grace.userId) sweeps += 1;
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1502,13 +1514,13 @@ describe('revocation reaches a subscription, not only a command', () => {
         },
         loadRoomMembership: async (room, user) => {
           if (room === otherRoomId) return gate.promise;
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
     );
 
-    memberships.set(membershipKey(otherRoomId, ada.userId), 'member');
+    memberships.set(membershipKey(ada.userId, otherRoomId), 'member');
     const socket = await connect('ada');
     send(socket, { type: 'command', command: 'room.join', roomId });
     await nextFrame(socket, 'joined');
@@ -1526,7 +1538,7 @@ describe('revocation reaches a subscription, not only a command', () => {
     });
 
     // …and while it hangs, the socket loses its session and the sweep revokes.
-    memberships.delete(membershipKey(roomId, ada.userId));
+    memberships.delete(membershipKey(ada.userId, roomId));
     await vi.waitFor(() => {
       expect(server.presence(roomId)).toHaveLength(0);
     });
@@ -1625,7 +1637,7 @@ describe('a rejection value nobody can read cannot suspend the sweep', () => {
         sweepUnverifiedMs: 300_000,
         loadRoomMembership: async (room, user) => {
           if (wedged && user === ada.userId) throw unreadableRejection();
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1763,7 +1775,7 @@ describe('a rejection value nobody can read cannot suspend the sweep', () => {
         },
         loadRoomMembership: async (room, user) => {
           if (user === grace.userId) graceLookups += 1;
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),
@@ -1779,7 +1791,7 @@ describe('a rejection value nobody can read cannot suspend the sweep', () => {
     const unhandled = await withUnhandledRejectionWatch(async () => {
       // The revocation the sweep is about to attempt is the one whose logging
       // throws, so the pass unwinds from inside `revoke`.
-      memberships.delete(membershipKey(roomId, ada.userId));
+      memberships.delete(membershipKey(ada.userId, roomId));
 
       const before = graceLookups;
       /**
@@ -1842,7 +1854,7 @@ describe('a rejection value nobody can read cannot suspend the sweep', () => {
         },
         loadRoomMembership: async (room, user) => {
           if (wedged && user === ada.userId) throw new Error('database is on fire');
-          const role = memberships.get(membershipKey(room, user));
+          const role = memberships.get(membershipKey(user, room));
           return role ? { role } : null;
         },
       }),

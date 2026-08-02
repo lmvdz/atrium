@@ -1,4 +1,4 @@
-import type { DatabaseHandle } from '@atrium/db';
+import { type DatabaseHandle, workspaceMembers } from '@atrium/db';
 import { coreEvents, memberships } from '@atrium/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -612,6 +612,17 @@ describe('the fan-out set is re-checked against memberships', () => {
     // membership is inserted directly rather than seeded, or this would be two
     // different Bobs and the test would prove nothing.
     const second = await seedRoom(handle, ['dave'], { slug: 'daves-room' });
+    // TWO ROWS, BECAUSE AUTHORIZATION READS TWO TABLES NOW. #26 made every
+    // room-authorization read join `workspace_members`, so that a `memberships`
+    // row whose workspace member row is gone grants nothing. Inserting only the
+    // `memberships` row would put Bob in a state production cannot produce —
+    // and the revalidation pass would correctly drop him from the second room,
+    // which is the opposite of what this case is about.
+    await handle.db.insert(workspaceMembers).values({
+      organizationId: second.workspaceId,
+      userId: room.people.bob as string,
+      role: 'member',
+    });
     await handle.db.insert(memberships).values({
       roomId: second.roomId,
       userId: room.people.bob as string,
