@@ -568,10 +568,26 @@ async function clickIndex(page, i) {
  * left unexpanded. A truncated level is not a covered level and this says so
  * rather than quoting one number that sounds like completeness.
  * ======================================================================== */
+/* A LOAD THAT LOSES A RACE FOR A CORE IS NOT A DEFECT IN THE PAGE (round 18).
+   This pass reloads the file once per state and waits 90s for the script to
+   define `render`. On a 4-core box shared with another job that wait was blown
+   at transition 2,800 of 5,303 — one starved load, and ninety minutes of walk
+   thrown away with it. The retry is bounded at two attempts and COUNTED, so a
+   page that genuinely hangs still fails the run and a run that needed retries
+   says how many it needed rather than quietly looking clean. */
+let SEQ_RELOADS = 0;
 async function seqStep(page, errors, path) {
   const errAt = errors.length;
-  await page.goto(URL);
-  await page.waitForFunction("typeof render === 'function'", null, { timeout: 90000 });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await page.goto(URL);
+      await page.waitForFunction("typeof render === 'function'", null, { timeout: 90000 });
+      break;
+    } catch (e) {
+      if (attempt) throw e;
+      SEQ_RELOADS++;
+    }
+  }
   const failed = [];
   for (const step of path) {
     const res = await page.evaluate(s => window.__seqDrive(s), step);
@@ -957,7 +973,160 @@ const D1_SCAN = () => {
   return Array.from(new Set(out));
 };
 
+/* THE SCAN R18-D1 RUNS. Feed rows grouped by the object they narrate and the
+   tick they were minted in, then every row after the first held against every
+   word pair the rows before it painted. Human-authored characters and reply
+   previews are removed on both sides, and a row's own state tag is removed from
+   the side being scanned — `objectTag()` re-derives the OBJECT's state on every
+   row about it, deliberately, which is why two seeded rows about D1 both read
+   `accepted · lars` and why that is not this rule's business. The tag is still
+   INDEXED, because `nothing inferred` reached the ledger line from exactly
+   there. This is the harness's copy of checkEchoInvariant(), so it can be
+   pointed at a build that has no such check. */
+const ECHO_SCAN = () => {
+  const words = (el, drop) => {
+    const c = el.cloneNode(true);
+    c.querySelectorAll('[data-voice="human"], .mreply' + (drop || "")).forEach(n => n.remove());
+    return String(c.textContent || "").toLowerCase()
+      .replace(/[^a-z0-9%$#]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  };
+  const groups = {};
+  document.querySelectorAll("#feed .mrow[data-obj]").forEach(el => {
+    const body = el.querySelector(".m");
+    const t = ((el.querySelector(".t") || {}).textContent || "").trim();
+    if (!body || !t) return;
+    const k = el.dataset.obj + "@" + t;
+    (groups[k] = groups[k] || []).push({ id: el.dataset.msg,
+      said: words(body, ", .tag"), all: words(body) });
+  });
+  const out = [];
+  Object.keys(groups).forEach(k => {
+    const g = groups[k];
+    for (let i = 1; i < g.length; i++) {
+      const earlier = {};
+      for (let p = 0; p < i; p++)
+        for (let n = 0; n + 1 < g[p].all.length; n++)
+          earlier[g[p].all[n] + " " + g[p].all[n + 1]] = g[p].id;
+      let run = [], from = null, best = [], bestFrom = null;
+      const close = () => { if (run.length > best.length) { best = run; bestFrom = from; } run = []; from = null; };
+      for (let n = 0; n + 1 < g[i].said.length; n++) {
+        const pair = g[i].said[n] + " " + g[i].said[n + 1];
+        if (earlier[pair]) { if (!run.length) { run = [g[i].said[n]]; from = earlier[pair]; } run.push(g[i].said[n + 1]); }
+        else close();
+      }
+      close();
+      if (best.length)
+        out.push("two feed rows narrate " + k.split("@")[0] + " in the same tick and " + g[i].id +
+                 " repeats " + JSON.stringify(best.join(" ")) + " from " + bestFrom +
+                 " — one event, stated twice");
+    }
+  });
+  return Array.from(new Set(out));
+};
+
 const REPROS = [
+  {
+    /* ROUND 18, D1 — THE ONE THREE BLIND REVIEWERS FOUND WITHOUT BEING ASKED.
+       One click. Answer P1 from the pin and the feed appends two rows, one tick
+       apart, about one object, and the second prints the first back: `lars
+       chose: Keep dual-write through 14 Aug` is the first row's body verbatim,
+       `not worded by lars` is its note in other words, and `nothing inferred`
+       is its tag. Two rows, ~50 words, one event.
+
+       Nothing separates them and nothing can: appendMessage() and
+       appendSystem() push into the same array on the same tick, and the only
+       things renderFeed() can insert between two rows are the two dividers
+       (fixed at earlier indices) and the routine strip (neither row is
+       routine). So the second row is always the first row's neighbour, and
+       every clause it repeats is a clause a reader sees twice in one block.
+
+       IT ALSO FIRES ON THE TYPED PATH, which matters because the typed answer
+       row's body is the human's own characters and is exempt: there the only
+       thing repeated is `nothing inferred`, from tag to ledger line, and the
+       rule catches it because a tag is indexed even though it is not scanned.
+       All three paths are driven here.
+
+       AND WHAT IT DOES NOT CATCH IS THE POINT OF SAYING WHAT IT DOES. Over these
+       three paths on r17 it reports exactly three runs — `nothing inferred`,
+       `unverified no sign off attached` and `lars chose keep dual write through
+       14 aug`, one per path. It does not
+       report `statement recorded verbatim, not worded by lars` sitting over a
+       note that reads `these are not lars's words`, because that is a
+       RESTATEMENT and not a repeat, and no word-level rule can see one. Those
+       were cut by hand, by reading the screen. A mechanical rule keeps a prune
+       pruned; it does not perform one.
+
+       FIRES ON r17 AS COMMITTED at every width in both themes. */
+    id: "R18-D1-one-event-is-stated-once",
+    what: "two feed rows minted in the same tick about the same object paint no run of words twice",
+    async run(page) {
+      const seen = [];
+      const sample = async () => { seen.push(...await page.evaluate(ECHO_SCAN)); };
+      /* 1 — the TYPED path first, while P1 is still open. The answer row here is
+             the human's own message, so everything but its tag is exempt. */
+      if (!await clickText(page, "Answer in your own words", { within: "#pin" }))
+        return "P1 offers no bound composer";
+      await page.fill("#cinput", "Dual-write runs to the freeze and the legacy tail is force-re-authed on 15 Aug");
+      await page.press("#cinput", "Enter");
+      await page.waitForTimeout(140);
+      await sample();
+      /* 2 — a CHOSEN answer on a question, whose ledger line carries the
+             consequence as well as the arrow */
+      if (!await clickText(page, "Answer — retention is 90 days")) return "Q1's answer not offered";
+      await sample();
+      /* 3 — and a CHOSEN answer on a decision, which is the pair the reviewers
+             read: reopen P1 from its receipt and take the card's option */
+      if (!await clickText(page, "the receipt for P1")) return "no route to P1's receipt";
+      if (!await clickIn(page, "#rcReopen")) return "the receipt offers no Reopen";
+      if (!await clickIn(page, "#rgo")) return "the reopen prompt offers no confirm";
+      if (!await clickText(page, "Keep dual-write through 14 Aug")) return "the reopened decision offers no option";
+      await sample();
+      await page.evaluate(f => { window.__r18d1 = f; }, Array.from(new Set(seen)));
+      return null;
+    },
+    async assert(page) {
+      const later = await page.evaluate(ECHO_SCAN);
+      const before = await page.evaluate(() => window.__r18d1 || []);
+      return Array.from(new Set(before.concat(later)));
+    }
+  },
+  {
+    /* ROUND 18, D2 — the same rule, one column left. Clear your list and the
+       pin says it is empty twice: `nothing owed — this is the whole list` in
+       the count slot and `NOTHING NEEDS YOU IN THIS ROOM — THAT IS A RESULT,
+       NOT AN ABSENCE` forty pixels under it. Two statements of one fact in the
+       page's most valuable real estate, on the screen you reach by doing the
+       work. And the clause that was cut, "this is the whole list", is a promise
+       that nothing is folded away — worth making about a list with something in
+       it, which is the state where it was never printed.
+
+       FIRES ON r17 AS COMMITTED at every width in both themes. */
+    id: "R18-D2-an-empty-list-says-so-once",
+    what: "the pin's count and its empty state do not both announce the same emptiness",
+    async run(page) {
+      if (!await clickText(page, "Keep dual-write through 14 Aug")) return "P1's answer not offered";
+      if (!await clickText(page, "Mark signed off")) return "K2 offers no sign-off";
+      if (!await clickText(page, "Answer — retention is 90 days")) return "Q1's answer not offered";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const box = document.querySelector("#pinList .empty");
+        if (!box) return [];
+        const r = box.getBoundingClientRect();
+        if (!r.width || !r.height) return [];
+        /* THE ASSERTION IS THE DESIGN, NOT A WORD HEURISTIC. While the empty
+           box is on screen it is the statement, so the count slot beside it
+           states nothing. r17 printed both. */
+        const count = String((document.getElementById("pinCount") || {}).textContent || "")
+          .replace(/\s+/g, " ").trim();
+        return count
+          ? ["the pin announces the same emptiness twice: the count slot says " + JSON.stringify(count) +
+             " over an empty state that already says " + JSON.stringify(String(box.textContent || "").trim())]
+          : [];
+      });
+    }
+  },
   {
     /* ROUND 17, D1. Zero clicks: at boot, on the pin and in the lens and in the
        receipt, `open 3h` over a record that says 09:11 and a room clock that
@@ -2200,6 +2369,8 @@ if (!SKIP_WALK) {
 if (!SKIP_WALK) {
   const notDriven = Array.from(sq.offeredSteps).filter(s => !sq.drivenSteps.has(s)).sort();
   log(`  (object, action, driver) steps offered: ${sq.offeredSteps.size} · driven: ${sq.drivenSteps.size}`);
+  /* a starved load is an environment fact and it is reported, not swallowed */
+  if (SEQ_RELOADS) log(`  state loads that timed out and were retried: ${SEQ_RELOADS} (bounded at one retry each)`);
   if (notDriven.length) {
     log(`  OFFERED BUT NOT DRIVEN — an action the page offers with no control the harness could reach:`);
     notDriven.forEach(s => log(`     - ${s}   [${sq.unreachable.get(s) || "no reason recorded"}]`));

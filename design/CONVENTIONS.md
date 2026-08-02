@@ -250,6 +250,70 @@ itself: every objective header reads `N of 13 objects` now, one denominator, so 
 headers read as overlapping slices of one room rather than as parts of a sum, and
 the caveat has less work to do.
 
+**And the rule was never only about numbers.** Everything above is one sentence —
+*a count that needs a sentence beside it is the wrong count* — applied to counts,
+for six rounds, while the same shape grew unchecked in prose. By r17 a single
+click appended **two feed rows, one tick apart, about one object**, and the second
+printed the first back: the option label verbatim, the authorship boundary in
+different words, and `nothing inferred` twice. Three blind reviewers reached the
+same verdict independently, none of them asked to look for it: *"every correction
+added a clause, nothing ever removed one"*, *"two rows, ~50 words, one event"*,
+*"by the fourth action I was scrolling past my own audit trail to see the
+conversation"*.
+
+**The generalisation. A disclaimer that has to appear every time is a design
+defect, not honesty.** If a surface needs a sentence explaining that its number is
+not what a reader would assume, the number is wrong or the surface is. If an
+authorship boundary needs restating on every row, the boundary belongs in the
+*form* of the row — its voice, its actor column, its tag — not in prose repeated
+per instance. This page already had the form: a chosen answer is actored to
+`atrium`, painted in the system's monospace, and tagged `chosen from the card`. The
+three sentences saying so were describing a distinction the reader could already
+see.
+
+**Two rows that narrate one object in one tick may not paint the same words**, and
+`checkEchoInvariant()` refuses it on the paint that renders it. It is an allowlist
+in the sense this file means: it does not enumerate forbidden phrasings, it forbids
+any repeated run of words at all, so a clause reworded next round is caught by the
+same line of code. What it deliberately does not see is written into the code beside
+it — a human's own characters, two rows in different ticks, two rows about different
+objects, and a row's own state tag, which `objectTag()` re-derives on every row
+about the object *on purpose* and is round 1's B2.
+
+**And the largest thing it cannot see is a restatement.** Over the three paths repro
+R18-D1 drives, it reports exactly three runs on r17; it says nothing about `statement recorded verbatim, not worded by lars`
+sitting over a note reading `these are not lars's words`, because those share no
+words. No word-level rule can. **A mechanical rule keeps a prune pruned; it does not
+perform one** — the restatements were found by three people reading the screen, and
+the next round's will be too.
+
+**The division that makes the prune possible: the answer row states the answer, the
+ledger line states the transition.** The ledger line was carrying the label, the
+authorship and `nothing inferred` — every one of them painted forty pixels higher,
+by the row the same write had just appended. What only it can say is what the
+*record* did, which is the arrow, plus the consequence nothing else carries (`still
+blocking 2 objectives`). Everything else went.
+
+**A summary earns its place when the thing it summarises is not on screen.** The pin
+said its list was empty twice — `nothing owed — this is the whole list` in the count
+slot, over `NOTHING NEEDS YOU IN THIS ROOM — THAT IS A RESULT, NOT AN ABSENCE` — on
+the screen a reader reaches by doing the work. And the clause that was cut, *this is
+the whole list*, is a promise that nothing is folded away: worth making about a list
+with something in it, which is the state where it was never printed. The count is
+printed now only when the pin is folded, because that is the only state in which the
+list itself cannot speak.
+
+**For every clause you cut, name the fact it carried and where that fact now is. If
+the answer is "nowhere", put it back.** Three cuts were refused on exactly that test
+in r18 and are recorded here so the next round does not re-litigate them: `these are
+not lars's words` stays on every chosen-answer row, because a row a reader reaches
+six months later, under a filter, with no neighbour in view, has no other prose
+saying the sentence was not typed; `SINCE YOU RETURNED · 5 rows here, all yours`
+stays, because it *is* the group boundary and the count is the only content it has;
+and `THAT IS A RESULT, NOT AN ABSENCE` stays, because an empty surface that does not
+say why it is empty reads as a page that failed to load. **Removing prose is not the
+goal. Saying each thing once is.**
+
 ## Epistemic glyphs
 
 Every rendered fact carries exactly one glyph. The glyph is *derived from the

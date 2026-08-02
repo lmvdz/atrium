@@ -32,7 +32,7 @@
 # Digits are normalised to `#`: the claim is about FORMS, not about values.
 # subject: the union over every state reachable in 0, 1 or 2 writes.
 #
-# rows: 217 · mint rows unread: 0
+# rows: 215 · mint rows unread: 0
 mint  declared:needsYou  "# item"
 mint  declared:needsYou  "# items"
 mint  declared:needsYou  "#"
@@ -170,8 +170,6 @@ page  feed  "the receipt for Q# →"
 page  feed  "the receipt for R# →"
 page  feed  "the receipt for V# →"
 page  feed  "the receipt for X# →"
-page  feed  "· answered by lars · lars chose: retention is ## days · statement recorded v"
-page  feed  "· lars chose: Keep dual-write through ## Aug · statement recorded verbatim, "
 page  feed  "· still blocking # objectives"
 page  lensBody  "# SOURCE · HOVER OR FOCUS TO EXPAND"
 page  lensBody  "# SOURCES · HOVER OR FOCUS TO EXPAND"

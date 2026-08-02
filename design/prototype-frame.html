@@ -1645,10 +1645,16 @@ S.rooms["users-migration"] = {
         { who: "lars", tm: "29 Jul 09:52", msg: "m0b", ex: "I'll sign off the rollback runbook before we cut over — give me the final version Monday.", note: "message · seq 8814 · self-stated commitment, extracted at θ .81" }
       ],
       corrections: [],
+      /* AND THE TAIL OF IT WAS THE HEAD OF IT AGAIN (round 18). This closed
+         "…leaves it self-reported, BECAUSE MARKING IT DONE IS YOU SAYING SO" —
+         a because-clause whose reason is the sentence it is attached to, under a
+         receipt header that already reads `nothing other than the claimant has
+         checked it`. The rule and the consequence stay; the third statement of
+         the rule goes. */
       note: { text: "A commitment you made about yourself is a claim until something other than you confirms it",
               asks: { of: "verification", say: v => v.ever("verified")
                 ? ". Something other than you has checked it, and that check is on the record."
-                : ". Marking it done leaves it " + enumText(v.value) + ", because marking it done is you saying so." } }
+                : ". Marking it done leaves it " + enumText(v.value) + "." } }
     },
     {
       id: "K1", kind: "commitment", objectives: ["o1", "o3"], text: "Ship the token-refresh fix",
@@ -3449,6 +3455,109 @@ function checkAnswerIdentityInvariant() {
       console.error("[atrium invariant] an option whose statement IS the proposal is not marked as agreeing with it — " +
         "answering with it would record a contradiction between two identical sentences:", o.id, opt.label, opt);
     });
+  });
+}
+
+/* ===========================================================================
+ * ONE EVENT, ONE STATEMENT (round 18 — the rule the pruning is an instance of)
+ *
+ * Seventeen rounds made this file truthful and every one of them added a clause.
+ * Nothing ever removed one, so by round 17 a single click appended two feed
+ * rows, one tick apart, about one object, and the second printed the first back:
+ * the option label verbatim, the authorship boundary in different words, and
+ * `nothing inferred` twice. Three blind reviewers named it independently.
+ *
+ * A prune is a state, not a fix. What keeps it pruned is a rule, and this is it:
+ * TWO ROWS THAT NARRATE THE SAME OBJECT IN THE SAME TICK MAY NOT PAINT THE SAME
+ * WORDS. It is an ALLOWLIST in the sense this file means — it does not enumerate
+ * the phrasings that are forbidden, it forbids any run of repeated words at all,
+ * so a clause reworded next round is caught by the same line of code.
+ *
+ * WHAT IT DELIBERATELY DOES NOT SEE, stated because a rule's blind spots are
+ * part of what it says:
+ *
+ *   - a human's own characters. `[data-voice="human"]` is exempt everywhere in
+ *     this file for the reason CONVENTIONS gives — the page-integrity rules are
+ *     about the page's own text — and a person may type whatever they like into
+ *     an answer that the ledger line beside it happens to repeat. Reply previews
+ *     go with them: a quotation is a repeat by construction and says so.
+ *   - two rows about the same object in DIFFERENT ticks. A feed is a history;
+ *     the same transition happening twice is two facts, not one said twice.
+ *   - two rows in the same tick about DIFFERENT objects, which are two events.
+ *   - one row repeating itself, and a row repeating a surface in another column.
+ *     Those are real, and the pin/lens/receipt overlaps this round cut by hand
+ *     are exactly them; what makes the feed pair mechanical is that the two rows
+ *     are adjacent, permanent and read as one block.
+ *   - a run of one word. Two rows about an object share its id and its kind, and
+ *     firing on that would be the cry-wolf failure this file forbids.
+ *   - THE STATE TAG, on the row being scanned. `objectTag()` renders the
+ *     OBJECT's current state, and it is deliberately re-derived on every row
+ *     that narrates the object — that is round 1's B2, and it is the reason two
+ *     seeded rows about D1 both read `accepted · lars`. Repetition there is the
+ *     feature. So a tag is INDEXED (a later row's sentence may not repeat what
+ *     an earlier row's tag already said, which is exactly how `nothing inferred`
+ *     came to be printed twice) and never SCANNED.
+ *
+ * It fires on r17 as committed at every width in both themes — one click on a
+ * card's option is enough — and repro R18-D1 drives the three paths that reach
+ * it: a typed answer, a chosen answer on a question, a chosen answer on a
+ * decision.
+ * ======================================================================== */
+function paintedPageWords(el, sel) {
+  const c = el.cloneNode(true);
+  c.querySelectorAll('[data-voice="human"], .mreply' + (sel || "")).forEach(n => n.remove());
+  return String(c.textContent || "").toLowerCase()
+    .replace(/[^a-z0-9%$#]+/g, " ").trim().split(/\s+/).filter(Boolean);
+}
+
+function checkEchoInvariant(r) {
+  if (!DEV) return;
+  /* the grouping is done off the dataset alone, and the text is read only for a
+     key that has more than one row in it — this runs on every paint of a feed
+     that can hold forty rows, and cloning them all to find nothing would be a
+     cost the states that pass should not pay */
+  const rows = {};
+  document.querySelectorAll("#feed .mrow[data-obj]").forEach(el => {
+    const m = msg(r, el.dataset.msg);
+    const body = el.querySelector(".m");
+    if (!m || !body) return;
+    const k = el.dataset.obj + "@" + m.t;
+    (rows[k] = rows[k] || []).push({ id: m.id, body: body });
+  });
+  Object.keys(rows).forEach(k => {
+    if (rows[k].length < 2) return;
+    /* `said` is what THIS row asserts — its sentence and its note. `all` is
+       everything it painted, tag included, which is what the rows after it are
+       held against. */
+    const g = rows[k].map(x => ({ id: x.id,
+      said: paintedPageWords(x.body, ", .tag"), all: paintedPageWords(x.body) }));
+    for (let i = 1; i < g.length; i++) {
+      /* every word pair the earlier rows of this group already painted, and
+         which row painted it — so the report names the row, not just the run */
+      const earlier = {};
+      for (let p = 0; p < i; p++)
+        for (let n = 0; n + 1 < g[p].all.length; n++)
+          earlier[g[p].all[n] + " " + g[p].all[n + 1]] = g[p].id;
+      /* the LONGEST run this row repeats, so what is reported is the clause a
+         reader sees twice rather than the two words a scan happened to hit */
+      let run = [], from = null, best = [], bestFrom = null;
+      const close = () => {
+        if (run.length > best.length) { best = run; bestFrom = from; }
+        run = []; from = null;
+      };
+      for (let n = 0; n + 1 < g[i].said.length; n++) {
+        const pair = g[i].said[n] + " " + g[i].said[n + 1];
+        if (earlier[pair]) {
+          if (!run.length) { run = [g[i].said[n]]; from = earlier[pair]; }
+          run.push(g[i].said[n + 1]);
+        } else close();
+      }
+      close();
+      if (best.length)
+        console.error("[atrium invariant] two feed rows narrate " + k.split("@")[0] + " in the same tick and paint the " +
+          "same words, so one event is stated twice and the second row carries nothing the first did not:",
+          g[i].id, "repeats", JSON.stringify(best.join(" ")), "from", bestFrom);
+    }
   });
 }
 
@@ -6059,15 +6168,30 @@ function renderPin() {
      The ROW count beside it stays outside the mint on purpose: it counts feed
      rows, not records, and a sentence about records may not carry a number about
      something else inside its claims. */
-  const itemBox = r.objects.length
+  /* and it is minted only where it is painted (round 18): with the list empty
+     the count slot below prints nothing, and a sentence nobody sees is a
+     sentence no reader can be misled by and no checker can hold to a surface */
+  const itemBox = r.objects.length && items.length
     ? say(r.objects.map(o => fieldView(o, "verification")), function () {
         const vs = Array.prototype.slice.call(arguments);
         const n = vs.filter(v => needsYouAt(v.owner, v.value)).length;
         return `${n} item${n === 1 ? "" : "s"}`;
       }, r.objects[0], ["needsYou"])
     : null;
+  /* AND WHEN THERE IS NOTHING TO COUNT, IT IS SAID ONCE (round 18). `nothing
+     owed — this is the whole list` sat 40px above `NOTHING NEEDS YOU IN THIS
+     ROOM — THAT IS A RESULT, NOT AN ABSENCE`: the same fact, twice, in the
+     page's most valuable real estate, on the screen you reach by clearing your
+     work. "this is the whole list" is a promise that nothing is folded away,
+     and it is only worth making about a list with something in it — which is
+     the state where it was never printed.
+     A SUMMARY EARNS ITS PLACE WHEN THE THING IT SUMMARISES IS NOT ON SCREEN,
+     which is the same rule the feed's ledger line answers to. Unfolded, the
+     empty box is the statement and it says what this line cannot: which room,
+     and that the emptiness is a result. Folded, the box is hidden — so the
+     count is the only thing left that can say it, and it says it. */
   $("pinCount").innerHTML = !items.length
-    ? esc("nothing owed — this is the whole list")
+    ? esc(S.ui.pinFolded ? "nothing owed" : "")
     : voiced(itemBox) + esc((f && f.k === "need")
       /* "highlighted" is now literally what happens — round 6 said this while
          dropping every other row to 1.5:1, so the word was doing the work of
@@ -7704,7 +7828,14 @@ function answerDecision(objectId, answer, provenanceNote) {
     m = appendMessage(r, { id: nextId("m"), t, actor: "atrium", system: true, byMe: true, fresh: true,
       origin: "chosen", chosenBy: S.me, chosenLabel: answer.label,
       body: [`${S.me} chose: ${answer.label}`], boundTo: o.id,
-      note: `statement recorded: ${statement} · chosen from the card's options, not typed — these are not ${S.me}'s words` });
+      /* ONE CLAUSE, NOT THREE (round 18). This read "chosen from the card's
+         options, not typed — these are not lars's words": one fact, said three
+         ways, on a row whose actor column already says `atrium` and whose text
+         is already in the system's monospace. What only this note can carry is
+         the STATEMENT — the body above it holds the option's label, which is a
+         different string — and the fact that lars did not write it. Those two
+         stay; the two restatements go. */
+      note: `statement recorded: ${statement} · chosen from the card — not ${S.me}'s words` });
   }
 
   /* the answer that WAS the answer stops being it, on the message itself. That
@@ -7915,7 +8046,8 @@ function answerDecision(objectId, answer, provenanceNote) {
     const moved = !sameValue(ws.value, ns.value);
     return (typed
       ? "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. "
-      : "You chose one of the statements the card offered. It is recorded verbatim as the decision, and the row that records it is in the system's voice — the page wrote that sentence, so it is not attributed to you as something you said. ") +
+      /* one fact, once — see the same cut in answerQuestion (round 18) */
+      : "You chose one of the statements the card offered. It is recorded verbatim as the decision, and the page wrote that sentence, not you. ") +
            (moved && contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
            (moved ? "" : "It is word for word the sentence already on the record, so the statement itself was not amended — the chain records that it was affirmed again, not that it changed. ") +
            (prior ? "It replaces what you chose before, which is still on the record and still in the room." : "");
@@ -7924,13 +8056,21 @@ function answerDecision(objectId, answer, provenanceNote) {
   /* the arrow states the verification the record moved through — round 8 wrote
      `proposed → accepted` as a literal, which is a claim about the state this
      object was in and not a reading of it (D2's class) */
+  /* THE LEDGER LINE STATES THE TRANSITION. THE ROW ABOVE IT STATES THE ANSWER
+     (round 18). This row used to end `· lars chose: Keep dual-write through 14
+     Aug · statement recorded verbatim, not worded by lars · nothing inferred`,
+     and every one of those clauses is painted forty pixels higher, by the answer
+     row this write appends immediately before it: the label is that row's body
+     verbatim, the authorship is its note, and `nothing inferred` is its tag.
+     Nothing separates the two — appendMessage() and appendSystem() push into the
+     same array on the same tick, and no divider, filter or routine strip can be
+     inserted between them — so the second row was printing the first one back.
+     What only this row can say is what the RECORD did, and that is the arrow.
+     checkEchoInvariant() is the rule this is an instance of. */
   appendSystem(r, [`${o.kind} ${o.id} · ${prior ? "re-answered · " : ""}`,
                   say([wasVf, nowVf], (wv, nv) => !sameValue(wv.value, nv.value)
                     ? `${enumText(wv.value)} → ${enumText(nv.value)}`
-                    : `${enumText(nv.value)} throughout`),
-                  " · " +
-                  (typed ? `recorded verbatim from ${S.me}'s typed answer` : `${S.me} chose: ${answer.label} · statement recorded verbatim, not worded by ${S.me}`) +
-                  ` · nothing inferred`], o, vAcc || change);
+                    : `${enumText(nv.value)} throughout`)], o, vAcc || change);
   S.ui.bound = null; S.ui.replyTo = null; S.ui.pinOpen = null;
   S.ui.prefill = null;
   $("cinput").value = "";
@@ -7984,7 +8124,8 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
     : appendMessage(r, { id: nextId("m"), t, actor: "atrium", system: true, byMe: true, fresh: true,
         origin: "chosen", chosenBy: S.me, chosenLabel: label,
         body: [`${S.me} answered: ${label}`], boundTo: o.id,
-        note: `statement recorded: ${statement} · chosen from the card's options, not typed — these are not ${S.me}'s words` });
+        /* one clause, not three — see the same note in answerDecision (round 18) */
+        note: `statement recorded: ${statement} · chosen from the card — not ${S.me}'s words` });
   if (typed) S.typed.push(statement);
   const vAt2 = recordOf(o, "verification").length - 1;
   const aAt = recordOf(o, "answer").length - 1;
@@ -8080,22 +8221,36 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
   o.note = say([nowV2], v =>
     (typed
       ? "The answer above is your own sentence, recorded verbatim as the answer of record. "
-      : "The answer above is the statement the card carried, recorded verbatim, and the row that records it is in the system's voice — the page wrote that sentence, so it is not attributed to you as something you said. ") +
+      /* "the row that records it is in the system's voice", "the page wrote
+         that sentence" and "it is not attributed to you as something you said"
+         are one fact written three times (round 18). The row itself is on
+         screen, in the system's voice, three panels left. One clause. */
+      : "The answer above is the statement the card carried, recorded verbatim — the page wrote that sentence, not you. ") +
     `Answering a question is not the same as verifying the answer. It is ${enumText(v.value)} until a sign-off is attached, which is why the objectives it blocks are still blocked.`);
   /* the arrow is the verification the record moved through, not a literal
      "open →" that a re-answer would have made false (D2) */
+  /* THE LEDGER LINE STATES THE TRANSITION AND ITS CONSEQUENCE (round 18, the
+     same prune as the decision path 170 lines above). Removed from this row:
+     `lars chose: retention is 90 days`, which is the answer row's body verbatim;
+     `statement recorded verbatim, not worded by lars`, which is that row's note;
+     and `unverified (no sign-off attached)`, which is that row's own tag, word
+     for word — round 12 correctly made that segment a record read, and it stays
+     a record read, on the tag, one row up. What is left is the arrow, the verb
+     that names which write this was, and the consequence, which nothing else on
+     screen carries. */
   const sys = appendSystem(r, [`question ${o.id} · `,
           say([wasV2, nowV2], (wv, nv) => !sameValue(wv.value, nv.value)
             ? `${enumText(wv.value)} → ${enumText(nv.value)}`
             : `${enumText(nv.value)} throughout`),
-          ` · ${priorAns ? "re-answered" : "answered"} by ${S.me} · ` +
-          (typed ? `recorded verbatim from ${S.me}'s typed answer` : `${S.me} chose: ${label} · statement recorded verbatim, not worded by ${S.me}`) + ` · `,
-          /* THE THIRD SEGMENT WAS A LITERAL (round 12, raised by the grok
-             reviewer). `unverified (no sign-off attached)` is a verification
-             VALUE, written down on a permanent row beside two segments that
-             were read. A row is permanent, so its quietest clause is as
-             load-bearing as its arrow. */
-          say([nowV2], v => `${enumText(v.value)} (no sign-off attached)`),
+          /* AND THE VERB IS A RECORD READ (round 18). It was `priorAns ?
+             "re-answered" : "answered"` — a branch on a MESSAGE POINTER, on a
+             permanent row, about whether this record had an answer before. The
+             answer history is what knows that, and once the clauses that used to
+             sit between them were gone `answered by lars · still blocking 2
+             objectives` became one clause: a continuity quantifier beside the
+             `answer` field's own word, in text nothing had read. Both are the
+             same fix. */
+          say([wasA], wa => ` · ${wa.value == null ? "answered" : "re-answered"} by ${S.me}`),
           ` · still blocking ${blocks}`],
           /* the row's arrow paints the VERIFICATION move, so the verification
              change is the one that travels with it */
@@ -9582,6 +9737,7 @@ function render() {
      one of them is synchronous with the paint that produced them. */
   checkFocusInvariant();
   checkRowScopeInvariant(room());
+  checkEchoInvariant(room());
   checkQuotationInvariant();
   checkRecordTextInvariant();
   checkRecordInvariant();
