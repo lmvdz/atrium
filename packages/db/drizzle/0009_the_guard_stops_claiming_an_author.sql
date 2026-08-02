@@ -122,6 +122,34 @@
 -- only the owner holds. What it falsifies is a sentence — in the file whose whole
 -- subject is sentences that were the guarantee.
 --
+-- ## A second sentence, from the same question asked of the invariants
+--
+-- Round 8's adversarial sweep asked "what is this guard's input made of, and who
+-- wrote it" of `core_events_invariants` too, and found a **combination** that
+-- neither of its two halves states. Both halves are already written down:
+--
+--   * `0008`'s membership rule is scoped to `actor_kind = 'human'` — and has to
+--     be, since a model or a system actor has no `memberships` row to check;
+--   * the privileges block grants EXECUTE on the append function to every
+--     non-superuser LOGIN role that already holds SELECT on `core_events`, which
+--     `0008`'s own COMMENT concedes "means a read-only login role granted SELECT
+--     before this migration also gets the door".
+--
+-- Put together — and nowhere are they put together — **a login role with nothing
+-- but SELECT can append `model`- or `system`-attributed history into any room,
+-- without membership in it.** Executed against a fresh role holding SELECT on
+-- every table plus EXECUTE: the row landed, room_seq 3. Every other invariant
+-- still bound it (subject-room resolution, canonical order, minted room_seq,
+-- derived receipt window), so this writes attributable-to-a-model rows and not
+-- forged human ones — but "an auditor role can put words in a room it is not in"
+-- is a capability, and this file exists because an unstated capability is how a
+-- sentence becomes false.
+--
+-- Not fixed here, deliberately, and the reason is scope rather than difficulty:
+-- narrowing the grant means changing how `0004` identifies the application role
+-- without being told its name, which is a deployment-visible decision and a
+-- ticket. What is fixed is that it is now written down.
+--
 -- This migration changes no schema. It changes what the database *says about
 -- itself*, which is the thing that was wrong.
 -- ═════════════════════════════════════════════════════════════════════════════

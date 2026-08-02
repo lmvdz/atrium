@@ -30,6 +30,20 @@ import type { Session, SessionAuthenticator } from './session.js';
  * the append transaction — because a socket outlives a membership and "you were
  * a member when you connected" is not an answer to "may you write this now".
  *
+ * **That sentence is about writing, and r8 stops it reading as more.** The
+ * *fan-out* set is subscribe-time membership and is not re-checked: `hub` holds
+ * the subscription until the socket closes or unsubscribes, and `broadcast`
+ * consults that map, not `memberships`. So a member whose membership is revoked
+ * while their socket is open **keeps receiving that room's `event` and `head`
+ * frames** until they disconnect — their next command is refused, and their
+ * next reconnect never subscribes, but the live stream does not stop. Found by
+ * r8's own adversarial sweep of a claim, not of a code path; recorded here
+ * rather than fixed, because closing it means either a membership read per
+ * subscriber per event or a revocation signal the system does not have, and
+ * both are a ticket rather than a comment. What is NOT open: the revoked member
+ * cannot write (checked twice, the second time under the append lock), and
+ * cannot re-enter after a reconnect.
+ *
  * There is no anonymous fallback and no unauthenticated configuration. Round 1
  * defaulted an unresolved session to `{ userId: 'anonymous' }` when no
  * authenticator was wired, which is a fail-open seam: the day someone forgets
