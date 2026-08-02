@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ACCEPTANCE_RULE_NAMES,
   ATTENTION_PRIORITY,
   AttentionClass,
   type AttentionContext,
@@ -8,6 +9,7 @@ import {
   type ComputedAttentionItem,
   changedSince,
   computeAttention,
+  decideAcceptance,
   dismissAttention,
   type ProvenanceMessage,
   projectAttention,
@@ -20,7 +22,18 @@ import {
   sortAttention,
   transitionAttention,
 } from '../src/index.js';
-import { ALICE, at, BOB, event, human, model, ROOM, sampleLog, UNCITED_TAIL } from './fixtures.js';
+import {
+  ALICE,
+  append,
+  at,
+  BOB,
+  event,
+  human,
+  model,
+  ROOM,
+  sampleLog,
+  UNCITED_TAIL,
+} from './fixtures.js';
 
 /**
  * #6's attention projection: four classes, hardest-first, and a rationale that
@@ -196,11 +209,17 @@ describe('class 1 — needs_decision', () => {
     expect(renderRationale(first)).toContain('nobody is named on this decision');
   });
 
-  it('produces nothing when membership is unknown, rather than guessing', () => {
+  it('names nobody when membership is unknown, and says so instead of guessing', () => {
+    // r9: the title used to be *"produces nothing when membership is unknown"*,
+    // and producing nothing is the half that was wrong. Guessing an audience is
+    // still refused — that is the assertion below — but the decision is not
+    // dropped on the floor for it. `projectAttention` refuses it out loud, which
+    // is the difference between a caller that has misconfigured itself finding
+    // out and a decision sitting staged forever.
     const state = reduce([...sampleLog(), decisionProposal({ id: 'prop_d', at: at(9) })]);
-    expect(computeAttention(state, context()).filter((e) => e.class === 'needs_decision')).toEqual(
-      [],
-    );
+    const projection = projectAttention(state, context());
+    expect(projection.items.filter((e) => e.class === 'needs_decision')).toEqual([]);
+    expect(projection.refusals.map((entry) => entry.proposalId)).toContain('prop_d');
   });
 
   it('stays quiet about a decision the engine would not surface', () => {
@@ -300,14 +319,53 @@ describe('class 2 — owned_commitment', () => {
     expect(renderRationale(confirm)).toContain('nobody gets committed by someone else');
   });
 
-  it('does not ask anybody to confirm their own words', () => {
+  /**
+   * **This test used to pin the defect — r9.**
+   *
+   * It read *"does not ask anybody to confirm their own words"* and asserted the
+   * panel raised **nothing** for a self-stated commitment. That was true of the
+   * engine it was written against, where a self-stated commitment auto-accepted
+   * and there was nothing left to ask. r5 moved commitment into the
+   * never-auto-accepts row, whose verdict text says in so many words that *"it
+   * goes to Needs-you for a person to accept or decline"* — and this assertion
+   * went on passing, because it could not tell the difference between "the
+   * engine settled this" and "the engine staged this and told nobody".
+   *
+   * What the old assertion actually covered is worth keeping and is kept below:
+   * that `commitmentAttribution` recognises BOB's own sentence as his, so he is
+   * not sent the *third-party* ask — the one whose rationale tells him somebody
+   * else put his name on it. That was the mutation it caught, and it still
+   * catches it, because attribution flipping to `third_party` would set
+   * `awaitingConfirmFrom` and produce a `commitment_confirm` reason at the same
+   * user id. Asserting on the *reason kind* rather than on absence is what makes
+   * the two distinguishable; absence never was.
+   */
+  it('asks the owner of a self-stated commitment, and not with the third-party sentence', () => {
     const state = reduce([
       ...sampleLog(),
       // BOB wrote the message the sentence is in, so this is a self-statement.
       thirdPartyCommitment({ id: 'prop_c', at: at(9), owner: BOB }),
     ]);
-    const items = computeAttention(state, context({ members: MEMBERS }));
-    expect(items.find((entry) => entry.objectId === 'prop_c')).toBeUndefined();
+    const projection = projectAttention(state, context({ members: MEMBERS }));
+    const staged = projection.items.filter((entry) => entry.objectId === 'prop_c');
+
+    // It reaches exactly one person: the owner. Not the room — nobody else has
+    // standing to say whether BOB's words were an undertaking.
+    expect(staged).toHaveLength(1);
+    expect(staged[0]).toMatchObject({
+      userId: BOB,
+      class: 'owned_commitment',
+      subjectKind: 'proposal',
+      priority: ATTENTION_PRIORITY.commitment_confirm,
+      reason: { kind: 'commitment_self_stated' },
+    });
+    const first = staged[0];
+    if (!first) throw new Error('unreachable');
+    // The half the old title was right about: he is not told a colleague
+    // committed him.
+    expect(renderRationale(first)).not.toContain('somebody else');
+    expect(renderRationale(first)).toContain('never accepted by inference');
+    expect(projection.refusals).toEqual([]);
   });
 
   it('refuses to raise a confirm it cannot justify, rather than asking everybody', () => {
@@ -821,5 +879,274 @@ describe('changedSince — what moved, as objects rather than events', () => {
     expect(changedSince(state, ROOM, null).map((object) => object.id)).toEqual(
       changedSince(state, ROOM, null).map((object) => object.id),
     );
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * r9 — the invariant, and the reason it is an invariant
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * **No proposal whose verdict is `needs_you` may leave `proposalItems` without
+ * producing either an attention item or a refusal.**
+ *
+ * Three rounds have now shipped a violation of that sentence, in three
+ * different branches, and each fix was a patch to the branch in front of it:
+ *
+ *  - **r7** — a `type_not_certified` claim, dropped by a guard that let only
+ *    decisions and commitments through.
+ *  - **r8** — added a fallthrough *below* the two type branches and left both of
+ *    them `continue`ing above it.
+ *  - **r9** — a self-stated commitment (`awaitingConfirmFrom` is null) and an
+ *    unassigned decision with no member list (the audience is empty).
+ *
+ * So this is not a fourth test for a fourth branch. It drives **every rule the
+ * engine can answer `needs_you` with**, in both audience configurations, and the
+ * table of rules is checked against `ACCEPTANCE_RULE_NAMES` rather than written
+ * out — so a rule added to the engine fails here until somebody says which side
+ * of the line it is on. The source fix is the other half: the branches return a
+ * `NeedsYouOutcome` whose affirmative arm is a non-empty tuple, so a branch with
+ * nobody to ask cannot compile without saying so.
+ */
+describe('r9 — a needs_you verdict never leaves the panel silently', () => {
+  const DANA = 'user_dana';
+  const SELF_COMMITMENT = "I'll wire the flag into the server tomorrow.";
+  const LAUNDERED = 'I will land the narrowing fix before the release, honestly.';
+  const OBJECTIVE = 'Get the migration shipped before the quarter ends.';
+  const DECISION = 'We ship the scaffold behind a flag, default off.';
+  const THIRD_PARTY = 'Justin will handle the migration rollback next week.';
+  const QUESTION = 'Do we keep the flag after the launch or drop it?';
+
+  const window_: ProvenanceMessage[] = [
+    { id: 'm_commit', authorId: ALICE, body: SELF_COMMITMENT },
+    { id: 'm_laundered', authorId: ALICE, body: LAUNDERED },
+    { id: 'm_objective', authorId: ALICE, body: OBJECTIVE },
+    { id: 'm_decision', authorId: ALICE, body: DECISION },
+    { id: 'm_third', authorId: BOB, body: THIRD_PARTY },
+    { id: 'm_question', authorId: ALICE, body: QUESTION },
+    UNCITED_TAIL,
+  ];
+
+  function staged(input: {
+    id: string;
+    type: string;
+    payload: Record<string, unknown>;
+    cites: string;
+    quote: string;
+    proposer?: { kind: 'human'; userId: string } | { kind: 'model'; model: string };
+  }): AuthoredEvent {
+    return event({
+      id: `ev_${input.id}`,
+      at: at(9),
+      actor: input.proposer?.kind === 'human' ? human(input.proposer.userId) : model(),
+      type: 'proposal_recorded',
+      proposal: {
+        id: input.id,
+        roomId: ROOM,
+        type: input.type,
+        payload: input.payload,
+        confidence: 0.95,
+        proposer: input.proposer ?? { kind: 'model', model: 'test-model' },
+        provenance: [input.cites],
+        quote: input.quote,
+        createdAt: at(9),
+      },
+    } as Parameters<typeof event>[0]);
+  }
+
+  /**
+   * One staged proposal per `needs_you` rule the engine has, each one a real
+   * reading of a real message rather than a shape poked into state.
+   */
+  const PROPOSALS = {
+    decision_assigned: staged({
+      id: 'decision_assigned',
+      type: 'decision',
+      payload: { statement: DECISION, decidedBy: ALICE },
+      cites: 'm_decision',
+      quote: DECISION,
+    }),
+    decision_unassigned: staged({
+      id: 'decision_unassigned',
+      type: 'decision',
+      payload: { statement: DECISION },
+      cites: 'm_decision',
+      quote: DECISION,
+    }),
+    commitment_self: staged({
+      id: 'commitment_self',
+      type: 'commitment',
+      payload: { statement: SELF_COMMITMENT, owner: ALICE },
+      cites: 'm_commit',
+      quote: SELF_COMMITMENT,
+    }),
+    commitment_third_party: staged({
+      id: 'commitment_third_party',
+      type: 'commitment',
+      payload: { statement: THIRD_PARTY, owner: DANA },
+      cites: 'm_third',
+      quote: THIRD_PARTY,
+    }),
+    claim_laundered: staged({
+      id: 'claim_laundered',
+      type: 'claim',
+      payload: { statement: LAUNDERED, claimant: ALICE },
+      cites: 'm_laundered',
+      quote: LAUNDERED,
+    }),
+    objective_staged: staged({
+      id: 'objective_staged',
+      type: 'objective',
+      payload: { title: OBJECTIVE },
+      cites: 'm_objective',
+      quote: OBJECTIVE,
+    }),
+    question_by_hand: staged({
+      id: 'question_by_hand',
+      type: 'open_question',
+      payload: { question: QUESTION },
+      cites: 'm_question',
+      quote: QUESTION,
+      proposer: { kind: 'human', userId: ALICE },
+    }),
+  } as const;
+
+  /** Which rule each of them is here to exercise. */
+  const EXPECTED_RULE: Record<keyof typeof PROPOSALS, string> = {
+    decision_assigned: 'never_auto_accepts',
+    decision_unassigned: 'never_auto_accepts',
+    commitment_self: 'never_auto_accepts',
+    commitment_third_party: 'third_party_commitment',
+    claim_laundered: 'type_not_certified',
+    objective_staged: 'never_auto_accepts',
+    question_by_hand: 'human_proposer',
+  };
+
+  /**
+   * The rules that can answer `needs_you`, and the rules that cannot — as two
+   * lists whose union is checked against the engine's own enum, so neither is a
+   * hand-written list that can quietly go stale. r4's finding, applied here: a
+   * coverage list that omits a name passes forever and is blind to exactly the
+   * case it was written for.
+   */
+  const NEEDS_YOU_RULES = [
+    'never_auto_accepts',
+    'type_not_certified',
+    'third_party_commitment',
+    'human_proposer',
+  ];
+  const NEVER_NEEDS_YOU_RULES = [
+    'missing_message_context',
+    'provenance_failed',
+    'receipt_not_certifiable',
+    'duplicate_of_accepted',
+    'below_theta_min',
+    'theta_band',
+    'auto_accept',
+  ];
+
+  it('splits every acceptance rule the engine has into needs-you-capable or not', () => {
+    expect([...NEEDS_YOU_RULES, ...NEVER_NEEDS_YOU_RULES].sort()).toEqual(
+      [...ACCEPTANCE_RULE_NAMES].sort(),
+    );
+  });
+
+  it('drives every needs-you-capable rule through a real staged proposal', () => {
+    const state = reduce([...sampleLog(), ...Object.values(PROPOSALS)]);
+    const reached = new Set<string>();
+    for (const name of Object.keys(PROPOSALS) as (keyof typeof PROPOSALS)[]) {
+      const record = state.proposals[name];
+      if (!record) throw new Error(`${name} did not stage`);
+      const verdict = decideAcceptance(record.proposal, { messages: window_ });
+      expect(`${name}: ${verdict.rule}/${verdict.visibility}`).toBe(
+        `${name}: ${EXPECTED_RULE[name]}/needs_you`,
+      );
+      reached.add(verdict.rule);
+    }
+    expect([...reached].sort()).toEqual([...NEEDS_YOU_RULES].sort());
+  });
+
+  /**
+   * The invariant itself. Written out twice with literal titles rather than
+   * generated from a table, because a `catches` entry in the mutant ledger can
+   * only name a test whose title is a literal — and this is the one test in the
+   * file the ledger most needs to be able to point at.
+   */
+  function nothingGoesSilent(members: AttentionContext['members']): void {
+    const state = reduce([...sampleLog(), ...Object.values(PROPOSALS)]);
+    const projection = projectAttention(state, {
+      now: at(20),
+      messages: window_,
+      ...(members ? { members } : {}),
+    });
+
+    // Stated over every proposal at once, so the failure names which one went
+    // silent rather than just that something did.
+    const silent = Object.keys(PROPOSALS).filter(
+      (id) =>
+        projection.items.filter((entry) => entry.objectId === id).length +
+          projection.refusals.filter((entry) => entry.proposalId === id).length ===
+        0,
+    );
+    expect(silent).toEqual([]);
+
+    // …and a refusal is only a legitimate outcome when it says something. An
+    // empty reason string satisfies "produced a refusal" and helps nobody.
+    for (const refusal of projection.refusals) {
+      expect(refusal.reason.length).toBeGreaterThan(40);
+    }
+  }
+
+  it('raises an item or refuses, for every one of them — with a member list', () => {
+    nothingGoesSilent(MEMBERS);
+  });
+
+  it('raises an item or refuses, for every one of them — without a member list', () => {
+    nothingGoesSilent(undefined);
+  });
+
+  it('sends a self-stated commitment to its owner whether or not a roster exists', () => {
+    // The D2 headline: `awaitingConfirmFrom` is null for a commitment somebody
+    // made about themselves, and the branch used to `continue` on exactly that.
+    // The owner is the audience, so this one does not need the room at all.
+    //
+    // Staged through `appendEvent` rather than `reduce`, so the demonstration
+    // runs the path a live room runs — one row at a time, past the same guards.
+    const landed = append(reduce(sampleLog()), PROPOSALS.commitment_self);
+    expect(landed.outcome).toBe('applied');
+    const state = landed.state;
+    for (const members of [undefined, MEMBERS]) {
+      const projection = projectAttention(state, {
+        now: at(20),
+        messages: window_,
+        ...(members ? { members } : {}),
+      });
+      const raised = projection.items.filter((entry) => entry.objectId === 'commitment_self');
+      expect(raised).toHaveLength(1);
+      expect(raised[0]?.userId).toBe(ALICE);
+      expect(raised[0]?.reason.kind).toBe('commitment_self_stated');
+    }
+  });
+
+  it('refuses an unassigned decision it has nobody to show, and names the room', () => {
+    // The instance the review did not name: `decidedBy ?? members[roomId]` with
+    // both absent is an empty audience, a loop that pushes nothing, and a
+    // decision staged forever in a panel nobody renders.
+    const state = reduce([...sampleLog(), PROPOSALS.decision_unassigned]);
+    const projection = projectAttention(state, { now: at(20), messages: window_ });
+    const refusal = projection.refusals.find((entry) => entry.proposalId === 'decision_unassigned');
+    expect(refusal?.reason).toContain(ROOM);
+    expect(refusal?.reason).toContain('never accepted by inference');
+    expect(projection.items.filter((entry) => entry.objectId === 'decision_unassigned')).toEqual(
+      [],
+    );
+  });
+
+  it('refuses a laundered reading it has nobody to show, rather than dropping it', () => {
+    // r8 raised this one for the room and stayed silent when there was no room.
+    const state = reduce([...sampleLog(), PROPOSALS.claim_laundered]);
+    const projection = projectAttention(state, { now: at(20), messages: window_ });
+    const refusal = projection.refusals.find((entry) => entry.proposalId === 'claim_laundered');
+    expect(refusal?.reason).toContain('nobody to put it in front of');
   });
 });

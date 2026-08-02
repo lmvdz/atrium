@@ -1,9 +1,11 @@
 import { z } from 'zod';
-import { decideAcceptance } from './acceptance.js';
+import { type AcceptanceDecision, decideAcceptance } from './acceptance.js';
 import { Id, Timestamp } from './common.js';
 import type { ProvenanceMessage } from './escalation.js';
+import { hasContent } from './matching.js';
 import { type AcceptedObject, AcceptedObjectType, payloadText } from './objects.js';
 import type { AcceptanceConfig } from './policy.js';
+import type { StoredProposal } from './proposal.js';
 import type { CoreState, ObjectRecord } from './state.js';
 
 /**
@@ -102,6 +104,19 @@ export const RationaleReason = z.discriminatedUnion('kind', [
     due: Timestamp.nullable().default(null),
   }),
   z.object({ kind: z.literal('commitment_confirm'), statement: z.string().min(1) }),
+  /**
+   * **r9.** A commitment the engine staged for its *own* owner — the self-stated
+   * shape, which since r5 never auto-accepts and until r9 raised nothing at all.
+   *
+   * A separate variant rather than a reuse of `commitment_confirm`, because that
+   * one's sentence is *"somebody else's message named you as the owner of this,
+   * and nobody gets committed by someone else's sentence"* — which is false here
+   * and false in the direction that matters. An item that tells you a colleague
+   * put your name on your own words is a rationale that misrepresents the room
+   * to the person being asked, and a rationale that cannot say truthfully why
+   * this person specifically is the thing this union exists to make impossible.
+   */
+  z.object({ kind: z.literal('commitment_self_stated'), statement: z.string().min(1) }),
   z.object({
     kind: z.literal('question_blocks_commitment'),
     question: z.string().min(1),
@@ -168,6 +183,8 @@ export function rationaleFor(userId: Id, reason: RationaleReason): Rationale {
       return `${you} — you own this commitment${reason.due ? `, due ${reason.due}` : ''}: "${clip(reason.statement)}".` as Rationale;
     case 'commitment_confirm':
       return `${you} — somebody else's message named you as the owner of this, and nobody gets committed by someone else's sentence. Confirm it or decline it: "${clip(reason.statement)}".` as Rationale;
+    case 'commitment_self_stated':
+      return `${you} — this is staged as a commitment of yours, and a commitment is never accepted by inference however plainly it reads. Confirm it or decline it: "${clip(reason.statement)}".` as Rationale;
     case 'question_blocks_commitment':
       return `${you} — you own the commitment this open question blocks ("${clip(reason.commitment)}"), so it is your answer that unblocks it: "${clip(reason.question)}".` as Rationale;
     case 'question_blocks_objective':
@@ -333,8 +350,15 @@ export interface AttentionContext {
    * Room membership, `roomId → user ids`. Needed for the "or any-member when
    * unassigned" half of #6's `needs_decision`: an unowned decision fans out to
    * everyone, because a decision nobody is asked about is a decision nobody
-   * makes. Without it, unassigned decisions produce no items at all — stated
-   * here so the silence is a known consequence rather than a mystery.
+   * makes.
+   *
+   * **Omitting it is no longer silent — r9.** This docblock used to end *"without
+   * it, unassigned decisions produce no items at all — stated here so the silence
+   * is a known consequence rather than a mystery"*, and a known silence is still
+   * a panel with a decision missing from it. Every proposal it starves now
+   * appears in `AttentionProjection.refusals` naming the room whose roster is
+   * missing. Documenting a hole is not the same as closing it, and the field
+   * that could be read to say otherwise was load-bearing in the wrong direction.
    */
   members?: Readonly<Record<Id, readonly Id[]>>;
   /**
@@ -421,8 +445,62 @@ function item(
 }
 
 /**
- * Everything a staged proposal raises: `needs_decision`, and the owner-confirm
- * shape of `owned_commitment`.
+ * **What a `needs_you` proposal owes the panel — r9, and it is a type rather
+ * than a rule of thumb.**
+ *
+ * The requirement: *no proposal whose verdict is `needs_you` may leave
+ * `proposalItems` without producing either an attention item or a refusal.*
+ *
+ * It is a type because it had to be. The same defect has now shipped three
+ * times, in three different branches, each one a `continue` that fired before
+ * anything counted what it had produced:
+ *
+ *  - **r7** — a `type_not_certified` claim, dropped by a guard that let only
+ *    decisions and commitments past.
+ *  - **r8** — fixed that one by appending a fallthrough *below* the two
+ *    type-specific branches, and left both of them `continue`ing above it.
+ *  - **r9** — the two it left: a self-stated commitment (`awaitingConfirmFrom`
+ *    is null, so the branch dropped it) and an unassigned decision with no
+ *    member list (the audience is empty, so the loop pushed nothing).
+ *
+ * Three patches to the same hole is the signal that the hole is the shape of the
+ * code and not of any one branch. So the branches no longer `push` and
+ * `continue`; each **returns** one of these, and the affirmative arm carries a
+ * *non-empty* tuple. A branch that ends up with nobody to ask cannot return an
+ * empty list — `tsc` refuses it — so it has to say so out loud, which is what
+ * `refuse` is. Same move as r8's `ReceiptText` brand, one level up: the thing
+ * that must not happen stops being a thing to remember.
+ *
+ * A refusal is a legitimate outcome, not a consolation prize. The loop already
+ * refuses `missing_message_context` and `receipt_not_certifiable` with a reason
+ * a person can read, and "nobody in this room can be asked about this" is the
+ * same kind of fact. What is not legitimate is silence.
+ */
+type NeedsYouOutcome =
+  | { kind: 'raise'; items: readonly [ComputedAttentionItem, ...ComputedAttentionItem[]] }
+  | { kind: 'refuse'; reason: string };
+
+/**
+ * The only constructor of a `raise`, and therefore the only way to satisfy the
+ * type above with a fanout whose size is decided at runtime.
+ *
+ * It takes the refusal reason as an argument rather than inventing one, because
+ * *why there was nobody to ask* is knowledge the branch has and this function
+ * does not.
+ */
+function raiseOrRefuse(
+  items: readonly ComputedAttentionItem[],
+  reasonIfNobody: string,
+): NeedsYouOutcome {
+  const [first, ...rest] = items;
+  return first === undefined
+    ? { kind: 'refuse', reason: reasonIfNobody }
+    : { kind: 'raise', items: [first, ...rest] };
+}
+
+/**
+ * Everything a staged proposal raises: `needs_decision`, and the two
+ * confirm shapes of `owned_commitment`.
  *
  * Both go through `decideAcceptance`, so the panel and the engine cannot
  * disagree about what a proposal in the θ band means — and so a proposal the
@@ -462,80 +540,49 @@ function proposalItems(
       refusals.push({ proposalId: proposal.id, reason: verdict.reason });
       continue;
     }
+    // The one `continue` that owes nothing: `accepted`, `quiet` and `none` are
+    // the engine saying this proposal is not anybody's turn. Every other exit
+    // from here goes through `NeedsYouOutcome`, which has no silent arm.
     if (verdict.visibility !== 'needs_you') continue;
 
-    if (proposal.type === 'decision') {
-      const statement = proposal.payload.statement;
-      const named = proposal.payload.decidedBy;
-      const audience =
-        named !== null ? [named] : [...(ctx.members?.[proposal.roomId] ?? [])].sort();
-      for (const userId of audience) {
-        out.push(
-          item({
-            id: itemId(userId, 'proposal', proposal.id, 'needs_decision'),
-            roomId: proposal.roomId,
-            userId,
-            objectId: proposal.id,
-            subjectKind: 'proposal',
-            class: 'needs_decision',
-            priority: ATTENTION_PRIORITY.needs_decision,
-            createdAt: ctx.now,
-            reason: { kind: 'decision_pending', statement, assigned: named !== null },
-          }),
-        );
-      }
+    const outcome = needsYouOutcome(proposal, verdict, ctx);
+    if (outcome.kind === 'refuse') {
+      refusals.push({ proposalId: proposal.id, reason: outcome.reason });
       continue;
     }
+    out.push(...outcome.items);
+  }
 
-    if (proposal.type === 'commitment') {
-      // A commitment only asks anybody anything when somebody else's sentence put
-      // their name on it — which is exactly `awaitingConfirmFrom`.
-      const owner = verdict.awaitingConfirmFrom;
-      if (owner === null) continue;
-      out.push(
-        item({
-          id: itemId(owner, 'proposal', proposal.id, 'owned_commitment'),
-          roomId: proposal.roomId,
-          userId: owner,
-          objectId: proposal.id,
-          subjectKind: 'proposal',
-          class: 'owned_commitment',
-          priority: ATTENTION_PRIORITY.commitment_confirm,
-          createdAt: ctx.now,
-          reason: { kind: 'commitment_confirm', statement: proposal.payload.statement },
-        }),
-      );
-      continue;
-    }
+  return out;
+}
 
-    // ── The other three types, and the promise that was not kept — r8 ────────
-    //
-    // This loop began `if (proposal.type !== 'decision' && proposal.type !==
-    // 'commitment') continue;`, which was true of the panel r7 inherited: those
-    // were the only two types that could reach `needs_you`. r7 added
-    // `type_not_certified`, whose refusal text ends *"so at 0.95 it goes to
-    // Needs-you with its quote for a person to accept or decline"* — and the
-    // adjudication that let the type narrowing ship rested on that sentence.
-    //
-    // Executed, the engine said `pending / needs_you` and `projectAttention`
-    // returned **zero items and zero refusals**: a claim is not a decision and
-    // not a commitment, so the line above dropped it before anything looked at
-    // the verdict. The reading was staged in a panel nobody renders. A refusal
-    // that names a destination is a promise, and this is the second one in this
-    // round to have been painted on.
-    //
-    // The class is `needs_decision` because that is what is being asked — a
-    // person decides whether these words were a claim or an undertaking — and
-    // because inventing a fifth `AttentionClass` for it would push a schema
-    // change through #22's storage to say the same thing. The audience is the
-    // room, on the same argument an unassigned decision fans out: nothing in a
-    // laundered reading names who should rule on it. `AttentionContext.members`
-    // is what makes that non-empty; without it this is silent, exactly as an
-    // unassigned decision already is, and that contract is stated on the field.
-    const statement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);
-    if (statement.length === 0) continue;
-    for (const userId of [...(ctx.members?.[proposal.roomId] ?? [])].sort()) {
-      out.push(
+/**
+ * Who a `needs_you` proposal goes in front of, per type — **total, by return
+ * type**.
+ *
+ * Every arm ends in a `NeedsYouOutcome`, so the compiler is what keeps the next
+ * type-specific branch from doing what the last three did.
+ */
+function needsYouOutcome(
+  proposal: StoredProposal,
+  verdict: AcceptanceDecision,
+  ctx: AttentionContext,
+): NeedsYouOutcome {
+  const room = [...(ctx.members?.[proposal.roomId] ?? [])].sort();
+
+  if (proposal.type === 'decision') {
+    const statement = proposal.payload.statement;
+    const named = proposal.payload.decidedBy;
+    const audience = named !== null ? [named] : room;
+    // **r9's fourth instance, and the one the review did not name.** With
+    // `decidedBy` null and no member list the audience was empty, the loop
+    // pushed nothing, and it fell out silent — the documented consequence of
+    // omitting `members`, which made it a known silence rather than an
+    // acceptable one. A decision is never accepted by inference, so a decision
+    // nobody is asked about stays staged forever; the projection now says that
+    // instead of leaving the caller to notice.
+    return raiseOrRefuse(
+      audience.map((userId) =>
         item({
           id: itemId(userId, 'proposal', proposal.id, 'needs_decision'),
           roomId: proposal.roomId,
@@ -545,13 +592,110 @@ function proposalItems(
           class: 'needs_decision',
           priority: ATTENTION_PRIORITY.needs_decision,
           createdAt: ctx.now,
-          reason: { kind: 'reading_pending', statement, proposedType: proposal.type },
+          reason: { kind: 'decision_pending', statement, assigned: named !== null },
         }),
-      );
-    }
+      ),
+      `nobody is named as having decided this and no member list was supplied for room "${proposal.roomId}", so there is no one to put it in front of — a decision is never accepted by inference, so it stays staged until somebody is asked: "${clip(statement)}"`,
+    );
   }
 
-  return out;
+  if (proposal.type === 'commitment') {
+    // This branch used to read: *"A commitment only asks anybody anything when
+    // somebody else's sentence put their name on it — which is exactly
+    // `awaitingConfirmFrom`."* That was true of the engine before r5, when a
+    // self-stated commitment auto-accepted and there was nothing to ask. r5 put
+    // commitment in the never-auto-accepts row, whose own reason text ends *"it
+    // goes to Needs-you for a person to accept or decline"* — and the branch
+    // above went on dropping every one of them, because `awaitingConfirmFrom` is
+    // null unless somebody else's sentence is the one being confirmed.
+    //
+    // The person to ask is the owner. For the self-stated shape that is who
+    // `commitmentAttribution` proved wrote the bearing message, and for the
+    // human-staged shape it is who staged it about themselves; in both, nobody
+    // else in the room has standing to say whether these words were an
+    // undertaking. `awaitingConfirmFrom` still wins when it is set, because the
+    // third-party case is a strictly stronger statement about *whose* confirm
+    // this is.
+    const owner = verdict.awaitingConfirmFrom ?? proposal.payload.owner;
+    const statement = proposal.payload.statement;
+    // The two are different questions and get different sentences.
+    // `commitment_confirm` says *somebody else's message named you*, which is
+    // false of a commitment you wrote yourself — a rationale that names the
+    // wrong reason is the failure `RationaleReason` exists to prevent.
+    const reason: RationaleReason =
+      verdict.awaitingConfirmFrom !== null
+        ? { kind: 'commitment_confirm', statement }
+        : { kind: 'commitment_self_stated', statement };
+    return raiseOrRefuse(
+      hasContent(owner)
+        ? [
+            item({
+              id: itemId(owner, 'proposal', proposal.id, 'owned_commitment'),
+              roomId: proposal.roomId,
+              userId: owner,
+              objectId: proposal.id,
+              subjectKind: 'proposal',
+              class: 'owned_commitment',
+              priority: ATTENTION_PRIORITY.commitment_confirm,
+              createdAt: ctx.now,
+              reason,
+            }),
+          ]
+        : [],
+      `no owner is named on this commitment, so there is nobody who can confirm or decline it — nobody gets committed by someone else's sentence, and nobody can be asked about one that names no one: "${clip(statement)}"`,
+    );
+  }
+
+  // ── The other three types, and the promise that was not kept — r8 ──────────
+  //
+  // This loop began `if (proposal.type !== 'decision' && proposal.type !==
+  // 'commitment') continue;`, which was true of the panel r7 inherited: those
+  // were the only two types that could reach `needs_you`. r7 added
+  // `type_not_certified`, whose refusal text ends *"so at 0.95 it goes to
+  // Needs-you with its quote for a person to accept or decline"* — and the
+  // adjudication that let the type narrowing ship rested on that sentence.
+  //
+  // Executed, the engine said `pending / needs_you` and `projectAttention`
+  // returned **zero items and zero refusals**: a claim is not a decision and
+  // not a commitment, so the line above dropped it before anything looked at
+  // the verdict. The reading was staged in a panel nobody renders. A refusal
+  // that names a destination is a promise, and this is the second one in this
+  // round to have been painted on.
+  //
+  // The class is `needs_decision` because that is what is being asked — a
+  // person decides whether these words were a claim or an undertaking — and
+  // because inventing a fifth `AttentionClass` for it would push a schema
+  // change through #22's storage to say the same thing. The audience is the
+  // room, on the same argument an unassigned decision fans out: nothing in a
+  // laundered reading names who should rule on it.
+  //
+  // **r9 closes the two holes r8 left in its own fallthrough**: an empty
+  // `members` and a payload with no text both used to `continue` from here, the
+  // first of them stated as a contract on the field and the second not stated
+  // anywhere. Both are refusals now.
+  const statement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);
+  if (statement.length === 0) {
+    return {
+      kind: 'refuse',
+      reason: `a ${proposal.type} was staged for a person to rule on, but its payload carries no text — there is nothing to show anybody, and an attention item that cannot quote what it is about is not one`,
+    };
+  }
+  return raiseOrRefuse(
+    room.map((userId) =>
+      item({
+        id: itemId(userId, 'proposal', proposal.id, 'needs_decision'),
+        roomId: proposal.roomId,
+        userId,
+        objectId: proposal.id,
+        subjectKind: 'proposal',
+        class: 'needs_decision',
+        priority: ATTENTION_PRIORITY.needs_decision,
+        createdAt: ctx.now,
+        reason: { kind: 'reading_pending', statement, proposedType: proposal.type },
+      }),
+    ),
+    `a machine read this as a ${proposal.type} and nothing in the words settles that it was one, so it is staged rather than accepted — but no member list was supplied for room "${proposal.roomId}", so there is nobody to put it in front of: "${clip(statement)}"`,
+  );
 }
 
 /**
