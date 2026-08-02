@@ -611,6 +611,53 @@ export interface ReceiptPolicy {
    * disposition the code no longer has is worse than no rationale.
    */
   maxLaterMessagesScanned: number;
+  /**
+   * Messages after the newest citation the window's **supplier** carries before
+   * it stops — the other half of `maxLaterMessagesScanned`, and the number
+   * `atrium_receipt_window` is written against.
+   *
+   * ## Why this number exists at all (#86)
+   *
+   * Two lanes shipped rules that were each internally consistent and together
+   * deadlocked. `drizzle/0006` defined the receipt window as *exactly the cited
+   * messages*; `laterRevision` below refuses any window that ends at the
+   * citations, because a window that stops there carries no evidence about what
+   * came after the quoted sentence. So the SQL could not produce a window the
+   * TypeScript would certify, and every non-human acceptance was refused.
+   *
+   * The fix widens the SQL. But a snapshot has to stop somewhere, and the moment
+   * it does, **two windows become the same bytes**: one where the room ran out,
+   * and one where the supplier did. This function has no message table and no
+   * clock; it cannot tell them apart from a short tail. Certifying the second as
+   * though it were the first is certifying against evidence never seen, which is
+   * the one direction of this whole file that must be unreachable.
+   *
+   * ## What makes them distinguishable, and why it is a `>` and not an `=`
+   *
+   * **The supplier stops one message later than this check reads.** Under that
+   * contract a window's tail is self-describing:
+   *
+   *  - fewer than `maxLaterMessagesCarried` after the newest citation ⇒ the
+   *    supplier had nothing left to give, so the window holds the room's whole
+   *    remainder and the scan reads all of it;
+   *  - `maxLaterMessagesCarried` or more ⇒ the supplier truncated, the tail is
+   *    over `maxLaterMessagesScanned` by construction, and `too_many_messages`
+   *    refers it. An unread window is not a clean one.
+   *
+   * Set them **equal** and the second case becomes ambiguous rather than
+   * refused: a room that ended at exactly 200 and a window cut at exactly 200
+   * are indistinguishable. Set this *below* `maxLaterMessagesScanned` and the
+   * ambiguity becomes silent certification — the window stops at 50, the scan
+   * reads 50, finds nothing, and 150 messages the policy says must be read were
+   * never supplied. `laterRevision` refuses on that configuration by name, per
+   * window, and `schema.test.ts` refuses it at build time by reading this number
+   * against the literal in `drizzle/0011`.
+   *
+   * It is a policy field rather than a comment for the reason `RETRO.md` has now
+   * recorded several times: a stated limit is not a disposition. The check that
+   * reads it is what makes it one.
+   */
+  maxLaterMessagesCarried: number;
 }
 
 export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
@@ -618,6 +665,12 @@ export const RECEIPT_POLICY: Readonly<ReceiptPolicy> = Object.freeze({
   maxAlignedTokens: 800,
   maxScannedSentences: 200,
   maxLaterMessagesScanned: 200,
+  /**
+   * One more than `maxLaterMessagesScanned`, and the relation is the rule — see
+   * the field's docblock, `laterRevision`'s window gate, and the assertion in
+   * `packages/db/test/schema.test.ts` that pins this to `drizzle/0011`'s literal.
+   */
+  maxLaterMessagesCarried: 201,
 });
 
 /* ─────────────────────────────────────────────────────────────────────────

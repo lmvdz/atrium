@@ -1291,10 +1291,7 @@ export function validateProposalProvenance(
         problems.push({
           kind: 'superseded_by_later_message',
           severity: 'refer',
-          detail:
-            revisited.why === 'window_ends_at_the_citations'
-              ? `the window carries nothing after the newest message this proposal cites, so the correction scan read no evidence about what came after the quoted sentence — whether a later message takes it back was never established, and a window that ends at the citations cannot answer that (see \`AcceptanceContext.messages\`)`
-              : `the window carries more after this citation than this check will read (${policy.maxLaterMessagesScanned} messages, ${policy.maxScannedSentences} sentences each, ${policy.maxAlignedTokens} tokens a sentence), so whether one of them corrects the quoted sentence was never established — an unread window is not a clean one, and a check that declined to run is not a check that passed`,
+          detail: unscannedDetail(revisited.why, policy),
           messageId: null,
         });
       } else if (revisited.kind === 'revision') {
@@ -1756,6 +1753,14 @@ export type LaterRevision =
         | 'no_citation_in_the_window'
         | 'statement_too_long'
         | 'window_ends_at_the_citations'
+        /**
+         * **The window's supplier stops before this check would.** #86, and it
+         * is the refusal that lets the window be widened at all: a snapshot has
+         * to stop somewhere, and a window cut at the supplier's ceiling is the
+         * same bytes as a room that ended there. See
+         * `RECEIPT_POLICY.maxLaterMessagesCarried`.
+         */
+        | 'window_carries_fewer_than_this_check_reads'
         | 'too_many_messages'
         | 'too_many_sentences'
         | 'too_many_tokens_in_a_sentence';
@@ -1790,6 +1795,43 @@ const scanned = (scannedAfterCitations: number): LaterRevision => ({
   kind: 'none',
   scannedAfterCitations,
 });
+
+/**
+ * **What the room is told when the correction scan declined, per reason.**
+ *
+ * A `Record` keyed by the union rather than a chain of ternaries, so `tsc`
+ * refuses a new `why` that nobody wrote a sentence for. That is the same
+ * construction `PROBLEM_EVIDENCE` uses, and it is here because the ternary this
+ * replaces was **wrong for three of its inputs**: everything that was not
+ * `window_ends_at_the_citations` fell into the `else`, so a statement too long
+ * to align, a statement with no routing tokens, and a citation list none of
+ * whose ids reached the window were each reported to the room as *"the window
+ * carries more after this citation than this check will read"* — a fact about
+ * the window, stated about a refusal that had nothing to do with the window.
+ *
+ * That is this file's own headline defect one layer out. `unscanned` exists so
+ * *we did not check* and *we checked and it was fine* cannot merge; reporting
+ * six different declinations in two sentences merges five of them back, and the
+ * one a person reads is the one that decides whether they go looking at the
+ * window or at the proposal. #86 added a seventh reason and a ternary has no
+ * room for it, which is how this was found.
+ */
+function unscannedDetail(
+  why: Extract<LaterRevision, { kind: 'unscanned' }>['why'],
+  policy: ReceiptPolicy,
+): string {
+  const detail: Readonly<Record<typeof why, string>> = {
+    no_statement_to_scan_for: `the sentence being minted carries no word this scan can route on, so there was nothing to look for a later correction *of* — whether a later message takes this back was never established, and a check that declined to run is not a check that passed`,
+    no_citation_in_the_window: `not one of the messages this proposal cites is in the window, so there is no quoted sentence in it to find a correction of — nothing about what came after was read either way, and an unread window is not a clean one`,
+    statement_too_long: `the sentence being minted is longer than the ${policy.maxAlignedTokens} tokens this check will align, so it was never compared against any later message — whether one of them takes it back was never established, and a check that declined to run is not a check that passed`,
+    window_ends_at_the_citations: `the window carries nothing after the newest message this proposal cites, so the correction scan read no evidence about what came after the quoted sentence — whether a later message takes it back was never established, and a window that ends at the citations cannot answer that (see \`AcceptanceContext.messages\`)`,
+    window_carries_fewer_than_this_check_reads: `the window stopped at the ${policy.maxLaterMessagesCarried} messages its supplier carries after the newest citation, which is not more than the ${policy.maxLaterMessagesScanned} this check reads — so a window the room outgrew and a room that simply ended are the same bytes from in here, and everything past that ceiling was never supplied and never read; the supplier's bound has to exceed this check's or the scan reports "nothing corrects this" about messages it was never handed (see \`RECEIPT_POLICY.maxLaterMessagesCarried\` and \`drizzle/0011\`)`,
+    too_many_messages: `the window carries more after this citation than this check will read (${policy.maxLaterMessagesScanned} messages, ${policy.maxScannedSentences} sentences each, ${policy.maxAlignedTokens} tokens a sentence), so whether one of them corrects the quoted sentence was never established — an unread window is not a clean one, and a check that declined to run is not a check that passed`,
+    too_many_sentences: `a message after this citation holds more than the ${policy.maxScannedSentences} sentences this check will read, so whether it corrects the quoted sentence was never established — an unread message is not a clean one, and a check that declined to run is not a check that passed`,
+    too_many_tokens_in_a_sentence: `a sentence after this citation is longer than the ${policy.maxAlignedTokens} tokens this check will align, so whether it restates the quoted sentence with something changed was never established — a check that declined to run is not a check that passed`,
+  };
+  return detail[why];
+}
 
 /**
  * **Does a message later in this window say the quoted sentence again, with
@@ -2050,6 +2092,51 @@ export function laterRevision(
     .some((message) => !cited.has(message.id));
   if (!readSomethingUnchosenAfterTheSentence) {
     return unscanned('window_ends_at_the_citations');
+  }
+
+  // ── …and it has to reach FAR ENOUGH past it, which is a different fact — #86 ─
+  //
+  // The gate above is satisfied by one message. That was the whole rule until
+  // the window on the other side of this boundary became a *snapshot with a
+  // bound*: `atrium_receipt_window` (`drizzle/0011`) carries the cited messages
+  // plus the room's next `RECEIPT_POLICY.maxLaterMessagesCarried`, and then it
+  // stops.
+  //
+  // **A window cut at the supplier's ceiling and a room that ended at the same
+  // count are the same bytes.** This function has no message table and no clock;
+  // the only thing it can read is how many messages arrived after the newest
+  // citation. So the two are told apart by the *contract* rather than by the
+  // window: the supplier stops strictly later than this check reads, which makes
+  // a truncated tail land over `maxLaterMessagesScanned` and be referred by
+  // `too_many_messages` below, while any shorter tail is provably the room's own
+  // end. Under that contract the ambiguous window does not exist.
+  //
+  // What is checked here is that the contract holds *for this call*, and it is
+  // checked here rather than trusted from a comment for the reason this file has
+  // recorded at every boundary it owns: a limit stated in prose and enforced
+  // nowhere is a limit an input walks through. If the ceiling is ever set at or
+  // below what this check reads, then a window standing at that ceiling is one
+  // whose remainder was never supplied and never read — and the scan below would
+  // report "nothing corrects this" about messages it was never handed. That is
+  // the *under*-supply direction, the one that certifies against evidence that
+  // was never seen, and it is refused by name rather than degraded into silence.
+  //
+  // Scoped to windows that actually stand at the ceiling. A short room under a
+  // broken ceiling is still a complete window — the supplier gave everything
+  // there was — and refusing it would be the r6 mistake in reverse: punishing a
+  // window for a fact about the configuration that did not touch it.
+  //
+  // `messages.length - (lastCited + 1)` and not `later.length`: what the
+  // supplier's bound governs is the run *after the newest citation*, and `later`
+  // starts at `scanFloor`, which is at or before it. Counting from the wrong
+  // index would compare the supplier's number against something the supplier
+  // does not decide.
+  const suppliedAfterTheCitations = messages.length - (lastCited + 1);
+  if (
+    suppliedAfterTheCitations >= policy.maxLaterMessagesCarried &&
+    policy.maxLaterMessagesCarried <= policy.maxLaterMessagesScanned
+  ) {
+    return unscanned('window_carries_fewer_than_this_check_reads');
   }
 
   // **Cited messages are scanned, not skipped.** The first repair filtered them
