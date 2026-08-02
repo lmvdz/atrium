@@ -9,6 +9,7 @@ import {
   orderedTokens,
   quoteCoversOwnText,
   quoteSpansWholeSentences,
+  readsAsQuestion,
   routingTokens,
   sentencesOf,
   statementBearing,
@@ -1143,7 +1144,11 @@ export function validateProposalProvenance(
     // rule: nothing may differ between a quote and its statement, `?` included,
     // so a question mark is never forgiven by the comparison. Here the mark is
     // *read* rather than compared, which is the part the comparison cannot do.
-    if (fromModel && subject.type !== 'open_question' && !isAssertion(subject.statement ?? '')) {
+    if (
+      fromModel &&
+      subject.type !== 'open_question' &&
+      !isAssertion(normalizeForReceipt(subject.statement ?? ''))
+    ) {
       problems.push({
         kind: 'statement_is_not_an_assertion',
         severity: 'refer',
@@ -1174,7 +1179,20 @@ export function validateProposalProvenance(
     //
     // `refer`, matching its mirror: the disposition on a mistyped reading is
     // that a person decides what it was, not that the words are thrown away.
-    if (fromModel && subject.type === 'open_question' && isAssertion(subject.statement ?? '')) {
+    // **`readsAsQuestion`, not `!isAssertion` — r8.** These two checks are
+    // mirrors and their safe directions are opposite: the one above refuses when
+    // a mark is *found*, so over-inclusion costs a referral; this one refuses
+    // when none is found, so over-inclusion **auto-accepts a declarative at
+    // `open_question`'s lower θ**, which is the laundering the check exists to
+    // close. One set could not serve both, which is the same finding
+    // `normalizeForMatch` produced in `matching.ts`, one file over. So the
+    // generous set refuses an assertion and the strict set certifies a question,
+    // and a mark nobody can verify sits in the first and not the second.
+    if (
+      fromModel &&
+      subject.type === 'open_question' &&
+      !readsAsQuestion(normalizeForReceipt(subject.statement ?? ''))
+    ) {
       problems.push({
         kind: 'statement_is_not_a_question',
         severity: 'refer',
@@ -1602,6 +1620,38 @@ export function laterRevision(
   // the caller rather than about this answer.
   if (firstCited === -1) return unscanned('no_citation_in_the_window');
 
+  // ── …and the floor is where the SENTENCE is, not where a citation is — r8 ──
+  //
+  // The paragraph above ends *"that floor being proposal-controlled only ever
+  // makes the scan read more"*, and r8's blind review produced the window where
+  // it does the opposite. Two messages carrying the **same body**:
+  //
+  //   m1 "The migration completed cleanly…"
+  //   m2 "Correction: the migration did not…"
+  //   m3 <byte-identical to m1>
+  //   m4 <uncited>
+  //
+  // cite `['m1']` and the scan starts at index 1, reads the correction, and the
+  // reading is `pending / receipt_not_certifiable`. Cite `['m3']` — equally true,
+  // equally verbatim, and the receipt cannot tell the two apart because the
+  // bodies are the same text — and `firstCited` is 2, so the correction sits
+  // *behind the scan's start* and the same reading `auto_accept`s. The floor was
+  // proposal-controlled downward after all; it just needed a duplicate body to
+  // show it.
+  //
+  // The repair is to stop asking the citation list where the sentence is. The
+  // sentence's earliest possible position is a fact about the **window's text**:
+  // the first message whose own words carry the statement. Padding, dropping or
+  // swapping citations cannot raise it, because it is not computed from them —
+  // and it can only ever be at or before `firstCited`, so this strictly widens
+  // what gets read, which is the direction the paragraph above was claiming for
+  // the wrong reason.
+  const normalizedStatement = normalizeForReceipt(statement);
+  const earliestBearing = messages.findIndex((message) =>
+    normalizeForReceipt(stripReplyBlockquotes(message.body)).includes(normalizedStatement),
+  );
+  const scanFloor = earliestBearing === -1 ? firstCited : Math.min(firstCited, earliestBearing);
+
   // ── The window has to reach past the sentence, and that is checkable ──────
   //
   // r6. Nothing required `messages` to extend past the citations, so a caller
@@ -1677,7 +1727,7 @@ export function laterRevision(
   // attack this file has been through. A cited message aligned against its own
   // statement is exact, and an exact restatement is not a revision, so scanning
   // them costs nothing.
-  const later = messages.slice(firstCited + 1);
+  const later = messages.slice(scanFloor + 1);
   // ── The cap fails closed, and that is r5 auditing its own first draft ──────
   //
   // The first version of this scan stopped at the cap and returned "nothing
@@ -1715,10 +1765,34 @@ export function laterRevision(
     for (const marker of RETRACTION_MARKERS) {
       if (containsPhrase(normalized, marker)) return revision(message, [marker]);
     }
-    if (SED_CORRECTION.test(own)) return revision(message, ['s/…/…/']);
+    // Over the same representation its sibling above reads, r8 — the round's
+    // foreign-lineage sweep found these two lines one apart and disagreeing
+    // about what text they were looking at. Every other member of this loop
+    // consumes `normalizeForRouting(own)`; this one consumed the raw body, so a
+    // `s/deploy/rollback/` written with a fullwidth solidus, inside emphasis, or
+    // in a different case was invisible to it while the retraction markers next
+    // to it saw through all three. A detector reading a rawer form than the
+    // detectors beside it is the same misalignment as the headline, in the
+    // direction that misses corrections.
+    if (SED_CORRECTION.test(normalized)) return revision(message, ['s/…/…/']);
 
     const sentences = sentencesOf(own);
     if (sentences.length > policy.maxScannedSentences) return unscanned('too_many_sentences');
+    // ── A correction in the sentence NEXT to the restatement — r8 ────────────
+    //
+    // The loop below compares one sentence at a time, and an exact restatement
+    // `continue`s as agreement. So *"<S> Unless CI is red."* — S repeated
+    // verbatim, with the qualifier in its own sentence — matched nothing: S was
+    // borne, "Unless CI is red." aligned with nothing, and the reading
+    // auto-accepted. The identical qualifier *inside* S's sentence referred.
+    //
+    // Those are the exact strings `quote_omits_surrounding_text` cites, one
+    // message earlier, to justify refusing that construction: *"a neighbouring
+    // line can reverse, condition or withdraw the one being quoted ('… Not.',
+    // 'Unless CI is red.', 'Correction: …')"*. The rule was applied to the
+    // bearing message and not to the messages after it, which is this file's own
+    // standing lesson about a rule with one enforcement point.
+    let restated = false;
     for (const sentence of sentences) {
       const aligned = alignTokens(routingTokens(sentence), wanted, policy);
       if (aligned.undecidable === 'too_long') return unscanned('too_many_tokens_in_a_sentence');
@@ -1737,7 +1811,10 @@ export function laterRevision(
       // differs on both sides is about something else. Containment in either
       // direction, and nothing else — no threshold, no opinion about which words
       // matter.
-      if (aligned.borne) continue;
+      if (aligned.borne) {
+        restated = true;
+        continue;
+      }
       const contained =
         aligned.unmatchedInStatement.length === 0 || aligned.unmatchedInQuote.length === 0;
       if (contained) {
@@ -1752,6 +1829,17 @@ export function laterRevision(
         // own fail-open shape: a difference found and nothing said about it.
         return revision(message, changed.length > 0 ? changed : ['whitespace']);
       }
+    }
+    // The sentence came back and the message says more around it. Whether the
+    // surrounding line qualifies, reverses or merely adds is not something a
+    // machine may decide from the words — which is `quote_omits_surrounding_text`
+    // verbatim, and the same disposition: `refer`, with the added words named.
+    if (restated && !quoteCoversOwnText(statement, own)) {
+      const around = sentences.filter(
+        (sentence) => !alignTokens(routingTokens(sentence), wanted, policy).borne,
+      );
+      const added = around.flatMap((sentence) => routingTokens(sentence));
+      return revision(message, added.length > 0 ? added : ['surrounding text']);
     }
   }
   return scanned(later.length);

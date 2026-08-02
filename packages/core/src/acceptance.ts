@@ -8,7 +8,7 @@ import {
   validateProposalProvenance,
 } from './escalation.js';
 import { type AuthoredEvent, authored, type CoreEvent, trustedContext } from './events.js';
-import { alignTokens, hasContent, routingTokens } from './matching.js';
+import { alignTokens, dedupTokens, hasContent, normalizeForReceipt } from './matching.js';
 import {
   type AcceptedObjectType,
   type ClaimPayload,
@@ -320,11 +320,30 @@ export function commitmentAttribution(
  * neither. A near-duplicate now costs a person one click, which is the cheap
  * side of this trade; the expensive side deleted a contradiction in silence.
  *
- * Routing tokens rather than receipt tokens, deliberately: case, fullwidth
- * spellings and markdown are noise to "is this the same sentence again", and
- * being lossy *here* means firing more often, which for the receipt path is the
- * dangerous direction and for a re-proposal is the harmless one — a text that
- * differs only in case is the same reading twice.
+ * ## …and why the tokens are not the routing ones, r8
+ *
+ * That paragraph used to read: *"Routing tokens rather than receipt tokens,
+ * deliberately: case, fullwidth spellings and markdown are noise… being lossy
+ * here means firing more often, which for a re-proposal is the harmless one."*
+ * **A duplicate is discarded**, four paragraphs above, in bold. Firing more
+ * often is therefore not the harmless direction; it is the destructive one, and
+ * the argument had the sign backwards on the one path in this file that deletes
+ * a reading outright.
+ *
+ * r8's review produced the input: NFKC folds `10²` to `102`, so
+ *
+ * | already accepted, from msg_1        | newly read, from msg_1              | r7 verdict |
+ * | ----------------------------------- | ----------------------------------- | ---------- |
+ * | the p99 settled at **102** ms       | the p99 settled at **10²** ms       | discarded  |
+ *
+ * — 100 against 102, gone, with no proposal, no issue and nothing in the room to
+ * see. That is the same shape as the `not` and `all`/`some` rows above it, one
+ * fold further down.
+ *
+ * `dedupTokens` forgives case and nothing else beyond what the receipt already
+ * forgives. A fullwidth or ligature spelling now costs one extra staged
+ * re-proposal, which is the side of this trade the paragraph above already chose
+ * once when it deleted `duplicateThreshold`.
  */
 export function findDuplicate(
   type: AcceptedObjectType,
@@ -332,13 +351,13 @@ export function findDuplicate(
   messageIds: readonly Id[],
   accepted: readonly AcceptedObjectRef[],
 ): AcceptedObjectRef | null {
-  const wanted = routingTokens(text);
+  const wanted = dedupTokens(text);
   if (wanted.length === 0) return null;
   const cited = new Set(messageIds);
   for (const candidate of accepted) {
     if (candidate.type !== type) continue;
     if (!candidate.messageIds.some((id) => cited.has(id))) continue;
-    const have = routingTokens(candidate.text);
+    const have = dedupTokens(candidate.text);
     if (have.length === 0) continue;
     // Symmetric by construction: `borne` requires both sides accounted for, so
     // neither "the new one restates the old" nor the reverse is enough alone.
@@ -701,7 +720,13 @@ export function decideAcceptance(
   // reducer reads the same predicate over the same text; the floor stays keyed
   // to `autoAccept`, because a rule about the text cannot live in a table keyed
   // by type.
-  const statement = payloadText(proposal.type, payload);
+  //
+  // **Over the normalized statement, r8.** The paragraph above says the receipt
+  // "has already proved" the statement is the author's own words. What it proved
+  // is that the two texts are equal *under `normalizeForReceipt`*, and this line
+  // used to hand the predicate the raw statement — so a zero-width space spliced
+  // into one word evaded all ten shapes while the receipt stayed clean.
+  const statement = normalizeForReceipt(payloadText(proposal.type, payload));
   if (!typeCertifiableFromText(proposal.type, statement)) {
     return {
       ...base,

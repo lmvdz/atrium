@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ReceiptText } from './common.js';
 import { AcceptedObjectType } from './objects.js';
 
 /**
@@ -241,6 +242,28 @@ export function autoAcceptable(type: AcceptedObjectType): boolean {
  * case there is nothing lexical for anyone to find, and the residue below says
  * so out loud.
  *
+ * ### …and in r7 that paragraph was false, which is r8's headline
+ *
+ * The receipt proves `normalizeForReceipt(quote) === normalizeForReceipt(
+ * statement)`. This predicate read the **raw** statement. The proposer therefore
+ * controlled the statement freely inside that equivalence class — every
+ * difference `normalizeForReceipt` forgives — and one deletable code point
+ * evaded all ten entries at once:
+ *
+ * ```
+ * body/quote: "I will land the narrowing fix before the release."
+ * statement:  "I wi<U+200B>ll land the narrowing fix before the release."
+ * → auto_accept, and the object lands in state with the poisoned text, while
+ *   the byte-identical verbatim statement gets pending / type_not_certified
+ * ```
+ *
+ * Both enforcement points failed identically, because both call this function
+ * over the same unnormalized text, so neither backstopped the other. The
+ * argument above is *sound* — and it is sound about `normalizeForReceipt(
+ * statement)`, not about `statement`. The parameter is `ReceiptText` now, so the
+ * compiler will not let a call site hand over the rawer form; see `ReceiptText`
+ * in `common.ts`.
+ *
  * **And the direction of error is free.** A hit adds a referral and can never
  * add an acceptance, which is the same admissibility argument r5 made for
  * `RETRACTION_MARKERS` and the only condition under which a word list belongs
@@ -260,28 +283,91 @@ export function autoAcceptable(type: AcceptedObjectType): boolean {
  * product's ordinary claim. `should` is out for the same reason —
  * *"deployments should be reversible"* is a claim about how things ought to
  * work far more often than it is somebody taking something on.
+ *
+ * ## What r8's blind review added, and what it took away
+ *
+ * The list had no **explicit performative** in it at all. Every one of these is
+ * the author's verbatim words and every one auto-accepted as a claim at 0.95:
+ * *I promise the narrowing fix lands…* · *I commit to landing…* · *I undertake
+ * to land…* · *Consider the narrowing fix handled by me…* · *Leave the narrowing
+ * fix with me…* · *I got this one…* · *Count on me for…* · *I owe you…* · *I am
+ * landing…* · *I deploy production on Friday.* A list of the *hedged* ways to
+ * undertake something that omits the ways of saying it outright is not a list
+ * anybody would have written on purpose; it is what you get when the entries
+ * come from adversarial examples and nobody enumerates the plain cases.
+ *
+ * And it fired on four sentences that undertake nothing: *The migration must be
+ * run before…*, *The backfill needs to finish…*, *You have to be an admin to…*,
+ * *Every deploy going to production is signed by CI.* The safe direction, and a
+ * real cost — the product's ordinary claim, referred. The cause in every case is
+ * the same: `must` / `need to` / `have to` are **deontic necessity**, a property
+ * of the world, and `going to` was matching a participle rather than a futurate.
+ * They are scoped now — deontic modals to a first person or a named human
+ * subject and not to a stative complement, `going to` to a preceding copula —
+ * which keeps *We need to cut the release branch* and *Everyone must update
+ * their local schema* and drops all four.
+ *
+ * Each group below is one argument, so a reviewer can attack the argument rather
+ * than the regexes.
  */
+
+/** A human subject. Anything else is the world, and the world undertakes nothing. */
+const AGENT = String.raw`(?:i|we|you|he|she|they|everyone|everybody|someone|somebody|anyone|@[\w.-]+)`;
+
 export const COMMITMENT_SHAPES: readonly RegExp[] = Object.freeze([
+  // ── Futurate modals. Ambiguous by nature, and left broad on purpose ────────
   /\bwill\b/i,
   /\bwon't\b/i,
   /\bshall\b/i,
   /\b(?:'ll|’ll)\b/i,
-  /\bgoing to\b/i,
   /\bgonna\b/i,
+  // A futurate `going to` has a copula in front of it. *Every deploy going to
+  // production is signed by CI* does not, and is a claim about routing.
+  /\b(?:am|is|are|was|were|'m|'re|'s)\s+going\s+to\b/i,
   /\b(?:plan|plans|planning|intend|intends|aim|aims)\s+to\b/i,
-  /\b(?:need|needs|has|have)\s+to\b/i,
-  /\bmust\b/i,
+
+  // ── Deontic necessity, but only when somebody carries it ──────────────────
+  //
+  // The negative lookahead is *You have to be an admin to run this* — a
+  // requirement stated about a state of the world, in the second person because
+  // English has no other impersonal pronoun. A stative complement is not an act
+  // anybody undertakes.
+  new RegExp(String.raw`\b${AGENT}\s+(?:must|has\s+to|have\s+to|needs?\s+to)\s+(?!be\b)`, 'i'),
+
+  // ── Explicit performatives: saying it outright, r8 ────────────────────────
+  /\b(?:i|we)\s+(?:promise|promises|commit|commits|undertake|undertakes|pledge|pledges|guarantee|guarantees|swear|swears)\b/i,
+  /\b(?:i|we)\s+owe\b/i,
+  /\bcount\s+on\s+(?:me|us)\b/i,
+  /\b(?:i|we)(?:'ve)?\s+(?:got|have got)\s+(?:this|it|that|these|those)\b/i,
+  /\bconsider\s+[^.!?]{0,60}?\b(?:done|handled|sorted|covered|taken care of)\b/i,
+  /\b(?:done|handled|sorted|covered)\s+by\s+(?:me|us)\b/i,
+  /\bleave\s+[^.!?]{0,60}?\b(?:to|with)\s+(?:me|us)\b/i,
+
+  // ── A first person doing something, now or on a date ─────────────────────
+  //
+  // *I am landing the narrowing fix* is a report and an undertaking in the same
+  // words, which is precisely the cell this predicate exists for. And the bare
+  // present — *I deploy production on Friday* — carries no marker at all, so the
+  // futurity has to come from the date beside it; the time words are the
+  // author's, pinned by the receipt, not a list of evasions a proposer can walk
+  // around.
+  /\b(?:i|we)\s+(?:am|are)\s+\p{L}+ing\b/iu,
+  /\b(?:i|we)'(?:m|re)\s+\p{L}+ing\b/iu,
+  /\b(?:i|we)\b[^.!?]{0,80}\b(?:tomorrow|tonight|next\s+(?:week|month|sprint|monday|tuesday|wednesday|thursday|friday)|(?:on|by|before)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|eod|eow|noon|the\s+release|the\s+deploy))\b/i,
+
   /\b(?:i|we|i'll|we'll)\s+(?:can|could)\s+(?:do|take|handle|own|land|ship)\b/i,
 ]);
 
 /**
  * True when the words could be an undertaking as easily as an assertion.
  *
- * Read over the *statement*, which the receipt has already proved is the
- * author's own text. See `COMMITMENT_SHAPES` for why a list is admissible over
- * an input the proposer cannot choose.
+ * Read over `normalizeForReceipt(statement)` — **the representation the receipt
+ * proved something about**, which is the whole of r8's headline and the reason
+ * this parameter is not a `string`. See `COMMITMENT_SHAPES` for why a list is
+ * admissible over an input the proposer cannot choose, and `ReceiptText` in
+ * `common.ts` for what happens when it turns out they could.
  */
-export function readsAsCommitment(text: string): boolean {
+export function readsAsCommitment(text: ReceiptText): boolean {
   return COMMITMENT_SHAPES.some((pattern) => pattern.test(text));
 }
 
@@ -303,7 +389,7 @@ export function readsAsCommitment(text: string): boolean {
  *    nothing to say so: none of the three auto-accepts at any confidence, so a
  *    person was already deciding.
  */
-export function typeCertifiableFromText(type: AcceptedObjectType, text: string): boolean {
+export function typeCertifiableFromText(type: AcceptedObjectType, text: ReceiptText): boolean {
   switch (type) {
     case 'open_question':
       return true;

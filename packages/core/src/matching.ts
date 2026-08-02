@@ -1,3 +1,4 @@
+import type { ReceiptText } from './common.js';
 import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
 
 /**
@@ -350,7 +351,7 @@ const CODE_SPAN = /(```[\s\S]*?```|``[\s\S]*?``|`[^`\n]*`)/;
  * folding, case folding, backtick deletion, underscore emphasis, **asterisk
  * emphasis**, and bare link-text substitution. The header of this file says why.
  */
-export function normalizeForReceipt(text: string): string {
+export function normalizeForReceipt(text: string): ReceiptText {
   const out: string[] = [];
   for (const [index, segment] of text.split(CODE_SPAN).entries()) {
     // `String.split` with one capture group alternates: prose, delimiter, prose…
@@ -367,7 +368,7 @@ export function normalizeForReceipt(text: string): string {
     const isCode = index % 2 === 1;
     out.push(isCode ? segment : foldProse(segment));
   }
-  return out.join('').trim();
+  return out.join('').trim() as ReceiptText;
 }
 
 function foldProse(text: string): string {
@@ -536,6 +537,28 @@ export function isWhitespaceToken(token: string): boolean {
 }
 
 /** `orderedTokens` under the lossy fold — for detectors, never for a receipt. */
+/**
+ * **Tokens for "is this the same reading again" — case-blind, and nothing else.**
+ *
+ * r8. `findDuplicate` ran on `routingTokens`, whose fold is NFKC, on the
+ * argument that *"being lossy here means firing more often, which for a
+ * re-proposal is the harmless direction"*. A duplicate is **discarded**, so
+ * firing more often is not the harmless direction — it is silent destruction,
+ * which is the failure that docblock's own table is about. NFKC maps `10²` onto
+ * `102`, so a reading of *"the p99 settled at 10² ms"* was thrown away as a
+ * duplicate of the accepted *"the p99 settled at 102 ms"*: 100 against 102, no
+ * proposal left, no issue, no trace.
+ *
+ * Case is the one difference that cannot change what a sentence says, so case is
+ * the one difference this forgives on top of the receipt's own allowlist. A
+ * fullwidth or ligature spelling is a *different* reading now and costs one
+ * extra staged proposal, which is the cheap side of the trade the same docblock
+ * already chose when it deleted the similarity threshold.
+ */
+export function dedupTokens(text: string): string[] {
+  return normalizeForReceipt(text).toLowerCase().match(TOKEN) ?? [];
+}
+
 export function routingTokens(text: string): string[] {
   return normalizeForRouting(text).match(ROUTING_TOKEN) ?? [];
 }
@@ -1001,6 +1024,17 @@ export function quoteCoversOwnText(quote: string, ownText: string): boolean {
  * What is claimed is exactly what is checked: **a sentence carrying a question
  * mark is not an assertion.**
  *
+ * ## What representation it reads, r8
+ *
+ * `ReceiptText`, like every other predicate whose guarantee was established over
+ * the fold — see `ReceiptText` in `common.ts` for the finding that made this a
+ * type rather than a habit. No input distinguishes the two representations here
+ * today: `normalizeForReceipt` deletes invisibles, folds apostrophes, collapses
+ * whitespace and unfolds links, and not one of those adds or removes a question
+ * mark. That is the argument r7 made for `readsAsCommitment` — *"the proposer
+ * does not control the input"* — and it was false there, so "it happens not to
+ * matter" is no longer a reason to leave a predicate on the rawer form.
+ *
  * ## Which characters are question marks
  *
  * This round's own blind review: the first draft compared tokens against the
@@ -1009,16 +1043,61 @@ export function quoteCoversOwnText(quote: string, ownText: string): boolean {
  * was right (it made distinct hostnames compare equal) and it left this check
  * reading one spelling of a mark that has several.
  *
- * The answer is `QUESTION_MARKS`: **Unicode's own inventory of question marks,
- * enumerated.** That is a closed, published list, not an open-ended list of
- * things somebody might try, which is the distinction `RETRO.md` draws between
- * an enumeration that is safe and one that is not.
+ * The answer is `QUESTION_MARKS` — and r8's blind review is why the sentence
+ * that used to stand here, *"Unicode's own inventory of question marks,
+ * enumerated"*, has been deleted rather than edited.
  *
- * It took three review passes to fill, and the sequence is the argument for
- * re-running a critic on what it made you change: the first found `？` (U+FF1F,
- * fullwidth), the second found `¿` (U+00BF — a Spanish interrogative opens with
- * one and need carry no other mark), the third found `᥅` (U+1945, Limbu) and
- * `꩝` (U+AA5D, Cham).
+ * **There is no such inventory.** Unicode publishes no `Question_Mark`
+ * property. `\p{Sentence_Terminal}` is the closest thing and it is a superset —
+ * it holds every full stop and exclamation mark in every script, so a check
+ * built on it would refuse every declarative sentence ever written. What this
+ * list actually is: **a hand enumeration**, and calling a hand enumeration a
+ * published property is what let it stay incomplete for three rounds while its
+ * own docblock said it could not be. It was missing `⳺`/`⳻` (U+2CFA/U+2CFB,
+ * Coptic), `⹔` (U+2E54, medieval), `⸘` (U+2E18, inverted interrobang), `𞥟`
+ * (U+1E95F, Adlam) and — the one that reopened r5's defect outright — the
+ * ordinary chat ornaments `❓`/`❔` (U+2753/U+2754). *"Would we deploy production
+ * Friday❓"* minted as a `claim` auto-accepted.
+ *
+ * It also held a mark that is **not a question mark**: U+AA5D, labelled here as
+ * "CHAM QUESTION MARK". The Cham block encodes AA5C SPIRAL, AA5D DANDA, AA5E
+ * DOUBLE DANDA, AA5F TRIPLE DANDA — a full stop and its repetitions, no
+ * interrogative. A name invented for a code point is the same class of defect as
+ * the comment that claimed `\s` contained NEL: a factual claim about an external
+ * standard, asserted in a comment, never measured.
+ *
+ * ## Two sets, because the two questions have opposite safe directions
+ *
+ * The list feeds two checks in `escalation.ts` that are mirror images, and
+ * `normalizeForMatch`'s history in this very file is what happens when one
+ * instrument serves two risk profiles:
+ *
+ *  - *"this is being minted as something other than an open question — does it
+ *    carry a question mark?"* A hit **refuses**. Being over-inclusive costs a
+ *    referral; being under-inclusive auto-accepts somebody's question as their
+ *    position. Safe direction: **generous**.
+ *  - *"this is being minted as an open question — does it carry a question
+ *    mark?"* A miss refuses. Being over-inclusive **auto-accepts a declarative
+ *    at `open_question`'s lower θ**, which is the laundering r7 closed. Safe
+ *    direction: **strict**.
+ *
+ * So `QUESTION_MARKS` is the strict set — marks that *certify* a text as a
+ * question — and `QUESTION_SHAPED_MARKS` is the generous superset that merely
+ * *refuses to certify it as an assertion*. `isAssertion` reads the generous one,
+ * `readsAsQuestion` reads the strict one, and a mark nobody can verify goes in
+ * the generous set only: it then costs a glance and never buys an acceptance.
+ * U+AA5D is that mark, and it is the reason the second set exists rather than a
+ * decision being guessed in either direction.
+ *
+ * **How completeness is measured now, since it cannot be derived.**
+ * `residue.test.ts` partitions `\p{Sentence_Terminal}` — Unicode's own list, 170
+ * code points — into "a question mark" and "explicitly not one", and asserts the
+ * two halves cover it exactly. A future Unicode release that adds a sentence
+ * terminator fails that test until somebody classifies it. It does not reach the
+ * marks outside `Sentence_Terminal` (`¿`, `՞`, the ornaments), which are pinned
+ * one by one; nothing available offline can derive those, and saying so is
+ * better than a third round of a sentence that claims a property Unicode does
+ * not publish.
  *
  * **NFKC was here and is gone.** The second repair folded the text first, on the
  * argument that this is a classification question rather than a comparison, so
@@ -1044,18 +1123,56 @@ export const QUESTION_MARKS: readonly string[] = Object.freeze([
   '\u2048', // QUESTION EXCLAMATION MARK
   '\u2049', // EXCLAMATION QUESTION MARK
   '\u203D', // INTERROBANG
+  '\u2753', // BLACK QUESTION MARK ORNAMENT — r8; what a phone keyboard emits
+  '\u2754', // WHITE QUESTION MARK ORNAMENT — r8
+  '\u2CFA', // COPTIC OLD NUBIAN DIRECT QUESTION MARK — r8
+  '\u2CFB', // COPTIC OLD NUBIAN INDIRECT QUESTION MARK — r8
+  '\u2E18', // INVERTED INTERROBANG — r8
   '\u2E2E', // REVERSED QUESTION MARK
+  '\u2E54', // MEDIEVAL QUESTION MARK — r8
   '\uA60F', // VAI QUESTION MARK
   '\uA6F7', // BAMUM QUESTION MARK
-  '\uAA5D', // CHAM QUESTION MARK
   '\uFE16', // PRESENTATION FORM FOR VERTICAL QUESTION MARK
   '\uFE56', // SMALL QUESTION MARK
   '\uFF1F', // FULLWIDTH QUESTION MARK
   '\u{11143}', // CHAKMA QUESTION MARK
+  '\u{1E95F}', // ADLAM INITIAL QUESTION MARK — r8
+]);
+
+/**
+ * The strict set, plus marks that *look* interrogative and cannot be verified as
+ * such. Read only by `isAssertion`, whose safe direction is over-inclusion.
+ *
+ * One entry, and its presence is the whole point: U+AA5D is the Cham danda — see
+ * the docblock above — so a Cham sentence ending in one is no longer *certified*
+ * as a question, while a `claim` minted from one is still referred rather than
+ * auto-accepted, exactly where r7 left it. Being wrong about this character now
+ * costs one glance in one direction instead of an acceptance in the other, which
+ * is the only honest disposition for a fact about Unicode that nothing available
+ * here can check.
+ */
+export const QUESTION_SHAPED_MARKS: readonly string[] = Object.freeze([
+  ...QUESTION_MARKS,
+  '\uAA5D', // CHAM PUNCTUATION DANDA — r7 called it a question mark; unverified
 ]);
 
 const QUESTION_MARK = new RegExp(`[${QUESTION_MARKS.join('')}]`, 'u');
+const QUESTION_SHAPED = new RegExp(`[${QUESTION_SHAPED_MARKS.join('')}]`, 'u');
 
-export function isAssertion(text: string): boolean {
-  return !QUESTION_MARK.test(text);
+/**
+ * **Nothing in this text reads as a question.** The generous direction: anything
+ * question-shaped means this is not being offered as an assertion.
+ */
+export function isAssertion(text: ReceiptText): boolean {
+  return !QUESTION_SHAPED.test(text);
+}
+
+/**
+ * **This text certifies itself as a question.** The strict direction, and
+ * deliberately not the negation of `isAssertion`: a mark nobody can verify
+ * refuses an assertion without proving a question, so both checks refuse it and
+ * neither accepts on it.
+ */
+export function readsAsQuestion(text: ReceiptText): boolean {
+  return QUESTION_MARK.test(text);
 }
