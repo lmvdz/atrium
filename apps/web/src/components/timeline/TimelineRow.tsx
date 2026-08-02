@@ -41,7 +41,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
-import { useAttribution, useCitedRecord } from '../model/ledger';
+import { useAttribution, useCitedRecord, useHere } from '../model/ledger';
 import type { MessageId, Quotation } from '../model/quotation';
 import {
   chosenAct,
@@ -58,6 +58,7 @@ import type {
 } from '../model/records';
 import { bodyDivergence, isAuthored } from '../model/records';
 import { slot } from '../model/slot';
+import type { Maybe } from '../model/text';
 import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
 import { MessageBody } from '../primitives/MessageBody';
@@ -113,6 +114,35 @@ export function TimelineRow({ entry, actions = [], onOpenTag }: TimelineRowProps
     <AuthoredRow actions={actions} entry={entry} onOpenTag={onOpenTag} />
   ) : (
     <ChosenRow entry={entry} onOpenTag={onOpenTag} />
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * A FEED IS THE CONVERSATION OF ONE ROOM — ROUND 10, D2.
+ *
+ * `/gallery` frame 05 rendered a head, a lens, a composer and a rail chip all
+ * saying `#identity-service`, a trace bar saying "#users-migration owes it to
+ * you, this room holds the message", and EIGHT `room: 'users-migration'` records
+ * as this room's conversation. A reader came away believing priya said "Staging
+ * backfill ran clean" in #identity-service.
+ *
+ * r8's D3 fix taught three render boundaries to compare a record's room against
+ * the room on screen and SAY where it is; r9 made the disagreement visible. Both
+ * left it possible, because the frame is assembled prop by prop and `room` can be
+ * overridden independently of `entries`.
+ *
+ * A row cannot say the words are from here. It has no such field — "here" is what
+ * the register says, and the record's room is a fact about the record. So the
+ * comparison the source link already does at the CARD is done at the ROW, where
+ * the words are actually printed, and it refuses rather than annotating: a feed
+ * row is the one place on the page that has no vocabulary for "elsewhere".
+ * ------------------------------------------------------------------------- */
+function refuseElsewhere(room: Maybe<string> | undefined, here: string, id: string): void {
+  if (room === null || room === undefined || room === here) return;
+  throw new Error(
+    `TimelineRow: ${id} is a message in #${room}, and this feed is #${here}'s conversation.\n` +
+      '  A feed row has no "elsewhere" treatment and no field to carry one — rendering it here says the words were said here.\n' +
+      '  The room a frame shows and the rows it shows are one fact; a frame that overrides one without the other is the state this refusal exists to make unreachable.',
   );
 }
 
@@ -173,11 +203,13 @@ function AuthoredRow({
      exists to prevent, and a silently corrected render is a corrected render
      nobody finds out about. */
   const attribution = useAttribution(entry.attribution, 'TimelineRow');
+  const here = useHere('TimelineRow');
   const diverged = bodyDivergence('TimelineRow', entry.body, attribution.text, {
     id: attribution.messageId,
     actor: attribution.actor,
   });
   if (diverged !== null) throw new Error(diverged);
+  refuseElsewhere(attribution.room, here, attribution.messageId);
 
   /* THE ROW AND THE LEDGER ARE THE SAME REGISTER, OR THIS DOES NOT RENDER — and
      that check now lives on the CITATION rather than on this row, so it holds at
@@ -293,6 +325,8 @@ function ChosenRow({
      this row was minted from, and refuses to hand back an `Attribution` for
      page-authored words. */
   const record = useCitedRecord(entry.citation, 'TimelineRow chosen');
+  const here = useHere('TimelineRow chosen');
+  refuseElsewhere(record.room, here, record.id);
   if (record.origin !== 'chosen') {
     throw new Error(
       `TimelineRow chosen: ${record.id} is origin ${record.origin} on this page's record, but this row renders it as a page-authored answer.\n` +

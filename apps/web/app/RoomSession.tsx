@@ -31,7 +31,7 @@ import type {
   SurfaceId,
   TimelineEntry,
 } from '../src/components';
-import { messageEntry } from '../src/components';
+import { messageEntry, needsViewer } from '../src/components';
 import * as f from './gallery/fixtures';
 import { RoomFrame } from './gallery/RoomFrame';
 import { RECORDS, sessionView } from './gallery/rooms';
@@ -189,7 +189,7 @@ export function RoomSession() {
       boxed={false}
       composerNote={note}
       entries={entries}
-      filtered={filter !== null}
+      filter={filter}
       focused={focused}
       humans={f.HUMANS}
       handlers={{
@@ -204,9 +204,11 @@ export function RoomSession() {
           setReceiptId(null);
           setBinding(chosen.binding);
           setFilter(null);
-          setOpenId(chosen.attention[0]?.id);
+          /* The pin opens what NEEDS you; `attention[0]` is merely the first item
+             the room ever owed, which after an act is not the same thing. */
+          setOpenId(chosen.attention.find((item) => needsViewer(item.state))?.id);
           setNote(
-            `switched to #${chosen.room.name} · ${chosen.attention.length} owed to you here, ${chosen.objects.length} objects in the lens`,
+            `switched to #${chosen.room.name} · ${chosen.owedCount} owed to you here, ${chosen.objects.length} objects in the lens`,
           );
         },
         onToggleObjective: (objectiveId: string) => {
@@ -314,7 +316,10 @@ export function RoomSession() {
       trailer={view.trailer}
       updatedAt="13:41"
       viewer={f.VIEWER}
-      viewerNote={`here · ${view.attention.length} owed to you`}
+      /* `owedCount`, not `attention.length` — round 10, D5. The pin's array holds
+         acted-on items now, so its length is the number of things that were ever
+         owed here rather than the number that still are. */
+      viewerNote={`here · ${view.owedCount} owed to you`}
     />
   );
 }

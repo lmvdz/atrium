@@ -27,7 +27,6 @@ import type {
   Quotation,
   ReceiptRecord,
   RoomHeadRecord,
-  RoomSummary,
   RoutineEntry,
   SinceYouLeftEntry,
   StateObject,
@@ -35,20 +34,24 @@ import type {
   SystemEntry,
   SystemStatement,
   TimelineEntry,
-  TrailerSummary,
 } from '../../src/components/model';
 import {
+  boundTo,
   checkedFeed,
   citationFrom,
   glyphFor,
+  glyphTag,
   happenedKindFor,
+  isSettled,
   messageEntry,
   needsTag,
   quotationFrom,
   rationale,
   settledForViewer,
+  sinceYouLeft,
   systemStatement,
   trailerFor,
+  withFilter,
 } from '../../src/components/model';
 
 /* --- the register of real messages --------------------------------------- */
@@ -247,35 +250,31 @@ function quote(id: string) {
 
 /* --- rail ---------------------------------------------------------------- */
 
-export const ROOMS: readonly RoomSummary[] = [
-  { id: 'r1', name: 'users-migration', unseen: 0, owed: 4, current: true },
-  { id: 'r2', name: 'identity-service', unseen: 12, owed: 1, current: false },
-  { id: 'r3', name: 'platform', unseen: 3, owed: 0, current: false },
-  { id: 'r4', name: 'design', unseen: 0, owed: 0, current: false },
-];
-
-export const ROOMS_QUIET: readonly RoomSummary[] = ROOMS.map((room) => ({ ...room, owed: 0 }));
-
 /**
- * THE RAIL AS IT MUST READ BESIDE A FRAME SHOWING `owed` ITEMS IN `roomName`.
+ * THE ROSTER, WITHOUT THE OWED COUNTS — ROUND 10, D1.
  *
- * ROUND 8, D2, ZERO CLICKS: `/gallery/pin/60` rendered `# users-migration ◆ 4`
- * in the same rail as `here · 60 owed to you`, because the rail was the static
- * `ROOMS` fixture and the pin was `manyOwed(60)`. A still is a STATE, and a
- * state whose rail contradicts its pin is not one of this product's states.
+ * `ROOMS` used to carry `owed: 4` per room, a NUMBER, and `Rail` drew the glyph
+ * beside it by hand. `RoomSummary.owed` is an `OwedSummary` now — the count and
+ * the hardest owed item's state, from one pass over one array — so a rail chip
+ * can only be built by something that holds the items.
  *
- * The chip for the room being shown states what the frame is showing; the other
- * chips are claims about rooms this frame does not render, so they keep their
- * own numbers. The room you are standing in has no unseen count, because you are
- * reading it.
+ * Only `app/gallery/rooms.ts` holds all four rooms' items, so that is where the
+ * rail is assembled (`railFor`, `roomsQuiet`, `sessionView`). What stays here is
+ * the part that is genuinely a fact about the roster and not about attention:
+ * the ids, the names, and how much of each room this person has not read.
  */
-export function railFor(roomName: string, owed: number): readonly RoomSummary[] {
-  return ROOMS.map((room) =>
-    room.name === roomName
-      ? { ...room, current: true, unseen: 0, owed }
-      : { ...room, current: false },
-  );
+export interface RoomRoster {
+  readonly id: string;
+  readonly name: string;
+  readonly unseen: number;
 }
+
+export const ROSTER: readonly RoomRoster[] = [
+  { id: 'r1', name: 'users-migration', unseen: 0 },
+  { id: 'r2', name: 'identity-service', unseen: 12 },
+  { id: 'r3', name: 'platform', unseen: 3 },
+  { id: 'r4', name: 'design', unseen: 0 },
+];
 
 export const VIEWER: HumanSummary = {
   id: 'lars',
@@ -530,12 +529,12 @@ export function item(itemId: string): AttentionItem {
  */
 export const OVERDUE: readonly string[] = ['K2'];
 
-export const TRAILER = trailerFor({ objects: OBJECTS, objectives: OBJECTIVES, overdue: 1 });
+export const TRAILER = trailerFor({ objects: OBJECTS, objectives: OBJECTIVES, overdue: OVERDUE });
 
 export const TRAILER_QUIET = trailerFor({
   objects: OBJECTS_QUIET,
   objectives: OBJECTIVES.map((objective) => ({ ...objective, status: 'active' as const })),
-  overdue: 0,
+  overdue: [],
 });
 
 /* --- timeline ------------------------------------------------------------ */
@@ -635,21 +634,30 @@ const routine = (open: boolean): RoutineEntry => ({
   rows: ROUTINE_ROWS,
 });
 
-const sinceYouLeft = (input: {
+/**
+ * THE DIVIDER, COUNTED FROM THE ROWS IT SITS WITH — ROUND 10, D3.
+ *
+ * It was `counts: { need: 4, change: 3, discussion: 6, routine: 8 }, total: 21,
+ * ownRows: 1`, hand-written beside a feed that holds seventeen rows in a
+ * different distribution. `SinceYouLeftDivider`'s own docblock opens with "the
+ * counts are counted, never asserted"; they were asserted, one file over, and a
+ * chip that says 8 while the filter behind it matches 3 is that gap made
+ * clickable.
+ */
+const divider = (input: {
+  entries: readonly TimelineEntry[];
   seen: boolean;
   activeFilter: SinceYouLeftEntry['activeFilter'];
-}): SinceYouLeftEntry => ({
-  type: 'since-you-left',
-  id: 'syl',
-  label: 'SINCE YOU LEFT',
-  window: '09:04 → 12:31 · 3h 27m away',
-  counts: { need: 4, change: 3, discussion: 6, routine: 8 },
-  total: 21,
-  ownRows: 1,
-  seen: input.seen,
-  seenAt: input.seen ? '13:12' : null,
-  activeFilter: input.activeFilter,
-});
+}): SinceYouLeftEntry =>
+  sinceYouLeft({
+    id: 'syl',
+    label: 'SINCE YOU LEFT',
+    window: '09:04 → 12:31 · 3h 27m away',
+    entries: input.entries,
+    seen: input.seen,
+    seenAt: input.seen ? '13:12' : null,
+    activeFilter: input.activeFilter,
+  });
 
 const BEFORE: readonly TimelineEntry[] = [
   message('m2', { state: CLAIM, tag: { label: 'claim · unverified', tone: 'neutral' } }),
@@ -718,8 +726,11 @@ const after = (owed: OwedSet): readonly TimelineEntry[] => [
     state: FAILED,
     /* Not a claim on the viewer: a failure needs AN explanation, from whoever
        can give one. `checkedFeed` only refuses rows whose STATE says they are
-       owed to the person reading, which this one's does not. */
-    tag: { label: '✗ failed · needs an explanation', tone: 'needs' },
+       owed to the person reading, which this one's does not.
+       THE GLYPH IS THE ROW'S OWN (round 10, D1): this was the literal string
+       '✗ failed · needs an explanation' beside a state that also produces a
+       glyph. They agreed; nothing made them. */
+    tag: glyphTag(FAILED, 'failed · needs an explanation', 'needs'),
   }),
   owedRow(item('P1'), owed.has('P1')),
   owedRow(item('X1'), owed.has('X1')),
@@ -735,7 +746,14 @@ const after = (owed: OwedSet): readonly TimelineEntry[] => [
      under his name; that shape no longer type-checks. */
   message('m-chosen', {
     state: ACCEPTED,
-    tag: { label: 'resolves ◆ · answer-bound · nothing inferred', tone: 'verified' },
+    /* THE GLYPH IN "resolves ◆" IS ANOTHER ITEM'S — P1's, the proposal this
+       answer resolves — and it was hand-written, so it was a claim about a
+       state on the same screen that nothing tied to that state. Derived from
+       the item now; the row's own glyph is `ACCEPTED`'s, one column left. */
+    tag: {
+      label: `resolves ${glyphFor(item('P1').state)} · answer-bound · nothing inferred`,
+      tone: 'verified',
+    },
   }),
 ];
 
@@ -753,27 +771,29 @@ export function timeline(options: {
   readonly owed?: OwedSet;
 }): readonly TimelineEntry[] {
   const owed = options.owed ?? allOwed;
-  const entries: TimelineEntry[] = checkedFeed(
+  /* The rows first, so the divider between them can COUNT them. */
+  const rows: readonly TimelineEntry[] = [...BEFORE, routine(options.routineOpen), ...after(owed)];
+  const entries: readonly TimelineEntry[] = checkedFeed(
     [
       ...BEFORE,
       routine(options.routineOpen),
-      sinceYouLeft({ seen: options.seen, activeFilter: options.filter }),
+      divider({ entries: rows, seen: options.seen, activeFilter: options.filter }),
       ...after(owed),
     ],
     ATTENTION,
     'fixtures.timeline',
-  ) as TimelineEntry[];
-  if (options.filter === null && options.targetId === undefined) return entries;
-  return entries.map((entry) => {
-    if (entry.type !== 'message') return entry;
-    const matchesFilter =
-      options.filter === null ? true : entry.tag !== null && entry.tag.tone === 'needs';
-    return {
-      ...entry,
-      matchesFilter,
-      targeted: options.targetId !== undefined && entry.id === options.targetId,
-    };
-  });
+  );
+  /* ROUND 10, D3. This was:
+       matchesFilter = options.filter === null ? true : entry.tag !== null && entry.tag.tone === 'needs'
+     — `options.filter` decided WHETHER to filter and never WHAT to match, so
+     `8 ROUTINE`, `3 CHANGES` and `6 DISCUSSION` all lifted the same three rows,
+     one of them a destructive table drop. `withFilter` matches on the class the
+     divider's chips counted. */
+  const filtered = withFilter(entries, options.filter);
+  if (options.targetId === undefined) return filtered;
+  return filtered.map((entry) =>
+    entry.type === 'message' ? { ...entry, targeted: entry.id === options.targetId } : entry,
+  );
 }
 
 export const QUIET_TIMELINE: readonly TimelineEntry[] = [
@@ -983,7 +1003,7 @@ export function receiptFromObject(
     })),
     provenance: [],
     corrections: [],
-    reopenable: glyphFor(object.state) !== '✓',
+    reopenable: !isSettled(object.state),
     reopenNote:
       'this receipt is derived from the object itself — it carries no excerpts, because nothing on this object cites a message',
   };
@@ -991,22 +1011,32 @@ export function receiptFromObject(
 
 /* --- cross-room jump ----------------------------------------------------- */
 
+/**
+ * THE TRACE BAR YOU LAND UNDER, AND IT LANDS WHERE THE MESSAGE IS.
+ *
+ * ROUND 10, D2. This was `targetMessage: cite('m10')` — a #users-migration
+ * record — on a frame whose head, lens, composer and rail all said
+ * `#identity-service`, and it named `◆ P1`, a users-migration item, by a
+ * hand-written glyph. The whole point of a cross-room jump is that you FOLLOWED
+ * an item to the room its source lives in, so the item is the one whose source
+ * is elsewhere (`Q1`, whose source `m-legal` is in #identity-service) and the row
+ * you land on is that source. The glyph is the item's own.
+ */
 export const JUMP: CrossRoomJumpRecord = {
   fromRoom: 'users-migration',
   why: systemStatement(
-    'you followed the source of ◆ P1 — #users-migration owes it to you, this room holds the message',
+    `you followed the source of ${glyphFor(item('Q1').state)} Q1 — #users-migration owes it to you, this room holds the message`,
   ),
-  targetMessage: cite('m10'),
+  targetMessage: cite('m-legal'),
 };
 
 /* --- composer ------------------------------------------------------------ */
 
-export const BOUND: ComposerBinding = {
-  mode: 'bound',
-  itemId: 'X1',
-  itemLabel: 'drop users_legacy at cutover',
-  objective: 'dual-write parity before cutover',
-};
+/* ROUND 10, D1. The banner's `◆` was written into `Composer`; the binding it
+   described named X1, which is irreversible and wears `■` on every other surface
+   on the same screen. `boundTo` is the only constructor for a bound composer, so
+   the id, the label and the state are one item's. */
+export const BOUND: ComposerBinding = boundTo(item('X1'), 'dual-write parity before cutover');
 
 export const FREE: ComposerBinding = { mode: 'free' };
 
@@ -1019,56 +1049,11 @@ export const REPLYING: ComposerBinding = { mode: 'replying', to: quote('m17') };
  * unbounded pin pushing the composer out of a 900px viewport at 19 items with
  * no way to scroll it back; `/gallery/pin/[n]` renders these at 4, 13, 19 and
  * 34 so the bound is measured rather than asserted.
- */
-export interface LoadRoom {
-  readonly attention: readonly AttentionItem[];
-  readonly objects: readonly StateObject[];
-  readonly objectives: readonly ObjectiveRecord[];
-  readonly trailer: TrailerSummary;
-  readonly rooms: readonly RoomSummary[];
-  readonly viewerNote: string;
-}
-
-/**
- * THE WHOLE FRAME AT A GIVEN LOAD, DERIVED FROM ONE NUMBER.
  *
- * ROUND 8, D2's zero-click repro. `/gallery/pin/60` handed `manyOwed(60)` to the
- * pin and left every other surface on the users-migration fixtures: the rail
- * said `# users-migration ◆ 4`, the lens said "4 items awaiting you", the
- * trailer counted two objectives, and the footer said "here · 60 owed to you" —
- * four answers to one question, on one screen, with nothing clicked.
- *
- * A route that exists to measure the pin under load is still a room. Every
- * surface on it now counts the same items.
+ * `loadRoom` — the whole frame at a given load — moved to `rooms.ts` in round 10,
+ * because its rail is now built from a room's ITEMS and only that module holds
+ * all four rooms'.
  */
-export function loadRoom(n: number): LoadRoom {
-  const attention = manyOwed(n);
-  const objects: readonly StateObject[] = attention.map((owedItem) => ({
-    id: owedItem.id,
-    kind: owedItem.state.kind === 'event' ? 'claim' : owedItem.state.kind,
-    state: owedItem.state,
-    text: owedItem.title,
-    facts: owedItem.facts,
-    objectives: ['load'],
-  }));
-  const objectives: readonly ObjectiveRecord[] = [
-    {
-      id: 'load',
-      title: `Carry ${n} owed items without losing the composer`,
-      status: 'active',
-      open: true,
-    },
-  ];
-  return {
-    attention,
-    objects,
-    objectives,
-    trailer: trailerFor({ objects, objectives, overdue: 0 }),
-    rooms: railFor(ROOM.name, n),
-    viewerNote: `here · ${n} owed to you`,
-  };
-}
-
 export function manyOwed(n: number): readonly AttentionItem[] {
   const shapes = [
     { state: DESTRUCTIVE, kind: 'drop', why: 'destructive and nothing else can authorise it' },

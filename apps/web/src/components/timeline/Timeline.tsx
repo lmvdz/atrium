@@ -15,6 +15,9 @@
 
 import { systemText } from '../model/quotation';
 import type { AttentionClass, TimelineEntry } from '../model/records';
+import { classCounts } from '../model/records';
+import type { Maybe } from '../model/text';
+import { plural } from '../model/text';
 import { RoutineCollapse } from './RoutineCollapse';
 import { SinceYouLeftDivider } from './SinceYouLeftDivider';
 import { SystemRow } from './SystemRow';
@@ -24,8 +27,16 @@ import styles from './timeline.module.css';
 
 export interface TimelineProps {
   readonly entries: readonly TimelineEntry[];
-  /** a filter LIFTS matching rows; it never removes or fades the rest */
-  readonly filtered: boolean;
+  /**
+   * WHICH CLASS IS LIFTED, not merely THAT something is — round 10, D3.
+   *
+   * It was `filtered: boolean` beside entries whose `matchesFilter` a caller had
+   * already decided, which is two registers for one fact: `/gallery`'s filtered
+   * frame passed `filter: 'need'` to the entry builder and `filtered: true` here,
+   * and nothing obliged them to name the same class. A filter LIFTS matching
+   * rows; it never removes or fades the rest.
+   */
+  readonly filter: Maybe<AttentionClass>;
   readonly label?: string;
   readonly onFilter?: (attentionClass: AttentionClass) => void;
   readonly onTogglePeek?: (entryId: string) => void;
@@ -46,7 +57,7 @@ const ROW_ACTIONS: readonly Omit<RowAction, 'onSelect'>[] = [
 
 export function Timeline({
   entries,
-  filtered,
+  filter,
   label = 'Conversation',
   onFilter,
   onTogglePeek,
@@ -56,14 +67,34 @@ export function Timeline({
   onUnmarkSeen,
   rowActions = ROW_ACTIONS,
 }: TimelineProps) {
+  /* THE LIFT IS SAID IN WORDS, NOT ONLY IN A BACKGROUND — round 10, D3.
+     What a filter did was carried by `--bg3` and a 2px inset stripe: nothing in
+     `textContent`, `aria-label` or `title` reported it, so the one surface whose
+     job is "here is what you asked for" was structurally invisible to every
+     instrument in this repo and to a screen reader. The number is
+     `classCounts` — the same derivation the chip's own number comes from, so the
+     chip cannot promise 8 and the feed report 3. */
+  const counts = classCounts(entries);
+  const lifted = filter === null ? 0 : counts[filter];
+  const total = counts.need + counts.change + counts.discussion + counts.routine;
   return (
     <section
       aria-label={systemText(label, 'Timeline label')}
-      className={[styles.feed, 'atr-scroll', filtered ? styles.feedFiltered : null]
+      className={[styles.feed, 'atr-scroll', filter === null ? null : styles.feedFiltered]
         .filter(Boolean)
         .join(' ')}
       data-region="conversation"
     >
+      {filter === null ? null : (
+        <p
+          className={`${styles.filterNote} atr-meta`}
+          data-filter-note={filter}
+          data-voice="system"
+        >
+          filtered to {filter} — {plural(lifted, 'row')} lifted of {total}; the rest are still here,
+          at full contrast, without their row actions
+        </p>
+      )}
       {entries.map((entry) => {
         if (entry.type === 'message') {
           const actions = rowActions.map((action) => ({

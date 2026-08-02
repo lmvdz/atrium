@@ -8,6 +8,7 @@
 
 import type { EpistemicState, NoGlyph } from '../model/glyph';
 import { glyphFor, glyphMeaning, glyphTone } from '../model/glyph';
+import { hardestState } from '../model/records';
 import styles from './primitives.module.css';
 
 export type GlyphProps = {
@@ -57,4 +58,34 @@ export function Glyph({ state, decorative = true, className }: GlyphProps) {
       {glyph}
     </span>
   );
+}
+
+export type AggregateGlyphProps = {
+  /**
+   * The set this glyph stands for. It renders the hardest member's state, so the
+   * glyph, its tone and its tooltip are all derived from an item that is
+   * actually in the set.
+   */
+  readonly over: readonly { readonly state: EpistemicState }[];
+  readonly decorative?: boolean;
+  readonly className?: string;
+} & NoGlyph;
+
+/**
+ * ONE GLYPH FOR A WHOLE SET — ROUND 10, D1.
+ *
+ * The pin's head, the rail's owed chip and the composer's binding banner all
+ * answer "what is the worst thing in this set". Two of the three wrote the
+ * character by hand, because there was no component that took a SET; `<Glyph>`
+ * takes one state, and a caller holding four items had nothing to hand it.
+ *
+ * It renders NOTHING for an empty set. An empty set has no state, and the
+ * fallback the pin used to carry — `{headGlyph ?? '·'}` — is a hand-written glyph
+ * with a `??` in front of it: `·` means "routine, no attention owed", which is a
+ * claim about items that are not there.
+ */
+export function AggregateGlyph({ over, decorative = true, className }: AggregateGlyphProps) {
+  const state = hardestState(over);
+  if (state === null) return null;
+  return <Glyph className={className} decorative={decorative} state={state} />;
 }

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
+import { railFor } from '../app/gallery/rooms';
 import {
   AttentionCard,
   AttentionCompact,
@@ -22,6 +23,10 @@ import { renderWith } from './harness';
 
 afterEach(cleanup);
 
+/* THE RAIL IS BUILT FROM THE ROOMS' ITEMS SINCE ROUND 10 — `RoomSummary.owed` is
+   an `OwedSummary`, so there is no hand-written roster to import. */
+const ROOMS = railFor(f.ROOM.name, f.ATTENTION);
+
 function item(input: Partial<AttentionItem> & Pick<AttentionItem, 'id' | 'state'>): AttentionItem {
   return {
     title: 'A thing that needs you',
@@ -33,7 +38,7 @@ function item(input: Partial<AttentionItem> & Pick<AttentionItem, 'id' | 'state'
   };
 }
 
-const EMPTY_TRAILER: TrailerSummary = trailerFor({ objects: [], objectives: [], overdue: 0 });
+const EMPTY_TRAILER: TrailerSummary = trailerFor({ objects: [], objectives: [], overdue: [] });
 
 describe('the rationale requirement', () => {
   /* CATCHES: relaxing rationale() to accept an empty or whitespace string. The
@@ -234,9 +239,12 @@ describe('the trailer', () => {
         },
       ],
       objectives: [{ id: 'o1', title: 'o', status: 'active', open: true }],
-      overdue: 0,
+      overdue: [],
     });
-    expect(summary.lead.text).toBe('1 of 1 still unverified');
+    /* ROUND 10, D4: the lead used to read "1 of 1 still unverified", counting the
+       objects OUTSIDE the pin and never saying so, in a sentence whose other
+       clause counts the pin's own objectives. Every lead names its scope now. */
+    expect(summary.lead.text).toBe('1 of the 1 outside your list still unverified');
     expect(summary.state.verification).toBe('self_reported');
     expect(summary.leadsWith).toBe('unverified');
   });
@@ -258,7 +266,7 @@ describe('the trailer', () => {
     const summary = trailerFor({
       objects: [failing],
       objectives: [{ id: 'o1', title: 'o', status: 'active', open: true }],
-      overdue: 0,
+      overdue: [],
     });
     expect(summary.leadsWith).toBe('failures');
     const { container } = render(<Trailer lastCheck="12:29" summary={summary} />);
@@ -291,7 +299,7 @@ describe('the trailer', () => {
         },
       ],
       objectives: [],
-      overdue: 3,
+      overdue: ['F1'],
     });
     expect(summary.lead.text).toBe('1 failure outside your list');
   });
@@ -341,7 +349,7 @@ describe('a surface indicator says its count as a count', () => {
     render(
       <Rail
         humans={f.HUMANS}
-        rooms={f.ROOMS}
+        rooms={ROOMS}
         viewer={f.VIEWER}
         viewerNote="here"
         workspaceName="atrium"
@@ -369,7 +377,7 @@ describe('a surface indicator says its count as a count', () => {
     const { container } = render(
       <Rail
         humans={f.HUMANS}
-        rooms={f.ROOMS}
+        rooms={ROOMS}
         viewer={f.VIEWER}
         viewerNote="here"
         workspaceName="atrium"

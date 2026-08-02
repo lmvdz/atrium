@@ -19,7 +19,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
-import { sessionView } from '../app/gallery/rooms';
+import { loadRoom, sessionView } from '../app/gallery/rooms';
 import { RoomSession } from '../app/RoomSession';
 import type { AgreementReport } from '../e2e/agreement';
 import { agreementScript } from '../e2e/agreement';
@@ -27,11 +27,13 @@ import { AttentionCard, ReceiptView } from '../src/components';
 import type { EpistemicState, ObjectKind, Verification } from '../src/components/model';
 import {
   checkedFeed,
+  foldPin,
   GLYPHS,
   glyphFor,
   glyphMeaning,
   happenedKindFor,
   messageEntry,
+  needsViewer,
   stateForHappened,
 } from '../src/components/model';
 import { renderWith } from './harness';
@@ -53,11 +55,52 @@ describe('an act moves every surface that counts it', () => {
     expect(before.objects.filter((o) => o.state.owedToViewer).map((o) => o.id)).toEqual(['IQ1']);
 
     const after = sessionView('r2', ['IQ1']);
-    expect(after.attention).toEqual([]);
+    expect(after.owedCount).toBe(0);
     expect(after.objects.filter((o) => o.state.owedToViewer)).toEqual([]);
     /* …and the object is still THERE. An act is not a deletion: the question is
        still in the room's current state, it just no longer needs this person. */
     expect(after.objects.map((o) => o.id)).toEqual(before.objects.map((o) => o.id));
+  });
+
+  /* CATCHES: `attention` going back to `view.attention.filter(item =>
+     !settled.has(item.id))` — round 10, D5, and the one place r9's own thesis was
+     not implemented. The r9 receipt said an act is modelled as
+     `settledForViewer(state)` "so the object stays in the lens and stops needing
+     you"; that was true of `objects` and false of `attention`, which removed.
+     The consequence was not cosmetic: `foldPin`'s `clean` bucket is built from
+     items that are present and no longer owed, so on `/` it was always empty and
+     the pin's "N items here no longer needs you" line was unreachable — an
+     affordance built to express the round's thesis, dead on the product route.
+     Restore the filter and BOTH assertions below fail: the item vanishes and
+     `clean` goes back to zero. */
+  it('an acted-on item stays in the pin’s register and stops needing you', () => {
+    const after = sessionView('r2', ['IQ1']);
+    expect(after.attention.map((item) => item.id)).toEqual(['IQ1']);
+    expect(after.attention.every((item) => !needsViewer(item.state))).toBe(true);
+    expect(foldPin(after.attention).clean.map((item) => item.id)).toEqual(['IQ1']);
+    expect(foldPin(after.attention).owedTotal).toBe(0);
+  });
+
+  /* CATCHES the same defect where a reader would meet it: `[data-pin-clean]` is
+     what the pin renders the `clean` bucket into, and it was measured `null` on
+     `/` after acting. Driven, not derived — the model can be right and the route
+     still not reach it, which is exactly what r9 shipped. */
+  it('the pin on `/` says an acted-on item no longer needs you', () => {
+    render(<RoomSession />);
+    const chip = [...document.querySelectorAll('nav[aria-label="Rooms and people"] button')].find(
+      (button) => /#identity-service/.test(button.getAttribute('aria-label') ?? ''),
+    );
+    act(() => {
+      fireEvent.click(chip as Element);
+    });
+    expect(document.querySelector('[data-pin-clean]')).toBeNull();
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Answer it' }));
+    });
+    const clean = document.querySelector('[data-pin-clean]');
+    expect(clean, 'the pin’s clean bucket never renders on the product route').not.toBeNull();
+    expect(clean?.getAttribute('data-pin-clean')).toBe('1');
+    expect(clean?.textContent).toContain('no longer needs you');
   });
 
   /* CATCHES the exact r8 line: `owed: roomView(room.id).attention.length` in
@@ -70,8 +113,8 @@ describe('an act moves every surface that counts it', () => {
       if (found === undefined) throw new Error(`no chip for ${name}`);
       return found.owed;
     };
-    expect(chip(sessionView('r2', []), 'identity-service')).toBe(1);
-    expect(chip(sessionView('r2', ['IQ1']), 'identity-service')).toBe(0);
+    expect(chip(sessionView('r2', []), 'identity-service').count).toBe(1);
+    expect(chip(sessionView('r2', ['IQ1']), 'identity-service').count).toBe(0);
   });
 
   /* CATCHES: the rail reading only the room on screen. D2's first repro is an
@@ -81,16 +124,32 @@ describe('an act moves every surface that counts it', () => {
   it('an act in one room moves that room’s chip from every other room', () => {
     const elsewhere = sessionView('r2', ['K2']);
     const chip = elsewhere.rooms.find((room) => room.name === 'users-migration');
-    expect(chip?.owed).toBe(3);
+    expect(chip?.owed.count).toBe(3);
   });
 
-  /* CATCHES: `overdue` going back to a hand-written number. `trailerFor` takes a
-     COUNT, and a count beside the objects it describes cannot be filtered — so
-     signing off the one late commitment left the trailer still saying one thing
-     was late. */
-  it('settling the late commitment stops the trailer counting it', () => {
-    expect(sessionView('r1', []).trailer.overdue).toBe(1);
-    expect(sessionView('r1', ['K2']).trailer.overdue).toBe(0);
+  /* WHAT THE OLD VERSION OF THIS TEST CAUGHT, and why it is rewritten.
+     r9 asserted `trailer.overdue` was 1 before signing off K2 and 0 after. It
+     caught `overdue` going back to a hand-written number — a count handed in
+     beside the objects it describes cannot be filtered, so an act could not move
+     it. That defect is still caught below: `overdue` is still a REGISTER OF IDS,
+     and a hand-written number cannot be intersected with anything.
+     What changed is the scope, which is round 10's D4. `overdue` is printed in a
+     clause whose other two numbers count the objects OUTSIDE your list, and it
+     was counted room-wide — so "0 overdue" stood 300px from a lens row reading
+     "overdue 16h". It counts the same objects its neighbours do now: K2 is late
+     and owed, so it is IN your list and not in that clause; sign it off and it
+     moves out of your list, into the clause, still late, exactly as its own row
+     in the lens still says.
+     CATCHES: re-scoping `overdue` back to the room (both numbers become 1), and
+     `trailerFor` taking a count again (the intersection stops compiling). */
+  it('the trailer’s late count is about the objects its clause names', () => {
+    expect(sessionView('r1', []).trailer.overdue).toBe(0);
+    expect(sessionView('r1', ['K2']).trailer.overdue).toBe(1);
+    /* …and the clause it lands in says which objects those are. */
+    const summary = sessionView('r1', ['K2']).trailer;
+    expect(summary.outside).toBe(
+      sessionView('r1', ['K2']).objects.filter((o) => !needsViewer(o.state)).length,
+    );
   });
 
   /* CATCHES: the feed's "needs you" tag going back to a fixture string. It is
@@ -145,10 +204,15 @@ describe('an act moves every surface that counts it', () => {
      and the footer said 60. */
   it('the pin-load route derives every surface from the one number', () => {
     for (const n of [4, 60]) {
-      const load = f.loadRoom(n);
+      const load = loadRoom(n);
       expect(load.attention.length).toBe(n);
       expect(load.objects.filter((o) => o.state.owedToViewer).length).toBe(n);
-      expect(load.rooms.find((room) => room.current)?.owed).toBe(n);
+      const chip = load.rooms.find((room) => room.current)?.owed;
+      expect(chip?.count).toBe(n);
+      /* …AND THE CHIP'S GLYPH IS THE HARDEST OF THOSE ITEMS — round 10, D1. At
+         every load `manyOwed` includes a failure, so `✗` is what the chip must
+         wear; the r9 rail wrote `◆` beside this number by hand. */
+      expect(chip?.kind === 'some' ? glyphFor(chip.state) : null).toBe('✗');
       expect(load.viewerNote).toContain(`${n} owed to you`);
     }
   });
@@ -396,6 +460,65 @@ describe('no two elements on screen state different answers to the same question
       look().contradictions.map((c) => c.question),
       'r8’s stale rail count was put back and the analysis did not notice',
     ).toContain('owed:here == owed:#identity-service');
+  });
+
+  /* ---------------------------------------------------------------------------
+   * ROUND 10, D1 — THE GLYPH PATH, BOTH DIRECTIONS.
+   *
+   * r9's verdict on this analyser was that the MECHANISM was fine and the
+   * question set was short: "a glyph is a character with no letter and no digit,
+   * so it is neither a form match nor a wordless count and never enters the
+   * comparison". So it ran clean over five states while the rail chip read `◆4`
+   * forty pixels from a pin head reading `■` about the same four items.
+   * ------------------------------------------------------------------------- */
+
+  /* CATCHES: the glyph path being dropped, or `questionsNear` failing to resolve
+     the two surfaces the r9 screen disagreed on. A path that resolves NOTHING
+     reports exactly like one that resolves everything in agreement. */
+  it('a glyph reaches the comparison, and says which set it is about', () => {
+    render(<RoomSession />);
+    const report = look();
+    expect(report.glyphMarks, 'no glyphs on a page covered in them').toBeGreaterThan(4);
+    expect(report.glyphClaims, 'no glyph resolved to a question').toBeGreaterThan(1);
+    const questions = report.claims.filter((c) => c.via === 'glyph').map((c) => c.question);
+    expect(questions, 'the pin head’s glyph is not about the owed count').toContain(
+      'glyph:owed:here',
+    );
+    expect(
+      questions.some((q) => q.startsWith('glyph:owed:#')),
+      'the rail chip’s glyph is not about any room’s owed count',
+    ).toBe(true);
+    /* THE GAP, MEASURED. Every bare glyph that resolved to nothing is reported
+       rather than described — the per-row glyphs in the feed are about one row
+       each, and the composer's ANSWERING banner sits beside a label and no
+       count. This is the number the next round is owed. */
+    console.info(
+      `agreement: ${report.glyphMarks} glyph marks · ${report.glyphClaims} compared · ${report.unresolvedGlyphs.length} about nothing this check can name`,
+    );
+  });
+
+  /* BOTH DIRECTIONS — and this is the r9 screen, not the r8 one. The rail's own
+     hand-written `◆` is put back over a set whose derived glyph is `■`; nothing
+     else moves. A check whose entire claim is that it would have caught D1 has
+     to be seen catching it. */
+  it('and it fails on the glyph the r9 rail hand-wrote', () => {
+    render(<RoomSession />);
+    expect(look().contradictions).toEqual([]);
+
+    const chipGlyph = document.querySelector('[data-owed-chip="users-migration"] [data-glyph]');
+    expect(chipGlyph, 'the rail renders no derived glyph to overwrite').not.toBeNull();
+    /* r9's markup exactly: `<span aria-hidden="true">◆</span>` beside the count,
+       with no `data-glyph` and no tone — a character, not a derivation. */
+    const handWritten = document.createElement('span');
+    handWritten.setAttribute('aria-hidden', 'true');
+    handWritten.textContent = '◆';
+    chipGlyph?.replaceWith(handWritten);
+
+    const contradictions = look().contradictions.map((c) => c.question);
+    expect(
+      contradictions,
+      'r9’s hand-written rail glyph was put back and the analysis did not notice',
+    ).toContain('glyph:owed:here == glyph:owed:#users-migration');
   });
 
   /* CATCHES: the wordless-count path being dropped. The prototype lane's

@@ -51,9 +51,12 @@ import {
   checkedFeed,
   citationFrom,
   messageEntry,
+  needsViewer,
+  owedSummary,
   rationale,
   settledForViewer,
   trailerFor,
+  withFilter,
 } from '../../src/components/model';
 import * as f from './fixtures';
 
@@ -152,6 +155,15 @@ export interface FeedOptions {
   readonly seen: boolean;
   readonly filter: SinceYouLeftEntry['activeFilter'];
   readonly routineOpen: boolean;
+  /**
+   * The row a cross-room jump landed on, marked in the feed.
+   *
+   * ROUND 10, D2: only `fixtures.timeline` could mark a target, so the gallery's
+   * cross-room frame reached for `f.timeline(…)` — users-migration's feed — while
+   * its head said `#identity-service`. Every room can mark a row now, so a frame
+   * showing a jump has no reason to borrow another room's conversation.
+   */
+  readonly targetId?: string;
 }
 
 /**
@@ -381,8 +393,27 @@ export interface SessionView {
   readonly objectives: readonly ObjectiveRecord[];
   /** the lens's objects, with anything acted on no longer owed */
   readonly objects: readonly StateObject[];
-  /** the pin's items: what still needs this person */
+  /**
+   * THE PIN'S ITEMS — ALL OF THEM, WITH THE ACTS APPLIED.
+   *
+   * ROUND 10, D5, and it corrects a receipt r9 published. r9 wrote that an act is
+   * modelled as `settledForViewer(state)` "so the object stays in the lens and
+   * stops needing you". That was true of `objects` and FALSE of `attention`,
+   * which was `view.attention.filter(item => !settled.has(item.id))` — a removal,
+   * the exact shape r8's D1 was about, surviving in the array the round is named
+   * for. The consequence was measurable: `foldPin`'s `clean` bucket and the pin's
+   * "N items here no longer needs you" line could not render on `/` at all
+   * (`[data-pin-clean]` was `null` after acting), so the affordance built to
+   * express the round's own thesis was dead code on the product route.
+   *
+   * An acted-on item is still here and still in the pin's register; it no longer
+   * needs this person, which is what `needsViewer` reads and what puts it in
+   * `clean`. Anything wanting the OWED count reads `owedCount` below rather than
+   * `attention.length`.
+   */
   readonly attention: readonly AttentionItem[];
+  /** how many of `attention` still need this person — never `attention.length` */
+  readonly owedCount: number;
   readonly binding: ComposerBinding;
   readonly trailer: TrailerSummary;
   /** the rail, every chip counting the same register this page counts */
@@ -391,9 +422,63 @@ export interface SessionView {
   readonly receiptFor: (objectId: string) => ReceiptRecord;
 }
 
-/** How many items still need the viewer in a room, given what has been acted on. */
-function owedIn(roomId: string, actedOn: readonly string[]): number {
-  return roomView(roomId).attention.filter((item) => !actedOn.includes(item.id)).length;
+/**
+ * A room's attention with the session's acts applied — the shape every surface
+ * that counts owed attention reads, in every room, from anywhere.
+ */
+function attentionIn(roomId: string, actedOn: readonly string[]): readonly AttentionItem[] {
+  const settled = new Set(actedOn);
+  return roomView(roomId).attention.map((item) =>
+    settled.has(item.id) ? { ...item, state: settledForViewer(item.state) } : item,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * THE RAIL — ROUND 10, D1.
+ *
+ * It lived in `fixtures.ts` and handed `Rail` a NUMBER per room, which is why the
+ * chip drew its glyph by hand: nothing in the room summary could have derived
+ * one. `owedSummary` takes the ITEMS and returns the count and the hardest owed
+ * state together, so this module — the only one that holds all four rooms'
+ * items — is where the rail is assembled.
+ * ------------------------------------------------------------------------- */
+
+/** The rail as it must read from `roomId`, with `actedOn` already applied. */
+export function railFrom(roomId: string, actedOn: readonly string[]): readonly RoomSummary[] {
+  return f.ROSTER.map((room) => ({
+    id: room.id,
+    name: room.name,
+    current: room.id === roomId,
+    /* The room you are standing in has no unseen count, because you are reading it. */
+    unseen: room.id === roomId ? 0 : room.unseen,
+    owed: owedSummary(attentionIn(room.id, actedOn)),
+  }));
+}
+
+/**
+ * THE RAIL BESIDE A STILL that is showing `items` in `roomName`.
+ *
+ * ROUND 8, D2, ZERO CLICKS: `/gallery/pin/60` rendered `# users-migration ◆ 4` in
+ * the same rail as `here · 60 owed to you`. The chip for the room being shown
+ * states what the frame is showing; the other chips are claims about rooms this
+ * frame does not render, so they count those rooms' own items.
+ */
+export function railFor(roomName: string, items: readonly AttentionItem[]): readonly RoomSummary[] {
+  return f.ROSTER.map((room) => {
+    const current = room.name === roomName;
+    return {
+      id: room.id,
+      name: room.name,
+      current,
+      unseen: current ? 0 : room.unseen,
+      owed: owedSummary(current ? items : attentionIn(room.id, [])),
+    };
+  });
+}
+
+/** Every chip at zero — the still where nothing anywhere needs this person. */
+export function roomsQuiet(roomName: string): readonly RoomSummary[] {
+  return railFor(roomName, []).map((room) => ({ ...room, owed: owedSummary([]) }));
 }
 
 /**
@@ -407,8 +492,10 @@ function owedIn(roomId: string, actedOn: readonly string[]): number {
 export function sessionView(roomId: string, actedOn: readonly string[]): SessionView {
   const view = roomView(roomId);
   const settled = new Set(actedOn);
-  const attention = view.attention.filter((item) => !settled.has(item.id));
-  const owed = new Set(attention.map((item) => item.id));
+  /* AN ACT IS `settledForViewer`, ON BOTH ARRAYS — round 10, D5. It was a filter
+     here and a map two lines down; see `SessionView.attention`. */
+  const attention = attentionIn(roomId, actedOn);
+  const owed = new Set(attention.filter((item) => needsViewer(item.state)).map((item) => item.id));
   const objects = view.objects.map((object) =>
     settled.has(object.id) ? { ...object, state: settledForViewer(object.state) } : object,
   );
@@ -418,25 +505,41 @@ export function sessionView(roomId: string, actedOn: readonly string[]): Session
     objectives: view.objectives,
     objects,
     attention,
+    owedCount: owed.size,
     binding: view.binding,
     trailer: trailerFor({
       objects,
       objectives: view.objectives,
-      /* The late things that are STILL late. A hand-written `overdue: 1` beside
-         the objects it describes is the same second register as a hand-written
-         owed count beside the pin. */
-      overdue: view.overdue.filter((id) => !settled.has(id)).length,
+      /* WHICH objects are late, handed over whole. Round 10, D4: this used to
+         `.length` here and be printed inside a clause counting the objects
+         OUTSIDE the pin, so one number in that clause was room-wide and the
+         other two were not. `trailerFor` intersects the register with the same
+         objects the clause's neighbours count, which is the only way three
+         numbers in one clause are about one set. */
+      overdue: view.overdue,
     }),
-    rooms: f.ROOMS.map((room) => ({
-      ...room,
-      current: room.id === roomId,
-      unseen: room.id === roomId ? 0 : room.unseen,
-      owed: owedIn(room.id, actedOn),
-    })),
+    rooms: railFrom(roomId, actedOn),
     /* `checkedFeed` a second time, over the room's WHOLE item list: the feed
-       this room built may not claim a row needs you unless an item cites it. */
-    timeline: (options) =>
-      checkedFeed(view.timeline(options, owed), view.attention, `room ${view.id}`),
+       this room built may not claim a row needs you unless an item cites it.
+       Then the target row is marked and the class filter applied, HERE — so
+       every room gets both rather than only the one whose fixture module
+       implemented them. */
+    timeline: (options) => {
+      const rows = checkedFeed(view.timeline(options, owed), view.attention, `room ${view.id}`);
+      const marked =
+        options.targetId === undefined
+          ? rows
+          : rows.map((entry) =>
+              entry.type === 'message'
+                ? { ...entry, targeted: entry.id === options.targetId }
+                : entry,
+            );
+      /* Applied here rather than left to each room's fixture: r1's builder
+         happens to call `withFilter` itself and rooms 2–4 never did, so
+         `3 CHANGES` in #identity-service filtered nothing at all. Re-applying it
+         to r1's rows recomputes the same value from the same classifier. */
+      return withFilter(marked, options.filter);
+    },
     /* The receipt's title glyph is the OBJECT's state, so a receipt opened after
        an act cannot still wear ◆ over a lens that has stopped saying so. P1 is
        the one curated record on this page; everything else is derived from the
@@ -449,5 +552,55 @@ export function sessionView(roomId: string, actedOn: readonly string[]): Session
       const object = objects.find((candidate) => candidate.id === objectId);
       return object === undefined ? base : { ...base, state: object.state };
     },
+  };
+}
+
+/* ---------------------------------------------------------------------------
+ * THE PIN UNDER LOAD — one full frame per owed-item count.
+ *
+ * ROUND 8, D2's zero-click repro: `/gallery/pin/60` handed `manyOwed(60)` to the
+ * pin and left every other surface on the users-migration fixtures — the rail
+ * said `# users-migration ◆ 4`, the lens said "4 items awaiting you", and the
+ * footer said "here · 60 owed to you". A route that exists to measure the pin
+ * under load is still a room.
+ *
+ * It lives here rather than in `fixtures.ts` since round 10: its rail is built
+ * from a room's ITEMS, and only this module holds all four rooms'.
+ * ------------------------------------------------------------------------- */
+
+export interface LoadRoom {
+  readonly attention: readonly AttentionItem[];
+  readonly objects: readonly StateObject[];
+  readonly objectives: readonly ObjectiveRecord[];
+  readonly trailer: TrailerSummary;
+  readonly rooms: readonly RoomSummary[];
+  readonly viewerNote: string;
+}
+
+export function loadRoom(n: number): LoadRoom {
+  const attention = f.manyOwed(n);
+  const objects: readonly StateObject[] = attention.map((owedItem) => ({
+    id: owedItem.id,
+    kind: owedItem.state.kind === 'event' ? 'claim' : owedItem.state.kind,
+    state: owedItem.state,
+    text: owedItem.title,
+    facts: owedItem.facts,
+    objectives: ['load'],
+  }));
+  const objectives: readonly ObjectiveRecord[] = [
+    {
+      id: 'load',
+      title: `Carry ${n} owed items without losing the composer`,
+      status: 'active',
+      open: true,
+    },
+  ];
+  return {
+    attention,
+    objects,
+    objectives,
+    trailer: trailerFor({ objects, objectives, overdue: [] }),
+    rooms: railFor(f.ROOM.name, attention),
+    viewerNote: `here · ${n} owed to you`,
   };
 }

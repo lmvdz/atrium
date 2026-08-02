@@ -91,6 +91,21 @@ export function needsViewer(state: EpistemicState): boolean {
 }
 
 /**
+ * Checked by something other than the claimant, or taken by a human — the two
+ * states that render `✓`.
+ *
+ * ROUND 10, D1. It existed as `glyphFor(state) === '✓'` at two call sites, which
+ * is a glyph CHARACTER spelled outside this module. The r10 rule is that the
+ * seven characters live in exactly one file, so the question a comparison was
+ * asking gets a name instead: `ObjectRow` wants "is this settled", not "does its
+ * glyph happen to be the tick", and asking the second was how the character got
+ * out of the vocabulary in the first place.
+ */
+export function isSettled(state: EpistemicState): boolean {
+  return SETTLED.has(state.verification);
+}
+
+/**
  * Whether the text gets the dotted underline. Independent of the glyph on
  * purpose — see UNSETTLED above.
  */

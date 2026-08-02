@@ -80,7 +80,11 @@ test.describe('gallery', () => {
       'data-seen',
       'false',
     );
-    await expect(sinceYouLeft.locator('[data-count-class="need"]')).toHaveText('4 NEED YOU');
+    /* ROUND 10, D3: the chip's number is COUNTED from the rows it sits with —
+       `4 NEED YOU` was hand-written in the fixture beside a feed holding two.
+       A chip that promises four and a filter that lifts three is the gap this
+       closes; `the chip lifts what it counts` below is the other half. */
+    await expect(sinceYouLeft.locator('[data-count-class="need"]')).toHaveText('2 NEED YOU');
     // hardest first: the ■ destructive decision is the open card
     await expect(
       sinceYouLeft.locator('[data-region="needs-you"] article [data-glyph]').first(),
@@ -97,7 +101,7 @@ test.describe('gallery', () => {
       'true',
     );
     await expect(filtered.locator('[data-row="since-you-left"]')).toContainText('marked seen');
-    await expect(filtered.locator('[data-count-class="need"]')).toHaveText('4 NEED YOU');
+    await expect(filtered.locator('[data-count-class="need"]')).toHaveText('2 NEED YOU');
     /* A filter LIFTS what matches; it never removes anything and it never
        fades anything. Round 1: `opacity: .3` put the row's text at 1.48–1.71:1,
        so the frame's own caption ("a row you cannot see is a row you cannot
@@ -160,12 +164,134 @@ test.describe('gallery', () => {
       'THAT IS A RESULT, NOT AN ABSENCE',
     );
     // and the trailer only says "verified" because it derived it
-    await expect(zero.locator('[data-row="trailer"]')).toContainText('everything else is verified');
+    /* ROUND 10, D4: every lead names the set it counts. "everything else is
+       verified" counted the objects OUTSIDE the pin and said "else", in a
+       sentence whose other clause counts the pin's own objectives. */
+    await expect(zero.locator('[data-row="trailer"]')).toContainText(
+      'everything outside your list is verified',
+    );
 
     // the room that owes nothing may not say everything is green
     await expect(
       page.locator('[data-gallery-frame="fresh-room"] [data-row="trailer"]'),
-    ).not.toContainText('everything else is verified');
+    ).not.toContainText('everything outside your list is verified');
+
+    /* ---------------------------------------------------------------------
+     * ROUND 10, D4 — THE TWO CLAUSES, EACH NAMING WHAT IT COUNTS.
+     *
+     * r9's trailer read "… — 2 objectives clear of you · 2 commitments, 0
+     * overdue · 1 failure": three numbers about the pin's objectives, three
+     * about the objects outside it, one room-wide, and the scope stated once.
+     * So "0 overdue" stood 300px from a lens row reading "overdue 16h".
+     * ------------------------------------------------------------------- */
+    const trailer = page.locator('[data-gallery-frame="fresh-room"] [data-row="trailer"]');
+    await expect(trailer.locator('[data-trailer-scope="outside"]')).toContainText(
+      'outside your list, of',
+    );
+    await expect(trailer.locator('[data-trailer-scope="yours"]')).toContainText('your list:');
+    /* AND NEITHER CLAUSE CARRIES THE OTHER'S NUMBERS. A clause is one element's
+       own text, so this is checkable rather than a claim about the sentence. */
+    await expect(trailer.locator('[data-trailer-scope="yours"]')).not.toContainText('commitment');
+    await expect(trailer.locator('[data-trailer-scope="outside"]')).not.toContainText('objectives');
+  });
+
+  /* ---------------------------------------------------------------------------
+   * ROUND 10, D2 — A FRAME IS A ROOM.
+   *
+   * Frame 05's head, lens, composer and rail all said `#identity-service` while
+   * its FEED rendered eight `room: 'users-migration'` records as this room's
+   * conversation: a reader came away believing priya said "Staging backfill ran
+   * clean — 4.2M rows in 38 minutes" in #identity-service. The rail also showed
+   * `#users-migration ◆4` and `#identity-service ◆4` for the same four items.
+   *
+   * CATCHES: any frame reassembled with `room` overridden independently of
+   * `entries`. The row-level refusal in `TimelineRow` makes that state throw
+   * rather than render, so this asserts the frame that used to be wrong.
+   * ------------------------------------------------------------------------- */
+  test('the cross-room frame is one room, feed included', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/gallery?theme=light');
+    const jump = page.locator('[data-gallery-frame="cross-room-jump"]');
+
+    // the head, the rail's current chip and the composer agree on the room
+    await expect(jump.locator('[data-region="current-state"]')).toContainText('#identity-service');
+    await expect(
+      jump.locator('nav[aria-label="Rooms and people"] [aria-current="true"]'),
+    ).toHaveAttribute('aria-label', /^#identity-service/);
+    await expect(jump.locator('textarea')).toHaveAttribute(
+      'aria-label',
+      'Message #identity-service',
+    );
+
+    /* AND SO DOES EVERY ROW IN THE FEED. The register knows which room each
+       record lives in; these are the ids #identity-service actually holds. */
+    const ids = await jump
+      .locator('[data-region="conversation"] [data-row="message"]')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('data-message-id')));
+    expect(ids.length, 'the cross-room frame renders no feed rows').toBeGreaterThan(1);
+    expect(
+      ids.filter((id) => id !== null && ['m2', 'm5', 'm7', 'm10', 'm17', 'm21'].includes(id)),
+      'a #users-migration record is rendered as #identity-service’s conversation',
+    ).toEqual([]);
+
+    /* THE SAME FOUR ITEMS ARE NOT COUNTED TWICE. r9's rail read
+       `#users-migration ◆4` beside `#identity-service ◆4`, which reads as eight. */
+    const chips = await jump
+      .locator('nav[aria-label="Rooms and people"] [data-owed-chip]')
+      .evaluateAll((els) =>
+        els.map((el) => `${el.getAttribute('data-owed-chip')}:${(el.textContent ?? '').trim()}`),
+      );
+    /* …and each chip's glyph is the hardest of THAT room's items (D1):
+       users-migration's four are headed by an irreversible drop, identity's one
+       is an open question. r9 printed a literal ◆ on both. */
+    expect(chips).toContain('users-migration:■4');
+    expect(chips).toContain('identity-service:?1');
+  });
+
+  /* ---------------------------------------------------------------------------
+   * ROUND 10, D3 — THE CHIP LIFTS WHAT IT COUNTS.
+   *
+   * Every chip lifted the same three rows: `matchesFilter` was
+   * `entry.tag !== null && entry.tag.tone === 'needs'` whatever the filter said,
+   * so someone asking what was ROUTINE while they were away was shown a
+   * destructive table drop as the answer. And the answer was carried by a
+   * background colour and an inset stripe — outside `textContent`, `aria-label`
+   * and `title`, and therefore outside every instrument in this repo.
+   * ------------------------------------------------------------------------- */
+  test('the class filter lifts the class it names, and says so in words', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/?theme=light');
+    await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
+
+    const seen: Record<string, string[]> = {};
+    for (const attentionClass of ['need', 'change', 'discussion', 'routine']) {
+      const chip = page.locator(`[data-count-class="${attentionClass}"]`);
+      await chip.click();
+      await expect(chip).toHaveAttribute('aria-pressed', 'true');
+      /* WHAT THE FILTER DID, IN WORDS. r9 said it only in a background colour. */
+      const note = page.locator('[data-filter-note]');
+      await expect(note).toHaveAttribute('data-filter-note', attentionClass);
+      await expect(note).toContainText(`filtered to ${attentionClass}`);
+
+      seen[attentionClass] = await page
+        .locator('[data-region="conversation"] [data-row]:not([data-dimmed])')
+        .evaluateAll((els) =>
+          els.map(
+            (el) =>
+              `${el.getAttribute('data-row')}:${el.getAttribute('data-message-id') ?? el.getAttribute('data-open') ?? ''}`,
+          ),
+        );
+      await chip.click();
+    }
+
+    /* NO TWO CHIPS LIFT THE SAME SET. On r9 all four lifted the identical three
+       rows; this is that measurement, inverted. */
+    const signatures = Object.values(seen).map((rows) => rows.sort().join('|'));
+    expect(new Set(signatures).size, 'two class chips lift the same rows').toBe(signatures.length);
+    /* …and ROUTINE lifts the routine strip, which is where the routine rows are. */
+    expect(seen.routine?.some((row) => row.startsWith('routine:'))).toBe(true);
+    /* …and NEED lifts only rows that are owed, never the routine strip. */
+    expect(seen.need?.some((row) => row.startsWith('routine:'))).toBe(false);
   });
 
   /* ---------------------------------------------------------------------

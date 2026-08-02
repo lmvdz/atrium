@@ -33,8 +33,18 @@ export function RoutineCollapse({ entry, onTogglePeek, peekLimit = 6 }: RoutineC
   const from = systemText(entry.from, 'RoutineCollapse from');
   const to = systemText(entry.to, 'RoutineCollapse to');
 
+  /* THE ROUTINE CHIP HAS TO BE ABLE TO LIFT THE ROUTINE ROWS — round 10, D3.
+     They are all behind this strip, so the strip is what the filter lifts. */
+  const matched = entry.matchesFilter !== false;
   return (
-    <div className={styles.routine} data-row="routine" data-open={entry.open ? 'true' : 'false'}>
+    <div
+      className={[styles.routine, matched ? styles.matched : styles.unmatched]
+        .filter(Boolean)
+        .join(' ')}
+      data-dimmed={matched ? undefined : 'true'}
+      data-open={entry.open ? 'true' : 'false'}
+      data-row="routine"
+    >
       <button
         aria-expanded={entry.open}
         /* THE VISIBLE SEPARATORS ARE aria-hidden, WHICH REMOVED THE ONLY

@@ -38,8 +38,9 @@
 import { useEffect, useState } from 'react';
 import { needsViewer } from '../model/glyph';
 import type { AttentionItem, GlyphCount, PinFold, TrailerSummary } from '../model/records';
-import { foldPin, hardestGlyph, PIN_COMPACT_BUDGET, pinBudgetFor } from '../model/records';
+import { foldPin, PIN_COMPACT_BUDGET, pinBudgetFor } from '../model/records';
 import { plural } from '../model/text';
+import { AggregateGlyph } from '../primitives/Glyph';
 import type { Arming } from '../primitives/HoldToAct';
 import { AttentionCard } from './AttentionCard';
 import { AttentionCompact } from './AttentionCompact';
@@ -136,19 +137,20 @@ export function Pin({
     return () => window.removeEventListener('resize', measure);
   }, []);
   const fold = foldPin(items, { openId, page, budget });
-  /* The head glyph is the hardest glyph among the items the pin is holding —
-     derived through the same `glyphFor` as every other glyph in the app. A
-     hand-written ◆ over a pin holding a ✗ is a claim dressed as a fact, one
-     level up from the row. */
-  const headGlyph = hardestGlyph(items.filter((item) => needsViewer(item.state)));
+  /* The items the head glyph is about: what still needs this person. */
+  const owedItems = items.filter((item) => needsViewer(item.state));
 
   return (
     <section aria-label="Needs you" className={styles.pin} data-region="needs-you">
       <div className={styles.pinHead}>
-        {/* the head glyph is the hardest thing in the pin, derived — a
-            hand-written ◆ over a pin holding a ✗ is a claim dressed as a fact */}
-        <span aria-hidden="true" className={styles.pinHeadGlyph} data-pin-glyph="true">
-          {headGlyph ?? '·'}
+        {/* THE HEAD GLYPH IS THE HARDEST THING IN THE PIN, and it is a component
+            over a SET rather than a character over a count — see AggregateGlyph.
+            It used to be `{headGlyph ?? '·'}`, which is a hand-written glyph
+            behind a `??`: `·` means "routine, no attention owed", a claim about
+            items that are not there. An empty pin says so in words on the line
+            beside this, so the glyph renders nothing rather than borrowing one. */}
+        <span className={styles.pinHeadGlyph} data-pin-glyph="true">
+          <AggregateGlyph over={owedItems} />
         </span>
         <span className={`${styles.pinHeadLabel} atr-lbl`}>NEEDS YOU</span>
         <span className="atr-meta" data-pin-count="true">

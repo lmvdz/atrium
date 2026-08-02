@@ -19,8 +19,19 @@ export type SystemRowProps = {
 } & NoGlyph;
 
 export function SystemRow({ entry }: SystemRowProps) {
+  /* A CLASS FILTER LIFTS ROWS OF ITS CLASS, AND A SYSTEM ROW HAS ONE — round 10,
+     D3. Only message rows carried the lift/quiet treatment, so `3 CHANGES` could
+     not lift the parity-harness row that IS the change. Absent reads as
+     "matches", which is what an unfiltered feed is. */
+  const matched = entry.matchesFilter !== false;
   return (
-    <div className={`${styles.mrow} atr-rise-s`} data-row="system">
+    <div
+      className={[styles.mrow, 'atr-rise-s', matched ? styles.matched : styles.unmatched]
+        .filter(Boolean)
+        .join(' ')}
+      data-dimmed={matched ? undefined : 'true'}
+      data-row="system"
+    >
       {/* The clock is a caller string too — the same sink as the trailer's
           last-check time, which round 6 found and fixed one component over. */}
       <div className={styles.time}>{systemText(entry.at, 'SystemRow at')}</div>

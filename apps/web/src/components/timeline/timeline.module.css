@@ -45,6 +45,15 @@
   box-shadow: inset 2px 0 0 var(--amb2);
 }
 
+/* …AND THE LIFT IS ALSO A SENTENCE. Round 10, D3: what a filter did was carried
+   by the background above and the inset stripe beside it, and by nothing a
+   reader of the text could reach. The note sits at the top of the feed, in the
+   feed's own muted meta treatment, and states the class and the count. */
+.filterNote {
+  margin: 0;
+  padding: 4px 24px 8px;
+}
+
 /* --- the row ------------------------------------------------------------- */
 /* time · glyph · actor · text — the fixed column grid from CONVENTIONS.md, so
    the glyph column always lands in the same place and the epistemic status of a

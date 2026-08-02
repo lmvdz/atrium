@@ -16,11 +16,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import type { RoomFrameProps } from '../app/gallery/RoomFrame';
 import { RoomFrame } from '../app/gallery/RoomFrame';
+import { railFor } from '../app/gallery/rooms';
 import { Composer } from '../src/components';
 import type { ComposerBinding } from '../src/components/model';
 import { initials } from '../src/components/model';
 
 afterEach(cleanup);
+
+/* Built from the rooms' items — see attention.test.tsx. */
+const ROOMS = railFor(f.ROOM.name, f.ATTENTION);
 
 const FREE: ComposerBinding = { mode: 'free' };
 const FOOT = '↵ send · ⇧↵ newline';
@@ -29,7 +33,7 @@ const FOOT = '↵ send · ⇧↵ newline';
 const FRAME: RoomFrameProps = {
   messages: f.RECORDS,
   room: f.ROOM,
-  rooms: f.ROOMS,
+  rooms: ROOMS,
   humans: f.HUMANS,
   viewer: f.VIEWER,
   viewerNote: 'here · 4 owed to you',
@@ -38,7 +42,7 @@ const FRAME: RoomFrameProps = {
   trailer: f.TRAILER,
   lastCheck: '12:29',
   entries: f.FRESH_TIMELINE,
-  filtered: false,
+  filter: null,
   objectives: f.OBJECTIVES,
   objects: f.OBJECTS,
   updatedAt: '13:41',

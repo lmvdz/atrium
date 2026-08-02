@@ -31,9 +31,57 @@ export interface RoomSummary {
   readonly id: string;
   readonly name: string;
   readonly unseen: number;
-  /** how many items in that room are owed to the viewer */
-  readonly owed: number;
+  /**
+   * WHAT THAT ROOM STILL OWES THIS PERSON — the count and the glyph, from one
+   * derivation over one set. It was a bare `number`, and the rail drew the glyph
+   * beside it by hand; see `owedSummary`.
+   */
+  readonly owed: OwedSummary;
   readonly current: boolean;
+}
+
+declare const owedBrand: unique symbol;
+
+/**
+ * THE ONE AGGREGATE GLYPH THAT WAS NOT DERIVED — ROUND 10, D1.
+ *
+ * `Rail.tsx` printed `<span aria-hidden="true">◆</span>` beside `room.owed`, and
+ * `room.owed` was a COUNT. So the rail could not have derived the glyph if it had
+ * wanted to: the one surface that reports what is owed in a room you are not
+ * standing in was handed a number and left to invent the rest. On `/` it said
+ * amber-reversible over a set whose hardest member is an irreversible table drop;
+ * on `/gallery/pin/34` it said `◆34` beside a pin headed `✗`.
+ *
+ * The type is what fixes it. A room's owed attention is the ITEMS, and the count
+ * and the glyph are two readings of the same array — so both come out of
+ * `owedSummary` together and neither can be written down.
+ *
+ * Tagged rather than nullable: `kind: 'none'` has no state at all, so a component
+ * rendering the chip cannot reach for a glyph that is not there and cannot be
+ * handed a `null` it has to guess a fallback for. (An empty set has no state; a
+ * borrowed glyph for one is the same lie one level down.)
+ */
+export type OwedSummary =
+  | { readonly [owedBrand]: 'owed-summary'; readonly kind: 'none'; readonly count: 0 }
+  | {
+      readonly [owedBrand]: 'owed-summary';
+      readonly kind: 'some';
+      readonly count: number;
+      /** the hardest owed item's own state — the chip's glyph is `glyphFor` of it */
+      readonly state: EpistemicState;
+    };
+
+/**
+ * The only constructor. It filters to what actually still needs the viewer, so a
+ * caller cannot hand it a settled item and get a count that includes it.
+ */
+export function owedSummary(items: readonly { readonly state: EpistemicState }[]): OwedSummary {
+  const owed = items.filter((item) => needsViewer(item.state));
+  const hardest = hardestState(owed);
+  if (hardest === null) {
+    return { kind: 'none', count: 0 } as OwedSummary;
+  }
+  return { kind: 'some', count: owed.length, state: hardest } as OwedSummary;
 }
 
 export type Presence = 'here' | 'idle' | 'away';
@@ -375,11 +423,20 @@ export function settledForViewer(state: EpistemicState): EpistemicState {
  * viewer, and the destructive clause comes from `irreversible`.
  */
 export function needsTag(state: EpistemicState, viewer: string): RowTag {
-  const glyph = glyphFor(state);
-  return {
-    label: `${glyph}${state.irreversible ? ' destructive ·' : ''} needs ${viewer}`,
-    tone: 'needs',
-  };
+  return glyphTag(state, `${state.irreversible ? 'destructive · ' : ''}needs ${viewer}`, 'needs');
+}
+
+/**
+ * A ROW TAG THAT LEADS WITH A GLYPH, AND THE GLYPH IS THE ROW'S OWN.
+ *
+ * ROUND 10, D1's class in a fixture: `tag: { label: '✗ failed · needs an
+ * explanation' }` writes the character beside a state that also produces one.
+ * They agree today; nothing makes them. This is the only way to get a glyph into
+ * a tag, so the state the row renders and the character in its tag are one
+ * derivation.
+ */
+export function glyphTag(state: EpistemicState, clause: string, tone: RowTag['tone']): RowTag {
+  return { label: `${glyphFor(state)} ${clause}`, tone };
 }
 
 /**
@@ -424,6 +481,12 @@ export interface SystemEntry {
   /** system rows are always system voice — the type says so */
   readonly statement: SystemStatement;
   readonly state: EpistemicState;
+  /**
+   * Matches the active class filter. Optional because a system row nested inside
+   * a routine strip is never filtered on its own — the strip is the row the
+   * filter lifts. Absent reads as "matches", the same default a message row has.
+   */
+  readonly matchesFilter?: boolean;
 }
 
 export type AttentionClass = 'need' | 'change' | 'discussion' | 'routine';
@@ -455,9 +518,129 @@ export interface RoutineEntry {
   readonly open: boolean;
   /** the rows behind the fold — the count is counted, never asserted */
   readonly rows: readonly SystemEntry[];
+  /** matches the active class filter; a ROUTINE chip has to be able to lift this */
+  readonly matchesFilter?: boolean;
 }
 
 export type TimelineEntry = MessageEntry | SystemEntry | SinceYouLeftEntry | RoutineEntry;
+
+/* ---------------------------------------------------------------------------
+ * WHICH CLASS A FEED ROW IS — ROUND 10, D3.
+ *
+ * `fixtures.ts` decided a row matched the active filter with
+ *
+ *   options.filter === null ? true : entry.tag !== null && entry.tag.tone === 'needs'
+ *
+ * — `options.filter` decided WHETHER to filter and never WHAT to match, so all
+ * four chips lifted the same three rows. Someone asking what was routine while
+ * they were away was shown a destructive table drop as the answer, and the
+ * answer was carried by a background colour and an inset stripe, so nothing
+ * reading `textContent`, `aria-label` or `title` could see it.
+ *
+ * The class is derived from the row, here, once. The divider's chips count the
+ * rows this function classifies, and the filter matches on the same value — so a
+ * chip that says 8 lifts 8, by construction rather than by two lists agreeing.
+ *
+ * WHAT DECIDES IT:
+ *   need        the row is owed to the person reading. `needsViewer`, the same
+ *               predicate the pin, the rail and the lens count.
+ *   change      something moved: it failed, or it was verified, or a human
+ *               accepted it. "Meaningful changes to what the group understands."
+ *   routine     a SYSTEM row with no epistemic weight — a deploy line, a green
+ *               harness. A person saying something routine is not routine, it is
+ *               discussion; the distinction is who is talking, not the state,
+ *               because `TALK` is the state of both.
+ *   discussion  everything else: people talking, nothing settled.
+ *
+ * The divider itself has no class — it is the thing doing the counting.
+ * ------------------------------------------------------------------------- */
+export function attentionClassOf(entry: TimelineEntry): Maybe<AttentionClass> {
+  if (entry.type === 'since-you-left') return null;
+  /* A routine strip is not one row: it stands for the rows behind the fold, and
+     the chip counts those. Callers that need the number use `classCounts`. */
+  if (entry.type === 'routine') return 'routine';
+  const { state } = entry;
+  if (needsViewer(state)) return 'need';
+  if (['failed', 'verified', 'accepted'].includes(state.verification)) return 'change';
+  if (entry.type === 'system' && state.verification === 'routine') return 'routine';
+  return 'discussion';
+}
+
+/** How many rows of each class, counted from the rows themselves. */
+export function classCounts(
+  entries: readonly TimelineEntry[],
+): Readonly<Record<AttentionClass, number>> {
+  const counts: Record<AttentionClass, number> = {
+    need: 0,
+    change: 0,
+    discussion: 0,
+    routine: 0,
+  };
+  for (const entry of entries) {
+    const attentionClass = attentionClassOf(entry);
+    if (attentionClass === null) continue;
+    /* The strip counts as the rows it swallowed — "8 ROUTINE" and what the peek
+       shows are the same eight, which is the rule `RoutineEntry` already had for
+       its own summary and did not have for the divider's chip. */
+    counts[attentionClass] += entry.type === 'routine' ? entry.rows.length : 1;
+  }
+  return counts;
+}
+
+/** Rows the viewer wrote — never counted back to them as unseen. */
+export function ownRowsIn(entries: readonly TimelineEntry[]): number {
+  return entries.filter(
+    (entry) => entry.type === 'message' && isAuthored(entry) && entry.fromViewer,
+  ).length;
+}
+
+/**
+ * THE DIVIDER, DERIVED FROM THE ROWS IT SITS ABOVE.
+ *
+ * Round 10: `counts: { need: 4, change: 3, discussion: 6, routine: 8 }` and
+ * `total: 21` were written down beside a feed that holds neither those rows nor
+ * that many. `SinceYouLeftDivider`'s own docblock says "the counts are counted,
+ * never asserted"; they were asserted, one file over.
+ */
+export function sinceYouLeft(input: {
+  readonly id: string;
+  readonly label: string;
+  readonly window: Maybe<string>;
+  readonly entries: readonly TimelineEntry[];
+  readonly seen: boolean;
+  readonly seenAt: Maybe<string>;
+  readonly activeFilter: Maybe<AttentionClass>;
+}): SinceYouLeftEntry {
+  const counts = classCounts(input.entries);
+  return {
+    type: 'since-you-left',
+    id: input.id,
+    label: input.label,
+    window: input.window,
+    counts,
+    total: counts.need + counts.change + counts.discussion + counts.routine,
+    ownRows: ownRowsIn(input.entries),
+    seen: input.seen,
+    seenAt: input.seenAt,
+    activeFilter: input.activeFilter,
+  };
+}
+
+/**
+ * THE FILTER, APPLIED. A chip lifts the rows of ITS class and nothing else; the
+ * rest are quieted, never hidden (`Timeline`'s own rule).
+ */
+export function withFilter(
+  entries: readonly TimelineEntry[],
+  filter: Maybe<AttentionClass>,
+): readonly TimelineEntry[] {
+  if (filter === null) return entries;
+  return entries.map((entry) =>
+    entry.type === 'since-you-left'
+      ? entry
+      : { ...entry, matchesFilter: attentionClassOf(entry) === filter },
+  );
+}
 
 /* --- attention ----------------------------------------------------------- */
 
@@ -784,9 +967,35 @@ export type ComposerBinding =
       readonly itemId: string;
       readonly itemLabel: string;
       readonly objective: string;
+      /**
+       * THE BOUND ITEM'S OWN STATE — ROUND 10, D1.
+       *
+       * `Composer` printed a literal `◆` in the ANSWERING banner. On `/` at rest
+       * the bound item is X1, which is `irreversible` and wears `■` on the pin
+       * card, in the feed tag, in the lens and in its receipt: one banner saying
+       * amber-reversible about the one decision on the page that is neither. The
+       * banner has the item's state now and derives its glyph like every other
+       * surface, and `boundTo` is the only way to build this arm — so the label
+       * and the glyph are read off one item rather than typed in beside it.
+       */
+      readonly state: EpistemicState;
     }
   /** the banner names whoever the quotation says wrote it, and nobody else */
   | { readonly mode: 'replying'; readonly to: Quotation };
+
+/**
+ * The only constructor for a bound composer. The id, the label and the state all
+ * come off ONE item, so a banner cannot name one thing and glyph another.
+ */
+export function boundTo(item: AttentionItem, objective: string): ComposerBinding {
+  return {
+    mode: 'bound',
+    itemId: item.id,
+    itemLabel: item.title,
+    objective,
+    state: item.state,
+  };
+}
 
 /* --- derivations --------------------------------------------------------- */
 
@@ -831,13 +1040,34 @@ export function glyphCounts(
 }
 
 /**
- * The glyph that stands for a whole group: the hardest one in it. `null` when
- * the group is empty — an empty group has no state, and a component that has to
- * render something for nothing should say so in words, not in a borrowed glyph.
+ * THE STATE THAT STANDS FOR A WHOLE GROUP: the hardest member's own state.
+ *
+ * ROUND 10. `hardestGlyph` returned the glyph, which is enough to PRINT a
+ * character and not enough to render one: `<Glyph>` takes a state and derives
+ * the glyph, the tone and the tooltip from it together. Handing a component the
+ * character is what leaves it choosing a colour and a title by hand beside a
+ * glyph it did not derive — which is D1's shape one step in from the rail.
+ *
+ * `null` when the group is empty. An empty group has no state, and a component
+ * that has to render something for nothing says so in words, not in a borrowed
+ * glyph.
  */
+export function hardestState(
+  items: readonly { readonly state: EpistemicState }[],
+): Maybe<EpistemicState> {
+  let best: EpistemicState | null = null;
+  for (const item of items) {
+    if (best === null || GLYPH_HARDNESS[glyphFor(item.state)] < GLYPH_HARDNESS[glyphFor(best)]) {
+      best = item.state;
+    }
+  }
+  return best;
+}
+
+/** The glyph that stands for a whole group: the hardest one in it. */
 export function hardestGlyph(items: readonly { readonly state: EpistemicState }[]): Maybe<Glyph> {
-  const counts = glyphCounts(items);
-  return counts[0]?.glyph ?? null;
+  const state = hardestState(items);
+  return state === null ? null : glyphFor(state);
 }
 
 /* --- the pin's own bound ------------------------------------------------- */
@@ -1083,11 +1313,32 @@ export interface TrailerSummary {
    * is what makes them one.
    */
   readonly leadsWith: 'failures' | 'overdue' | 'unverified' | 'open' | 'owed' | 'clear';
+  /* ---------------------------------------------------------------------------
+   * TWO SCOPES, AND EACH CLAUSE NAMES ITS OWN — ROUND 10, D4.
+   *
+   * The trailer read "✗ 1 failure outside your list — 2 objectives clear of you ·
+   * 2 commitments, 0 overdue · last check 12:29". `commitments` and `failures`
+   * counted the objects OUTSIDE the pin; `overdue` was handed in as a room-wide
+   * number; `objectivesClear` is about the pin. Three scopes in one sentence,
+   * one of them stated. So "0 overdue" sat 300px from a lens row reading
+   * "overdue 16h", and on `/gallery/pin/60` "0 failures" sat beside a lens head
+   * reading "15 failures", and both were true of what they counted and unreadable
+   * as such.
+   *
+   * The fields below are grouped by scope and the component renders them as two
+   * named clauses. `overdue` is now counted over the same objects `commitments`
+   * and `failures` are, from a register of WHICH objects are late — the only way
+   * for the three numbers in one clause to be about one set.
+   * ------------------------------------------------------------------------- */
+  /** YOUR LIST: objectives with nothing in them owed to you */
   readonly objectivesClear: number;
   readonly objectivesTotal: number;
+  /** OUTSIDE YOUR LIST: the objects that do not need you, counted three ways */
   readonly commitments: number;
   readonly overdue: number;
   readonly failures: number;
+  /** how many objects "outside your list" is, so the clause can be checked */
+  readonly outside: number;
 }
 
 /* No `lastCheck`: round 1 caught it being accepted and never read. A parameter
@@ -1097,16 +1348,26 @@ export interface TrailerSummary {
 export function trailerFor(input: {
   readonly objects: readonly StateObject[];
   readonly objectives: readonly ObjectiveRecord[];
-  readonly overdue: number;
+  /**
+   * WHICH objects are late, by id — not how many.
+   *
+   * ROUND 10, D4: it was a `number` computed room-wide, printed inside a clause
+   * whose other two numbers count the objects outside your list. A count cannot
+   * be re-scoped; a register of ids can, and this one is intersected with the
+   * same `rest` the clause's neighbours are counted over.
+   */
+  readonly overdue: readonly string[];
 }): TrailerSummary {
   const owed = input.objects.filter((o) => needsViewer(o.state));
   const owedIds = new Set(owed.map((o) => o.id));
   const rest = input.objects.filter((o) => !owedIds.has(o.id));
+  const late = new Set(input.overdue);
 
   const objectivesClear = input.objectives.filter(
     (ob) => !owed.some((o) => o.objectives.includes(ob.id)),
   ).length;
   const commitments = rest.filter((o) => o.kind === 'commitment').length;
+  const overdue = rest.filter((o) => late.has(o.id)).length;
   const failures = rest.filter((o) => o.state.verification === 'failed').length;
   const unverified = rest.filter((o) =>
     ['proposed', 'unverified', 'self_reported'].includes(o.state.verification),
@@ -1125,10 +1386,14 @@ export function trailerFor(input: {
     objectivesClear,
     objectivesTotal: input.objectives.length,
     commitments,
-    overdue: input.overdue,
+    overdue,
     failures,
+    outside: rest.length,
   });
 
+  /* EVERY LEAD IS ABOUT THE SAME SET AS THE CLAUSE UNDER IT, and says so. The
+     r9 leads counted `rest` and only the failures arm mentioned it, which is how
+     "N things are late" read as a claim about the room. */
   if (failures > 0) {
     return summary(
       'failed',
@@ -1137,11 +1402,11 @@ export function trailerFor(input: {
       'failures',
     );
   }
-  if (input.overdue > 0) {
+  if (overdue > 0) {
     return summary(
       'proposed',
       'commitment',
-      `${input.overdue} thing${input.overdue === 1 ? ' is' : 's are'} late, none failed`,
+      `${overdue} thing${overdue === 1 ? ' is' : 's are'} late outside your list, none failed`,
       'overdue',
     );
   }
@@ -1149,7 +1414,7 @@ export function trailerFor(input: {
     return summary(
       'self_reported',
       'claim',
-      `${unverified} of ${rest.length} still unverified`,
+      `${unverified} of the ${rest.length} outside your list still unverified`,
       'unverified',
     );
   }
@@ -1157,12 +1422,12 @@ export function trailerFor(input: {
     return summary(
       'open',
       'question',
-      `${openQuestions} question${openQuestions === 1 ? '' : 's'} still open`,
+      `${openQuestions} question${openQuestions === 1 ? '' : 's'} outside your list still open`,
       'open',
     );
   }
   if (owed.length > 0) {
     return summary('proposed', 'decision', 'the list above is all of it', 'owed');
   }
-  return summary('verified', 'claim', 'everything else is verified', 'clear');
+  return summary('verified', 'claim', 'everything outside your list is verified', 'clear');
 }

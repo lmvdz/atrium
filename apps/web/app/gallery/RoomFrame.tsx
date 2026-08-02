@@ -42,6 +42,7 @@ import type {
   ComposerBinding,
   CrossRoomJumpRecord,
   HumanSummary,
+  Maybe,
   MessageRecord,
   ObjectiveRecord,
   ReceiptRecord,
@@ -52,6 +53,7 @@ import type {
   TimelineEntry,
   TrailerSummary,
 } from '../../src/components/model';
+import { needsViewer } from '../../src/components/model';
 import { ThemeToggle } from '../theme-toggle';
 import { surfaces } from './fixtures';
 
@@ -145,7 +147,8 @@ export interface RoomFrameProps {
   readonly trailer: TrailerSummary;
   readonly lastCheck: string;
   readonly entries: readonly TimelineEntry[];
-  readonly filtered: boolean;
+  /** which class is lifted, or null. Round 10, D3 — see `TimelineProps.filter`. */
+  readonly filter: Maybe<AttentionClass>;
   readonly objectives: readonly ObjectiveRecord[];
   readonly objects: readonly StateObject[];
   readonly updatedAt: string;
@@ -251,7 +254,16 @@ function Frame(props: RoomFrameProps) {
                 key="surfaces"
                 focused={props.focused}
                 onFocus={on.onFocusSurface}
-                surfaces={surfaces(props.attention.length, props.objects.length)}
+                /* NOT `props.attention.length` — round 10, D5. The pin's array
+                   holds acted-on items now (they stop needing you rather than
+                   leaving), so the OWED count is `needsViewer` over it, which is
+                   the same predicate `foldPin`, the rail and the lens count. A
+                   length is the one reading of that array that stopped being
+                   true the moment an act became a state change. */
+                surfaces={surfaces(
+                  props.attention.filter((item) => needsViewer(item.state)).length,
+                  props.objects.length,
+                )}
               />,
             )}
           />
@@ -281,7 +293,7 @@ function Frame(props: RoomFrameProps) {
           />
           <Timeline
             entries={props.entries}
-            filtered={props.filtered}
+            filter={props.filter}
             onFilter={on.onFilter}
             onMarkSeen={on.onMarkSeen}
             onOpenTag={on.onOpenTag}

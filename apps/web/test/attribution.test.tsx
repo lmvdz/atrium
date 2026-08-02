@@ -380,9 +380,62 @@ describe('the message row is discriminated on origin', () => {
      markup. */
   it('the rendered actor cell cites the message it came from', () => {
     const entry = messageEntry(priya, { state: lars_state() });
-    const { container } = renderWith(RECORDS, <TimelineRow entry={entry} />);
+    /* IN THE ROOM THE RECORD SAYS IT IS IN. This `priya` fixture carries
+       `room: 'identity-service'` and the harness stands in #users-migration by
+       default; since round 10 a feed row refuses to render a record from another
+       room (D2), so a test about ATTRIBUTION has to stand where the words were
+       said. The refusal itself is asserted in `the feed is one room's
+       conversation` below. */
+    const { container } = renderWith(RECORDS, <TimelineRow entry={entry} />, 'identity-service');
     const cell = container.querySelector('[data-attribution="m10"]');
     expect(cell?.textContent).toBe('priya');
+  });
+
+  /* ---------------------------------------------------------------------------
+   * ROUND 10, D2 — A FEED IS ONE ROOM'S CONVERSATION.
+   *
+   * `/gallery` frame 05 rendered a head, a lens, a composer and a rail chip all
+   * saying `#identity-service` over EIGHT `room: 'users-migration'` records, so a
+   * reader came away believing priya said "Staging backfill ran clean — 4.2M rows
+   * in 38 minutes" in #identity-service. r8's D3 taught three boundaries to SAY
+   * where a cited message is; r9 made the disagreement visible. Neither prevented
+   * it, because a frame is assembled prop by prop and `room` can be overridden
+   * independently of `entries`.
+   *
+   * CATCHES: deleting `refuseElsewhere` from either arm of `TimelineRow`, and
+   * anything that reassembles a frame with a head from one room and a feed from
+   * another — the gallery's own frame is asserted below in gallery.spec.ts, and
+   * this is the unit that makes it unrenderable rather than merely absent.
+   * ------------------------------------------------------------------------- */
+  it('a feed refuses a row whose record is from another room', () => {
+    const entry = messageEntry(priya, { state: lars_state() });
+    expect(() => renderWith(RECORDS, <TimelineRow entry={entry} />, 'users-migration')).toThrow(
+      /is a message in #identity-service, and this feed is #users-migration/,
+    );
+  });
+
+  /* BOTH DIRECTIONS, AND ON BOTH ARMS. A chosen row has no actor to forge and
+     could still be filed into the wrong room's feed; and a record that says
+     nothing about its room is not a record that says it is elsewhere. */
+  it('the refusal covers the page-authored arm, and passes an unrecorded room', () => {
+    const chosenRow = messageEntry(
+      { ...chosen, room: 'identity-service' },
+      { state: lars_state() },
+    );
+    expect(() =>
+      renderWith(
+        [{ ...chosen, room: 'identity-service' }],
+        <TimelineRow entry={chosenRow} />,
+        'users-migration',
+      ),
+    ).toThrow(/is a message in #identity-service/);
+
+    cleanup();
+    /* `lars` (m21) carries no `room`; absence is a fact about the register, not a
+       claim that the message is elsewhere. */
+    const local = messageEntry(lars, { state: lars_state() });
+    const { container } = renderWith(RECORDS, <TimelineRow entry={local} />, 'anywhere-at-all');
+    expect(container.querySelector('[data-attribution="m21"]')?.textContent).toBe('lars');
   });
 
   /* CATCHES: the row rendering a name with no record behind it. Every rendered
@@ -598,7 +651,7 @@ describe('the forged entry, from the round-3 receipt', () => {
      above but also passes on a genuine row. An honest row must still render. */
   it('an honest row built the honest way still renders', () => {
     const entry = messageEntry(priya, { state: lars_state() });
-    const { container } = renderWith(RECORDS, <TimelineRow entry={entry} />);
+    const { container } = renderWith(RECORDS, <TimelineRow entry={entry} />, 'identity-service');
     expect(container.querySelector('[data-row-body]')?.textContent).toBe(priya.text);
     expect(container.querySelector('[data-attribution]')?.textContent).toBe('priya');
   });

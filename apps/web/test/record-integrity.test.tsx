@@ -64,7 +64,7 @@ describe('no optional field reaches a rendered string unguarded', () => {
       f.timeline({ seen: true, filter: 'need', routineOpen: true }),
       f.timeline({ seen: true, filter: null, routineOpen: false, targetId: 'm10' }),
     ]) {
-      const { container, unmount } = render(<Timeline entries={entries} filtered={false} />);
+      const { container, unmount } = render(<Timeline entries={entries} filter={null} />);
       expect(container.textContent ?? '').not.toMatch(LEAKED);
       unmount();
     }
@@ -110,7 +110,7 @@ describe('no synthesized speech, checked against the rendered DOM', () => {
     const { container } = render(
       <Timeline
         entries={f.timeline({ seen: false, filter: null, routineOpen: true })}
-        filtered={false}
+        filter={null}
       />,
     );
     expect(strayQuotes(container)).toEqual([]);

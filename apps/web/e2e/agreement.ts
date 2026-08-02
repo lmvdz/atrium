@@ -50,6 +50,36 @@
  * resolves each to the nearest labelling string, and asserts that the set it
  * cannot resolve IS EMPTY. The rail's owed badge — literal text `◆4` — reaches
  * the comparison through that path.
+ *
+ * ROUND 10 — THE ANSWER WITH NO WORD AND NO DIGIT IN IT.
+ *
+ * r9's own verdict on this file was right and incomplete: "the check does what it
+ * says — it is the enumeration of questions that is short, not the mechanism". It
+ * ran verbatim over five states with 0 contradictions while four rendered
+ * falsehoods were on screen. Three of its named blind spots are closed here:
+ *
+ *   1. A GLYPH. It is a character with no letter and no digit, so it was neither
+ *      a form match nor a wordless count and never entered the comparison. r9's
+ *      `/` had a rail chip reading `◆` forty pixels from a pin head reading `■`
+ *      about the same four items. Bare glyphs are now enumerated, resolved to a
+ *      question by `questionsNear`, and compared as `glyph:<question>` — and the
+ *      "owed:here is owed:#<the room on screen>" unification covers the glyph
+ *      pair as well as the count pair, which is what makes those two land on one
+ *      question.
+ *   2. `failures` / `overdue` / `commitments` HAD NO FORM, so "0 failures" beside
+ *      "15 failures" was silence. Both are forms now, and they are DIFFERENT
+ *      questions because the two sentences count different sets — which is only
+ *      legible because r10's trailer names its scopes (D4).
+ *   3. A FILTER MATCH WAS BACKGROUND COLOUR AND AN INSET STRIPE. The feed states
+ *      what it lifted, in words, at the top of the region (D3), so what a filter
+ *      did is now inside `textContent` rather than only in a computed style.
+ *
+ * WHAT IS STILL OUTSIDE IT, measured rather than asserted: `unresolvedGlyphs`
+ * reports every bare glyph that resolved to no question — the composer's
+ * ANSWERING banner is the standing member, because its glyph sits beside an item
+ * LABEL and no count, and no form matches near it. The `not-room:` rule still
+ * only fires when a room ON SCREEN is also named elsewhere. And this check still
+ * says nothing about agreement with the RECORD, by design.
  * ------------------------------------------------------------------------- */
 
 /** One thing an element says, parsed into the question it answers. */
@@ -92,6 +122,21 @@ export interface AgreementReport {
   /** wordless counts found, and how many of them produced a claim */
   readonly wordlessCounts: number;
   readonly wordlessClaims: number;
+  /**
+   * GLYPH MARKS FOUND, AND HOW MANY REACHED THE COMPARISON — round 10.
+   *
+   * The r9 check's own blind spot, in its own words: "a glyph is a character with
+   * no letter and no digit, so it is neither a form match nor a wordless count
+   * and never enters the comparison". `glyphMarks` is every bare glyph on screen;
+   * `glyphClaims` is how many of them resolved to a question something else also
+   * answers. The DIFFERENCE is the part of the vocabulary this check still cannot
+   * compare, reported as a number rather than described in a comment — so the
+   * next round is told the size of the gap instead of discovering it.
+   */
+  readonly glyphMarks: number;
+  readonly glyphClaims: number;
+  /** the bare glyphs that resolved to no question at all, for that difference */
+  readonly unresolvedGlyphs: readonly { readonly text: string; readonly selector: string }[];
 }
 
 /**
@@ -179,7 +224,49 @@ export const AGREEMENT = String.raw`((options) => {
     { re: /source in #([\w-]+) →/, q: (m) => 'not-room:' + m[1], a: () => 'elsewhere' },
     { re: /jump to source in #([\w-]+) →/, q: (m) => 'not-room:' + m[1], a: () => 'elsewhere' },
     { re: /\(in #([\w-]+)\)/, q: (m) => 'not-room:' + m[1], a: () => 'elsewhere' },
+
+    /* ---------------------------------------------------------------------
+     * THE COUNTS THAT ARE NOT ABOUT OWED ATTENTION — round 10, D4.
+     *
+     * The r9 check had no form for 'failures', 'overdue' or 'commitments', so
+     * "0 failures" in the trailer beside "15 failures" in the lens head was
+     * SILENCE. They are two different questions — the trailer counts the objects
+     * outside your list, the lens counts the room — and until r10 neither
+     * sentence said which, so a reader had no way to tell a scope from a
+     * contradiction. Each clause names its scope now and each scope is its own
+     * question here, which is what makes the two numbers comparable to their own
+     * kind and not to each other.
+     * ------------------------------------------------------------------- */
+    { re: /outside your list, of (\d+) objects?:/, q: () => 'objects:outside', a: (m) => m[1] },
+    { re: /outside your list, of \d+ objects?:.*?(\d+) commitments?/, q: () => 'commitments:outside', a: (m) => m[1] },
+    { re: /outside your list, of \d+ objects?:.*?(\d+) late/, q: () => 'late:outside', a: (m) => m[1] },
+    { re: /outside your list, of \d+ objects?:.*?(\d+) failures?/, q: () => 'failures:outside', a: (m) => m[1] },
+    /* the same three, said by the trailer's LEAD instead of by its clause — the
+       clause drops whichever one the lead is already about (round 7) */
+    { re: /(\d+) failures? outside your list/, q: () => 'failures:outside', a: (m) => m[1] },
+    { re: /(\d+) things? (?:is|are) late outside your list/, q: () => 'late:outside', a: (m) => m[1] },
+    { re: /(\d+) of the (\d+) outside your list still unverified/, q: () => 'objects:outside', a: (m) => m[2] },
+    { re: /your list: (\d+) of (\d+) objectives clear/, q: () => 'objectives:clear', a: (m) => m[1] + '/' + m[2] },
+    /* …and the lens head, which counts the ROOM. Anchored on the shape of the
+       whole line rather than on the word 'failure' alone: a bare '(\d+) failures'
+       matches the trailer too, and reading the two as one question is exactly the
+       false contradiction that would make this check noise. */
+    { re: /(\d+) objects? · \d+ settled/, q: () => 'objects:room', a: (m) => m[1] },
+    { re: /(\d+) objects? · \d+ settled.*?· (\d+) failures?/, q: () => 'failures:room', a: (m) => m[2] },
   ];
+
+  /* ---------------------------------------------------------------------
+   * THE VOCABULARY, AS CHARACTERS — round 10, D1.
+   *
+   * The seven glyphs. A glyph is the one thing on this page that answers a
+   * question with no letter and no digit in it, which is precisely why the r9
+   * check could not see one: it was neither a form match nor a wordless count.
+   * Two glyphs about one set that disagree is the contradiction this check
+   * exists to find, and on r9's route / the rail chip said '◆' over the four items
+   * the pin head said '■' about.
+   * ------------------------------------------------------------------- */
+  const GLYPHS = ['✓', '~', '?', '·', '◆', '■', '✗'];
+  const isGlyphMark = (s) => s.length === 1 && GLYPHS.indexOf(s) !== -1;
 
   /* ---------------------------------------------------------------------
    * FORMS THAT LOOK LIKE THE OWED QUESTION AND ARE NOT. Enumerated rather than
@@ -233,10 +320,13 @@ export const AGREEMENT = String.raw`((options) => {
   const contradictions = [];
   const unparsed = [];
   const unlabelled = [];
+  const unresolvedGlyphs = [];
   let elements = 0;
   let strings = 0;
   let wordlessCounts = 0;
   let wordlessClaims = 0;
+  let glyphMarks = 0;
+  let glyphClaims = 0;
 
   const readString = (text, el, via) => {
     if (text === null || text === undefined) return 0;
@@ -288,6 +378,64 @@ export const AGREEMENT = String.raw`((options) => {
       node = node.parentElement;
     }
     return null;
+  };
+
+  /* ---------------------------------------------------------------------
+   * WHICH QUESTION A BARE GLYPH IS ABOUT.
+   *
+   * A glyph carries no words, so unlike every other claim on the page it cannot
+   * say what it is about — the surrounding element has to. This walks the glyph's
+   * own element and up to three ancestors, running the SAME FORMS over each
+   * one's text and announced attributes, and stops at the first level that
+   * yields any question. Bounded, and it stops at the first hit, because <body>
+   * matches everything and an unbounded walk would attach every glyph on the
+   * page to every question on it.
+   *
+   * Measured against the two surfaces r9 disagreed on:
+   *   the rail chip   '<span aria-hidden>◆</span>' inside a pill whose 'title' is
+   *                   "4 items in #users-migration need you" → owed:#users-migration
+   *   the pin head    '<span data-pin-glyph>■</span>' inside '.pinHead', whose
+   *                   text contains "4 items · hardest first"  → owed:here
+   * and 'owed:here == owed:#<room on screen>' is already unified below, so the
+   * two glyphs land on one question and r9's screen reports a contradiction.
+   *
+   * WHAT IT STILL CANNOT REACH, measured rather than guessed: see
+   * 'unresolvedGlyphs' in the report. The composer's ANSWERING banner is the
+   * known one — its glyph sits beside an item LABEL and no count, so no form
+   * matches near it, and nothing else on screen states that item's glyph in a
+   * form this check can parse. That glyph is held by the source sweep
+   * ('test/glyph-source.test.ts') and by the render mutation
+   * ('test/glyph-render.test.tsx') instead.
+   * ------------------------------------------------------------------- */
+  const questionsNear = (el) => {
+    let node = el;
+    /* THREE LEVELS, AND THE BOUND IS THE MEASUREMENT, NOT A ROUND NUMBER. A glyph
+       mark is adjacent to what it labels: the rail chip's glyph is one level
+       inside the pill that carries the count; the pin head's is two inside the
+       head line that does. At FOUR the walk reaches 'main', whose text holds the
+       pin AND the feed AND the composer — measured, that attached every feed
+       row's per-row glyph to the room's owed count and reported four
+       contradictions on a page that had none. A per-row glyph is about one row
+       and belongs in 'unresolvedGlyphs', which is where it lands now. */
+    for (let i = 0; node && i < 3; i += 1) {
+      const before = claims.length;
+      const strings = [allText(node), node.getAttribute('aria-label'), node.getAttribute('title')];
+      for (const value of strings) {
+        if (value === null || value === undefined) continue;
+        const text = String(value).replace(/\s+/g, ' ').trim();
+        if (text.length === 0) continue;
+        for (const form of FORMS) {
+          const m = text.match(form.re);
+          if (m !== null) claims.push({ question: form.q(m), answer: String(form.a(m)), text: text.slice(0, 160), selector: describe(node), via: 'glyph-scope' });
+        }
+      }
+      if (claims.length > before) {
+        const found = claims.splice(before, claims.length - before);
+        return found.map((c) => c.question);
+      }
+      node = node.parentElement;
+    }
+    return [];
   };
 
   /* CLAIMS THAT NEED THE ELEMENT AND NOT ONLY THE STRING.
@@ -349,6 +497,26 @@ export const AGREEMENT = String.raw`((options) => {
         readString(label, el, 'wordless-count');
         if (claims.length > before) wordlessClaims += 1;
       }
+
+      /* THE ANSWER WITH NO WORD AND NO DIGIT IN IT — the glyph. */
+      if (isGlyphMark(own)) {
+        glyphMarks += 1;
+        const questions = questionsNear(el);
+        if (questions.length === 0) {
+          unresolvedGlyphs.push({ text: own, selector: describe(el) });
+        } else {
+          glyphClaims += 1;
+          for (const question of questions) {
+            claims.push({
+              question: 'glyph:' + question,
+              answer: own,
+              text: own,
+              selector: describe(el),
+              via: 'glyph',
+            });
+          }
+        }
+      }
     }
 
     /* ---------------------------------------------------------------------
@@ -382,16 +550,23 @@ export const AGREEMENT = String.raw`((options) => {
     );
     if (roomAnswers.length === 1) {
       const here = roomAnswers[0];
-      const scoped = byQuestion.get('owed:#' + here) || [];
-      const local = byQuestion.get('owed:here') || [];
-      const answers = Array.from(new Set(scoped.concat(local).map((c) => c.answer)));
-      if (answers.length > 1) {
-        contradictions.push({
-          screen: rootIndex,
-          question: 'owed:here == owed:#' + here,
-          answers: answers,
-          claims: scoped.concat(local).map((c) => ({ answer: c.answer, text: c.text, selector: c.selector })),
-        });
+      /* THE GLYPH HALF OF THE SAME UNIFICATION — round 10, D1. "how many things
+         here need you" and "how many things in #<the room on screen> need you"
+         are one question, and so are the two GLYPHS that stand for those two
+         sets. r9's rail chip answered '◆' and its pin head answered '■' about
+         the same four items, forty pixels apart. */
+      for (const prefix of ['', 'glyph:']) {
+        const scoped = byQuestion.get(prefix + 'owed:#' + here) || [];
+        const local = byQuestion.get(prefix + 'owed:here') || [];
+        const answers = Array.from(new Set(scoped.concat(local).map((c) => c.answer)));
+        if (answers.length > 1) {
+          contradictions.push({
+            screen: rootIndex,
+            question: prefix + 'owed:here == ' + prefix + 'owed:#' + here,
+            answers: answers,
+            claims: scoped.concat(local).map((c) => ({ answer: c.answer, text: c.text, selector: c.selector })),
+          });
+        }
       }
       const notHere = byQuestion.get('not-room:' + here) || [];
       if (notHere.length > 0) {
@@ -416,6 +591,9 @@ export const AGREEMENT = String.raw`((options) => {
     unparsed: unparsed,
     wordlessCounts: wordlessCounts,
     wordlessClaims: wordlessClaims,
+    glyphMarks: glyphMarks,
+    glyphClaims: glyphClaims,
+    unresolvedGlyphs: unresolvedGlyphs,
   };
 })`;
 

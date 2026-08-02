@@ -503,9 +503,14 @@ const LEDGER = [
     test: 'test/attribution.test.tsx',
   },
   {
+    /* ROUND 10: the anchor was `if (ledger === null)`, and r9 moved the refusal
+       into `useRegister`, where the value is the whole register. A stale anchor
+       is a guard nobody is running — `test/harness-integrity.test.ts` now asserts
+       every anchor in this ledger still matches its file exactly once, so the
+       next one is a red gate rather than a discovery. */
     name: 'a render boundary with no record ledger degrades instead of refusing',
     file: 'src/components/model/ledger.tsx',
-    find: '  if (ledger === null) {\n    throw new Error(',
+    find: '  if (register === null) {\n    throw new Error(',
     replace: '  if (false) {\n    throw new Error(',
     test: 'test/attribution.test.tsx',
   },
@@ -851,7 +856,7 @@ const LEDGER = [
   {
     name: 'nesting a second record register silently shadows the first',
     file: 'src/components/model/ledger.tsx',
-    find: '  if (outer !== null && outer !== ledger) {',
+    find: '  if (outer !== null && outer.ledger !== ledger) {',
     replace: '  if (false) {',
     test: 'test/attribution.test.tsx',
   },
@@ -1309,16 +1314,16 @@ const LEDGER = [
   {
     name: 'the room chip goes back to changing the head and nothing else',
     file: 'app/RoomSession.tsx',
-    find: '  const view = useMemo(() => roomView(roomId), [roomId]);',
+    find: '  const view = useMemo(() => sessionView(roomId, actedOn), [roomId, actedOn]);',
     replace:
-      "  const view = useMemo(() => ({ ...roomView('r1'), room: roomView(roomId).room }), [roomId]);",
+      "  const view = useMemo(() => ({ ...sessionView('r1', actedOn), room: sessionView(roomId, actedOn).room }), [roomId, actedOn]);",
     test: 'test/session.test.tsx',
   },
   {
     name: 'the rail stops following the room the head names',
     file: 'app/RoomSession.tsx',
-    find: '      rooms={railRooms(roomId)}',
-    replace: "      rooms={railRooms('r1')}",
+    find: '      rooms={view.rooms}',
+    replace: "      rooms={sessionView('r1', actedOn).rooms}",
     test: 'test/session.test.tsx',
   },
 
@@ -1417,8 +1422,11 @@ const LEDGER = [
   /* D5 — the file set, the fourth incomplete input set in this repo. */
   {
     name: 'the sweep’s file list goes back to two named directories',
-    file: 'test/printed-strings.test.tsx',
-    find: 'const SOURCES: readonly string[] = appSources();',
+    /* The enumeration moved to `test/app-sources.ts` in round 10, when the glyph
+       sweep became its second consumer and a denominator with two copies became
+       the r8 defect one level up. */
+    file: 'test/app-sources.ts',
+    find: 'export const SOURCES: readonly string[] = appSources();',
     replace:
       "const SOURCES: readonly string[] = appSources().filter((p) => p.includes('/src/components/') || p.includes('/app/'));",
     test: 'test/printed-strings.test.tsx',

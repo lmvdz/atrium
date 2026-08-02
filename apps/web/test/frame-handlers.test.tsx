@@ -31,8 +31,12 @@ import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { RoomFrame } from '../app/gallery/RoomFrame';
+import { railFor } from '../app/gallery/rooms';
 
 afterEach(cleanup);
+
+/* Built from the rooms' items — see attention.test.tsx. */
+const ROOMS = railFor(f.ROOM.name, f.ATTENTION);
 
 function find(relative: string): string {
   let dir = process.cwd();
@@ -484,7 +488,7 @@ describe('the three seams round 6 found dead are live', () => {
         binding={f.FREE}
         composerNote="note"
         entries={f.QUIET_TIMELINE}
-        filtered={false}
+        filter={null}
         focused="conversation"
         handlers={handlers}
         humans={f.HUMANS}
@@ -493,7 +497,7 @@ describe('the three seams round 6 found dead are live', () => {
         objectives={f.OBJECTIVES}
         objects={f.OBJECTS}
         room={f.ROOM}
-        rooms={f.ROOMS}
+        rooms={ROOMS}
         trailer={f.TRAILER}
         updatedAt="13:41"
         viewer={f.VIEWER}
@@ -508,7 +512,7 @@ describe('the three seams round 6 found dead are live', () => {
     const chip = container.querySelector('nav button');
     expect(chip, 'the rail renders no room chips').not.toBeNull();
     fireEvent.click(chip as Element);
-    expect(onSelectRoom).toHaveBeenCalledWith(f.ROOMS[0]?.id);
+    expect(onSelectRoom).toHaveBeenCalledWith(ROOMS[0]?.id);
   });
 
   it('an objective triangle toggles the objective that is collapsed', () => {

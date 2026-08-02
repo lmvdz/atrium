@@ -3,6 +3,7 @@ import * as f from './fixtures';
 import styles from './gallery.module.css';
 import type { RoomFrameProps } from './RoomFrame';
 import { RoomFrame } from './RoomFrame';
+import { RECORDS, railFor, roomsQuiet, sessionView } from './rooms';
 import { ThemeSwitch } from './theme-switch';
 
 export const metadata: Metadata = {
@@ -17,14 +18,19 @@ interface GalleryFrame {
   readonly props: RoomFrameProps;
 }
 
+/* EVERY FRAME'S REGISTER IS THE WHOLE PAGE'S. Round 10, D2: frame 05 cites a
+   record that lives in another room, and a ledger holding only users-migration's
+   records could not resolve it — the four rooms share one register precisely so
+   "is this message's source somewhere else" has an answer. */
 const base = {
-  messages: f.RECORDS,
+  messages: RECORDS,
   room: f.ROOM,
   /* THE RAIL STATES WHAT THE FRAME IS SHOWING. Round 8, D2: a still whose rail
      chip and whose footer answer "how many things here need you" differently is
      not a state of this product. `railFor` derives the current chip from the
-     frame's own pin. */
-  rooms: f.railFor(f.ROOM.name, f.ATTENTION.length),
+     frame's own pin — the ITEMS, since round 10, because the chip's glyph is
+     derived from the hardest of them. */
+  rooms: railFor(f.ROOM.name, f.ATTENTION),
   humans: f.HUMANS,
   viewer: f.VIEWER,
   viewerNote: `here · ${f.ATTENTION.length} owed to you`,
@@ -32,13 +38,34 @@ const base = {
   attention: f.ATTENTION,
   trailer: f.TRAILER,
   lastCheck: '12:29',
-  filtered: false,
+  filter: null,
   objectives: f.OBJECTIVES,
   objects: f.OBJECTS,
   updatedAt: '13:41',
   binding: f.FREE,
   composerNote: 'nothing is inferred from a message unless you bind it',
 };
+
+/* ---------------------------------------------------------------------------
+ * FRAME 05'S ROOM, WHOLE — ROUND 10, D2.
+ *
+ * The frame used to be `{...base, room: {…name: 'identity-service'}, rooms:
+ * railFor('identity-service', 4), entries: f.timeline(…)}`: the head, the lens,
+ * the composer and the rail chip were overridden to #identity-service and the
+ * FEED was left as #users-migration's. Eight `room: 'users-migration'` records
+ * rendered as this room's conversation, so a reader came away believing priya
+ * said "Staging backfill ran clean — 4.2M rows in 38 minutes" in
+ * #identity-service. The rail also showed `#users-migration ◆4` and
+ * `#identity-service ◆4` for the same four items, reading as eight.
+ *
+ * A frame is a room. `sessionView` is the one shape a room comes in — head,
+ * lens, pin, rail, trailer and feed derived together from one id — so there is no
+ * longer a prop table where the head and the feed can be set independently. Every
+ * frame below spreads one of these, and `TimelineRow` refuses any row whose
+ * record is not from the room the ledger says is on screen, so the class is
+ * unreachable rather than merely absent from this file.
+ * ------------------------------------------------------------------------- */
+const IDENTITY = sessionView('r2', []);
 
 const FRAMES: readonly GalleryFrame[] = [
   {
@@ -54,7 +81,7 @@ const FRAMES: readonly GalleryFrame[] = [
   {
     id: 'since-you-left',
     title: 'Since you left, with owed items',
-    note: 'Three hours away. The divider counts by attention class, the routine group collapses legibly, and the pin sorts hardest first — the ■ destructive decision opens, the rest compress but stay actionable.',
+    note: 'Three hours away. The divider counts the rows below it by attention class — counted, not asserted — the routine group collapses legibly, and the pin sorts hardest first, so the destructive decision opens and the rest compress but stay actionable.',
     props: {
       ...base,
       entries: f.timeline({ seen: false, filter: null, routineOpen: false }),
@@ -70,7 +97,10 @@ const FRAMES: readonly GalleryFrame[] = [
     props: {
       ...base,
       entries: f.timeline({ seen: true, filter: 'need', routineOpen: true }),
-      filtered: true,
+      /* ONE REGISTER FOR WHICH CLASS IS LIFTED. Round 10, D3: this frame passed
+         `filter: 'need'` to the entry builder and `filtered: true` to the frame,
+         and nothing obliged the two to name the same class. */
+      filter: 'need' as const,
       openAttentionId: 'K2',
       label: 'filtered',
     },
@@ -90,23 +120,25 @@ const FRAMES: readonly GalleryFrame[] = [
   {
     id: 'cross-room-jump',
     title: 'Cross-room jump',
-    note: 'An owed item whose source lives in another room says so and goes there. The trace bar persists rather than fading — the reason you are standing in this room should still be on screen when you look up — and the target row is marked in the feed.',
+    note: 'You followed Q1’s source out of #users-migration; its message lives here, so here is where you are standing. The whole frame is #identity-service — head, feed, pin, lens and rail — because a room is one value and this frame is a room. The trace bar persists rather than fading, and the row it landed on is marked in the feed.',
     props: {
       ...base,
-      room: {
-        ...f.ROOM,
-        name: 'identity-service',
-        topic: 'tokens, sessions, and who is allowed to mint them',
-      },
-      /* The frame is standing in #identity-service and showing four owed items,
-         so that is what its chip says. It used to be `ROOMS` with `current`
-         moved and nothing else: the rail said identity-service owed one while
-         the footer three inches below said four. */
-      rooms: f.railFor('identity-service', f.ATTENTION.length),
-      entries: f.timeline({ seen: true, filter: null, routineOpen: false, targetId: 'm10' }),
+      room: IDENTITY.room,
+      rooms: IDENTITY.rooms,
+      attention: IDENTITY.attention,
+      objectives: IDENTITY.objectives,
+      objects: IDENTITY.objects,
+      trailer: IDENTITY.trailer,
+      viewerNote: `here · ${IDENTITY.owedCount} owed to you`,
+      entries: IDENTITY.timeline({
+        seen: true,
+        filter: null,
+        routineOpen: false,
+        targetId: 'm-legal',
+      }),
       jump: f.JUMP,
-      openAttentionId: 'P1',
-      binding: f.REPLYING,
+      openAttentionId: 'IQ1',
+      binding: IDENTITY.binding,
       label: 'cross-room-jump',
     },
   },
@@ -116,7 +148,7 @@ const FRAMES: readonly GalleryFrame[] = [
     note: 'Nothing needs this person. The pin says so as an answer rather than showing an empty box, and the trailer is only allowed to say everything is verified because it derived that from the objects, not from an author’s optimism.',
     props: {
       ...base,
-      rooms: f.ROOMS_QUIET,
+      rooms: roomsQuiet(f.ROOM.name),
       viewerNote: 'here · nothing owed',
       attention: [],
       trailer: f.TRAILER_QUIET,

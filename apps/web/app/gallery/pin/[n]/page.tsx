@@ -16,6 +16,7 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import * as f from '../../fixtures';
 import { RoomFrame } from '../../RoomFrame';
+import { loadRoom } from '../../rooms';
 
 /**
  * 4 fits; 13 and 19 are the round-1 failure points; 34 is well past them; 60 is
@@ -51,7 +52,7 @@ export default async function PinLoadPage({ params }: { params: Promise<{ n: str
      on one screen. A route that exists to measure the pin under load is still a
      room, and a still whose rail contradicts its pin is not a state this product
      has. */
-  const load = f.loadRoom(count);
+  const load = loadRoom(count);
 
   return (
     <div data-pin-load={String(count)}>
@@ -64,7 +65,7 @@ export default async function PinLoadPage({ params }: { params: Promise<{ n: str
            load, so no row in the backdrop feed may still be claiming to need
            the viewer on its own account. */
         entries={f.timeline({ seen: false, filter: null, routineOpen: false, owed: new Set() })}
-        filtered={false}
+        filter={null}
         focused="needs-you"
         humans={f.HUMANS}
         label={`pin-load-${count}`}

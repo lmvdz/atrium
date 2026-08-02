@@ -41,6 +41,22 @@ export type TrailerProps = {
 } & NoGlyph;
 
 export function Trailer({ summary, lastCheck, onShowRest }: TrailerProps) {
+  /* ---------------------------------------------------------------------------
+   * TWO CLAUSES, EACH NAMING WHAT IT COUNTS — ROUND 10, D4.
+   *
+   * The r9 tail was "2 objectives clear of you · 2 commitments, 0 overdue · 1
+   * failure": three numbers about the pin's objectives, three about the objects
+   * outside the pin, and one that was room-wide, run together with `·` between
+   * them and the scope stated once, in the lead. So "0 overdue" stood 300px from
+   * a lens row reading "overdue 16h", and "0 failures" stood beside a lens head
+   * reading "15 failures". Both numbers were true; the sentence did not say of
+   * what.
+   *
+   * Each clause is now ONE element whose own text is the whole clause, scope word
+   * included. That is also what makes it readable by the agreement check: a claim
+   * belongs to the element that states it, and a clause split across four `<b>`s
+   * has no element that states it.
+   * ------------------------------------------------------------------------- */
   return (
     <div className={styles.trailer} data-row="trailer" data-voice="system">
       <Glyph className={styles.trailerGlyph} decorative={false} state={summary.state} />
@@ -54,27 +70,26 @@ export function Trailer({ summary, lastCheck, onShowRest }: TrailerProps) {
           <SystemVoice inline statement={summary.lead} />
         </button>{' '}
         —{' '}
-        <b>
-          {summary.objectivesClear}/{summary.objectivesTotal} objectives
-        </b>{' '}
-        clear of you · <b>{plural(summary.commitments, 'commitment')}</b>
-        {/* THE TAIL DOES NOT REPEAT THE LEAD. Round 7: "1 failure outside your
-            list — … · 1 failure · last check 12:29". The lead is derived from
-            whichever count is worst and the tail printed every count, so the
-            worst one was said twice in one sentence. `leadsWith` is what the
-            derivation already knew and was not returning. */}
-        {summary.leadsWith === 'overdue' ? '' : `, ${summary.overdue} overdue`}
-        {summary.leadsWith === 'failures' ? null : (
-          <>
-            {' · '}
-            <b>{plural(summary.failures, 'failure')}</b>
-          </>
-        )}{' '}
-        · last check{' '}
+        <span data-trailer-scope="outside">
+          outside your list, of {plural(summary.outside, 'object')}:{' '}
+          {plural(summary.commitments, 'commitment')}
+          {/* THE CLAUSE STILL DOES NOT REPEAT THE LEAD (round 7): the lead is
+              derived from whichever count is worst, so the clause drops the one
+              it led with rather than saying it twice in one sentence. */}
+          {summary.leadsWith === 'overdue' ? '' : ` · ${summary.overdue} late`}
+          {summary.leadsWith === 'failures' ? '' : ` · ${plural(summary.failures, 'failure')}`}
+        </span>{' '}
+        ·{' '}
+        <span data-trailer-scope="yours">
+          your list: {summary.objectivesClear} of {summary.objectivesTotal} objectives clear of you
+        </span>{' '}
+        ·{' '}
         {/* A clock is a page-authored string with no constructor to be checked
             at, painted inside `data-voice="system"`. The renderer is not merely
             the last place the check can go — it is the only place. */}
-        {systemText(lastCheck, 'Trailer last check')}
+        <span data-trailer-scope="check">
+          last check {systemText(lastCheck, 'Trailer last check')}
+        </span>
       </span>
     </div>
   );

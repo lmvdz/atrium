@@ -1,38 +1,19 @@
-/* ---------------------------------------------------------------------------
- * EVERY CALLER-SUPPLIED STRING THE PAGE PRINTS GOES THROUGH A DOOR — COUNTED,
- * AND THE COUNT DOES NOT COME FROM THE CLAIM.
- *
- * The recurring shape, now at its fifth address in five rounds:
- *
- *   r3  `systemStatement` was checked at the constructor and not at the parser.
- *   r5  checked at both and not at the renderer; `statementText()` was written.
- *   r6  applied to ONE page-authored string type; `rationaleText()` was written.
- *   r6, blind review  a sweep of every element carrying `data-voice="system"`
- *       found three more sinks inside those elements.
- *   r7, blind review  the sweep's DENOMINATOR was the set of elements the page
- *       had marked, and four sinks sat outside it — `ProvenanceEntry.note`
- *       rendered inside the same `<button>` as a resolved quotation on the line
- *       immediately after the quoted words, `CorrectionEntry.heading` in the
- *       exact layout slot round 6 deleted `HappenedLine.who` from,
- *       `RowTag.label` welded onto the end of a person's own sentence, and
- *       `AttentionItem.facts`.
- *
- * `test/system-voice.test.tsx`'s own header names the failure — "the address came
- * from a receipt instead of from a count" — and then commits it: a denominator
- * taken from `data-voice="system"` is a denominator supplied by the claim, which
- * is the exact thing CONVENTIONS' harness section condemns.
- *
- * So the denominator here is EVERY PLACE A STRING REACHES A READER: every JSX
- * child interpolation and every announced-text attribute, in every component file
- * and every app file, with the file list read off the filesystem rather than
- * written down. See `test/printed.ts` for the analysis and its limits.
- * ------------------------------------------------------------------------- */
-
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { TAG_SCOPED_TEXT_ATTRIBUTES } from '../src/components/model/printed-surface';
+import {
+  COMPILED_EXTENSIONS,
+  compilerRoots,
+  insideTheApp,
+  NOT_THE_APP,
+  parsedProject,
+  REPO,
+  routeEntryPoints,
+  SOURCES,
+  WEB,
+} from './app-sources';
 import {
   ANNOUNCED_ATTRIBUTES,
   analyseSource,
@@ -43,145 +24,16 @@ import {
   setCssPrintedAttributes,
 } from './printed';
 
-function find(path: string): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i += 1) {
-    const candidate = resolve(dir, path);
-    if (existsSync(candidate)) return candidate;
-    dir = dirname(dir);
-  }
-  throw new Error(`${path} not found above ${process.cwd()}`);
-}
-
-const WEB = find('apps/web/package.json').replace(/\/package\.json$/, '');
-
 /* ---------------------------------------------------------------------------
  * THE FILE SET — r8 D5, AND THE FOURTH SUBSYSTEM IN THIS REPO TO SHIP A CORRECT
  * ANALYSIS OVER AN INCOMPLETE INPUT SET.
  *
- * RETRO.md records the other three. This one shipped in round 7, inside the file
- * written to end exactly this defect class: the list was "`*.tsx` under two named
- * directories", and the only guard on it was `SOURCES.length > 24`. Measured on
- * r7: adding `src/components/primitives/Leak.jsx` and `src/widgets/Leak2.tsx`,
- * each rendering `<span title={note}>{note}</span>` off an untraced prop, left
- * the sweep at 226 sites — UNCHANGED and GREEN — while `tsconfig` sets
- * `allowJs: true` and Next compiles and ships both.
- *
- * A directory list and an extension list are both a claim about what runs. So the
- * enumeration is tied to the three things that actually decide it, and the
- * DIFFERENCES ARE ASSERTED EMPTY rather than assumed:
- *
- *   1. THE BUNDLER'S REACH — every file under `apps/web` with an extension Next
- *      compiles, outside the directories that are not the app. This is the walk
- *      below, and it is the widest of the three.
- *   2. THE COMPILER'S `include` — `tsconfig.json`, read and parsed by TypeScript
- *      itself rather than by a regex over the JSON. Asserted equal to (1), in
- *      BOTH directions: a file tsc roots that the walk missed is a hole in the
- *      walk, and a file the walk finds that tsc never roots is a file Next ships
- *      and nothing typechecks — which is what `allowJs: true` beside a tsconfig
- *      `include` naming only the two TypeScript globs had arranged.
- *   3. THE MODULE GRAPH — every source file the built program actually pulled in
- *      from under `apps/web`. A module the app imports from a directory this walk
- *      skipped shows up here and nowhere else.
- *   4. NEXT'S ROUTE CONVENTIONS — `page`/`layout`/`route`/`error`/… under `app/`
- *      are entry points whether or not anything imports them, so the graph in (3)
- *      cannot see a route nobody links to.
- *
- * WHAT THIS ENUMERATES FROM, AND WHAT EXECUTES THAT IT DOES NOT LIST: it
- * enumerates from the filesystem, cross-checked against tsc's parse of the
- * project and the resulting module graph. What executes and is NOT listed: the
- * CSS (handled separately — see `CSS_PRINTED_ATTRIBUTES`), the `design/` token
- * sheet, and code in `packages/*` that this app imports, which is enumerated by
- * its own package's tests and reaches the page as a value rather than as JSX.
+ * It is enumerated in `test/app-sources.ts` since round 10, because the glyph
+ * sweep needs the same denominator and two copies of a denominator can differ.
+ * The three authorities on "what is the app" — the bundler's reach, the
+ * compiler's `include`, and the module graph — plus Next's route conventions are
+ * asserted equal below, in both directions.
  * ------------------------------------------------------------------------- */
-
-/**
- * Extensions Next compiles into the app. `allowJs` is on, so the JavaScript ones
- * are not hypothetical — a `.jsx` beside a `.tsx` is bundled identically.
- */
-const COMPILED_EXTENSIONS: readonly string[] = [
-  '.ts',
-  '.tsx',
-  '.js',
-  '.jsx',
-  '.mjs',
-  '.cjs',
-  '.mts',
-  '.cts',
-];
-
-/**
- * Directories under `apps/web` that are not the shipped app. Everything else is,
- * including any directory nobody has created yet — which is the point of naming
- * the exclusions rather than the inclusions.
- */
-const NOT_THE_APP: ReadonlySet<string> = new Set(['node_modules', 'test', 'e2e', 'public']);
-
-function isCompiled(name: string): boolean {
-  if (name.endsWith('.d.ts')) return false;
-  return COMPILED_EXTENSIONS.some((extension) => name.endsWith(extension));
-}
-
-/** Every file under `apps/web` that Next can compile into the app. */
-function appSources(): readonly string[] {
-  const out: string[] = [];
-  const walk = (current: string): void => {
-    for (const name of readdirSync(current).sort()) {
-      if (NOT_THE_APP.has(name) || name.startsWith('.')) continue;
-      const full = join(current, name);
-      if (statSync(full).isDirectory()) {
-        walk(full);
-        continue;
-      }
-      if (isCompiled(name)) out.push(full);
-    }
-  };
-  walk(WEB);
-  return out;
-}
-
-const SOURCES: readonly string[] = appSources();
-
-/** The project as TypeScript itself parses it — not as a regex over the JSON. */
-function parsedProject(): ts.ParsedCommandLine {
-  const configPath = join(WEB, 'tsconfig.json');
-  const raw = ts.readConfigFile(configPath, (p) => readFileSync(p, 'utf8'));
-  return ts.parseJsonConfigFileContent(raw.config, ts.sys, WEB);
-}
-
-/** Files the compiler roots from this app's own tree, on the same terms. */
-function compilerRoots(parsed: ts.ParsedCommandLine): readonly string[] {
-  return parsed.fileNames.filter((path) => insideTheApp(path));
-}
-
-function insideTheApp(path: string): boolean {
-  const rel = relative(WEB, path);
-  if (rel.startsWith('..') || rel.startsWith('/')) return false;
-  if (!isCompiled(rel)) return false;
-  return !rel.split('/').some((segment) => NOT_THE_APP.has(segment) || segment.startsWith('.'));
-}
-
-/** Next's file-based entry points: reachable by URL, not by import. */
-const ROUTE_FILES: readonly string[] = [
-  'page',
-  'layout',
-  'route',
-  'error',
-  'global-error',
-  'not-found',
-  'template',
-  'default',
-  'loading',
-];
-
-function routeEntryPoints(): readonly string[] {
-  return SOURCES.filter((path) => {
-    const rel = relative(WEB, path);
-    if (!rel.startsWith('app/')) return false;
-    const base = rel.slice(rel.lastIndexOf('/') + 1);
-    return ROUTE_FILES.some((name) => COMPILED_EXTENSIONS.some((ext) => base === `${name}${ext}`));
-  });
-}
 
 /* ---------------------------------------------------------------------------
  * THE ATTRIBUTE SET IS ONLY CLOSED RELATIVE TO A STYLESHEET.
@@ -199,7 +51,6 @@ function routeEntryPoints(): readonly string[] {
  * below, because an enumerator whose current answer is "none" is exactly the
  * enumerator that can be broken without anyone noticing.
  * ------------------------------------------------------------------------- */
-const REPO = dirname(dirname(WEB));
 
 function cssFiles(): readonly string[] {
   const out: string[] = [];

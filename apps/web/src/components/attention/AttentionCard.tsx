@@ -24,7 +24,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
-import { glyphFor } from '../model/glyph';
+import { glyphFor, glyphTone } from '../model/glyph';
 import { useCitedLocation } from '../model/ledger';
 import type { SourceLocation } from '../model/quotation';
 import { offeredText, systemText } from '../model/quotation';
@@ -71,7 +71,11 @@ const EMPHASIS_CLASS: Readonly<Record<AttentionAction['emphasis'], string>> = {
 };
 
 export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: AttentionCardProps) {
-  const glyph = glyphFor(item.state);
+  /* THE TONE, NOT THE CHARACTER. Round 10, D1: this asked `glyph === '◆' || glyph
+     === '?'` and `glyph === '■'`, which spells three glyph characters outside the
+     vocabulary module to ask a question `glyphTone` already answers — and the
+     tone is what the class names anyway. */
+  const tone = glyphTone(glyphFor(item.state));
   /* EVERY FACT IS A CALLER STRING THIS CARD PRINTS, on the meta line under the
      title. Round 7: `facts: ['justin said: I authorise dropping users_legacy',
      'destructive']` rendered verbatim there. `list()` joins with `·` and drops
@@ -82,8 +86,8 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
     <article
       className={[
         styles.acard,
-        glyph === '◆' || glyph === '?' ? styles.acardGate : null,
-        glyph === '■' ? styles.acardDestructive : null,
+        tone === 'needs' ? styles.acardGate : null,
+        tone === 'destructive' ? styles.acardDestructive : null,
         'atr-rise',
       ]
         .filter(Boolean)
@@ -92,9 +96,7 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
       /* The card's border and inset stripe are a non-text graphic carrying gate
          vs destructive; named here so the rendered audit's registry can measure
          them without depending on a CSS-module hash. */
-      data-card-state={
-        glyph === '■' ? 'destructive' : glyph === '◆' || glyph === '?' ? 'gate' : 'plain'
-      }
+      data-card-state={tone === 'destructive' ? 'destructive' : tone === 'needs' ? 'gate' : 'plain'}
       data-irreversible={item.state.irreversible ? 'true' : 'false'}
     >
       <Glyph className={styles.acardGlyph} decorative={false} state={item.state} />

@@ -221,6 +221,15 @@ test.describe('shell', () => {
         const style = getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden') continue;
         if (el.getClientRects().length === 0) continue;
+        /* THE WHOLE NAME, NOT A DISPLAY STRING — round 10. It was truncated to
+           60 characters HERE, and `INERT` matches against it: the composer
+           textarea's exemption is `/^Answer .* in your own words$/`, and the
+           moment the bound item's label got long enough the anchor fell off the
+           end of the string and the field was reported dead. A pattern matched
+           against an abbreviation is a pattern that stops meaning what it says,
+           and the alternative — loosening it to `/^Answer /` — would have
+           exempted the "Answer it" BUTTON, which is a live control. Matched in
+           full; abbreviated only where it is printed. */
         const name = (
           el.getAttribute('aria-label') ||
           el.textContent ||
@@ -228,8 +237,7 @@ test.describe('shell', () => {
           el.tagName
         )
           .trim()
-          .replace(/\s+/g, ' ')
-          .slice(0, 60);
+          .replace(/\s+/g, ' ');
         out.push({ index, name });
       }
       return out;
@@ -295,7 +303,7 @@ test.describe('shell', () => {
         inertHit.add(exemption.why);
         continue;
       }
-      if (!changed) dead.push(`${control.name} (control #${control.index})`);
+      if (!changed) dead.push(`${control.name.slice(0, 60)} (control #${control.index})`);
     }
 
     console.info(

@@ -30,9 +30,7 @@ describe('the feed forwards what its children accept', () => {
      that does nothing is worse than no button: it says the affordance exists. */
   it('a row action reaches the caller with the row and the action', () => {
     const calls: [string, string][] = [];
-    render(
-      <Timeline entries={ENTRIES} filtered={false} onRowAction={(a, b) => calls.push([a, b])} />,
-    );
+    render(<Timeline entries={ENTRIES} filter={null} onRowAction={(a, b) => calls.push([a, b])} />);
     fireEvent.click(screen.getAllByRole('button', { name: 'reply' })[0] as HTMLElement);
     fireEvent.click(screen.getAllByRole('button', { name: 'quote' })[0] as HTMLElement);
     expect(calls.length).toBe(2);
@@ -47,7 +45,7 @@ describe('the feed forwards what its children accept', () => {
      button; before this it was a button with no handler on every single row. */
   it('a row tag reaches onOpenTag', () => {
     const opened: string[] = [];
-    render(<Timeline entries={ENTRIES} filtered={false} onOpenTag={(id) => opened.push(id)} />);
+    render(<Timeline entries={ENTRIES} filter={null} onOpenTag={(id) => opened.push(id)} />);
     const tag = document.querySelector('[data-row-tag]') as HTMLElement | null;
     expect(tag).not.toBeNull();
     fireEvent.click(tag as HTMLElement);
@@ -60,11 +58,7 @@ describe('the feed forwards what its children accept', () => {
   it('mark seen and unmark seen both reach the caller', () => {
     const marked: string[] = [];
     const { unmount } = render(
-      <Timeline
-        entries={ENTRIES}
-        filtered={false}
-        onMarkSeen={(id) => marked.push(`mark:${id}`)}
-      />,
+      <Timeline entries={ENTRIES} filter={null} onMarkSeen={(id) => marked.push(`mark:${id}`)} />,
     );
     fireEvent.click(screen.getByRole('button', { name: 'mark this group seen' }));
     unmount();
@@ -72,7 +66,7 @@ describe('the feed forwards what its children accept', () => {
     render(
       <Timeline
         entries={SEEN_ENTRIES}
-        filtered={false}
+        filter={null}
         onUnmarkSeen={(id) => marked.push(`unmark:${id}`)}
       />,
     );
@@ -87,12 +81,12 @@ describe('the feed forwards what its children accept', () => {
     render(
       <Timeline
         entries={ENTRIES}
-        filtered={false}
+        filter={null}
         onFilter={(c) => calls.push(`filter:${c}`)}
         onTogglePeek={(id) => calls.push(`peek:${id}`)}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: '4 NEED YOU' }));
+    fireEvent.click(screen.getByRole('button', { name: '2 NEED YOU' }));
     fireEvent.click(screen.getByRole('button', { name: /8 routine/ }));
     expect(calls).toEqual(['filter:need', 'peek:routine-group']);
   });
@@ -101,7 +95,7 @@ describe('the feed forwards what its children accept', () => {
      fork pressure — #25 wanting a different set had no way to say so. */
   it('the row action set can be replaced without forking the component', () => {
     render(
-      <Timeline entries={ENTRIES} filtered={false} rowActions={[{ id: 'pin', label: 'pin it' }]} />,
+      <Timeline entries={ENTRIES} filter={null} rowActions={[{ id: 'pin', label: 'pin it' }]} />,
     );
     expect(screen.getAllByRole('button', { name: 'pin it' }).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'reply' })).toBeNull();
@@ -173,9 +167,9 @@ describe('a handler is told what it acted on, by the register', () => {
       <CrossRoomJump jump={f.JUMP} onReveal={(id) => revealed.push(id)} />,
     );
     const button = container.querySelector('[data-jumps-to]');
-    expect(button?.getAttribute('data-jumps-to')).toBe('m10');
+    expect(button?.getAttribute('data-jumps-to')).toBe('m-legal');
     fireEvent.click(button as Element);
-    expect(revealed).toEqual(['m10']);
+    expect(revealed).toEqual(['m-legal']);
   });
 
   /* CATCHES: any of the three resolving against a register that does not hold

@@ -287,11 +287,20 @@ describe('the round’s own enumerators', () => {
        Next's route conventions, with the differences asserted empty. A walk of
        the filesystem is one authority on "what is the app"; on r7 it was the
        only one, and it named two directories and one extension. */
+    /* ROUND 10 GAVE THE FILE SET A SECOND CONSUMER — the glyph source sweep —
+       so it moved to `test/app-sources.ts`. A denominator with two copies is the
+       r8 defect one level up, so the enumerator is asserted in the module that
+       owns it and BOTH sweeps are asserted to read that module rather than a
+       list of their own. */
+    const sources = read('apps/web/test/app-sources.ts');
+    expect(sources, 'the app file set hard-codes its file list').toMatch(/function appSources/);
+    expect(sources).toMatch(/readdirSync/);
+    const glyphs = read('apps/web/test/glyph-source.test.ts');
+    expect(glyphs, 'the glyph sweep wrote its own file list').toMatch(/from '\.\/app-sources'/);
     const printed = read('apps/web/test/printed-strings.test.tsx');
-    expect(printed, 'the printed-string sweep hard-codes its file list').toMatch(
-      /function appSources/,
+    expect(printed, 'the printed-string sweep wrote its own file list').toMatch(
+      /from '\.\/app-sources'/,
     );
-    expect(printed).toMatch(/readdirSync/);
     expect(printed, 'the file set stopped being checked against the compiler').toMatch(
       /compilerRoots\(PARSED\)/,
     );
@@ -368,5 +377,67 @@ describe('the round’s own enumerators', () => {
     expect(ledger, 'a red catcher no longer disqualifies its entries').toMatch(
       /baseline\.get\(entry\.test\) === true/,
     );
+  });
+
+  /* ---------------------------------------------------------------------------
+   * EVERY ANCHOR IN THE LEDGER STILL MATCHES — ROUND 10.
+   *
+   * The harness reports a stale `find` as an escape and exits 1, so it is not
+   * silent — but only WHEN IT IS RUN, and it rewrites source in place, so it is
+   * not part of the ordinary gate and a round is asked not to run it. Measured on
+   * r9: FOUR anchors matched nothing.
+   *
+   *   ledger.tsx      `if (ledger === null) {`               r9 moved the refusal
+   *                   `if (outer !== null && outer !== ledger) {`   into useRegister
+   *   RoomSession.tsx `const view = useMemo(() => roomView(roomId)…`  r9 replaced
+   *                   `rooms={railRooms(roomId)}`             roomView/railRooms
+   *
+   * Four guards that had stopped guarding, in the ledger whose entire job is
+   * proving the other guards work. That is `use is checked by mutation` applied
+   * to the mutation ledger itself: an anchor that matches nothing is a mutation
+   * that never happens, and the round after it lands has no way to know.
+   *
+   * This is a STATIC check — it reads the ledger and greps the file. It runs in
+   * `pnpm test`, mutates nothing, and leaves the tree alone.
+   *
+   * CATCHES: any refactor that moves a line the ledger anchors on. It cannot see
+   * an anchor that still matches but no longer means what the entry's name says —
+   * only running the harness can, and that is what the harness is for.
+   * ------------------------------------------------------------------------- */
+  it('every mutation anchor still matches its file, exactly once', () => {
+    const ledger = read('apps/web/test/mutations.mjs');
+    /* The entries are object literals in one array; each is `name`, `file`,
+       `find` in that order. Parsed from the source rather than imported, because
+       importing `mutations.mjs` RUNS the harness. */
+    const entry =
+      /name: '((?:[^'\\]|\\.)*)',\s*\n\s*file: '([^']+)',\s*\n\s*find:\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)(?:\s*\+\s*\n?\s*(?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))*)/g;
+    const stale: string[] = [];
+    let found = 0;
+    for (const match of ledger.matchAll(entry)) {
+      found += 1;
+      const [, name, file, literal] = match;
+      if (name === undefined || file === undefined || literal === undefined) continue;
+      /* The `find` is a JavaScript string literal, possibly concatenated. `JSON`
+         cannot read a single-quoted one, so the escapes are resolved the way the
+         harness itself resolves them — by evaluating the literal, with nothing
+         but the literal in scope. */
+      const needle = new Function(`return ${literal};`)() as string;
+      let body: string;
+      try {
+        body = read(`apps/web/${file}`);
+      } catch {
+        stale.push(`${name} — ${file} does not exist`);
+        continue;
+      }
+      const hits = body.split(needle).length - 1;
+      if (hits !== 1) stale.push(`${name} — ${file} matches ${hits} times`);
+    }
+    /* THE DENOMINATOR FIRST. A regex that stops matching the ledger's shape
+       reports exactly like a ledger with no stale anchors. */
+    expect(found, 'the ledger parse found almost no entries').toBeGreaterThan(100);
+    expect(
+      stale,
+      'a mutation anchor matches nothing (or more than one thing), so that guard is not being run',
+    ).toEqual([]);
   });
 });

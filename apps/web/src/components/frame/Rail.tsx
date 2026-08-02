@@ -14,6 +14,7 @@
 import { systemText } from '../model/quotation';
 import type { HumanSummary, RoomSummary } from '../model/records';
 import { initials, text } from '../model/text';
+import { Glyph } from '../primitives/Glyph';
 import styles from './frame.module.css';
 
 export interface RailProps {
@@ -103,9 +104,18 @@ function RoomRow({
      places; checking it once and painting the checked value is the same shape
      `AttentionCompact` uses for its rationale. */
   const roomName = systemText(room.name, 'Rail room');
+  /* THE COUNT AND THE GLYPH ARE ONE VALUE — ROUND 10, D1. `room.owed` was a
+     number and the chip drew `<span aria-hidden="true">◆</span>` beside it: the
+     only aggregate glyph in the app that was not derived, on the one surface
+     that reports what a room you are NOT standing in owes you, where nothing
+     else on screen can correct it. It promised amber-reversible over a set whose
+     hardest member is an irreversible table drop.
+     `OwedSummary` carries the count and the hardest owed item's STATE together,
+     from one pass over one array, and `<Glyph>` derives the character, the tone
+     and the tooltip from that state. */
   const owedLabel =
-    room.owed > 0
-      ? `${room.owed} item${room.owed === 1 ? '' : 's'} in #${roomName} need you`
+    room.owed.kind === 'some'
+      ? `${room.owed.count} item${room.owed.count === 1 ? '' : 's'} in #${roomName} need you`
       : null;
   /* THE SAME WELDED NAME AS THE SURFACE CHIP, two more times. The name and the
      count are adjacent elements with no text node between them, so the room
@@ -115,8 +125,8 @@ function RoomRow({
      is why the sweep is worth more than the instance. Stated rather than left
      to how the platform joins two spans. */
   const name = `#${roomName}${
-    room.owed > 0
-      ? ` — ${room.owed} owed to you`
+    room.owed.kind === 'some'
+      ? ` — ${room.owed.count} owed to you`
       : room.unseen > 0
         ? ` — ${room.unseen} unseen`
         : ''
@@ -128,7 +138,7 @@ function RoomRow({
       className={[
         styles.rrow,
         room.current ? styles.rrowOn : null,
-        room.unseen > 0 || room.owed > 0 ? styles.rrowUnread : null,
+        room.unseen > 0 || room.owed.kind === 'some' ? styles.rrowUnread : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -144,10 +154,10 @@ function RoomRow({
       <span className={styles.rrowName} data-truncates="name">
         {roomName}
       </span>
-      {room.owed > 0 ? (
-        <span className={styles.owedPill} title={owedLabel ?? undefined}>
-          <span aria-hidden="true">◆</span>
-          {room.owed}
+      {room.owed.kind === 'some' ? (
+        <span className={styles.owedPill} data-owed-chip={roomName} title={owedLabel ?? undefined}>
+          <Glyph state={room.owed.state} />
+          {room.owed.count}
         </span>
       ) : room.unseen > 0 ? (
         <span className={styles.count} title={`${room.unseen} unseen`}>

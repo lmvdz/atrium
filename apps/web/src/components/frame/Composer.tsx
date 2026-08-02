@@ -39,6 +39,7 @@ import { useAttribution } from '../model/ledger';
 import type { Quotation } from '../model/quotation';
 import { quotationRef, systemText } from '../model/quotation';
 import type { ComposerBinding } from '../model/records';
+import { Glyph } from '../primitives/Glyph';
 import styles from './frame.module.css';
 
 export interface ComposerProps {
@@ -177,7 +178,14 @@ export function Composer({
     <div className={styles.composer}>
       {binding.mode === 'bound' ? (
         <div className={styles.ctxbar} data-binding="bound">
-          <span aria-hidden="true">◆</span>
+          {/* THE BOUND ITEM'S OWN GLYPH — ROUND 10, D1. This was a literal `◆`,
+              and on `/` at rest the bound item is X1, which is irreversible and
+              wears `■` on its pin card, in its feed tag, in the lens and in its
+              receipt. The banner told the one person who is about to answer it
+              that it was the reversible kind. `ComposerBinding`'s bound arm
+              carries the item's state now and `boundTo` is its only
+              constructor, so the label and the glyph are read off one item. */}
+          <Glyph state={binding.state} />
           <b>ANSWERING</b>
           {/* The promise is the part that must survive a narrow frame: it is
               what makes binding trustworthy. The scope truncates instead. */}

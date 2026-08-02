@@ -9,7 +9,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
-import { glyphFor } from '../model/glyph';
+import { isSettled } from '../model/glyph';
 import { systemText } from '../model/quotation';
 import type { StateObject } from '../model/records';
 import { slot } from '../model/slot';
@@ -26,7 +26,10 @@ export type ObjectRowProps = {
 const WARN = /overdue|not accepted|open |blocked|reopened|unverified|late/i;
 
 export function ObjectRow({ object, onOpenReceipt }: ObjectRowProps) {
-  const settled = glyphFor(object.state) === '✓';
+  /* `isSettled`, not `glyphFor(state) === '✓'`. Round 10, D1: the second spells a
+     glyph character outside the vocabulary module, and asks a question about a
+     character when the question is about the state. */
+  const settled = isSettled(object.state);
   return (
     <button
       className={[styles.oitem, settled ? styles.oitemSettled : null, 'atr-rise']

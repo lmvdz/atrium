@@ -23,7 +23,7 @@ import {
 
 afterEach(cleanup);
 
-const TRAILER: TrailerSummary = trailerFor({ objects: [], objectives: [], overdue: 0 });
+const TRAILER: TrailerSummary = trailerFor({ objects: [], objectives: [], overdue: [] });
 
 /* 60 is the load round 2's gauntlet used: expanded, it stranded 50 owed items
    behind an affordance that could not reveal them. */
