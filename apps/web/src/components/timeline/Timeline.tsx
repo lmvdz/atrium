@@ -68,8 +68,7 @@ export function Timeline({
         if (entry.type === 'message') {
           const actions = rowActions.map((action) => ({
             ...action,
-            onSelect: undefined,
-            unusedSelect:
+            onSelect:
               onRowAction === undefined
                 ? undefined
                 : /* The row hands back the message it RESOLVED, not the id it was
