@@ -6,6 +6,7 @@ import {
   objectPayloadByType,
   PAYLOAD_FIELD_ROLE,
   payloadAttributions,
+  payloadText,
   TEXT_FIELD,
 } from '../src/index.js';
 import { ALICE, BOB } from './fixtures.js';
@@ -55,6 +56,49 @@ describe('the attribution table is exhaustive over the payloads', () => {
       expect(ATTRIBUTION_FIELD[type]).toBe(named[0] ?? null);
       expect(table[TEXT_FIELD[type]]).toBe('text');
     }
+  });
+
+  it('says which field each type puts its sentence in — one answer, spelled out once', () => {
+    // The twin of the case below, for the other half of #4's rule, and added in
+    // #22 r11 for the reason r10 added that one: until r11 `objects.ts`'s
+    // `payloadText` wrote the ladder out by hand — `open_question ? 'question'
+    // : objective ? 'title' : 'statement'` — beside this derived table, and two
+    // answers to one question is the defect this whole file exists for. They
+    // agreed, which is what made it invisible; they were free to stop agreeing
+    // the day a sixth type arrived.
+    //
+    // Written out rather than derived from `PAYLOAD_FIELD_ROLE`: a check that
+    // computed the expectation from the table under test would move with it.
+    expect(TEXT_FIELD).toEqual({
+      decision: 'statement',
+      commitment: 'statement',
+      open_question: 'question',
+      claim: 'statement',
+      objective: 'title',
+    });
+  });
+
+  it('reads the sentence out of a payload of every type', () => {
+    // `payloadText` is the reader `TEXT_FIELD` feeds, and the gate that refuses
+    // a reworded sentence under somebody else's name compares two of its
+    // results. Every type, because the ladder it replaced was wrong for exactly
+    // one of them at a time.
+    //
+    // Mutation this catches: `the_text_field_is_hand_written_again` — restore
+    // the ladder with the objective arm dropped. An objective's title stops
+    // being its sentence and nothing else in the suite notices.
+    expect(payloadText('decision', { statement: 'we adopt it' })).toBe('we adopt it');
+    expect(payloadText('commitment', { statement: 'i will wire it' })).toBe('i will wire it');
+    expect(payloadText('open_question', { question: 'do we keep it?' })).toBe('do we keep it?');
+    expect(payloadText('claim', { statement: 'the build is green' })).toBe('the build is green');
+    expect(payloadText('objective', { title: 'ship it this quarter' })).toBe(
+      'ship it this quarter',
+    );
+    // A payload that carries no text — or text that is not a string — reads as
+    // the empty sentence rather than throwing: the gate compares two of these
+    // on paths where the payload has not been parsed.
+    expect(payloadText('objective', { statement: 'wrong key' })).toBe('');
+    expect(payloadText('claim', { statement: 7 })).toBe('');
   });
 
   it('says a decision names its decider — the sentence r9 got wrong', () => {

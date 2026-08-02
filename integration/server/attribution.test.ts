@@ -313,6 +313,236 @@ describe('#4 across every route by which a name arrives on an object', () => {
   });
 });
 
+describe('#4’s other half — a sentence arriving under somebody else’s name', () => {
+  it('refuses the five commands that made the victim confess to taking kickbacks — r11', async () => {
+    /**
+     * r10 closed *nobody gets committed by someone else's sentence* and left
+     * *nobody gets **quoted*** open, while the refusal text went on citing it.
+     * `correctionAttributionRefusal` compared name sets and never looked at the
+     * field the sentence is in, so five commands — every one an `ack` with
+     * `issues: []` — turned the victim's own accepted commitment into a `✓`
+     * claim in which he confesses to taking kickbacks, in his name, with
+     * Mallory's words:
+     *
+     *   amend {statement}      ← the defect
+     *   amend {due}            ← legal, and stays legal
+     *   retype → claim         ← legal: the victim's name was already there
+     *   amend {verification}   ← isHuman-gated only; #68, not this round
+     *   amend {statement}      ← the defect again, now on a verified claim
+     *
+     * Driven against a real server and judged on `accepted_objects` and on the
+     * victim's and the bystander's sockets, because the actor's own ack is not
+     * evidence: a business refusal *is* an ack.
+     *
+     * Mutation: `the_gate_never_refuses_on_the_sentence` — drop the clause in
+     * `correctionAttributionRefusal` that compares `objectStatement(after)`
+     * with `objectStatement(before)`.
+     */
+    const mallory = await connect(room.people.mallory as string);
+    const victim = await connect(room.people.victim as string);
+    const bystander = await connect(room.people.bystander as string);
+    await mallory.subscribe(room.roomId);
+    await victim.subscribe(room.roomId);
+    await bystander.subscribe(room.roomId);
+
+    // The victim stages and self-accepts his own commitment. Entirely legal.
+    const victimId = room.people.victim as string;
+    const OWN_WORDS = "I'll review the Q3 deck before Friday";
+    const proposalId = await stage(victim, {
+      type: 'commitment',
+      payload: { statement: OWN_WORDS, owner: victimId },
+      confidence: 1,
+      provenance: [],
+      quote: null,
+      interpretationId: null,
+    });
+    const minted = await accept(victim, proposalId);
+    expect(minted.issues).toEqual([]);
+    const objectId = minted.objectId as string;
+
+    const marked = (ack: { type: string; issues?: string[] }) => issuesOf(ack);
+
+    const first = await mallory.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId,
+      action: 'amend',
+      patch: { statement: 'I falsified the Q3 revenue figures' },
+    });
+    expect(marked(first)[0]).toContain(
+      `rewording a sentence that stands under user "${victimId}"'s name`,
+    );
+
+    // The three that assert nothing under his name still land — the round does
+    // not freeze the product to close the leak.
+    for (const legal of [
+      { action: 'amend' as const, patch: { due: '2026-08-14T17:00:00.000Z' } },
+      { action: 'retype' as const, patch: { claimant: victimId }, toType: 'claim' as const },
+      { action: 'amend' as const, patch: { verification: 'verified' } },
+    ]) {
+      const ack = await mallory.command({
+        name: 'correct',
+        roomId: room.roomId,
+        objectId,
+        action: legal.action,
+        patch: legal.patch,
+        ...(legal.toType ? { toType: legal.toType } : {}),
+      });
+      expect(marked(ack)).toEqual([]);
+    }
+
+    const last = await mallory.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId,
+      action: 'amend',
+      patch: { statement: 'I have been taking kickbacks from the vendor' },
+    });
+    expect(marked(last)[0]).toContain(
+      `rewording a sentence that stands under user "${victimId}"'s name`,
+    );
+
+    // The database. Under r10 this row read `revision: 5` with Mallory's
+    // sentence in it; the sentence is the victim's own, and only the three
+    // legal acts moved the revision.
+    const row = await objectRow(objectId);
+    expect(row?.type).toBe('claim');
+    expect(row?.payload).toMatchObject({
+      claimant: victimId,
+      statement: OWN_WORDS,
+      verification: 'verified',
+    });
+    expect(row?.revision).toBe(3);
+    expect(
+      (await handle.db.select().from(corrections).where(eq(corrections.objectId, objectId))).map(
+        (entry) => entry.action,
+      ),
+    ).toEqual(['amend', 'retype', 'amend']);
+
+    // And the other participants' sockets: both refused rows arrive — the log
+    // is gap-free — and both arrive carrying the reason they took no effect.
+    for (const watcher of [victim, bystander]) {
+      const refused = watcher.frames.filter(
+        (frame) => frame.type === 'event' && frame.entry.issues.length > 0,
+      );
+      expect(refused).toHaveLength(2);
+      for (const frame of refused) {
+        if (frame.type !== 'event') throw new Error('unreachable');
+        expect(frame.entry.event.type).toBe('object_corrected');
+        expect(frame.entry.issues[0]).toContain('nobody gets committed, or quoted');
+      }
+    }
+  });
+
+  it('lets the person named reword it, and leaves every other verb alone', async () => {
+    /**
+     * The other direction, and the one a fix for this is most likely to get
+     * wrong: refusing whenever a name is *present* rather than when the
+     * sentence *changes* freezes the product instead of leaking. Seven
+     * corrections by somebody who is not named, on an object that names the
+     * victim, plus the victim rewording his own sentence.
+     *
+     * Mutation: `the_sentence_clause_fires_on_a_name_being_present`, and
+     * `the_sentence_clause_ignores_whose_name_it_is` for the last line.
+     */
+    const mallory = await connect(room.people.mallory as string);
+    const victim = await connect(room.people.victim as string);
+    await mallory.subscribe(room.roomId);
+    await victim.subscribe(room.roomId);
+
+    const victimId = room.people.victim as string;
+    const proposalId = await stage(victim, {
+      type: 'commitment',
+      payload: { statement: "I'll ship the migration on Tuesday", owner: victimId },
+      confidence: 1,
+      provenance: [],
+      quote: null,
+      interpretationId: null,
+    });
+    const objectId = (await accept(victim, proposalId)).objectId as string;
+
+    const byMallory = [
+      { action: 'amend' as const, patch: { due: '2026-09-01T09:00:00.000Z' } },
+      { action: 'amend' as const, patch: { status: 'done' } },
+      { action: 'reopen' as const, patch: {} },
+      { action: 'retract' as const, patch: {} },
+      { action: 'restore' as const, patch: {} },
+    ];
+    for (const step of byMallory) {
+      const ack = await mallory.command({
+        name: 'correct',
+        roomId: room.roomId,
+        objectId,
+        action: step.action,
+        patch: step.patch,
+      });
+      expect(issuesOf(ack as { type: string; issues?: string[] })).toEqual([]);
+    }
+
+    // The person named may reword it — the one correction the product most
+    // needs to keep, because it is what turns `~` into `✓`.
+    const own = await victim.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId,
+      action: 'amend',
+      patch: { statement: "I'll ship the migration on Wednesday" },
+    });
+    expect(issuesOf(own as { type: string; issues?: string[] })).toEqual([]);
+
+    const row = await objectRow(objectId);
+    expect(row?.payload).toMatchObject({
+      statement: "I'll ship the migration on Wednesday",
+      owner: victimId,
+      due: '2026-09-01T09:00:00.000Z',
+    });
+    expect(row?.revision).toBe(6);
+  });
+
+  it('does not read a retype’s carried sentence as a rewording', async () => {
+    /**
+     * #5's canonical fix — "that was only a suggestion" — carries the text from
+     * one type's key to another's. Comparing the patch's keys instead of the two
+     * sentences would refuse it on anybody else's object and take the affordance
+     * out of the product.
+     *
+     * Mutation: compare `Object.hasOwn(event.patch, TEXT_FIELD[type])` instead
+     * of `objectStatement(after) === objectStatement(before)`.
+     */
+    const mallory = await connect(room.people.mallory as string);
+    const victim = await connect(room.people.victim as string);
+    await mallory.subscribe(room.roomId);
+    await victim.subscribe(room.roomId);
+
+    const victimId = room.people.victim as string;
+    const SENTENCE = 'we should drop the flag after GA';
+    const proposalId = await stage(victim, {
+      type: 'commitment',
+      payload: { statement: SENTENCE, owner: victimId },
+      confidence: 1,
+      provenance: [],
+      quote: null,
+      interpretationId: null,
+    });
+    const objectId = (await accept(victim, proposalId)).objectId as string;
+
+    const ack = await mallory.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId,
+      action: 'retype',
+      toType: 'open_question',
+      patch: {},
+    });
+    expect(issuesOf(ack as { type: string; issues?: string[] })).toEqual([]);
+    const row = await objectRow(objectId);
+    expect(row?.type).toBe('open_question');
+    // The same sentence, under the new type's own key — which is what makes it
+    // a statement about how it was read rather than a new sentence.
+    expect(row?.payload).toMatchObject({ question: SENTENCE });
+  });
+});
+
 describe('a refused append on the wire — D4', () => {
   it('reaches every other subscriber carrying its refusal, live and on catch-up', async () => {
     /**

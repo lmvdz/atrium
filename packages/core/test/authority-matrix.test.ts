@@ -91,6 +91,12 @@ const GATES = {
   supersession: 'retires an accepted',
   answer_relation: 'declares an open question answered',
   correction: 'corrections (amend, retract, restore)',
+  // #4's sentence has two halves and so does the correction gate: a name
+  // arriving on a sentence, and a sentence arriving under a name. The markers
+  // are the two verbs the refusals lead with — `selfStagedReadingRefusal` also
+  // ends in "…'s name on it", so a marker cut there would swallow it.
+  correction_attribution: 'putting user',
+  correction_quotation: 'rewording a sentence',
   acceptance_binding: 'may only accept its own reading',
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
@@ -265,9 +271,21 @@ function expectedForRelation(
 // ─────────────────────────────────────────────────────────────────────────────
 
 let clock = 0;
+/**
+ * The next distinct instant, in the one canonical spelling.
+ *
+ * One second apart rather than one minute: the old version spelled the hour as
+ * `10 + clock / 60`, which walks past `23` — and `24:00:00.000Z` is not a real
+ * instant, so `Timestamp` refuses it and every case built after the 840th event
+ * dies on a parse error nobody would read as "the matrix outgrew its clock".
+ * #22 r11 added twenty cells and found it. Seconds carry this file to nearly
+ * fifty thousand events, and `Date#toISOString` is the spelling `Timestamp`
+ * exists to insist on, so the format cannot drift from it by hand.
+ */
+const CLOCK_EPOCH = Date.parse('2026-07-31T10:00:00.000Z');
 function nextAt(): string {
   clock += 1;
-  return `2026-07-31T${String(10 + Math.floor(clock / 60)).padStart(2, '0')}:${String(clock % 60).padStart(2, '0')}:00.000Z`;
+  return new Date(CLOCK_EPOCH + clock * 1000).toISOString();
 }
 
 const parse = (input: unknown): CoreEvent => CoreEventSchema.parse(input);
@@ -346,6 +364,34 @@ const NAMES: Record<AcceptedObjectType, string | null> = {
   objective: null,
 };
 
+/**
+ * **Which field** each type puts a person in, and which one holds its sentence —
+ * restated, never imported.
+ *
+ * `attribution.ts` derives both from `PAYLOAD_FIELD_ROLE`, which is exactly why
+ * this file writes them out by hand: an oracle that imported `ATTRIBUTION_FIELD`
+ * and `TEXT_FIELD` would agree with the classification under test by
+ * construction, and a payload field reclassified in error would move both sides
+ * together and be invisible here. Reclassify `commitment.statement` as a detail
+ * and the source stops calling it text; these two tables do not, and the matrix
+ * goes red.
+ */
+const NAME_KEY: Record<AcceptedObjectType, string | null> = {
+  decision: 'decidedBy',
+  commitment: 'owner',
+  claim: 'claimant',
+  open_question: null,
+  objective: null,
+};
+
+const TEXT_KEY: Record<AcceptedObjectType, string> = {
+  decision: 'statement',
+  commitment: 'statement',
+  claim: 'statement',
+  open_question: 'question',
+  objective: 'title',
+};
+
 function proposalEvent(input: {
   id: string;
   type: AcceptedObjectType;
@@ -391,6 +437,14 @@ function acceptEvent(input: {
   citing?: string[];
   messages?: readonly ProvenanceMessage[];
   /**
+   * Whose name the object stands under, overriding `payloadFor`'s default —
+   * and, for a setup row, who mints it. The r11 matrix needs the same object
+   * named for the corrector and for somebody else, and "which field holds the
+   * name" is restated in `NAME_KEY` rather than imported, like every other rule
+   * this oracle knows.
+   */
+  names?: string;
+  /**
    * This row is scaffolding, not the case under test: mint it under whoever the
    * payload names, so #22 r10's attribution gate lets it through and the object
    * exists for the verb or relation actually being probed.
@@ -399,15 +453,9 @@ function acceptEvent(input: {
 }): AuthoredEvent {
   const at = nextAt();
   const payload = payloadFor(input.type, input.verified);
-  if (input.statement !== undefined) {
-    payload[
-      input.type === 'open_question'
-        ? 'question'
-        : input.type === 'objective'
-          ? 'title'
-          : 'statement'
-    ] = input.statement;
-  }
+  const nameKey = NAME_KEY[input.type];
+  if (input.names !== undefined && nameKey !== null) payload[nameKey] = input.names;
+  if (input.statement !== undefined) payload[TEXT_KEY[input.type]] = input.statement;
   return row(
     {
       id: `ev_${input.id}`,
@@ -423,8 +471,8 @@ function acceptEvent(input: {
         updatedAt: at,
       },
     },
-    input.setup && input.actor === 'human' && NAMES[input.type] !== null
-      ? { kind: 'human', userId: NAMES[input.type] as string }
+    input.setup && input.actor === 'human' && (input.names ?? NAMES[input.type]) !== null
+      ? { kind: 'human', userId: (input.names ?? NAMES[input.type]) as string }
       : input.actor,
     input.messages === undefined ? WINDOW : input.messages,
   );
@@ -757,13 +805,20 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
       return { events, objectId };
     }
 
-    // Everything else acts on a commitment: it has both a text field and an
-    // attribution field, so `amend`, `reattribute` and `retype` all apply.
+    // `amend` acts on an objective: it has a text field and names nobody.
+    //
+    // It used to act on the same BOB-owned commitment as the verbs below, with
+    // `{statement: 'reworded'}` — which is #22 r11's defect written as a
+    // fixture. Rewording a sentence that stands under somebody else's name is
+    // now refused, so that cell was asserting `allowed` for the act the round
+    // exists to close. This axis of the matrix is *who may correct at all*, and
+    // an objective answers that without dragging a second rule into the cell;
+    // whose name is on the object is its own axis, in the matrix below.
     events.push(
       acceptEvent({
         id: `c_${suffix}`,
         objectId,
-        type: 'commitment',
+        type: verb === 'amend' ? 'objective' : 'commitment',
         actor: 'human',
         proposalId: null,
         setup: true,
@@ -787,7 +842,7 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
   }
 
   function patchFor(verb: CorrectionAction): Record<string, unknown> {
-    if (verb === 'amend') return { statement: 'reworded' };
+    if (verb === 'amend') return { title: 'reworded, and nobody is named on it' };
     if (verb === 'reattribute') return { owner: ALICE };
     if (verb === 'retype') return { claimant: ALICE };
     return {};
@@ -853,6 +908,222 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
     ]);
     expect(verdictOf(state, 'ev_vp')).toBe('claim_verification');
   });
+});
+
+/**
+ * The second axis of the correction matrix: **whose name the object stands
+ * under, and what the correction asserts under it.**
+ *
+ * The matrix above ranges over actors and answers *may this actor correct at
+ * all*. It cannot see #22 r11, because r11's defect is a human doing a
+ * human-only thing: ALICE rewording BOB's sentence, five times, `ack` with
+ * `issues: []` every time, ending at a `✓` claim in which BOB confesses to
+ * taking kickbacks and BOB wrote none of the words.
+ *
+ * So the same six verbs run again here, against the *same object* named for the
+ * corrector and named for somebody else, and each case declares two facts about
+ * itself: whom it leaves the object naming, and whether it leaves a different
+ * sentence. The oracle is #4's sentence with both halves in it — *nobody gets
+ * committed, or quoted, by someone else's sentence* — and it is written out
+ * rather than called.
+ *
+ * Every legal verb r10 made a named mutant of is in here as a cell that must
+ * stay `allowed` on somebody else's object: `retract`, `restore`, `reopen`,
+ * `amend` of a due date, `amend` of a status, and a `retype` that carries the
+ * sentence across unchanged. A gate that fired on a name being *present* rather
+ * than a sentence *changing* would freeze all six, which is the other bug and
+ * just as shipped.
+ */
+describe('authority matrix — object_corrected, every verb × whose name it stands under', () => {
+  /** What the object says before any correction; `REWORDED` is what it must not be made to say. */
+  const ORIGINAL = 'wire the flag into the server tomorrow';
+  const REWORDED = 'i have been taking kickbacks from the vendor';
+
+  interface AssertionCase {
+    label: string;
+    verb: CorrectionAction;
+    toType?: AcceptedObjectType;
+    /** Whose name the object stands under once this has been applied. */
+    namesAfter: (before: string) => string;
+    /** Does it leave a different sentence? */
+    rewords: boolean;
+    patch: (before: string) => Record<string, unknown>;
+    /** An extra correction to run first, so the verb has something to act on. */
+    prepare?: 'retract' | 'close';
+  }
+
+  /** The person a correction would hand it to: whoever is not already named. */
+  const theOther = (before: string) => (before === ALICE ? BOB : ALICE);
+
+  const CASES: AssertionCase[] = [
+    {
+      label: 'amend the sentence',
+      verb: 'amend',
+      namesAfter: (before) => before,
+      rewords: true,
+      patch: () => ({ statement: REWORDED }),
+    },
+    {
+      label: 'amend the due date',
+      verb: 'amend',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({ due: '2026-08-01T10:00:00.000Z' }),
+    },
+    {
+      label: 'amend the status',
+      verb: 'amend',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({ status: 'done' }),
+    },
+    {
+      label: 'retract it',
+      verb: 'retract',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({}),
+    },
+    {
+      label: 'restore it',
+      verb: 'restore',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({}),
+      prepare: 'retract',
+    },
+    {
+      label: 'reopen it',
+      verb: 'reopen',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({}),
+      prepare: 'close',
+    },
+    {
+      label: 'retype it, carrying the sentence',
+      verb: 'retype',
+      toType: 'claim',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: (before) => ({ claimant: before }),
+    },
+    {
+      label: 'retype it and reword it in the same act',
+      verb: 'retype',
+      toType: 'claim',
+      namesAfter: (before) => before,
+      rewords: true,
+      patch: (before) => ({ claimant: before, statement: REWORDED }),
+    },
+    {
+      label: 'retype it onto the other person',
+      verb: 'retype',
+      toType: 'claim',
+      namesAfter: theOther,
+      rewords: false,
+      patch: (before) => ({ claimant: theOther(before) }),
+    },
+    {
+      label: 'reattribute it onto the other person',
+      verb: 'reattribute',
+      namesAfter: theOther,
+      rewords: false,
+      patch: (before) => ({ owner: theOther(before) }),
+    },
+  ];
+
+  /**
+   * #4, restated: a correction is one person's act, so it may only assert
+   * things under its own author's name. A name arriving that is not the
+   * corrector's is the first half; a sentence changing under a name that is not
+   * the corrector's is the second. ALICE corrects throughout.
+   */
+  function expectedForAssertion(namedBefore: string, testCase: AssertionCase): Gate | 'allowed' {
+    const namedAfter = testCase.namesAfter(namedBefore);
+    if (namedAfter !== namedBefore && namedAfter !== ALICE) return 'correction_attribution';
+    if (testCase.rewords && namedAfter !== ALICE) return 'correction_quotation';
+    return 'allowed';
+  }
+
+  for (const standsUnder of ['the corrector', 'somebody else'] as const) {
+    const namedBefore = standsUnder === 'the corrector' ? ALICE : BOB;
+
+    for (const testCase of CASES) {
+      it(`ALICE tries to ${testCase.label}, on a commitment standing under ${standsUnder}`, () => {
+        const suffix = `${standsUnder === 'the corrector' ? 'own' : 'other'}_${testCase.label.replace(/[^a-z]+/g, '_')}`;
+        const objectId = `obj_a_${suffix}`;
+        const events: AuthoredEvent[] = [
+          acceptEvent({
+            // `acceptEvent` prefixes this with `ev_`, so it must not read as
+            // the correction's own id — two rows sharing one event id is a
+            // redelivery, and the reducer drops the second in silence.
+            id: `seed_${suffix}`,
+            objectId,
+            type: 'commitment',
+            actor: 'human',
+            proposalId: null,
+            names: namedBefore,
+            statement: ORIGINAL,
+            setup: true,
+          }),
+        ];
+
+        // Scaffolding runs as the person named, so a cell can never fail on the
+        // rule it is not testing.
+        const owner: Actor = { kind: 'human', userId: namedBefore };
+        if (testCase.prepare !== undefined) {
+          events.push(
+            row(
+              {
+                id: `ev_prep_${suffix}`,
+                at: nextAt(),
+                type: 'object_corrected',
+                objectId,
+                ...(testCase.prepare === 'retract'
+                  ? { action: 'retract' }
+                  : { action: 'amend', patch: { status: 'done' } }),
+              },
+              owner,
+            ),
+          );
+        }
+
+        const correctionId = `ev_a_${suffix}`;
+        events.push(
+          row(
+            {
+              id: correctionId,
+              at: nextAt(),
+              type: 'object_corrected',
+              objectId,
+              action: testCase.verb,
+              ...(testCase.toType === undefined ? {} : { toType: testCase.toType }),
+              patch: testCase.patch(namedBefore),
+            },
+            'human',
+          ),
+        );
+
+        const state = reduce(events);
+        const expected = expectedForAssertion(namedBefore, testCase);
+        expect(verdictOf(state, correctionId)).toBe(expected);
+        expect(state.corrections.some((entry) => entry.eventId === correctionId)).toBe(
+          expected === 'allowed',
+        );
+
+        // A refused correction leaves the sentence exactly as it was — the
+        // point of the round. `issues: []` with the object already rewritten is
+        // the shape r10 shipped.
+        const record = state.objects[objectId];
+        if (!record) throw new Error('setup did not produce an object');
+        const text = (record.object.payload as Record<string, unknown>)[
+          TEXT_KEY[record.object.type]
+        ];
+        expect(text).toBe(expected === 'allowed' && testCase.rewords ? REWORDED : ORIGINAL);
+      });
+    }
+  }
 });
 
 describe('authority matrix — relation_added, every actor × kind × retired type', () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type Actor,
   type AuthoredEvent,
   type CoreEvent,
   type CoreState,
@@ -33,6 +34,12 @@ const corrected = (
     at: string;
     objectId: string;
     action: 'amend' | 'retract' | 'restore' | 'retype' | 'reattribute' | 'reopen';
+    /**
+     * Who is correcting. ALICE unless a case says otherwise — and since #22 r11
+     * a case that rewords a sentence standing under somebody's name has to say
+     * otherwise, because only that person may reword it.
+     */
+    actor?: Actor;
   },
 ): AuthoredEvent =>
   event({
@@ -447,17 +454,257 @@ describe('reattribute — the verb split that keeps the log readable', () => {
   });
 
   it('still lets amend change everything that is not the attribution field', () => {
+    // BOB corrects, because `obj_commitment_1` is BOB's and since #22 r11 the
+    // sentence under a person's name is theirs to reword. What the case is
+    // about — the verb split fences off the attribution field and *nothing
+    // else*, so an `amend` of the sentence is a plain, unrefused correction —
+    // is unchanged; only whose hand is on it moved.
     const state = reduce([
       ...sampleLog(),
       corrected({
         id: 'ev_ok',
         at: at(9),
+        actor: human(BOB),
         objectId: 'obj_commitment_1',
         action: 'amend',
         patch: { statement: 'Wire the flag into the server, behind the env var' },
       }),
     ]);
     expect(state.issues).toEqual([]);
+    const record = state.objects.obj_commitment_1;
+    expect(record?.object.type === 'commitment' && record.object.payload.statement).toBe(
+      'Wire the flag into the server, behind the env var',
+    );
+  });
+});
+
+/**
+ * #22 r11: the other half of #4's sentence.
+ *
+ * r10 closed *nobody gets committed by someone else's sentence* and left
+ * *nobody gets **quoted*** standing open while the refusal text went on citing
+ * it. The gate compared name sets and never looked at the field the sentence is
+ * in, so a member could take a colleague's own accepted commitment and rewrite
+ * the words under his name, as many times as he liked, `ack` with `issues: []`
+ * every time.
+ */
+describe('the sentence under a person’s name is theirs — #22 r11', () => {
+  const MALLORY = 'user_mallory';
+  const BOBS_OWN = "I'll review the Q3 deck before Friday";
+
+  /** BOB stages and self-accepts his own commitment. Entirely legal — his name. */
+  function bobsCommitment(): AuthoredEvent[] {
+    return [
+      event({
+        id: 'ev_bob',
+        at: at(1),
+        actor: human(BOB),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_bob',
+          roomId: ROOM,
+          type: 'commitment',
+          payload: { statement: BOBS_OWN, owner: BOB },
+          createdAt: at(1),
+          updatedAt: at(1),
+        },
+      } as Parameters<typeof event>[0]),
+    ];
+  }
+
+  /** A correction by a third person — neither the owner nor anybody named. */
+  const mallory = (overrides: Parameters<typeof corrected>[0]): AuthoredEvent =>
+    corrected({ ...overrides, actor: human(MALLORY) });
+
+  it('refuses the five commands that made BOB confess to taking kickbacks', () => {
+    // The gauntlet's sequence, verbatim and in order. Under r10 all five acked
+    // with `issues: []` and left `type=claim, claimant=BOB,
+    // verification=verified, revision=5` with a statement MALLORY wrote.
+    //
+    // Mutation this catches: delete the second clause of
+    // `correctionAttributionRefusal` — the one that compares
+    // `objectStatement(after)` with `objectStatement(before)`. Nothing else in
+    // the suite goes red for it, which is precisely how it shipped.
+    const state = reduce([
+      ...bobsCommitment(),
+      mallory({
+        id: 'ev_m1',
+        at: at(2),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { statement: 'I falsified the Q3 revenue figures' },
+      }),
+      mallory({
+        id: 'ev_m2',
+        at: at(3),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { due: at(20) },
+      }),
+      mallory({
+        id: 'ev_m3',
+        at: at(4),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'claim',
+        patch: { claimant: BOB },
+      }),
+      mallory({
+        id: 'ev_m4',
+        at: at(5),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { verification: 'verified' },
+      }),
+      mallory({
+        id: 'ev_m5',
+        at: at(6),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { statement: 'I have been taking kickbacks from the vendor' },
+      }),
+    ]);
+
+    // The two that put words under BOB's name are refused, by name, and the
+    // room is told which rule and whose name.
+    const refused = state.issues.map((issue) => issue.eventId);
+    expect(refused).toEqual(['ev_m1', 'ev_m5']);
+    for (const issue of state.issues) {
+      expect(issue.reason).toContain(`rewording a sentence that stands under user "${BOB}"'s name`);
+      expect(issue.reason).toContain('nobody gets committed, or quoted');
+    }
+
+    // …and the sentence in the current-state table is still the one BOB wrote.
+    const record = state.objects.obj_bob;
+    expect(record?.object.type === 'claim' && record.object.payload.statement).toBe(BOBS_OWN);
+    // What is deliberately still reachable, stated rather than hidden: the three
+    // acts that assert nothing under BOB's name all land. MALLORY may read his
+    // commitment as a claim and mark it verified — a reading of BOB's own words,
+    // recorded as MALLORY's act. Whether `verification: 'verified'` should be
+    // reachable by `amend` from any member at all is #68, and is not this round.
+    expect(record?.object.type === 'claim' && record.object.payload.claimant).toBe(BOB);
+    expect(record?.object.type === 'claim' && record.object.payload.verification).toBe('verified');
+    expect(record?.revision).toBe(3);
+    expect(state.corrections.map((entry) => entry.eventId)).toEqual(['ev_m2', 'ev_m3', 'ev_m4']);
+  });
+
+  it('lets a person reword their own sentence', () => {
+    // Mutation this catches: drop the `isForeign` filter from clause two, so it
+    // refuses on any name being present. The product would freeze — nobody
+    // could fix their own wording — which is the other bug and just as shipped.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_bob_fix',
+        at: at(2),
+        actor: human(BOB),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { statement: "I'll review the Q3 deck before Thursday" },
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_bob;
+    expect(record?.object.type === 'commitment' && record.object.payload.statement).toBe(
+      "I'll review the Q3 deck before Thursday",
+    );
+  });
+
+  it('lets anybody reword a sentence that names nobody', () => {
+    // An objective's title and a question's text are the room's, not a person's
+    // — there is nobody to have been quoted, so there is nothing to refuse.
+    //
+    // Mutation this catches: make clause two fire whenever the text changes,
+    // ignoring `namedAfter` entirely. Both lines below go red.
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_q',
+        at: at(9),
+        actor: human(MALLORY),
+        objectId: 'obj_question_1',
+        action: 'amend',
+        patch: { question: 'Do we keep the flag after GA?' },
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_question_1;
+    expect(record?.object.type === 'open_question' && record.object.payload.question).toBe(
+      'Do we keep the flag after GA?',
+    );
+  });
+
+  it('does not read a retype’s carried sentence as a rewording', () => {
+    // `retypeCarryOver` moves the text from `statement` to `question` — a
+    // different key holding the same string. The gate compares what
+    // `TEXT_FIELD` says the text *is*, not which keys the patch mentions, so
+    // this is the same sentence and nobody has been quoted.
+    //
+    // Mutation this catches: compare `Object.hasOwn(event.patch, textField)`
+    // instead of the two texts. MALLORY's retype below starts being refused,
+    // and #5's canonical fix — "that was only a suggestion" — stops working on
+    // anybody else's object.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_rt',
+        at: at(2),
+        actor: human(MALLORY),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'open_question',
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_bob;
+    expect(record?.object.type === 'open_question' && record.object.payload.question).toBe(
+      BOBS_OWN,
+    );
+  });
+
+  it('refuses a retype that rewords in the same act', () => {
+    // The verb is not the trigger; the sentence changing under a foreign name
+    // is. Mutation this catches: run clause two only when `action === 'amend'`.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_rt2',
+        at: at(2),
+        actor: human(MALLORY),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'claim',
+        patch: { claimant: BOB, statement: 'I have been taking kickbacks from the vendor' },
+      }),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain(
+      `rewording a sentence that stands under user "${BOB}"'s name`,
+    );
+    const record = state.objects.obj_bob;
+    expect(record?.object.type).toBe('commitment');
+    expect(record?.revision).toBe(0);
+  });
+
+  it('reports the name clause, not the sentence clause, when both would fire', () => {
+    // A retype that moves the name *and* rewords: the room is told the more
+    // fundamental thing first — that MALLORY cannot put ALICE's name on
+    // anything — because fixing only the wording would leave the act still
+    // refused and the second message would be the surprising one.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_rt3',
+        at: at(2),
+        actor: human(MALLORY),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'claim',
+        patch: { claimant: ALICE, statement: 'I have been taking kickbacks from the vendor' },
+      }),
+    ]);
+    expect(state.issues[0]?.reason).toContain(`putting user "${ALICE}"'s name on it`);
+    expect(state.objects.obj_bob?.object.type).toBe('commitment');
   });
 });
 
@@ -619,11 +866,18 @@ describe('epistemic state — `~` until a person touches it', () => {
   });
 
   it('is confirmed the moment a person corrects it', () => {
+    // BOB is the claimant of the machine's reading, and since #22 r11 he is the
+    // only person who may reword a sentence standing under his name. That makes
+    // the fixture the archetypal case rather than an incidental one: a model
+    // read BOB's words, BOB refines the reading, and the refinement is what
+    // turns `~` into `✓`. Anyone else who thinks the reading is wrong retracts
+    // it and stages one a second person can accept.
     const state = reduce([
       ...modelAcceptedClaim(),
       corrected({
         id: 'ev_touch',
         at: at(3),
+        actor: human(BOB),
         objectId: 'obj_model_claim',
         action: 'amend',
         patch: { statement: 'the build is green on main and on the release branch' },
@@ -659,6 +913,8 @@ describe('epistemic state — `~` until a person touches it', () => {
       corrected({
         id: 'ev_touch2',
         at: at(4),
+        // BOB, the claimant — see the case above.
+        actor: human(BOB),
         objectId: 'obj_model_claim',
         action: 'amend',
         patch: { statement: 'the build is green on main and on the release branch' },
@@ -830,9 +1086,12 @@ describe('correctionRateByType — #5’s live quality metric', () => {
   it('counts objects corrected, not corrections', () => {
     const state = reduce([
       ...sampleLog(),
+      // BOB's commitment, so BOB rewords it (#22 r11). The metric counts
+      // objects, not correctors, so nothing about the case moves.
       corrected({
         id: 'ev_m1',
         at: at(9),
+        actor: human(BOB),
         objectId: 'obj_commitment_1',
         action: 'amend',
         patch: { statement: 'one' },
@@ -840,6 +1099,7 @@ describe('correctionRateByType — #5’s live quality metric', () => {
       corrected({
         id: 'ev_m2',
         at: at(10),
+        actor: human(BOB),
         objectId: 'obj_commitment_1',
         action: 'amend',
         patch: { statement: 'two' },
