@@ -2362,15 +2362,30 @@ describe('core_events — the receipt window is derived, not supplied', () => {
      *     makes an append cost the room's whole history) and any drift in the
      *     migration's literal that `schema.test.ts` somehow let through;
      *  2. it is the room's EARLIEST messages after the citation, not an
-     *     arbitrary N of them — catches `receipt_window_tail_is_unordered`,
-     *     dropping the `ORDER BY m."seq"` that precedes the LIMIT. Without it
-     *     the planner may return any N rows, and the correction this window
-     *     exists to make findable is usually the very next message.
+     *     arbitrary N of them. Without the `ORDER BY m."seq"` that precedes the
+     *     LIMIT the planner may return any N rows, and the correction this
+     *     window exists to make findable is usually the very next message.
      *
      * The second claim is the one a smaller room could not make: with a tail
      * exactly at the bound, "cut at N" and "cut at the earliest N" are the same
      * answer. This room posts one message MORE than the bound, so the two
      * differ by exactly the last message — which must be the one left out.
+     *
+     * ── WHAT THIS TEST DOES NOT CATCH, MEASURED RATHER THAN ASSUMED ─────────
+     *
+     * `receipt_window_tail_is_unordered` — deleting that `ORDER BY` — was made
+     * and this suite stayed GREEN. On 202 rows Postgres walks
+     * `messages_room_seq_idx` and hands back the earliest 201 regardless, so the
+     * mutant is latent rather than dead: the property below is asserted and the
+     * plan happens to satisfy it. A bigger table, a parallel scan or a bitmap
+     * heap scan is free to choose differently, and nothing here would notice.
+     *
+     * So the instrument that actually holds the ordering is the textual one —
+     * `packages/db/test/schema.test.ts` requires `ORDER BY m."seq"` immediately
+     * before the LIMIT and fails without it (verified by the same mutation).
+     * Recorded here rather than left as a claim this test cannot support,
+     * because a comment naming a mutant it does not kill is worse than no
+     * comment: it retires the mutant from somebody else's list.
      */
     const alice = await seedUser('alice-bound');
     const room = await seedRoom(handle, ['zoe'], { slug: 'room-bound' });
