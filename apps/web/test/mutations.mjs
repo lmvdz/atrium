@@ -1243,7 +1243,11 @@ const LEDGER = [
   {
     name: 'the printed-string sweep stops seeing announced-text attributes',
     file: 'test/printed.ts',
-    find: '    if (!ANNOUNCED_ATTRIBUTES.includes(name)) return [];',
+    /* r8: re-anchored. The predicate moved into `model/printed-surface.ts` when
+       the runtime door and the static sweep were made to share one list, and the
+       old anchor named a line that no longer exists — reported STALE, which is
+       the ledger's own integrity check doing its job. */
+    find: '    if (!announcesText(name, hostTag(node)) && !cssPrintedAttributes.has(name.toLowerCase())) {\n      return [];\n    }',
     replace: '    return [];',
     test: 'test/printed-strings.test.tsx',
   },
@@ -1326,11 +1330,235 @@ const LEDGER = [
     replace: '        {false ? null : (',
     test: 'test/attention.test.tsx',
   },
+
+  /* ---------------------------------------------------------------------------
+   * ROUND 8 — the walk, the sink surface, and the sweep's three denominators.
+   * ------------------------------------------------------------------------- */
+
+  /* D1 — a walk that returns on the unrecognised is an allowlist that fails open. */
+  {
+    name: 'the slot walk goes back to returning on every shape it does not recognise',
+    file: 'src/components/model/slot.ts',
+    find: '  if (!isValidElement(node)) {',
+    replace: '  if (!isValidElement(node)) return;\n  if (false) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a portal carries its contents past the walk unchecked',
+    file: 'src/components/model/slot.ts',
+    find: '    if (tag === PORTAL_TYPE) {\n      walk((node as unknown as { children: ReactNode }).children, budget);',
+    replace: '    if (tag === PORTAL_TYPE) {\n      void budget;',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'a prop that is not children stops being searched for markup',
+    file: 'src/components/model/slot.ts',
+    find: '    walkProp(value, budget, { left: MAX_PROP_SEARCH });',
+    replace: '    void value;',
+    test: 'test/attribution.test.tsx',
+  },
+
+  /* D6 — the static half and the runtime door, enforcing one rule from two lists. */
+  {
+    name: 'the slot door stops holding announced attributes to the system’s voice',
+    file: 'src/components/model/slot.ts',
+    find: '      if (announcesText(key, tag)) {',
+    replace: '      if (false && announcesText(key, tag)) {',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the sink surface loses the announced attributes nobody had listed',
+    file: 'src/components/model/printed-surface.ts',
+    find: "  'aria-roledescription',\n",
+    replace: '',
+    test: 'test/attribution.test.tsx',
+  },
+  {
+    name: 'the tag-scoped text attributes stop being text',
+    file: 'src/components/model/printed-surface.ts',
+    find: "  ['optgroup', new Set(['label'])],",
+    replace: "  ['optgroup', new Set([])],",
+    test: 'test/printed-strings.test.tsx',
+  },
+
+  /* D2 — the type narrowing that excluded the one branded string in the library. */
+  {
+    name: 'the sweep’s type narrowing goes back to skipping branded strings',
+    file: 'test/printed-strings.test.tsx',
+    find: '  if (part.isIntersection() && depth < 3) {\n    return part.types.some((member) => partIsFree(member, depth + 1));\n  }',
+    replace: '  void depth;',
+    test: 'test/printed-strings.test.tsx',
+  },
+
+  /* D4 — the node types outside the denominator. */
+  {
+    name: 'the sweep stops seeing children and dangerouslySetInnerHTML as content',
+    file: 'test/printed.ts',
+    find: '    if (CHILDREN_PROPS.includes(name)) {\n      if (!ts.isJsxExpression(initializer) || initializer.expression === undefined) return [];',
+    replace:
+      '    if (CHILDREN_PROPS.includes(name)) {\n      if (true) return [];\n      if (!ts.isJsxExpression(initializer) || initializer.expression === undefined) return [];',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the sweep stops seeing React.createElement',
+    file: 'test/printed.ts',
+    find: '  if (ts.isCallExpression(node)) return createElementSites(node);',
+    replace: '  if (ts.isCallExpression(node)) return [];',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the sweep stops asking the CSS which attributes a stylesheet prints',
+    file: 'test/printed.ts',
+    find: '  cssPrintedAttributes = new Set([...names].map((name) => name.toLowerCase()));',
+    replace: '  void names;',
+    test: 'test/printed-strings.test.tsx',
+  },
+
+  /* D5 — the file set, the fourth incomplete input set in this repo. */
+  {
+    name: 'the sweep’s file list goes back to two named directories',
+    file: 'test/printed-strings.test.tsx',
+    find: 'const SOURCES: readonly string[] = appSources();',
+    replace:
+      "const SOURCES: readonly string[] = appSources().filter((p) => p.includes('/src/components/') || p.includes('/app/'));",
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the sweep’s extension list goes back to TypeScript only',
+    file: 'test/printed-strings.test.tsx',
+    find: "  '.jsx',\n",
+    replace: '',
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the tsconfig include stops rooting the JavaScript Next also ships',
+    file: 'tsconfig.json',
+    find: '    "**/*.jsx",\n',
+    replace: '',
+    test: 'test/printed-strings.test.tsx',
+  },
+
+  /* D3 — the payload door's bound, which asked a question about the file. */
+  {
+    name: 'the payload door’s bound goes back to asking about the function',
+    file: 'test/printed.ts',
+    find: '  const here = directHost(call, file, named);\n  if (here !== null) return here;',
+    replace:
+      "  const here = directHost(call, file, named);\n  if (true) return here ?? '<button>';",
+    test: 'test/printed-strings.test.tsx',
+  },
+  {
+    name: 'the payload door stops following a const to every one of its uses',
+    file: 'test/printed.ts',
+    find: '    const host = directHost(use, file, named);\n    if (host === null) return null;',
+    replace: '    const host = directHost(use, file, named);\n    if (host === null) continue;',
+    test: 'test/printed-strings.test.tsx',
+  },
+
+  /* The enumerators' own soft spots. */
+  {
+    name: 'the component node set goes back to being compared with itself',
+    file: 'test/frame-handlers.test.tsx',
+    find: '  for (const area of readdirSync(root).sort()) {\n    const dir = join(root, area);\n    if (!statSync(dir).isDirectory()) continue;',
+    replace:
+      "  for (const area of readdirSync(root).sort()) {\n    const dir = join(root, area);\n    if (!statSync(dir).isDirectory() || area === 'lens') continue;",
+    test: 'test/frame-handlers.test.tsx',
+  },
+  {
+    name: 'the register’s field list goes back to being written by hand',
+    file: 'test/attribution.test.tsx',
+    find: "    id: { id: 'm-not-this-one' },\n",
+    replace: '',
+    test: 'test/attribution.test.tsx',
+  },
+
+  /* D7–D10 — the product. */
+  {
+    name: 'the receipt’s provenance section goes back to a heading over nothing',
+    file: 'src/components/lens/ReceiptView.tsx',
+    find: '        {receipt.provenance.length === 0 ? (',
+    replace: '        {false ? (',
+    test: 'test/timeline-handlers.test.tsx',
+  },
+  {
+    name: 'a history line with no clock paints a dash where a time goes',
+    file: 'app/gallery/fixtures.ts',
+    find: '      id: `${object.id}-h${index}`,\n      kind,\n      statement: systemStatement(fact),',
+    replace:
+      "      id: `${object.id}-h${index}`,\n      kind,\n      at: '—',\n      statement: systemStatement(fact),",
+    test: 'test/timeline-handlers.test.tsx',
+  },
+  {
+    name: 'the shell stops stating the narrowest window it works in',
+    file: 'src/components/frame/AppFrame.tsx',
+    find: '      <div className={styles.belowMin} data-below-minimum-width={String(MINIMUM_WIDTH)}>',
+    replace: '      <div className={styles.belowMin}>',
+    test: 'test/viewport.test.tsx',
+  },
+  {
+    name: 'the minimum-width notice drifts from the floor the stylesheet declares',
+    file: 'src/components/frame/AppFrame.tsx',
+    find: 'export const MINIMUM_WIDTH = 1024;',
+    replace: 'export const MINIMUM_WIDTH = 900;',
+    test: 'test/viewport.test.tsx',
+  },
+  {
+    name: 'the notice is revealed at a width that is not the floor',
+    file: 'src/components/frame/frame.module.css',
+    find: '@media (max-width: 1023px) {\n  .belowMin {',
+    replace: '@media (max-width: 900px) {\n  .belowMin {',
+    test: 'test/viewport.test.tsx',
+  },
+  {
+    name: 'the composer goes back to seeding its status line with demo scaffolding',
+    file: 'app/RoomSession.tsx',
+    find: '  const [note, setNote] = useState<string | undefined>(undefined);',
+    replace:
+      "  const [note, setNote] = useState<string | undefined>(\n    'every control on this page is wired — click one and this line reports what it did',\n  );",
+    test: 'test/session.test.tsx',
+  },
 ];
 
 if (process.argv.includes('--list')) {
   for (const entry of LEDGER) console.info(`${entry.test.padEnd(34)} ${entry.name}`);
   process.exit(0);
+}
+
+/**
+ * The syntax error in a mutated file, or null.
+ *
+ * ONE PARSER PER LANGUAGE. Round 8 added a `tsconfig.json` mutation and this gate
+ * ran the TypeScript parser over JSON, which reports `';' expected` for perfectly
+ * good JSON — so a valid mutation was rejected as BROKEN. That is the round-6
+ * defect's mirror image and the same lesson as everything else this round:
+ * a wrong instrument invents defects, not just misses them. CSS was already
+ * exempted the same way, and an exemption is worse than a parser, so it has one.
+ */
+function syntaxError(file, source) {
+  if (file.endsWith('.json')) {
+    try {
+      JSON.parse(source);
+      return null;
+    } catch (error) {
+      return String(error.message);
+    }
+  }
+  if (file.endsWith('.css')) {
+    /* No CSS parser in this toolchain. What CAN be checked is that the braces
+       still balance, which is what every mutation here could plausibly break. */
+    const opens = (source.match(/\{/g) ?? []).length;
+    const closes = (source.match(/\}/g) ?? []).length;
+    return opens === closes ? null : `unbalanced braces (${opens} open, ${closes} close)`;
+  }
+  const parsed = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const errors = parsed.parseDiagnostics ?? [];
+  return errors.length === 0 ? null : ts.flattenDiagnosticMessageText(errors[0].messageText, ' ');
 }
 
 /** Run a catcher. Returns true when it FAILED — which is what "caught" means. */
@@ -1406,17 +1634,10 @@ for (const entry of LEDGER) {
 
      Syntax is checked before the catcher runs. An unparseable mutation is
      reported as a defect in the LEDGER, not as a caught defect in the code. */
-  const parsed = ts.createSourceFile(
-    entry.file,
-    mutated,
-    ts.ScriptTarget.Latest,
-    true,
-    entry.file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-  const syntaxErrors = parsed.parseDiagnostics ?? [];
-  if (entry.file.endsWith('.css') === false && syntaxErrors.length > 0) {
+  const broken = syntaxError(entry.file, mutated);
+  if (broken !== null) {
     escaped.push(
-      `${entry.name} — the mutated ${entry.file} does not parse, so the catcher never ran (${ts.flattenDiagnosticMessageText(syntaxErrors[0].messageText, ' ')})`,
+      `${entry.name} — the mutated ${entry.file} does not parse, so the catcher never ran (${broken})`,
     );
     console.info(`BROKEN   ${entry.name}`);
     continue;

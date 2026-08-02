@@ -186,3 +186,73 @@ describe('a handler is told what it acted on, by the register', () => {
     );
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * WHAT THE RECEIPT SAYS WHEN IT HAS NOTHING TO SAY — r8 D7/D8.
+ *
+ * Nine of the gallery's ten receipts are derived from the object rather than
+ * from a curated record, and both defects live in exactly those nine: an empty
+ * PROVENANCE section rendered as a bare heading, and a naked em dash standing in
+ * the column where a time goes. Both are about a component filling a slot it has
+ * nothing for — the `HappenedLine.who` shape, one field over.
+ * ------------------------------------------------------------------------- */
+describe('a derived receipt says what it has and does not decorate what it lacks', () => {
+  /* The exact receipts the app builds: every object except the one with a
+     curated record. Enumerated from the fixture set rather than named, so an
+     object added to the gallery is covered on the day it is added. */
+  const DERIVED = f.OBJECTS.filter((object) => object.id !== f.RECEIPT.id).map((object) =>
+    f.receiptFromObject(f.OBJECTS, object.id),
+  );
+
+  it('there are derived receipts to check', () => {
+    expect(
+      DERIVED.length,
+      'the gallery has no derived receipts, which cannot be true',
+    ).toBeGreaterThan(5);
+    expect(DERIVED.every((receipt) => receipt.provenance.length === 0)).toBe(true);
+  });
+
+  /* CATCHES D7: a section heading with nothing under it. The CORRECTION CHAIN
+     right below already had an empty state, so the reader got a bare word here
+     and found the explanation three sections down in `reopenNote`. */
+  it.each(DERIVED.map((receipt) => [receipt.id, receipt] as const))(
+    'the empty provenance section of %s explains itself where the question is asked',
+    (_id, receipt) => {
+      const { container } = renderWith(f.RECORDS, <ReceiptView receipt={receipt} />);
+      const text = container.textContent ?? '';
+      const heading = text.indexOf('PROVENANCE');
+      const next = text.indexOf('CORRECTION CHAIN');
+      expect(heading, 'the receipt renders no provenance section').toBeGreaterThan(-1);
+      expect(
+        text.slice(heading + 'PROVENANCE'.length, next).trim(),
+        'the provenance section is a heading over nothing',
+      ).not.toBe('');
+      expect(text).toContain('nothing on this object cites a message');
+    },
+  );
+
+  /* CATCHES D8: a placeholder painted as a value. `receiptFromObject` used to
+     pass `at: '—'`, so every derived history line read "proposed by justin —". */
+  it.each(DERIVED.map((receipt) => [receipt.id, receipt] as const))(
+    'no history line of %s prints a dash where a time goes',
+    (_id, receipt) => {
+      expect(
+        receipt.happened.filter((line) => line.at !== undefined),
+        'a derived history line carries a clock it cannot have',
+      ).toEqual([]);
+      const { container } = renderWith(f.RECORDS, <ReceiptView receipt={receipt} />);
+      expect(
+        container.textContent ?? '',
+        'a naked em dash is rendered as the time of an event',
+      ).not.toMatch(/\s—\s*(·|$|[A-Z])/);
+      /* BOTH DIRECTIONS: a receipt that DOES have clocks still prints them. */
+    },
+  );
+
+  it('a receipt that has clocks still prints them', () => {
+    const { container } = renderWith(f.RECORDS, <ReceiptView receipt={f.RECEIPT} />);
+    const clocks = f.RECEIPT.happened.map((line) => line.at).filter((at) => at !== undefined);
+    expect(clocks.length, 'the curated receipt has no clocks to print').toBeGreaterThan(0);
+    for (const at of clocks) expect(container.textContent).toContain(at);
+  });
+});

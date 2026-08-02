@@ -175,7 +175,9 @@ describe('the layout states the narrowest window it works in', () => {
     const sets = [...FRAME_CSS.matchAll(/grid-template-columns:\s*([^;]+);/g)]
       .map((hit) => hit[1] ?? '')
       .filter((value) => /minmax\(\s*\d+px/.test(value));
-    expect(sets.length, 'no four-column track set found in the frame stylesheet').toBeGreaterThan(0);
+    expect(sets.length, 'no four-column track set found in the frame stylesheet').toBeGreaterThan(
+      0,
+    );
     const widths = sets.map((set) =>
       [...set.matchAll(/(\d+)px/g)].reduce((total, hit) => total + Number(hit[1] ?? 0), 0),
     );

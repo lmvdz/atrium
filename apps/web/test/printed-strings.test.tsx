@@ -467,6 +467,20 @@ describe('every caller-supplied string the page prints goes through a door', () 
       expect(COMPILED_EXTENSIONS).toContain('.jsx');
       expect(COMPILED_EXTENSIONS).toContain('.js');
       expect(PARSED.options.allowJs, 'allowJs decides whether .js/.jsx ship').toBe(true);
+      /* AND THE `include` COVERS EVERY ONE OF THEM. With no `.jsx` in the tree
+         today, "the sweep reads what the compiler roots" is vacuously true — so
+         the guarantee is stated against the CONFIG rather than against the
+         current file list, which is the difference between a rule and a
+         coincidence. `allowJs: true` beside an include of only the TypeScript
+         globs is a file Next ships that nothing typechecks. */
+      const include = (ts.readConfigFile(join(WEB, 'tsconfig.json'), (p) => readFileSync(p, 'utf8'))
+        .config.include ?? []) as readonly string[];
+      expect(
+        COMPILED_EXTENSIONS.filter(
+          (extension) => !include.some((glob) => glob.endsWith(`*${extension}`)),
+        ),
+        'Next compiles this extension and the tsconfig `include` does not root it',
+      ).toEqual([]);
       /* The walk covers the whole app tree, not a list of directories inside it:
          `src/widgets/` is the shape the r8 review used, and it never existed. */
       expect(SOURCES.some((path) => relative(WEB, path).startsWith('src/components/'))).toBe(true);
@@ -932,6 +946,89 @@ describe('the analysis sees every shape it claims to', () => {
     );
     return offeredCallSites(file).map((site) => site.host);
   }
+
+  /* ---------------------------------------------------------------------------
+   * THE TYPE PREDICATE'S OWN SELF-TEST — r8 D2.
+   *
+   * The dataflow self-tests stub the type question out (`isFreeString: () =>
+   * true`), which is right for exercising the dataflow and means `typeIsFree`
+   * itself is exercised by NOTHING except the library as it happens to be
+   * written today. Running the r8 ledger against r8's own fix proved that:
+   * deleting the intersection branch changed no number and no test, because
+   * there is currently no site that prints a `Rationale` raw. The sweep's job is
+   * the defect AT ANY ADDRESS, so the predicate needs a check that does not
+   * depend on the library having the defect right now.
+   *
+   * So the predicate gets asked directly, about a program written here. This
+   * builds a real `ts.Program` over an in-memory file — the checker is the whole
+   * point, and a stubbed checker would be testing the stub.
+   * ------------------------------------------------------------------------- */
+  function typesIn(source: string): ReadonlyMap<string, boolean> {
+    const name = '/probe-types.ts';
+    const file = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const host: ts.CompilerHost = {
+      fileExists: (path) => path === name,
+      getCanonicalFileName: (path) => path,
+      getCurrentDirectory: () => '/',
+      getDefaultLibFileName: () => 'lib.d.ts',
+      getNewLine: () => '\n',
+      getSourceFile: (path) => (path === name ? file : undefined),
+      readFile: (path) => (path === name ? source : undefined),
+      useCaseSensitiveFileNames: () => true,
+      writeFile: () => undefined,
+    };
+    const program = ts.createProgram({
+      host,
+      options: { noLib: true, noResolve: true },
+      rootNames: [name],
+    });
+    const checker = program.getTypeChecker();
+    const out = new Map<string, boolean>();
+    const visit = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+        out.set(node.name.getText(file), typeIsFree(checker.getTypeAtLocation(node.name)));
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return out;
+  }
+
+  it('reads a branded string as a free string, because a brand is not a check', () => {
+    const answers = typesIn(`
+      declare const brand: unique symbol;
+      type Rationale = string & { readonly [brand]: 'rationale' };
+      type Glyph = '✓' | '◆' | '■';
+      declare const branded: Rationale;
+      declare const plain: string;
+      declare const closed: Glyph;
+      declare const optionalClosed: Glyph | undefined;
+      declare const anything: any;
+      declare const count: number;
+      declare const brandedOrNothing: Rationale | undefined;
+      const a = branded;
+      const b = plain;
+      const c = closed;
+      const d = optionalClosed;
+      const e = anything;
+      const f = count;
+      const g = brandedOrNothing;
+    `);
+    /* THE DEFECT: `Rationale = string & {…}` is an INTERSECTION, so
+       `type.isUnion()` is false and the old predicate tested the intersection's
+       own flags — none of which are `String`. The one branded string in this
+       library was counted and never traced, and it is exactly the type whose raw
+       render was round 5's finding. */
+    expect(answers.get('a'), 'a branded string is a string a cast can fill').toBe(true);
+    expect(answers.get('g'), 'a branded string beside undefined is still one').toBe(true);
+    expect(answers.get('b')).toBe(true);
+    expect(answers.get('e')).toBe(true);
+    /* BOTH DIRECTIONS: a closed union of literals is still not caller text, or
+       the sweep reports every `Glyph` on the page and stops being read. */
+    expect(answers.get('c'), 'a closed union of string literals is not caller text').toBe(false);
+    expect(answers.get('d')).toBe(false);
+    expect(answers.get('f'), 'a count is not text').toBe(false);
+  });
 
   it('refuses the exact shape the round-7 bound accepted', () => {
     /* A control somewhere in the same function is not the string's destination.

@@ -239,3 +239,43 @@ describe('a throw inside render has somewhere to land', () => {
     expect(() => find('apps/web/app/global-error.tsx')).not.toThrow();
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * THE PRODUCT CHROME IS NOT A README — r8.
+ *
+ * `/` is the route this round calls the actual product, and its composer's
+ * status line was seeded with "every control on this page is wired — click one
+ * and this line reports what it did": an instruction to a REVIEWER, sitting in
+ * the chrome a user reads. The r8 blind review's product judgment was otherwise
+ * good — 4 of 63 long strings on `/` explain the interface's own counting — and
+ * named this one as scaffolding to remove.
+ *
+ * A status line with nothing to report reports nothing. What makes that a
+ * guarantee rather than a deletion is that the line still WORKS: a handler
+ * writes to it and it appears.
+ * ------------------------------------------------------------------------- */
+describe('the status line reports what the page did, and nothing before it did anything', () => {
+  /* CATCHES: the scaffolding coming back, at any wording. The bound is not "this
+     sentence is absent" — that is a denylist of one string — it is that the line
+     RENDERS NOTHING until a control fires. */
+  it('nothing is under the composer until a control does something', () => {
+    render(<RoomSession />);
+    expect(
+      document.querySelector('[data-composer-note]'),
+      'the composer states something before the page has done anything',
+    ).toBe(null);
+  });
+
+  /* BOTH DIRECTIONS: the line is not merely deleted. Every handler still writes
+     to it, which is the property `/` exists to make checkable. */
+  it('a control that fires writes what it did into the line', () => {
+    render(<RoomSession />);
+    const rows = screen.getAllByRole('button');
+    const chip = rows.find((button) => (button.textContent ?? '').includes('#'));
+    expect(chip, 'no room chip to press').toBeDefined();
+    if (chip !== undefined) fireEvent.click(chip);
+    const note = document.querySelector('[data-composer-note]');
+    expect(note, 'a control fired and the status line stayed absent').not.toBe(null);
+    expect((note?.textContent ?? '').length).toBeGreaterThan(0);
+  });
+});

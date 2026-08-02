@@ -1595,6 +1595,39 @@ describe('an announced attribute in a slot is a string the page printed', () => 
       that the attribute reaches the door at all. */
   const VOICE = /no "X said"|no first person|no quotation marks/;
 
+  /* A TEST DRIVEN OFF A LIST CANNOT SEE THE LIST SHRINK.
+     Found by running the r8 ledger against r8's own fix: the `it.each` below is
+     driven off `ANNOUNCED_ATTRIBUTES`, so deleting `aria-roledescription` from
+     the shared list deleted a CASE rather than failing one, and the mutation
+     ESCAPED. Every other enumerator this round grew a second authority for
+     exactly this reason; the second authority for a list of platform facts is
+     the list written out. It is short, it is not derived from anything, and that
+     is the point — it is the only thing here that a shrinking list has to get
+     past. */
+  it('the announced list is the whole announced list', () => {
+    expect([...ANNOUNCED_ATTRIBUTES].sort()).toEqual([
+      'alt',
+      'aria-braillelabel',
+      'aria-brailleroledescription',
+      'aria-description',
+      'aria-keyshortcuts',
+      'aria-label',
+      'aria-placeholder',
+      'aria-roledescription',
+      'aria-valuetext',
+      'placeholder',
+      'title',
+    ]);
+    /* …and the id-REFERENCE attributes stay off it. Their value is an id, not
+       text; putting them here would check an id against the system-voice rule
+       and check the sentence it points at nowhere. */
+    for (const reference of ['aria-labelledby', 'aria-describedby', 'aria-details']) {
+      expect(ANNOUNCED_ATTRIBUTES, `${reference} is a reference, not text`).not.toContain(
+        reference,
+      );
+    }
+  });
+
   /* CATCHES: the runtime door checking content and not attributes. Driven off
      the SHARED list rather than four names typed here, so an attribute added to
      the sweep is an attribute this refuses on the same commit. */
