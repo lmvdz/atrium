@@ -378,15 +378,11 @@
         "derives the window from the event’s own provenance, in the room’s own order"
       ],
       "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE sql STABLE AS $m$ SELECT NULL::jsonb $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_receipt_window(uuid, actor_kind, jsonb)"
-      ],
       "restoreFrom": [
-        "CREATE FUNCTION \"atrium_receipt_window\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_receipt_window\"",
-        "DO $privileges$"
+        "CREATE OR REPLACE FUNCTION \"atrium_receipt_window\"",
+        "COMMENT ON FUNCTION \"atrium_receipt_window\""
       ],
-      "restoreMigration": "0006_derived_receipt_snapshot.sql"
+      "restoreMigration": "0011_the_window_reaches_past_the_citations.sql"
     },
     {
       "id": "at_spelling_unconstrained",
@@ -493,16 +489,12 @@
       "suite": "integration",
       "kind": "sql",
       "why": "The derivation this round replaced looked messages up by id alone, so a model acceptance in room A could be handed the text of a message from room B and check its receipt against a conversation the room never had. @atrium/core's TrustedContext doc says 'the room's own message table'; nothing enforced it.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $m$ DECLARE v_ids jsonb; v_window jsonb; BEGIN IF p_actor_kind = 'human' THEN RETURN NULL; END IF; IF p_payload->>'type' IS DISTINCT FROM 'object_accepted' THEN RETURN NULL; END IF; v_ids := p_payload->'object'->'provenance'->'messageIds'; IF v_ids IS NULL OR jsonb_typeof(v_ids) <> 'array' OR jsonb_array_length(v_ids) = 0 THEN RETURN NULL; END IF; SELECT coalesce(jsonb_agg(jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) ORDER BY m.seq), '[]'::jsonb) INTO v_window FROM messages m WHERE m.id::text IN (SELECT jsonb_array_elements_text(v_ids)); RETURN v_window; END; $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_receipt_window(uuid, actor_kind, jsonb)"
-      ],
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $m$ DECLARE c_later_messages_carried constant integer := 201; v_ids jsonb; v_last_cited_seq bigint; v_window jsonb; BEGIN IF p_actor_kind = 'human' THEN RETURN NULL; END IF; IF p_payload->>'type' IS DISTINCT FROM 'object_accepted' THEN RETURN NULL; END IF; v_ids := p_payload->'object'->'provenance'->'messageIds'; IF v_ids IS NULL OR jsonb_typeof(v_ids) <> 'array' OR jsonb_array_length(v_ids) = 0 THEN RETURN NULL; END IF; SELECT max(m.seq) INTO v_last_cited_seq FROM messages m WHERE m.id::text IN (SELECT jsonb_array_elements_text(v_ids)); SELECT coalesce(jsonb_agg(w.obj ORDER BY w.s), '[]'::jsonb) INTO v_window FROM (SELECT m.seq AS s, jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) AS obj FROM messages m WHERE m.id::text IN (SELECT jsonb_array_elements_text(v_ids)) UNION ALL (SELECT m.seq AS s, jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) AS obj FROM messages m WHERE m.seq > v_last_cited_seq ORDER BY m.seq LIMIT c_later_messages_carried)) w; RETURN v_window; END; $m$",
       "restoreFrom": [
-        "CREATE FUNCTION \"atrium_receipt_window\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_receipt_window\"",
-        "DO $privileges$"
+        "CREATE OR REPLACE FUNCTION \"atrium_receipt_window\"",
+        "COMMENT ON FUNCTION \"atrium_receipt_window\""
       ],
-      "restoreMigration": "0006_derived_receipt_snapshot.sql",
+      "restoreMigration": "0011_the_window_reaches_past_the_citations.sql",
       "catches": ["will not put another room’s message in a room’s receipt window"]
     },
     {
@@ -634,16 +626,12 @@
       "suite": "integration",
       "kind": "sql",
       "why": "The derivation answers `[]` where it should answer NULL: for a human acceptance, for an event with no receipt, and for an acceptance that cites nothing. Absent and empty are different facts — #21's reducer refuses a non-human acceptance for both, and reports the two differently — so collapsing them makes a replay report the wrong reason, and gives every human acceptance a receipt window it never had.",
-      "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $m$ DECLARE v_ids jsonb; v_window jsonb; BEGIN IF p_actor_kind = 'human' THEN RETURN '[]'::jsonb; END IF; IF p_payload->>'type' IS DISTINCT FROM 'object_accepted' THEN RETURN '[]'::jsonb; END IF; v_ids := p_payload->'object'->'provenance'->'messageIds'; IF v_ids IS NULL OR jsonb_typeof(v_ids) <> 'array' OR jsonb_array_length(v_ids) = 0 THEN RETURN '[]'::jsonb; END IF; SELECT coalesce(jsonb_agg(jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) ORDER BY m.seq), '[]'::jsonb) INTO v_window FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids)); RETURN v_window; END; $m$",
-      "restorePrelude": [
-        "DROP FUNCTION IF EXISTS public.atrium_receipt_window(uuid, actor_kind, jsonb)"
-      ],
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $m$ DECLARE c_later_messages_carried constant integer := 201; v_ids jsonb; v_last_cited_seq bigint; v_window jsonb; BEGIN IF p_actor_kind = 'human' THEN RETURN '[]'::jsonb; END IF; IF p_payload->>'type' IS DISTINCT FROM 'object_accepted' THEN RETURN '[]'::jsonb; END IF; v_ids := p_payload->'object'->'provenance'->'messageIds'; IF v_ids IS NULL OR jsonb_typeof(v_ids) <> 'array' OR jsonb_array_length(v_ids) = 0 THEN RETURN '[]'::jsonb; END IF; SELECT max(m.seq) INTO v_last_cited_seq FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids)); SELECT coalesce(jsonb_agg(w.obj ORDER BY w.s), '[]'::jsonb) INTO v_window FROM (SELECT m.seq AS s, jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) AS obj FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids)) UNION ALL (SELECT m.seq AS s, jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) AS obj FROM messages m WHERE m.room_id = p_room_id AND m.seq > v_last_cited_seq ORDER BY m.seq LIMIT c_later_messages_carried)) w; RETURN v_window; END; $m$",
       "restoreFrom": [
-        "CREATE FUNCTION \"atrium_receipt_window\"",
-        "REVOKE EXECUTE ON FUNCTION \"atrium_receipt_window\"",
-        "DO $privileges$"
+        "CREATE OR REPLACE FUNCTION \"atrium_receipt_window\"",
+        "COMMENT ON FUNCTION \"atrium_receipt_window\""
       ],
-      "restoreMigration": "0006_derived_receipt_snapshot.sql",
+      "restoreMigration": "0011_the_window_reaches_past_the_citations.sql",
       "catches": [
         "gives a human acceptance no window at all",
         "gives an acceptance that cites nothing a null window rather than an empty one"
@@ -653,7 +641,7 @@
       "id": "fk_delete_action_drifts",
       "suite": "integration",
       "kind": "sql",
-      "why": "The failure the stale FK audit was evidence of: a delete action changes and the paragraph describing it does not. 0005's audit named a column that does not exist under an action it does not have, and omitted one that does — with no way for a reader to tell which of its other rows were also wrong. The audit is read off `pg_constraint` now, so drift fails a test instead of ageing quietly in a comment. Re-anchored on merge: the auth lane squashed and renamed the initial migration, so `restoreMigration` moved from 0000_classy_shocker.sql to 0000_auth_and_workspaces.sql. Same statement, same file, new name \u2014 a stale anchor here reads as ESCAPED, which is why the ledger's own test resolves every marker rather than trusting the string.",
+      "why": "The failure the stale FK audit was evidence of: a delete action changes and the paragraph describing it does not. 0005's audit named a column that does not exist under an action it does not have, and omitted one that does — with no way for a reader to tell which of its other rows were also wrong. The audit is read off `pg_constraint` now, so drift fails a test instead of ageing quietly in a comment. Re-anchored on merge: the auth lane squashed and renamed the initial migration, so `restoreMigration` moved from 0000_classy_shocker.sql to 0000_auth_and_workspaces.sql. Same statement, same file, new name — a stale anchor here reads as ESCAPED, which is why the ledger's own test resolves every marker rather than trusting the string.",
       "apply": "ALTER TABLE attention_items DROP CONSTRAINT attention_items_user_id_users_id_fk; ALTER TABLE attention_items ADD CONSTRAINT attention_items_user_id_users_id_fk FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL ON UPDATE no action",
       "restorePrelude": [
         "ALTER TABLE attention_items DROP CONSTRAINT attention_items_user_id_users_id_fk"
@@ -1174,6 +1162,38 @@
         "walks past a refused row without putting it in the room",
         "applies the same rule to a catch-up page as to a live frame"
       ]
+    },
+    {
+      "suite": "integration",
+      "kind": "sql",
+      "restoreFrom": [
+        "CREATE OR REPLACE FUNCTION \"atrium_receipt_window\"",
+        "COMMENT ON FUNCTION \"atrium_receipt_window\""
+      ],
+      "restoreMigration": "0011_the_window_reaches_past_the_citations.sql",
+      "id": "receipt_window_ends_at_the_citations",
+      "why": "#86 itself, as a mutant: the window is exactly the cited messages, which is what 0006 shipped and what fix/realtime-r11 argued for. Merged with fix/core-engine-r12's laterRevision — which refuses any window that ends at the citations — the SQL cannot produce a window the TypeScript will certify, so EVERY non-human acceptance is refused and the model path is dead. git produced no conflict marker for it: the two rules live in different files and different languages. This is the entry that keeps the deadlock findable if anyone narrows the window again.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $m$ DECLARE c_later_messages_carried constant integer := 201; v_ids jsonb; v_last_cited_seq bigint; v_window jsonb; BEGIN IF p_actor_kind = 'human' THEN RETURN NULL; END IF; IF p_payload->>'type' IS DISTINCT FROM 'object_accepted' THEN RETURN NULL; END IF; v_ids := p_payload->'object'->'provenance'->'messageIds'; IF v_ids IS NULL OR jsonb_typeof(v_ids) <> 'array' OR jsonb_array_length(v_ids) = 0 THEN RETURN NULL; END IF; SELECT max(m.seq) INTO v_last_cited_seq FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids)); SELECT coalesce(jsonb_agg(w.obj ORDER BY w.s), '[]'::jsonb) INTO v_window FROM (SELECT m.seq AS s, jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) AS obj FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids))) w; RETURN v_window; END; $m$",
+      "catches": [
+        "carries what the room said after the newest citation, in the room’s order",
+        "stops the tail at the bound `policy.ts` names, and takes the earliest",
+        "is the window @atrium/core certifies, for every shape the SQL can snapshot",
+        "derives the window from the event’s own provenance, in the room’s own order",
+        "replays an accepted claim identically after its author is deleted"
+      ]
+    },
+    {
+      "suite": "integration",
+      "kind": "sql",
+      "restoreFrom": [
+        "CREATE OR REPLACE FUNCTION \"atrium_receipt_window\"",
+        "COMMENT ON FUNCTION \"atrium_receipt_window\""
+      ],
+      "restoreMigration": "0011_the_window_reaches_past_the_citations.sql",
+      "id": "receipt_window_tail_is_unbounded",
+      "why": "The tail carries every message after the newest citation instead of stopping at RECEIPT_POLICY.maxLaterMessagesCarried, so an append's cost is the room's whole history and the snapshot column grows without bound. The bound is also half of #86's mechanism: the checker tells a truncated window from a room that ended by whether the tail reached the supplier's ceiling, and a supplier with no ceiling never reaches one.",
+      "apply": "CREATE OR REPLACE FUNCTION public.atrium_receipt_window(p_room_id uuid, p_actor_kind actor_kind, p_payload jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $m$ DECLARE c_later_messages_carried constant integer := 201; v_ids jsonb; v_last_cited_seq bigint; v_window jsonb; BEGIN IF p_actor_kind = 'human' THEN RETURN NULL; END IF; IF p_payload->>'type' IS DISTINCT FROM 'object_accepted' THEN RETURN NULL; END IF; v_ids := p_payload->'object'->'provenance'->'messageIds'; IF v_ids IS NULL OR jsonb_typeof(v_ids) <> 'array' OR jsonb_array_length(v_ids) = 0 THEN RETURN NULL; END IF; SELECT max(m.seq) INTO v_last_cited_seq FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids)); SELECT coalesce(jsonb_agg(w.obj ORDER BY w.s), '[]'::jsonb) INTO v_window FROM (SELECT m.seq AS s, jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) AS obj FROM messages m WHERE m.room_id = p_room_id AND m.id::text IN (SELECT jsonb_array_elements_text(v_ids)) UNION ALL (SELECT m.seq AS s, jsonb_build_object('id', m.id::text, 'authorId', coalesce(m.author_id::text, ''), 'body', m.body) AS obj FROM messages m WHERE m.room_id = p_room_id AND m.seq > v_last_cited_seq ORDER BY m.seq)) w; RETURN v_window; END; $m$",
+      "catches": ["stops the tail at the bound `policy.ts` names, and takes the earliest"]
     }
   ]
 }

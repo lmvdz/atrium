@@ -1626,6 +1626,43 @@
       "find": "  return { items: out, refusals: [], examined: [] };",
       "replace": "  return {\n    items: out,\n    refusals: [],\n    examined: out.map((entry) => ({\n      class: 'mention',\n      subjectKind: 'object',\n      subjectId: entry.objectId,\n      producer: 'mention_signal',\n    })),\n  };",
       "catches": ["does not resolve one person’s mention on a cycle whose signal named another"]
+    },
+    {
+      "id": "later_revision_drops_the_supplier_bound_check",
+      "why": "#86. The window's supplier (atrium_receipt_window, drizzle/0011) stops at RECEIPT_POLICY.maxLaterMessagesCarried, and a window cut at that ceiling is the same bytes as a room that ended there — this function has no message table and no clock. Without this gate a ceiling at or below what the scan reads makes the scan report 'nothing corrects this' about messages it was never handed, which is the one direction of #86 that certifies rather than refuses.",
+      "file": "src/escalation.ts",
+      "find": "    return unscanned('window_carries_fewer_than_this_check_reads');",
+      "replace": "    void 0;",
+      "catches": [
+        "refuses a window standing at a ceiling no higher than the read bound",
+        "refuses at the ceiling even when carried and scanned are exactly equal",
+        "reports the refusal as a fact about the window, never about the reading",
+        "tells the room which question was declined, in its own words"
+      ]
+    },
+    {
+      "id": "later_revision_supplier_bound_uses_strict_less_than",
+      "why": "The equal case is the ambiguous one, and it is why drizzle/0011's literal is maxLaterMessagesScanned + 1 rather than the same number: a room that ended at exactly 200 and a window cut at exactly 200 cannot be told apart from in here, so certifying one certifies the other. A strict `<` passes every test about a ceiling below the read bound and lets the equal case through.",
+      "file": "src/escalation.ts",
+      "find": "    policy.maxLaterMessagesCarried <= policy.maxLaterMessagesScanned",
+      "replace": "    policy.maxLaterMessagesCarried < policy.maxLaterMessagesScanned",
+      "catches": ["refuses at the ceiling even when carried and scanned are exactly equal"]
+    },
+    {
+      "id": "later_revision_supplier_bound_counts_from_the_scan_floor",
+      "why": "The supplier's bound governs only the run it appended AFTER the newest citation; `later` starts at scanFloor, which is at or before the earliest one. Counting from there makes the guard fire one message early per extra citation — and makes the boundary movable by padding the citation list, which is the padding attack this file has been through at three other guards.",
+      "file": "src/escalation.ts",
+      "find": "  const suppliedAfterTheCitations = messages.length - (lastCited + 1);",
+      "replace": "  const suppliedAfterTheCitations = messages.length - (scanFloor + 1);",
+      "catches": ["measures the tail from the newest citation, not from the scan floor"]
+    },
+    {
+      "id": "problem_evidence_supersession_is_the_proposal",
+      "why": "fix/core-engine-r11 established that a verdict is either a fact about the reading or a fact about the window, and that a window-fact must refer rather than conclude. `superseded_by_later_message` is the finding that says what does or does not follow the citations; both of its arms change answer when the window slides, so it is a window-fact. Classified as the_proposal it reads as a judgement of the reading, and attention.ts resolves somebody’s confirm from a cycle that could not see the message it was confirming.",
+      "file": "src/escalation.ts",
+      "find": "  superseded_by_later_message: 'the_window',",
+      "replace": "  superseded_by_later_message: 'the_proposal',",
+      "catches": ["reports the refusal as a fact about the window, never about the reading"]
     }
   ]
 }
