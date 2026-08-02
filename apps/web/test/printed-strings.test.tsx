@@ -32,7 +32,16 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { ANNOUNCED_ATTRIBUTES, analyseSource, type PrintedFinding } from './printed';
+import { TAG_SCOPED_TEXT_ATTRIBUTES } from '../src/components/model/printed-surface';
+import {
+  ANNOUNCED_ATTRIBUTES,
+  analyseSource,
+  attributesPrintedByCss,
+  CONTROL_TAGS,
+  offeredCallSites,
+  type PrintedFinding,
+  setCssPrintedAttributes,
+} from './printed';
 
 function find(path: string): string {
   let dir = process.cwd();
@@ -46,15 +55,153 @@ function find(path: string): string {
 
 const WEB = find('apps/web/package.json').replace(/\/package\.json$/, '');
 
-/**
- * EVERY `.tsx` UNDER THE TWO TREES THAT RENDER, READ OFF THE FILESYSTEM.
+/* ---------------------------------------------------------------------------
+ * THE FILE SET — r8 D5, AND THE FOURTH SUBSYSTEM IN THIS REPO TO SHIP A CORRECT
+ * ANALYSIS OVER AN INCOMPLETE INPUT SET.
  *
- * D8's lesson from the round-6 review, generalised: `frame-handlers.test.tsx`
- * derived its EDGES and hand-wrote its NODES, so a component the list did not
- * name was invisible to a test whose whole point is counting. A file list that
- * matches the filesystem today is a latent version of the same defect.
+ * RETRO.md records the other three. This one shipped in round 7, inside the file
+ * written to end exactly this defect class: the list was "`*.tsx` under two named
+ * directories", and the only guard on it was `SOURCES.length > 24`. Measured on
+ * r7: adding `src/components/primitives/Leak.jsx` and `src/widgets/Leak2.tsx`,
+ * each rendering `<span title={note}>{note}</span>` off an untraced prop, left
+ * the sweep at 226 sites — UNCHANGED and GREEN — while `tsconfig` sets
+ * `allowJs: true` and Next compiles and ships both.
+ *
+ * A directory list and an extension list are both a claim about what runs. So the
+ * enumeration is tied to the three things that actually decide it, and the
+ * DIFFERENCES ARE ASSERTED EMPTY rather than assumed:
+ *
+ *   1. THE BUNDLER'S REACH — every file under `apps/web` with an extension Next
+ *      compiles, outside the directories that are not the app. This is the walk
+ *      below, and it is the widest of the three.
+ *   2. THE COMPILER'S `include` — `tsconfig.json`, read and parsed by TypeScript
+ *      itself rather than by a regex over the JSON. Asserted equal to (1), in
+ *      BOTH directions: a file tsc roots that the walk missed is a hole in the
+ *      walk, and a file the walk finds that tsc never roots is a file Next ships
+ *      and nothing typechecks — which is what `allowJs: true` beside a tsconfig
+ *      `include` naming only the two TypeScript globs had arranged.
+ *   3. THE MODULE GRAPH — every source file the built program actually pulled in
+ *      from under `apps/web`. A module the app imports from a directory this walk
+ *      skipped shows up here and nowhere else.
+ *   4. NEXT'S ROUTE CONVENTIONS — `page`/`layout`/`route`/`error`/… under `app/`
+ *      are entry points whether or not anything imports them, so the graph in (3)
+ *      cannot see a route nobody links to.
+ *
+ * WHAT THIS ENUMERATES FROM, AND WHAT EXECUTES THAT IT DOES NOT LIST: it
+ * enumerates from the filesystem, cross-checked against tsc's parse of the
+ * project and the resulting module graph. What executes and is NOT listed: the
+ * CSS (handled separately — see `CSS_PRINTED_ATTRIBUTES`), the `design/` token
+ * sheet, and code in `packages/*` that this app imports, which is enumerated by
+ * its own package's tests and reaches the page as a value rather than as JSX.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Extensions Next compiles into the app. `allowJs` is on, so the JavaScript ones
+ * are not hypothetical — a `.jsx` beside a `.tsx` is bundled identically.
  */
-function tsxUnder(dir: string): readonly string[] {
+const COMPILED_EXTENSIONS: readonly string[] = [
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.mts',
+  '.cts',
+];
+
+/**
+ * Directories under `apps/web` that are not the shipped app. Everything else is,
+ * including any directory nobody has created yet — which is the point of naming
+ * the exclusions rather than the inclusions.
+ */
+const NOT_THE_APP: ReadonlySet<string> = new Set(['node_modules', 'test', 'e2e', 'public']);
+
+function isCompiled(name: string): boolean {
+  if (name.endsWith('.d.ts')) return false;
+  return COMPILED_EXTENSIONS.some((extension) => name.endsWith(extension));
+}
+
+/** Every file under `apps/web` that Next can compile into the app. */
+function appSources(): readonly string[] {
+  const out: string[] = [];
+  const walk = (current: string): void => {
+    for (const name of readdirSync(current).sort()) {
+      if (NOT_THE_APP.has(name) || name.startsWith('.')) continue;
+      const full = join(current, name);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (isCompiled(name)) out.push(full);
+    }
+  };
+  walk(WEB);
+  return out;
+}
+
+const SOURCES: readonly string[] = appSources();
+
+/** The project as TypeScript itself parses it — not as a regex over the JSON. */
+function parsedProject(): ts.ParsedCommandLine {
+  const configPath = join(WEB, 'tsconfig.json');
+  const raw = ts.readConfigFile(configPath, (p) => readFileSync(p, 'utf8'));
+  return ts.parseJsonConfigFileContent(raw.config, ts.sys, WEB);
+}
+
+/** Files the compiler roots from this app's own tree, on the same terms. */
+function compilerRoots(parsed: ts.ParsedCommandLine): readonly string[] {
+  return parsed.fileNames.filter((path) => insideTheApp(path));
+}
+
+function insideTheApp(path: string): boolean {
+  const rel = relative(WEB, path);
+  if (rel.startsWith('..') || rel.startsWith('/')) return false;
+  if (!isCompiled(rel)) return false;
+  return !rel.split('/').some((segment) => NOT_THE_APP.has(segment) || segment.startsWith('.'));
+}
+
+/** Next's file-based entry points: reachable by URL, not by import. */
+const ROUTE_FILES: readonly string[] = [
+  'page',
+  'layout',
+  'route',
+  'error',
+  'global-error',
+  'not-found',
+  'template',
+  'default',
+  'loading',
+];
+
+function routeEntryPoints(): readonly string[] {
+  return SOURCES.filter((path) => {
+    const rel = relative(WEB, path);
+    if (!rel.startsWith('app/')) return false;
+    const base = rel.slice(rel.lastIndexOf('/') + 1);
+    return ROUTE_FILES.some((name) => COMPILED_EXTENSIONS.some((ext) => base === `${name}${ext}`));
+  });
+}
+
+/* ---------------------------------------------------------------------------
+ * THE ATTRIBUTE SET IS ONLY CLOSED RELATIVE TO A STYLESHEET.
+ *
+ * `content: attr(data-x)` prints ANY attribute — the r8 review named `data-*` as
+ * a sink the sweep could not see, and the honest fix is not to add every
+ * `data-*` to a list (which would report `data-hold-progress` as caller text and
+ * teach the next round to trust a list again). Whether a `data-*` reaches a
+ * reader is a fact about the CSS, so it is READ FROM THE CSS.
+ *
+ * Today the derived set is EMPTY: no rule in this app uses `attr()`. That is a
+ * measurement, not an assumption — the derivation runs on every commit, and the
+ * day a rule adds one the sweep picks the attribute up without anyone editing a
+ * list. `stylesheetsOf` is exercised against synthetic CSS in the self-test
+ * below, because an enumerator whose current answer is "none" is exactly the
+ * enumerator that can be broken without anyone noticing.
+ * ------------------------------------------------------------------------- */
+const REPO = dirname(dirname(WEB));
+
+function cssFiles(): readonly string[] {
   const out: string[] = [];
   const walk = (current: string): void => {
     for (const name of readdirSync(current).sort()) {
@@ -64,26 +211,27 @@ function tsxUnder(dir: string): readonly string[] {
         walk(full);
         continue;
       }
-      if (name.endsWith('.tsx')) out.push(full);
+      if (name.endsWith('.css')) out.push(full);
     }
   };
-  walk(dir);
+  walk(WEB);
+  walk(join(REPO, 'design'));
   return out;
 }
 
-const SOURCES: readonly string[] = [
-  ...tsxUnder(join(WEB, 'src/components')),
-  ...tsxUnder(join(WEB, 'app')),
-];
+const CSS_PRINTED_ATTRIBUTES: readonly string[] = [
+  ...new Set(cssFiles().flatMap((path) => attributesPrintedByCss(readFileSync(path, 'utf8')))),
+].sort();
+
+setCssPrintedAttributes(CSS_PRINTED_ATTRIBUTES);
+
+const PARSED = parsedProject();
 
 function program(): ts.Program {
-  const configPath = join(WEB, 'tsconfig.json');
-  const raw = ts.readConfigFile(configPath, (p) => readFileSync(p, 'utf8'));
-  const parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, WEB);
   return ts.createProgram({
     rootNames: [...SOURCES],
     options: {
-      ...parsed.options,
+      ...PARSED.options,
       noEmit: true,
       incremental: false,
       composite: false,
@@ -100,14 +248,45 @@ function program(): ts.Program {
  * `'here' | 'idle' | 'away'`, `'true' | undefined` — the set of values is
  * enumerable from the type, so no sentence can arrive through one. `string`,
  * a template-literal type, `any` and `unknown` all can.
+ *
+ * AND SO CAN A BRANDED ONE — r8 D2, and the narrowing that missed it was
+ * narrowing past the exact type this whole sweep was written about.
+ *
+ * `Rationale = string & { readonly [rationaleBrand]: 'rationale' }` is an
+ * INTERSECTION. `type.isUnion()` is false, so the old version tested the
+ * intersection's own flags — `Intersection`, none of `Any | Unknown | String |
+ * TemplateLiteral` — and answered NO. Every `Rationale` site in the library was
+ * therefore COUNTED and never TRACED: measured, adding `title={item.rationale}`
+ * to `AttentionCard`'s `<article>` moved the sweep from `226 sites · 126 traced`
+ * to `227 sites · 126 traced` with no new finding, and the suite stayed green.
+ *
+ * `Rationale` is the only branded string in the library and it is precisely the
+ * type whose RAW RENDER was round 5's finding — `AttentionCard` and
+ * `AttentionCompact` printed `{item.rationale}` directly, including into two
+ * `title=` attributes. The sweep's stated job is that defect AT ANY ADDRESS; for
+ * the type it was written about it caught it at zero, and the only thing standing
+ * between the library and a repeat was a hand-written test in
+ * `attention.test.tsx` naming the two addresses that already existed.
+ *
+ * A brand is a type-level marker; it does not stop a `JSON.parse`, a cast, or a
+ * `String()` from putting a sentence in one. The type question the sweep asks is
+ * "can a free string be in here", and for `string & Brand` the answer is yes.
  */
 function typeIsFree(type: ts.Type): boolean {
   const parts = type.isUnion() ? type.types : [type];
-  return parts.some((part) => {
-    if ((part.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return true;
-    if ((part.flags & ts.TypeFlags.StringLiteral) !== 0) return false;
-    return (part.flags & (ts.TypeFlags.String | ts.TypeFlags.TemplateLiteral)) !== 0;
-  });
+  return parts.some((part) => partIsFree(part, 0));
+}
+
+function partIsFree(part: ts.Type, depth: number): boolean {
+  if ((part.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return true;
+  /* A BRAND IS AN INTERSECTION, and it is free when any member of it is. Bounded
+     because a type graph is not; three is far past every brand in this library,
+     which is `string & { readonly [b]: 'x' }` — one level. */
+  if (part.isIntersection() && depth < 3) {
+    return part.types.some((member) => partIsFree(member, depth + 1));
+  }
+  if ((part.flags & ts.TypeFlags.StringLiteral) !== 0) return false;
+  return (part.flags & (ts.TypeFlags.String | ts.TypeFlags.TemplateLiteral)) !== 0;
 }
 
 /**
@@ -227,6 +406,83 @@ describe('every caller-supplied string the page prints goes through a door', () 
     );
   });
 
+  /* CATCHES the r8 D5 defect and its whole class: a correct analysis over an
+     incomplete input set. Three independent authorities on "what is the app",
+     and the DIFFERENCES are the assertion — a count of files proves nothing,
+     because the wrong denominator is a number too. */
+  describe('the file set is what executes, and the difference is empty', () => {
+    const SOURCE_SET = new Set(SOURCES);
+
+    /* THE COMPILER, BOTH DIRECTIONS. Left-to-right: a file tsc roots that the
+       walk missed is a hole in the walk. Right-to-left: a file the walk finds
+       that tsc never roots is a file Next ships and NOTHING TYPECHECKS — which
+       is exactly what `allowJs: true` beside a `tsconfig` include naming only
+       the two TypeScript globs had arranged: a `.jsx` was invisible twice. */
+    it('every file the compiler roots from this app is swept', () => {
+      const roots = compilerRoots(PARSED);
+      expect(roots.length, 'the tsconfig parse yielded no files from this app').toBeGreaterThan(24);
+      expect(
+        roots.filter((path) => !SOURCE_SET.has(path)).map((path) => relative(WEB, path)),
+        'the compiler roots a file this sweep does not read',
+      ).toEqual([]);
+    });
+
+    it('every file this sweep reads is a file the compiler roots', () => {
+      const roots = new Set(compilerRoots(PARSED));
+      expect(
+        SOURCES.filter((path) => !roots.has(path)).map((path) => relative(WEB, path)),
+        'Next compiles this file and the tsconfig `include` never roots it, so nothing typechecks what ships',
+      ).toEqual([]);
+    });
+
+    /* THE MODULE GRAPH. A file the app imports from a directory the walk skipped
+       is in the program and nowhere else — the "two named directories" defect,
+       caught by the compiler's own resolution rather than by a second list. */
+    it('every module the app pulls in from its own tree is swept', () => {
+      const pulled = PROGRAM.getSourceFiles()
+        .map((file) => file.fileName)
+        .filter((path) => insideTheApp(path))
+        .filter((path) => !SOURCE_SET.has(path));
+      expect(
+        pulled.map((path) => relative(WEB, path)),
+        'the app imports a file from its own tree that this sweep does not read',
+      ).toEqual([]);
+    });
+
+    /* NEXT'S ROUTE CONVENTIONS. A route is an entry point by NAME — no import
+       reaches it — so the module graph above cannot see one that nothing links
+       to. `/gallery/pin/[n]` is the shipped case. */
+    it('every route entry point Next serves is swept', () => {
+      const routes = routeEntryPoints().map((path) => relative(WEB, path));
+      expect(routes, 'no route entry points found, so this bound measures nothing').not.toEqual([]);
+      expect(routes).toContain('app/page.tsx');
+      expect(routes).toContain('app/layout.tsx');
+      expect(routes.some((path) => path.includes('/pin/'))).toBe(true);
+    });
+
+    /* AND THE EXTENSION LIST IS THE OTHER HALF OF THE DENOMINATOR. `.tsx` alone
+       was half a claim: `allowJs` is on, and the r8 review shipped a `.jsx` past
+       the r7 sweep to prove it. */
+    it('sweeps every extension Next compiles, not only the one this app happens to use', () => {
+      expect(COMPILED_EXTENSIONS).toContain('.jsx');
+      expect(COMPILED_EXTENSIONS).toContain('.js');
+      expect(PARSED.options.allowJs, 'allowJs decides whether .js/.jsx ship').toBe(true);
+      /* The walk covers the whole app tree, not a list of directories inside it:
+         `src/widgets/` is the shape the r8 review used, and it never existed. */
+      expect(SOURCES.some((path) => relative(WEB, path).startsWith('src/components/'))).toBe(true);
+      expect(SOURCES.some((path) => relative(WEB, path).startsWith('app/'))).toBe(true);
+      expect(
+        SOURCES.every(
+          (path) =>
+            !relative(WEB, path)
+              .split('/')
+              .some((s) => NOT_THE_APP.has(s)),
+        ),
+        'the sweep is reading its own test tree',
+      ).toBe(true);
+    });
+  });
+
   /* CATCHES the recurring defect at ANY address rather than at the one a critic
      names: a caller-supplied string reaching a reader without passing a check on
      the render path. The four the round-6 review found by hand are four members
@@ -250,84 +506,65 @@ describe('every caller-supplied string the page prints goes through a door', () 
     ).toEqual([]);
   });
 
-  /* CATCHES: the weaker door spreading. `offeredText` keeps its pronouns, which
-     is right for the copy ON a control and wrong everywhere else — CONVENTIONS'
-     own rule is that the payload exemption belongs to a sentence SHAPE, not to a
-     span. So every call site is required to be inside a control, and the list of
-     hosts is asserted rather than assumed. */
+  /* ---------------------------------------------------------------------------
+   * THE PAYLOAD DOOR'S BOUND — r8 D3.
+   *
+   * Round 7 asked `containsTag(enclosingFunction(call), CONTROLS)`: "does the
+   * function this call sits in render a control ANYWHERE" — a question about the
+   * file, not about the string. Measured on r7,
+   * `title={offeredText(item.title, 'AttentionCard summary')}` on the `<article>`
+   * passed, including the test named "the payload door is only used on the copy
+   * of a control", suite green at 408; and 23 of the 52 strong-door call sites
+   * sat in a function the predicate would have accepted just as readily.
+   *
+   * The bound is now a question about the string's DESTINATION — see
+   * `offeredCallSites` in `test/printed.ts`, which is self-tested against
+   * synthetic source below, both for what it accepts and for what it refuses.
+   *
+   * And this is THE LIST THE OLD COMMENT PROMISED. It said "Asserted as the list
+   * below" under a dangling `&& true`; there was no list below, and `&& true` is
+   * what a deleted clause leaves behind. Here it is, in both directions: a new
+   * call site is a diff, and a host that stops existing is a diff too.
+   * ------------------------------------------------------------------------- */
+  const OFFERED_HOSTS: readonly string[] = [
+    'src/components/attention/AttentionCard.tsx <button>',
+    'src/components/attention/AttentionCard.tsx <button>',
+    'src/components/attention/AttentionCompact.tsx <button>',
+    'src/components/primitives/HoldToAct.tsx <button>',
+    'src/components/primitives/HoldToAct.tsx <button> + <span id={describeId}> named by a control',
+    'src/components/timeline/TimelineRow.tsx <button>',
+  ];
+
   it('the payload door is only used on the copy of a control', () => {
-    /** Tags that ARE a control: something a person presses. */
-    const CONTROLS = new Set(['button', 'HoldToAct', 'a', 'summary', 'input']);
-    const offSite: string[] = [];
-    let calls = 0;
-    for (const path of SOURCES) {
+    const sites = SOURCES.flatMap((path) => {
       const file = PROGRAM.getSourceFile(path);
-      if (file === undefined) continue;
-      const visit = (node: ts.Node): void => {
-        if (
-          ts.isCallExpression(node) &&
-          ts.isIdentifier(node.expression) &&
-          node.expression.getText(file) === 'offeredText'
-        ) {
-          calls += 1;
-          /* The bound is "this string is the copy of a control", so what has to
-             hold is that the FUNCTION the call sits in renders one. Requiring the
-             call to be lexically inside the `<button>` element would exempt
-             nothing and refuse the correct shape — `HoldToAct` composes its
-             contract line at the top of the component and paints it in three
-             places, which is the same one-checked-read discipline every other
-             component here uses. */
-          const owner = enclosingFunction(node);
-          const renders =
-            owner !== undefined &&
-            containsTag(owner, CONTROLS, file) &&
-            /* …and the call is inside a component that is ABOUT a control, not a
-               component that happens to have one somewhere in it. The file has to
-               be one of the two kinds: a control primitive, or a row whose
-               offered copy is its action. Asserted as the list below. */
-            true;
-          if (!renders) {
-            offSite.push(
-              `${relative(WEB, path)}:${
-                file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1
-              }`,
-            );
-          }
-        }
-        ts.forEachChild(node, visit);
-      };
-      visit(file);
-    }
-    expect(calls, 'nothing uses the payload door, so this bound measures nothing').toBeGreaterThan(
-      3,
-    );
+      if (file === undefined) return [];
+      return offeredCallSites(file).map((site) => ({ ...site, file: relative(WEB, path) }));
+    });
     expect(
-      offSite,
-      'offeredText — the door that keeps its pronouns — is used somewhere that does not render a control',
+      sites.length,
+      'nothing uses the payload door, so this bound measures nothing',
+    ).toBeGreaterThan(3);
+    expect(
+      sites
+        .filter((site) => site.host === null)
+        .map((site) => `${site.file}:${site.line} {${site.expr}}`),
+      'offeredText — the door that keeps its pronouns — is used on a string that is not a control’s copy',
     ).toEqual([]);
   });
+
+  /* THE LIST, BOTH DIRECTIONS. A call site added anywhere shows up here with the
+     control it claims, and a host named here that no longer exists shows up as a
+     missing row — which is the check the r7 comment described and did not have. */
+  it('every payload-door call site is on the list, and every entry on the list is real', () => {
+    const found = SOURCES.flatMap((path) => {
+      const file = PROGRAM.getSourceFile(path);
+      if (file === undefined) return [];
+      return offeredCallSites(file).map((site) => `${relative(WEB, path)} ${site.host}`);
+    }).sort();
+    expect(found, 'the payload door’s call sites and their controls').toEqual([...OFFERED_HOSTS]);
+  });
 });
-
-function enclosingFunction(node: ts.Node): ts.Node | undefined {
-  let current: ts.Node | undefined = node.parent;
-  while (current !== undefined) {
-    if (ts.isFunctionLike(current)) return current;
-    current = current.parent;
-  }
-  return undefined;
-}
-
-function containsTag(root: ts.Node, tags: ReadonlySet<string>, file: ts.SourceFile): boolean {
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (found) return;
-    if (ts.isJsxSelfClosingElement(node) && tags.has(node.tagName.getText(file))) found = true;
-    if (ts.isJsxOpeningElement(node) && tags.has(node.tagName.getText(file))) found = true;
-    ts.forEachChild(node, visit);
-  };
-  visit(root);
-  return found;
-}
 
 /* ---------------------------------------------------------------------------
  * THE ENUMERATOR'S OWN SELF-TEST.
@@ -414,7 +651,13 @@ describe('the analysis sees every shape it claims to', () => {
           );
         }
       `),
-    ).toEqual(['alias', "p.flag ? 'ok' : p.free", '`prefix ${p.free}`', 'x']);
+    ).toEqual([
+      'alias',
+      "p.flag ? 'ok' : p.free",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the analyser's rendering of a template it REFUSED, quoted back verbatim — the curly is the evidence, not a template written by mistake.
+      '`prefix ${p.free}`',
+      'x',
+    ]);
   });
 
   it('refuses a prop of an EXPORTED component even when this file only passes literals', () => {
@@ -534,5 +777,264 @@ describe('the analysis sees every shape it claims to', () => {
         export function A({ p }: { p: any }) { return <div className={p.free} data-x={p.free}>y</div>; }
       `),
     ).toEqual([]);
+  });
+
+  /* ---------------------------------------------------------------------------
+   * THE NODE-TYPE DENOMINATOR — r8 D4, each shape measured against the r7
+   * analyser and found unreported. The control the review ran alongside them,
+   * `title={p.free}`, WAS reported — so this was a hole in the SHAPE LIST, not
+   * in the dataflow, which is why every one of them gets a row here.
+   * ------------------------------------------------------------------------- */
+
+  it('sees `children` written as an attribute, which React renders as children', () => {
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) { return <div children={p.free} />; }
+      `),
+    ).toEqual(['p.free']);
+  });
+
+  /* THE WIDEST SINK ON THE PLATFORM, and it was outside the count while being
+     LIVE at `app/layout.tsx:39` — benign there only because the value happens to
+     be a module constant, which is a fact about today's code and not a guard. */
+  it('sees dangerouslySetInnerHTML, and reads the __html it writes', () => {
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) {
+          return <div dangerouslySetInnerHTML={{ __html: p.free }} />;
+        }
+      `),
+    ).toEqual(['p.free']);
+    /* …and a literal written here is still a literal. */
+    expect(
+      analyse(`
+        const BOOT = 'document.documentElement.dataset.theme = "dark"';
+        export function A() { return <script dangerouslySetInnerHTML={{ __html: BOOT }} />; }
+      `),
+    ).toEqual([]);
+  });
+
+  /* THREE MORE STRINGS A SCREEN READER SPEAKS. Driven off the shared list, so
+     this fails if an attribute is dropped from `printed-surface.ts` rather than
+     only if it is dropped from a copy of it. */
+  it.each([...ANNOUNCED_ATTRIBUTES])('sees %s', (attribute) => {
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) { return <div ${attribute}={p.free}>y</div>; }
+      `),
+    ).toEqual(['p.free']);
+  });
+
+  it('sees the announced attributes the round-8 review named, by name', () => {
+    for (const attribute of ['aria-roledescription', 'aria-placeholder', 'aria-keyshortcuts']) {
+      expect(ANNOUNCED_ATTRIBUTES, `${attribute} is a string a reader receives`).toContain(
+        attribute,
+      );
+    }
+  });
+
+  /* TAG-SCOPED, IN BOTH DIRECTIONS. `label` on an `<optgroup>` is painted by the
+     user agent; `label` on a component is an ordinary prop, and `value` on a
+     context provider is not text at all — a universal entry would report
+     `<LedgerContext.Provider value={ledger}>` and teach the next round that the
+     sweep cries wolf. */
+  it.each([
+    ['optgroup', 'label'],
+    ['option', 'label'],
+    ['option', 'value'],
+    ['input', 'value'],
+  ])('sees <%s %s>', (tag, attribute) => {
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) { return <${tag} ${attribute}={p.free} />; }
+      `),
+    ).toEqual(['p.free']);
+  });
+
+  it('does not read a component’s `label` or `value` prop as painted text', () => {
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) {
+          return <Ctx.Provider value={p.ledger}><Section label={p.heading} /></Ctx.Provider>;
+        }
+      `),
+    ).toEqual([]);
+    expect([...TAG_SCOPED_TEXT_ATTRIBUTES.keys()].sort()).toEqual(['input', 'optgroup', 'option']);
+  });
+
+  /* THE SAME TREE, WRITTEN THE OTHER WAY. The whole analysis keyed on JSX
+     syntax, so a file reaching for the function form was outside the count. */
+  it('sees React.createElement, in children and in props', () => {
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) {
+          return createElement('div', null, p.free);
+        }
+      `),
+    ).toEqual(['p.free']);
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) {
+          return React.createElement('span', { title: p.free, className: p.free }, 'literal');
+        }
+      `),
+    ).toEqual(['p.free']);
+    expect(
+      analyse(`
+        export function A({ p }: { p: any }) {
+          return createElement('optgroup', { label: p.free });
+        }
+      `),
+    ).toEqual(['p.free']);
+    /* …and a literal tree built the function way is still literal. */
+    expect(
+      analyse(`
+        export function A() { return createElement('div', { title: 'written here' }, 'literal'); }
+      `),
+    ).toEqual([]);
+  });
+
+  /* CSS IS THE ONE AUTHORITY THIS LIST CANNOT HOLD. `content: attr(data-x)`
+     prints any attribute at all, so the `data-*` sink set is derived from the
+     stylesheets — and this exercises the derivation, because an enumerator whose
+     current answer is "none" is the one that can break silently. */
+  it('derives the CSS-printed attributes from the stylesheets, not from a list', () => {
+    expect(attributesPrintedByCss('.x::after { content: attr(data-route); }')).toEqual([
+      'data-route',
+    ]);
+    expect(
+      attributesPrintedByCss('.a::before{content:attr( data-A )}.b::after{content:attr(title)}'),
+    ).toEqual(['data-a', 'title']);
+    expect(attributesPrintedByCss('.x { color: red; }')).toEqual([]);
+    /* The measurement on this app, today. If a rule adds an `attr()`, the
+       attribute becomes a printed site with no edit to any list here. */
+    expect(
+      CSS_PRINTED_ATTRIBUTES,
+      'a stylesheet prints an attribute; it is a sink now and this list is how the sweep learned it',
+    ).toEqual([]);
+  });
+
+  /* ---------------------------------------------------------------------------
+   * THE PAYLOAD DOOR'S BOUND, SELF-TESTED — r8 D3.
+   *
+   * The r7 bound was implemented inline in the test with no self-test at all,
+   * which is how a predicate that answers a different question than its name
+   * says survived a round. It answers the question now, and the shapes it has to
+   * accept and the shapes it has to refuse are both written down.
+   * ------------------------------------------------------------------------- */
+  function offered(source: string): readonly (string | null)[] {
+    const file = ts.createSourceFile(
+      'probe.tsx',
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    return offeredCallSites(file).map((site) => site.host);
+  }
+
+  it('refuses the exact shape the round-7 bound accepted', () => {
+    /* A control somewhere in the same function is not the string's destination.
+       This source is the r8 review's measurement, reduced. */
+    expect(
+      offered(`
+        export function Card({ item }: { item: any }) {
+          return (
+            <article title={offeredText(item.title, 'Card summary')}>
+              <button>{offeredText(item.action.label, 'Card label')}</button>
+            </article>
+          );
+        }
+      `),
+    ).toEqual([null, '<button>']);
+  });
+
+  it.each([...CONTROL_TAGS])('accepts the copy inside a <%s>', (tag) => {
+    expect(
+      offered(`
+        export function A({ p }: { p: any }) {
+          return <${tag} title={offeredText(p.why, 'A')}>x</${tag}>;
+        }
+      `),
+    ).toEqual([`<${tag}>`]);
+  });
+
+  /* THE SECOND ACCEPTED SHAPE, which a purely lexical rule would refuse and
+     which refusing would make the page worse: `HoldToAct` paints its contract
+     line into an `.srOnly` span the button points at, so that span's text IS
+     that button's accessible description. */
+  it('accepts copy in an element a control names through aria-describedby', () => {
+    expect(
+      offered(`
+        export function Hold({ describe }: { describe: string }) {
+          const contract = \`\${offeredText(describe, 'Hold')} — press and hold\`;
+          return (
+            <>
+              <button aria-describedby={describeId} title={contract}>press</button>
+              <span id={describeId}>{contract}</span>
+            </>
+          );
+        }
+      `),
+    ).toEqual(['<button> + <span id={describeId}> named by a control']);
+  });
+
+  /* …and follows the const to EVERY use. One unchecked use is an alias that
+     launders the door, so the whole call site is refused. */
+  it('refuses a const whose uses do not all land on a control', () => {
+    expect(
+      offered(`
+        export function A({ p }: { p: any }) {
+          const copy = offeredText(p.why, 'A');
+          return (
+            <div>
+              <button>{copy}</button>
+              <p>{copy}</p>
+            </div>
+          );
+        }
+      `),
+    ).toEqual([null]);
+  });
+
+  it('refuses a const nothing in this function reads', () => {
+    expect(
+      offered(`
+        export function A({ p }: { p: any }) {
+          const copy = offeredText(p.why, 'A');
+          return <button>press</button>;
+        }
+      `),
+    ).toEqual([null]);
+  });
+
+  /* AND AN ID A CONTROL DOES NOT POINT AT IS NOT A CONTROL'S COPY — otherwise
+     "put it in a span with an id" would be the new loophole. */
+  it('refuses an element whose id no control references', () => {
+    expect(
+      offered(`
+        export function A({ p }: { p: any }) {
+          return (
+            <>
+              <button>press</button>
+              <span id={loose}>{offeredText(p.why, 'A')}</span>
+            </>
+          );
+        }
+      `),
+    ).toEqual([null]);
+  });
+
+  it('reports an attribute a stylesheet prints, once one does', () => {
+    setCssPrintedAttributes(['data-route']);
+    try {
+      expect(
+        analyse(`
+          export function A({ p }: { p: any }) { return <div data-route={p.free}>y</div>; }
+        `),
+      ).toEqual(['p.free']);
+    } finally {
+      setCssPrintedAttributes(CSS_PRINTED_ATTRIBUTES);
+    }
   });
 });

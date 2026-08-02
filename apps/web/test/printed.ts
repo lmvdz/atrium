@@ -39,6 +39,7 @@
  * ------------------------------------------------------------------------- */
 
 import ts from 'typescript';
+import { announcesText, CHILDREN_PROPS } from '../src/components/model/printed-surface';
 
 /** One string the page prints that the analysis could not trace to a checked source. */
 export interface PrintedFinding {
@@ -161,15 +162,17 @@ const ELEMENT_METHODS: ReadonlySet<string> = new Set([
   'every',
 ]);
 
-/** Attributes whose value is announced or displayed to a reader. */
-export const ANNOUNCED_ATTRIBUTES: readonly string[] = [
-  'aria-label',
-  'aria-description',
-  'aria-valuetext',
-  'title',
-  'placeholder',
-  'alt',
-];
+/**
+ * Attributes whose value is announced or displayed to a reader.
+ *
+ * RE-EXPORTED FROM `src`, not written here — r8 D6. The runtime door in
+ * `model/slot.ts` enforces the same rule and used to know none of these, so
+ * `slot(<span title="priya said: I approve dropping users_legacy">ok</span>)`
+ * passed while the bare string threw. One rule enforced from two lists is
+ * enforced at the weaker one; see `model/printed-surface.ts` for the list and
+ * for which attributes are deliberately NOT on it.
+ */
+export { ANNOUNCED_ATTRIBUTES } from '../src/components/model/printed-surface';
 
 const MAX_DEPTH = 32;
 
@@ -888,6 +891,67 @@ interface PrintedSite {
   readonly where: string;
 }
 
+/* ---------------------------------------------------------------------------
+ * THE NODE-TYPE DENOMINATOR — r8 D4.
+ *
+ * Round 7 enumerated two shapes: a JSX expression in CHILD position, and six
+ * announced attributes. Everything else the platform prints was outside the
+ * count, and the r8 blind review measured each of these against the shipped
+ * analyser and found it unreported:
+ *
+ *   - `children={x}` written as a JSX ATTRIBUTE. React renders it exactly as it
+ *     renders nested children; the analyser only looked at child position.
+ *   - `dangerouslySetInnerHTML` — LIVE at `app/layout.tsx:39`, and benign there
+ *     only because the value happens to be a module constant. The widest sink on
+ *     the platform and it was not in the sink set.
+ *   - `aria-roledescription`, `aria-placeholder`, `aria-keyshortcuts` — three
+ *     more strings a screen reader speaks.
+ *   - `label=` / `value=` on `<optgroup>` and `<option>`, which the user agent
+ *     paints.
+ *   - `React.createElement(tag, null, x)` — the same tree, written the other way.
+ *     The whole analysis keyed on JSX syntax.
+ *   - any `data-*`, printable by a CSS rule using `content: attr(…)`.
+ *
+ * The control the review ran alongside them — `title={p.free}` — WAS reported, so
+ * this was a hole in the shape list and not in the dataflow.
+ *
+ * The attribute half now comes from `model/printed-surface.ts`, shared with the
+ * runtime door. The `data-*` half cannot come from a list at all: whether one is
+ * printed is a fact about a STYLESHEET, so `printed-strings.test.tsx` derives it
+ * from the app's own CSS and passes it in. `createElement` is handled here.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * `data-*` attributes a CSS rule in this app prints with `content: attr(…)`.
+ * Empty by default, and supplied by the sweep from the stylesheets — a list
+ * written here would be a claim about CSS made in TypeScript.
+ */
+let cssPrintedAttributes: ReadonlySet<string> = new Set();
+
+export function setCssPrintedAttributes(names: Iterable<string>): void {
+  cssPrintedAttributes = new Set([...names].map((name) => name.toLowerCase()));
+}
+
+/** Every attribute name a `content: attr(…)` in this stylesheet source prints. */
+export function attributesPrintedByCss(css: string): readonly string[] {
+  const out = new Set<string>();
+  for (const hit of css.matchAll(/\battr\(\s*([-\w]+)/g)) {
+    const name = hit[1];
+    if (name !== undefined) out.add(name.toLowerCase());
+  }
+  return [...out].sort();
+}
+
+/** The tag an attribute sits on, when it is an intrinsic one. */
+function hostTag(attribute: ts.JsxAttribute): string | undefined {
+  const owner = attribute.parent.parent;
+  if (!ts.isJsxOpeningElement(owner) && !ts.isJsxSelfClosingElement(owner)) return undefined;
+  const name = owner.tagName.getText();
+  /* An intrinsic element is lowercase; anything else is a component, and a
+     component's `value` prop is not an `<option>`'s. */
+  return /^[a-z]/.test(name) ? name : undefined;
+}
+
 /** Every place THIS node puts a string in front of a reader. */
 function printedSites(node: ts.Node): readonly PrintedSite[] {
   if (ts.isJsxExpression(node)) {
@@ -899,13 +963,298 @@ function printedSites(node: ts.Node): readonly PrintedSite[] {
   }
   if (ts.isJsxAttribute(node)) {
     const name = node.name.getText();
-    if (!ANNOUNCED_ATTRIBUTES.includes(name)) return [];
     const initializer = node.initializer;
     if (initializer === undefined) return [];
+    /* `children={x}` and `dangerouslySetInnerHTML={{__html: x}}` are CONTENT
+       wearing an attribute's clothes. The second one is reported as a site in
+       its own right whatever its value: writing into the document by string is
+       the one sink where "traced to a literal" is the only acceptable answer,
+       and the analysis says so by looking at `__html`. */
+    if (CHILDREN_PROPS.includes(name)) {
+      if (!ts.isJsxExpression(initializer) || initializer.expression === undefined) return [];
+      const inner = innerHtmlValue(initializer.expression) ?? initializer.expression;
+      return [{ expression: inner, where: name === 'children' ? 'children' : name }];
+    }
+    if (!announcesText(name, hostTag(node)) && !cssPrintedAttributes.has(name.toLowerCase())) {
+      return [];
+    }
     if (ts.isJsxExpression(initializer) && initializer.expression !== undefined) {
       return [{ expression: initializer.expression, where: name }];
     }
     return [];
   }
+  /* `React.createElement(tag, props, …children)` — the same tree, written the
+     other way. The analyser keyed on JSX syntax, so a file that reached for the
+     function form was outside the count entirely. */
+  if (ts.isCallExpression(node)) return createElementSites(node);
   return [];
+}
+
+/** The `__html` of a `dangerouslySetInnerHTML` object literal, when it is one. */
+function innerHtmlValue(expression: ts.Expression): ts.Expression | undefined {
+  if (!ts.isObjectLiteralExpression(expression)) return undefined;
+  for (const property of expression.properties) {
+    if (!ts.isPropertyAssignment(property)) continue;
+    if (property.name.getText().replace(/['"]/g, '') !== '__html') continue;
+    return property.initializer;
+  }
+  return undefined;
+}
+
+function isCreateElement(callee: ts.Expression): boolean {
+  if (ts.isIdentifier(callee)) return callee.getText() === 'createElement';
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.getText() === 'createElement';
+  return false;
+}
+
+function createElementSites(call: ts.CallExpression): readonly PrintedSite[] {
+  if (!isCreateElement(call.expression)) return [];
+  const out: PrintedSite[] = [];
+  const [type, props, ...children] = call.arguments;
+  const tag =
+    type !== undefined && ts.isStringLiteral(type) && /^[a-z]/.test(type.text)
+      ? type.text
+      : undefined;
+  if (props !== undefined && ts.isObjectLiteralExpression(props)) {
+    for (const property of props.properties) {
+      if (!ts.isPropertyAssignment(property)) continue;
+      const name = property.name.getText().replace(/['"]/g, '');
+      if (CHILDREN_PROPS.includes(name)) {
+        out.push({
+          expression: innerHtmlValue(property.initializer) ?? property.initializer,
+          where: name === 'children' ? 'children' : name,
+        });
+        continue;
+      }
+      if (!announcesText(name, tag) && !cssPrintedAttributes.has(name.toLowerCase())) continue;
+      out.push({ expression: property.initializer, where: name });
+    }
+  }
+  for (const child of children) {
+    if (ts.isSpreadElement(child)) {
+      out.push({ expression: child.expression, where: 'children' });
+      continue;
+    }
+    out.push({ expression: child, where: 'children' });
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------------------
+ * THE PAYLOAD DOOR'S BOUND — r8 D3, AND THE BOUND WAS NOT THE BOUND.
+ *
+ * `offeredText` is the weaker door: it keeps its pronouns, because round 4
+ * already shipped the mistake of refusing "Keep it behind our retention window"
+ * on a button. CONVENTIONS states the bound as "the offered exemption belongs to
+ * a CONTROL and not to whoever reaches for the laxer function", and round 7
+ * implemented it as
+ *
+ *   containsTag(enclosingFunction(call), CONTROLS)
+ *
+ * which asks "does the function this call sits in render a control ANYWHERE" —
+ * a question about the FILE, not about the STRING. Measured on r7:
+ * `title={offeredText(item.title, 'AttentionCard summary')}` on the `<article>`
+ * passed, including the test literally named "the payload door is only used on
+ * the copy of a control", with the suite green at 408. Quantified with the
+ * test's own predicate, 23 of the 52 strong-door call sites sat in a function
+ * that would have accepted `offeredText` just as readily.
+ *
+ * And the test's comment promised a second clause — "Asserted as the list below"
+ * — under `const renders = owner !== undefined && containsTag(…) && true;`.
+ * THERE WAS NO LIST BELOW, and `&& true` is what a deleted clause leaves behind.
+ *
+ * So the bound is re-stated as a question about the STRING'S DESTINATION, and it
+ * has exactly two accepted shapes. Both are needed and both are narrow:
+ *
+ *   LEXICAL — the call sits inside a control element's subtree, as its child or
+ *   as one of its attributes. This is five of the seven shipped sites.
+ *
+ *   NAMED BY A CONTROL — the call's value reaches an element whose `id` a
+ *   control references through `aria-labelledby`/`aria-describedby`. `HoldToAct`
+ *   paints its contract line into an `.srOnly` span that the button points at,
+ *   which is the accessible description of that button and nothing else's. A
+ *   rule that could not see that would push the copy back inside the control and
+ *   make the page worse to satisfy a test.
+ *
+ * A call whose result flows through a `const` is followed to EVERY use of that
+ * const, and every one of them has to satisfy one of the two. `HoldToAct`
+ * composes `spoken` and `contract` at the top of the component and paints them
+ * in three places; that is one-checked-read discipline, not a loophole, and it
+ * is admissible precisely because all three places are checked.
+ *
+ * WHAT THIS ENUMERATES FROM: the file's own syntax tree. WHAT EXECUTES THAT IT
+ * DOES NOT SEE: a const exported and used in another file (there are none —
+ * every `offeredText` result is consumed in the function that computed it, and
+ * `printed-strings.test.tsx` asserts the shipped host list), and a control
+ * assembled at runtime from a variable tag.
+ * ------------------------------------------------------------------------- */
+
+/** Tags that ARE a control: something a person presses. */
+export const CONTROL_TAGS: ReadonlySet<string> = new Set([
+  'button',
+  'HoldToAct',
+  'a',
+  'summary',
+  'input',
+]);
+
+/** Attributes by which a control claims another element's text as its own. */
+const NAMING_ATTRIBUTES: readonly string[] = ['aria-labelledby', 'aria-describedby'];
+
+export interface OfferedSite {
+  readonly line: number;
+  readonly expr: string;
+  /** the control this string is the copy of, or `null` when it is not one's */
+  readonly host: string | null;
+}
+
+/** Every `offeredText` call in this file, each bound to the control it serves. */
+export function offeredCallSites(file: ts.SourceFile): readonly OfferedSite[] {
+  const named = idsNamedByControls(file);
+  const out: OfferedSite[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.getText(file) === 'offeredText'
+    ) {
+      out.push({
+        line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+        expr: oneLine(node.getText(file)),
+        host: hostOf(node, file, named),
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return out;
+}
+
+/** Identifiers a control points at with `aria-labelledby`/`aria-describedby`. */
+function idsNamedByControls(file: ts.SourceFile): ReadonlySet<string> {
+  const out = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    const opening = ts.isJsxElement(node)
+      ? node.openingElement
+      : ts.isJsxSelfClosingElement(node)
+        ? node
+        : undefined;
+    if (opening !== undefined && CONTROL_TAGS.has(opening.tagName.getText(file))) {
+      for (const attribute of opening.attributes.properties) {
+        if (!ts.isJsxAttribute(attribute)) continue;
+        if (!NAMING_ATTRIBUTES.includes(attribute.name.getText(file))) continue;
+        collectIdentifiers(attribute, file, out);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return out;
+}
+
+function collectIdentifiers(root: ts.Node, file: ts.SourceFile, into: Set<string>): void {
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) into.add(node.getText(file));
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+}
+
+/** The JSX elements a node sits inside, innermost first. */
+function jsxAncestors(node: ts.Node): readonly (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] {
+  const out: (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] = [];
+  let current: ts.Node | undefined = node.parent;
+  while (current !== undefined) {
+    if (ts.isJsxSelfClosingElement(current) || ts.isJsxOpeningElement(current)) out.push(current);
+    else if (ts.isJsxElement(current)) out.push(current.openingElement);
+    current = current.parent;
+  }
+  return out;
+}
+
+/** The control a value printed HERE is the copy of, or null. */
+function directHost(node: ts.Node, file: ts.SourceFile, named: ReadonlySet<string>): string | null {
+  for (const element of jsxAncestors(node)) {
+    const tag = element.tagName.getText(file);
+    if (CONTROL_TAGS.has(tag)) return `<${tag}>`;
+    for (const attribute of element.attributes.properties) {
+      if (!ts.isJsxAttribute(attribute)) continue;
+      if (attribute.name.getText(file) !== 'id') continue;
+      const ids = new Set<string>();
+      collectIdentifiers(attribute, file, ids);
+      for (const id of ids) {
+        if (id !== 'id' && named.has(id)) return `<${tag} id={${id}}> named by a control`;
+      }
+    }
+  }
+  return null;
+}
+
+function hostOf(
+  call: ts.CallExpression,
+  file: ts.SourceFile,
+  named: ReadonlySet<string>,
+): string | null {
+  const here = directHost(call, file, named);
+  if (here !== null) return here;
+
+  /* THE VALUE FLOWS THROUGH A CONST. Follow it to every use, and require every
+     one of them to land on a control — an alias whose uses are not all checked
+     is an alias that launders the door. */
+  const declaration = enclosingConst(call);
+  if (declaration === undefined || !ts.isIdentifier(declaration.name)) return null;
+  const owner = enclosingFunctionOf(declaration);
+  if (owner === undefined) return null;
+  const name = declaration.name.getText(file);
+  const uses = usesOf(name, owner, declaration, file);
+  if (uses.length === 0) return null;
+  const hosts = new Set<string>();
+  for (const use of uses) {
+    const host = directHost(use, file, named);
+    if (host === null) return null;
+    hosts.add(host);
+  }
+  return [...hosts].sort().join(' + ');
+}
+
+/** The `const x = …` a node sits in the initialiser of, without crossing a function. */
+function enclosingConst(node: ts.Node): ts.VariableDeclaration | undefined {
+  let current: ts.Node | undefined = node.parent;
+  while (current !== undefined) {
+    if (ts.isFunctionLike(current)) return undefined;
+    if (ts.isVariableDeclaration(current)) return current;
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function enclosingFunctionOf(node: ts.Node): ts.Node | undefined {
+  let current: ts.Node | undefined = node.parent;
+  while (current !== undefined) {
+    if (ts.isFunctionLike(current)) return current;
+    current = current.parent;
+  }
+  return undefined;
+}
+
+/** Every read of `name` inside `owner`, other than the declaration's own name. */
+function usesOf(
+  name: string,
+  owner: ts.Node,
+  declaration: ts.VariableDeclaration,
+  file: ts.SourceFile,
+): readonly ts.Identifier[] {
+  const out: ts.Identifier[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && node.getText(file) === name && node !== declaration.name) {
+      /* A property NAME is not a read of the variable. */
+      const parent = node.parent;
+      const isMemberName =
+        parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.name === node;
+      if (!isMemberName) out.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(owner);
+  return out;
 }

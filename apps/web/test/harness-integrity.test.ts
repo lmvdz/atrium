@@ -281,12 +281,26 @@ describe('the round’s own enumerators', () => {
     expect(FRAME_HANDLERS, 'COMPOSED is a hand-written list again').toMatch(
       /jsxTagsIn\(FRAME_SOURCE\)/,
     );
-    /* The same for the sweep whose denominator is every printed string. */
+    /* The same for the sweep whose denominator is every printed string — and
+       since r8 the file list is not merely READ, it is cross-checked against the
+       compiler's own parse of the project, the resulting module graph, and
+       Next's route conventions, with the differences asserted empty. A walk of
+       the filesystem is one authority on "what is the app"; on r7 it was the
+       only one, and it named two directories and one extension. */
     const printed = read('apps/web/test/printed-strings.test.tsx');
     expect(printed, 'the printed-string sweep hard-codes its file list').toMatch(
-      /function tsxUnder/,
+      /function appSources/,
     );
     expect(printed).toMatch(/readdirSync/);
+    expect(printed, 'the file set stopped being checked against the compiler').toMatch(
+      /compilerRoots\(PARSED\)/,
+    );
+    expect(printed, 'the file set stopped being checked against the module graph').toMatch(
+      /PROGRAM\.getSourceFiles\(\)/,
+    );
+    expect(printed, 'the file set stopped being checked against Next’s routes').toMatch(
+      /routeEntryPoints\(\)/,
+    );
   });
 
   /* CATCHES: the Slot boundary going back to being invisible. `ReceiptView` is
