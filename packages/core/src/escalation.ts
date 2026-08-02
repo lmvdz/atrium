@@ -756,16 +756,23 @@ export interface ProvenanceMessage {
  *    whole and correctly attributed, was **destroyed**, and the room was told its
  *    citation had failed when it had not.
  *  - `statement_adds_link_structure` — the statement being minted carries
- *    Markdown link markup the quote does not, built out of the author's own
- *    words. The fold unfolds a link to `label dest title`, so the two normalize
- *    identically and every other check passes; the stored text is markup its
- *    named author never wrote. See `linkStructures`.
+ *    Markdown link markup **the cited message** does not, built out of the
+ *    author's own words. The fold unfolds a link to `label dest title`, so the
+ *    two normalize identically and every other check passes; the stored text is
+ *    markup its named author never wrote. See `linkStructures`.
  *  - `statement_adds_block_structure` — **r11**, and it is the entry above at
  *    the other rule in the fold that can *build* structure rather than delete
- *    it. The statement begins a line with a Markdown block marker the quote does
- *    not, built by putting a line break where the author put a space; the
- *    whitespace collapse forgives the difference, so the two normalize
- *    identically and every other check passes. See `blockStructures`.
+ *    it. The statement carries a Markdown block marker, a paragraph break or a
+ *    hard line break **the cited message** does not, built by putting a line
+ *    break where the author put a space; the whitespace collapse forgives the
+ *    difference, so the two normalize identically and every other check passes.
+ *    See `blockStructures` and `breakStructures`.
+ *
+ *    **Both are read against the message body since r12, not against the
+ *    quote.** The quote is a proposal field: r10 and r11 diffed the statement
+ *    against it, so a forgery written into *both* fields cancelled to an empty
+ *    difference and auto-accepted. A guard on what an author wrote can only be
+ *    anchored to text the author wrote — see `addedStructure`.
  *  - `ambiguous_quote` — two or more cited messages, by different people,
  *    contain the quote. Taking the first in window order picks an author by
  *    accident, and the author is the whole answer to "who said this".
@@ -1403,12 +1410,44 @@ export function validateProposalProvenance(
       // Run outside the `borne` branch on purpose — an invariant asserted on one
       // branch of a dispatch does not constrain the others, which is r10's other
       // finding one file over.
-      const added = addedLinkStructure(quote, statement);
+      //
+      // ── …and the thing it is compared against is the *message* — r12 ───────
+      //
+      // r10 and r11 both read this guard against `quote`, and **`quote` is a
+      // proposal field**. `Proposal` carries it beside `payload.statement`, one
+      // proposer writes both, so putting the fabricated markup in the quote as
+      // well as the statement cancelled the difference to empty and the whole
+      // package looked at nothing else. Measured: with an honest quote both
+      // forgeries are refused, with a forged one both take a clean receipt, land
+      // `auto_accept`, and survive replay.
+      //
+      // Validating the quote does not already stop it. The quote is checked
+      // against the body twice — `normalizeForReceipt(body).includes(...)` above
+      // and `quoteCoversOwnText` — and **both run through the receipt fold,
+      // which was designed to ignore exactly the dimension these guards depend
+      // on**: a whitespace run is one space, and `[label](dest "title")` is
+      // `label dest title`. Two mechanisms, each correct alone, and the defect
+      // was the seam. `significant`'s docblock, which promised the opposite in
+      // the word "verbatim", is repaired in the same round.
+      //
+      // So the anchor is `bearing.body` — the only text in this function an
+      // author actually wrote. Comparing two fields the same caller filled in
+      // proves nothing whatever either of them says. **And `''` when there is no
+      // bearing message**, which is fail-closed rather than a skip: every
+      // structure in the statement is then unattributed and reported. That
+      // branch is already `quote_not_found`, `ambiguous_quote` or
+      // `quote_only_in_reply_blockquote` — all `reject` — so the extra problem
+      // cannot change a verdict; it is written this way so the guard never
+      // depends on another check having fired, which is the reasoning `RETRO.md`
+      // records as fail-open twice over.
+      const authored = bearing?.body ?? '';
+      const wrote = bearing ? `message "${bearing.id}"` : 'any message in this window';
+      const added = addedLinkStructure(authored, statement);
       if (added.length > 0) {
         problems.push({
           kind: 'statement_adds_link_structure',
           severity: 'reject',
-          detail: `the ${subject.type} being minted carries link markup the quote does not — ${added.map((link) => `\`${clip(link, 60)}\``).join(', ')} — so the record would store markup its named author never wrote, assembled out of their own words: a link's text, destination and title normalize to the same words whether or not the brackets are there, which is why every other check on this receipt passes`,
+          detail: `the ${subject.type} being minted carries link markup ${wrote} does not — ${added.map((link) => `\`${clip(link, 60)}\``).join(', ')} — so the record would store markup its named author never wrote, assembled out of their own words: a link's text, destination and title normalize to the same words whether or not the brackets are there, which is why every other check on this receipt passes`,
           messageId: where,
         });
       }
@@ -1446,12 +1485,25 @@ export function validateProposalProvenance(
       // sentence, it is the quoted sentence re-broken into lines by something
       // that was not its author, and that is a wrong receipt rather than an
       // unanswerable question.
-      const built = addedBlockStructure(quote, statement);
+      //
+      // ── …at the message, and at the breaks a marker cannot carry — r12 ────
+      //
+      // Anchored to `authored` for the reason above: the quote is the proposer's
+      // field, and a forged one cancelled every marker in `BLOCK_MARKER`'s
+      // inventory. And `addedBlockStructure` now reads `breakStructures` too,
+      // because `blockStructures` reports **line beginnings** and the two
+      // rendered breaks that carry no marker were clean even with an honest
+      // quote: a blank line splits one paragraph into two, and two trailing
+      // spaces make a `<br>` everywhere. Same fold entry, same author's
+      // characters, shapes the r11 reader was structurally unable to see. A bare
+      // re-wrapped newline stays free and stays stated residue — see
+      // `breakStructures` for where that line is drawn and why.
+      const built = addedBlockStructure(authored, statement);
       if (built.length > 0) {
         problems.push({
           kind: 'statement_adds_block_structure',
           severity: 'reject',
-          detail: `the ${subject.type} being minted begins ${built.length === 1 ? 'a line' : `${built.length} lines`} with a Markdown block marker the quote does not — ${built.map((line) => `\`${clip(line, 60)}\``).join(', ')} — so the record would store block structure its named author never wrote, built by putting a line break where they put a space: a run of whitespace normalizes to one space whichever characters it is made of, which is why every other check on this receipt passes`,
+          detail: `the ${subject.type} being minted carries Markdown structure ${wrote} does not — ${built.map((line) => `\`${clip(line, 60)}\``).join(', ')} — so the record would store block structure its named author never wrote, built by putting a line break where they put a space: a run of whitespace normalizes to one space whichever characters it is made of, which is why every other check on this receipt passes`,
           messageId: where,
         });
       }

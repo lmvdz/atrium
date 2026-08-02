@@ -664,7 +664,12 @@ describe('r10 — a statement may not add link markup its author never wrote', (
       const verdict = decideAcceptance(proposal, { messages });
       expect(verdict.rule, attack.label).toBe('provenance_failed');
       expect(verdict.verdict, attack.label).toBe('discard');
-      expect(verdict.reason, attack.label).toContain('link markup the quote does not');
+      // r12: was `'link markup the quote does not'`. The old sentence caught a
+      // refusal that fired without naming what it had found; the new one catches
+      // that **and** a guard that has drifted back to comparing the statement
+      // against the proposer's own quote field, because the refusal now names
+      // the message it was actually read against.
+      expect(verdict.reason, attack.label).toContain('link markup message "m1" does not');
 
       // …and the reducer refuses the model acceptance too, so the two gates do
       // not disagree about one receipt.

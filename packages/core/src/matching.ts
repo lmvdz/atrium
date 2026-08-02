@@ -387,6 +387,15 @@ function foldProse(text: string): string {
  * **Every link this text is made of, as markup rather than as words** — the one
  * many-to-one rule in the fold above, read back out.
  *
+ * ## What this is read against — r12
+ *
+ * **The message body**, and nothing else. r10 and r11 both diffed the statement
+ * against the *quote*, and the quote is a proposal field the proposer writes: a
+ * forgery put into `quote` as well as `payload.statement` cancels to an empty
+ * multiset and lands. Everything below is unchanged — what moved is the first
+ * argument at the call site, from a field somebody supplied to the text an
+ * author actually wrote. See `addedStructure`.
+ *
  * ## Why this exists — r10, and it is r7's finding in a mirror
  *
  * `unfoldLink` is deliberately lossy in one direction: `[label](dest "title")`
@@ -443,8 +452,9 @@ export function linkStructures(text: string): string[] {
 }
 
 /**
- * **Link markup the statement has and the quote does not** — a multiset
- * difference, so two identical links in the statement need two in the quote.
+ * **Link markup the statement has and the message its author wrote does not** —
+ * a multiset difference, so two identical links in the statement need two in the
+ * message.
  *
  * One-directional on purpose, and the direction is the one r4 argued: a
  * statement that *drops* a link keeps the destination and the title as words,
@@ -452,18 +462,34 @@ export function linkStructures(text: string): string[] {
  * that *adds* one is text nobody wrote, and no reduction of the author's words
  * produces it.
  */
-export function addedLinkStructure(quote: string, statement: string): string[] {
-  return addedStructure(quote, statement, linkStructures);
+export function addedLinkStructure(authored: string, statement: string): string[] {
+  return addedStructure(authored, statement, linkStructures);
 }
 
 /**
- * **The one mechanism, since r11**: markup the statement has and the quote does
- * not, counted rather than merely present.
+ * **The one mechanism, since r11**: markup the statement has and the author's
+ * own message does not, counted rather than merely present.
  *
  * A multiset difference, so two identical structures in the statement need two
- * in the quote, and one-directional for the reason `addedLinkStructure`'s
+ * in the message, and one-directional for the reason `addedLinkStructure`'s
  * docblock gives: a statement that *drops* markup keeps every word the author
  * wrote, and a statement that *adds* it is text nobody wrote.
+ *
+ * ## The first argument is `authored`, and that is r12's whole finding
+ *
+ * It was `quote` in r10 and r11. **The quote is a proposal field**: `Proposal`
+ * carries `quote` beside `payload.statement` and the same proposer writes both,
+ * so a forgery placed in *both* fields cancelled here to an empty difference and
+ * every other check on the receipt passed. Two mechanisms, each correct alone,
+ * and the defect was the seam — the quote's own fidelity is proved against the
+ * body by `normalizeForReceipt`, and that fold was designed to ignore exactly
+ * the dimension these readers depend on (a whitespace run is one space, and
+ * `[label](dest "title")` is `label dest title`).
+ *
+ * A guard on what an author wrote can only be anchored to text the author wrote.
+ * Comparing two fields the same caller filled in proves nothing at all, whatever
+ * either of them says. The reader is unchanged; the anchor is the cited
+ * message's body. See `validateProposalProvenance`.
  *
  * Extracted so the block-structure guard below is the same rule with a different
  * reader, rather than a second implementation of the same idea that can drift
@@ -472,12 +498,12 @@ export function addedLinkStructure(quote: string, statement: string): string[] {
  * rather than aspirational").
  */
 function addedStructure(
-  quote: string,
+  authored: string,
   statement: string,
   read: (text: string) => string[],
 ): string[] {
   const available = new Map<string, number>();
-  for (const structure of read(quote)) {
+  for (const structure of read(authored)) {
     available.set(structure, (available.get(structure) ?? 0) + 1);
   }
   const added: string[] = [];
@@ -545,8 +571,19 @@ const CODE_FENCE = /^ {0,3}(?:`{3,}|~{3,})/;
  * package is one answer too many. A bare newline would not see U+0085, and a
  * fold that already forgives a NEL as whitespace would then be a fold that can
  * hide a heading behind one.
+ *
+ * **CRLF is one break, not two — r12.** UAX #14 pairs CR LF as a single
+ * mandatory break, and the character class alone split `a\r\nb` into three lines
+ * with an empty one between them. That cost nothing while the only question
+ * asked here was "does a line *begin* with a marker", because an empty line
+ * opens nothing. `breakStructures` asks whether a line is *blank*, and under the
+ * class alone a CRLF text would report a paragraph break at every line ending:
+ * harmless on the message's side, where the difference is one-directional, and a
+ * **false refusal** on a statement whose line endings differ from its message's.
+ * The alternation comes first because alternation is ordered — the class would
+ * otherwise match the CR on its own and leave the LF to start the next line.
  */
-const LINE_BREAK_SPLIT = /[\n\v\f\r\u0085\u2028\u2029]/;
+const LINE_BREAK_SPLIT = /\r\n|[\n\v\f\r\u0085\u2028\u2029]/;
 
 /**
  * **Every block a text's line beginnings open** — the second many-to-one rule in
@@ -594,6 +631,16 @@ const LINE_BREAK_SPLIT = /[\n\v\f\r\u0085\u2028\u2029]/;
  * through byte for byte, and a `>` displayed inside a literal opens nothing. A
  * segment that does not itself start at a line beginning has its first line
  * skipped, because `` `x` > a `` is not a block quote.
+ *
+ * ## The half this cannot see, which is `breakStructures` — r12
+ *
+ * This reads **line beginnings**, so the structure a line *ending* makes is
+ * invisible to it: a blank line splits one paragraph into two and reports
+ * nothing, because `blockOpener` returns `null` for a blank line — correctly, a
+ * blank line *ends* a block. But inserting one into a single paragraph *starts*
+ * a second, which is the same finding one question over. The rule below reads
+ * that half; `addedBlockStructure` diffs both together, because they are one
+ * question — *is this rendered structure the author's?* — with two readers.
  */
 export function blockStructures(text: string): string[] {
   const out: string[] = [];
@@ -657,13 +704,114 @@ function blockOpener(line: string): string | null {
   return BLOCK_MARKER.test(rest) ? rest : null;
 }
 
+/** A line with nothing in it but whitespace — CommonMark's blank line. */
+function isBlankLine(line: string): boolean {
+  return line.replace(WHITESPACE_RUN, '').length === 0;
+}
+
 /**
- * **Block markup the statement has and the quote does not** — `blockStructures`
- * through the same multiset difference `addedLinkStructure` uses, for the same
- * reason and in the same direction.
+ * A **hard line break**, in the two spellings CommonMark gives it: two or more
+ * spaces before the break, or a backslash before it.
+ *
+ * Only the first is reachable through the fold — a backslash is not whitespace,
+ * so `foo\⏎bar` and `foo bar` are different normal forms and the receipt refuses
+ * the statement before this rule is consulted. It is enumerated anyway, on the
+ * discipline `BLOCK_MARKER` states: the list comes from the specification's
+ * table rather than from the evasions somebody has met, and a reader narrowed to
+ * "the one that happens to be reachable today" is a reader that goes wrong the
+ * next time a fold entry moves. Tabs are not spaces here, because CommonMark
+ * says a hard break is spaces.
  */
-export function addedBlockStructure(quote: string, statement: string): string[] {
-  return addedStructure(quote, statement, blockStructures);
+const HARD_LINE_BREAK = /(?: {2,}|\\)$/;
+
+/**
+ * **The structure a line's *ending* makes** — the half `blockStructures` cannot
+ * see, and r12's second face.
+ *
+ * ## Why this exists
+ *
+ * `blockStructures` reports a marker at a line *beginning*, so the two rendered
+ * breaks that carry no marker at all were clean with an honest quote and a
+ * proposer-written one alike:
+ *
+ * ```
+ * author : Do not deploy on Friday. Bob agreed to the rollback plan.
+ * record : Do not deploy on Friday.⏎⏎Bob agreed to the rollback plan.   → two paragraphs
+ * record : Do not deploy on Friday.··⏎Bob agreed to the rollback plan.  → a <br>
+ * ```
+ *
+ * Both `auto_accept` before this rule, both stored, both built out of the
+ * author's own characters by the same fold entry r11 found: a run of whitespace
+ * is one space whichever characters it is made of. It is r11's finding at the
+ * shapes r11's reader was structurally unable to report.
+ *
+ * ## Where the line is drawn, and why a bare newline is on the other side of it
+ *
+ * A blank line and a hard break are structure in **every** CommonMark-family
+ * renderer: one closes a paragraph and opens another, one emits a `<br>`. A
+ * *bare* newline inside a paragraph is a space in CommonMark and a `<br>` only
+ * under a renderer configured with `breaks: true`. Reporting it would be this
+ * package claiming a rendering it cannot know, and it would narrow the fold's
+ * whitespace entry — the entry with the best argument of the four, which r11
+ * refused to narrow and this round does not either. **So a re-wrapped line is
+ * still free, and that is the stated residue**: a renderer that breaks on every
+ * newline renders a statement whose lines were re-wrapped differently from its
+ * author's. The record is written here and rendered in another lane, which is
+ * the asymmetry `linkStructures` was built on, and this is the one place it is
+ * paid for rather than collected.
+ *
+ * ## Read off the raw text, like `CODE_FENCE`
+ *
+ * A blank line cannot occur inside a code *span* — it ends the paragraph the
+ * span lives in — so the only literal this over-reads is a fenced block, whose
+ * fences `CODE_FENCE` already reads the same way and whose contents the receipt
+ * compares byte for byte. Both texts are read identically, so an over-read
+ * cancels; the alternative, threading blank-line runs through the segment walk,
+ * is a second answer to where a line ends inside a rule that exists because
+ * there is only one.
+ *
+ * The descriptor names the content either side of the break, so it cancels only
+ * against the same break in the same place — a paragraph break the author put
+ * somewhere else is still a paragraph break the author did not put here.
+ */
+export function breakStructures(text: string): string[] {
+  const out: string[] = [];
+  const prepared = text.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+  const lines = prepared.split(LINE_BREAK_SPLIT);
+  const collapse = (line: string): string => line.replace(WHITESPACE_RUN, ' ').trim();
+  for (const [index, line] of lines.entries()) {
+    if (index === 0) continue;
+    // The nearest content line before this one, and this one's own content. A
+    // break with nothing on one side of it renders nothing: leading and trailing
+    // blank lines are trimmed by the fold, and a hard break at the end of a
+    // block is a hard break CommonMark drops.
+    if (isBlankLine(line)) continue;
+    let previous = index - 1;
+    while (previous >= 0 && isBlankLine(lines[previous] as string)) previous -= 1;
+    if (previous < 0) continue;
+    if (previous < index - 1) out.push(`blank line before "${collapse(line)}"`);
+    else if (HARD_LINE_BREAK.test(lines[previous] as string)) {
+      out.push(`hard line break after "${collapse(lines[previous] as string)}"`);
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * **Block markup the statement has and the author's own message does not** —
+ * both readers through the same multiset difference `addedLinkStructure` uses,
+ * for the same reason and in the same direction.
+ *
+ * One difference over two readers rather than two differences, because the two
+ * report disjoint descriptors — a block opener is a marker or a four-column
+ * indent, a break descriptor is a sentence — so concatenating them is the same
+ * answer as diffing each and concatenating those, and it is one refusal to read.
+ */
+export function addedBlockStructure(authored: string, statement: string): string[] {
+  return addedStructure(authored, statement, (text) => [
+    ...blockStructures(text),
+    ...breakStructures(text),
+  ]);
 }
 
 /**
@@ -1170,11 +1318,36 @@ export function statementBearing(
  * The two functions below ask *which marks, in which order*, over a text that
  * has been cut into sentences and reassembled; the cut throws the whitespace
  * between two sentences away, so comparing spacing here would compare an
- * artefact of the splitter. Spacing fidelity is proved twice elsewhere and
- * neither proof runs through here: `alignTokens` reports `whitespaceDiffers`
- * between the quote and the statement, and `validateProposalProvenance` requires
- * the quote to occur in the message body **verbatim** under
- * `normalizeForReceipt`, which passes code spans through byte for byte.
+ * artefact of the splitter.
+ *
+ * ## What this used to promise, and why it was false — r12
+ *
+ * It said spacing fidelity *"is proved twice elsewhere"*, and named
+ * `validateProposalProvenance` as requiring the quote to occur in the message
+ * body **verbatim** under `normalizeForReceipt`. Under that fold nothing about
+ * spacing is verbatim, and it is not an oversight: entry 1 collapses every
+ * whitespace run to one space and trims the ends, entry 4 unfolds `[label](dest
+ * "title")` into `label dest title`. Both keep their arguments and neither is
+ * narrowed. But **the fold was designed to ignore exactly the dimension a
+ * structure guard depends on**, and a sentence promising the opposite is how
+ * r10's and r11's guards came to be anchored to the quote while being read as
+ * anchored to the message. Two mechanisms, each correct alone; the defect was
+ * the seam, and this sentence was the seam written down.
+ *
+ * What holds, in the terms it holds in:
+ *
+ *  - The quote occurs in the body **word for word, mark for mark, in order**.
+ *    `normalizeForReceipt` admits four differences and each is enumerated with
+ *    the argument that admits it; inside a code segment it is byte for byte,
+ *    because the fold does not run there.
+ *  - **Nothing is proved about spacing, line structure or link punctuation** by
+ *    that comparison. `alignTokens` does report `whitespaceDiffers`, but only
+ *    the branch where the two texts already fail to bear each other reads it, so
+ *    it says nothing about a statement that folds to its quote exactly.
+ *  - Structure fidelity is proved separately by `addedLinkStructure` and
+ *    `addedBlockStructure`, and **against the body** rather than against the
+ *    quote: they are the guards on what the author wrote, and the quote is a
+ *    field the proposer fills in.
  */
 function significant(text: string): string[] {
   return orderedTokens(text).filter((token) => !isWhitespaceToken(token));

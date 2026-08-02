@@ -362,7 +362,12 @@ export type AttentionProducer =
   | 'blocking_relation'
   /** `blockingQuestionItems`, the `questionMentions` half. A caller signal. */
   | 'named_question'
-  /** `mentionItems`. A caller signal. */
+  /**
+   * `mentionItems`. A caller signal, and **no source declares it** — r12. The
+   * producer is still the true one for a stored item, which is what
+   * `producerOf` needs it for; it is simply a key nothing ever supplies, so a
+   * mention item is never resolved by absence by anybody. See `mentionItems`.
+   */
   | 'mention_signal'
   /**
    * A reason kind this build does not know — a store written by another version
@@ -422,6 +427,17 @@ function producerOf(reason: RationaleReason | undefined): AttentionProducer {
  *
  * `producer` is r11 and it is what stops one half of a shared class concluding
  * on the other half's behalf. See `AttentionProducer`.
+ *
+ * ## Taking the person out is a claim, and only a state reader may make it — r12
+ *
+ * "For everyone at once" is exactly right for a source that reads **state**: the
+ * commitment is in state, its owner is in state, so a cycle that walked state
+ * knows about every person the subject could route to. It is exactly wrong for a
+ * source that reads **caller signals**, which know about the people they name
+ * and nothing about the rest — and `mentionItems` declared this key anyway, so
+ * one signal naming bob concluded about alice. The key does not change; what
+ * changed is that a signal-driven producer no longer declares one. See
+ * `mentionItems` for why a user-scoped key would decide nothing.
  */
 export interface ExaminedSubject {
   class: AttentionClass;
@@ -1127,11 +1143,44 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
   // readings — nobody was mentioned there, and nobody told this cycle about the
   // message that mentioned them — and the caller cannot mark the difference: an
   // ordinary sliding window that has moved past the mentioning message produces
-  // the second while looking exactly like the first. So it declares an
-  // examination only for a subject it was actually handed, which means a mention
-  // item is never resolved by absence. It is resolved by the person, which is
-  // what #6's one-click dismiss is for.
-  const examined: ExaminedSubject[] = [];
+  // the second while looking exactly like the first. So a mention item is never
+  // resolved by absence. It is resolved by the person, which is what #6's
+  // one-click dismiss is for.
+  //
+  // ── …and "what it was given" includes *who* — r12 ────────────────────────
+  //
+  // r10 wrote that sentence and then declared an examination *per subject it
+  // was handed*, which closed the empty case and left the partial one wide
+  // open. `itemId(signal.userId, 'object', signal.objectId, 'mention')` carries
+  // the user; the `ExaminedSubject` pushed beside it carried `class`,
+  // `subjectKind`, `subjectId` and `producer` and **no user at all**. So one
+  // signal about an object concluded about that object for everybody:
+  //
+  //   cycle 1  mentions: [alice on obj_7]  → alice:mention = pending
+  //   cycle 2  mentions: [bob   on obj_7]  → alice:mention = RESOLVED
+  //   cycle 3  mentions: [alice, bob]      → alice:mention = RESOLVED (rule 1 pins it)
+  //
+  // No caller mistake — an ordinary sliding window past the message that named
+  // alice while a newer message on the same object names bob. Permanent, and
+  // nobody clicked anything.
+  //
+  // **So it declares no examinations at all**, which is the answer the
+  // `questionMentions` half of `blockingQuestionItems` already gives in this
+  // file, in its own words: *a signal-driven producer can only conclude about
+  // what it was handed, and what it was handed is what it raised.* Scoping the
+  // key to the user instead would be the same thing spelled longer — every
+  // signal this source is handed raises an item, so a user-scoped declaration
+  // could only ever name a subject already in `computedIds`, which rule 2 never
+  // reaches. A declaration that can never decide anything is a field to get
+  // wrong later, and the key stays the shape every other producer uses.
+  //
+  // A `mention` item therefore leaves the panel by the person, or when a source
+  // that *reads state* can honestly say no signal could raise it any more —
+  // which is what `blockingQuestionItems` does for `named_question`, and there
+  // is no such state fact for a mention. `PRODUCER_OF.mention` stays
+  // `mention_signal` rather than being deleted: a stored item still has a true
+  // producer, and "no source declares this key" is a different fact from "this
+  // rationale is unrecognised".
   const signals = [...(ctx.mentions ?? [])].sort((a, b) => {
     if (a.objectId !== b.objectId) return a.objectId < b.objectId ? -1 : 1;
     if (a.userId !== b.userId) return a.userId < b.userId ? -1 : 1;
@@ -1143,12 +1192,6 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
     const id = itemId(signal.userId, 'object', signal.objectId, 'mention');
     if (seen.has(id)) continue;
     seen.add(id);
-    examined.push({
-      class: 'mention',
-      subjectKind: 'object',
-      subjectId: signal.objectId,
-      producer: 'mention_signal',
-    });
     out.push(
       item({
         id,
@@ -1163,7 +1206,7 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
       }),
     );
   }
-  return { items: out, refusals: [], examined };
+  return { items: out, refusals: [], examined: [] };
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -1320,6 +1363,18 @@ export function dismissAttention(attentionItem: AttentionItem): AttentionTransit
  * it honestly can: when the subject is no longer an open live question, no
  * signal could raise an item about it, so an answered question leaves the panel
  * without anybody clicking anything. See `blockingQuestionItems`.
+ *
+ * ## …and one subject with two people is two questions — r12
+ *
+ * r11 fixed the class that had two producers and left the producer that has
+ * many *people*. An `ExaminedSubject` has the user taken out of it deliberately
+ * — see its docblock — and `mentionItems` declared one per subject it was
+ * handed, so a cycle whose only mention signal named bob on `obj_7` resolved
+ * alice's mention on `obj_7`, permanently, with rule 1 pinning it afterwards.
+ * The same sliding window r10 and r11 both found, one axis over: not *which
+ * producer concluded* but *about whom*. A signal-driven producer declares
+ * nothing now, which is what the `questionMentions` half of
+ * `blockingQuestionItems` has always done.
  */
 export function reconcileAttention(
   stored: readonly AttentionItem[],
