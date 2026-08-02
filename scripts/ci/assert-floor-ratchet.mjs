@@ -25,6 +25,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isMainModule } from './main-module.mjs';
 
@@ -120,7 +121,49 @@ export function floorsOf(manifest) {
   if (typeof playwright.minTotalTests === 'number') {
     floors.set('playwright.minTotalTests', playwright.minTotalTests);
   }
+  // ── AND THE ASSERTION FLOORS (#40 round 9) ────────────────────────────────
+  // `assertionFloorProblems` in checker-graph.mjs holds each stack assertion to
+  // a count of recorded `check(…)` calls, because the positive control cannot
+  // tell a real assertion script from one cut down to its precondition. Those
+  // floors ratchet for exactly the reason the test floors do — the cheapest way
+  // to make a failing gate pass is to lower the number it compares against —
+  // and reading them here is what makes lowering one require a justification
+  // keyed to the script whose assertions went away.
+  for (const [script, entry] of Object.entries(manifest?.assertions?.scripts ?? {})) {
+    if (typeof entry?.minChecks === 'number') {
+      floors.set(`assertions.scripts.${script}.minChecks`, entry.minChecks);
+    }
+  }
   return floors;
+}
+
+/**
+ * A digest of *which* floors these are, not just how many they add up to.
+ *
+ * ── THE NULL SPACE OF A SUM (#40 round 9) ───────────────────────────────────
+ * Round 8 put the total of every floor into the README and read it back, so
+ * that lowering one costs an edit to a sentence saying the floors got smaller.
+ * A blind critic did the arithmetic that invites: `packages/ci-guard` 115 → 95
+ * with `packages/auth` 200 → 220 leaves the total at 1441 and the sentence
+ * untouched, and takes twenty tests off the one workspace whose whole purpose
+ * is witnessing `scripts/` from outside. Any scalar over ten keys has a null
+ * space; this is the null space somebody lowering a floor actually wants.
+ *
+ * So the identities go into the sentence too. Sorted so the digest is a
+ * function of the floors rather than of JSON key order, and truncated to twelve
+ * hex characters because this is a *loudness* measure — it exists to make an
+ * edit require retyping a string, not to resist a preimage attack by someone
+ * who is already editing the file that defines it.
+ *
+ * @param {object} manifest
+ * @returns {string} twelve lowercase hex characters
+ */
+export function floorFingerprint(manifest) {
+  const floors = [...floorsOf(manifest)]
+    .map(([key, floor]) => `${key}=${floor}`)
+    .sort()
+    .join('\n');
+  return createHash('sha256').update(floors).digest('hex').slice(0, 12);
 }
 
 /**

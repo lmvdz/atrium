@@ -95,14 +95,22 @@ import { composeArgs } from './compose.mjs';
 import { mainGuardProblems } from './guard-scan.mjs';
 import { requireFrom } from './import-from.mjs';
 import { isMainModule } from './main-module.mjs';
-import { CONTROLS, controlProblems } from './positive-control.mjs';
+import { CONTROLS, controlProblems, expectationProblems } from './positive-control.mjs';
 import { manifestPath } from './record-built-images.mjs';
 import { repoRoot } from './repo-root.mjs';
-import { readFreshReport } from './report-file.mjs';
+import { fail, readFreshReport } from './report-file.mjs';
 import { scanForExpectedFailures } from './scan-expected-failures.mjs';
 import { completedCommands } from './shell-command.mjs';
-import { check, failures, resetFailures, stackTarget, verdict } from './stack-client.mjs';
-import { checkWorkflowFile, protectedCommandCoverage } from './workflow-policy.mjs';
+import {
+  absentDeployment,
+  check,
+  failures,
+  mailpit,
+  resetFailures,
+  stackTarget,
+  verdict,
+} from './stack-client.mjs';
+import { CI_SCRIPT_PATH, checkWorkflowFile, protectedCommandCoverage } from './workflow-policy.mjs';
 
 /** Directories that hold source this repository wrote. */
 const SOURCE_ROOTS = ['scripts', 'packages', 'apps'];
@@ -674,6 +682,53 @@ export const ENFORCEMENT = [
     ],
   },
   {
+    /**
+     * ── TWO IMPORTERS IS UNDER THE THRESHOLD AND OVER THE STAKE (r9) ─────────
+     * `SHARED_MODULE_THRESHOLD` is three, and `fail` from report-file.mjs has
+     * two importers: `assert-vitest-report.mjs` and `assert-playwright-report.mjs`.
+     * A blind critic measured what that costs — `return 1` to `return 0` and
+     * **both** report assertions print every problem they found as an
+     * `::error::` annotation and exit 0. Two is not a habit and three is; that
+     * argument is about when a *number* forces a row, and it was never an
+     * argument that a decision under the number is safe. The threshold is not
+     * the only thing that may put a binding in this table, and this is the
+     * second binding put here by the stake rather than by the count.
+     */
+    check: 'fail',
+    definedIn: 'scripts/ci/report-file.mjs',
+    fn: fail,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'it is the exit status of both report gates. `return 0` here prints every problem as a GitHub annotation and exits 0, which is louder on the page than silence and exactly as green — the same shape as the `process.on("exit")` rewrite guard-scan.mjs refuses, one function further in',
+    contract: (status) => {
+      // Silenced while it runs: `fail` prints `::error::` lines, and a contract
+      // that leaves GitHub annotations on a green run is a contract that teaches
+      // readers to ignore annotations.
+      const said = console.error;
+      console.error = () => {};
+      try {
+        return [
+          ...expectProblem(
+            status(['a problem'], 'the probe') === 1,
+            'a list of problems is not a failing status, so both report gates would annotate their findings and exit 0',
+          ),
+          ...expectProblem(
+            status(['a', 'b'], 'the probe') === 1,
+            'two problems are not a failing status either',
+          ),
+        ];
+      } finally {
+        console.error = said;
+      }
+    },
+    mutants: [
+      { name: 'always green', fn: () => 0 },
+      { name: 'green for a single problem', fn: (problems) => (problems.length > 1 ? 1 : 0) },
+      { name: 'returns the count rather than a status', fn: (problems) => problems.length },
+    ],
+  },
+  {
     check: 'manifestPath',
     definedIn: 'scripts/ci/record-built-images.mjs',
     fn: manifestPath,
@@ -703,6 +758,174 @@ export const ENFORCEMENT = [
         fn: () => {
           throw new Error('no');
         },
+      },
+    ],
+  },
+  {
+    /**
+     * #40 round 9, D1. The rule that a control's expectation must be about a
+     * behaviour, made a function so it can be run over the shipped table.
+     */
+    check: 'expectationProblems',
+    definedIn: 'scripts/ci/positive-control.mjs',
+    fn: (controls) => expectationProblems(controls),
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'round 8\'s three deploy controls each expected `/assert-page-serves/` — the script\'s own name, which every Node stack trace supplies for free. Measured on r8 as committed: the control was scored "red as required" against an `ENOENT` for a certificate authority the job does not write until six steps later, so it proved the assertion went red because a file was missing and never because the deployment was missing. A version of this that reports nothing puts every control back to being satisfied by any red at all',
+    contract: (rule) => {
+      const identity = {
+        deploy: [
+          { id: 'assert-x', entry: 'assert-x', expect: /assert-x/, world: 'w', because: 'b' },
+        ],
+      };
+      const behaviour = {
+        deploy: [
+          {
+            id: 'assert-x',
+            entry: 'assert-x',
+            expect: /assert-x: \d+ assertion\(s\) failed\./,
+            world: 'w',
+            because: 'b',
+          },
+        ],
+      };
+      return [
+        ...expectProblem(
+          rule(behaviour).length === 0,
+          'it reports a problem about an expectation that matches the sentence an assertion records, which is the shape every control here is meant to have',
+        ),
+        ...expectProblem(
+          rule(identity).some((problem) => /satisfied by a Node stack trace/.test(problem)),
+          "it accepts an expectation that is just the script's own name — the round-8 defect verbatim, and the reason three controls were green against a missing file",
+        ),
+        ...expectProblem(
+          rule({ deploy: [{ id: 'assert-x', entry: 'assert-x', world: 'w', because: 'b' }] }).some(
+            (problem) => /no `expect` regular expression/.test(problem),
+          ),
+          'it accepts a control with no expectation at all, which any non-zero exit satisfies',
+        ),
+        ...expectProblem(
+          rule(CONTROLS).length === 0,
+          'it reports a problem about the shipped control table, which must be clean',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'accepts every expectation', fn: () => [] },
+      { name: 'rejects every expectation', fn: () => ['a problem'] },
+      {
+        name: 'only checks the empty string — the identity match, unopposed',
+        fn: (controls) =>
+          Object.values(controls).flatMap((rows) =>
+            rows.flatMap((row) => (row.expect?.test('') ? ['matches the empty string'] : [])),
+          ),
+      },
+    ],
+  },
+  {
+    /**
+     * #40 round 9, D1. What the cold world says instead of crashing.
+     */
+    check: 'absentDeployment',
+    definedIn: 'scripts/ci/stack-client.mjs',
+    fn: absentDeployment,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'three stack assertions used to die at module scope with an unhandled `ENOENT` or `ECONNREFUSED`, and their positive controls matched the script name in the stack trace rather than anything either script said. This is the sentence that made the cold world a recorded failure instead of a crash, so a version of it that returns `undefined` puts all three controls back to proving nothing — and, worse, lets the real assertions run against a target they never confirmed exists',
+    contract: (absent) => {
+      const target = {
+        origin: 'https://atrium.localhost',
+        address: '127.0.0.1',
+        httpsPort: 443,
+        domain: 'atrium.localhost',
+      };
+      return [
+        ...expectProblem(
+          absent(target, { response: { status: 200 } }) === undefined,
+          'it calls a deployment that answered with a status absent',
+        ),
+        ...expectProblem(
+          /nothing is serving this deployment/.test(
+            String(absent(target, { error: { code: 'ECONNREFUSED' } })),
+          ),
+          'it says nothing about a connection nothing accepted, which is the whole cold world',
+        ),
+        ...expectProblem(
+          /ATRIUM_STACK_CA/.test(
+            String(absent({ ...target, caProblem: 'ATRIUM_STACK_CA points at x' }, {})),
+          ),
+          "it ignores a certificate authority that could not be read — the state the deploy job is in at step 4, and the one round 8's controls were accidentally matching",
+        ),
+        ...expectProblem(
+          absent(target, { response: {} }) !== undefined,
+          'it treats an answer with no status as a deployment that is there, so anything that resolves at all would satisfy the precondition',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'always says the deployment is there', fn: () => undefined },
+      { name: 'always says it is absent', fn: () => 'gone' },
+      {
+        name: 'ignores an unreadable certificate authority',
+        fn: (target, outcome) => absentDeployment({ ...target, caProblem: undefined }, outcome),
+      },
+    ],
+  },
+  {
+    /**
+     * ── A DEBT ENTRY WHOSE REASON WAS FALSE (#40 round 9) ────────────────────
+     * `mailpit` sat in `UNCONTRACTED` under "it talks to the mail catcher the
+     * overlay adds; with no overlay there is nothing to talk to". A blind critic
+     * read the function: it does no I/O at all. It resolves one environment
+     * variable to a base URL and returns an object of closures — which is
+     * exactly the shape the `composeArgs` row eleven lines away already
+     * contracts. Its stated witness was worse than the reason: it cited a ledger
+     * case in which the stack never boots, so `mailpit()` is provably never
+     * called on that path.
+     *
+     * An exemption list is only honest if every entry in it is true. This one
+     * was the entry that made the list an excuse, so it is a row instead.
+     */
+    check: 'mailpit',
+    definedIn: 'scripts/ci/stack-client.mjs',
+    fn: mailpit,
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'three assertions reach the mail relay through it, and the address it resolves is the difference between reading the message this run sent and waiting for one that went somewhere else. `ATRIUM_MAILPIT_URL` unset must mean the published port on this box, not a silent empty base that turns every fetch into a relative URL',
+    contract: (relay) => [
+      ...expectProblem(
+        relay({}).base === 'http://127.0.0.1:8025',
+        'with no ATRIUM_MAILPIT_URL it does not resolve the published mail port, so every assertion that reads the mail is asking a URL nobody serves',
+      ),
+      ...expectProblem(
+        relay({ ATRIUM_MAILPIT_URL: 'http://relay:8025' }).base === 'http://relay:8025',
+        'it ignores ATRIUM_MAILPIT_URL, so the overlay cannot move the relay',
+      ),
+      ...expectProblem(
+        relay({ ATRIUM_MAILPIT_URL: '   ' }).base === 'http://127.0.0.1:8025',
+        'it takes a blank ATRIUM_MAILPIT_URL as an address, which is the value-vs-presence defect this repository has now made four times',
+      ),
+      ...expectProblem(
+        typeof relay({}).get === 'function' && typeof relay({}).deleteAll === 'function',
+        'it does not hand back both of the operations the signup assertion needs',
+      ),
+    ],
+    mutants: [
+      { name: 'a silent empty base', fn: () => ({ base: '', get: () => {}, deleteAll: () => {} }) },
+      {
+        name: 'ignores the environment',
+        fn: () => ({ base: 'http://127.0.0.1:8025', get: () => {}, deleteAll: () => {} }),
+      },
+      {
+        name: 'trims nothing, so a blank variable becomes the address',
+        fn: (env = process.env) => ({
+          base: env.ATRIUM_MAILPIT_URL ?? 'http://127.0.0.1:8025',
+          get: () => {},
+          deleteAll: () => {},
+        }),
       },
     ],
   },
@@ -757,6 +980,75 @@ export const ENFORCEMENT = [
       {
         name: 'accepts an exit of 0 — the D3 exploit, unopposed',
         fn: (control, outcome) => (outcome.status === 0 ? [] : controlProblems(control, outcome)),
+      },
+    ],
+  },
+  {
+    /**
+     * #40 round 9. The half of the anti-gutting argument the cold control
+     * cannot reach: a script cut down to its `requireDeployment` precondition
+     * goes red in a world with no deployment exactly like the real one.
+     */
+    check: 'assertionFloorProblems',
+    definedIn: 'scripts/ci/checker-graph.mjs',
+    fn: (root, read, list) => assertionFloorProblems(root, read, list),
+    subjects: ['scripts/', '.github/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'the measured exploit is twenty lines that keep every import and every `report(…)` and delete the forty-eight `check(…)` calls between them. The positive control proves the script is a function of the world; this is what proves it still makes the assertions it is credited with, and it is the only thing that does',
+    contract: (floors, { root, read }) => {
+      const bare = (path, encoding) =>
+        String(path).endsWith('ci-manifest.json')
+          ? JSON.stringify({ vitest: { workspaces: {} } })
+          : read(path, encoding);
+      const impossible = (path, encoding) =>
+        String(path).endsWith('ci-manifest.json')
+          ? JSON.stringify({
+              assertions: { scripts: { 'scripts/ci/assert-page-serves.mjs': { minChecks: 9999 } } },
+            })
+          : read(path, encoding);
+      const departed = (path, encoding) =>
+        String(path).endsWith('ci-manifest.json')
+          ? JSON.stringify({
+              assertions: { scripts: { 'scripts/ci/assert-gone.mjs': { minChecks: 1 } } },
+            })
+          : read(path, encoding);
+      return [
+        ...expectProblem(
+          floors(root, read).length === 0,
+          'it reports a problem against the real tree, where every script that records assertions has a floor it meets',
+        ),
+        ...expectProblem(
+          floors(root, bare).some((problem) => /no `assertions.scripts` object/.test(problem)),
+          'a manifest with the whole table deleted reads as every script being held to a floor',
+        ),
+        ...expectProblem(
+          floors(root, impossible).some((problem) =>
+            /recorded assertion\(s\) and .* declares a floor of/.test(problem),
+          ),
+          'a script that makes fewer assertions than its floor is not reported, which is the gutting itself',
+        ),
+        ...expectProblem(
+          floors(root, departed).some((problem) =>
+            /does not record assertions through `check`/.test(problem),
+          ),
+          'a floor over a script that no longer records anything reads as protection',
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'every floor is met', fn: () => [] },
+      { name: 'no floor is ever met', fn: () => ['a floor'] },
+      {
+        name: 'only checks the table exists, never the counts',
+        fn: (root, read) => {
+          try {
+            const manifest = JSON.parse(String(read(join(root, MANIFEST), 'utf8')));
+            return manifest?.assertions?.scripts === undefined ? ['no table'] : [];
+          } catch {
+            return ['unreadable'];
+          }
+        },
       },
     ],
   },
@@ -1828,12 +2120,24 @@ const SHARED_MODULE_THRESHOLD = 3;
  *
  * It counts bindings now: `module#export`, one row per decision, declared by
  * each row's `covers` (which defaults to the single name the row already
- * names). That immediately exposes eight bindings over the threshold whose
+ * names). That immediately exposed a set of bindings over the threshold whose
  * behaviour no in-process contract can assert, and pretending otherwise would be
  * worse than saying so. Each is written down here with the reason no contract is
  * possible *and* the thing that exercises it instead — because "no test" and "no
  * test in this file" are different claims, and the first one is the one that
  * should be expensive to write.
+ *
+ * ── AND THE REASONS HAVE TO BE TRUE (#40 round 9) ───────────────────────────
+ * Round 8 wrote "eight bindings" over a table holding seven, and one of the
+ * seven was `mailpit`, excused as "it talks to the mail catcher" by a function
+ * that does no I/O whatsoever — it resolves one environment variable and returns
+ * closures, which is the shape the `composeArgs` row eleven lines away already
+ * contracts. Its stated witness cited a ledger case in which the stack never
+ * boots, so the function is provably never called on it. A count nobody checked
+ * guarding entries nobody re-read is the exemption list this repository keeps
+ * deleting, wearing a different hat. `mailpit` has a row now; the count is gone
+ * from this comment, because the number that matters is the one the rule prints
+ * beside the entries when it fires.
  *
  * This is an exemption list, which this repository refuses elsewhere and for
  * good reason. The difference is what it is a list *of*: the lists this
@@ -1874,11 +2178,75 @@ const UNCONTRACTED = {
     witness:
       'assert-signup-verifies.mjs is exactly this path as an assertion, and assert-page-serves.mjs and assert-ws-upgrade.mjs both depend on the session it produces.',
   },
-  'scripts/ci/stack-client.mjs#mailpit': {
-    why: 'it talks to the mail catcher the overlay adds; with no overlay there is nothing to talk to.',
-    witness: 'the same three, and the `no-transport` case in deploy-mutation-ledger.mjs.',
+  'scripts/ci/stack-client.mjs#requireDeployment': {
+    why: 'it ends on `report`, which is `process.exit(verdict(what))`, so a contract that reached the failing branch would end the process running the contract. `absentDeployment` — the decision it acts on — has a row above with three mutants, and this function is `check(absentDeployment(…))` plus that exit.',
+    witness:
+      'packages/ci-guard/test/checkers.test.ts drives it with an injected request function and an injected reporter, and requires it to report exactly once for a refused connection and not at all for a deployment that answered; and every deploy control in positive-control.mjs matches the sentence it records.',
   },
 };
+
+/**
+ * Every binding `import * as name` depends on, or `undefined` for "all of them".
+ *
+ * ── AND THE THIRD SPELLING (#40 round 9, D4, found attacking the fix) ────────
+ * Counting `ns.member` closed the measured rewrite and not the one line past it:
+ * `const { queryDatabase } = composeModule;` reaches the same binding through a
+ * destructuring, which is not a property access, so the count went back to zero
+ * and the debt table went stale again. Enumerating the ways to read a property
+ * off an object is a denylist, and this file's whole argument is that denylists
+ * are unbounded — so the enumeration is only an *optimisation*: any use of the
+ * namespace this function does not recognise makes the answer "every export of
+ * that module", which is the true and conservative reading of what a namespace
+ * import depends on.
+ */
+function namespaceMembers(sourceFile, name) {
+  const used = new Set();
+  let opaque = false;
+  const visit = (node) => {
+    if (
+      (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === name
+    ) {
+      if (ts.isPropertyAccessExpression(node)) used.add(node.name.text);
+      else if (
+        node.argumentExpression !== undefined &&
+        ts.isStringLiteralLike(node.argumentExpression)
+      ) {
+        used.add(node.argumentExpression.text);
+      } else opaque = true;
+      return;
+    }
+    // `const { a, b } = ns;` — a read of two properties with no member access
+    // anywhere in it.
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      ts.isIdentifier(node.initializer) &&
+      node.initializer.text === name
+    ) {
+      if (ts.isObjectBindingPattern(node.name)) {
+        for (const element of node.name.elements) {
+          const key = element.propertyName ?? element.name;
+          if (ts.isIdentifier(key)) used.add(key.text);
+          else opaque = true;
+        }
+        return;
+      }
+      opaque = true;
+      return;
+    }
+    if (ts.isIdentifier(node) && node.text === name && !ts.isNamespaceImport(node.parent)) {
+      // The namespace itself, changing hands: passed to a function, spread,
+      // re-exported. Whatever happens to it, every export is reachable.
+      opaque = true;
+      return;
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return opaque ? undefined : used;
+}
 
 /**
  * Every module many scripts depend on that nothing in the registry describes.
@@ -1931,25 +2299,46 @@ export function sharedModuleProblems(
       // Every *name* this file takes out of that module, which is the unit the
       // rule is about: a module clears with one row, a decision does not.
       const bindings = statement.importClause?.namedBindings;
+      const target = toPosix(posix.join(posix.dirname(file), specifier.text));
+      const dependsOn = (imported) => {
+        const key = `${target}#${imported}`;
+        if (!bindingImporters.has(key)) bindingImporters.set(key, new Set());
+        bindingImporters.get(key).add(file);
+      };
       if (bindings !== undefined && ts.isNamedImports(bindings)) {
-        const target = toPosix(posix.join(posix.dirname(file), specifier.text));
         for (const element of bindings.elements) {
           // The *imported* name, not the local alias: `import { check as c }`
           // depends on `check`.
-          const imported = (element.propertyName ?? element.name).text;
-          const key = `${target}#${imported}`;
-          if (!bindingImporters.has(key)) bindingImporters.set(key, new Set());
-          bindingImporters.get(key).add(file);
+          dependsOn((element.propertyName ?? element.name).text);
         }
       }
-      // Resolved against the *importing file's* directory, not assumed to be
-      // `scripts/ci/`. `scripts/ci` is flat today and "the directory happens to
-      // be flat today" is this ticket's own founding assumption: a script at
-      // `scripts/other/x.mjs` importing `./y.mjs` means `scripts/other/y.mjs`,
-      // and reading that as `scripts/ci/y.mjs` would credit one module with
-      // another's importers and miss the real one entirely. Found attacking this
-      // round's own fix.
-      const target = toPosix(posix.join(posix.dirname(file), specifier.text));
+      // ── AND THE OTHER SPELLING OF THE SAME DEPENDENCY (#40 round 9, D4) ───
+      // This counted `ts.isNamedImports` and nothing else, so `import * as
+      // composeModule from './compose.mjs'` made every binding it uses
+      // invisible. Measured by a blind critic: rewriting three importers that
+      // way dropped a still-shared binding below the threshold and made the
+      // *staleness* half of this rule instruct the reader to delete its debt
+      // entry — a gate arguing for the removal of the acknowledgement of a
+      // decision three files still depend on. A namespace import is a
+      // dependency on every property of the namespace that is read, so those
+      // are the names counted.
+      if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+        const used = namespaceMembers(parsed, bindings.name.text);
+        // `undefined` is "this rule could not enumerate what it reads", and the
+        // conservative answer to that is every export the module has: a
+        // namespace import is a dependency on all of them until something proves
+        // otherwise, and proving otherwise is what the enumeration above is for.
+        for (const name of used ?? exportsOf(root, read, target)) dependsOn(name);
+      }
+      // `import defaultName from './x.mjs'` is a dependency on `default`.
+      if (statement.importClause?.name !== undefined) dependsOn('default');
+      // `target` above is resolved against the *importing file's* directory, not
+      // assumed to be `scripts/ci/`. `scripts/ci` is flat today and "the
+      // directory happens to be flat today" is this ticket's own founding
+      // assumption: a script at `scripts/other/x.mjs` importing `./y.mjs` means
+      // `scripts/other/y.mjs`, and reading that as `scripts/ci/y.mjs` would
+      // credit one module with another's importers and miss the real one
+      // entirely. Found attacking round 8's own fix.
       if (!importers.has(target)) importers.set(target, new Set());
       importers.get(target).add(file);
     }
@@ -1968,6 +2357,35 @@ export function sharedModuleProblems(
       (entry.covers ?? [entry.check]).map((name) => `${entry.definedIn}#${name}`),
     ),
   );
+  // ── AND `covers` HAS TO NAME SOMETHING THAT EXISTS (#40 round 9, D4) ──────
+  // `check` is validated against `exportedNames(definedIn)` — a row that names a
+  // module it does not come from is refused, and has been since round 7. `covers`
+  // was read straight into the set above with no validation at all, which makes
+  // it the same defect in the field that *silences* the rule rather than the one
+  // that states it. Measured by a blind critic: delete four entries from
+  // UNCONTRACTED, add them plus a name that does not exist anywhere to the
+  // `composeArgs` row's `covers` — a two-line contract about splitting an
+  // environment variable — and `sharedModuleProblems` reports **0**. Four shared
+  // decisions cleared by one row asserting nothing about any of them, and a
+  // typo cleared nothing while looking like it had.
+  for (const entry of registry) {
+    if (entry.covers === undefined) continue;
+    let exports;
+    try {
+      exports = exportedNames(entry.definedIn, String(read(join(root, entry.definedIn), 'utf8')));
+    } catch (error) {
+      problems.push(
+        `${entry.definedIn} could not be read to confirm what ${entry.check}'s \`covers\` names: ${error.message}`,
+      );
+      continue;
+    }
+    for (const name of entry.covers) {
+      if (exports.has(name)) continue;
+      problems.push(
+        `the row for ${entry.check} claims to cover \`${name}\` in ${entry.definedIn}, which exports no such name (it exports ${[...exports].sort().join(', ') || 'nothing'}). \`covers\` is how a row clears a *decision* rather than a file, so an unvalidated one clears whatever it is spelled like: a name with a typo in it silences nothing and reads as though it silenced something, and a list of real names on a row whose contract never touches them silences four.`,
+      );
+    }
+  }
   const shared = new Set();
   for (const [key, files] of [...bindingImporters].sort()) {
     if (files.size < SHARED_MODULE_THRESHOLD) continue;
@@ -1999,6 +2417,142 @@ export function sharedModuleProblems(
 }
 
 /**
+ * How many recorded assertions each stack assertion still makes.
+ *
+ * ── THE HOLE THE COLD CONTROL CANNOT REACH (#40 round 9) ────────────────────
+ * `positive-control.mjs` proves an assertion is a function of the world by
+ * running it in a world where it must fail. That catches a script that checks
+ * *nothing*. It does not catch one that checks *less than it claims*: since
+ * round 9 every stack assertion opens with `requireDeployment`, and a script cut
+ * down to nothing but that precondition goes red in the cold world exactly like
+ * the real one. A blind critic put the number on it — **48 `check()` calls
+ * (24 + 15 + 9) are uncontrolled**, and the gutting that removes them was
+ * measured to leave every gate green.
+ *
+ * No behavioural control run before the stack exists can distinguish those two
+ * scripts, so this half is syntactic and blunt on purpose: each of them declares
+ * a floor of recorded assertions in `.github/ci-manifest.json`, and the floors
+ * are read by `floorsOf` — which means `assert-floor-ratchet.mjs` compares them
+ * against `origin/main` like every other floor, and the README fingerprint moves
+ * when one does. Deleting twenty-three of `assert-page-serves`'s twenty-four
+ * checks is now three files that have to agree about it.
+ *
+ * The subject set is derived, not declared: any script under `scripts/` that
+ * imports `check` from `./stack-client.mjs` is recording assertions and must
+ * have a floor, and a floor for a script that stopped importing it is stale and
+ * says so. What this is *not* is a claim that the assertions are good — a
+ * `check(true, …)` counts. It is a claim that they are still there, which is the
+ * one thing the twenty-line gutting removes.
+ *
+ * @param {string} [root]
+ * @param {typeof readFileSync} [read]
+ * @param {typeof readdirSync} [list]
+ * @returns {string[]}
+ */
+export function assertionFloorProblems(
+  root = process.cwd(),
+  read = readFileSync,
+  list = readdirSync,
+) {
+  const problems = [];
+  let floors;
+  try {
+    floors = JSON.parse(String(read(join(root, MANIFEST), 'utf8')))?.assertions?.scripts;
+  } catch (error) {
+    return [
+      `${MANIFEST} could not be read to check the assertion floors: ${error.message}. A floor nobody could read is a floor nobody is held to.`,
+    ];
+  }
+  if (!isPlainObject(floors)) {
+    return [
+      `${MANIFEST} has no \`assertions.scripts\` object, so no script is held to a floor of recorded assertions at all. That table is the only thing standing between a stack assertion and the twenty-line rewrite that keeps its imports, keeps its \`report(…)\` and deletes every \`check(…)\` between them.`,
+    ];
+  }
+  const counted = new Map();
+  for (const file of sourceFiles(root, list)) {
+    if (!file.startsWith('scripts/')) continue;
+    let source;
+    try {
+      source = String(read(join(root, file), 'utf8'));
+    } catch {
+      continue;
+    }
+    const parsed = parseOnce(file, source);
+    if (!importsCheck(parsed)) continue;
+    const calls = countCalls(parsed, 'check');
+    // Importing `check` and never calling it is what this file itself does — it
+    // hands the binding to a contract as data. A file with no call sites is not
+    // recording assertions, so it needs no floor; and a file that *had* one and
+    // dropped to zero is caught by the staleness half below, which is the shape
+    // the gutting takes.
+    if (calls > 0) counted.set(file, calls);
+  }
+  for (const [file, calls] of [...counted].sort()) {
+    const floor = floors[file]?.minChecks;
+    if (typeof floor !== 'number') {
+      problems.push(
+        `${file} records assertions through \`check\` from stack-client.mjs and has no \`minChecks\` floor in ${MANIFEST}. Without one, every one of its ${calls} assertion(s) can be deleted in a single commit and nothing anywhere will say so: the positive control only proves the script goes red in a world with no deployment, which a script consisting of nothing but its precondition also does.`,
+      );
+      continue;
+    }
+    if (calls < floor) {
+      problems.push(
+        `${file} makes ${calls} recorded assertion(s) and ${MANIFEST} declares a floor of ${floor}. A suite that shrank is the thing every floor in this manifest exists to catch, and this is the one whose shrinking the deploy job cannot see — lowering it is a decision that belongs in the ratchet's justifications, beside the number.`,
+      );
+    }
+  }
+  for (const file of Object.keys(floors)) {
+    if (counted.has(file)) continue;
+    problems.push(
+      `${MANIFEST} declares an assertion floor for ${file}, which does not record assertions through \`check\` from stack-client.mjs any more (it may have been deleted, renamed, or rewritten to report some other way). A floor over nothing is a floor that reads as protection and is not.`,
+    );
+  }
+  return problems;
+}
+
+/** Every name a module exports, for the conservative namespace-import answer. */
+function exportsOf(root, read, module) {
+  try {
+    return exportedNames(module, String(read(join(root, module), 'utf8')));
+  } catch {
+    return new Set();
+  }
+}
+
+/** True when this file imports `check` by name from the shared client. */
+function importsCheck(sourceFile) {
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const specifier = statement.moduleSpecifier;
+    if (!ts.isStringLiteral(specifier)) continue;
+    if (!/(?:^\.\/|^(?:\.\.\/)+)stack-client\.mjs$/.test(specifier.text)) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings === undefined || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      if ((element.propertyName ?? element.name).text === 'check') return true;
+    }
+  }
+  return false;
+}
+
+/** Call sites of a plain identifier, at any depth. */
+function countCalls(sourceFile, name) {
+  let found = 0;
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === name
+    ) {
+      found += 1;
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return found;
+}
+
+/**
  * Assertions the deploy job runs that no positive control ever breaks.
  *
  * ── FOUND ATTACKING THIS ROUND'S OWN FIX (#40 round 8) ──────────────────────
@@ -2024,6 +2578,10 @@ const CONTROL_EXEMPT = {
     "it asserts that nothing of this project is left running, which is *true* before anything is brought up. A cold control for it would require it to fail at telling the truth. Its world is the other one — after `down` — and the `teardown-keeps-volumes` case in deploy-mutation-ledger.mjs mutates that stage's own flags and requires this script to catch the result.",
   'assert-deploy-preflight':
     'it is the only check in the job about the *machine* rather than the deployment, so "no stack is up" is not a broken world for it. Its mutations are `old-engine` and `routed-gateway` in deploy-mutation-ledger.mjs, which change what it observes about the host.',
+  // Reached the moment round 9 widened this rule from the deploy job's
+  // `assert-*.mjs` steps to every entry point every job runs (D3/D5).
+  'compose-stack':
+    'it is the verb, not the assertion: `build`, `up`, `trust-ca` and `down` are how a world is *made*, and a positive control over a world-maker would be a requirement that making a world fails. The argv it builds for all four verbs is asserted in gate-selftest.mjs from `composeStackArgv`, which is the code that runs rather than a copy of the text beside it, and the stages it drives are what deploy-mutation-ledger.mjs mutates.',
 };
 
 /**
@@ -2047,44 +2605,63 @@ export function controlCoverageProblems(
       `${WORKFLOW_DIRECTORY}/ci.yml could not be read to check control coverage: ${error.message}`,
     ];
   }
-  const steps = document?.jobs?.deploy?.steps;
-  if (!Array.isArray(steps) || steps.length === 0) {
+  const jobs = document?.jobs;
+  if (!isPlainObject(jobs) || Object.keys(jobs).length === 0) {
     return [
-      `${WORKFLOW_DIRECTORY}/ci.yml has no \`deploy\` job with steps, so "every assertion it runs has a control" is true of nothing. A rule whose subject set is empty is satisfied by anything.`,
+      `${WORKFLOW_DIRECTORY}/ci.yml has no jobs, so "every entry point it runs has a control" is true of nothing. A rule whose subject set is empty is satisfied by anything.`,
     ];
   }
-  const controlled = new Set((controls.deploy ?? []).map((control) => control.id));
-  const asserted = [];
-  for (const step of steps) {
-    if (typeof step?.run !== 'string') continue;
-    let commands;
-    try {
-      commands = completedCommands(step.run);
-    } catch {
-      continue;
-    }
-    for (const command of commands) {
-      for (const word of command.argv) {
-        const found = /^(?:\.\.\/)*scripts\/ci\/(assert-[a-z0-9-]+)\.mjs$/.exec(String(word));
-        if (found !== null) asserted.push(found[1]);
+  // Every group, not just `deploy`: a control's job is to prove one entry point,
+  // and which group it lives in is an ordering detail of when the world it needs
+  // exists. Round 8 read `controls.deploy` and the deploy job's steps, and the
+  // five entry points the round-9 D3 bypass was weaponised on were all in the
+  // *verify* job.
+  const controlled = new Set(
+    Object.values(controls).flatMap((rows) => rows.map((control) => control.entry ?? control.id)),
+  );
+  const run = new Map();
+  for (const [jobId, job] of Object.entries(jobs)) {
+    for (const step of Array.isArray(job?.steps) ? job.steps : []) {
+      if (typeof step?.run !== 'string') continue;
+      let commands;
+      try {
+        commands = completedCommands(step.run);
+      } catch {
+        continue;
+      }
+      for (const command of commands) {
+        for (const word of command.argv) {
+          // ── THE NAME WAS THE RULE, AND THE RULE WAS THE NAME (r9, D5) ─────
+          // This matched `assert-[a-z0-9-]+\.mjs`, and the entrypoint allowlist
+          // in workflow-policy.mjs permits any `scripts/ci/([a-z0-9-]+)\.mjs`.
+          // Measured: adding `run: node scripts/ci/check-invented-thing.mjs` to
+          // the deploy job left coverage reporting 0 problems and the policy
+          // exiting 0 — a brand-new, entirely uncontrolled entry point, admitted
+          // by spelling. Same for `verify-`. A coverage rule keyed on a filename
+          // convention covers whatever the convention happens to be called.
+          const found = CI_SCRIPT_PATH.exec(String(word));
+          if (found === null) continue;
+          if (!run.has(found[1])) run.set(found[1], new Set());
+          run.get(found[1]).add(jobId);
+        }
       }
     }
   }
-  if (asserted.length === 0) {
+  if (run.size === 0) {
     return [
-      'no assertion script could be read out of the deploy job at all, so this check has nothing to be about. Either the job stopped asserting anything or the parse stopped working; both are worse than a missing control.',
+      "no entry point could be read out of any job at all, so this check has nothing to be about. Either the workflow stopped running this repository's own scripts or the parse stopped working; both are worse than a missing control.",
     ];
   }
-  for (const name of [...new Set(asserted)].sort()) {
+  for (const [name, where] of [...run].sort()) {
     if (controlled.has(name) || Object.hasOwn(CONTROL_EXEMPT, name)) continue;
     problems.push(
-      `the deploy job runs ${name}.mjs and no positive control in scripts/ci/positive-control.mjs ever requires it to fail. Nothing else in this repository can tell that script apart from one gutted to \`report('${name}')\`, which was measured to print "passed." and exit 0 with no stack running while every other gate stayed green. Give it a control, or exempt it with the reason a broken world for it would be a false red.`,
+      `${[...where].sort().join(' and ')} runs scripts/ci/${name}.mjs and no positive control in scripts/ci/positive-control.mjs ever requires it to fail. Nothing else in this repository can tell that script apart from one gutted to \`report('${name}')\`, which was measured to print "passed." and exit 0 with no stack running while every other gate stayed green — and from one whose exit status was moved into a named ternary, which round 9 measured on exactly the entry points this rule used not to reach. Give it a control, or exempt it with the reason a broken world for it would be a false red.`,
     );
   }
   for (const [name, why] of Object.entries(CONTROL_EXEMPT)) {
-    if (!asserted.includes(name)) {
+    if (!run.has(name)) {
       problems.push(
-        `${name} is exempted from the positive controls and the deploy job does not run it any more. A stale exemption is one nobody re-read: ${why}`,
+        `${name} is exempted from the positive controls and no job runs it any more. A stale exemption is one nobody re-read: ${why}`,
       );
     }
     if (controlled.has(name)) {
@@ -2093,7 +2670,25 @@ export function controlCoverageProblems(
       );
     }
   }
+  // And a control for something the workflow does not run is a control whose
+  // subject left: it costs a child process per gate run and proves nothing about
+  // this pipeline. `selfcheck` is the one group whose caller is a control rather
+  // than a step, so its entries are excused from having a step of their own.
+  for (const [group, rows] of Object.entries(controls)) {
+    if (group === 'selfcheck') continue;
+    for (const control of rows) {
+      const name = control.entry ?? control.id;
+      if (run.has(name)) continue;
+      problems.push(
+        `the \`${group}\` group controls scripts/ci/${name}.mjs and no job in ${WORKFLOW_DIRECTORY}/ci.yml runs it. A control over a script the pipeline does not run proves something about a file rather than about this build.`,
+      );
+    }
+  }
   return problems;
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -2225,6 +2820,11 @@ export function checkerGraphProblems({
   // about whatever fixture registry a self-test happened to hand in. Passing the
   // fixture here would make every one-row fixture report twelve missing modules.
   problems.push(...sharedModuleProblems(root, read, list));
+
+  // And every stack assertion still has to *make* its assertions: the cold
+  // control proves a script is a function of the world, and a script cut down to
+  // its precondition is a function of the world too.
+  problems.push(...assertionFloorProblems(root, read, list));
 
   // And every assertion the deploy job runs has to have a world in which it
   // must fail. `CONTROLS` is data in this same commit; the set it has to cover
