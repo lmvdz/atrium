@@ -683,8 +683,17 @@ export function decideAcceptance(
   // one cell changes.
   //
   // The floor twin is `MODEL_ACCEPTANCE_FLOOR`, derived from the same
-  // `modelMayMint`, and the reducer's named refusal is `claim_acceptance` — all
-  // three from one predicate, because a rule applied at one site is not a rule.
+  // `modelMayMint`, so this row and the reducer's refusal come from one
+  // predicate — a rule applied at one site is not a rule. The reducer says it in
+  // words rather than through a named human-only gate, and `modelMintingGate`
+  // records why: a gate there runs before the verified-claim check and would
+  // shadow `claim_verification` into unreachability.
+  //
+  // (That sentence read "the reducer's named refusal is `claim_acceptance`"
+  // until this round's own sweep caught it — the gate was built, measured,
+  // reverted, and the comment justifying it stayed. Third instance in this file
+  // family of a live comment describing a mechanism that no longer exists, and
+  // the first one written by the same commit as the code it describes.)
   if (!typeCertifiableFromText(proposal.type)) {
     return {
       ...base,

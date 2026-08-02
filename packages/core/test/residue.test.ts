@@ -5,6 +5,7 @@ import {
   findDuplicate,
   hasContent,
   normalizeForReceipt,
+  normalizeForRouting,
   orderedTokens,
   type Proposal,
   Proposal as ProposalSchema,
@@ -293,15 +294,20 @@ describe('r5 — normalization may not do semantic damage', () => {
   // over the union, and it fails loudly if a shard did not run.
   const PLANES = Array.from({ length: 17 }, (_, plane) => plane);
   const deletedByPlane = new Map<number, number[]>();
+  /** What each shard actually swept — counted inside the loop, not re-derived. */
+  const sweptPerPlane = new Map<number, number>();
 
   it.each(PLANES)('collects every code point the fold deletes in plane %i', (plane) => {
     const found: number[] = [];
     const start = plane * 0x10000;
+    let swept = 0;
     for (let cp = start; cp < start + 0x10000; cp += 1) {
       if (cp >= 0xd800 && cp <= 0xdfff) continue;
       // `x` and `y` are ordinary letters, so anything deleted between them fuses.
       if (normalizeForReceipt(`x${String.fromCodePoint(cp)}y`) === 'xy') found.push(cp);
+      swept += 1;
     }
+    sweptPerPlane.set(plane, swept);
     deletedByPlane.set(plane, found);
   });
 
@@ -316,8 +322,11 @@ describe('r5 — normalization may not do semantic damage', () => {
     // LineTerminator, and it is a Unicode **mandatory** line break, so deleting
     // it changes what a reader sees. A comment asserting a property of the
     // language is a factual claim, so this test measures instead of arguing.
-    // Every shard ran, and their union is the sweep the unsharded loop did.
+    // Every shard ran, and their union is the sweep the unsharded loop did —
+    // counted by the shards rather than re-derived from the array, so a plane
+    // that did not run fails here instead of passing arithmetic.
     expect(deletedByPlane.size).toBe(PLANES.length);
+    expect([...sweptPerPlane.values()].reduce((total, count) => total + count, 0)).toBe(1_112_064);
     const deleted = PLANES.flatMap((plane) => deletedByPlane.get(plane) ?? []).sort(
       (a, b) => a - b,
     );
@@ -1141,5 +1150,84 @@ describe('r7 — a body too long to scan is not a body that was read', () => {
         ),
       ).map((problem) => problem.kind),
     ).toContain('quote_is_a_fragment');
+  });
+});
+
+describe('r7 — the two things the link rule was still deleting', () => {
+  // r7's blind review ran a 400k-sample collision search over the receipt fold
+  // and found exactly five surprising collisions, all of them this rule. The
+  // "Four entries" allowlist in `matching.ts` named neither, because neither was
+  // ever admitted: the pattern consumed them as syntax and never re-emitted
+  // them. Both are author-written text a reader sees, which is r4's own argument
+  // for making the destination content.
+  const withTitle = 'See [the runbook](https://x.example "Do NOT run step 4") before deploying.';
+  const stripped = 'See the runbook https://x.example before deploying.';
+
+  it('keeps a link title, which is text the author wrote', () => {
+    // The whole exploit in one pair: a statement that silently drops the
+    // author's warning, quoted verbatim, reaching `auto_accept`.
+    expect(normalizeForReceipt(withTitle)).not.toBe(normalizeForReceipt(stripped));
+    expect(normalizeForReceipt(withTitle)).toContain('Do NOT run step 4');
+
+    const messages: ProvenanceMessage[] = room(
+      { id: 'msg_1', authorId: ALICE, body: withTitle },
+      { id: 'msg_2', authorId: BOB, body: 'understood, thanks for the pointer' },
+    );
+    expect(
+      validateProposalProvenance(
+        {
+          type: 'claim',
+          provenance: ['msg_1'],
+          quote: stripped,
+          statement: stripped,
+          proposer: { kind: 'model' },
+          attributedTo: ALICE,
+        },
+        messages,
+      ),
+    ).not.toEqual([]);
+    expect(
+      decideAcceptance(
+        modelProposal({
+          type: 'claim',
+          payload: { statement: stripped, claimant: ALICE },
+          quote: stripped,
+        }),
+        { messages },
+      ).verdict,
+    ).not.toBe('auto_accept');
+  });
+
+  it('keeps the image marker, so an embed is not a link', () => {
+    // `![alt](url)` embeds and `[alt](url)` links. Folding both to `alt url`
+    // made one text out of two different things.
+    expect(normalizeForReceipt('See ![the diagram](https://x.example/d.png) here.')).not.toBe(
+      normalizeForReceipt('See [the diagram](https://x.example/d.png) here.'),
+    );
+  });
+
+  it('is the same policy in both folds, which is what "one answer" means', () => {
+    // r7 found the two folds carrying separate copies of this callback, and
+    // changing one left the other on the old policy — routing dropped every
+    // destination, silently, until `escalation.test.ts` caught it. They call one
+    // function now.
+    //
+    // Not equality between the folds: routing is lossier by design (case, NFKC,
+    // emphasis). The claim is the narrower one that broke — whatever a link
+    // carries, both folds keep it.
+    const texts = [
+      withTitle,
+      'See ![the diagram](https://x.example/d.png) here.',
+      'see [the playground](https://example.com/x?y=1) for it',
+    ];
+    for (const text of texts) {
+      for (const fragment of ['Do NOT run step 4', 'https://x.example', 'https://example.com']) {
+        if (!text.includes(fragment)) continue;
+        expect(normalizeForRouting(text), `${fragment} in routing`).toContain(
+          fragment.toLowerCase(),
+        );
+        expect(normalizeForReceipt(text), `${fragment} in the receipt`).toContain(fragment);
+      }
+    }
   });
 });

@@ -248,8 +248,62 @@ const SENTENCE_BREAK = /(?<=[.!?…。？！])\p{White_Space}+|[\n\v\f\r\u0085\u
  * only disappears when the text already states it. A statement that drops the
  * destination is then a statement that drops words the quote carries, which is
  * the case `refer` exists for: a person looks at where the link actually goes.
+ *
+ * ## …and the title and the image marker, which r7 found still on the floor
+ *
+ * The "Four entries" this fold admits are enumerated above with the argument
+ * that admits each. This rule was quietly deleting two more things that are not
+ * on that list, and r7's blind review found them with a 400k-sample collision
+ * search — **the only surprising collisions it found, and all five were this
+ * rule**:
+ *
+ *  - **The link title.** `[the runbook](https://x.example "Do NOT run step 4")`
+ *    normalized to `the runbook https://x.example`, so a statement omitting
+ *    *Do NOT run step 4* was certifiable against a record that says it. That is
+ *    r4's own argument about the destination, word for word: the title is
+ *    author-written text a reader sees, and deleting it lets a statement drop
+ *    what the message says.
+ *  - **The `!` image marker.** `![alt](url)` and `[alt](url)` are different
+ *    things — one embeds, one links — and folding both to `alt url` made them
+ *    the same text.
+ *
+ * Neither had an argument, because neither was ever admitted; they were
+ * consumed by the pattern as syntax and never re-emitted. **Writing them into
+ * the allowlist as entries five and six was the cheaper repair and is the one
+ * this file's own history refuses**: `RETRO.md` records twice that a limitation
+ * stated in prose is not a disposition, and the disposition here would have been
+ * "auto-accept a statement that drops a warning its author wrote". They are
+ * content now, on the same argument the destination is, and the allowlist stays
+ * at four.
+ *
+ * A statement quoting the message verbatim carries them and is unaffected —
+ * `quoteCoversOwnText` already requires the quote to be the whole body — so the
+ * only reading this refuses is one that strips them, which is a reading that
+ * edited the text.
  */
-const MARKDOWN_LINK = /!?\[([^\]]*)\]\(\s*([^)\s]*)(?:\s+"[^"]*")?\s*\)/g;
+const MARKDOWN_LINK = /(!?)\[([^\]]*)\]\(\s*([^)\s]*)(?:\s+"([^"]*)")?\s*\)/g;
+
+/**
+ * The one link policy, called by both folds.
+ *
+ * Everything a link is made of survives except the punctuation that arranges it:
+ * the marker, the text, the destination, the title. The destination is dropped
+ * only when the text already states it, so an autolink does not become a stutter
+ * nothing can bear.
+ */
+function unfoldLink(
+  _match: string,
+  bang: string,
+  label: string,
+  destination: string,
+  title?: string,
+): string {
+  const text = label.trim();
+  const target = destination.trim();
+  const caption = (title ?? '').trim();
+  const linked = target.length === 0 || text === target ? text : `${text} ${target}`;
+  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;
+}
 
 /**
  * Code, in every spelling Markdown gives it: a fence, a double-backtick span, a
@@ -318,16 +372,7 @@ export function normalizeForReceipt(text: string): string {
 
 function foldProse(text: string): string {
   const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
-  return folded
-    .replace(MARKDOWN_LINK, (_match, label: string, destination: string) => {
-      const text = label.trim();
-      const target = destination.trim();
-      if (target.length === 0) return text;
-      // The destination disappears only when the text already states it, so an
-      // autolink does not turn into a stutter that nothing can bear.
-      return text === target ? text : `${text} ${target}`;
-    })
-    .replace(WHITESPACE_RUN, ' ');
+  return folded.replace(MARKDOWN_LINK, unfoldLink).replace(WHITESPACE_RUN, ' ');
 }
 
 /**
@@ -358,11 +403,15 @@ export function normalizeForRouting(text: string): string {
       // …" after "Use https://safe.example/app …") reduced to the same tokens as
       // the one before it and did not read as a revision. A destination is content
       // wherever it appears; there is one answer to that question now, not two.
-      .replace(MARKDOWN_LINK, (_m, label: string, destination: string) => {
-        const label_ = label.trim();
-        const target = destination.trim();
-        return target.length === 0 || label_ === target ? label_ : `${label_} ${target}`;
-      })
+      // **One function, since r7.** The two folds each carried their own copy of
+      // this callback, and r7 changed one of them — to stop discarding the link
+      // title and the `!` image marker — which silently left routing on the old
+      // policy and, because the pattern's capture groups moved with it, dropped
+      // destinations from routing entirely. `escalation.test.ts` caught it in
+      // one run. The comment above says "there is one answer to that question
+      // now, not two"; it is one *implementation* now too, which is what makes
+      // the sentence true rather than aspirational.
+      .replace(MARKDOWN_LINK, unfoldLink)
       .replace(/[*_`]+/g, ' ')
       .replace(DELETABLE, '')
       .replace(WHITESPACE_RUN, ' ')

@@ -122,12 +122,25 @@ describe('r6 — the token stream is the text, so token equality is text equalit
   // sixteenth of the time, which keeps the per-test budget in `vitest.config.ts`
   // meaningful instead of merely large. The failure message gains the plane.
   const PLANES = Array.from({ length: 17 }, (_, plane) => plane);
+  /**
+   * What each shard actually checked, recorded by the shard.
+   *
+   * **Not arithmetic, and that is the point.** The first draft of the companion
+   * test below re-derived the covered count from `PLANES` and asserted it came
+   * to 1,112,064 — which is true of the *array* whether or not a single shard
+   * ran, so `it.skip` on a plane, a `--sequence` change, or a shard that threw
+   * before its first iteration would all have left it green. The count is
+   * incremented inside the loop that does the work, so the companion test is
+   * evidence about the sweep rather than about seventeen multiplications.
+   */
+  const sweptPerPlane = new Map<number, number>();
   it.each(PLANES)(
     'reassembles a text built from any code point in plane %i, not only the ones somebody listed',
     (plane) => {
       // The corpus above is a list, and a list is the instrument this package
       // keeps being failed for. So: every code point, between two letters.
       const start = plane * 0x10000;
+      let swept = 0;
       for (let cp = start; cp < start + 0x10000; cp += 1) {
         if (cp >= 0xd800 && cp <= 0xdfff) continue;
         const char = String.fromCodePoint(cp);
@@ -135,25 +148,26 @@ describe('r6 — the token stream is the text, so token equality is text equalit
         if (orderedTokens(text).join('') !== normalizeForReceipt(text)) {
           throw new Error(`U+${cp.toString(16).toUpperCase()} does not reassemble`);
         }
+        swept += 1;
       }
+      sweptPerPlane.set(plane, swept);
     },
   );
 
-  it('sweeps every code point across the shards, with nothing between them', () => {
+  it('swept every code point across the shards, with nothing between them', () => {
     // The shard boundaries are arithmetic, and arithmetic in a test is a place
-    // to drop a range silently. This asserts the seventeen shards partition
-    // 0…0x10FFFF exactly — the surrogates excluded and nothing else.
-    const covered = PLANES.reduce((total, plane) => {
-      const start = plane * 0x10000;
-      let count = 0;
-      for (let cp = start; cp < start + 0x10000; cp += 1) {
-        if (cp < 0xd800 || cp > 0xdfff) count += 1;
-      }
-      return total + count;
-    }, 0);
-    expect(covered).toBe(0x110000 - 0x800);
-    expect(covered).toBe(1_112_064);
+    // to drop a range silently. Every shard reported what it checked, and the
+    // reports add up to the whole of 0…0x10FFFF with the surrogates excluded and
+    // nothing else — which is the number this round's headline is stated in.
+    expect(sweptPerPlane.size).toBe(PLANES.length);
+    const swept = [...sweptPerPlane.values()].reduce((total, count) => total + count, 0);
+    expect(swept).toBe(0x110000 - 0x800);
+    expect(swept).toBe(1_112_064);
     expect(PLANES.at(-1) as number).toBe(0x10ffff >>> 16);
+    // …and no plane reported the surrogate range as covered.
+    expect(sweptPerPlane.get(0)).toBe(0x10000 - 0x800);
+    for (const plane of PLANES.slice(1))
+      expect(sweptPerPlane.get(plane), `plane ${plane}`).toBe(0x10000);
   });
 
   it('is borne exactly when the two normalized texts are the same string', () => {

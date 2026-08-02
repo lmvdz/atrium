@@ -797,11 +797,14 @@
     },
     {
       "id": "normalize_drops_link_destination",
-      "why": "Collapses a markdown link to its text, as r4 did. `Use [https://safe.example/app](https://evil.example/app) today.` then certifies a statement naming the safe URL against a record whose actionable link points somewhere else.",
+      "why": "Collapses a markdown link to its text, as r4 did. `Use [https://safe.example/app](https://evil.example/app) today.` then certifies a statement naming the safe URL against a record whose actionable link points somewhere else. r7 unified the two folds onto one `unfoldLink`, so this single mutation now reaches both call sites — which is the point of there being one.",
       "file": "src/matching.ts",
-      "find": "    return text === target ? text : `${text} ${target}`;",
-      "replace": "    return text;",
-      "catches": ["keeps a markdown link\"s destination as content"]
+      "find": "  const linked = target.length === 0 || text === target ? text : `${text} ${target}`;",
+      "replace": "  const linked = text;",
+      "catches": [
+        "keeps a markdown link\"s destination as content",
+        "keeps a markdown link\"s destination, exactly as the receipt fold does"
+      ]
     },
     {
       "id": "normalize_refolds_nfkc",
@@ -912,14 +915,6 @@
       "find": "  const later = messages.slice(firstCited + 1);",
       "replace": "  const later = messages.slice(firstCited + 1).filter((m) => !cited.has(m.id));",
       "catches": ["cannot be skipped by citing the correction itself"]
-    },
-    {
-      "id": "routing_drops_link_destinations",
-      "why": "Collapses a markdown link to its label in the routing fold, which `laterRevision` runs over — so a later message that changes only the link *destination* reduces to the same tokens as the one before it and does not read as a revision.",
-      "file": "src/matching.ts",
-      "find": "      return target.length === 0 || label_ === target ? label_ : `${label_} ${target}`;",
-      "replace": "      return label_ + (target.length === 0 ? '' : '');",
-      "catches": ["keeps a markdown link\"s destination, exactly as the receipt fold does"]
     },
     {
       "id": "whitespace_controls_deleted",
@@ -1063,6 +1058,22 @@
       "find": "      if (sentencesOf(ownText).length > policy.maxScannedSentences) {",
       "replace": "      if (false) {",
       "catches": ["says the check declined rather than calling a whole body a fragment"]
+    },
+    {
+      "id": "link_title_discarded",
+      "why": "r7. Drops the markdown link title again, so `[the runbook](https://x.example \"Do NOT run step 4\")` folds to text the author's warning is missing from, and a statement omitting the warning auto-accepts. The same argument r4 used to make the destination content — the title is author-written text a reader sees.",
+      "file": "src/matching.ts",
+      "find": "  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;",
+      "replace": "  return `${bang}${linked}`;",
+      "catches": ["keeps a link title, which is text the author wrote"]
+    },
+    {
+      "id": "image_marker_discarded",
+      "why": "r7. Drops the `!` image marker, so `![alt](url)` and `[alt](url)` — an embed and a link — normalize to the same text and a statement about one is certifiable against a record carrying the other.",
+      "file": "src/matching.ts",
+      "find": "  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;",
+      "replace": "  return caption.length === 0 ? linked : `${linked} ${caption}`;",
+      "catches": ["keeps the image marker, so an embed is not a link"]
     }
   ]
 }
