@@ -491,6 +491,24 @@ export function addedLinkStructure(authored: string, statement: string): string[
  * either of them says. The reader is unchanged; the anchor is the cited
  * message's body. See `validateProposalProvenance`.
  *
+ * ## Why the body loses nothing, stated where it can be checked
+ *
+ * The body is a *superset* of the quote, so the obvious worry is that structure
+ * the author wrote somewhere else in the message now cancels a forgery spliced
+ * in here. **On the auto-accept path there is no somewhere else.**
+ * `quoteCoversOwnText` already requires the quote to be the whole body — a quote
+ * that is anything less is `quote_omits_surrounding_text`, `refer`, never
+ * accepted on a machine's word — so where it matters the body and the quote hold
+ * the same words. What they do *not* hold identically is the spacing and the
+ * link punctuation, because `significant` compares them through the fold, and
+ * that difference is exactly the forgery. The anchor is strictly better in the
+ * dimension under attack and identical in every other.
+ *
+ * On the `refer` path the two differ and the body is the looser of the two. That
+ * is the right direction there: the reading is going to a person either way,
+ * with `quote_omits_surrounding_text` beside it telling them the quote is not
+ * the whole message.
+ *
  * Extracted so the block-structure guard below is the same rule with a different
  * reader, rather than a second implementation of the same idea that can drift
  * away from the first — `normalizeForRouting`'s own comment records what that
