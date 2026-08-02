@@ -15,8 +15,28 @@ import { createRoot } from 'react-dom/client';
 import { AttributionLedger } from '../src/components';
 import type { MessageRecord } from '../src/components/model';
 
-export function renderWith(records: readonly MessageRecord[], ui: ReactElement): RenderResult {
-  return render(<AttributionLedger messages={records}>{ui}</AttributionLedger>);
+/**
+ * The room these tests are standing in unless they say otherwise.
+ *
+ * `AttributionLedger` requires the room being rendered since r9 — "is this
+ * message's source somewhere else?" is a comparison, and round 8 shipped three
+ * render boundaries answering it from the record alone. The default is the room
+ * the gallery register's own records say they live in, so a test that does not
+ * care about cross-room copy renders the local case; a test that does passes the
+ * other room and gets the cross-room case.
+ */
+export const HERE = 'users-migration';
+
+export function renderWith(
+  records: readonly MessageRecord[],
+  ui: ReactElement,
+  room: string = HERE,
+): RenderResult {
+  return render(
+    <AttributionLedger messages={records} room={room}>
+      {ui}
+    </AttributionLedger>,
+  );
 }
 
 /** No ledger at all — the case a render boundary must refuse rather than fudge. */

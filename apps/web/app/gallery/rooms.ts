@@ -47,7 +47,14 @@ import type {
   TimelineEntry,
   TrailerSummary,
 } from '../../src/components/model';
-import { citationFrom, messageEntry, rationale, trailerFor } from '../../src/components/model';
+import {
+  checkedFeed,
+  citationFrom,
+  messageEntry,
+  rationale,
+  settledForViewer,
+  trailerFor,
+} from '../../src/components/model';
 import * as f from './fixtures';
 
 const ACCEPTED = {
@@ -72,12 +79,6 @@ const TALK = {
   kind: 'event',
   verification: 'routine',
   owedToViewer: false,
-  irreversible: false,
-} as const;
-const GATE = {
-  kind: 'decision',
-  verification: 'proposed',
-  owedToViewer: true,
   irreversible: false,
 } as const;
 const OPEN_QUESTION = {
@@ -147,19 +148,29 @@ function row(id: string, input: Parameters<typeof messageEntry>[1]): MessageEntr
   return messageEntry(record, { ...input, viewer: f.VIEWER.name });
 }
 
-export interface RoomView {
+export interface FeedOptions {
+  readonly seen: boolean;
+  readonly filter: SinceYouLeftEntry['activeFilter'];
+  readonly routineOpen: boolean;
+}
+
+/**
+ * A ROOM AS THE FIXTURES DECLARE IT — everything owed, nothing acted on yet.
+ *
+ * Deliberately NOT exported. See `sessionView` below: this is the array round 8
+ * left reachable, and every consumer that reached it went on painting a number
+ * an act had already changed.
+ */
+interface RoomView {
   readonly id: string;
   readonly room: RoomHeadRecord;
   readonly objectives: readonly ObjectiveRecord[];
   readonly objects: readonly StateObject[];
   readonly attention: readonly AttentionItem[];
   readonly binding: ComposerBinding;
-  readonly overdue: number;
-  readonly timeline: (options: {
-    readonly seen: boolean;
-    readonly filter: SinceYouLeftEntry['activeFilter'];
-    readonly routineOpen: boolean;
-  }) => readonly TimelineEntry[];
+  /** WHICH objects are late, by id — so settling one can stop counting it */
+  readonly overdue: readonly string[];
+  readonly timeline: (options: FeedOptions, owed: ReadonlySet<string>) => readonly TimelineEntry[];
 }
 
 const IDENTITY_OBJECTS: readonly StateObject[] = [
@@ -168,7 +179,13 @@ const IDENTITY_OBJECTS: readonly StateObject[] = [
     kind: 'question',
     state: OPEN_QUESTION,
     text: 'Does legal approve 90-day retention of users_legacy?',
-    facts: ['raised by priya 09:11', 'open 3h', 'answers to you'],
+    /* NO "answers to you". Round 8, D1, sixth surface: that fact string is
+       `state.owedToViewer` written a second time, in prose, on a register the
+       act does not touch — so after answering the question the lens went on
+       saying it answered to you, beside a glyph that had already stopped
+       saying so. The glyph and the objective group's count carry that fact and
+       both of them move. */
+    facts: ['raised by priya 09:11', 'open 3h'],
     objectives: ['io1'],
   },
   {
@@ -219,6 +236,30 @@ const DESIGN_OBJECTS: readonly StateObject[] = [
   },
 ];
 
+const IDENTITY_ATTENTION: readonly AttentionItem[] = [
+  {
+    id: 'IQ1',
+    state: OPEN_QUESTION,
+    title: 'Does legal approve 90-day retention of users_legacy?',
+    rationale: rationale(
+      'you opened the question and legal answers to you — nobody else in this room can carry it, and it has been open 3h',
+    ),
+    facts: ['raised by priya 09:11', 'open 3h'],
+    source: citationFrom(f.MESSAGES['m-legal'] as MessageRecord),
+    actions: [
+      { id: 'answer', label: 'Answer it', emphasis: 'primary', statement: null },
+      { id: 'reassign', label: 'Ask priya instead', emphasis: 'ghost', statement: null },
+    ],
+  },
+];
+
+/** One of this room's owed items by id. */
+function identityItem(itemId: string): AttentionItem {
+  const found = IDENTITY_ATTENTION.find((candidate) => candidate.id === itemId);
+  if (found === undefined) throw new Error(`fixture: no attention item ${itemId}`);
+  return found;
+}
+
 const VIEWS: Readonly<Record<string, RoomView>> = {
   r1: {
     id: 'r1',
@@ -227,8 +268,8 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     objects: f.OBJECTS,
     attention: f.ATTENTION,
     binding: f.BOUND,
-    overdue: 1,
-    timeline: (options) => f.timeline(options),
+    overdue: f.OVERDUE,
+    timeline: (options, owed) => f.timeline({ ...options, owed }),
   },
   r2: {
     id: 'r2',
@@ -241,28 +282,17 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
       { id: 'io1', title: 'Rotate the signing key safely', status: 'active', open: true },
     ],
     objects: IDENTITY_OBJECTS,
-    attention: [
-      {
-        id: 'IQ1',
-        state: OPEN_QUESTION,
-        title: 'Does legal approve 90-day retention of users_legacy?',
-        rationale: rationale(
-          'you opened the question and legal answers to you — nobody else in this room can carry it, and it has been open 3h',
-        ),
-        facts: ['raised by priya 09:11', 'open 3h'],
-        source: citationFrom(f.MESSAGES['m-legal'] as MessageRecord),
-        actions: [
-          { id: 'answer', label: 'Answer it', emphasis: 'primary', statement: null },
-          { id: 'reassign', label: 'Ask priya instead', emphasis: 'ghost', statement: null },
-        ],
-      },
-    ],
+    attention: IDENTITY_ATTENTION,
     binding: { mode: 'free' },
-    overdue: 0,
-    timeline: () => [
+    overdue: [],
+    /* The 09:11 row is BUILT FROM IQ1. It carried `state: GATE` and a
+       hand-written `'◆ needs lars'` beside the item that is the reason it needs
+       lars — round 8's fifth surface, and the one that says its number in prose
+       so no count check could see it. */
+    timeline: (_options, owed) => [
       row('i1', { state: ACCEPTED }),
       row('i2', { state: CLAIM, tag: { label: 'claim · unverified', tone: 'neutral' } }),
-      f.messageIn('m-legal', { state: GATE, tag: { label: '◆ needs lars', tone: 'needs' } }),
+      f.owedRow(identityItem('IQ1'), owed.has('IQ1')),
     ],
   },
   r3: {
@@ -278,7 +308,7 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     objects: PLATFORM_OBJECTS,
     attention: [],
     binding: { mode: 'free' },
-    overdue: 0,
+    overdue: [],
     timeline: () => [
       row('p1', {
         state: VERIFIED,
@@ -300,13 +330,13 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     objects: DESIGN_OBJECTS,
     attention: [],
     binding: { mode: 'free' },
-    overdue: 0,
+    overdue: [],
     timeline: () => [row('d1', { state: ACCEPTED })],
   },
 };
 
 /** The room a rail chip switches to. Throws rather than falling back to room one. */
-export function roomView(roomId: string): RoomView {
+function roomView(roomId: string): RoomView {
   const view = VIEWS[roomId];
   if (view === undefined) throw new Error(`no room ${roomId}`);
   return view;
@@ -314,30 +344,110 @@ export function roomView(roomId: string): RoomView {
 
 export const ROOM_IDS: readonly string[] = Object.keys(VIEWS);
 
-/**
- * The rail, with the current room derived from the one being shown.
+/* ---------------------------------------------------------------------------
+ * ONE VIEW, DERIVED ONCE, CONSUMED BY EVERYTHING ON THE PAGE.
  *
- * Round 6 left `current: true` hard-coded on `r1` in the fixture while the head
- * changed, so the rail marked one room and the head named another — the two
- * sources of truth the whole product is about, disagreeing on screen. The unseen
- * count drops to zero for the room you are standing in, because you are reading
- * it.
+ * ROUND 8, D1 AND D2 — one defect with two repros. `RoomSession` filtered the
+ * acted-on items out of the array it handed to `Pin`, `SurfaceIndicators` and
+ * the rail's footer note, and out of nothing else. Answering `IQ1` in
+ * #identity-service left one screen saying, simultaneously:
+ *
+ *   NOTHING NEEDS YOU IN THIS ROOM · nothing owed · NEEDS YOU 0 (disabled) ·
+ *   here · 0 owed to you
+ *   ◆ 1 · "#identity-service — 1 owed to you" · 1 item awaiting you ·
+ *   1 need you · ◆ needs lars · 0/1 objectives clear of you
+ *
+ * And `railRooms` computed `owed` from `roomView(id).attention.length` — the
+ * unfiltered array — ON THE LINE IMMEDIATELY BELOW a docblock about round 6
+ * leaving the rail and the head disagreeing. The comment was a monument to the
+ * class and the line under it was a fresh instance.
+ *
+ * SO THE FIX IS NOT FIVE MORE FILTERS. That shape is what produced round 7's
+ * half-fix under round 6's comment, and it leaves the sixth call site for round
+ * 10. `RoomView` is private to this module; the only thing a consumer can get is
+ * a `SessionView`, which is the room WITH THE ACTS APPLIED — attention, objects,
+ * feed rows, trailer, rail and receipt all derived from the same two values.
+ * There is no expression outside this file whose type is the unsettled room.
+ *
+ * And an act is not a filter. `settledForViewer` says what actually happened:
+ * the object is still on the record, still proposed, still in the lens — it no
+ * longer needs THIS PERSON. Modelling it as removal from one array is why four
+ * other surfaces went on saying it did not happen.
+ * ------------------------------------------------------------------------- */
+
+export interface SessionView {
+  readonly id: string;
+  readonly room: RoomHeadRecord;
+  readonly objectives: readonly ObjectiveRecord[];
+  /** the lens's objects, with anything acted on no longer owed */
+  readonly objects: readonly StateObject[];
+  /** the pin's items: what still needs this person */
+  readonly attention: readonly AttentionItem[];
+  readonly binding: ComposerBinding;
+  readonly trailer: TrailerSummary;
+  /** the rail, every chip counting the same register this page counts */
+  readonly rooms: readonly RoomSummary[];
+  readonly timeline: (options: FeedOptions) => readonly TimelineEntry[];
+  readonly receiptFor: (objectId: string) => ReceiptRecord;
+}
+
+/** How many items still need the viewer in a room, given what has been acted on. */
+function owedIn(roomId: string, actedOn: readonly string[]): number {
+  return roomView(roomId).attention.filter((item) => !actedOn.includes(item.id)).length;
+}
+
+/**
+ * THE ROOM AS IT IS AFTER THE ACTS — the only room shape render can reach.
+ *
+ * `actedOn` is the session's whole register of "you have dealt with this",
+ * across every room: an act in #users-migration has to move #users-migration's
+ * rail chip while you are standing in #identity-service, which is D2's first
+ * repro.
  */
-export function railRooms(roomId: string): readonly RoomSummary[] {
-  return f.ROOMS.map((room) => ({
-    ...room,
-    current: room.id === roomId,
-    unseen: room.id === roomId ? 0 : room.unseen,
-    owed: roomView(room.id).attention.length,
-  }));
-}
-
-export function trailerForRoom(view: RoomView): TrailerSummary {
-  return trailerFor({ objects: view.objects, objectives: view.objectives, overdue: view.overdue });
-}
-
-/** The receipt for an object in a given room. */
-export function receiptForIn(view: RoomView, objectId: string): ReceiptRecord {
-  if (view.id === 'r1') return f.receiptFor(objectId);
-  return f.receiptFromObject(view.objects, objectId);
+export function sessionView(roomId: string, actedOn: readonly string[]): SessionView {
+  const view = roomView(roomId);
+  const settled = new Set(actedOn);
+  const attention = view.attention.filter((item) => !settled.has(item.id));
+  const owed = new Set(attention.map((item) => item.id));
+  const objects = view.objects.map((object) =>
+    settled.has(object.id) ? { ...object, state: settledForViewer(object.state) } : object,
+  );
+  return {
+    id: view.id,
+    room: view.room,
+    objectives: view.objectives,
+    objects,
+    attention,
+    binding: view.binding,
+    trailer: trailerFor({
+      objects,
+      objectives: view.objectives,
+      /* The late things that are STILL late. A hand-written `overdue: 1` beside
+         the objects it describes is the same second register as a hand-written
+         owed count beside the pin. */
+      overdue: view.overdue.filter((id) => !settled.has(id)).length,
+    }),
+    rooms: f.ROOMS.map((room) => ({
+      ...room,
+      current: room.id === roomId,
+      unseen: room.id === roomId ? 0 : room.unseen,
+      owed: owedIn(room.id, actedOn),
+    })),
+    /* `checkedFeed` a second time, over the room's WHOLE item list: the feed
+       this room built may not claim a row needs you unless an item cites it. */
+    timeline: (options) =>
+      checkedFeed(view.timeline(options, owed), view.attention, `room ${view.id}`),
+    /* The receipt's title glyph is the OBJECT's state, so a receipt opened after
+       an act cannot still wear ◆ over a lens that has stopped saying so. P1 is
+       the one curated record on this page; everything else is derived from the
+       settled objects, and P1's own state is taken from the same place. */
+    receiptFor: (objectId) => {
+      const base =
+        view.id === 'r1' && objectId === 'P1'
+          ? f.receiptFor(objectId)
+          : f.receiptFromObject(objects, objectId);
+      const object = objects.find((candidate) => candidate.id === objectId);
+      return object === undefined ? base : { ...base, state: object.state };
+    },
+  };
 }

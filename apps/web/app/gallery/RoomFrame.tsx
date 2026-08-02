@@ -171,7 +171,10 @@ export interface RoomFrameProps {
  */
 export function RoomFrame(props: RoomFrameProps) {
   return (
-    <AttributionLedger messages={props.messages}>
+    /* The register AND the vantage. "Is this message's source somewhere else?"
+       needs the record and the room on screen, and round 8 answered it at three
+       render boundaries that had only ever been handed the record. */
+    <AttributionLedger messages={props.messages} room={props.room.name}>
       <Frame {...props} />
     </AttributionLedger>
   );

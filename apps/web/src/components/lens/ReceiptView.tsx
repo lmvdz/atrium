@@ -21,8 +21,9 @@
  * ------------------------------------------------------------------------- */
 
 import type { NoGlyph } from '../model/glyph';
-import { useAttribution, useCitedRecord } from '../model/ledger';
-import { quotationRef, systemText } from '../model/quotation';
+import { GLYPHS, glyphMeaning } from '../model/glyph';
+import { useAttribution, useCitedLocation, useHere } from '../model/ledger';
+import { quotationRef, sourceLocation, systemText } from '../model/quotation';
 import type { CorrectionEntry, ProvenanceEntry, ReceiptRecord } from '../model/records';
 import { stateForHappened } from '../model/records';
 import { slot } from '../model/slot';
@@ -102,9 +103,20 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
             </span>
           </div>
         ))}
+        {/* THE LEGEND IS THE VOCABULARY, PRINTED — so it is printed FROM the
+            vocabulary. Round 8 shipped a hand-written list of five while this
+            same section emitted ■ and ·, both unexplained: the section that
+            exists to say what the glyphs mean was two glyphs behind the glyphs
+            above it. `GLYPHS` is `Record<Glyph, …>`-derived and `glyphMeaning`
+            is an exhaustive switch, so an eighth glyph does not compile and a
+            seventh cannot go unlisted. */}
         <div className={styles.happenedLegend}>
-          ✓ checked by something other than the claimant · ~ the claimant&rsquo;s own account · ?
-          explicitly unverified · ◆ needs you · ✗ failed
+          {GLYPHS.map((glyph, index) => (
+            <span key={glyph}>
+              {index === 0 ? null : <span aria-hidden="true"> · </span>}
+              {glyph} {glyphMeaning(glyph)}
+            </span>
+          ))}
         </div>
       </Section>
 
@@ -196,6 +208,7 @@ function ProvenanceRow({
      `jump` field is gone; everything below comes out of the record the excerpt
      cites. */
   const excerpt = useAttribution(entry.excerpt, 'ReceiptView provenance');
+  const location = sourceLocation(excerpt, useHere('ReceiptView provenance'));
   return (
     <button
       className={styles.prov}
@@ -208,10 +221,16 @@ function ProvenanceRow({
           {excerpt.actor}
         </span>
         <span>{excerpt.at}</span>
-        <span className={styles.provJump}>
-          {excerpt.room === null
-            ? 'jump to source, typed in this room →'
-            : `jump to source in #${excerpt.room} →`}
+        {/* THE SAME COMPARISON AS THE CARD'S SOURCE LINK, FROM THE SAME DOOR.
+            Round 8, D3, in the opposite direction: `excerpt.room === null` read
+            "the register does not record a room" as "typed in this room", so a
+            receipt open in #identity-service labelled its own room's excerpts
+            as cross-room and labelled a room-less record as local. Neither
+            branch had ever been told which room it was rendering in. */}
+        <span className={styles.provJump} data-source-where={location.where}>
+          {location.where === 'elsewhere'
+            ? `jump to source in #${location.room} →`
+            : 'jump to source →'}
         </span>
       </span>
       {/* THE QUOTATION IS NOT TRUNCATED HERE, AND THAT IS THE FIX.
@@ -307,19 +326,22 @@ function CorrectionLink({
   readonly link: NonNullable<CorrectionEntry['link']>;
   readonly onJump?: (messageId: string) => void;
 }) {
-  const record = useCitedRecord(link.ref, 'ReceiptView correction link');
-  const room = record.room ?? null;
+  const { record, location } = useCitedLocation(link.ref, 'ReceiptView correction link');
   return (
     <>
       {' · '}
       <button
         className={styles.corrLink}
         data-jumps-to={record.id}
+        data-source-where={location.where}
         onClick={onJump === undefined ? undefined : () => onJump(record.id)}
         type="button"
       >
         {systemText(link.label, 'ReceiptView correction link')}
-        {room === null ? '' : ` (in #${room})`}
+        {/* The third site with the same shape. "(in #X)" is a statement that X
+            is somewhere else — it was printed whenever the record carried a
+            room, including when X was the room the receipt was open in. */}
+        {location.where === 'elsewhere' ? ` (in #${location.room})` : ''}
       </button>
     </>
   );

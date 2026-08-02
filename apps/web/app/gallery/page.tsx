@@ -20,10 +20,14 @@ interface GalleryFrame {
 const base = {
   messages: f.RECORDS,
   room: f.ROOM,
-  rooms: f.ROOMS,
+  /* THE RAIL STATES WHAT THE FRAME IS SHOWING. Round 8, D2: a still whose rail
+     chip and whose footer answer "how many things here need you" differently is
+     not a state of this product. `railFor` derives the current chip from the
+     frame's own pin. */
+  rooms: f.railFor(f.ROOM.name, f.ATTENTION.length),
   humans: f.HUMANS,
   viewer: f.VIEWER,
-  viewerNote: 'here · 4 owed to you',
+  viewerNote: `here · ${f.ATTENTION.length} owed to you`,
   focused: 'conversation' as const,
   attention: f.ATTENTION,
   trailer: f.TRAILER,
@@ -94,7 +98,11 @@ const FRAMES: readonly GalleryFrame[] = [
         name: 'identity-service',
         topic: 'tokens, sessions, and who is allowed to mint them',
       },
-      rooms: f.ROOMS.map((room) => ({ ...room, current: room.name === 'identity-service' })),
+      /* The frame is standing in #identity-service and showing four owed items,
+         so that is what its chip says. It used to be `ROOMS` with `current`
+         moved and nothing else: the rail said identity-service owed one while
+         the footer three inches below said four. */
+      rooms: f.railFor('identity-service', f.ATTENTION.length),
       entries: f.timeline({ seen: true, filter: null, routineOpen: false, targetId: 'm10' }),
       jump: f.JUMP,
       openAttentionId: 'P1',

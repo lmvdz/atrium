@@ -261,7 +261,15 @@ describe('a quotation cites a message; the attribution is looked up from it', ()
     );
     const attribution = container.querySelector('[data-attribution="m17"]');
     expect(attribution?.textContent).toContain('justin');
-    expect(container.querySelector('[data-quoted]')?.getAttribute('data-quoted')).toBe('msg:m17');
+    /* `@users-migration` because the record says so. `MessageRecord.room` is
+       ABSOLUTE since r9 — it used to be written only when the message was not in
+       the room on screen, which is a fact about a viewport stored on a register
+       four viewports share. The token is still pinned exactly; what it pins now
+       includes the room the register records, which is the field
+       `recordFingerprint` has hashed since round 6. */
+    expect(container.querySelector('[data-quoted]')?.getAttribute('data-quoted')).toBe(
+      'msg:m17@users-migration',
+    );
   });
 
   /* CATCHES the forgery AT EVERY BOUNDARY THAT PRINTS A NAME, not just the one
@@ -1263,8 +1271,8 @@ describe('two registers in one tree', () => {
     const other: MessageRecord = { ...lars, actor: 'priya' };
     expect(() =>
       render(
-        <AttributionLedger messages={[lars]}>
-          <AttributionLedger messages={[other]}>
+        <AttributionLedger messages={[lars]} room="users-migration">
+          <AttributionLedger messages={[other]} room="users-migration">
             <span>anything</span>
           </AttributionLedger>
         </AttributionLedger>,

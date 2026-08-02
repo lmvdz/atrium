@@ -44,30 +44,40 @@ export default async function PinLoadPage({ params }: { params: Promise<{ n: str
      out. */
   const count = /^\d+$/.test(n) ? Number.parseInt(n, 10) : Number.NaN;
   if (!Number.isInteger(count) || count < 0 || count > MAX_LOAD) notFound();
-  const attention = f.manyOwed(count);
+  /* EVERY SURFACE ON THIS ROUTE COUNTS THE SAME ITEMS. Round 8, D2, with no
+     clicks at all: the pin held `manyOwed(60)` while the rail held the static
+     `ROOMS` fixture and the lens held `OBJECTS`, so `/gallery/pin/60` shipped
+     `# users-migration ◆ 4`, "4 items awaiting you" and "here · 60 owed to you"
+     on one screen. A route that exists to measure the pin under load is still a
+     room, and a still whose rail contradicts its pin is not a state this product
+     has. */
+  const load = f.loadRoom(count);
 
   return (
     <div data-pin-load={String(count)}>
       <RoomFrame
-        attention={attention}
+        attention={load.attention}
         binding={f.FREE}
         boxed={false}
         composerNote={`${count} owed · the pin folds rather than pushing this off the screen`}
-        entries={f.timeline({ seen: false, filter: null, routineOpen: false })}
+        /* …including the feed. The owed items in this room are the synthetic
+           load, so no row in the backdrop feed may still be claiming to need
+           the viewer on its own account. */
+        entries={f.timeline({ seen: false, filter: null, routineOpen: false, owed: new Set() })}
         filtered={false}
         focused="needs-you"
         humans={f.HUMANS}
         label={`pin-load-${count}`}
         messages={f.RECORDS}
         lastCheck="12:29"
-        objectives={f.OBJECTIVES}
-        objects={f.OBJECTS}
+        objectives={load.objectives}
+        objects={load.objects}
         room={f.ROOM}
-        rooms={f.ROOMS}
-        trailer={f.TRAILER}
+        rooms={load.rooms}
+        trailer={load.trailer}
         updatedAt="13:41"
         viewer={f.VIEWER}
-        viewerNote={`here · ${count} owed to you`}
+        viewerNote={load.viewerNote}
       />
     </div>
   );

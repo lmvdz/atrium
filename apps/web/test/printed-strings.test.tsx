@@ -362,11 +362,6 @@ const EXEMPT: readonly { readonly file: string; readonly expr: string; readonly 
     why: 'a message body is A PERSON’S OWN WORDS, and `segmentText` is the same function `messageEntry` and `TimelineRow` use to prove `bodyText(body) === record.text` before a name is printed over them — holding it to the system’s voice would be refusing the one string on the page that is supposed to be somebody’s sentence',
   },
   {
-    file: 'src/components/primitives/Glyph.tsx',
-    expr: 'meaning',
-    why: 'glyphMeaning() maps one of seven glyphs — themselves derived from the state by glyphFor — onto a sentence written in model/glyph.ts; no caller string reaches it',
-  },
-  {
     file: 'app/error.tsx',
     expr: 'error.message',
     why: 'the error boundary’s whole job is printing the refusal VERBATIM; every throw in this model is written to be read by a person, and holding it to the system-voice bans would refuse the evidence (messageLedger’s own message contains quotation marks) and replace it with a second refusal',

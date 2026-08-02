@@ -25,7 +25,8 @@
 
 import type { NoGlyph } from '../model/glyph';
 import { glyphFor } from '../model/glyph';
-import { useCitedRecord } from '../model/ledger';
+import { useCitedLocation } from '../model/ledger';
+import type { SourceLocation } from '../model/quotation';
 import { offeredText, systemText } from '../model/quotation';
 import { rationaleText } from '../model/rationale';
 import type { AttentionAction, AttentionItem } from '../model/records';
@@ -168,6 +169,15 @@ export function AttentionCard({ item, viewer, onAct, onArm, onJumpToSource }: At
  * id. `AttentionItem.source` was a `SourceRef` -- `{messageId, room}` -- and the
  * card printed the carried room while the handler acted on the item; two facts
  * about one source with nothing obliging them to agree.
+ *
+ * ROUND 8, D3: IT THEN READ THE RIGHT FIELD AND ASKED THE WRONG QUESTION.
+ * `record.room !== null` is "does this record CARRY a room", not "is that room
+ * somewhere else", and the two differ in exactly the case that matters: an item
+ * in #identity-service whose source is in #identity-service wore the cross-room
+ * treatment, a `data-source-room` naming the room it was standing in, and a
+ * tooltip reading "…, not here" — three rows above the cited message, in that
+ * room's own feed. The comparison is `sourceLocation`, once, in the register
+ * that knows both the record and the room on screen.
  */
 function SourceLink({
   itemId,
@@ -178,25 +188,36 @@ function SourceLink({
   readonly source: NonNullable<AttentionItem['source']>;
   readonly onJumpToSource?: (itemId: string, messageId: string) => void;
 }) {
-  const record = useCitedRecord(source, 'AttentionCard source');
-  const room = record.room ?? null;
+  const { record, location } = useCitedLocation(source, 'AttentionCard source');
   return (
     <>
       <span aria-hidden="true">·</span>
       <button
-        className={room === null ? styles.link : styles.xroom}
-        data-source-room={room ?? 'here'}
+        className={location.where === 'elsewhere' ? styles.xroom : styles.link}
+        data-source-room={location.room ?? 'unrecorded'}
+        data-source-where={location.where}
         data-jumps-to={record.id}
         onClick={onJumpToSource === undefined ? undefined : () => onJumpToSource(itemId, record.id)}
-        title={
-          room === null
-            ? 'the source of this item is a message in this room'
-            : `the source of this item is in #${room}, not here`
-        }
+        title={sourceTitle(location)}
         type="button"
       >
-        {room === null ? 'jump to source →' : `source in #${room} →`}
+        {location.where === 'elsewhere' ? `source in #${location.room} →` : 'jump to source →'}
       </button>
     </>
   );
+}
+
+/* The three answers, spelled out. `unrecorded` says what the register does not
+   say instead of claiming the message is here — that assumption is what made the
+   field viewport-relative in the first place. Exhaustive over `SourceWhere`, so
+   a fourth answer does not compile until it is written. */
+function sourceTitle(location: SourceLocation): string {
+  switch (location.where) {
+    case 'here':
+      return `the source of this item is a message in #${location.room} — this room`;
+    case 'elsewhere':
+      return `the source of this item is in #${location.room}, not here`;
+    case 'unrecorded':
+      return 'the record does not say which room the source of this item is in';
+  }
 }

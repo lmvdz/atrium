@@ -122,24 +122,60 @@ export function glyphTone(glyph: Glyph): GlyphTone {
   }
 }
 
+/**
+ * THE VOCABULARY, HARDEST FIRST — and the only enumeration of it.
+ *
+ * `Record<Glyph, number>` is exhaustive by type: an eighth glyph does not
+ * compile until it appears here. Everything that needs the list in order reads
+ * it from this one place — the pin's sort, the tallies, and the receipt's
+ * printed legend.
+ *
+ * ROUND 8 SHIPPED A LEGEND THAT ENUMERATED FIVE OF THE SEVEN. `ReceiptView`
+ * wrote its own list by hand — "✓ · ~ · ? · ◆ · ✗" — while the section above it
+ * emitted `■` and `·` and explained neither. A hand-written enumeration of a
+ * closed vocabulary is the same defect as a hand-written glyph: a second
+ * register, free to disagree with the first. There is one register now, and a
+ * legend rendered from it cannot fall behind the vocabulary it explains.
+ */
+export const GLYPH_HARDNESS: Readonly<Record<Glyph, number>> = {
+  '✗': 0,
+  '■': 1,
+  '◆': 2,
+  '?': 3,
+  '~': 4,
+  '·': 5,
+  '✓': 6,
+};
+
+/** Every glyph in the vocabulary, hardest first. Derived, never listed twice. */
+export const GLYPHS: readonly Glyph[] = (Object.keys(GLYPH_HARDNESS) as Glyph[]).sort(
+  (a, b) => GLYPH_HARDNESS[a] - GLYPH_HARDNESS[b],
+);
+
+/**
+ * What each glyph means, in the one place it is written.
+ *
+ * `as const satisfies Record<Glyph, string>` does two jobs: the `Record`
+ * requires all seven, and the `as const` keeps the literals, so
+ * `glyphMeaning`'s return type is a union of seven sentences rather than
+ * `string`. That is not cosmetic — it is what lets `test/printed-strings.test.ts`
+ * SEE that no caller text can reach the tooltip, instead of being told so by an
+ * exemption. A closed union of string literals is not caller text; the sweep
+ * already knows that, and until r9 the type did not say it.
+ */
+const GLYPH_MEANING = {
+  '✓': 'verified — checked by something other than the claimant',
+  '~': "a claim — the claimant's own account, nothing has checked it",
+  '?': 'an open question — explicitly unverified',
+  '·': 'routine — no attention owed',
+  '◆': 'needs you — a reversible gate waiting on a human',
+  '■': 'needs you — destructive, and not undoable',
+  '✗': 'failed',
+} as const satisfies Record<Glyph, string>;
+
 /** The tooltip is part of the vocabulary, not decoration. */
-export function glyphMeaning(glyph: Glyph): string {
-  switch (glyph) {
-    case '✓':
-      return 'verified — checked by something other than the claimant';
-    case '~':
-      return "a claim — the claimant's own account, nothing has checked it";
-    case '?':
-      return 'an open question — explicitly unverified';
-    case '·':
-      return 'routine — no attention owed';
-    case '◆':
-      return 'needs you — a reversible gate waiting on a human';
-    case '■':
-      return 'needs you — destructive, and not undoable';
-    case '✗':
-      return 'failed';
-  }
+export function glyphMeaning(glyph: Glyph): (typeof GLYPH_MEANING)[Glyph] {
+  return GLYPH_MEANING[glyph];
 }
 
 /**

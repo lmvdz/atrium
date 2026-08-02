@@ -27,10 +27,23 @@
 
 import type { ReactNode } from 'react';
 import { createContext, useContext, useMemo } from 'react';
-import type { Attribution, Citation, MessageLedger, MessageRecord, Quotation } from './quotation';
-import { messageLedger, resolveCitation, resolveQuotation } from './quotation';
+import type {
+  Attribution,
+  Citation,
+  MessageLedger,
+  MessageRecord,
+  Quotation,
+  SourceLocation,
+} from './quotation';
+import { messageLedger, resolveCitation, resolveQuotation, sourceLocation } from './quotation';
 
-const LedgerContext = createContext<MessageLedger | null>(null);
+interface Register {
+  readonly ledger: MessageLedger;
+  /** the room this subtree is rendering — the other half of "is this here?" */
+  readonly here: string;
+}
+
+const LedgerContext = createContext<Register | null>(null);
 
 export interface AttributionLedgerProps {
   /**
@@ -38,6 +51,20 @@ export interface AttributionLedgerProps {
    * the same register the feed was built from) or a prebuilt ledger.
    */
   readonly messages: Iterable<MessageRecord> | MessageLedger;
+  /**
+   * THE ROOM THIS SUBTREE IS SHOWING. Required, and required here rather than on
+   * three component prop tables.
+   *
+   * ROUND 8, D3: three render boundaries answered "is this message's source in
+   * this room?" from ONE operand — whether the record carried a room at all —
+   * because the room on screen was not available to any of them. The register is
+   * where the other operand belongs: this provider already is "the records this
+   * page holds", and which room the page is showing is the same kind of fact
+   * about the same page. A comparison needs both sides in one scope; putting the
+   * room here is what makes `sourceLocation` callable once instead of guessed at
+   * three times.
+   */
+  readonly room: string;
   readonly children: ReactNode;
 }
 
@@ -45,8 +72,9 @@ function asLedger(messages: Iterable<MessageRecord> | MessageLedger): MessageLed
   return 'recordFor' in messages ? messages : messageLedger(messages);
 }
 
-export function AttributionLedger({ messages, children }: AttributionLedgerProps) {
+export function AttributionLedger({ messages, room, children }: AttributionLedgerProps) {
   const ledger = useMemo(() => asLedger(messages), [messages]);
+  const register = useMemo(() => ({ ledger, here: room }), [ledger, room]);
   /* TWO REGISTERS IN ONE TREE IS NOT A CONFIGURATION, IT IS THE DEFECT.
      Found by the round-5 blind critic: nesting `<AttributionLedger>` silently
      took the inner one, so a subtree could resolve `m14` against a register the
@@ -60,14 +88,25 @@ export function AttributionLedger({ messages, children }: AttributionLedgerProps
      already throws when two records claim one id, which is the check that makes
      merging honest and shadowing dishonest. */
   const outer = useContext(LedgerContext);
-  if (outer !== null && outer !== ledger) {
+  if (outer !== null && outer.ledger !== ledger) {
     throw new Error(
       'AttributionLedger: this subtree is already inside a record register, and nesting a second one shadows the first.\n' +
         '  Two registers in one tree is the state in which a name over words is a coin flip: the outer rows and the inner rows resolve the same message id against different records, and nothing reports it.\n' +
         '  Build one ledger from both record sets — `messageLedger` refuses two records claiming one id, which is the check nesting skips.',
     );
   }
-  return <LedgerContext.Provider value={ledger}>{children}</LedgerContext.Provider>;
+  return <LedgerContext.Provider value={register}>{children}</LedgerContext.Provider>;
+}
+
+function useRegister(from: string): Register {
+  const register = useContext(LedgerContext);
+  if (register === null) {
+    throw new Error(
+      `${from}: rendered outside an <AttributionLedger>, so there is no record to check the attribution against.\n` +
+        '  A quotation cites a message; printing one without the record it cites is how a name ends up over words that are not that person’s.',
+    );
+  }
+  return register;
 }
 
 /**
@@ -75,14 +114,28 @@ export function AttributionLedger({ messages, children }: AttributionLedgerProps
  * so the message says which boundary refused rather than which hook did.
  */
 export function useMessageLedger(from: string): MessageLedger {
-  const ledger = useContext(LedgerContext);
-  if (ledger === null) {
-    throw new Error(
-      `${from}: rendered outside an <AttributionLedger>, so there is no record to check the attribution against.\n` +
-        '  A quotation cites a message; printing one without the record it cites is how a name ends up over words that are not that person’s.',
-    );
-  }
-  return ledger;
+  return useRegister(from).ledger;
+}
+
+/** The room this subtree is showing. The other operand of every "…, not here". */
+export function useHere(from: string): string {
+  return useRegister(from).here;
+}
+
+/**
+ * WHERE A CITED MESSAGE IS, RELATIVE TO THE ROOM ON SCREEN.
+ *
+ * The one door for the question round 8's D3 was three wrong answers to. It
+ * returns the record as well, because every caller needs both and looking the
+ * record up twice is two lookups that can disagree.
+ */
+export function useCitedLocation(
+  citation: Citation,
+  from: string,
+): { readonly record: MessageRecord; readonly location: SourceLocation } {
+  const register = useRegister(from);
+  const record = resolveCitation(register.ledger, citation, from);
+  return { record, location: sourceLocation(record, register.here) };
 }
 
 /**

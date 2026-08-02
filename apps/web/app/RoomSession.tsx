@@ -34,7 +34,7 @@ import type {
 import { messageEntry } from '../src/components';
 import * as f from './gallery/fixtures';
 import { RoomFrame } from './gallery/RoomFrame';
-import { RECORDS, railRooms, receiptForIn, roomView, trailerForRoom } from './gallery/rooms';
+import { RECORDS, sessionView } from './gallery/rooms';
 
 const TALK = {
   kind: 'event',
@@ -81,7 +81,18 @@ export function RoomSession() {
      screen. It holds the room's ID now and everything on the page derives from
      the view that id names. */
   const [roomId, setRoomId] = useState('r1');
-  const view = useMemo(() => roomView(roomId), [roomId]);
+  /* THE ONLY VIEW THIS COMPONENT CAN GET, AND THE ACTS ARE ALREADY IN IT.
+     ROUND 8, D1/D2: this was `roomView(roomId)` — the room as the fixtures
+     declare it — and the acted-on items were filtered out of ONE array on the
+     way to `Pin`, `SurfaceIndicators` and the rail's footer note. `objects`,
+     `railRooms(roomId)`, `trailerForRoom(view)`, the feed's tag and
+     `onSelectRoom`'s prose all read the unfiltered one, so a single click left
+     six surfaces on one screen disagreeing about one number.
+     `sessionView` takes the register of acts and returns the room after them.
+     `roomView` is not exported any more: there is no expression in this file
+     whose type is the unsettled room, so the next surface added here cannot
+     read the stale array by forgetting to filter it. */
+  const view = useMemo(() => sessionView(roomId, actedOn), [roomId, actedOn]);
   /* A collapsed objective is a per-room fact, so it is stored per room. Leaving
      it global would carry room one's disclosure state into room two, which is
      the same "one fact, two rooms" defect one level down. */
@@ -95,11 +106,6 @@ export function RoomSession() {
         return override === undefined ? objective : { ...objective, open: override };
       }),
     [view, roomId, openObjectives],
-  );
-
-  const attention = useMemo(
-    () => view.attention.filter((item) => !actedOn.includes(item.id)),
-    [view, actedOn],
   );
 
   /* Every message this session has produced, ON THE SAME REGISTER as the
@@ -134,6 +140,12 @@ export function RoomSession() {
      closed over `roomId` would file a message into the room the page last
      rendered, which is the D5 shape in a different field. */
   const here = useRef('r1');
+  /* AND WHICH ROOM IT SAYS IT IS IN. A sent record used to carry no `room`, and
+     round 8's D3 made absence mean "wherever you happen to be looking" — so a
+     message typed in #platform would have been rendered as local by every one of
+     the four rooms. `MessageRecord.room` is absolute; a record minted here says
+     which room it was typed in, once, at the moment it is typed. */
+  const hereName = useRef(f.ROOM.name);
 
   const send = useCallback((text: string) => {
     const at = clock();
@@ -148,6 +160,7 @@ export function RoomSession() {
       actor: f.VIEWER.name,
       text: text.trim(),
       origin: 'typed',
+      room: hereName.current,
     };
     setRecords((current) => [...current, record]);
     const row = messageEntry(record, { state: TALK, viewer: f.VIEWER.name });
@@ -167,11 +180,11 @@ export function RoomSession() {
      here killed five visible controls with every gate green. `RoomFrame` builds
      the receipt now and its handlers go through `RoomFrameHandlers` like every
      other seam in the library. */
-  const receipt = receiptId === null ? undefined : receiptForIn(view, receiptId);
+  const receipt = receiptId === null ? undefined : view.receiptFor(receiptId);
 
   return (
     <RoomFrame
-      attention={attention}
+      attention={view.attention}
       binding={binding}
       boxed={false}
       composerNote={note}
@@ -181,9 +194,10 @@ export function RoomSession() {
       humans={f.HUMANS}
       handlers={{
         onSelectRoom: (next: string) => {
-          const chosen = roomView(next);
+          const chosen = sessionView(next, actedOn);
           setRoomId(next);
           here.current = next;
+          hereName.current = chosen.room.name;
           /* Everything scoped to the room you were in goes with it: an open
              receipt belongs to an object in the room you left, a binding names
              an item in it, and a filter is a question about its feed. */
@@ -296,11 +310,11 @@ export function RoomSession() {
       openAttentionId={openId}
       receipt={receipt}
       room={view.room}
-      rooms={railRooms(roomId)}
-      trailer={trailerForRoom(view)}
+      rooms={view.rooms}
+      trailer={view.trailer}
       updatedAt="13:41"
       viewer={f.VIEWER}
-      viewerNote={`here · ${attention.length} owed to you`}
+      viewerNote={`here · ${view.attention.length} owed to you`}
     />
   );
 }

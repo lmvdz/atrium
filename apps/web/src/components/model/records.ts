@@ -12,7 +12,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { EpistemicState, Glyph, ObjectKind } from './glyph';
-import { glyphFor, needsViewer } from './glyph';
+import { GLYPH_HARDNESS, glyphFor, needsViewer } from './glyph';
 import type {
   Citation,
   MessageId,
@@ -351,6 +351,72 @@ export interface RowTag {
   readonly tone: 'neutral' | 'needs' | 'verified';
 }
 
+/**
+ * The same state, no longer owed to the person reading — what acting on
+ * something does to it.
+ *
+ * ROUND 8, D1: acting REMOVED an item from one array. Removal is not what
+ * happened: the object is still on the record, it is still proposed, it is still
+ * in the lens; what changed is that it no longer needs this person. Modelling
+ * the act as a filter on one array is precisely why four other surfaces went on
+ * saying it did.
+ */
+export function settledForViewer(state: EpistemicState): EpistemicState {
+  return { ...state, owedToViewer: false };
+}
+
+/**
+ * THE "NEEDS YOU" TAG ON A FEED ROW, DERIVED FROM THE ROW'S STATE.
+ *
+ * `'◆ needs lars'` and `'■ destructive · needs lars'` were hand-written strings
+ * on fixture rows, restating the row's own `state` — a second register for the
+ * one fact this whole product is about, and one that no act could move. The
+ * glyph comes from `glyphFor` like every other glyph, the name comes from the
+ * viewer, and the destructive clause comes from `irreversible`.
+ */
+export function needsTag(state: EpistemicState, viewer: string): RowTag {
+  const glyph = glyphFor(state);
+  return {
+    label: `${glyph}${state.irreversible ? ' destructive ·' : ''} needs ${viewer}`,
+    tone: 'needs',
+  };
+}
+
+/**
+ * A FEED MAY NOT SAY A ROW NEEDS YOU UNLESS SOMETHING OWED CITES IT.
+ *
+ * The refusal that makes round 8's D1 unrepresentable rather than merely fixed.
+ * The pin, the rail, the tab and the lens all count the same register; a feed
+ * row is the fifth surface, and it is the one that carries its claim in prose
+ * rather than in a number, so no count check can see it. A row whose state says
+ * "owed to the viewer" must be the source of an attention item — then removing
+ * that item from the register necessarily unmakes the row, because the row is
+ * built from it.
+ *
+ * `items` is the room's WHOLE attention list, owed and acted-on alike: a row for
+ * something that has just been settled is legal, it simply may not still claim
+ * to need anybody, and that is `needsViewer` on its own state.
+ */
+export function checkedFeed(
+  entries: readonly TimelineEntry[],
+  items: readonly AttentionItem[],
+  from: string,
+): readonly TimelineEntry[] {
+  const cited = new Set(
+    items.map((item) => item.source?.messageId).filter((id) => id !== undefined),
+  );
+  for (const entry of entries) {
+    if (entry.type !== 'message') continue;
+    if (!needsViewer(entry.state)) continue;
+    if (cited.has(entry.id)) continue;
+    throw new Error(
+      `${from}: the feed row for ${entry.id} says it needs the viewer, and no owed item in this room cites that message.\n` +
+        '  A row that claims your attention on its own authority is a second register for the one fact the pin, the rail, the tab and the lens all count — and the only one an act cannot move.',
+    );
+  }
+  return entries;
+}
+
 export interface SystemEntry {
   readonly type: 'system';
   readonly id: string;
@@ -454,14 +520,59 @@ export interface StateObject {
 
 /* --- receipt ------------------------------------------------------------- */
 
+/**
+ * The vocabulary a history line can be in.
+ *
+ * ROUND 8, D4: THERE WAS NO `destructive`, SO THE ONE DISTINCTION IN THIS
+ * VOCABULARY THAT CHANGES WHAT A CONTROL DOES WAS DROPPED BY THE DERIVATION AND
+ * THEN ASSERTED THE OTHER WAY BY THE TOOLTIP.
+ *
+ * `receiptFromObject` collapsed every owed object to `gate`, and
+ * `stateForHappened('gate')` hard-codes `irreversible: false`. So X1 — a
+ * decision whose `state.irreversible` is true, whose card renders as a
+ * two-second press-and-hold, and whose receipt title says "needs you —
+ * destructive, and not undoable" — had all three of its history lines painted
+ * ◆ with `title="needs you — a reversible gate waiting on a human"`, INCLUDING
+ * the line whose entire text is the word `destructive`.
+ *
+ * An `EpistemicState` goes into `happenedKindFor` and comes back out of
+ * `stateForHappened`; a round trip that loses a field is a derivation that
+ * asserts a fact it was never told. The round trip is now lossless where it is
+ * visible — `glyphFor(stateForHappened(happenedKindFor(s))) === glyphFor(s)` for
+ * every state, asserted over the whole cross-product in
+ * `test/record-integrity.test.tsx` rather than spot-checked.
+ */
 export type HappenedKind =
   | 'claim'
   | 'verified'
   | 'accepted'
   | 'gate'
+  | 'destructive'
   | 'question'
   | 'routine'
   | 'failed';
+
+/**
+ * WHICH HISTORY-LINE KIND A STATE IS, going in.
+ *
+ * It lived inline in `app/gallery/fixtures.ts` as a nested ternary, which is
+ * where it was written without a `destructive` arm — one derivation of a closed
+ * vocabulary, in a fixture module, with nothing pairing it against the
+ * derivation that reads it back. It is here beside `stateForHappened` so the
+ * two halves of the round trip are one screen apart and one test away.
+ */
+export function happenedKindFor(state: EpistemicState): HappenedKind {
+  if (state.verification === 'failed') return 'failed';
+  if (needsViewer(state)) {
+    if (state.irreversible) return 'destructive';
+    return state.kind === 'question' ? 'question' : 'gate';
+  }
+  if (state.verification === 'verified') return 'verified';
+  if (state.verification === 'accepted') return 'accepted';
+  if (state.verification === 'open') return 'question';
+  if (state.verification === 'routine') return 'routine';
+  return 'claim';
+}
 
 /** History entries carry a semantic kind; the glyph derives from it, like everything else. */
 export function stateForHappened(kind: HappenedKind): EpistemicState {
@@ -488,6 +599,16 @@ export function stateForHappened(kind: HappenedKind): EpistemicState {
         verification: 'proposed',
         owedToViewer: true,
         irreversible: false,
+      };
+    /* ■, and the reason the arm exists: a gate answers in one click and this
+       does not. Losing it between `happenedKindFor` and here is what painted a
+       destructive object's history in the reversible-gate glyph. */
+    case 'destructive':
+      return {
+        kind: 'decision',
+        verification: 'proposed',
+        owedToViewer: true,
+        irreversible: true,
       };
     case 'question':
       return { kind: 'question', verification: 'open', owedToViewer: false, irreversible: false };
@@ -673,15 +794,10 @@ export type ComposerBinding =
  * Hardest first — the corpus's turn-17 sort. Failures outrank destructive
  * decisions, which outrank reversible gates, which outrank open questions.
  */
-const GLYPH_HARDNESS: Readonly<Record<Glyph, number>> = {
-  '✗': 0,
-  '■': 1,
-  '◆': 2,
-  '?': 3,
-  '~': 4,
-  '·': 5,
-  '✓': 6,
-};
+/* The order lives in model/glyph.ts with the vocabulary it orders — see
+   `GLYPH_HARDNESS` there. It was a second private copy here until r9, and a
+   second copy of a closed vocabulary is what let the receipt's legend fall two
+   glyphs behind the glyphs the receipt was emitting. */
 
 export function hardestFirst(items: readonly AttentionItem[]): readonly AttentionItem[] {
   return [...items].sort(

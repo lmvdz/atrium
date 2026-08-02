@@ -54,6 +54,8 @@
  *   a property of the brand.
  * ------------------------------------------------------------------------- */
 
+import type { Maybe } from './text';
+
 export type MessageId = string;
 
 /**
@@ -79,8 +81,61 @@ export interface MessageRecord {
   readonly actor: string;
   readonly text: string;
   readonly origin: MessageOrigin;
-  /** the room the message lives in, when it is not the one on screen */
+  /**
+   * THE ROOM THIS MESSAGE LIVES IN. Absolute, and about the record only.
+   *
+   * ROUND 8, D3. It was documented as "the room the message lives in, WHEN IT IS
+   * NOT THE ONE ON SCREEN" — a fact defined relative to a viewport, stored on a
+   * register this page deliberately shares across all four rooms so that
+   * citations resolve. It cannot be relative to anything: one register, four
+   * viewports, and a field whose meaning depends on which one you are looking
+   * through is wrong in three of them.
+   *
+   * What it bought: `AttentionCard`, `ProvenanceRow` and `CorrectionLink` all
+   * decided here-versus-elsewhere by asking whether the field was PRESENT, and
+   * never compared it to the room being rendered. So `#identity-service`'s own
+   * open question — whose source is `m-legal`, whose record says
+   * `identity-service`, and whose cited message renders three rows below in that
+   * very feed — wore the cross-room treatment and a tooltip reading "the source
+   * of this item is in #identity-service, not here", under a head, a lens and a
+   * feed all saying you were in #identity-service.
+   *
+   * `undefined` now means the register does not record a room for this message,
+   * which is a third answer and not a synonym for "here". Nothing in the app
+   * omits it. `sourceLocation()` below is the one comparison; no render boundary
+   * makes its own.
+   */
   readonly room?: string;
+}
+
+/** Where a cited message is, RELATIVE TO THE ROOM ON SCREEN — the only relative thing. */
+export type SourceWhere = 'here' | 'elsewhere' | 'unrecorded';
+
+export interface SourceLocation {
+  readonly where: SourceWhere;
+  /** the record's own room, absolute; null only when the register does not say */
+  readonly room: Maybe<string>;
+}
+
+/**
+ * THE COMPARISON, ONCE, IN THE ONE PLACE THAT KNOWS BOTH OPERANDS.
+ *
+ * A record's room is a fact about the record. "Here" is a fact about the
+ * viewport. "Is this somewhere else?" is neither — it is a comparison, and a
+ * comparison written at three render boundaries is three chances to write it
+ * from one operand, which is exactly what round 8 shipped at all three.
+ */
+export function sourceLocation(
+  /* A record or a resolved attribution — both carry the record's own room, and
+     `Attribution.room` is `Maybe<string>` where `MessageRecord.room` is
+     optional. One comparison, both shapes, so the receipt's excerpt row and the
+     card's source link cannot answer differently. */
+  record: { readonly room?: Maybe<string> },
+  here: string,
+): SourceLocation {
+  const room = record.room ?? null;
+  if (room === null) return { where: 'unrecorded', room: null };
+  return { where: room === here ? 'here' : 'elsewhere', room };
 }
 
 declare const citationBrand: unique symbol;

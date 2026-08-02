@@ -35,13 +35,18 @@ import type {
   SystemEntry,
   SystemStatement,
   TimelineEntry,
+  TrailerSummary,
 } from '../../src/components/model';
 import {
+  checkedFeed,
   citationFrom,
   glyphFor,
+  happenedKindFor,
   messageEntry,
+  needsTag,
   quotationFrom,
   rationale,
+  settledForViewer,
   systemStatement,
   trailerFor,
 } from '../../src/components/model';
@@ -51,6 +56,17 @@ import {
    `typed` or `seeded`. m-chosen is here on purpose: it is the one-click answer,
    and it is what the round-4 gauntlet caught being quoted as somebody's words. */
 
+/**
+ * THE ROOM THESE RECORDS LIVE IN, WRITTEN DOWN.
+ *
+ * Round 8, D3: every record here but `m-legal` carried NO room, and three render
+ * boundaries read that absence as "the room you are looking at". A room is a
+ * fact about a message; absence is a fact about the register. They are the same
+ * value only from one viewport, and this register is deliberately shared across
+ * all four.
+ */
+const HERE = 'users-migration';
+
 export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
   m2: {
     id: 'm2',
@@ -58,6 +74,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'priya',
     text: 'Staging backfill ran clean — 4.2M rows in 38 minutes.',
     origin: 'seeded',
+    room: HERE,
   },
   m5: {
     id: 'm5',
@@ -65,6 +82,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'dana',
     text: '4.7% of sessions still present legacy opaque tokens.',
     origin: 'seeded',
+    room: HERE,
   },
   /* The inline-runs fixture. Round 2 shipped this record with a body that added
      a mention and a whole clause the record did not contain — the words under
@@ -76,6 +94,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'mateo',
     text: '@lars dual-write costs about $900/mo in extra write throughput — that is users.dualwrite on both tables, not the backfill.',
     origin: 'seeded',
+    room: HERE,
   },
   m10: {
     id: 'm10',
@@ -83,6 +102,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'priya',
     text: 'Cut over Friday 1 Aug and drop the legacy tokens with it.',
     origin: 'seeded',
+    room: HERE,
   },
   m14: {
     id: 'm14',
@@ -90,6 +110,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'lars',
     text: 'This was an actual call, not priya thinking out loud.',
     origin: 'typed',
+    room: HERE,
   },
   /* A message that genuinely lives in another room. It has no row in this feed —
      the register is not the feed — and it is what a cross-room source, a
@@ -112,6 +133,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'justin',
     text: 'Parity check 418 came back with 12 checksum diffs on users_legacy.',
     origin: 'seeded',
+    room: HERE,
   },
   m19: {
     id: 'm19',
@@ -119,6 +141,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'justin',
     text: 'Simplest is to drop users_legacy in the same window. Nothing reads it after cutover.',
     origin: 'seeded',
+    room: HERE,
   },
   m21: {
     id: 'm21',
@@ -126,6 +149,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'lars',
     text: 'Hold the cutover until 418 is explained. I would rather be a week late than lose a session.',
     origin: 'typed',
+    room: HERE,
   },
   q1: {
     id: 'q1',
@@ -133,6 +157,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'priya',
     text: 'Seven clean days. The dual-write condition is met.',
     origin: 'seeded',
+    room: HERE,
   },
   q2: {
     id: 'q2',
@@ -140,6 +165,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'lars',
     text: 'Good. Nothing else from me today.',
     origin: 'typed',
+    room: HERE,
   },
   'm-chosen': {
     id: 'm-chosen',
@@ -149,6 +175,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     // PAGE-AUTHORED. `quotationFrom` returns null for this; the only way it can
     // be rendered is in system voice, as "chose: …".
     origin: 'chosen',
+    room: HERE,
   },
   /* ORDINARY ENGLISH IN A ONE-CLICK ANSWER. Round 4 applied the system-voice
      first-person ban to the OPTION PAYLOAD, so all four of these threw at
@@ -162,6 +189,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'lars',
     text: 'Keep it behind our retention window',
     origin: 'chosen',
+    room: HERE,
   },
   'm-day': {
     id: 'm-day',
@@ -169,6 +197,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'priya',
     text: 'Give us another day',
     origin: 'chosen',
+    room: HERE,
   },
   'm-approve': {
     id: 'm-approve',
@@ -176,6 +205,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'justin',
     text: 'Yes — I approve',
     origin: 'chosen',
+    room: HERE,
   },
   'm-agreed': {
     id: 'm-agreed',
@@ -183,6 +213,7 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     actor: 'dana',
     text: 'Ship it, we agreed',
     origin: 'chosen',
+    room: HERE,
   },
 };
 
@@ -224,6 +255,27 @@ export const ROOMS: readonly RoomSummary[] = [
 ];
 
 export const ROOMS_QUIET: readonly RoomSummary[] = ROOMS.map((room) => ({ ...room, owed: 0 }));
+
+/**
+ * THE RAIL AS IT MUST READ BESIDE A FRAME SHOWING `owed` ITEMS IN `roomName`.
+ *
+ * ROUND 8, D2, ZERO CLICKS: `/gallery/pin/60` rendered `# users-migration ◆ 4`
+ * in the same rail as `here · 60 owed to you`, because the rail was the static
+ * `ROOMS` fixture and the pin was `manyOwed(60)`. A still is a STATE, and a
+ * state whose rail contradicts its pin is not one of this product's states.
+ *
+ * The chip for the room being shown states what the frame is showing; the other
+ * chips are claims about rooms this frame does not render, so they keep their
+ * own numbers. The room you are standing in has no unseen count, because you are
+ * reading it.
+ */
+export function railFor(roomName: string, owed: number): readonly RoomSummary[] {
+  return ROOMS.map((room) =>
+    room.name === roomName
+      ? { ...room, current: true, unseen: 0, owed }
+      : { ...room, current: false },
+  );
+}
 
 export const VIEWER: HumanSummary = {
   id: 'lars',
@@ -380,7 +432,14 @@ export const ATTENTION: readonly AttentionItem[] = [
       'no automated path may drop a table that still takes live reads, and legal has not answered on retention — only a maintainer can authorise it',
     ),
     facts: ['proposed by justin 12:44', 'destructive', 'blocks Q1'],
-    source: cite('m17'),
+    /* m19, NOT m17. The card's own fact line says "proposed by justin 12:44",
+       which is m19 — "Simplest is to drop users_legacy in the same window" —
+       while the source link jumped to m17, justin's 12:31 parity-check report.
+       Two facts about one source with nothing obliging them to agree, at the
+       address round 6 deleted the carried room from. It matters structurally as
+       well as factually now: the ■ row in the feed is built from this item, so
+       the item has to cite the message that row is. */
+    source: cite('m19'),
     actions: [
       { id: 'authorise', label: 'Authorise the drop', emphasis: 'primary', statement: null },
       {
@@ -453,6 +512,23 @@ export const ATTENTION: readonly AttentionItem[] = [
     ],
   },
 ];
+
+/** One owed item by id. Throws rather than returning the first one. */
+export function item(itemId: string): AttentionItem {
+  const found = ATTENTION.find((candidate) => candidate.id === itemId);
+  if (found === undefined) throw new Error(`fixture: no attention item ${itemId}`);
+  return found;
+}
+
+/**
+ * WHICH OBJECTS ARE LATE, BY ID — not how many.
+ *
+ * `overdue: 1` was a hand-written number handed to `trailerFor` beside the
+ * objects it is about, so signing off the one overdue commitment left the
+ * trailer still saying one thing was late. A count that cannot be filtered is a
+ * count that cannot follow an act.
+ */
+export const OVERDUE: readonly string[] = ['K2'];
 
 export const TRAILER = trailerFor({ objects: OBJECTS, objectives: OBJECTIVES, overdue: 1 });
 
@@ -606,16 +682,47 @@ const BEFORE: readonly TimelineEntry[] = [
   }),
 ];
 
-const AFTER: readonly TimelineEntry[] = [
+/**
+ * A ROW WHOSE "NEEDS YOU" IS THE PIN'S, NOT THE FIXTURE'S.
+ *
+ * ROUND 8, D1, FIFTH SURFACE. `message('m10', { state: GATE, tag: '◆ needs lars' })`
+ * is a hand-written claim that this row is owed to lars, written beside — and
+ * independent of — the attention item that is the reason it is. Acting on the
+ * item removed it from one array; the row went on saying "◆ needs lars" under a
+ * pin reading "nothing owed".
+ *
+ * The row is built FROM the item now: its state is the item's state, its tag is
+ * derived from that state, and when the item is no longer owed the row is no
+ * longer owed either, because there is nothing left to write it from.
+ * `checkedFeed` refuses any row that claims otherwise.
+ */
+export function owedRow(item: AttentionItem, stillOwed: boolean): MessageEntry {
+  const source = item.source;
+  if (source === null) {
+    throw new Error(`fixture: ${item.id} has no source message, so it has no feed row`);
+  }
+  const state = stillOwed ? item.state : settledForViewer(item.state);
+  return message(source.messageId, {
+    state,
+    tag: stillOwed ? needsTag(state, VIEWER.name) : null,
+  });
+}
+
+/** Which owed items are still owed — the whole set, by default. */
+export type OwedSet = ReadonlySet<string>;
+
+const allOwed: OwedSet = new Set(ATTENTION.map((item) => item.id));
+
+const after = (owed: OwedSet): readonly TimelineEntry[] => [
   message('m17', {
     state: FAILED,
+    /* Not a claim on the viewer: a failure needs AN explanation, from whoever
+       can give one. `checkedFeed` only refuses rows whose STATE says they are
+       owed to the person reading, which this one's does not. */
     tag: { label: '✗ failed · needs an explanation', tone: 'needs' },
   }),
-  message('m10', { state: GATE, tag: { label: '◆ needs lars', tone: 'needs' } }),
-  message('m19', {
-    state: DESTRUCTIVE,
-    tag: { label: '■ destructive · needs lars', tone: 'needs' },
-  }),
+  owedRow(item('P1'), owed.has('P1')),
+  owedRow(item('X1'), owed.has('X1')),
   message('m21', {
     state: TALK,
     // the reply banner's actor and time come off the quotation, not beside it
@@ -642,13 +749,20 @@ export function timeline(options: {
   readonly filter: SinceYouLeftEntry['activeFilter'];
   readonly routineOpen: boolean;
   readonly targetId?: string;
+  /** which of this room's owed items are still owed; all of them by default */
+  readonly owed?: OwedSet;
 }): readonly TimelineEntry[] {
-  const entries: TimelineEntry[] = [
-    ...BEFORE,
-    routine(options.routineOpen),
-    sinceYouLeft({ seen: options.seen, activeFilter: options.filter }),
-    ...AFTER,
-  ];
+  const owed = options.owed ?? allOwed;
+  const entries: TimelineEntry[] = checkedFeed(
+    [
+      ...BEFORE,
+      routine(options.routineOpen),
+      sinceYouLeft({ seen: options.seen, activeFilter: options.filter }),
+      ...after(owed),
+    ],
+    ATTENTION,
+    'fixtures.timeline',
+  ) as TimelineEntry[];
   if (options.filter === null && options.targetId === undefined) return entries;
   return entries.map((entry) => {
     if (entry.type !== 'message') return entry;
@@ -687,7 +801,7 @@ export const QUIET_TIMELINE: readonly TimelineEntry[] = [
   message('m-agreed', { state: ACCEPTED }),
 ];
 
-export const FRESH_TIMELINE: readonly TimelineEntry[] = [...BEFORE, ...AFTER.slice(0, 2)];
+export const FRESH_TIMELINE: readonly TimelineEntry[] = [...BEFORE, ...after(allOwed).slice(0, 2)];
 
 /* --- receipt ------------------------------------------------------------- */
 
@@ -841,18 +955,14 @@ export function receiptFromObject(
 ): ReceiptRecord {
   const object = objects.find((candidate) => candidate.id === objectId);
   if (object === undefined) throw new Error(`fixture: no state object ${objectId}`);
-  const kind: HappenedKind =
-    object.state.verification === 'failed'
-      ? 'failed'
-      : object.state.verification === 'verified'
-        ? 'verified'
-        : object.state.verification === 'accepted'
-          ? 'accepted'
-          : object.state.owedToViewer
-            ? 'gate'
-            : object.state.verification === 'open'
-              ? 'question'
-              : 'claim';
+  /* ROUND 8, D4: this was a nested ternary here, and it collapsed every owed
+     object to `gate` — so X1, whose `irreversible` is true, whose card is a
+     press-and-hold and whose receipt title says "destructive, and not undoable",
+     had all three history lines painted ◆ "a reversible gate waiting on a
+     human", including the line whose entire text is the word `destructive`.
+     The derivation lives beside `stateForHappened` now, and the two are checked
+     as a round trip rather than read side by side. */
+  const kind: HappenedKind = happenedKindFor(object.state);
   return {
     id: object.id,
     state: object.state,
@@ -910,6 +1020,55 @@ export const REPLYING: ComposerBinding = { mode: 'replying', to: quote('m17') };
  * no way to scroll it back; `/gallery/pin/[n]` renders these at 4, 13, 19 and
  * 34 so the bound is measured rather than asserted.
  */
+export interface LoadRoom {
+  readonly attention: readonly AttentionItem[];
+  readonly objects: readonly StateObject[];
+  readonly objectives: readonly ObjectiveRecord[];
+  readonly trailer: TrailerSummary;
+  readonly rooms: readonly RoomSummary[];
+  readonly viewerNote: string;
+}
+
+/**
+ * THE WHOLE FRAME AT A GIVEN LOAD, DERIVED FROM ONE NUMBER.
+ *
+ * ROUND 8, D2's zero-click repro. `/gallery/pin/60` handed `manyOwed(60)` to the
+ * pin and left every other surface on the users-migration fixtures: the rail
+ * said `# users-migration ◆ 4`, the lens said "4 items awaiting you", the
+ * trailer counted two objectives, and the footer said "here · 60 owed to you" —
+ * four answers to one question, on one screen, with nothing clicked.
+ *
+ * A route that exists to measure the pin under load is still a room. Every
+ * surface on it now counts the same items.
+ */
+export function loadRoom(n: number): LoadRoom {
+  const attention = manyOwed(n);
+  const objects: readonly StateObject[] = attention.map((owedItem) => ({
+    id: owedItem.id,
+    kind: owedItem.state.kind === 'event' ? 'claim' : owedItem.state.kind,
+    state: owedItem.state,
+    text: owedItem.title,
+    facts: owedItem.facts,
+    objectives: ['load'],
+  }));
+  const objectives: readonly ObjectiveRecord[] = [
+    {
+      id: 'load',
+      title: `Carry ${n} owed items without losing the composer`,
+      status: 'active',
+      open: true,
+    },
+  ];
+  return {
+    attention,
+    objects,
+    objectives,
+    trailer: trailerFor({ objects, objectives, overdue: 0 }),
+    rooms: railFor(ROOM.name, n),
+    viewerNote: `here · ${n} owed to you`,
+  };
+}
+
 export function manyOwed(n: number): readonly AttentionItem[] {
   const shapes = [
     { state: DESTRUCTIVE, kind: 'drop', why: 'destructive and nothing else can authorise it' },

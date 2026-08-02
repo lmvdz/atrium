@@ -29,8 +29,10 @@ export function Glyph({ state, decorative = true, className }: GlyphProps) {
   const glyph = glyphFor(state);
   const tone = glyphTone(glyph);
   /* Derived from the glyph, which is derived from the state: seven possible
-     values, all written in model/glyph.ts. Named here because the printed-string
-     sweep exempts it by name and the exemption has to be findable. */
+     values, all written in model/glyph.ts. `glyphMeaning`'s return type is the
+     union of those seven literals, so the printed-string sweep can SEE that no
+     caller text reaches this tooltip — it used to be told so by an exemption
+     naming this variable, which is a list where a type would do. */
   const meaning = glyphMeaning(glyph);
   const shared = {
     className: [styles.glyph, TONE_CLASS[tone], className].filter(Boolean).join(' '),

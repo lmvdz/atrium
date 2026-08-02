@@ -74,6 +74,14 @@ const REGISTER_DOORS: ReadonlySet<string> = new Set([
   'useCitedRecord',
   'resolveCitation',
   'resolveQuotation',
+  /* The same lookup, plus the comparison against the room on screen. Neither of
+     these can invent a string: `sourceLocation` returns the record's OWN room
+     and a three-way tag derived from comparing it with the room being rendered,
+     and `useCitedLocation` is `resolveCitation` with that comparison applied.
+     Added in r9 with the D3 fix — the comparison had to move somewhere that
+     knows both operands, and the register is where both live. */
+  'sourceLocation',
+  'useCitedLocation',
 ]);
 
 /**
