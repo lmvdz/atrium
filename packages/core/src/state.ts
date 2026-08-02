@@ -49,6 +49,26 @@ export interface ObjectRecord {
  */
 export interface ProposalRecord {
   proposal: StoredProposal;
+  /**
+   * The trusted actor that appended `proposal_recorded` — **who typed this**, as
+   * opposed to `proposal.proposer`, which is what the reading claims to be.
+   *
+   * The two are different questions and until #22 r9 the state answered only the
+   * second. `proposer` is a description of a reading; a model proposer says "a
+   * machine read this out of the room". Nothing recorded who *staged* that
+   * description, so a participant who wrote `proposer: {kind:'model', …}` by hand
+   * produced a proposal indistinguishable, in state and in every read model built
+   * from it, from one an interpretation pipeline emitted. The gauntlet's forgery
+   * used exactly that: a member staged a machine-attributed commitment naming
+   * somebody else, accepted it himself, and the durable row said a model had read
+   * it (r9, D1).
+   *
+   * Minted here from the `TrustedContext` actor and from nothing a caller sends,
+   * exactly as `ObjectRecord.acceptedBy` is. It is the input to
+   * `selfStagedReadingRefusal` and it is what a projection writes so the read
+   * model can name the person, rather than repeating the marking the stager chose.
+   */
+  stagedBy: Actor;
   status: ProposalStatus;
   /** The accepted object this proposal turned into, if any. */
   acceptedObjectId: Id | null;

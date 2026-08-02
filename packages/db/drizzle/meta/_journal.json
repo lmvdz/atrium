@@ -71,6 +71,13 @@
       "when": 1785926400000,
       "tag": "0009_the_guard_stops_claiming_an_author",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786012800000,
+      "tag": "0010_the_read_model_names_the_stager",
+      "breakpoints": true
     }
   ]
 }

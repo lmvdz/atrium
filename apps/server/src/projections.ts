@@ -92,6 +92,26 @@ async function projectMessagePosted(
   });
 }
 
+/**
+ * The polymorphic actor id: the user id for a human, the model id for a model,
+ * NULL for the system actor — the shape `core_events.actor_id` already uses, and
+ * what `proposals_staged_by_id_matches_kind` requires.
+ */
+function actorId(actor: Actor): string | null {
+  switch (actor.kind) {
+    case 'human':
+      return actor.userId;
+    case 'model':
+      return actor.model;
+    case 'system':
+      return null;
+    default: {
+      const exhaustive: never = actor;
+      throw new Error(`unknown actor ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
 async function projectProposalRecorded(
   { tx, roomId, before, after }: ProjectionContext<RoomEvent>,
   event: EventOf<'proposal_recorded'>,
@@ -110,6 +130,13 @@ async function projectProposalRecorded(
     proposerKind: proposal.proposer.kind,
     proposerModel: proposal.proposer.kind === 'model' ? proposal.proposer.model : null,
     proposerUserId: proposal.proposer.kind === 'human' ? proposal.proposer.userId : null,
+    // Read off the reducer's record, not off `context.actor`, for rule (2) at the
+    // top of this file: the state is what the fold produced, and taking the actor
+    // from the context here would be a second derivation of the same fact, free
+    // to disagree with the one the acceptance gate reads (#22 r9, D1).
+    stagedByKind: record.stagedBy.kind,
+    stagedById: actorId(record.stagedBy),
+    quote: proposal.quote,
     status: record.status,
     createdAt: new Date(proposal.createdAt),
   });

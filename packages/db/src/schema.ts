@@ -859,6 +859,37 @@ export const proposals = pgTable(
     proposerKind: proposerKind('proposer_kind').notNull(),
     proposerModel: text('proposer_model'),
     proposerUserId: uuid('proposer_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /**
+     * Who *typed* this proposal, as against `proposer_*`, which is what the
+     * reading claims to be (#22 r9, D1).
+     *
+     * Until r9 the read model recorded only the claim. A member who staged a
+     * proposal marked `proposer_kind='model'` produced a row that read, to every
+     * query built over this table, exactly like one an interpretation pipeline had
+     * emitted — and the `core_events` row that knew better is the log, not the
+     * read model. Nothing anyone reads could name the person.
+     *
+     * Deliberately shaped like `core_events.actor_kind`/`actor_id` rather than
+     * like `proposer_*`: the stager is an `Actor`, so it has a `system` variant
+     * that `proposer_kind` has no spelling for, and `actor_id` carries the user id
+     * for a human and the model id for a model under the same check constraint
+     * that table uses. It is not an FK for the same reason `core_events.actor_id`
+     * is not one — the column is polymorphic. A deleted user leaves the id behind
+     * here on purpose: "who staged this attribution" is a fact about an append,
+     * not a live pointer.
+     */
+    stagedByKind: actorKind('staged_by_kind').notNull(),
+    stagedById: text('staged_by_id'),
+    /**
+     * The span of a cited message the reading rests on, verbatim.
+     *
+     * Also new in r9, and for the same reason: it is the field every attribution
+     * rule is computed from, `validateProposalProvenance` checks it, and it was
+     * the one part of the forged reading that no read model could show. A
+     * projection that carries the citation list but not the sentence being
+     * attributed can render a `~` that nobody can check by eye.
+     */
+    quote: text('quote'),
     status: proposalStatus('status').notNull().default('proposed'),
     decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
@@ -875,6 +906,22 @@ export const proposals = pgTable(
       sql`(${t.proposerKind} = 'model' AND ${t.proposerModel} IS NOT NULL)
           OR (${t.proposerKind} = 'human' AND ${t.proposerUserId} IS NOT NULL)`,
     ),
+    /**
+     * The same rule `core_events_actor_id_matches_kind` states, on the same
+     * shape: `staged_by_id` is the user id for a human and the model id for a
+     * model, and is NULL for the system actor and only for it. Without it,
+     * `{kind:'system', staged_by_id:'alice'}` is a row that reads as a person
+     * having staged something the process staged.
+     */
+    check(
+      'proposals_staged_by_id_matches_kind',
+      sql`(${t.stagedByKind} = 'system') = (${t.stagedById} IS NULL)`,
+    ),
+    check(
+      'proposals_staged_by_id_not_blank',
+      sql`${t.stagedById} IS NULL OR length(${t.stagedById}) > 0`,
+    ),
+    index('proposals_staged_by_idx').on(t.stagedByKind, t.stagedById),
   ],
 );
 

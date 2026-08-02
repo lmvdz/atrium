@@ -6,6 +6,7 @@ import {
   humanOnlyRefusal,
   isHuman,
   proposalBindingRefusal,
+  selfStagedReadingRefusal,
 } from './authority.js';
 import type { Actor } from './common.js';
 import { ATTRIBUTION_FIELD, retypeCarryOver } from './corrections.js';
@@ -474,7 +475,7 @@ function dispatch(state: CoreState, entry: AuthoredEvent): boolean {
   const { event, actor } = entry;
   switch (event.type) {
     case 'proposal_recorded':
-      return applyProposalRecorded(state, event);
+      return applyProposalRecorded(state, event, actor);
     case 'proposal_rejected':
       return applyProposalRejected(state, event, actor);
     case 'proposal_superseded':
@@ -495,7 +496,11 @@ function dispatch(state: CoreState, entry: AuthoredEvent): boolean {
 
 type EventOf<T extends CoreEvent['type']> = Extract<CoreEvent, { type: T }>;
 
-function applyProposalRecorded(state: CoreState, event: EventOf<'proposal_recorded'>): boolean {
+function applyProposalRecorded(
+  state: CoreState,
+  event: EventOf<'proposal_recorded'>,
+  actor: Actor,
+): boolean {
   const { proposal } = event;
   if (state.proposals[proposal.id]) {
     fail(state, event.id, `proposal "${proposal.id}" already recorded`);
@@ -520,6 +525,11 @@ function applyProposalRecorded(state: CoreState, event: EventOf<'proposal_record
   // behind. See `StoredProposal`.
   state.proposals[proposal.id] = {
     proposal: storeProposal(proposal),
+    // Who typed it, from the trusted context — never from the payload. See
+    // `ProposalRecord.stagedBy`: `proposal.proposer` is what the reading claims
+    // to be, and staging stays open to every actor, so the only thing that makes
+    // the claim answerable later is recording who made it.
+    stagedBy: actor,
     status: 'proposed',
     acceptedObjectId: null,
     rejectedReason: null,
@@ -739,6 +749,29 @@ function applyObjectAccepted(
         event.id,
         proposalBindingRefusal('acceptance_binding', actor, proposal.proposal.proposer, proposalId),
       );
+      return false;
+    }
+
+    // …and the case that rule lets through, because a human matches every
+    // proposer: the human who typed the machine attribution in the first place.
+    // `actorMatchesProposer` asks whether this actor may touch a reading of this
+    // *description*; this asks who wrote the description. See
+    // `selfStagedReadingRefusal` for why it is a refusal rather than a receipt
+    // check, and for what stays deliberately open (#22 r9, D1).
+    const selfStaged = selfStagedReadingRefusal({
+      actor,
+      proposalId,
+      proposer: proposal.proposal.proposer,
+      stagedBy: proposal.stagedBy,
+      attributedTo:
+        object.type === 'claim'
+          ? object.payload.claimant
+          : object.type === 'commitment'
+            ? object.payload.owner
+            : null,
+    });
+    if (selfStaged) {
+      fail(state, event.id, selfStaged);
       return false;
     }
 

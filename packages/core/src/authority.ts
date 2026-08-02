@@ -153,6 +153,133 @@ export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean 
   return false;
 }
 
+/**
+ * The one human acceptance that is not a receipt: **your own** reading, when
+ * that reading either wears a machine's name or puts somebody else's name on
+ * something (#22 r9, D1).
+ *
+ * ## The claim this narrows, and why it survives narrowing
+ *
+ * `acceptanceReceiptRefusal` below says a human acceptance runs none of the
+ * receipt gates, and that asymmetry is the product: **a person who reads a
+ * machine's reading and accepts it is the receipt.** That is still the rule.
+ * What it assumed, without saying so, is that the person reading the reading is
+ * not the person who wrote it. Every gate it skips — the quote has to be in a
+ * cited message, the named person has to have written it, the provenance has to
+ * validate — is skipped on the strength of a human judgement that a *second*
+ * party exercised. When the accepter is the stager, there is no second party
+ * and no judgement was exercised at all: the same person wrote the sentence,
+ * dressed it as a machine's reading, and blessed it.
+ *
+ * The gauntlet executed exactly that, over one socket, from an ordinary
+ * membership: `record_proposal` with `proposer: {kind:'model', model:…}`, a
+ * quote that appears in no cited message, a `commitment` owned by somebody else
+ * — then `accept_proposal` on it. Both acked, `issues: []`, and out came a
+ * durable commitment naming the victim, under a `proposals` row reading
+ * `proposer_kind='model'`. The machine dressing is the whole of the harm: it
+ * launders a member's sentence into a reading nobody is answerable for.
+ *
+ * ## Refused, not re-checked
+ *
+ * The tempting fix is to run the receipt gates on this acceptance instead of
+ * skipping them. It does not hold: `atrium_receipt_window` derives NULL for a
+ * human actor by construction, so the gates would have no window and would
+ * refuse every self-acceptance as `missing_receipt_context` — the right answer
+ * for the wrong reason, and a fail-open the moment somebody "fixes" the window
+ * derivation. And a receipt that *did* validate would still not make this
+ * acceptance a receipt, because the person checking is the person being checked.
+ *
+ * So this is a refusal in the shape of the thing that is actually missing: a
+ * machine-attributed reading needs a human other than its stager to accept it.
+ *
+ * ## The second clause, and why it is the same defect rather than another one
+ *
+ * The first version of this rule keyed on the machine label alone, and the live
+ * proof showed what that left standing: with `proposer` gone from the command
+ * layer, the gauntlet's *exact* two-command sequence still minted a durable
+ * `commitment` owned by the victim. All that changed was the dressing — the row
+ * now read `proposer_kind='human'`, `proposer_user_id=<attacker>`. Same command,
+ * same victim, same obligation, and #4 is unambiguous that **nobody gets
+ * committed by someone else's sentence.**
+ *
+ * The reason it survived is worth stating, because it is the same sentence twice.
+ * `acceptanceReceiptRefusal`'s sixth gate refuses a third-party commitment and
+ * says it "waits for the named owner to confirm, and only a human acceptance can
+ * carry that confirmation" — so a human acceptance *is* the confirmation. Which
+ * human was never asked. When the confirming human is the one who wrote the
+ * sentence, the confirmation is the sentence agreeing with itself.
+ *
+ * So the rule refuses a self-accepted staged reading on **either** ground:
+ *
+ *  1. it is machine-attributed — a reading nobody is answerable for, blessed by
+ *     the person who typed it; or
+ *  2. it attributes something to somebody other than the accepter — a `claim`
+ *     whose claimant, or a `commitment` whose owner, is not the person accepting.
+ *
+ * The two types in (2) are exactly the two `acceptanceReceiptRefusal` calls
+ * "the types that put a name on somebody", and for the same reason. A decision,
+ * an objective and an open question name nobody, so a person staging one and
+ * accepting it is asserting something in their own name, with their id on both
+ * the proposal and the acceptance, and nothing is laundered.
+ *
+ * ## What stays open, deliberately
+ *
+ *  - **A person staging and accepting their own commitment or claim.** "I will do
+ *    X", "I said Y" — owner or claimant is the accepter, so there is no second
+ *    person in it and nobody else's word is being spoken.
+ *  - **A person staging and accepting a decision, objective or open question.**
+ *    Names nobody; see above.
+ *  - **A different human accepting a machine-labelled reading**, and a different
+ *    human confirming a third-party commitment. That is the design position,
+ *    unchanged and load-bearing: they read it, and their judgement is the
+ *    receipt. Whether *any* human should be able to confirm a commitment on
+ *    somebody else's behalf, or only the named owner, is a real question and a
+ *    different one — this rule does not touch it, and the answer today is "any
+ *    human other than the stager".
+ *  - **A non-human accepter.** Already covered, and harder: `actorMatchesProposer`
+ *    binds it to its own model id and `acceptanceReceiptRefusal` runs in full.
+ *
+ * ## Why it is not enough on its own, and what pairs with it
+ *
+ * `apps/server/src/commands.ts` no longer lets a socket choose `proposer` at all
+ * — a participant-staged proposal is a *human* proposal, by construction, so
+ * today nothing reachable from the wire can even build the input this refuses.
+ * That closes today's door; this closes the class. When #21's pipeline lands and
+ * a legitimate seam mints model proposals again, the pipeline is the stager
+ * (`stagedBy.kind !== 'human'`), any person in the room may accept its readings,
+ * and the only thing still refused is the case that was never legitimate.
+ */
+export function selfStagedReadingRefusal(input: {
+  actor: Actor;
+  proposalId: string;
+  proposer: Proposer;
+  stagedBy: Actor;
+  /**
+   * Who the object being minted puts a name on — a `claim`'s claimant, a
+   * `commitment`'s owner, `null` for the three types that name nobody.
+   *
+   * Taken from the *object*, as `acceptanceReceiptRefusal` takes its statement
+   * from the object: payload binding is not checked on the human path, so the
+   * object is the thing whose attribution is about to become durable, and it is
+   * the one this must be computed from.
+   */
+  attributedTo: string | null;
+}): string | null {
+  const { actor, proposer, stagedBy, attributedTo } = input;
+  if (actor.kind !== 'human') return null;
+  // Only the person who typed it. Anybody else accepting is a second judgement,
+  // which is what the human path is built on.
+  if (stagedBy.kind !== 'human' || stagedBy.userId !== actor.userId) return null;
+
+  if (proposer.kind === 'model') {
+    return `${actorName(actor)} accepted proposal "${input.proposalId}", which they staged themselves as a reading by model "${proposer.model}" — a human acceptance is the receipt for a machine's reading only when the person accepting is not the person who staged it; nobody validates their own attribution to a model. It needs somebody else in the room to accept it, or a non-human acceptance, which is checked against the messages it cites`;
+  }
+  if (attributedTo !== null && attributedTo !== actor.userId) {
+    return `${actorName(actor)} accepted proposal "${input.proposalId}", which they staged themselves and which puts user "${attributedTo}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a person confirming their own sentence is that sentence agreeing with itself. It waits for "${attributedTo}", or for somebody else in the room to accept it`;
+  }
+  return null;
+}
+
 /** A short name for a proposer, for refusal texts. */
 function proposerName(proposer: Proposer): string {
   return proposer.kind === 'model' ? `model "${proposer.model}"` : `user "${proposer.userId}"`;
@@ -283,7 +410,12 @@ export interface AcceptanceReceiptRefusal {
  *     through this path.
  *
  * A human acceptance runs none of this: a person accepting a reading has read
- * it, and their judgement is the receipt. That asymmetry is the product.
+ * it, and their judgement is the receipt. That asymmetry is the product — with
+ * the one exception r9 found, which is not an exception to the asymmetry but to
+ * the word *reading*: a person who accepts a machine-labelled proposal **they
+ * themselves staged** has read nothing but their own sentence, and there is no
+ * judgement in it to be the receipt. That case is refused before this function
+ * is reached; see `selfStagedReadingRefusal`.
  */
 export function acceptanceReceiptRefusal(input: {
   actor: Actor;

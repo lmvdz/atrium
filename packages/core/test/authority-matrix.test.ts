@@ -100,6 +100,9 @@ const GATES = {
   missing_receipt_context: 'no message window supplied',
   receipt_failed: 'on a receipt that does not hold',
   third_party_confirm: 'waits for the named owner to confirm',
+  // Both grounds of the r9 gate, which is one gate: the marker is the clause the
+  // two refusals share, not the tail either of them ends in.
+  self_staged_reading: 'which they staged themselves',
 } as const;
 type Gate = keyof typeof GATES;
 
@@ -140,6 +143,20 @@ interface AcceptanceCase {
   type: AcceptedObjectType;
   /** Cited proposal, or none at all (the answer-binding shape). */
   cited: 'model_a' | 'human' | 'none';
+  /**
+   * Who *staged* the cited proposal, drawn independently of what it names as
+   * proposer and of who accepts it.
+   *
+   * A dimension as of r9, and it is a dimension because of what it cost to leave
+   * fixed: every acceptance cell above recorded its proposal as `model_proposer`,
+   * so "a **person** staged a **model**-attributed reading and then accepted it
+   * himself" was not a cell in this matrix at all. That is D1 — the gauntlet
+   * minted a commitment against a colleague through it, over one socket, from an
+   * ordinary membership. The lifecycle matrix below already varied `recordedBy`
+   * for rejection and supersession; acceptance is where it mattered most and was
+   * the one row that held it constant.
+   */
+  recordedBy: ActorKind;
   /** Whether the cited proposal clears this type's floor. */
   confidence: 'above' | 'below';
   /** Only meaningful for a claim. */
@@ -160,6 +177,17 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   if (testCase.cited === 'none' && !human) return 'direct_acceptance';
   if (testCase.cited !== 'none' && !ownsProposal(testCase.actor, testCase.cited)) {
     return 'acceptance_binding';
+  }
+  // "A person's acceptance is not a receipt for a reading they staged themselves,
+  // when that reading wears a machine's name or puts somebody else's name on
+  // something." Restated from `selfStagedReadingRefusal`, not imported from it.
+  //
+  // `recordedBy: 'human'` is ALICE and so is the human accepter, which is what
+  // makes those the same person; every `claim` and `commitment` payload in this
+  // file names BOB, which is what makes them somebody else's.
+  if (human && testCase.recordedBy === 'human' && testCase.cited !== 'none') {
+    const namesSomebodyElse = testCase.type === 'claim' || testCase.type === 'commitment';
+    if (testCase.cited === 'model_a' || namesSomebodyElse) return 'self_staged_reading';
   }
   if (testCase.cited !== 'none' && !human && testCase.confidence === 'below') {
     return 'confidence_floor';
@@ -415,15 +443,24 @@ for (const actor of ACTOR_KINDS) {
         // not a cell, it is the same cell twice.
         if (cited === 'none' && confidence === 'below') continue;
         const verifiedVariants = type === 'claim' ? [false, true] : [false];
+        // Who staged it, for the same reason: with nothing cited there is no
+        // staging to attribute. Two stagers rather than all four — a human and a
+        // model — because the rule this dimension exists for splits on exactly
+        // that, and the system actor cannot appear as a proposer at all.
+        const recordedByVariants: ActorKind[] =
+          cited === 'none' ? ['model_proposer'] : ['model_proposer', 'human'];
         for (const verified of verifiedVariants) {
-          acceptanceCases.push({
-            kind: 'object_accepted',
-            actor,
-            type,
-            cited,
-            confidence,
-            verified,
-          });
+          for (const recordedBy of recordedByVariants) {
+            acceptanceCases.push({
+              kind: 'object_accepted',
+              actor,
+              type,
+              cited,
+              recordedBy,
+              confidence,
+              verified,
+            });
+          }
         }
       }
     }
@@ -432,7 +469,7 @@ for (const actor of ACTOR_KINDS) {
 
 describe('authority matrix — object_accepted, every actor × type × citation × confidence', () => {
   for (const testCase of acceptanceCases) {
-    const label = `${testCase.actor} accepts ${testCase.type}${testCase.verified ? ' (verified)' : ''} via ${testCase.cited}${testCase.cited === 'none' ? '' : ` @${testCase.confidence} floor`}`;
+    const label = `${testCase.actor} accepts ${testCase.type}${testCase.verified ? ' (verified)' : ''} via ${testCase.cited}${testCase.cited === 'none' ? '' : ` staged by ${testCase.recordedBy} @${testCase.confidence} floor`}`;
     it(label, () => {
       const suffix = `${acceptanceCases.indexOf(testCase)}`;
       const events: AuthoredEvent[] = [];
@@ -458,7 +495,7 @@ describe('authority matrix — object_accepted, every actor × type × citation 
             confidence,
             verified: testCase.verified,
             // Independent of the proposer, and of the accepting actor.
-            recordedBy: 'model_proposer',
+            recordedBy: testCase.recordedBy,
           }),
         );
       }
@@ -845,15 +882,21 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
 });
 
 describe('the matrix as a whole', () => {
-  it('enumerates every cell it claims to — 4 actors × 5 types × 5 citation/confidence shapes', () => {
-    // Per actor, per type: two cited proposals × two confidence bands, plus the
-    // one direct shape (with nothing cited there is no band) = 5. Five types, of
-    // which `claim` is doubled for verified/unverified: 4×5 + 5×2 = 30.
-    expect(acceptanceCases).toHaveLength(4 * (4 * 5 + 5 * 2));
+  it('enumerates every cell it claims to — 4 actors × 5 types × 9 citation/staging/confidence shapes', () => {
+    // Per actor, per type: two cited proposals × two confidence bands × two
+    // stagers, plus the one direct shape (with nothing cited there is no band and
+    // no staging) = 9. Five types, of which `claim` is doubled for
+    // verified/unverified: 4×9 + 9×2 = 54 per actor.
+    //
+    // The staging dimension is r9's and is the one that was missing: every cell
+    // here used to be recorded by `model_proposer`, so the whole *human*-staged
+    // half of the space — where D1 lives — was outside the enumeration while the
+    // file's own header claimed the case space was enumerated.
+    expect(acceptanceCases).toHaveLength(4 * (4 * 9 + 9 * 2));
     const distinct = new Set(
       acceptanceCases.map(
         (entry) =>
-          `${entry.actor}|${entry.type}|${entry.cited}|${entry.confidence}|${entry.verified}`,
+          `${entry.actor}|${entry.type}|${entry.cited}|${entry.recordedBy}|${entry.confidence}|${entry.verified}`,
       ),
     );
     expect(distinct.size).toBe(acceptanceCases.length);
@@ -867,9 +910,40 @@ describe('the matrix as a whole', () => {
     expect(refused).toBeLessThan(acceptanceCases.length);
   });
 
-  it('leaves the human row entirely open — the floor gates machines, not people', () => {
-    for (const testCase of acceptanceCases.filter((entry) => entry.actor === 'human')) {
-      expect(expectedForAcceptance(testCase)).toBe('allowed');
+  it('leaves the human row open except where a person is the only judgement in the room', () => {
+    /**
+     * Until r9 this said "entirely open — the floor gates machines, not people",
+     * and that was the whole claim: θ, the receipt, and the attribution rules
+     * exist to bound *machines*, and a person's judgement is the receipt.
+     *
+     * It is still the claim, and r9 narrows it by one shape rather than weakening
+     * it. The narrowing is not about people being untrusted — it is that a person
+     * accepting a reading **they** staged is not a second judgement about a
+     * reading, and both things the human path skips on the strength of one (the
+     * receipt checks, and #4's third-party confirmation) assume there is one.
+     *
+     * Written as a partition rather than as "allowed unless refused", so a third
+     * refusal creeping into the human row fails here instead of being absorbed.
+     */
+    const humanRow = acceptanceCases.filter((entry) => entry.actor === 'human');
+    const onlyJudgementInTheRoom = (entry: AcceptanceCase) =>
+      entry.cited !== 'none' &&
+      entry.recordedBy === 'human' &&
+      (entry.cited === 'model_a' || entry.type === 'claim' || entry.type === 'commitment');
+
+    // The exception is a real part of the space, not an empty set the partition
+    // is trivially true over — and both of its grounds are populated.
+    expect(
+      humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'model_a').length,
+    ).toBeGreaterThan(0);
+    expect(
+      humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'human').length,
+    ).toBeGreaterThan(0);
+
+    for (const testCase of humanRow) {
+      expect(expectedForAcceptance(testCase)).toBe(
+        onlyJudgementInTheRoom(testCase) ? 'self_staged_reading' : 'allowed',
+      );
     }
     for (const shape of RECEIPT_SHAPES) {
       expect(expectedForReceipt('human', shape)).toBe('allowed');

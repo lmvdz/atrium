@@ -14,6 +14,7 @@ import {
 import { and, count, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Command, ProposalDraft } from '../../apps/server/src/commands.js';
+import { projectRoomEvent } from '../../apps/server/src/projections.js';
 import {
   openDatabase,
   resetDatabase,
@@ -67,19 +68,26 @@ const send = (roomId: string, body: string, clientMessageId: string | null = nul
 });
 
 /**
- * The non-payload half of a model proposal — every draft below shares it.
+ * The non-payload half of a proposal staged over a socket — every draft below
+ * shares it.
  *
- * It takes the cited message rather than defaulting to none, because #21 made
- * "a model proposal cites at least one message" a schema rule instead of a
- * comment: a reading with no receipt is an assertion, and the acceptance
- * boundary exists to refuse assertions. The quote is the span of that message
- * the reading rests on, and is required outright for a model claim or
- * commitment — the two types that put a name on somebody.
+ * It takes the cited message rather than defaulting to none because that is what
+ * a receipt is, and the citation is projected into `proposal_sources` whose
+ * composite FK refuses a message from another room or no message at all.
+ *
+ * **It no longer names a proposer.** Until r9 this helper was `modelDraft` and
+ * said `proposer: {kind:'model', model:'test-model'}`, because the command layer
+ * took the proposer from the caller — which is the D1 defect, and a fixture
+ * asserting the shape of the thing that was wrong. `ProposalDraft` has no
+ * `proposer` field now: everything staged over a socket is a human proposal by
+ * the session's own user. The schema rules that apply only to a *model* proposal
+ * — non-empty provenance, a mandatory quote on a claim or commitment — are
+ * therefore not reachable from the wire at all, and are covered where they live,
+ * in `packages/core/test/schemas.test.ts`.
  */
-function modelDraft(messageId: string, quote: string): Omit<ProposalDraft, 'type' | 'payload'> {
+function citedDraft(messageId: string, quote: string): Omit<ProposalDraft, 'type' | 'payload'> {
   return {
     confidence: 0.7,
-    proposer: { kind: 'model', model: 'test-model' },
     provenance: [messageId],
     quote,
     interpretationId: null,
@@ -197,14 +205,14 @@ describe('send_message', () => {
 
 describe('the proposal → acceptance boundary, over the wire', () => {
   /**
-   * A model proposal has to carry a receipt now (#21).
+   * The message a staged reading cites.
    *
-   * `provenance` may not be empty for a model proposer — a model reading with no
-   * cited message is an assertion, and the acceptance boundary exists to refuse
-   * assertions. So the fixture posts the message the reading is drawn from and
-   * cites it, which is what the interpretation pipeline will do. A *human*
-   * proposer may cite nothing, because a person staging their own reading is the
-   * receipt; that path is exercised elsewhere in this file.
+   * A human proposer may cite nothing — a person staging their own reading is
+   * the receipt — so this is not a schema requirement on the wire path. It is
+   * here because the acceptance projects `object_sources`, whose composite
+   * `(room_id, message_id)` foreign key refuses a citation of a message from
+   * another room or of a message that does not exist, and because a proposal with
+   * a receipt is the shape a reader can actually check.
    */
   async function citedMessage(client: TestClient, body: string): Promise<string> {
     const ack = await client.command(send(room.roomId, body));
@@ -222,7 +230,6 @@ describe('the proposal → acceptance boundary, over the wire', () => {
         type: 'decision',
         payload: { statement, decidedBy: null, status: 'active' },
         confidence: 0.8,
-        proposer: { kind: 'model', model: 'test-model' },
         provenance: [messageId],
         quote: `we should ${statement}`,
         interpretationId: null,
@@ -410,7 +417,6 @@ describe('the proposal → acceptance boundary, over the wire', () => {
         type: 'open_question',
         payload: { question: 'when do we ship?', status: 'open' },
         confidence: 0.9,
-        proposer: { kind: 'model', model: 'test-model' },
         provenance: [asked],
         quote: 'when do we ship?',
         interpretationId: null,
@@ -469,26 +475,44 @@ describe('the proposal → acceptance boundary, over the wire', () => {
    * demand was never asked for — Alice having committed Bob with Bob's name on
    * both ends of the sentence. The trusted `actor` columns were always Alice's;
    * this is the other identity in the row, the one nothing was deriving.
+   *
+   * **r9 asks the same question of the other branch.** r8 fixed the *human*
+   * spelling and passed a *model* proposer through as written, on the grounds
+   * that `record_proposal` is the seam #21's pipeline will call. It is not — it
+   * is on the participant socket, and a member writing `proposer: {kind:'model',
+   * …}` by hand produced a durable row that read as a machine's reading. So this
+   * now drives both spellings of the same forgery over one socket and asserts
+   * that neither reaches the ledger, and that `staged_by_*` names the person who
+   * typed it either way.
+   *
+   * Both keys are sent through a cast, because `ProposalDraft` no longer has a
+   * `proposer` field at all — which is the fix, and is why the cast is the
+   * faithful thing to write here rather than a hole in the test: a real socket
+   * sends JSON, an unknown key is stripped by zod, and this is the only way to
+   * put on the wire what a real attacker would put on the wire.
    */
   it('files a human proposal under the session, not under the name the client sent', async () => {
     const alice = await connect(room.people.alice as string);
     const bob = room.people.bob as string;
     const messageId = await citedMessage(alice, 'bob will write the migration');
 
-    const recorded = await alice.command({
-      name: 'record_proposal',
-      roomId: room.roomId,
-      proposal: {
-        type: 'commitment',
-        payload: { statement: 'write the migration', owner: bob, due: null, status: 'open' },
-        confidence: 0.9,
-        // The forgery: Alice's socket, Bob's name on the staging.
-        proposer: { kind: 'human', userId: bob },
-        provenance: [messageId],
-        quote: 'bob will write the migration',
-        interpretationId: null,
-      },
-    });
+    const forge = async (proposer: unknown) =>
+      alice.command({
+        name: 'record_proposal',
+        roomId: room.roomId,
+        proposal: {
+          type: 'commitment',
+          payload: { statement: 'write the migration', owner: bob, due: null, status: 'open' },
+          confidence: 0.9,
+          proposer,
+          provenance: [messageId],
+          quote: 'bob will write the migration',
+          interpretationId: null,
+        },
+      } as unknown as Command);
+
+    // The forgery r8 found: Alice's socket, Bob's name on the staging.
+    const recorded = await forge({ kind: 'human', userId: bob });
     expect(recorded.type).toBe('ack');
 
     const proposal = (
@@ -503,6 +527,144 @@ describe('the proposal → acceptance boundary, over the wire', () => {
     // somebody other than its stager, so it is third-party and waits for Bob.
     const [stored] = await handle.db.select().from(proposals).where(eq(proposals.id, proposal.id));
     expect(stored?.proposerUserId).toBe(room.people.alice);
+    expect(stored?.stagedByKind).toBe('human');
+    expect(stored?.stagedById).toBe(room.people.alice);
+
+    // The forgery r9 found: the same sentence, dressed as a machine's reading.
+    const dressed = await forge({ kind: 'model', model: 'claude-opus-4.6' });
+    expect(dressed.type).toBe('ack');
+    const second = (
+      await lastEvent<{ proposal: { id: string; proposer: { kind: string; userId: string } } }>(
+        room.roomId,
+      )
+    ).proposal;
+    expect(second.proposer).toEqual({ kind: 'human', userId: room.people.alice });
+
+    const [dressedRow] = await handle.db
+      .select()
+      .from(proposals)
+      .where(eq(proposals.id, second.id));
+    expect(dressedRow?.proposerKind).toBe('human');
+    expect(dressedRow?.proposerModel).toBeNull();
+    expect(dressedRow?.proposerUserId).toBe(room.people.alice);
+    expect(dressedRow?.stagedByKind).toBe('human');
+    expect(dressedRow?.stagedById).toBe(room.people.alice);
+    expect(dressedRow?.quote).toBe('bob will write the migration');
+  });
+
+  /**
+   * The other half of D1, and the half that closes the *class* rather than
+   * today's door.
+   *
+   * Removing `proposer` from the draft means a socket cannot spell the forgery
+   * any more — but it is one seam, and #21's pipeline will need a seam that
+   * *can* stage a model reading. So the durable rule has to hold against a model
+   * proposal that reached the ledger some other way, and this drives exactly
+   * that: `ledger.append` (the production append, the real reducer, the real
+   * trusted-window derivation) records a model-attributed commitment naming Bob,
+   * under **Alice's** human actor. Then Alice accepts it over her socket, which
+   * is the ordinary `accept_proposal` command every member has.
+   *
+   * On r8 this was two acks and a durable commitment against Bob. The refusal
+   * has to be a *refusal* — no object, no row, an aborted transaction — not an
+   * `applied_with_issue` that lands the object and files a complaint.
+   */
+  it('refuses a human accepting a machine-attributed reading they staged themselves', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = room.people.bob as string;
+    const messageId = await citedMessage(alice, 'anything at all, in alice’s own words');
+
+    const proposalId = randomUUID();
+    await server.ledger.append({
+      roomId: room.roomId,
+      // The staging actor: a person. The proposal it carries says a model read
+      // it. Those are the two facts the rule is about, and until r9 only the
+      // second one was recorded anywhere a reader could see.
+      actor: { kind: 'human', userId: room.people.alice as string },
+      build: ({ id, at }) =>
+        ({
+          id,
+          at,
+          type: 'proposal_recorded',
+          proposal: {
+            id: proposalId,
+            roomId: room.roomId,
+            type: 'commitment',
+            payload: {
+              statement: 'bob takes full responsibility and will pay personally',
+              owner: bob,
+              due: null,
+              status: 'open',
+            },
+            confidence: 1,
+            proposer: { kind: 'model', model: 'claude-opus-4.6' },
+            provenance: [messageId],
+            // A sentence that appears in no cited message. Nothing on the human
+            // acceptance path ever matched it against anything, which is why the
+            // dressing was worth putting on.
+            quote: 'yes, I take full responsibility and will pay for it personally',
+            interpretationId: null,
+            status: 'proposed',
+            createdAt: at,
+          },
+        }) as never,
+      // The real projection, in the same transaction as the append — the same
+      // callback `appendAndProject` hands over. Without it this would append a
+      // ledger row and assert about a `proposals` table nobody wrote.
+      project: (context) => projectRoomEvent(context),
+    });
+
+    // The read model can now name the person, which is the fact the refusal and
+    // every other remedy needs.
+    const [staged] = await handle.db.select().from(proposals).where(eq(proposals.id, proposalId));
+    expect(staged?.proposerKind).toBe('model');
+    expect(staged?.stagedByKind).toBe('human');
+    expect(staged?.stagedById).toBe(room.people.alice);
+
+    const refused = await alice.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    /**
+     * An `ack` carrying an issue, not a `nack` — and that is the architecture's
+     * answer for every authority gate, not a weakening of this one. `ledger.ts`:
+     * "`append` aborts on `rejected` and `malformed` only. A **business** refusal
+     * is `applied_with_issue`, and `applied_with_issue` is appended — that is the
+     * whole point of it." The attempt is history; what it did not do is mint
+     * anything. `acceptance_binding` and the receipt gates all answer this way.
+     *
+     * So the assertion that matters is the pair: the reason is on the wire, and
+     * `accepted_objects` is empty. On r8 this was `ack` with `issues: []` and a
+     * durable commitment against Bob.
+     */
+    expect(refused.type).toBe('ack');
+    expect(refused).toMatchObject({
+      issues: [expect.stringContaining('nobody validates their own attribution to a model')],
+    });
+
+    // No object, and the proposal is still open for somebody else to judge.
+    const objects = await handle.db
+      .select()
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.roomId, room.roomId));
+    expect(objects).toEqual([]);
+    const [after] = await handle.db.select().from(proposals).where(eq(proposals.id, proposalId));
+    expect(after?.status).toBe('proposed');
+
+    // …and somebody else in the room can, which is the design position this
+    // narrows rather than abandons: a person who reads a machine's reading and
+    // accepts it *is* the receipt, as long as they are not the person who wrote
+    // the reading.
+    const bobClient = await connect(bob);
+    const accepted = await bobClient.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(accepted.type).toBe('ack');
   });
 });
 
@@ -653,20 +815,50 @@ describe('live ≡ replay', () => {
     await alice.command(send(room.roomId, quote));
     const cited = (await lastEvent<{ messageId: string }>(room.roomId)).messageId;
 
-    await alice.command({
-      name: 'record_proposal',
+    /**
+     * Staged by a **model**, through the ledger's own append — as of r9, the only
+     * way there is.
+     *
+     * Until r9 this went over the socket with `proposer: {kind:'model', …}` in the
+     * draft, because the command layer took the proposer from the caller. That is
+     * D1, and the command layer no longer offers the field: a socket stages human
+     * proposals and nothing else. A model reading now enters the way #21's
+     * pipeline will enter it, under a model actor, which is also what makes the
+     * acceptance below legal — `actorMatchesProposer` binds a model actor to its
+     * own model id, so a model may not accept a person's staged reading.
+     *
+     * Note what did **not** change: this is still the production append, still the
+     * real reducer, still the real trusted-window derivation. The staging moved
+     * one seam over; nothing about what this test measures did.
+     */
+    const proposalId = randomUUID();
+    await server.ledger.append({
       roomId: room.roomId,
-      proposal: {
-        ...modelDraft(cited, quote),
-        type: 'claim',
-        payload: {
-          statement: quote,
-          claimant: room.people.alice as string,
-          verification: 'unverified',
-        },
-      },
+      actor: { kind: 'model', model: 'test-model' },
+      build: ({ id, at }) =>
+        ({
+          id,
+          at,
+          type: 'proposal_recorded',
+          proposal: {
+            id: proposalId,
+            roomId: room.roomId,
+            type: 'claim',
+            payload: {
+              statement: quote,
+              claimant: room.people.alice as string,
+              verification: 'unverified',
+            },
+            confidence: 0.7,
+            proposer: { kind: 'model', model: 'test-model' },
+            provenance: [cited],
+            quote,
+            interpretationId: null,
+            status: 'proposed',
+            createdAt: at,
+          },
+        }) as never,
     });
-    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
 
     /**
      * Accepted by a **model**, through the ledger's own append.
@@ -764,7 +956,7 @@ describe('live ≡ replay', () => {
     // message_id)` foreign key refuses a citation of a message from another room
     // or of no message at all.
     const cited = (await lastEvent<{ messageId: string }>(room.roomId)).messageId;
-    const draft = modelDraft(cited, quote);
+    const draft = citedDraft(cited, quote);
 
     const recordProposal = async (draft: ProposalDraft) => {
       await alice.command({
@@ -868,7 +1060,6 @@ describe('live ≡ replay', () => {
           verification: 'unverified',
         },
         confidence: 0.6,
-        proposer: { kind: 'model', model: 'test-model' },
         provenance: [],
         interpretationId: null,
       },

@@ -12,7 +12,6 @@ import {
   ObjectivePayload,
   OpenQuestionPayload,
   type Proposal,
-  Proposer,
   Provenance,
   type Relation,
 } from '@atrium/core';
@@ -58,27 +57,36 @@ import type { Authorizer, Session } from './session.js';
  * `record_proposal` and `reject_proposal` are not in #12's six. They are here
  * because `accept_proposal` is otherwise unreachable — a proposal has to exist
  * before it can be accepted, and the interpretation pipeline that will mint
- * them is #21's. They are the seam that pipeline will call, and nothing in them
- * interprets anything: the caller supplies the reading, the reducer still
- * refuses to let it arrive pre-accepted.
+ * them is #21's. Nothing in them interprets anything: the caller supplies the
+ * reading, the reducer still refuses to let it arrive pre-accepted.
+ *
+ * They are **not** the seam #21's pipeline will call. r8 said they were, and r9
+ * found what that sentence cost: a participant socket that can describe its own
+ * sentence as a machine's reading (see `draftBase`). A proposal staged here is a
+ * human proposal by the session's own user, full stop; #21 will need a seam of
+ * its own, and whatever it is, `stagedBy` will record which one was used.
  */
 
 const AttachmentList = z.array(MessageAttachment).max(20).default([]);
 
-/** A proposal as a caller submits it: the reading, without a position or an id. */
+/**
+ * A proposal as a caller submits it: the reading, without a position or an id.
+ *
+ * **`proposer` is not here.** It is derived from the session in
+ * `draftToProposal`, and a socket has no way to write it (#22 r9, D1). r8
+ * overwrote a *human* proposer with the session user and passed a **model**
+ * proposer through as written, on the grounds that this is the seam #21's
+ * pipeline will call — but the pipeline does not exist and the seam is on the
+ * participant socket, so the only thing that ever reached the model branch was a
+ * participant typing it. That is how a member minted a commitment against a
+ * colleague under `proposer_kind='model'`. Removed rather than validated, for the
+ * same reason `status` is not taken from the caller: a field whose value is
+ * always overridden invites someone to believe it, and there is no legitimate
+ * value for a socket to send. See `draftToProposal`.
+ */
 const draftBase = {
   confidence: z.number().min(0).max(1),
-  /**
-   * Who staged this reading.
-   *
-   * A **model** proposer is taken as given — that is what this field is for, and
-   * `record_proposal` is the seam #21's pipeline calls. A **human** proposer is
-   * overwritten with the session's own user in `draftToProposal`; whatever a
-   * client sends for it is discarded. See the note there for the rule that was
-   * reading it and the forgery that reached that rule.
-   */
-  proposer: Proposer,
-  /** Message ids this reading was drawn from. Non-empty for a model proposer. */
+  /** Message ids this reading was drawn from. */
   provenance: z.array(Id).default([]),
   /**
    * The verbatim span of a cited message this reading rests on.
@@ -479,7 +487,7 @@ function describeCause(error: unknown): string {
  * `proposed` and record the coercion, and offering a field whose value is
  * always overridden invites someone to believe it.
  *
- * ## A *human* proposer is the session, not a parameter (#22 r8 self-review)
+ * ## The proposer is the session, not a parameter (#22 r8, completed by r9)
  *
  * `proposer` looked like part of "the reading", which the caller supplies. It is
  * not: `acceptance.ts:381-399` reads `proposal.proposer.userId` to decide whether
@@ -489,20 +497,33 @@ function describeCause(error: unknown): string {
  * sentence's author wrote. A member could stage `proposer: {kind:'human', userId:
  * <victim>}` on a commitment owned by that victim: `staged === attributedTo`, so
  * it classified as `self`, and the confirmation the rule exists to demand was
- * never asked for. Same class as the round's other defects — asked what the
- * guard's input was made of and who wrote it, and the answer was "the caller".
+ * never asked for.
  *
- * So a human proposer is overwritten with the session's own user, exactly as
- * `actorOf` derives the trusted actor, rather than validated against it: there is
- * no legitimate value for a client to send here, so there is nothing to refuse
+ * r8 fixed the human branch and left the model branch passing through as written,
+ * because "`record_proposal` is the seam #21's interpretation pipeline calls".
+ * **That justification named a caller that does not exist.** The seam is exposed
+ * on the participant socket, so the only thing that ever reached the model branch
+ * was a participant writing it by hand — and r9's gauntlet did: a member staged a
+ * `commitment` naming a colleague as owner, marked `proposer: {kind:'model',
+ * model:'claude-opus-4.6'}, confidence: 1`, with a quote that appears in no cited
+ * message, then accepted it himself. Both commands acked with `issues: []`.
+ * `@atrium/core`'s "a model reading must cite messages and quote them" bounded
+ * nothing, because *citing* is not *matching* and the only thing that matches a
+ * quote against a message is the receipt gate — which a human acceptance skips.
+ *
+ * So the field is gone. Every proposal staged over a socket is a human proposal
+ * by the session's own user, derived exactly as `actorOf` derives the trusted
+ * actor. There is no value for a client to send, so there is nothing to refuse
  * and nothing for a mismatch message to leak.
  *
- * A **model** proposer is untouched and is the reason this field exists at all —
- * `record_proposal` is the seam #21's interpretation pipeline calls, and a model
- * reading is not staged by the person whose socket carried it. That path is
- * bounded elsewhere: `@atrium/core` requires non-empty `provenance` and a `quote`
- * for a model claim or commitment, so a model reading still has to name the
- * message it rests on.
+ * That closes today's door and not the class — a member could no longer *write*
+ * the model attribution, but the day #21's pipeline lands and this seam has a
+ * legitimate model-staging caller again, the same acceptance would be available
+ * to whoever can reach it. The class is closed one layer down, by
+ * `selfStagedReadingRefusal` in `@atrium/core`: a machine-attributed reading
+ * needs a human other than its stager to accept it, and `ProposalRecord.stagedBy`
+ * is what makes that answerable. Neither half is sufficient alone; see the note
+ * on that function.
  */
 function draftToProposal(
   draft: ProposalDraft,
@@ -516,8 +537,7 @@ function draftToProposal(
     type: draft.type,
     payload: draft.payload,
     confidence: draft.confidence,
-    proposer:
-      draft.proposer.kind === 'human' ? { kind: 'human', userId: session.userId } : draft.proposer,
+    proposer: { kind: 'human', userId: session.userId },
     provenance: draft.provenance,
     quote: draft.quote,
     interpretationId: draft.interpretationId,

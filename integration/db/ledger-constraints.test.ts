@@ -1468,6 +1468,10 @@ describe('composite (room_id, id) foreign keys — rooms are the isolation bound
       confidence: 0.9,
       proposerKind: 'model',
       proposerModel: 'test',
+      // The stager (r9): who typed the proposal, as against what the reading
+      // claims to be. NOT NULL, so a direct insert has to say.
+      stagedByKind: 'model',
+      stagedById: 'test',
     });
     await violatesConstraint('accepted_objects_proposal_same_room_fk', () =>
       handle.db.insert(acceptedObjects).values({
@@ -1568,6 +1572,10 @@ describe('attention_items — a polymorphic subject that is still room-scoped', 
       confidence: 0.9,
       proposerKind: 'model',
       proposerModel: 'test',
+      // The stager (r9): who typed the proposal, as against what the reading
+      // claims to be. NOT NULL, so a direct insert has to say.
+      stagedByKind: 'model',
+      stagedById: 'test',
     });
     return id;
   }

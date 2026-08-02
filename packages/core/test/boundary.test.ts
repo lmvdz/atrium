@@ -317,6 +317,11 @@ describe('absent or empty — the receipt inputs that are refused, not skipped',
         interpretationId: null,
         createdAt: at(1),
       } as StoredProposal,
+      // A rehydrated record carries the stager the ledger row recorded (#22 r9).
+      // The model that staged it here, so this stays a test about the quote: the
+      // acceptance below is by a model actor, which runs the receipt gates
+      // whoever staged the proposal.
+      stagedBy: { kind: 'model', model: 'test-model' },
       status: 'proposed',
       acceptedObjectId: null,
       rejectedReason: null,
