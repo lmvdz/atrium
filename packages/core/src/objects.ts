@@ -62,6 +62,26 @@ export const objectPayloadByType = {
   objective: ObjectivePayload,
 } as const;
 
+/** The payload a given type carries, keyed off the one table above. */
+export type ObjectPayloadOf<K extends AcceptedObjectType> = z.infer<
+  (typeof objectPayloadByType)[K]
+>;
+
+/**
+ * **Every field a payload of this type has**, read off the schema rather than
+ * written out.
+ *
+ * r10. `findDuplicate` compared exactly one field of a payload — the sentence —
+ * and destroyed every reading that differed only in `owner`, `claimant`, `due`,
+ * `status` or `verification`. The repair that adds the two fields the finding
+ * was demonstrated with is the enumeration `RETRO.md` refuses; this is the
+ * enumeration that cannot fall behind, because the schema *is* the list. A field
+ * added to a payload above appears here in the same commit.
+ */
+export function objectPayloadKeys(type: AcceptedObjectType): readonly string[] {
+  return Object.keys(objectPayloadByType[type].shape);
+}
+
 const envelope = {
   id: Id,
   roomId: Id,
@@ -109,6 +129,37 @@ export type Commitment = z.infer<typeof Commitment>;
 export type OpenQuestion = z.infer<typeof OpenQuestion>;
 export type Claim = z.infer<typeof Claim>;
 export type Objective = z.infer<typeof Objective>;
+
+/**
+ * The text field of a payload, whichever the type calls it: `question` for an
+ * open question, `title` for an objective, `statement` for the other three.
+ *
+ * It lives here, on the types themselves, rather than in the acceptance engine
+ * where it started — `authority.ts` needs it to ask whether a quote bears the
+ * sentence being minted, and it must not import the engine to find out (the
+ * engine imports the reducer, which imports `authority.ts`).
+ */
+export function payloadText(type: AcceptedObjectType, payload: Record<string, unknown>): string {
+  const value = payload[payloadTextKey(type)];
+  return typeof value === 'string' ? value : '';
+}
+
+/**
+ * Which key `payloadText` reads, named rather than recomputed.
+ *
+ * r10's `payloadsMatch` compares every field of a payload *except* the sentence,
+ * which it has already compared with the receipt's alignment — so it needs the
+ * name of the one key to skip, and a second copy of this ternary is how the two
+ * would drift.
+ */
+export function payloadTextKey(type: AcceptedObjectType): string {
+  return type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';
+}
+
+/** `payloadText` for a whole object. */
+export function objectStatement(object: AcceptedObject): string {
+  return payloadText(object.type, object.payload as unknown as Record<string, unknown>);
+}
 
 /** Narrowing helper — `type` is the discriminator everywhere in the system. */
 export function isType<T extends AcceptedObjectType>(

@@ -46,3 +46,11 @@ yarn-error.log*
 
 # harness-managed agent worktrees and session state
 .claude/
+
+# blind-review scratch (prompt, runner scripts, transcripts) — evidence lives on the ticket
+critic-prompt.txt
+run-codex.sh
+run-grok.sh
+codex-r5*.txt
+grok-r5*.txt
+receipt.md

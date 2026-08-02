@@ -1,0 +1,1632 @@
+{
+  "$comment": [
+    "The mutant ledger for @atrium/core.",
+    "",
+    "Standing campaign rule, from #21's round-2 gauntlet: a mutation claim ships",
+    "with a committed, re-runnable mutant list and its results, or it is not",
+    "evidence. Round 2's write-up claimed '25 run, 25 caught' with nothing in the",
+    "repo a reviewer could execute, and that is a number, not a receipt.",
+    "",
+    "Run it:   node packages/core/mutants/run.mjs",
+    "Gate it:  node packages/core/mutants/run.mjs --check   (exit 1 if any survives)",
+    "One:      node packages/core/mutants/run.mjs --only quote_bearing_disabled",
+    "",
+    "Each mutant is a single verbatim substitution in one source file. The runner",
+    "refuses a mutant whose `find` does not occur exactly once, so a mutant that",
+    "has drifted out of the code is a loud failure rather than a silent pass — the",
+    "failure mode a ledger like this actually has.",
+    "",
+    "`catches` names the tests that must go red. It is checked, not decorative:",
+    "the runner asserts every listed name appears among the failures, so a mutant",
+    "that is caught by some unrelated test counts as an escape."
+  ],
+  "mutants": [
+    {
+      "id": "boundary_parse_dropped_append",
+      "why": "r2's blocking finding, route 1: appendEvent folds whatever it is handed. Reverting to r2 lets a raw model claim with no quote through.",
+      "file": "src/reduce.ts",
+      "find": "  const parsed = CoreEvent.safeParse(event);\n  if (!parsed.success) {\n    return {\n      outcome: 'malformed',\n      event,\n      actor: trusted.actor,\n      detail: parseFailureDetail(parsed.error),\n      state,\n    };\n  }\n  const entry: AuthoredEvent = { ...trusted, event: parsed.data };\n  const rejection = rejectionFor(state, parsed.data);\n  if (rejection) {\n    return { outcome: 'rejected', event: parsed.data, actor: trusted.actor, ...rejection, state };\n  }",
+      "replace": "  const entry: AuthoredEvent = { ...trusted, event };\n  const rejection = rejectionFor(state, event);\n  if (rejection) {\n    return { outcome: 'rejected', event, actor: trusted.actor, ...rejection, state };\n  }",
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
+    },
+    {
+      "id": "boundary_parse_dropped_fold",
+      "why": "The same finding on the replay path: reduce/foldEvents fold unparsed rows.",
+      "file": "src/reduce.ts",
+      "find": "  for (const entry of log) {\n    const parsed = CoreEvent.safeParse(entry.event);\n    if (!parsed.success) {\n      outcomes.push({\n        outcome: 'malformed',\n        event: entry.event,\n        actor: entry.actor,\n        detail: parseFailureDetail(parsed.error),\n      });\n      continue;\n    }\n    rows.push({ ...entry, event: parsed.data });\n  }",
+      "replace": "  for (const entry of log) rows.push(entry);",
+      "catches": [
+        "refuses a raw model claim proposal that quotes nothing, and never records it",
+        "refuses a whitespace-only quote exactly as it refuses a missing one",
+        "folds the well-formed rows around a malformed one, and reports it"
+      ]
+    },
+    {
+      "id": "empty_window_reducer",
+      "why": "r2 gauntlet, empty presence: `messages: []` passes an undefined-only check and the receipt is skipped, not refused.",
+      "file": "src/authority.ts",
+      "find": "  if (window === undefined || window.length === 0 || !window.some((m) => hasContent(m.body))) {",
+      "replace": "  if (window === undefined) {",
+      "catches": ["refuses `messages: []` at the reducer, exactly as it refuses no messages"]
+    },
+    {
+      "id": "empty_window_engine",
+      "why": "The same hole in the acceptance engine, which the attention panel reads through.",
+      "file": "src/acceptance.ts",
+      "find": "  if (proposal.proposer.kind === 'model' && windowIsAbsent) {",
+      "replace": "  if (proposal.proposer.kind === 'model' && messages === undefined) {",
+      "catches": [
+        "refuses `messages: []` at the engine, exactly as it refuses no messages",
+        "refuses `messages: []` at the attention panel, with a receipt for the silence"
+      ]
+    },
+    {
+      "id": "reducer_quote_gate_dropped",
+      "why": "The reducer goes back to trusting the schema one layer up for the quote.",
+      "file": "src/authority.ts",
+      "find": "  if (isBlank(proposal.quote)) {\n    return {\n      gate: 'missing_quote',",
+      "replace": "  if (false && isBlank(proposal.quote)) {\n    return {\n      gate: 'missing_quote',",
+      "catches": [
+        "re-requires a non-empty quote at the reducer, not one layer up",
+        "names the missing-quote gate rather than folding it into the receipt"
+      ]
+    },
+    {
+      "id": "validator_quote_requirement_dropped",
+      "why": "The validator stops requiring a quote of a model reading that names somebody.",
+      "file": "src/escalation.ts",
+      "find": "  if (fromModel && normalizedQuote.length === 0) {",
+      "replace": "  if (false && fromModel && normalizedQuote.length === 0) {",
+      "catches": [
+        "does not let a padded citation list plus an empty quote flip attribution",
+        "covers every problem kind it declares",
+        "requires a quote from a model reading of every type, not only the two that name a person"
+      ]
+    },
+    {
+      "id": "attribution_fallback_restored",
+      "why": "r2's citation-list fallback comes back: with no bearing message, any cited author supports the attribution. This is the padding attack.",
+      "file": "src/escalation.ts",
+      "find": "    const supported = bearing\n      ? bearing.authorId === attributed\n      : fromModel\n        ? false\n        : cited.some((message) => message.authorId === attributed);",
+      "replace": "    const supported = bearing\n      ? bearing.authorId === attributed\n      : cited.some((message) => message.authorId === attributed);",
+      "catches": [
+        "does not let a padded citation list plus an empty quote flip attribution",
+        "rejects a quote elided with an ellipsis that is not verbatim anywhere"
+      ]
+    },
+    {
+      "id": "quote_bearing_disabled",
+      "why": "r2 gauntlet, major 1: the quote no longer has to carry the sentence being minted. Cite Bob's 'yes', mint 'Bob will deploy'.",
+      "file": "src/escalation.ts",
+      "find": "    if (fromModel) {\n      const statement = subject.statement ?? '';",
+      "replace": "    if (false) {\n      const statement = subject.statement ?? '';",
+      "catches": [
+        "refuses a verbatim, correctly attributed quote that carries a different sentence",
+        "refuses the same thing at the reducer, where it is a trust boundary",
+        "covers every problem kind it declares",
+        "refuses the exact pair from the gauntlet at the acceptance engine"
+      ]
+    },
+    {
+      "id": "min_quote_length_unenforced",
+      "why": "minQuoteLength goes back to being a blockquote-detection knob only.",
+      "file": "src/escalation.ts",
+      "find": "    if (fromModel && normalizedQuote.length < policy.minQuoteLength) {",
+      "replace": "    if (false && fromModel && normalizedQuote.length < policy.minQuoteLength) {",
+      "catches": [
+        "enforces minQuoteLength on the acceptance path, not only on blockquotes",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "ambiguous_quote_takes_the_first",
+      "why": "Several cited authors carry the quote and the first in window order wins — attribution decided by ingestion order.",
+      "file": "src/escalation.ts",
+      "find": "    const authors = new Set(inOwnText.map((message) => message.authorId));\n    if (authors.size > 1) {",
+      "replace": "    const authors = new Set(inOwnText.map((message) => message.authorId));\n    if (false && authors.size > 1) {",
+      "catches": [
+        "refuses as ambiguous when two cited authors both carry the quote",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "bearing_message_takes_the_first",
+      "why": "The same defect one level down: bearingMessage answers 'who said this' with whoever is first.",
+      "file": "src/escalation.ts",
+      "find": "  const authors = new Set(borne.map((message) => message.authorId));\n  return authors.size === 1 ? (borne[0] ?? null) : null;",
+      "replace": "  return borne[0] ?? null;",
+      "catches": [
+        "reports every bearing message, and names one only when one person wrote it",
+        "reads an undetermined author as third-party, never as self"
+      ]
+    },
+    {
+      "id": "receipt_policy_min_quote_lowered",
+      "why": "The pinned receipt minimum moves. A pin that is derived rather than literal would not notice.",
+      "file": "src/policy.ts",
+      "find": "  minQuoteLength: 24,",
+      "replace": "  minQuoteLength: 4,",
+      "catches": [
+        "is exactly this table",
+        "is the number the escalation config quotes by, not a second one",
+        "enforces minQuoteLength on the acceptance path, not only on blockquotes"
+      ]
+    },
+    {
+      "id": "dedup_ignores_polarity",
+      "why": "Puts the stopword-filtered similarity score back in `findDuplicate`. A duplicate is discarded, so the score decides what the room never sees — and `not`, `all` and `some` are stopwords, which made a contradiction of an accepted object score 1.0 against it.",
+      "file": "src/acceptance.ts",
+      "find": "    if (!alignTokens(have, wanted).borne) continue;",
+      "replace": "    const shared = new Set(have).size === 0 ? 0 : wanted.filter((t) => have.includes(t)).length;\n    if (shared / Math.max(wanted.length, have.length) < 0.8) continue;",
+      "catches": ["does not discard a reading that says the opposite of the accepted one"]
+    },
+    {
+      "id": "claim_theta_auto_lowered",
+      "why": "r1's original escape: the θ table moves and every probe derived from it moves with it. The literal probes must catch this.",
+      "file": "src/policy.ts",
+      "find": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),",
+      "replace": "    claim: Object.freeze({ thetaAuto: 0.6, thetaMin: 0.5, autoAccept: true }),",
+      "catches": [
+        "is exactly this table",
+        "does not accept a hair under θ_auto (0.6999)",
+        "is the engine’s θ, not a second number under it"
+      ]
+    },
+    {
+      "id": "claim_theta_min_lowered",
+      "why": "The other end of the band, likewise.",
+      "file": "src/policy.ts",
+      "find": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.5, autoAccept: true }),",
+      "replace": "    claim: Object.freeze({ thetaAuto: 0.7, thetaMin: 0.3, autoAccept: true }),",
+      "catches": ["is exactly this table", "discards a hair under θ_min (0.4999)"]
+    },
+    {
+      "id": "floor_decoupled_from_theta",
+      "why": "The reducer's floor goes back to being a second, lower set of numbers than the engine's θ.",
+      "file": "src/policy.ts",
+      "find": "      autoAcceptable(type) ? DEFAULT_ACCEPTANCE_RULES[type].thetaAuto : Number.POSITIVE_INFINITY,",
+      "replace": "      autoAcceptable(type) ? 0.5 : Number.POSITIVE_INFINITY,",
+      "catches": [
+        "is the same number the reducer folds against — one table, not two",
+        "is the engine’s θ, not a second number under it"
+      ]
+    },
+    {
+      "id": "type_certification_removed",
+      "why": "r7. Deletes the engine's refusal to auto-accept a reading whose words are an undertaking as easily as an assertion, so `type` — a model-supplied field — again selects the rule that judges the proposal. One body, one quote, one author, confidence 0.95: as a `commitment` it is `pending / never_auto_accepts`, as a `claim` it is `auto_accept`.",
+      "file": "src/acceptance.ts",
+      "find": "  if (!typeCertifiableFromText(proposal.type, statement)) {",
+      "replace": "  if (false) {",
+      "catches": [
+        "refers a claim whose words are equally an undertaking",
+        "refuses the laundered commitment at the engine"
+      ]
+    },
+    {
+      "id": "claim_certification_always_true",
+      "why": "r7. Says every claim is certifiable whatever its words, which is r6 exactly: the laundered commitment goes back to auto-accepting as a claim.",
+      "file": "src/policy.ts",
+      "find": "    case 'claim':\n      return !readsAsCommitment(text);",
+      "replace": "    case 'claim':\n      return true;",
+      "catches": [
+        "refers a claim whose words are equally an undertaking",
+        "refuses the laundered commitment at the engine",
+        "refuses the laundered commitment at the reducer, where it is a boundary"
+      ]
+    },
+    {
+      "id": "declarative_open_question_allowed",
+      "why": "r7's mirror. Deletes the refusal of a declarative sentence minted as an `open_question` — the type with the lowest θ_auto in the table (0.6 against a claim's 0.7), so a reading routed through it clears a bar its own type would not.",
+      "file": "src/escalation.ts",
+      "find": "    if (\n      fromModel &&\n      subject.type === 'open_question' &&\n      !readsAsQuestion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
+      "replace": "    if (false) {",
+      "catches": [
+        "covers every problem kind it declares",
+        "does not police attribution on types that name nobody — but still requires their receipt"
+      ]
+    },
+    {
+      "id": "payload_actor_guard_disabled",
+      "why": "The event schema stops refusing a payload-supplied actor.",
+      "file": "src/events.ts",
+      "find": "    if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
+      "replace": "    if (false && value !== null && typeof value === 'object' && Object.hasOwn(value, 'actor')) {",
+      "catches": ["refuses a raw payload that smuggles an actor, naming the seam"]
+    },
+    {
+      "id": "receipt_skipped_entirely",
+      "why": "The reducer stops running the receipt on non-human acceptances at all — r1's blocking finding.",
+      "file": "src/reduce.ts",
+      "find": "      const refusal = acceptanceReceiptRefusal({",
+      "replace": "      const refusal = false && acceptanceReceiptRefusal({",
+      "catches": [
+        "refuses a model acceptance with no message window at all",
+        "refuses one whose quote is only inside somebody else’s blockquote",
+        "refuses `messages: []` at the reducer, exactly as it refuses no messages"
+      ]
+    },
+    {
+      "id": "payload_binding_disabled",
+      "why": "A machine may mint a payload nobody staged behind a citation that says a person could have checked it.",
+      "file": "src/authority.ts",
+      "find": "  if (canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
+      "replace": "  if (false && canonicalJson(object.payload) !== canonicalJson(proposal.payload)) {",
+      "catches": ["refuses an acceptance whose payload is not the one that was staged"]
+    },
+    {
+      "id": "provenance_binding_disabled",
+      "why": "The citation set may change on the way through acceptance — which is what the attribution rules are computed over.",
+      "file": "src/authority.ts",
+      "find": "  if (canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
+      "replace": "  if (false && canonicalJson(objectCites) !== canonicalJson(proposalCites)) {",
+      "catches": ["refuses an acceptance that pads or drops cited messages on the way through"]
+    },
+    {
+      "id": "proposer_binding_disabled",
+      "why": "One interpreter may accept, reject or retire another's staged readings.",
+      "file": "src/authority.ts",
+      "find": "  if (actor.kind === 'model') return proposer.kind === 'model' && proposer.model === actor.model;",
+      "replace": "  if (actor.kind === 'model') return true;",
+      "catches": [
+        "refuses a second model accepting the first model’s proposal",
+        "refuses a model accepting a human’s proposal"
+      ]
+    },
+    {
+      "id": "confidence_floor_disabled",
+      "why": "A machine may mint an object from a reading it does not stand behind, at any confidence including zero.",
+      "file": "src/reduce.ts",
+      "find": "      if (proposal.proposal.confidence < floor) {",
+      "replace": "      if (false && proposal.proposal.confidence < floor) {",
+      "catches": [
+        "refuses a model accepting its own near-zero-confidence claim",
+        "is the engine’s θ, not a second number under it"
+      ]
+    },
+    {
+      "id": "decision_never_auto_disabled",
+      "why": "#4's one absolute: a decision never auto-accepts, at any confidence.",
+      "file": "src/reduce.ts",
+      "find": "  const mintingGate = modelMintingGate(object.type);\n  if (mintingGate !== null && !isHuman(actor)) {",
+      "replace": "  const mintingGate = modelMintingGate(object.type);\n  if (false && mintingGate !== null && !isHuman(actor)) {",
+      "catches": [
+        "refuses a model actor accepting a decision through its own proposal",
+        "reached every gate in the table — walking what the reducer said, not what the oracle predicts"
+      ]
+    },
+    {
+      "id": "claim_verification_gate_disabled",
+      "why": "`~` becomes `✓` on a machine's word.",
+      "file": "src/reduce.ts",
+      "find": "  if (object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
+      "replace": "  if (false && object.type === 'claim' && object.payload.verification === 'verified' && !isHuman(actor)) {",
+      "catches": ["refuses a claim born verified on a model actor’s word"]
+    },
+    {
+      "id": "direct_acceptance_gate_disabled",
+      "why": "A machine may skip the proposal entirely and emit the object — the whole acceptance boundary becomes optional.",
+      "file": "src/reduce.ts",
+      "find": "  if (proposalId === null && !isHuman(actor)) {",
+      "replace": "  if (false && proposalId === null && !isHuman(actor)) {",
+      "catches": [
+        "refuses a proposal-less acceptance from a model actor",
+        "refuses a proposal-less acceptance from a system actor too"
+      ]
+    },
+    {
+      "id": "answers_human_gate_disabled",
+      "why": "A machine may close a person's open question by pointing an arbitrary claim at it.",
+      "file": "src/reduce.ts",
+      "find": "    if (!isHuman(actor)) {\n      fail(\n        state,\n        event.id,\n        humanOnlyRefusal('answer_relation', actor, `relation \"${relation.id}\"`),\n      );\n      return false;\n    }",
+      "replace": "    if (false) return false;",
+      "catches": ["refuses a model answering an open question"]
+    },
+    {
+      "id": "supersession_policy_narrowed",
+      "why": "Supersession goes back to gating decisions only, so a machine may retire a human-accepted commitment.",
+      "file": "src/reduce.ts",
+      "find": "    if (decideSupersession(retired).authority === 'requires_human' && !isHuman(actor)) {",
+      "replace": "    if (retired === 'decision' && !isHuman(actor)) {",
+      "catches": ["refuses a model retiring a commitment", "refuses a model retiring an objective"]
+    },
+    {
+      "id": "corrections_human_gate_disabled",
+      "why": "Every correction verb is human-only in v1; a correction reaches backwards.",
+      "file": "src/reduce.ts",
+      "find": "  if (!isHuman(actor)) {\n    const verifying =",
+      "replace": "  if (false) {\n    const verifying =",
+      "catches": ["refuses a system actor correction as well"]
+    },
+    {
+      "id": "blockquote_stripping_neutered",
+      "why": "The spike's worst error: a quote that exists only inside somebody else's reply-blockquote.",
+      "file": "src/escalation.ts",
+      "find": "    .filter((line) => !BLOCKQUOTE_LINE.test(line))\n    .join('\\n');",
+      "replace": "    .join('\\n');",
+      "catches": ["refuses one whose quote is only inside somebody else’s blockquote"]
+    },
+    {
+      "id": "answer_binding_order_check_dropped",
+      "why": "The two answer-binding events share a timestamp; if the relation sorts first the question is left open beside its own answer.",
+      "file": "src/acceptance.ts",
+      "find": "  if (\n    compareCursor({ at: command.at, id: acceptEventId }, { at: command.at, id: relationEventId }) >=\n    0\n  ) {",
+      "replace": "  if (false) {",
+      "catches": ["refuses ids whose order would put the edge before the object"]
+    },
+    {
+      "id": "answer_binding_question_open_check_dropped",
+      "why": "Binding a second answer leaves two `answers` edges and one status.",
+      "file": "src/acceptance.ts",
+      "find": "  if (record.object.payload.status !== 'open') {",
+      "replace": "  if (false) {",
+      "catches": ["refuses a question that is already answered"]
+    },
+    {
+      "id": "attention_reads_its_own_theta",
+      "why": "The panel and the engine disagree about a proposal in the θ band — r1's major 9.",
+      "file": "src/attention.ts",
+      "find": "    if (verdict.visibility !== 'needs_you') {\n      conclude(proposal);\n      continue;\n    }",
+      "replace": "    if (verdict.visibility === 'nowhere-at-all') {\n      conclude(proposal);\n      continue;\n    }",
+      "catches": ["stays quiet about a decision the engine would not surface"]
+    },
+    {
+      "id": "attention_priority_tiers_swapped",
+      "why": "The hardest-first sort is the whole product of the panel.",
+      "file": "src/attention.ts",
+      "find": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 0,",
+      "replace": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 9,",
+      "catches": ["gives every class a tier, and every tier a distinct rank"]
+    },
+    {
+      "id": "ordering_gate_loosened",
+      "why": "An event that lands exactly on the cursor is admitted, so two payloads can claim one position.",
+      "file": "src/reduce.ts",
+      "find": "  if (state.cursor && compareCursor(cursor, state.cursor) <= 0) {",
+      "replace": "  if (state.cursor && compareCursor(cursor, state.cursor) < 0) {",
+      "catches": ["rejects an event that lands on exactly the cursor"]
+    },
+    {
+      "id": "consumed_ids_not_spent_on_failure",
+      "why": "A redelivery of an event that failed its business checks gets a second try against a state that has moved on.",
+      "file": "src/reduce.ts",
+      "find": "  state.consumedEventIds.push(event.id);",
+      "replace": "  if (applied) state.consumedEventIds.push(event.id);",
+      "catches": ["spends the id of an event that was consumed but did not apply"]
+    },
+    {
+      "id": "amend_may_touch_attribution",
+      "why": "Moving an obligation off a named person becomes a substring search over patches instead of a verb.",
+      "file": "src/reduce.ts",
+      "find": "  } else if (touchesAttribution) {",
+      "replace": "  } else if (false && touchesAttribution) {",
+      "catches": ["refuses an amend that would move the obligation instead"]
+    },
+    {
+      "id": "noop_amend_silent_again",
+      "why": "An amendment that changes nothing reports `applied` with nothing applied.",
+      "file": "src/reduce.ts",
+      "find": "  if (canonicalJson(patched.after) === canonicalJson(patched.before)) {\n    fail(",
+      "replace": "  if (canonicalJson(patched.after) === canonicalJson(patched.before)) {\n    return true;\n    fail(",
+      "catches": [
+        "treats an empty amend patch as a no-op — and says so rather than reporting success",
+        "folds the parsed value, not the raw one — so schema defaults are real"
+      ]
+    },
+    {
+      "id": "one_concession_marker_deleted",
+      "why": "A table driven from a constant cannot notice a row that stopped existing; the by-value pin must.",
+      "file": "src/escalation.ts",
+      "find": "  'i stand corrected',\n  'my mistake',\n",
+      "replace": "  'my mistake',\n",
+      "catches": ["is exactly this list"]
+    },
+    {
+      "id": "one_future_pattern_deleted",
+      "why": "Same, for the future-tense patterns.",
+      "file": "src/escalation.ts",
+      "find": "  /\\bplease\\s+(?:can|could|take|handle|own|pick up|review|land|ship)\\b/i,\n",
+      "replace": "",
+      "catches": ["is exactly these five patterns", "has a case for every pattern"]
+    },
+    {
+      "id": "escalation_scan_cap_loosened",
+      "why": "The per-call cost of the pre-model pass goes back to being chosen by whoever writes the messages.",
+      "file": "src/escalation.ts",
+      "find": "  const body = message.body.slice(0, config.maxScanChars);",
+      "replace": "  const body = message.body;",
+      "catches": ["bounds the work per call, so content cannot choose the cost"]
+    },
+    {
+      "id": "rationale_accepts_a_bare_string",
+      "why": "The attention rationale brand stops binding at runtime, so a store can hand back a sentence nobody's template produced.",
+      "file": "src/attention.ts",
+      "find": "export const RationaleReason = z.discriminatedUnion('kind', [",
+      "replace": "export const RationaleReason = z.union([z.string(), ...[]] as never) ?? z.discriminatedUnion('kind', [",
+      "catches": ["requires a structured reason — no unexplained attention, and no free text"]
+    },
+    {
+      "id": "subject_kind_default_restored",
+      "why": "An attention item that silently defaults to 'object' points #22's foreign key at a proposal id.",
+      "file": "src/attention.ts",
+      "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal']);",
+      "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal']).default('object');",
+      "catches": ["has no default for subjectKind — the wrong value there is unfalsifiable"]
+    },
+    {
+      "id": "counterexample_voice_reverted",
+      "why": "CONVENTIONS: the system never synthesizes speech. 'the room said' attributes a form field to people.",
+      "file": "src/corrections.ts",
+      "find": "correction note:",
+      "replace": "the room said:",
+      "catches": ["formats a block ready to inject, quoting the note as a note"]
+    },
+    {
+      "id": "blank_window_reducer",
+      "why": "r3 gauntlet, major 2: a window of messages whose bodies are all empty is structurally non-empty, so `length === 0` is false and nothing downstream has anything to find a fault in.",
+      "file": "src/authority.ts",
+      "find": "  if (window === undefined || window.length === 0 || !window.some((m) => hasContent(m.body))) {",
+      "replace": "  if (window === undefined || window.length === 0) {",
+      "catches": ["refuses a window of messages that exist and say nothing, at the reducer"]
+    },
+    {
+      "id": "blank_window_engine",
+      "why": "The same hole at the acceptance engine, which the attention panel reads through.",
+      "file": "src/acceptance.ts",
+      "find": "    messages === undefined || messages.length === 0 || !messages.some((m) => hasContent(m.body));",
+      "replace": "    messages === undefined || messages.length === 0;",
+      "catches": ["refuses a window of messages that exist and say nothing, at the engine"]
+    },
+    {
+      "id": "reducer_quote_gate_rescoped",
+      "why": "r3 gauntlet, major 2: the reducer's missing-quote gate goes back to covering only the two types that name a person, which is the scope a model objective was minted through.",
+      "file": "src/authority.ts",
+      "find": "  if (isBlank(proposal.quote)) {\n    return {\n      gate: 'missing_quote',",
+      "replace": "  if ((object.type === 'claim' || object.type === 'commitment') && isBlank(proposal.quote)) {\n    return {\n      gate: 'missing_quote',",
+      "catches": [
+        "names that gate for every model-minted type, not only the two that name a person"
+      ]
+    },
+    {
+      "id": "validator_quote_requirement_rescoped",
+      "why": "The same rescoping in the validator both the engine and the reducer run.",
+      "file": "src/escalation.ts",
+      "find": "  if (fromModel && normalizedQuote.length === 0) {",
+      "replace": "  if (fromModel && (subject.type === 'claim' || subject.type === 'commitment') && normalizedQuote.length === 0) {",
+      "catches": [
+        "requires a quote from a model reading of every type, not only the two that name a person",
+        "refuses a model objective minted with no quote against a window of empty bodies",
+        "does not police attribution on types that name nobody — but still requires their receipt"
+      ]
+    },
+    {
+      "id": "proposal_quote_rescoped",
+      "why": "The schema stops requiring a quote from a model proposal of the three types that name nobody.",
+      "file": "src/proposal.ts",
+      "find": "  if (isBlank(proposal.quote)) {",
+      "replace": "  if ((proposal.type === 'claim' || proposal.type === 'commitment') && isBlank(proposal.quote)) {",
+      "catches": [
+        "requires that quote from a model on every type, not only the two that name a person",
+        "refuses a model objective minted with no quote against a window of empty bodies"
+      ]
+    },
+    {
+      "id": "bearing_forgives_interposed_words",
+      "why": "r3 gauntlet, major 1, exactly: a word the quote carries and the statement drops stops being reported, so `Bob will not deploy production Friday` supports `Bob will deploy production Friday`.",
+      "file": "src/matching.ts",
+      "find": "      if (qt !== undefined) unaccounted(qt, unmatchedInQuote);\n      i += 1;",
+      "replace": "      i += 1;",
+      "catches": [
+        "refuses the exact pair from the gauntlet at the acceptance engine",
+        "refuses the exact pair from the gauntlet at the reducer, where it is a boundary",
+        "names the interposed word rather than scrambling the rest of the alignment",
+        "refuses negation"
+      ]
+    },
+    {
+      "id": "bearing_forgives_missing_statement_words",
+      "why": "The other direction: the statement may assert words the quote does not contain, which is the quantifier flip (all -> some) and the invented sentence.",
+      "file": "src/matching.ts",
+      "find": "      if (st !== undefined) unaccounted(st, unmatchedInStatement);\n      j += 1;",
+      "replace": "      j += 1;",
+      "catches": [
+        "refuses a statement that inserts a word the quote does not contain",
+        "refuses a verbatim, correctly attributed quote that carries a different sentence"
+      ]
+    },
+    {
+      "id": "bearing_forgives_the_tail",
+      "why": "Only the covering span of the statement is checked, so a trailing `unless the migration is still red` is invisible.",
+      "file": "src/matching.ts",
+      "find": "  for (; i < quote.length; i += 1) {\n    const leftover = quote[i];\n    if (leftover !== undefined) unaccounted(leftover, unmatchedInQuote);\n  }",
+      "replace": "  i = quote.length;",
+      "catches": [
+        "refuses a trailing \"unless\"",
+        "refuses a trailing \"except\"",
+        "refuses a quote that is a superset carrying an unrelated sentence"
+      ]
+    },
+    {
+      "id": "bearing_forgives_the_statement_tail",
+      "why": "The statement may run past the end of the quote and assert whatever it likes there.",
+      "file": "src/matching.ts",
+      "find": "  for (; j < statement.length; j += 1) {\n    const leftover = statement[j];\n    if (leftover !== undefined) unaccounted(leftover, unmatchedInStatement);\n  }",
+      "replace": "  j = statement.length;",
+      "catches": ["refuses a statement that runs past the end of its quote"]
+    },
+    {
+      "id": "ordered_tokens_dedup",
+      "why": "The bearing tokens become a set again, which is how r3 could not have told double negation from single even with `not` off the stopword list.",
+      "file": "src/matching.ts",
+      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForReceipt(text).match(TOKEN) ?? [];\n}",
+      "replace": "export function orderedTokens(text: string): string[] {\n  const all = normalizeForReceipt(text).match(TOKEN) ?? [];\n  return all.filter((token, index) => all.indexOf(token) === index);\n}",
+      "catches": [
+        "counts a repeated word twice, so double negation is not one negation",
+        "refuses double negation"
+      ]
+    },
+    {
+      "id": "bearing_drops_short_tokens",
+      "why": "The three-character floor `contentTokens` uses for routing comes back to the receipt, and `no` stops existing.",
+      "file": "src/matching.ts",
+      "find": "export function orderedTokens(text: string): string[] {\n  return normalizeForReceipt(text).match(TOKEN) ?? [];\n}",
+      "replace": "export function orderedTokens(text: string): string[] {\n  return (normalizeForReceipt(text).match(TOKEN) ?? []).filter((token) => token.length > 2);\n}",
+      "catches": ["keeps two-letter words, because \"no\" inverts a sentence"]
+    },
+    {
+      "id": "receipt_policy_droppable_restored",
+      "why": "Puts `droppableTokens` back, with the entry r6 removed. Every entry it ever held was broken by a reviewer on the same shape — a justification about *context* enforced by a set-membership test over a *character*. `.` was there because \"a full stop terminates a sentence and carries no other meaning\", and grok's blind pass produced ``Load `.env` before the deploy tonight.`` bearing ``Load `env` …``, `` `..` `` bearing `` `` ``, and \"We ship Monday. Then we celebrate.\" bearing \"We ship Monday Then we celebrate.\" — all auto-accepted and all folded through `appendEvent`.",
+      "file": "src/matching.ts",
+      "find": "  return {\n    borne: sameRun(quote, statement),",
+      "replace": "  const drop = (t: readonly string[]) => t.filter((x) => x !== '.');\n  return {\n    borne: sameRun(drop(quote), drop(statement)),",
+      "catches": [
+        "lets nothing at all differ between a quote and its statement",
+        "refuses a difference of a full stop, like every other difference",
+        "refuses the code literal a dropped full stop used to rewrite",
+        "is borne exactly when the two normalized texts are the same string"
+      ]
+    },
+    {
+      "id": "receipt_policy_align_cap_raised",
+      "why": "The bound on the O(n*m) alignment is lifted, so the cost of a receipt check is chosen by whoever writes the quote.",
+      "file": "src/policy.ts",
+      "find": "  maxAlignedTokens: 800,",
+      "replace": "  maxAlignedTokens: 4000000,",
+      "catches": [
+        "refuses an input too large to align rather than approximating it",
+        "is exactly this table"
+      ]
+    },
+    {
+      "id": "statement_uncheckable_skipped",
+      "why": "Skips the `undecidable` branch entirely, so the bearing check's three refusals-to-run stop being reported as themselves. Since r6 the branch below it — `!borne`, with a named case for every way the diff can end — catches the empty quote and the empty statement and refuses them anyway, which is the second line working. What the mutation still destroys is the split the branch exists for: `too_long` loses its `refer` and is discarded as a malformed reading.",
+      "file": "src/escalation.ts",
+      "find": "      if (bearingResult.undecidable !== null) {",
+      "replace": "      if (false) {",
+      "catches": ["refers it rather than rejecting it"]
+    },
+    {
+      "id": "refer_severity_ignored_reducer",
+      "why": "The reducer stops refusing an acceptance whose receipt the check declines to rule on, so `refer` fails open at the trust boundary.",
+      "file": "src/authority.ts",
+      "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "replace": "  const referring = referringProblems(problems);\n  if (false) {",
+      "catches": ["refuses the exact pair from the gauntlet at the reducer, where it is a boundary"]
+    },
+    {
+      "id": "refer_severity_ignored_engine",
+      "why": "The same fail-open at the acceptance engine: an unjudgeable receipt falls through to auto-accept.",
+      "file": "src/acceptance.ts",
+      "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "replace": "  const referring = referringProblems(problems);\n  if (false) {",
+      "catches": [
+        "refuses the exact pair from the gauntlet at the acceptance engine",
+        "refers a paraphrase of the quote to a person instead of accepting it"
+      ]
+    },
+    {
+      "id": "refer_collapsed_into_reject",
+      "why": "The two negative answers are collapsed: a reading the check cannot rule on is discarded instead of referred, which hides the discrepancy a person needs to see.",
+      "file": "src/escalation.ts",
+      "find": "            kind: 'quote_carries_more_than_statement',\n            severity: 'refer',",
+      "replace": "            kind: 'quote_carries_more_than_statement',\n            severity: 'reject',",
+      "catches": [
+        "leaves the reading staged rather than deleting it, so a person sees the discrepancy",
+        "refers a paraphrase of the quote to a person instead of accepting it"
+      ]
+    },
+    {
+      "id": "attention_certifiable_silence_dropped",
+      "why": "The panel stops recording why it went quiet about a proposal whose receipt cannot be certified, so the silence has no receipt.",
+      "file": "src/attention.ts",
+      "find": "    if (verdict.rule === 'receipt_not_certifiable') {",
+      "replace": "    if (false) {",
+      "catches": [
+        "silences the confirm request and records why, rather than asking Bob to confirm it"
+      ]
+    },
+    {
+      "id": "blank_is_trim",
+      "why": "r3 gauntlet polish: emptiness goes back to being whitespace-only, so a zero-width space counts as content and every required-input refusal becomes incidental.",
+      "file": "src/matching.ts",
+      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}\\p{Regional_Indicator}]/u;",
+      "replace": "const CONTENTFUL = /\\S/u;",
+      "catches": [
+        "reads a zero-width character as no content at all",
+        "treats a quote of invisible characters as no quote at all"
+      ]
+    },
+    {
+      "id": "normalize_keeps_invisibles",
+      "why": "The other half: an invisible character spliced into a quote makes it a different string from the message it came out of, so a correct receipt fails for the wrong reason.",
+      "file": "src/matching.ts",
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.replace(/[’ʼ]/g, \"'\");",
+      "catches": ["matches a quote whose words a zero-width character was spliced into"]
+    },
+    {
+      "id": "ordered_tokens_ascii_only",
+      "why": "r4's own blind review: the tokenizer split on /[^a-z0-9']+/, which is a denylist of the characters that may carry meaning. Cyrillic and fullwidth negations were deleted as separators and bore their own affirmative; a Russian sentence tokenized to nothing and was refused as empty. Mutates the whole token rule rather than only the word class, because since r6 an ASCII-only word class alone leaves every other script matching the code-point alternative — the same evasion has to be applied to the rule that replaced it.",
+      "file": "src/matching.ts",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "replace": "const TOKEN = /[a-z0-9]+(?:'[a-z0-9]+)*/gu;",
+      "catches": [
+        "refuses a negation written in another script or another width",
+        "checks a sentence written in a language with no ASCII in it at all"
+      ]
+    },
+    {
+      "id": "ordered_tokens_drops_punctuation",
+      "why": "The other half of r4's denylist: a visible mark stops being a token, so `Bob will deploy Friday?` bears the assertion and a leading ❌ or 🚫 vanishes. Since r6 the same edit also deletes every space and every standalone apostrophe, so the token stream stops reassembling the text it came from — which is the property the whole receipt rests on.",
+      "file": "src/matching.ts",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "replace": "const TOKEN = new RegExp(String.raw`${WORD}`, 'gu');",
+      "catches": [
+        "refuses a question minted as an assertion",
+        "refuses a symbol that carries the negation",
+        "lets nothing at all differ between a quote and its statement",
+        "reassembles the normalized text exactly, for every text"
+      ]
+    },
+    {
+      "id": "normalize_folds_emphasis",
+      "why": "Re-admits asterisk emphasis to the difference allowlist. It was there for three drafts and broke twice: `a*b*c` folds to `abc`, and `2*3*4` folds to `234` — which changes how many, in the one direction the entry's own justification promised it could not.",
+      "file": "src/matching.ts",
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.replace(/(\\*{1,3})(?=\\S)([\\s\\S]*?\\S)\\1/g, '$2').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "catches": ["does not fold an asterisk that is doing arithmetic or globbing"]
+    },
+    {
+      "id": "quote_anchoring_disabled",
+      "why": "r4's own blind review, and the strongest finding of the round: the quote goes back to being any substring of the cited message, so a model that sets quote === statement to an affirmative span leaves `it is not true that` outside the scissors and auto-accepts the inversion.",
+      "file": "src/escalation.ts",
+      "find": "      } else if (!quoteSpansWholeSentences(quote, ownText, policy)) {",
+      "replace": "      } else if (false && !quoteSpansWholeSentences(quote, ownText, policy)) {",
+      "catches": [
+        "refuses a quote mined out of an explicit denial",
+        "refuses a quote mined out of a report of what nobody thinks",
+        "refuses a quote mined out of a hedge",
+        "refuses a quote mined out of a first-person refusal"
+      ]
+    },
+    {
+      "id": "quote_anchoring_allows_a_prefix",
+      "why": "The anchor accepts a quote that merely *starts* a sentence rather than covering whole ones, which readmits every trailing qualifier — `we ship Friday` mined out of `we ship Friday unless CI is red`.",
+      "file": "src/matching.ts",
+      "find": "      if (run.length > wanted.length) break;\n      if (run.length === wanted.length && sameRun(run, wanted)) return true;",
+      "replace": "      if (run.length > wanted.length + 40) break;\n      if (run.length >= wanted.length && wanted.every((token, index) => token === run[index])) return true;",
+      "catches": ["refuses a quote that stops before the qualifier in its own sentence"]
+    },
+    {
+      "id": "sentence_split_ignores_terminators",
+      "why": "Sentences stop being split on `.`/`?`/`!`, so a multi-sentence message is one sentence and every honest single-sentence quote out of it becomes a fragment — the anchor inverted into an over-refusal nobody would notice until the product refused everything.",
+      "file": "src/matching.ts",
+      "find": "const SENTENCE_BREAK = /(?<=[.!?…。？！])\\p{White_Space}+|[\\n\\v\\f\\r\\u0085\\u2028\\u2029]+/u;",
+      "replace": "const SENTENCE_BREAK = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]+/u;",
+      "catches": ["accepts a run of several whole sentences, and refuses half of one"]
+    },
+    {
+      "id": "typographic_apostrophe_unfolded",
+      "why": "`won’t` stops being `won't`, so a faithful quotation is refused for its typography — an over-refusal, and the kind that gets 'fixed' later by weakening the check that matters.",
+      "file": "src/matching.ts",
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.replace(DELETABLE, '');",
+      "catches": ["treats a typographic apostrophe as an apostrophe"]
+    },
+    {
+      "id": "quote_context_unchecked",
+      "why": "Drops the rule that a certifiable quote is the whole of what its author wrote. This is r4's documented residue: \"We will deploy production Friday. Not.\" quoted as its first sentence is verbatim, whole-sentence, correctly attributed, and bears its own statement.",
+      "file": "src/escalation.ts",
+      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body)) {",
+      "replace": "      } else if (false && !quoteCoversOwnText(quote, bearing.body)) {",
+      "catches": [
+        "does not certify a quote whose message carries a trailing inverter",
+        "refers every other way a neighbouring sentence changes the force"
+      ]
+    },
+    {
+      "id": "later_correction_unseen",
+      "why": "Stops acceptance looking past the cited messages, so a window holding \"We will deploy production Friday.\" followed by \"Correction: we will not deploy production Friday.\" certifies the first on a proposal that cites only it.",
+      "file": "src/escalation.ts",
+      "find": "    if (fromModel && cited.length > 0 && hasContent(subject.statement)) {\n      const revisited = laterRevision(",
+      "replace": "    if (false && cited.length > 0 && hasContent(subject.statement)) {\n      const revisited = laterRevision(",
+      "catches": [
+        "refuses to certify a sentence a later message in the window corrects",
+        "refuses to certify when a later message takes something back in other words"
+      ]
+    },
+    {
+      "id": "speech_act_unchecked",
+      "why": "Lets a question be minted as a claim. The payload schemas require only a nonempty string and the receipt proves string equality, so \"Would we deploy production Friday?\" as a Claim has a perfect receipt and turns somebody's question into their position.",
+      "file": "src/escalation.ts",
+      "find": "    if (\n      fromModel &&\n      subject.type !== 'open_question' &&\n      !isAssertion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
+      "replace": "    if (\n      false &&\n      subject.type !== 'open_question' &&\n      !isAssertion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
+      "catches": ["does not mint a question as a claim"]
+    },
+    {
+      "id": "refer_below_theta_again",
+      "why": "Puts the referral check back under the theta_min discard, where r4 had it. An inverted receipt at confidence 0.4999 is then discarded as weak, destroying the exact discrepancy the receipt exists to show.",
+      "file": "src/acceptance.ts",
+      "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "replace": "  const referring = referringProblems(problems);\n  if (referring.length > 0 && proposal.confidence >= rule.thetaMin) {",
+      "catches": ["refers an inverted receipt that sits below theta_min"]
+    },
+    {
+      "id": "commitment_model_mintable",
+      "why": "Lets a machine mint a commitment again. #44's fact-check drove a model actor through the whole stack with {statement: 'Bob will deploy production Friday', owner: 'user_bob'} and it landed with zero issues.",
+      "file": "src/authority.ts",
+      "find": "    case 'commitment':\n      return 'commitment_acceptance';",
+      "replace": "    case 'commitment':\n      return null;",
+      "catches": ["refuses a model accepting a commitment before the receipt is even read"]
+    },
+    {
+      "id": "objective_model_mintable",
+      "why": "Lets a machine mint an objective — the heading everything else in the room is filed under, and one that already needs a person to retire.",
+      "file": "src/authority.ts",
+      "find": "    case 'objective':\n      return 'objective_acceptance';",
+      "replace": "    case 'objective':\n      return null;",
+      "catches": ["refuses a model accepting an objective — the heading everything is filed under"]
+    },
+    {
+      "id": "normalize_deletes_backticks",
+      "why": "Deletes the backticks a code span is made of, as r4 did. A backticked span is mention rather than use, and folding the delimiters away turns a string its author displayed into a sentence its author asserted.",
+      "file": "src/matching.ts",
+      "find": "const CODE_SPAN = /(```[\\s\\S]*?```|``[\\s\\S]*?``|`[^`\\n]*`)/;",
+      "replace": "const CODE_SPAN = /()`+/;",
+      "catches": ["does not accept a quote whose code delimiters the model dropped"]
+    },
+    {
+      "id": "normalize_drops_link_destination",
+      "why": "Collapses a markdown link to its text, as r4 did. `Use [https://safe.example/app](https://evil.example/app) today.` then certifies a statement naming the safe URL against a record whose actionable link points somewhere else. r7 unified the two folds onto one `unfoldLink`, so this single mutation now reaches both call sites — which is the point of there being one.",
+      "file": "src/matching.ts",
+      "find": "  const linked = target.length === 0 || text === target ? text : `${text} ${target}`;",
+      "replace": "  const linked = text;",
+      "catches": [
+        "keeps a markdown link\"s destination as content",
+        "keeps a markdown link\"s destination, exactly as the receipt fold does"
+      ]
+    },
+    {
+      "id": "normalize_refolds_nfkc",
+      "why": "Re-applies NFKC compatibility folding on the receipt path, so two distinct hostnames and two distinct identifiers compare equal.",
+      "file": "src/matching.ts",
+      "find": "  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "replace": "  const folded = text.normalize('NFKC').replace(DELETABLE, '').replace(/[’ʼ]/g, \"'\");",
+      "catches": ["does not fold a fullwidth or ligature spelling onto its ASCII form"]
+    },
+    {
+      "id": "content_excludes_pictographs",
+      "why": "Takes emoji and flags back out of what counts as content, so a message that is a row of 🚫 or a single 🇺🇸 reduces to \"nothing\" and its quote is refused as blank — a failure wearing another failure's clothes, and a package disagreeing with its own tokenizer.",
+      "file": "src/matching.ts",
+      "find": "const CONTENTFUL = /[\\p{L}\\p{N}\\p{Extended_Pictographic}\\p{Regional_Indicator}]/u;",
+      "replace": "const CONTENTFUL = /[\\p{L}\\p{N}]/u;",
+      "catches": [
+        "counts an emoji-only message as having something in it",
+        "counts a flag as content, which is not a pictograph"
+      ]
+    },
+    {
+      "id": "receipt_after_confidence_floor",
+      "why": "Puts the reducer's receipt check back under the confidence floor, so an acceptance whose quote says the opposite of its statement is refused as 'confidence too low' and the serious finding never reaches the room's log.",
+      "file": "src/reduce.ts",
+      "find": "      const refusal = acceptanceReceiptRefusal({",
+      "replace": "      const floorFirst = MODEL_ACCEPTANCE_FLOOR[object.type];\n      if (proposal.proposal.confidence < floorFirst) {\n        fail(\n          state,\n          event.id,\n          confidenceFloorRefusal(actor, object.type, proposalId, proposal.proposal.confidence),\n        );\n        return false;\n      }\n      const refusal = acceptanceReceiptRefusal({",
+      "catches": ["reports the receipt fault rather than the confidence, when both hold"]
+    },
+    {
+      "id": "later_correction_cap_fails_open",
+      "why": "Makes the later-correction scan return 'nothing found' when the window is longer than it will read, instead of refusing. This round's own first draft did exactly that and defended it in a comment — a limit written down with an auto-accept under it, which is the shape the whole round exists to delete.",
+      "file": "src/escalation.ts",
+      "find": "  if (later.length > policy.maxLaterMessagesScanned) return unscanned('too_many_messages');",
+      "replace": "  if (later.length > policy.maxLaterMessagesScanned) return scanned(later.length);",
+      "catches": ["refuses when the window is longer than the scan will read"]
+    },
+    {
+      "id": "question_mark_folded_first",
+      "why": "Normalizes before the question-mark test, which is what the second repair did. NFKC is redundant against the completed inventory and actively destroys one mark: U+037E GREEK QUESTION MARK canonically decomposes to an ASCII semicolon, so the folded form reads as punctuation.",
+      "file": "src/matching.ts",
+      "find": "  return !QUESTION_SHAPED.test(text);",
+      "replace": "  return !QUESTION_SHAPED.test(text.normalize('NFKC'));",
+      "catches": ["reads a mark a canonical decomposition would destroy"]
+    },
+    {
+      "id": "code_span_whitespace_collapsed",
+      "why": "Carries the whitespace-collapse rule into a code literal, so `` `a  b` `` and `` `a b` `` compare equal. Two spaces in prose are a line wrap; two spaces in a password are a different password.",
+      "file": "src/matching.ts",
+      "find": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').trim() as ReceiptText;",
+      "replace": "    out.push(isCode ? segment : foldProse(segment));\n  }\n  return out.join('').replace(/\\s+/g, ' ').trim() as ReceiptText;",
+      "catches": ["refuses to mint a code literal the author did not write, at every layer"]
+    },
+    {
+      "id": "dedup_destroys_a_referral",
+      "why": "Puts the duplicate discard back above the referral, where it deletes a detected receipt discrepancy the room has never been shown — the same destruction the theta_min ordering was fixed for, through a different door.",
+      "file": "src/acceptance.ts",
+      "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "replace": "  const dupFirst = context.acceptedObjects\n    ? findDuplicate(proposal.type, payload, proposal.provenance, context.acceptedObjects)\n    : null;\n  if (dupFirst) {\n    return {\n      ...base,\n      verdict: 'discard',\n      visibility: 'none',\n      rule: 'duplicate_of_accepted',\n      duplicateOf: dupFirst.objectId,\n      reason: `the room already accepted \"${dupFirst.objectId}\"`,\n    };\n  }\n  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "catches": ["does not let deduplication destroy a discrepancy nobody has seen"]
+    },
+    {
+      "id": "bidi_controls_deleted",
+      "why": "Folds every `\\p{Cf}` away again — the bidi overrides, the soft hyphen and the zero-width joiner with the genuinely invisible characters. `Bob will \\u202Eton\\u202C deploy production Friday.` renders as \"Bob will not deploy production Friday.\"; `re\\u00ADsign` renders as \"re-sign\"; and `\\u{1F469}\\u200D\\u{1F4BB}` is one glyph where `\\u{1F469}\\u{1F4BB}` is two.",
+      "file": "src/matching.ts",
+      "find": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]/gu;",
+      "replace": "const DELETABLE = /[\\p{Cf}\\p{Cc}]/gu;",
+      "catches": [
+        "does not delete a bidi override, which decides what the reader sees",
+        "deletes exactly this set of code points, and fuses two words with none of them"
+      ]
+    },
+    {
+      "id": "later_scan_starts_after_last_citation",
+      "why": "Starts the later-correction scan after the *last* cited message instead of at or before the sentence, so padding the citation list with an unrelated later message hides a correction behind the scan's start. The same attack r1's gauntlet found against the attribution check. **Restated in r8**: it used to mutate `firstCited`, and r8's text-derived floor made that form stop discriminating — `earliestBearing` finds the sentence whatever the citations say, so the r6 mutation was caught by nothing it claimed. The rule is unchanged; the line that carries it moved, and a mutant left pointing at the old line is a row that has quietly stopped measuring anything.",
+      "file": "src/escalation.ts",
+      "find": "  const scanFloor = earliestBearing === -1 ? firstCited : Math.min(firstCited, earliestBearing);",
+      "replace": "  const scanFloor = lastCited;",
+      "catches": ["cannot be skipped by padding the citation list"]
+    },
+    {
+      "id": "question_mark_set_narrowed",
+      "why": "Drops the inverted question mark, which a Spanish interrogative opens with and may carry no other mark at all — `¿Bob will deploy production Friday` minted as a claim.",
+      "file": "src/matching.ts",
+      "find": "  '\\u00BF', // INVERTED QUESTION MARK — a Spanish interrogative opens with one\n",
+      "replace": "",
+      "catches": ["reads a mark that opens the sentence instead of closing it"]
+    },
+    {
+      "id": "coverage_reads_the_stripped_text",
+      "why": "Points the coverage check at `stripReplyBlockquotes(body)` instead of the body, which is r5's first draft. `stripReplyBlockquotes` deletes every line beginning with `>` whether or not anybody else wrote it, so an author who writes \"We will deploy production Friday.\" and then \"> Not.\" has their own second line deleted and the first certifies.",
+      "file": "src/escalation.ts",
+      "find": "      } else if (!quoteCoversOwnText(quote, bearing.body)) {",
+      "replace": "      } else if (!quoteCoversOwnText(quote, ownText)) {",
+      "catches": ["refers a quote whose author put the inverter in their own blockquote"]
+    },
+    {
+      "id": "later_revision_addition_only",
+      "why": "Asks only whether a later message *adds* to the statement, so a correction that says the same thing with a word **removed** — the r3 inversion, mirrored — reads as unrelated and the earlier reading auto-accepts.",
+      "file": "src/escalation.ts",
+      "find": "      const contained =\n        aligned.unmatchedInStatement.length === 0 || aligned.unmatchedInQuote.length === 0;",
+      "replace": "      const contained =\n        aligned.unmatchedInStatement.length === 0 && aligned.unmatchedInQuote.length > 0;",
+      "catches": ["refuses to certify when a later message drops a word from the sentence"]
+    },
+    {
+      "id": "later_scan_skips_cited_messages",
+      "why": "Filters the cited messages out of the later-correction scan, so putting the correction in a message the proposal *cites* steps over the check that exists to find corrections. A citation is chosen by the proposal, so anything it can exclude is a boundary the proposal controls.",
+      "file": "src/escalation.ts",
+      "find": "  const later = messages.slice(scanFloor + 1);",
+      "replace": "  const later = messages.slice(scanFloor + 1).filter((m) => !cited.has(m.id));",
+      "catches": ["cannot be skipped by citing the correction itself"]
+    },
+    {
+      "id": "whitespace_controls_deleted",
+      "why": "Puts the control-character clause back: `(?!\\s)\\p{Cc}` alongside the enumeration. Its docblock argued the clause could not fuse two words because \"tab, newline, vertical tab, form feed, carriage return and NEL are `\\s`\" — and JavaScript's `\\s` does not contain U+0085 NEL, U+007F, or U+0080–U+009F. The clause therefore deleted them, and `Bob will deploy<NEL>production Friday.` normalized to `deployproduction`, which a quote of the fused text matched. NEL is a Unicode mandatory line break, so deleting it changes what a reader sees. The mutant's own `why` said the opposite until r6.",
+      "file": "src/matching.ts",
+      "find": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]/gu;\n\n/**\n * **What counts as whitespace**",
+      "replace": "const DELETABLE = /[\\u200B\\u2060\\u2061\\u2062\\u2063\\u2064\\uFEFF]|(?!\\s)\\p{Cc}/gu;\n\n/**\n * **What counts as whitespace**",
+      "catches": ["deletes exactly this set of code points, and fuses two words with none of them"]
+    },
+    {
+      "id": "whitespace_run_uses_js_s",
+      "why": "Reads the whitespace run as JavaScript's `\\s` instead of Unicode's `\\p{White_Space}`. The two differ on U+0085 NEL — a mandatory line break that `\\s` does not contain — so a NEL between two words stops collapsing to a space, and the fold that was supposed to own it does not.",
+      "file": "src/matching.ts",
+      "find": "const WHITESPACE_RUN = /\\p{White_Space}+/gu;",
+      "replace": "const WHITESPACE_RUN = /\\s+/gu;",
+      "catches": ["deletes exactly this set of code points, and fuses two words with none of them"]
+    },
+    {
+      "id": "ordered_tokens_drops_spaces",
+      "why": "r6's finding, exactly: the tokenizer discards whitespace, so the token comparison proves word equality and the receipt claims text equality. ``Run `rm -rf / tmp/cache` …`` then bears ``Run `rm -rf /tmp/cache` …`` and a doubled space in a password is invisible — the case `normalizeForReceipt` passes code spans through byte for byte to prevent.",
+      "file": "src/matching.ts",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "replace": "const TOKEN = new RegExp(String.raw`${WORD}|\\S`, 'gu');",
+      "catches": [
+        "reassembles the normalized text exactly, for every text",
+        "refuses every one of the four at the engine",
+        "refuses every one of the four at the reducer, where it is a boundary",
+        "refuses to mint a code literal the author did not write, at every layer"
+      ]
+    },
+    {
+      "id": "ordered_tokens_drops_apostrophes",
+      "why": "The other half of r6's finding: a standalone ASCII apostrophe stops being a token, so `'We will deploy production Friday.'` — a displayed sentence — bears the bare assertion. Backticks and double quotes are content for exactly this reason; the apostrophe was the one spelling of mention-versus-use nothing could see.",
+      "file": "src/matching.ts",
+      "find": "const TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "replace": "const TOKEN = new RegExp(String.raw`${WORD}|[^']`, 'gu');",
+      "catches": [
+        "reads an edge apostrophe as a mark of its own, not as part of the word",
+        "refuses every one of the four at the engine",
+        "refuses every one of the four at the reducer, where it is a boundary"
+      ]
+    },
+    {
+      "id": "routing_tokens_keep_spaces",
+      "why": "Gives the detector the receipt's exhaustive stream. The routing fold has already collapsed every whitespace run, so a space token carries no information there and only confuses the resynchronising diff: an inserted word arrives with an inserted space, and the correction scan reads a plain contradiction as an unrelated sentence.",
+      "file": "src/matching.ts",
+      "find": "const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|\\S`, 'gu');",
+      "replace": "const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|[\\s\\S]`, 'gu');",
+      "catches": ["drops whitespace from the detector\"s tokens and only from the detector\"s"]
+    },
+    {
+      "id": "align_borne_read_off_the_diff",
+      "why": "Computes `borne` from the resynchronising diff again instead of from `sameRun`. The diff is a judgement about which tokens correspond and it does not name a whitespace difference, so a re-spaced code literal comes back borne — the r6 defect, reintroduced one layer in from the tokenizer.",
+      "file": "src/matching.ts",
+      "find": "    borne: sameRun(quote, statement),",
+      "replace": "    borne: unmatchedInQuote.length === 0 && unmatchedInStatement.length === 0,",
+      "catches": [
+        "refuses to mint a code literal the author did not write, at every layer",
+        "lets nothing at all differ between a quote and its statement",
+        "refuses every one of the four at the engine"
+      ]
+    },
+    {
+      "id": "respacing_not_reported",
+      "why": "Drops the whitespace branch, so a statement holding the same marks in a different spacing falls through to the catch-all. The catch-all still refuses — that is what it is for — but the receipt stops saying what it found, and a refusal nobody can act on is the failure this file spends its length on. The branch says the fact and not the cause: three drafts of this round tried to enumerate the ways two texts can differ in spacing alone and a brute force broke all three.",
+      "file": "src/escalation.ts",
+      "find": "        } else if (bearingResult.whitespaceDiffers) {",
+      "replace": "        } else if (false && bearingResult.whitespaceDiffers) {",
+      "catches": [
+        "refuses to mint a code literal the author did not write, at every layer",
+        "names the difference in a form a reader can act on",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "uncheckable_too_long_rejected",
+      "why": "Collapses the two reasons the bearing check declines back into one severity. `too_long` then rejects, `acceptance.ts` turns a reject into a discard, and a 421-token design comment quoted whole and correctly attributed is destroyed — while the room is told its citation failed, which is not what happened. `refer` is defined as never auto-accepted and never discarded.",
+      "file": "src/escalation.ts",
+      "find": "          severity: tooLong ? 'refer' : 'reject',",
+      "replace": "          severity: 'reject',",
+      "catches": ["refers it rather than rejecting it"]
+    },
+    {
+      "id": "later_revision_window_gate_removed",
+      "why": "Removes the check that the correction scan actually read something the proposal did not choose. A caller supplying 'the messages this receipt cites' — the natural reading of the field — then turns the scan off in silence: whole room refuses, cited-only auto-accepts. Same fail-open as messages: [] and [{ body: '' }], one level out. r6's first repair asked whether the *window* held an uncited message, and grok's blind pass padded it with an *earlier* one — which cannot correct a later message — so the question is what the scan read. r7 moved the gate's existence test from the earliest citation to the newest; the mutant that restores r6's version of it is `later_revision_gate_reads_the_earliest_citation`.",
+      "file": "src/escalation.ts",
+      "find": "  const readSomethingUnchosenAfterTheSentence = messages\n    .slice(lastCited + 1)\n    .some((message) => !cited.has(message.id));\n  if (!readSomethingUnchosenAfterTheSentence) {\n    return unscanned('window_ends_at_the_citations');\n  }",
+      "replace": "  // window gate removed",
+      "catches": [
+        "refuses a window that stops where the citations stop",
+        "says how far it read, so \"found nothing\" is not \"read nothing\"",
+        "reads the newest citation, not the earliest, so a second citation buys nothing"
+      ]
+    },
+    {
+      "id": "later_revision_gate_reads_the_earliest_citation",
+      "why": "r7's finding, and r6's shipped code. The window gate's existence test ran from `firstCited + 1` — the index the *scan* starts at — so it passed as soon as some uncited message sat after the *earliest* citation. `provenance` is model-supplied, so citing one extra *earlier* message turned the gate off while every message the scan read sat at or before the sentence: `[cited, uncited, cited]` went from `pending` to `auto_accept`, at the engine and at the reducer both. A rule over a value the proposer controls measures the proposer's cooperation.",
+      "file": "src/escalation.ts",
+      "find": "    .slice(lastCited + 1)",
+      "replace": "    .slice(firstCited + 1)",
+      "catches": [
+        "reads the newest citation, not the earliest, so a second citation buys nothing",
+        "refuses the padded multi-citation window at both enforcement points",
+        "refuses the padded window at the reducer, where it is a boundary"
+      ]
+    },
+    {
+      "id": "token_rendered_raw",
+      "why": "Interpolates an unmatched token straight into the refusal. `orderedTokens` is exhaustive since r6, so a token can be a control character with no glyph, and the receipt then reports `the quote says \"\"` — a check that ran, found something, and said nothing a reader can use.",
+      "file": "src/escalation.ts",
+      "find": "  const printable = /^[\\p{L}\\p{N}\\p{M}\\p{P}\\p{S}]+$/u.test(value);",
+      "replace": "  const printable = true;",
+      "catches": ["names the difference in a form a reader can act on"]
+    },
+    {
+      "id": "bearing_result_ignored",
+      "why": "Drops the whole `!borne` branch, so a bearing check that ran and refused reports nothing at all — the fail-open shape this ticket has found in six different places, at the one comparison the acceptance path makes between the quote and the statement. It is the mutation `statement_uncheckable_skipped` used to stand in for before r6 gave the branch a named case for every way the diff can end.",
+      "file": "src/escalation.ts",
+      "find": "      } else if (!bearingResult.borne) {",
+      "replace": "      } else if (false) {",
+      "catches": [
+        "refuses the exact pair from the gauntlet at the acceptance engine",
+        "refuses the exact pair from the gauntlet at the reducer, where it is a boundary",
+        "covers every problem kind it declares",
+        "refuses every one of the four at the engine",
+        "refuses to mint a code literal the author did not write, at every layer"
+      ]
+    },
+    {
+      "id": "line_break_is_newline_only",
+      "why": "Reads a line break as \\n alone again, which is the same defect `\\s` had for whitespace one function over: U+0085 NEL, U+2028 and U+2029 end a line everywhere a line is rendered and `\\n` sees none of them. A body whose breaks are NEL becomes one line, so a reply-blockquote on its first line swallows the author's own words and a multi-sentence body reads as a single sentence. Found by this round running its own `\\p{White_Space}` fix back over the rest of the package.",
+      "file": "src/matching.ts",
+      "find": "export const LINE_BREAK = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]/u;",
+      "replace": "export const LINE_BREAK = /[\\n]/u;",
+      "catches": ["reads a line break the way every renderer does, not the way a newline does"]
+    },
+    {
+      "id": "fragment_scan_cap_reports_a_fragment",
+      "why": "r7. Removes the cap branch, so a body with more sentences than the scan will read falls through to `quoteSpansWholeSentences` returning false and the room is told the quote was 'cut out of the middle of a sentence' — about a quote that may be the entire body. Right disposition, false sentence; the same class as the transposition mislabel one function over.",
+      "file": "src/escalation.ts",
+      "find": "      if (sentencesOf(ownText).length > policy.maxScannedSentences) {",
+      "replace": "      if (false) {",
+      "catches": ["says the check declined rather than calling a whole body a fragment"]
+    },
+    {
+      "id": "link_title_discarded",
+      "why": "r7. Drops the markdown link title again, so `[the runbook](https://x.example \"Do NOT run step 4\")` folds to text the author's warning is missing from, and a statement omitting the warning auto-accepts. The same argument r4 used to make the destination content — the title is author-written text a reader sees.",
+      "file": "src/matching.ts",
+      "find": "  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;",
+      "replace": "  return `${bang}${linked}`;",
+      "catches": ["keeps a link title, which is text the author wrote"]
+    },
+    {
+      "id": "image_marker_discarded",
+      "why": "r7. Drops the `!` image marker, so `![alt](url)` and `[alt](url)` — an embed and a link — normalize to the same text and a statement about one is certifiable against a record carrying the other.",
+      "file": "src/matching.ts",
+      "find": "  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;",
+      "replace": "  return caption.length === 0 ? linked : `${linked} ${caption}`;",
+      "catches": ["keeps the image marker, so an embed is not a link"]
+    },
+    {
+      "id": "later_revision_no_citation_reads_clean",
+      "why": "r7, found by the round's foreign-lineage pass. `laterRevision` returns the value meaning 'the scan ran to the end and found nothing' when no cited id is in the window — so 'checked, clean' and 'never looked' become one value again, which is the exact merge r6 built the tagged union to prevent. Guarded upstream by `unknown_message`, which is the objection: the safety of this answer becomes a property of a different function.",
+      "file": "src/escalation.ts",
+      "find": "  if (firstCited === -1) return unscanned('no_citation_in_the_window');",
+      "replace": "  if (firstCited === -1) return scanned(0);",
+      "catches": ["says it read nothing, rather than reporting a clean scan of nothing"]
+    },
+    {
+      "id": "later_revision_blank_statement_reads_clean",
+      "why": "The same merge on the other two paths: a blank statement, or one with no routing tokens, reported a completed scan of a window it never opened.",
+      "file": "src/escalation.ts",
+      "find": "  if (isBlank(statement)) return unscanned('no_statement_to_scan_for');",
+      "replace": "  if (isBlank(statement)) return scanned(0);",
+      "catches": ["says it read nothing, rather than reporting a clean scan of nothing"]
+    },
+    {
+      "id": "reducer_type_certification_removed",
+      "why": "r7's reducer twin. The engine is advice and `appendEvent` is the trust boundary — r5's lesson — so deleting this lets a laundered commitment land as an accepted claim even while the engine refuses to emit one.",
+      "file": "src/reduce.ts",
+      "find": "      if (\n        !typeCertifiableFromText(\n          object.type,\n          normalizeForReceipt(payloadText(object.type, object.payload)),\n        )\n      ) {",
+      "replace": "      if (false) {",
+      "catches": [
+        "refuses the laundered commitment at the reducer, where it is a boundary",
+        "refuses a model landing a claim whose words could be an undertaking"
+      ]
+    },
+    {
+      "id": "commitment_shapes_emptied",
+      "why": "r7. Empties the marker list, so nothing reads as an undertaking and every claim certifies itself again. The list is admissible only because the proposer cannot choose its input — the statement is the author's own words, proved verbatim by the receipt — and because a hit only ever adds a referral.",
+      "file": "src/policy.ts",
+      "find": "  /\\bwill\\b/i,",
+      "replace": "  /(?!)/,",
+      "catches": ["refers a claim whose words are equally an undertaking"]
+    },
+    {
+      "id": "certification_reads_raw_statement_engine",
+      "why": "r8's headline. The receipt proves equality under `normalizeForReceipt`; the engine read the raw statement, so one deletable code point evaded every COMMITMENT_SHAPES entry at once.",
+      "file": "src/acceptance.ts",
+      "find": "  const statement = normalizeForReceipt(payloadText(proposal.type, payload));",
+      "replace": "  const statement = payloadText(proposal.type, payload);",
+      "catches": [
+        "reads a value the proposer does not control — over the form the receipt proved",
+        "folds the typographic apostrophe, which needed no adversary at all"
+      ]
+    },
+    {
+      "id": "certification_reads_raw_statement_reducer",
+      "why": "The twin. Both enforcement points called one predicate over one unnormalized text, so neither backstopped the other.",
+      "file": "src/reduce.ts",
+      "find": "          normalizeForReceipt(payloadText(object.type, object.payload)),",
+      "replace": "          payloadText(object.type, object.payload),",
+      "catches": ["refuses it at the reducer too, so neither backstops the other by accident"]
+    },
+    {
+      "id": "scan_floor_from_citations",
+      "why": "r8. The correction scan's floor was `firstCited`, which the proposal controls: with two messages carrying the same body, citing the later copy put the correction behind the scan's start.",
+      "file": "src/escalation.ts",
+      "find": "  const scanFloor = earliestBearing === -1 ? firstCited : Math.min(firstCited, earliestBearing);",
+      "replace": "  const scanFloor = firstCited;",
+      "catches": [
+        "finds the correction whichever copy of the sentence is cited",
+        "reads the same disposition end to end for both citations"
+      ]
+    },
+    {
+      "id": "adjacent_correction_unscanned",
+      "why": "r8. A correction in the sentence *next to* an exact restatement was missed, using the exact strings `quote_omits_surrounding_text` cites one message earlier.",
+      "file": "src/escalation.ts",
+      "find": "    if (restated && !quoteCoversOwnText(statement, own)) {",
+      "replace": "    if (false && restated && !quoteCoversOwnText(statement, own)) {",
+      "catches": ["sees a correction in the sentence next to the restatement"]
+    },
+    {
+      "id": "sed_marker_reads_raw_body",
+      "why": "r8's foreign-lineage sweep: `SED_CORRECTION` read the raw body while every retraction marker beside it read the routing fold.",
+      "file": "src/escalation.ts",
+      "find": "    if (SED_CORRECTION.test(normalized)) return revision(message, ['s/…/…/']);",
+      "replace": "    if (SED_CORRECTION.test(own)) return revision(message, ['s/…/…/']);",
+      "catches": ["reads the sed marker through the fold its neighbours read through"]
+    },
+    {
+      "id": "cursor_compares_the_spelling",
+      "why": "r8. `'.'` sorts before `'Z'`, so `…00:00.500Z` compared earlier than `…00:00Z` — half a second later, rejected as out_of_order, unrecoverably.",
+      "file": "src/reduce.ts",
+      "find": "  const ka = instantKey(a.at);\n  const kb = instantKey(b.at);\n  return ka === kb ? compare(a.id, b.id) : compare(ka, kb);",
+      "replace": "  return a.at === b.at ? compare(a.id, b.id) : compare(a.at, b.at);",
+      "catches": [
+        "sorts half a second later after, not before",
+        "reads every spelling `Timestamp` admits as one order",
+        "keeps sub-millisecond precision rather than collapsing it onto the id",
+        "orders a log by when things happened",
+        "does not reject the later event as out of order, unrecoverably"
+      ]
+    },
+    {
+      "id": "instant_key_truncates_to_milliseconds",
+      "why": "r8, and the first mutant to touch `common.ts` at all. Folding the fraction into `Date.parse` collides two instants that differ below a millisecond, which orders them by id.",
+      "file": "src/common.ts",
+      "find": "  const sub = (fraction ?? '').padEnd(9, '0');",
+      "replace": "  const sub = (fraction ?? '').padEnd(3, '0').slice(0, 3);",
+      "catches": ["keeps sub-millisecond precision rather than collapsing it onto the id"]
+    },
+    {
+      "id": "retype_skips_structural_invariants",
+      "why": "r8. No mutant and no test reached past `applyRetype`s payload: it was the one door into states `applyObjectAccepted` and `applyRelationAdded` refuse.",
+      "file": "src/reduce.ts",
+      "find": "  const structural = retypeStructuralRefusal(state, from, toType);\n  if (structural) {",
+      "replace": "  const structural = retypeStructuralRefusal(state, from, toType);\n  if (false && structural) {",
+      "catches": [
+        "refuses to retype an objective that things are filed under",
+        "refuses to retype an answered question out of being a question"
+      ]
+    },
+    {
+      "id": "retype_drops_the_person",
+      "why": "r8, and the first mutant on `corrections.ts` that is not a display string. Without the attribution carry, a retype round trip moves a commitment's owner with no `reattribute` row.",
+      "file": "src/corrections.ts",
+      "find": "    const held = payload[fromField];\n    if (typeof held === 'string' && held.length > 0) out[toField] = held;",
+      "replace": "    const held = payload[fromField];\n    if (typeof held === 'string' && held.length < 0) out[toField] = held;",
+      "catches": [
+        "refuses a retype that moves a commitment onto a different person",
+        "carries the person across a retype round trip"
+      ]
+    },
+    {
+      "id": "answers_edge_ignores_retraction",
+      "why": "r8. `answerBindingRefusal` says it is 'checked again by the reducer because a check that only runs upstream is not a check'. The reducer repeated four of seven; this is one it did not.",
+      "file": "src/reduce.ts",
+      "find": "    if (from.retractedAt !== null) {\n      fail(\n        state,\n        event.id,\n        `open question \"${from.object.id}\" is retracted",
+      "replace": "    if (false) {\n      fail(\n        state,\n        event.id,\n        `open question \"${from.object.id}\" is retracted",
+      "catches": ["refuses an edge that would settle a retracted question"]
+    },
+    {
+      "id": "answers_edge_ignores_already_answered",
+      "why": "r8, and verbatim round 1's gauntlet finding — two `answers` edges on one question — fixed then in the command layer only.",
+      "file": "src/reduce.ts",
+      "find": "    if (from.object.type === 'open_question' && from.object.payload.status !== 'open') {",
+      "replace": "    if (false) {",
+      "catches": ["refuses a second answer onto one question — round 1’s finding, at the fold"]
+    },
+    {
+      "id": "supersession_is_irreversible",
+      "why": "r8. `applyReopen` names 'retract the decision that replaced it' as the remedy for a superseded decision, and on r7 that did nothing at all.",
+      "file": "src/reduce.ts",
+      "find": "    releaseSupersessions(state, record.object.id, event.at);",
+      "replace": "    void releaseSupersessions;",
+      "catches": ["un-retires the replaced decision when the replacement is retracted"]
+    },
+    {
+      "id": "panel_skips_uncertified_readings",
+      "why": "r8. `acceptance.ts` promises a laundered reading 'goes to Needs-you with its quote'; `projectAttention` dropped every proposal that was not a decision or a commitment, and returned zero items and zero refusals.",
+      "file": "src/attention.ts",
+      "find": "  const statement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);",
+      "replace": "  const statement = '';",
+      "catches": [
+        "renders the laundered reading the engine sent to Needs-you",
+        "refuses a laundered reading it has nobody to show, rather than dropping it"
+      ]
+    },
+    {
+      "id": "panel_continues_before_the_invariant",
+      "why": "r9. The defect class in one line: a branch added to the proposal loop that `continue`s before anything counts what it produced. Three rounds shipped one; this is what the invariant test is for.",
+      "file": "src/attention.ts",
+      "find": "    const outcome = needsYouOutcome(proposal, verdict, ctx);",
+      "replace": "    if (proposal.type === 'commitment') continue;\n    const outcome = needsYouOutcome(proposal, verdict, ctx);",
+      "catches": [
+        "raises an item or refuses, for every one of them — with a member list",
+        "raises an item or refuses, for every one of them — without a member list",
+        "sends a self-stated commitment to its owner whether or not a roster exists"
+      ]
+    },
+    {
+      "id": "panel_drops_self_stated_commitment",
+      "why": "r9. `awaitingConfirmFrom` is null for a commitment somebody made about themselves, and the branch used it as the whole audience — so every self-stated commitment the engine sent to Needs-you reached nobody, in a rule whose own reason text says it 'goes to Needs-you for a person to accept or decline'.",
+      "file": "src/attention.ts",
+      "find": "    const owner = verdict.awaitingConfirmFrom ?? proposal.payload.owner;",
+      "replace": "    const owner = verdict.awaitingConfirmFrom ?? '';",
+      "catches": [
+        "sends a self-stated commitment to its owner whether or not a roster exists",
+        "asks the owner of a self-stated commitment, and not with the third-party sentence"
+      ]
+    },
+    {
+      "id": "panel_tells_you_a_colleague_committed_you",
+      "why": "r9. `commitment_confirm` renders 'somebody else's message named you as the owner of this' — false of a commitment you wrote yourself, and false in the direction that misrepresents the room to the person being asked.",
+      "file": "src/attention.ts",
+      "find": "      verdict.awaitingConfirmFrom !== null\n        ? { kind: 'commitment_confirm', statement }\n        : { kind: 'commitment_self_stated', statement };",
+      "replace": "      verdict.awaitingConfirmFrom !== null\n        ? { kind: 'commitment_confirm', statement }\n        : { kind: 'commitment_confirm', statement };",
+      "catches": [
+        "asks the owner of a self-stated commitment, and not with the third-party sentence",
+        "sends a self-stated commitment to its owner whether or not a roster exists"
+      ]
+    },
+    {
+      "id": "panel_silences_an_empty_audience",
+      "why": "r9. `raiseOrRefuse` is the only thing standing between an empty fanout and silence: with no roster and no `decidedBy`, an unassigned decision produced no item and said nothing about it.",
+      "file": "src/attention.ts",
+      "find": "  return first === undefined\n    ? { kind: 'refuse', reason: reasonIfNobody }\n    : { kind: 'raise', items: [first, ...rest] };",
+      "replace": "  return first === undefined\n    ? { kind: 'raise', items: [] as unknown as [ComputedAttentionItem] }\n    : { kind: 'raise', items: [first, ...rest] };",
+      "catches": [
+        "refuses an unassigned decision it has nobody to show, and names the room",
+        "refuses a laundered reading it has nobody to show, rather than dropping it",
+        "raises an item or refuses, for every one of them — without a member list"
+      ]
+    },
+    {
+      "id": "reconcile_drops_dismissals",
+      "why": "r8. A stored non-pending item that stopped being computed was dropped, so a dismissal survived one cycle and not two — and one documented refusal path empties the store.",
+      "file": "src/attention.ts",
+      "find": "      status: entry.status === 'pending' && concluded ? 'resolved' : entry.status,",
+      "replace": "      status: entry.status !== 'pending' && concluded ? 'resolved' : entry.status,",
+      "catches": [
+        "resolves a pending item whose object no longer generates it",
+        "keeps a dismissal across a cycle that computes nothing",
+        "still resolves a pending item that stopped being computed"
+      ]
+    },
+    {
+      "id": "fallback_priority_returns_nan",
+      "why": "r8. `MAX_SAFE_INTEGER + NaN` is `NaN`, a comparator returning `NaN` is not an ordering, and an out-of-enum class sorted above `needs_decision`.",
+      "file": "src/attention.ts",
+      "find": "    default:\n      return Number.MAX_SAFE_INTEGER;\n  }\n}",
+      "replace": "    default: {\n      const exhaustive = attentionClass as never;\n      return Number.MAX_SAFE_INTEGER + (exhaustive as unknown as number);\n    }\n  }\n}",
+      "catches": ["sorts an out-of-enum class last instead of above everything"]
+    },
+    {
+      "id": "mention_items_undeduped",
+      "why": "r8. Two signals naming one person on one object produced two items with one id, so the projection was not byte-identical across arrival orders.",
+      "file": "src/attention.ts",
+      "find": "    if (seen.has(id)) continue;\n    seen.add(id);\n    out.push(\n      item({",
+      "replace": "    seen.add(id);\n    out.push(\n      item({",
+      "catches": ["is byte-identical whichever order the mentions arrive in"]
+    },
+    {
+      "id": "item_id_unescaped",
+      "why": "r8. Ids interpolated `userId` and the subject id raw, and `Id` has no charset restriction, so one item could inherit another’s dismissal.",
+      "file": "src/attention.ts",
+      "find": "  return `attn:${escapeIdPart(userId)}:${subjectKind}:${escapeIdPart(subjectId)}:${cls}`;",
+      "replace": "  return `attn:${userId}:${subjectId}:${cls}`;",
+      "catches": ["cannot be made to collide across the proposal and object namespaces"]
+    },
+    {
+      "id": "dedup_folds_compatibility_forms",
+      "why": "r8. NFKC maps `10²` onto `102`, so a reading of 100 was discarded as a duplicate of 102 — silently, on the one path in the engine that destroys a reading.",
+      "file": "src/acceptance.ts",
+      "find": "  const wanted = orderedTokens(payloadText(type, payload));",
+      "replace": "  const wanted = routingTokens(payloadText(type, payload));",
+      "catches": ["keeps `10² ms` and `102 ms` apart"]
+    },
+    {
+      "id": "dedup_folds_case",
+      "why": "r9. r8's surviving fold. The lower-casing ran through the code segment `normalizeForReceipt` preserves byte for byte, so a correction from `Hunter2` to `hunter2` was discarded and the record kept the old password — no proposal, no issue, no trace.",
+      "file": "src/acceptance.ts",
+      "find": "  const wanted = orderedTokens(payloadText(type, payload));\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    // A withdrawn or replaced object is not a thing the room \"already has\". Two\n    // fields rather than one because that is `isLive`'s own answer to what\n    // standing means, and a second definition of it here would be exactly the\n    // drift this package keeps finding.\n    if (candidate.retractedAt !== null || candidate.supersededById !== null) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    // Total on a ref the type forbids: a JS caller still carrying r9's\n    // `{objectId, type, text, messageIds}` reaches here with no payload at all,\n    // and `payloadText` would throw inside a path whose whole contract is that\n    // it never does. Skipping is the same direction every other guard here\n    // takes — a candidate nothing can compare is not a duplicate.\n    const candidatePayload = candidate.payload as unknown as Record<string, unknown> | undefined;\n    if (candidatePayload === null || typeof candidatePayload !== 'object') continue;\n    const have = orderedTokens(payloadText(type, candidatePayload));\n",
+      "replace": "  const wanted = orderedTokens(payloadText(type, payload).toLowerCase());\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    // A withdrawn or replaced object is not a thing the room \"already has\". Two\n    // fields rather than one because that is `isLive`'s own answer to what\n    // standing means, and a second definition of it here would be exactly the\n    // drift this package keeps finding.\n    if (candidate.retractedAt !== null || candidate.supersededById !== null) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    // Total on a ref the type forbids: a JS caller still carrying r9's\n    // `{objectId, type, text, messageIds}` reaches here with no payload at all,\n    // and `payloadText` would throw inside a path whose whole contract is that\n    // it never does. Skipping is the same direction every other guard here\n    // takes — a candidate nothing can compare is not a duplicate.\n    const candidatePayload = candidate.payload as unknown as Record<string, unknown> | undefined;\n    if (candidatePayload === null || typeof candidatePayload !== 'object') continue;\n    const have = orderedTokens(payloadText(type, candidatePayload).toLowerCase());\n",
+      "catches": [
+        "r9 — keeps a re-cased literal apart from the literal it is not",
+        "a machine-accepted reading cannot be destroyed by a re-cased duplicate"
+      ]
+    },
+    {
+      "id": "question_ornaments_unknown",
+      "why": "r8. `❓`/`❔` were in neither the source list nor the test list that pinned it, so a question minted as a claim auto-accepted — r5's defect, reopened.",
+      "file": "src/matching.ts",
+      "find": "  '\\u2753', // BLACK QUESTION MARK ORNAMENT — r8; what a phone keyboard emits\n  '\\u2754', // WHITE QUESTION MARK ORNAMENT — r8\n",
+      "replace": "",
+      "catches": ["refuses an ornament question mark minted as a claim — r5’s defect, reopened"]
+    },
+    {
+      "id": "question_certification_is_the_negation",
+      "why": "r8. The two speech-act checks are mirrors with opposite safe directions; reading one generous set for both auto-accepts a declarative at `open_question`s lower θ.",
+      "file": "src/escalation.ts",
+      "find": "      !readsAsQuestion(normalizeForReceipt(subject.statement ?? ''))",
+      "replace": "      isAssertion(normalizeForReceipt(subject.statement ?? ''))",
+      "catches": ["refuses an assertion on an unverifiable mark without certifying a question"]
+    },
+    {
+      "id": "payload_text_reads_the_wrong_key",
+      "why": "r8, and the first mutant on `objects.ts`. `payloadText` is what every text predicate in the package is handed; reading the wrong key for one type makes all of them blind to it.",
+      "file": "src/objects.ts",
+      "find": "  return type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';",
+      "replace": "  return type === 'open_question' ? 'question' : 'statement';",
+      "catches": ["places fixed confidences in the cells the table implies"]
+    },
+    {
+      "id": "correction_rate_counts_every_correction",
+      "why": "r8. `correctionRateByType` is #5/#17s live quality metric and had no mutant; counting corrections rather than corrected objects inflates the rate silently.",
+      "file": "src/corrections.ts",
+      "find": "  for (const type of correctedByType.values()) {\n    out[type].corrected += 1;\n  }",
+      "replace": "  for (const correction of state.corrections) {\n    out[correction.objectType].corrected += 1;\n  }",
+      "catches": ["counts objects corrected, not corrections"]
+    },
+    {
+      "id": "watermark_never_advances",
+      "why": "r8. The per-room watermark is what #22's `core_events.room_seq` maps onto and no mutant touched it.",
+      "file": "src/reduce.ts",
+      "find": "  if (roomId !== null) state.watermarks[roomId] = cursorOf(event);",
+      "replace": "  if (roomId === null) state.watermarks[roomId as string] = cursorOf(event);",
+      "catches": [
+        "tracks the last consumed position per room",
+        "tracks each room separately while the gate stays global",
+        "consumes — and advances — an event refused on business grounds"
+      ]
+    },
+    {
+      "id": "canonical_json_keeps_key_order",
+      "why": "r8, and the first mutant on `state.ts`. `serializeState` is the instrument every determinism and live≡replay test measures with; unsorted keys make all of them assert nothing about order.",
+      "file": "src/state.ts",
+      "find": "    for (const key of Object.keys(source).sort()) {",
+      "replace": "    for (const key of Object.keys(source)) {",
+      "catches": ["serializes a state with its keys sorted, whatever order they were built in"]
+    },
+    {
+      "id": "engine_always_auto_accepts",
+      "why": "r8's test-scoping finding. Gutting `decideAcceptance` to an unconditional `auto_accept` left `guards.test.ts` and `replay.test.ts` entirely green — the wider suite caught it, so this was never a hole, but two files named for the trust boundary could not see the engine half of it. This row exists so the scoping is measured rather than assumed.",
+      "file": "src/acceptance.ts",
+      "find": "  const config = context.config ?? defaultAcceptanceConfig;\n  const rule = config[proposal.type];",
+      "replace": "  const config = context.config ?? defaultAcceptanceConfig;\n  const rule = config[proposal.type];\n  if (proposal.id !== '__never__')\n    return {\n      thetaAuto: rule.thetaAuto,\n      thetaMin: rule.thetaMin,\n      autoAcceptAvailable: rule.autoAccept,\n      confidence: proposal.confidence,\n      problems: [],\n      attribution: null,\n      awaitingConfirmFrom: null,\n      duplicateOf: null,\n      verdict: 'auto_accept',\n      visibility: 'accepted',\n      rule: 'auto_accept',\n      reason: 'mutant',\n    } as never;",
+      "catches": [
+        "never emits an acceptance the reducer would refuse to fold",
+        "discards a reading the table says to discard rather than surfacing it"
+      ]
+    },
+    {
+      "id": "dedup_reads_only_the_sentence",
+      "why": "r10. Puts back the comparison that consulted one field of a payload. Every other field — `owner`, `claimant`, `verification`, `due`, `status`, `decidedBy` — was invisible, so one message naming two people accepted the first reading and destroyed the second with no proposal, no attention item and no issue.",
+      "file": "src/acceptance.ts",
+      "find": "    if (!payloadsMatch(type, candidatePayload, payload)) continue;\n",
+      "replace": "",
+      "catches": [
+        "does not discard a reading that differs anywhere else in the payload",
+        "does not destroy a second person’s commitment drawn from one sentence"
+      ]
+    },
+    {
+      "id": "dedup_key_set_is_the_schema_only",
+      "why": "r10. Narrows `payloadsMatch` to the keys the schema declares, dropping the keys the payloads actually carry. A field a caller stores that this version of the package has not heard of then goes uncompared, which is the enumeration-by-hand failure the union exists to prevent.",
+      "file": "src/acceptance.ts",
+      "find": "  const keys = new Set([...objectPayloadKeys(type), ...Object.keys(a), ...Object.keys(b)]);",
+      "replace": "  const keys = new Set(objectPayloadKeys(type));",
+      "catches": ["treats a payload field it has never heard of as a difference"]
+    },
+    {
+      "id": "dedup_matches_a_tombstone",
+      "why": "r10. Disables the retracted/superseded guard, so a re-reading is discarded against a tombstone — which means a retracted object can never be re-proposed: the room withdraws it and the next pass over the same window reads it into nothing.",
+      "file": "src/acceptance.ts",
+      "find": "    if (candidate.retractedAt !== null || candidate.supersededById !== null) continue;",
+      "replace": "    if (candidate.retractedAt === undefined) continue;",
+      "catches": [
+        "lets a retracted reading be proposed again",
+        "does not discard a reading against a tombstone"
+      ]
+    },
+    {
+      "id": "reconcile_resolves_the_unexamined",
+      "why": "r10. Rule 2 without the examination check: a cycle that could not compute an item marks it resolved, and rule 1 then pins it forever. An ordinary sliding window is enough — zero items, zero refusals, permanently resolved, while the proposal is still staged and still waiting for somebody.",
+      "file": "src/attention.ts",
+      "find": "      status: entry.status === 'pending' && concluded ? 'resolved' : entry.status,",
+      "replace": "      status: entry.status === 'pending' ? 'resolved' : entry.status,",
+      "catches": [
+        "leaves a pending item alone when the cycle never examined its subject",
+        "keeps a pending item pending across a slid window",
+        "keeps a pending item pending across a cycle with no window"
+      ]
+    },
+    {
+      "id": "refusal_counts_as_a_conclusion",
+      "why": "r10. Makes a refused proposal declare an examination, so a missing member list — or any other reason the projection could not route a needs_you verdict — reads as evidence that somebody acted on it. A refusal is a receipt for the silence, not a resolution.",
+      "file": "src/attention.ts",
+      "find": "    const outcome = needsYouOutcome(proposal, verdict, ctx);\n    if (outcome.kind === 'refuse') {\n      refusals.push({ proposalId: proposal.id, reason: outcome.reason });",
+      "replace": "    const outcome = needsYouOutcome(proposal, verdict, ctx);\n    if (outcome.kind === 'refuse') {\n      conclude(proposal);\n      refusals.push({ proposalId: proposal.id, reason: outcome.reason });",
+      "catches": ["keeps a pending item pending when there is nobody left to ask"]
+    },
+    {
+      "id": "mentions_declare_examinations_they_did_not_make",
+      "why": "r10. Lets the state walk declare `mention` examinations alongside its own class. A mention is a caller signal and no source reads state for it, so 'no item for obj_7' cannot be told apart from 'nobody told this cycle about obj_7' — the state walk saying it looked resolves every mention in the room the moment the window slides past the message that raised it.",
+      "file": "src/attention.ts",
+      "find": "  const examined: ExaminedSubject[] = Object.keys(state.objects)\n    .sort()\n    .map((subjectId) => ({\n      class: 'owned_commitment',\n      subjectKind: 'object',\n      subjectId,\n      producer: 'open_commitment',\n    }));",
+      "replace": "  const examined: ExaminedSubject[] = Object.keys(state.objects)\n    .sort()\n    .flatMap((subjectId) => [\n      {\n        class: 'owned_commitment' as const,\n        subjectKind: 'object' as const,\n        subjectId,\n        producer: 'open_commitment' as const,\n      },\n      {\n        class: 'mention' as const,\n        subjectKind: 'object' as const,\n        subjectId,\n        producer: 'mention_signal' as const,\n      },\n    ]);",
+      "catches": ["keeps a mention pending when the cycle was handed no signals"]
+    },
+    {
+      "id": "unknown_message_rejects",
+      "why": "r10. Classes a citation the window does not reach as *the reading is wrong* rather than *the window did not read it*. `reject` is what the engine turns into `discard`, so the proposal produced no item, no refusal and no trace — the opposite of the disposition this file gives every other unread input.",
+      "file": "src/escalation.ts",
+      "find": "        kind: 'unknown_message',\n        severity: 'refer',",
+      "replace": "        kind: 'unknown_message',\n        severity: 'reject',",
+      "catches": ["classes an unreached citation as unscanned rather than wrong"]
+    },
+    {
+      "id": "statement_may_add_link_structure",
+      "why": "r10. Removes the check that a statement carries no Markdown link markup the cited message lacks. The fold unfolds `[label](dest \"title\")` to `label dest title`, so a statement assembled out of the author's own words with brackets spliced through it normalizes identically, is borne, and lands as their words.",
+      "file": "src/escalation.ts",
+      "find": "      const added = addedLinkStructure(authored, statement);",
+      "replace": "      const added: string[] = [];",
+      "catches": [
+        "refuses a statement that splices link markup into the author’s own words",
+        "leaves a link the author actually wrote alone, in both directions",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "proposal_concludes_from_visibility_alone",
+      "why": "r11. Restores r10's `proposalItems` exactly: the guard that refuses to conclude on a verdict which is a fact about the window is deleted, so `visibility !== 'needs_you'` falls straight through to `conclude`. A window that slid past one of two cited messages then returns `discard / provenance_failed` — the quote is in none of the survivors — the cycle declares it examined, and rule 1 pins the resulting `resolved` forever, while `decideAcceptance` on the full window still says `needs_you / confirm: bob` and the proposal is still `proposed`.",
+      "file": "src/attention.ts",
+      "find": "    if (verdict.about === 'the_window') {\n      refusals.push({\n        proposalId: proposal.id,",
+      "replace": "    if (false as boolean) {\n      refusals.push({\n        proposalId: proposal.id,",
+      "catches": [
+        "keeps a confirm pending when the window dropped one of two citations",
+        "keeps a whole room’s needs_decision pending across the same slide",
+        "keeps a pending item pending across a slid window"
+      ]
+    },
+    {
+      "id": "problem_about_never_says_the_window",
+      "why": "r11. Makes every finding a fact about the reading, which is the derivation the guard above stands on. A check computed over whichever cited messages survived then claims to have judged the proposal, and the `the_cited_messages` row of PROBLEM_EVIDENCE stops meaning anything.",
+      "file": "src/escalation.ts",
+      "find": "  if (evidence === 'the_proposal') return 'the_reading';\n  if (evidence === 'the_window') return 'the_window';\n  return windowHoldsEveryCitation ? 'the_reading' : 'the_window';",
+      "replace": "  void evidence;\n  void windowHoldsEveryCitation;\n  return 'the_reading';",
+      "catches": [
+        "makes “about the window” a property of the finding, derived from the window",
+        "keeps a confirm pending when the window dropped one of two citations",
+        "reaches no post-gate verdict with a window that missed a citation"
+      ]
+    },
+    {
+      "id": "problem_about_always_says_the_window",
+      "why": "r11. The over-correction in the other direction: every finding becomes a window fact, so no cycle ever concludes about a proposal and rule 2 is closed for the whole proposal source. A guard that never lets go is not a fix, it is a panel that only grows.",
+      "file": "src/escalation.ts",
+      "find": "  if (evidence === 'the_proposal') return 'the_reading';\n  if (evidence === 'the_window') return 'the_window';\n  return windowHoldsEveryCitation ? 'the_reading' : 'the_window';",
+      "replace": "  void evidence;\n  void windowHoldsEveryCitation;\n  return 'the_window';",
+      "catches": [
+        "still concludes when the window held every citation and the receipt is wrong",
+        "makes “about the window” a property of the finding, derived from the window"
+      ]
+    },
+    {
+      "id": "examined_key_drops_the_producer",
+      "why": "r11. One class with two producers shares an examination key again, so the half that reads state concludes on behalf of the half that reads a caller signal. This is r10's key, and it is what let a cycle handed no `questionMentions` resolve somebody's named question by absence.",
+      "file": "src/attention.ts",
+      "find": "  return `${entry.class}:${entry.subjectKind}:${escapeIdPart(entry.subjectId)}:${entry.producer}`;",
+      "replace": "  return `${entry.class}:${entry.subjectKind}:${escapeIdPart(entry.subjectId)}`;",
+      "catches": [
+        "keeps a question_names_you item pending across a cycle with no signal",
+        "leaves a pending item alone when the cycle never examined its subject",
+        "preserves an item whose rationale this build does not recognise"
+      ]
+    },
+    {
+      "id": "named_question_examined_by_the_state_half",
+      "why": "r11. Restores r10's declaration: the state walk claims a `named_question` examination for every object whether or not the subject has settled. A cycle with no `questionMentions` then resolves an open question that names somebody, with zero items and zero refusals, which is the slide `mentionItems` refuses to make.",
+      "file": "src/attention.ts",
+      "find": "    if (openQuestion(subjectId) === null) {\n      examined.push({\n        class: 'blocking_question',",
+      "replace": "    if (true as boolean) {\n      examined.push({\n        class: 'blocking_question',",
+      "catches": ["keeps a question_names_you item pending across a cycle with no signal"]
+    },
+    {
+      "id": "named_question_never_examined",
+      "why": "r11. The over-correction: the state half never concludes for the signal half, so a question that is answered, retracted or superseded leaves its `question_names_you` item owed forever. An item nothing can ever finish is the panel #6 says the room learns to ignore.",
+      "file": "src/attention.ts",
+      "find": "    if (openQuestion(subjectId) === null) {\n      examined.push({\n        class: 'blocking_question',",
+      "replace": "    if (false as boolean) {\n      examined.push({\n        class: 'blocking_question',",
+      "catches": ["resolves it when the question itself is answered"]
+    },
+    {
+      "id": "statement_may_add_block_structure",
+      "why": "r11. Removes the check that a statement opens no line with a Markdown block marker the cited message lacks. `foldProse` collapses a whitespace run to one space in both directions, so a statement that puts a line break where its author put a space normalizes identically, is borne, and lands as their words — carrying a block quote, a heading, a list or a table row nobody wrote.",
+      "file": "src/escalation.ts",
+      "find": "      const built = addedBlockStructure(authored, statement);",
+      "replace": "      const built: string[] = [];",
+      "catches": [
+        "refuses a statement that re-breaks the author’s lines into markup",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "block_marker_read_anywhere_in_the_line",
+      "why": "r11. Drops the line-beginning requirement, so a block marker anywhere in a line counts as structure. Ordinary prose containing `-`, `>`, `#` or `|` is then refused for markup nobody built — a refusal that is false about the room's own words, which is the failure r7 measured 56,559 of one function over.",
+      "file": "src/matching.ts",
+      "find": "  const rest = line.slice(index).replace(WHITESPACE_RUN, ' ').trim();",
+      "replace": "  const rest = line\n    .slice(index)\n    .replace(WHITESPACE_RUN, ' ')\n    .trim()\n    .replace(/^[^-+*>#|]*/, '');",
+      "catches": [
+        "reads a block marker as a block marker only at a line beginning",
+        "leaves the author’s own block structure alone, in both directions"
+      ]
+    },
+    {
+      "id": "code_fence_left_to_the_segment_walk",
+      "why": "r11, and this round's own probe found it. Removes the raw-text fence pass, leaving fences to the code-segment walk — where `CODE_SPAN`'s double-backtick alternative consumes the first two characters of a three-tick opener and re-emits the rest as prose, so a fence is named in the block-start inventory and invisible to the scanner reading it.",
+      "file": "src/matching.ts",
+      "find": "  for (const line of prepare(text).split(LINE_BREAK_SPLIT)) {\n    if (CODE_FENCE.test(line)) out.push(line.replace(WHITESPACE_RUN, ' ').trim());\n  }",
+      "replace": "  void CODE_FENCE;",
+      "catches": ["sees a code fence, which the code-segment walk cannot"]
+    },
+    {
+      "id": "link_structure_anchored_to_the_quote",
+      "why": "r12. Puts the link guard back on `quote`, which is a proposal field the proposer writes beside `payload.statement`. A forgery written into both cancels to an empty multiset difference, every other check on the receipt passes because the fold unfolds a link to `label dest title`, and the record stores a link its named author never wrote.",
+      "file": "src/escalation.ts",
+      "find": "      const added = addedLinkStructure(authored, statement);",
+      "replace": "      const added = addedLinkStructure(quote, statement);",
+      "catches": ["refuses a forgery the proposer wrote into the quote as well as the statement"]
+    },
+    {
+      "id": "block_structure_anchored_to_the_quote",
+      "why": "r12. The same substitution at the block guard. Every entry in `BLOCK_MARKER`'s inventory becomes reachable again by writing the re-broken line into the quote as well as the statement.",
+      "file": "src/escalation.ts",
+      "find": "      const built = addedBlockStructure(authored, statement);",
+      "replace": "      const built = addedBlockStructure(quote, statement);",
+      "catches": [
+        "refuses a forgery the proposer wrote into the quote as well as the statement",
+        "does not care how the proposer spaced the quote, only what the message says"
+      ]
+    },
+    {
+      "id": "structure_guard_unanchored_passes",
+      "why": "r12. Anchors to the statement itself when no cited message bears the quote, so the difference is empty and the guard reports nothing. The proposal is rejected on another problem, which is exactly why this must not be relied on: an invariant that holds only because a different check fired does not hold.",
+      "file": "src/escalation.ts",
+      "find": "      const authored = bearing?.body ?? '';",
+      "replace": "      const authored = bearing?.body ?? statement;",
+      "catches": ["reports every structure in a statement no cited message bears"]
+    },
+    {
+      "id": "block_structure_ignores_line_endings",
+      "why": "r12. Drops `breakStructures` from the block difference, so the two rendered breaks that carry no line-initial marker go back to being invisible: a blank line splices a paragraph break into one paragraph, and two trailing spaces make a `<br>`. Both fold to the author‘s sentence and both were `auto_accept` on r11 with an honest quote.",
+      "file": "src/matching.ts",
+      "find": "  return addedStructure(authored, statement, (text) => [\n    ...blockStructures(text),\n    ...breakStructures(text),\n  ]);",
+      "replace": "  return addedStructure(authored, statement, blockStructures);",
+      "catches": ["refuses a paragraph break and a hard line break the author never wrote"]
+    },
+    {
+      "id": "break_descriptor_forgets_where",
+      "why": "r12. Keys the paragraph-break descriptor on nothing instead of on the line it precedes, so a blank line the author wrote anywhere in the message cancels one the statement spliced in somewhere else. A moved break is still a break the author did not write there.",
+      "file": "src/matching.ts",
+      "find": "    if (previous < index - 1) out.push(`blank line before \"${collapse(line)}\"`);",
+      "replace": "    if (previous < index - 1) out.push('blank line');",
+      "catches": ["reads a break as structure only where a renderer would"]
+    },
+    {
+      "id": "line_break_split_forgets_crlf",
+      "why": "r12. Drops the CRLF alternative, so `a\\r\\nb` reads as three lines with a blank one between them and every CRLF statement reports a paragraph break at every line ending — a false `reject` on a statement whose line endings differ from its message‘s. UAX #14 pairs CR LF as one mandatory break.",
+      "file": "src/matching.ts",
+      "find": "const LINE_BREAK_SPLIT = /\\r\\n|[\\n\\v\\f\\r\\u0085\\u2028\\u2029]/;",
+      "replace": "const LINE_BREAK_SPLIT = /[\\n\\v\\f\\r\\u0085\\u2028\\u2029]/;",
+      "catches": ["leaves a re-wrapped line and the author’s own breaks alone"]
+    },
+    {
+      "id": "mention_items_declare_an_examination",
+      "why": "r12. Puts back r10's per-subject examination. An `ExaminedSubject` has the person taken out of it, so one mention signal naming bob on an object concludes about that object for alice too — an ordinary sliding window past the message that named her resolves her item permanently, and rule 1 pins it afterwards.",
+      "file": "src/attention.ts",
+      "find": "  return { items: out, refusals: [], examined: [] };",
+      "replace": "  return {\n    items: out,\n    refusals: [],\n    examined: out.map((entry) => ({\n      class: 'mention',\n      subjectKind: 'object',\n      subjectId: entry.objectId,\n      producer: 'mention_signal',\n    })),\n  };",
+      "catches": ["does not resolve one person’s mention on a cycle whose signal named another"]
+    }
+  ]
+}

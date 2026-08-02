@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { appendEvent, computeAttention, foldEvents, reduce, serializeState } from '../src/index.js';
-import { ALICE, at, BOB, event, human, ROOM, sampleLog, shuffle } from './fixtures.js';
+import {
+  type AuthoredEvent,
+  appendEvent,
+  computeAttention,
+  foldEvents,
+  reduce,
+  renderRationale,
+  serializeState,
+  wasConsumed,
+} from '../src/index.js';
+import {
+  ALICE,
+  at,
+  BOB,
+  event,
+  human,
+  ids,
+  ROOM,
+  reminted,
+  sampleLog,
+  shuffle,
+} from './fixtures.js';
 
 describe('reduce — determinism', () => {
   it('is a pure function: the same events produce the same state', () => {
@@ -12,7 +32,7 @@ describe('reduce — determinism', () => {
     const canonical = serializeState(reduce(sampleLog()));
     for (const seed of [1, 7, 42, 1337, 90210]) {
       const shuffled = shuffle(sampleLog(), seed);
-      expect(shuffled.map((e) => e.id)).not.toEqual(sampleLog().map((e) => e.id));
+      expect(ids(shuffled)).not.toEqual(ids(sampleLog()));
       expect(serializeState(reduce(shuffled))).toBe(canonical);
     }
   });
@@ -27,8 +47,31 @@ describe('reduce — determinism', () => {
   it('folds incrementally to the same state as a full replay', () => {
     const events = sampleLog();
     const full = reduce(events);
-    const incremental = events.reduce((state, next) => appendEvent(state, next).state, reduce([]));
+    const incremental = events.reduce(
+      (state, next) => appendEvent(state, next.event, next).state,
+      reduce([]),
+    );
     expect(serializeState(incremental)).toBe(serializeState(full));
+  });
+
+  it('folds an out-of-order arrival to a replay of what it consumed', () => {
+    // The half the test above cannot reach, r8. `sampleLog()` is already in
+    // canonical order, so folding it one at a time never puts an event at or
+    // before the cursor — delete the position gate entirely and that test stays
+    // green. Live≡replay is a claim about *arrival* order, and this is the only
+    // shape that measures it.
+    for (const seed of [1, 7, 42, 1337]) {
+      const arrival = shuffle(sampleLog(), seed);
+      const consumed: AuthoredEvent[] = [];
+      let live = reduce([]);
+      for (const next of arrival) {
+        const result = appendEvent(live, next.event, next);
+        if (wasConsumed(result)) consumed.push(next);
+        live = result.state;
+      }
+      expect(serializeState(live), `seed ${seed}`).toBe(serializeState(reduce(consumed)));
+      expect(consumed.length, `seed ${seed}`).toBeLessThan(arrival.length);
+    }
   });
 
   it('is idempotent per event id — a redelivery is rejected, not double-applied', () => {
@@ -60,8 +103,10 @@ describe('reduce — determinism', () => {
 
   it('rejects a redelivery that re-minted its timestamp, and says so', () => {
     const events = sampleLog();
-    const reminted = events.map((e) => ({ ...e, at: at(20 + Number(e.id.slice(3))) }));
-    const { state, outcomes } = foldEvents([...events, ...reminted]);
+    const late = events.map((entry) =>
+      reminted(entry, { at: at(20 + Number(entry.event.id.slice(3))) }),
+    );
+    const { state, outcomes } = foldEvents([...events, ...late]);
     const rejected = outcomes.filter((o) => o.outcome === 'rejected');
 
     expect(rejected).toHaveLength(events.length);
@@ -94,7 +139,7 @@ describe('reduce — acceptance', () => {
   it('refuses to accept the same object id twice', () => {
     const [proposal, accept] = sampleLog();
     if (!proposal || !accept) throw new Error('fixture changed');
-    const state = reduce([proposal, accept, { ...accept, id: 'ev_dup' }]);
+    const state = reduce([proposal, accept, reminted(accept, { id: 'ev_dup', at: at(20) })]);
     expect(state.issues).toEqual([
       { eventId: 'ev_dup', reason: 'object "obj_decision_1" already accepted' },
     ]);
@@ -301,7 +346,9 @@ describe('computeAttention', () => {
       class: 'owned_commitment',
       status: 'pending',
     });
-    expect(items[0]?.rationale).toContain('you own this commitment');
+    const first = items[0];
+    if (!first) throw new Error('unreachable');
+    expect(renderRationale(first)).toContain('you own this commitment');
   });
 
   it('drops attention for retracted objects', () => {

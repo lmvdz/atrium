@@ -3,7 +3,10 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "dist",
-    "types": []
+    // Tests only. `tsconfig.build.json` pins `types: []` back on for `src`, so
+    // the *package* still cannot see Node's types — but `purity.test.ts` has to
+    // read the source files to prove it, and reading files needs `node:fs`.
+    "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
 }

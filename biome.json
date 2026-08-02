@@ -78,7 +78,12 @@
   },
   "overrides": [
     {
-      "includes": ["**/*.config.*", "**/scripts/**", "apps/server/src/**"],
+      "includes": [
+        "**/*.config.*",
+        "**/scripts/**",
+        "apps/server/src/**",
+        "packages/core/mutants/**"
+      ],
       "linter": {
         "rules": {
           "suspicious": {

@@ -172,11 +172,45 @@ describe('generated migration', () => {
    * Nobody should ever "upgrade" a phantom deployment across this line. The
    * next migration to be written is `0001`, and from that point the ordinary
    * rules apply again.
+   *
+   * AND `0001` HAS NOW BEEN WRITTEN — by the core lane, adding three
+   * `correction_action` enum values. So the assertion states the guarantee
+   * rather than the file count it happened to imply on the day it was written:
+   * "there is exactly ONE `0000_`, and it is first" is what stops the squash
+   * un-squashing, and it stays true for every migration written after it.
+   * `expect(files).toHaveLength(1)` did not mean "the squash held"; it meant
+   * "nobody has migrated since", which is a different sentence and stops being
+   * true the moment the schema moves.
    */
-  it('is a single initial migration, because nothing has shipped yet', () => {
+  it('is a single squashed initial migration, because nothing had shipped', () => {
     const files = migrationFiles();
-    expect(files).toHaveLength(1);
+    expect(files.filter((file) => file.startsWith('0000_'))).toHaveLength(1);
     expect(files[0]).toMatch(/^0000_/);
+  });
+
+  /**
+   * THE OTHER HALF, AND THE ONE THAT ONLY MATTERS ONCE THERE IS MORE THAN ONE
+   * MIGRATION. Numbers are the whole ordering — drizzle applies them in journal
+   * order and names them by tag — so two lanes that each write `0001` produce a
+   * directory that looks fine to a reader and applies one of them. Merging
+   * three branches that had each moved the schema is exactly the situation that
+   * makes it possible, so the numbering is asserted rather than eyeballed:
+   * contiguous from 0000, no duplicates, and the journal saying the same thing
+   * as the filesystem in the same order.
+   */
+  it('numbers its migrations contiguously, and the journal agrees with the files', () => {
+    const files = migrationFiles();
+    const numbers = files.map((file) => Number(file.slice(0, 4)));
+    expect(numbers, 'migration numbers must be contiguous from 0000 with no duplicates').toEqual(
+      files.map((_, index) => index),
+    );
+
+    const journal = JSON.parse(readFileSync(join(migrationsDir, 'meta', '_journal.json'), 'utf8'));
+    const entries = journal.entries as { idx: number; tag: string }[];
+    expect(entries.map((entry) => entry.idx)).toEqual(files.map((_, index) => index));
+    expect(entries.map((entry) => entry.tag)).toEqual(
+      files.map((file) => file.replace(/\.sql$/, '')),
+    );
   });
 
   it('creates rooms.workspace_id as part of the table, not as a bare ALTER', () => {
