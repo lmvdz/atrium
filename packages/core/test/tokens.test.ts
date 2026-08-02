@@ -441,15 +441,20 @@ describe('r6 — the four bodies that minted a sentence nobody wrote', () => {
       'Set the deployment password to `a  b` today, everyone.',
       'Set the deployment password to `a b` today, everyone.',
     ],
+    // Marker-free since r7, for the reason given at `SENTENCE` above: both of
+    // these read "We will deploy…" and the type rule then refused them at the
+    // reducer whatever the tokenizer did, so the reducer row of this table
+    // stopped measuring the tokenizer. The rule being pinned is about
+    // apostrophes; the fixture should carry nothing else a rule can catch.
     [
       'quotation marks added around two words',
-      'We will deploy production Friday, everyone, promise.',
-      "We will 'deploy' production 'Friday', everyone, promise.",
+      'The migration is reversible on production, everyone, promise.',
+      "The migration is 'reversible' on 'production', everyone, promise.",
     ],
     [
       'a displayed sentence minted as an asserted one',
-      "'We will deploy production on Friday afternoon.'",
-      'We will deploy production on Friday afternoon.',
+      "'The backfill completed cleanly on the production database.'",
+      'The backfill completed cleanly on the production database.',
     ],
   ];
 
@@ -773,7 +778,14 @@ describe('r6 — the correction scan cannot be turned off by the window the call
  * toward a referral.
  */
 describe('r7 — padding the citation list with earlier chatter does not turn the scan on', () => {
-  const SENTENCE = 'We will deploy production Friday afternoon as planned.';
+  // **Marker-free on purpose, and r7's ledger is why.** This read "We will
+  // deploy production Friday afternoon as planned." until the type rule landed
+  // hours later in the same round — and `readsAsCommitment` fires on "will", so
+  // the reducer refused this proposal for its *type* whether or not the window
+  // gate existed. The reducer assertion below stopped pinning D1 the moment a
+  // second refusal shipped, and `run.mjs`'s wrong-test mode is what said so.
+  // A fixture is minimal against the rule it pins, not realistic.
+  const SENTENCE = 'The migration completed cleanly on the production database.';
 
   /**
    * The whole exploit, as three messages. The sentence is last in the window —
@@ -894,7 +906,7 @@ describe('r7 — padding the citation list with earlier chatter does not turn th
     // the defect r6 was fixing when it moved the existence test with it.
     const withCorrection: ProvenanceMessage[] = [
       { id: 'm1', authorId: BOB, body: SENTENCE },
-      { id: 'm2', authorId: BOB, body: 'Correction: we will not deploy production Friday.' },
+      { id: 'm2', authorId: BOB, body: 'Correction: the migration did not complete cleanly.' },
       { id: 'm3', authorId: ALICE, body: 'The staging cluster is green.' },
       UNCITED_TAIL,
     ];

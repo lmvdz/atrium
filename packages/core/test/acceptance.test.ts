@@ -1175,7 +1175,18 @@ describe('r7 — a claim whose words could be an undertaking is referred, not ac
     );
   });
 
-  it('refuses the laundered commitment at the engine and at the reducer', () => {
+  it('refuses the laundered commitment at the engine', () => {
+    // **Split from the reducer half, and r7's ledger is why.** As one test
+    // asserting only that no object landed, it passed under a mutation that
+    // deleted the *engine* row — because the reducer twin still refused. A test
+    // covering two enforcement points measures whichever one is left.
+    const statement = 'We will deploy production Friday afternoon as planned.';
+    expect(decideAcceptance(claimOf(statement), { messages: room(statement) }).rule).toBe(
+      'type_not_certified',
+    );
+  });
+
+  it('refuses the laundered commitment at the reducer, where it is a boundary', () => {
     // r5's lesson, run over r7's rule: the engine is advice and `appendEvent` is
     // the trust boundary. Both read `typeCertifiableFromText` over the same
     // text, so a proposal the engine refuses cannot be folded behind its back.

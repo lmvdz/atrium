@@ -199,7 +199,7 @@
       "replace": "  if (false) {",
       "catches": [
         "refers a claim whose words are equally an undertaking",
-        "refuses the laundered commitment at the engine and at the reducer"
+        "refuses the laundered commitment at the engine"
       ]
     },
     {
@@ -210,7 +210,8 @@
       "replace": "    case 'claim':\n      return true;",
       "catches": [
         "refers a claim whose words are equally an undertaking",
-        "refuses the laundered commitment at the engine and at the reducer"
+        "refuses the laundered commitment at the engine",
+        "refuses the laundered commitment at the reducer, where it is a boundary"
       ]
     },
     {
@@ -1096,7 +1097,7 @@
       "find": "      if (!typeCertifiableFromText(object.type, payloadText(object.type, object.payload))) {",
       "replace": "      if (false) {",
       "catches": [
-        "refuses the laundered commitment at the engine and at the reducer",
+        "refuses the laundered commitment at the reducer, where it is a boundary",
         "refuses a model landing a claim whose words could be an undertaking"
       ]
     },
