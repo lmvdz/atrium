@@ -97,7 +97,11 @@ function withoutComments(css: string): string {
 function floorsIn(source: string, file: string): readonly Floor[] {
   const css = withoutComments(source);
   const out: Floor[] = [];
-  for (const hit of css.matchAll(/min-width:\s*(\d+)px/g)) {
+  /* BOTH SPELLINGS. `min-inline-size` is the logical-property name for the same
+     declaration and the platform treats them identically — a floor written that
+     way would be a floor this enumerator could not see, which is the r6
+     case-sensitivity finding in the axis of a property name. */
+  for (const hit of css.matchAll(/min-(?:width|inline-size):\s*(\d+)px/g)) {
     const raw = hit[1];
     if (raw === undefined) continue;
     const px = Number(raw);
