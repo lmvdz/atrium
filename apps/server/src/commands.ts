@@ -19,7 +19,7 @@ import {
 import type { Database } from '@atrium/db';
 import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
-import { projectRoomEvent } from './projections.js';
+import { type ProjectionHooks, projectRoomEvent } from './projections.js';
 import { MessageAttachment, type RoomEvent } from './room-events.js';
 import type { Authorizer, MembershipPair, Session } from './session.js';
 
@@ -214,6 +214,17 @@ export interface CommandServiceOptions {
   db: Database;
   ledger: Ledger;
   authorizer: Authorizer;
+  /**
+   * Work that must commit with the append — today, only the interpretation
+   * enqueue (#23). Wired from `index.ts` with the queue handle; absent, a
+   * message is still appended and broadcast and simply never interpreted.
+   *
+   * It is deliberately *not* defaulted to a no-op inside `projectRoomEvent`:
+   * "nothing schedules interpretation" is a real deployment state (a process
+   * running with the worker disabled) and should be a visible piece of wiring
+   * rather than an omission nobody can see.
+   */
+  projectionHooks?: ProjectionHooks;
 }
 
 export interface CommandService {
@@ -234,6 +245,7 @@ export function createCommandService({
   db,
   ledger,
   authorizer,
+  projectionHooks = {},
 }: CommandServiceOptions): CommandService {
   async function requireMembership(session: Session, roomId: string, runner?: Tx) {
     const membership = await authorizer.authorize(session, roomId, runner);
@@ -273,7 +285,7 @@ export function createCommandService({
         await requireMembership(session, roomId, tx);
       },
       build,
-      project: (context) => projectRoomEvent(context),
+      project: (context) => projectRoomEvent(context, projectionHooks),
     });
     const issues =
       appended.outcome?.outcome === 'applied_with_issue'
@@ -559,8 +571,16 @@ function draftToProposal(
   } as Proposal;
 }
 
-/** The object an acceptance mints, carrying the proposal's provenance forward. */
-function objectFromProposal(
+/**
+ * The object an acceptance mints, carrying the proposal's provenance forward.
+ *
+ * Exported for the interpretation worker (#23), which accepts through the same
+ * ledger this layer does and must mint the same object from the same proposal.
+ * A second copy of this mapping in `jobs/interpret.ts` would be a second answer
+ * to "what does accepting this proposal produce", free to disagree the first
+ * time either side gained a field.
+ */
+export function objectFromProposal(
   proposal: Proposal | Omit<Proposal, 'status'>,
   objectiveId: string | null,
   at: string,

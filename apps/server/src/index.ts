@@ -9,6 +9,7 @@ import { createDatabase } from '@atrium/db';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
+import { createGatewayProvider } from './jobs/provider.js';
 import { createLedger } from './ledger.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
@@ -90,10 +91,65 @@ async function main(): Promise<void> {
   const ledger = createLedger({ db: database.db, logger, instanceId: bus.instanceId });
   await ledger.hydrate();
 
+  /* ---------------------------------------------------------------------------
+   * THE INTERPRETATION WORKER (#23), AND THE ORDER IT HAS TO BE WIRED IN.
+   *
+   * The queue must exist before the command service, because the command
+   * service's append transaction is where the enqueue happens — that is the
+   * whole point of it (#19's gauntlet: a message committed with no job is a
+   * message nothing will ever read). So the queue starts first, holding a
+   * `getCommands`-shaped hole for nothing; the ledger is what the worker needs,
+   * and the ledger is already up.
+   *
+   * `INTERPRET_MODEL_DEFAULT` / `INTERPRET_MODEL_ESCALATION` have no defaults.
+   * Unset, the worker is not wired AND the enqueue hook is not installed: no
+   * jobs are created, so nothing accumulates in a dead-letter queue, and this
+   * line is the receipt. Choosing a model on the operator's behalf is the one
+   * thing this must not do — it is somebody's bill.
+   * ------------------------------------------------------------------------- */
+  const routing =
+    env.INTERPRET_MODEL_DEFAULT && env.INTERPRET_MODEL_ESCALATION
+      ? { default: env.INTERPRET_MODEL_DEFAULT, escalation: env.INTERPRET_MODEL_ESCALATION }
+      : null;
+  if (routing === null) {
+    logger.error(
+      'interpretation is DISABLED — set INTERPRET_MODEL_DEFAULT and INTERPRET_MODEL_ESCALATION',
+      {
+        default: env.INTERPRET_MODEL_DEFAULT ?? null,
+        escalation: env.INTERPRET_MODEL_ESCALATION ?? null,
+      },
+    );
+  }
+
+  const queue = await startQueue({
+    databaseUrl: env.DATABASE_URL,
+    concurrency: env.INTERPRET_WORKER_CONCURRENCY,
+    coalesceSeconds: env.INTERPRET_COALESCE_SECONDS,
+    retryLimit: env.INTERPRET_RETRY_LIMIT,
+    logger,
+    interpretation: routing
+      ? {
+          db: database.db,
+          ledger,
+          provider: createGatewayProvider(),
+          routing,
+          config: {
+            maxWindowMessages: env.INTERPRET_MAX_WINDOW_MESSAGES,
+            contextMessagesBefore: env.INTERPRET_CONTEXT_MESSAGES,
+          },
+        }
+      : undefined,
+  });
+
   const commands = createCommandService({
     db: database.db,
     ledger,
     authorizer: createMembershipAuthorizer(database.db),
+    projectionHooks: routing
+      ? {
+          onMessagePosted: ({ tx, roomId }) => queue.enqueueInterpretation(tx, roomId),
+        }
+      : {},
   });
 
   let ready = false;
@@ -125,12 +181,6 @@ async function main(): Promise<void> {
   });
 
   await realtime.listen();
-
-  const queue = await startQueue({
-    databaseUrl: env.DATABASE_URL,
-    concurrency: env.INTERPRET_WORKER_CONCURRENCY,
-    logger,
-  });
 
   ready = true;
   logger.info('atrium server ready');

@@ -35,11 +35,39 @@ import type { RoomEvent } from './room-events.js';
  * project.
  */
 
-export async function projectRoomEvent(context: ProjectionContext<RoomEvent>): Promise<void> {
+/**
+ * Side effects that must share the append's transaction but are not read-table
+ * writes.
+ *
+ * There is exactly one, and it is the interpretation enqueue (#23). It is a
+ * *hook* rather than a line in `projectMessagePosted` because this module may
+ * not import `queue.ts` — `queue.ts` imports the ledger and the projections,
+ * and a cycle here would be a cycle in the append path. Passing it in also
+ * makes "was the job enqueued in the same transaction as the message?" a
+ * question a test can ask by handing over a hook that inspects `tx`.
+ *
+ * Absent, nothing schedules interpretation and messages accumulate unread. That
+ * is the state `merge/foundation` shipped in, and #19's gauntlet routed it:
+ * `enqueueInterpretation` existed and nothing called it.
+ */
+export interface ProjectionHooks {
+  /**
+   * Called with the append transaction after a message row is inserted, and
+   * before the transaction commits. A throw takes the message down with it,
+   * which is the point: a message whose interpretation could not be scheduled
+   * is a message nothing will ever read.
+   */
+  onMessagePosted?: (input: { tx: Tx; roomId: string; messageId: string }) => Promise<unknown>;
+}
+
+export async function projectRoomEvent(
+  context: ProjectionContext<RoomEvent>,
+  hooks: ProjectionHooks = {},
+): Promise<void> {
   const { event } = context;
   switch (event.type) {
     case 'message_posted':
-      return projectMessagePosted(context, event);
+      return projectMessagePosted(context, event, hooks);
     case 'proposal_recorded':
       return projectProposalRecorded(context, event);
     case 'proposal_rejected':
@@ -80,6 +108,7 @@ function humanId(actor: Actor): string | null {
 async function projectMessagePosted(
   { tx, roomId, actor }: ProjectionContext<RoomEvent>,
   event: EventOf<'message_posted'>,
+  hooks: ProjectionHooks,
 ): Promise<void> {
   await tx.insert(messages).values({
     id: event.messageId,
@@ -90,6 +119,10 @@ async function projectMessagePosted(
     clientMessageId: event.clientMessageId,
     attachments: event.attachments,
   });
+  // Same transaction, same statement batch, no gap. `pg-boss`'s `fromDrizzle`
+  // adapter writes the job row through `tx`, so there is no instant at which
+  // the message is durable and the job is not.
+  await hooks.onMessagePosted?.({ tx, roomId, messageId: event.messageId });
 }
 
 /**

@@ -154,6 +154,53 @@ const RawEnvSchema = BaseEnvSchema.extend({
   WS_MEMBERSHIP_REVALIDATE_INTERVAL_MS: z.coerce.number().int().positive().optional(),
   INTERPRET_WORKER_CONCURRENCY: z.coerce.number().int().positive().max(50).default(2),
 
+  /* ── the interpretation worker (#23) ──────────────────────────────────── */
+  /**
+   * The two model ids, and there is deliberately **no default for either**.
+   *
+   * #7 chose the pair — a cheap default pass and a stronger escalation tier —
+   * and #8 chose when each runs, but neither number belongs in this file. A
+   * model id baked into TypeScript is a model id that survives a deployment
+   * meaning to change it, and it is the one setting whose wrong value is
+   * invisible: the worker keeps running and quietly bills a different model
+   * than the operator believes. `docker-compose.yml` and `.env.example` carry
+   * the shipped ids, where a deployment can see and override them.
+   *
+   * Unset is not an error at boot — it disables interpretation, loudly, at the
+   * one place that could have scheduled it (see `index.ts`). A process that
+   * cannot say which model it would call must not enqueue work claiming it
+   * will, and it must not pick one on the operator's behalf.
+   *
+   * The gateway credential itself is `AI_GATEWAY_API_KEY`, read by the AI SDK
+   * and never by this process; it is not in this schema because nothing here
+   * should ever be in a position to log it.
+   */
+  INTERPRET_MODEL_DEFAULT: z.string().min(1).optional(),
+  INTERPRET_MODEL_ESCALATION: z.string().min(1).optional(),
+  /**
+   * #8's coalescing window, in seconds. One number, three uses — the singleton
+   * slot width, the debounce delay, and the offset a follow-up pass is pushed
+   * by — so it is read once and passed down rather than re-spelled per use.
+   *
+   * The minimum is 1 because pg-boss's singleton window is whole seconds and a
+   * zero-width slot is no dedup at all; the maximum is five minutes because a
+   * room whose readings arrive later than that has stopped being realtime.
+   */
+  INTERPRET_COALESCE_SECONDS: z.coerce.number().int().min(1).max(300).default(10),
+  /** Most messages one pass reads. A backlog drains over consecutive passes. */
+  INTERPRET_MAX_WINDOW_MESSAGES: z.coerce.number().int().min(1).max(500).default(50),
+  /**
+   * How much already-read history precedes the window.
+   *
+   * It has a floor of 1 rather than an "off": with no history the escalation
+   * triggers cannot recognise a reply-blockquote *of an earlier room message*,
+   * which is the trigger the spike found on every real dispute in both windows
+   * — so zero would silently disable the routing while looking configured.
+   */
+  INTERPRET_CONTEXT_MESSAGES: z.coerce.number().int().min(1).max(500).default(25),
+  /** Attempts before a pass is dead-lettered. */
+  INTERPRET_RETRY_LIMIT: z.coerce.number().int().min(1).max(20).default(5),
+
   S3_ENDPOINT: z.string().min(1).default('http://localhost:9000'),
   S3_REGION: z.string().min(1).default('us-east-1'),
   S3_BUCKET: z.string().min(1).default('atrium-attachments'),
