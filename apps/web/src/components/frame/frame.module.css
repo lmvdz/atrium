@@ -1,0 +1,749 @@
+/* The app frame: workspace strip | rail | workspace | lens.
+   No hex, rgb() or hsl(): every colour is a token from design/tokens.css. */
+
+.app {
+  display: grid;
+  grid-template-columns: 52px 234px minmax(560px, 1fr) 376px;
+  height: 100vh;
+  /* the narrowest supported width is 1124 CSS px; a classic scrollbar eats ~15
+     of those, so the floor is set below the viewport target rather than at it.
+     The ≤1279 track set needs 998px, so 1024 is a real floor, not a guess. */
+  min-width: 1024px;
+  overflow: hidden;
+}
+
+/* grid and flex items default to min-width:auto, which lets a long mono line
+   push a column past its track and paint over its neighbour. Every track in
+   this shell is authoritative; content ellipsises or wraps inside it. */
+.app > *,
+.center > * {
+  min-width: 0;
+}
+
+/* The gallery renders frames at a fixed size rather than at viewport height,
+   so a full frame can sit inside a scrolling page and still be a full frame. */
+.boxed {
+  height: 100%;
+}
+
+/* ---------------------------------------------------------------------------
+   THE MINIMUM IS STATED, NOT DISCOVERED — r8 D10.
+
+   `.app` has declared `min-width: 1024px` since round 3 and nothing said so to
+   a reader. Below it the four-column shell is wider than the window, `<body>`
+   overflows sideways, and the page just… goes off the edge: the r8 review
+   measured 664px of overflow at a 360px viewport and 304px at 720, with no
+   breakpoint anywhere below 1279 and nothing on screen explaining it. 1024,
+   1440 and 1920 are clean, so this is exactly the shape every other defect this
+   round has: correct behaviour over an input range nobody stated.
+
+   Making the shell reflow into fewer columns is a design change this round
+   cannot verify — touch, coarse pointer, zoom and every non-Chromium engine are
+   outside what has been reviewed, and shipping an unmeasured mobile layout is
+   how "compliant but unusable" gets built. So the honest move is the one this
+   codebase makes everywhere else: SAY SO. The page keeps working and scrolls;
+   the notice states the floor and why, in the system's own voice.
+
+   The number here is the same number `.app` declares, and `test/viewport.test.tsx`
+   reads BOTH out of this stylesheet and out of the component's copy and asserts
+   they are one number — so a floor that moves and a sentence that does not is a
+   failure rather than a lie.
+   ------------------------------------------------------------------------- */
+.belowMin {
+  display: none;
+}
+
+@media (max-width: 1023px) {
+  .belowMin {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 40;
+    padding: 7px 12px;
+    background: var(--bg1);
+    border-bottom: 1px solid var(--line);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--tx1);
+  }
+}
+
+/* --- workspace strip ----------------------------------------------------- */
+
+.ws {
+  background: var(--bg5);
+  border-right: 1px solid var(--line2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0 12px;
+  gap: 8px;
+}
+
+.wsTile {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid var(--tx1);
+  background: var(--tx1);
+  color: var(--bg1);
+  display: grid;
+  place-items: center;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wsSpacer {
+  flex: 1;
+}
+
+.wsYou {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--replybg);
+  border: 1px solid var(--filebd);
+  display: grid;
+  place-items: center;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--blu2);
+}
+
+.iconbtn {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  color: var(--tx2);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.iconbtn:hover {
+  background: var(--bg7);
+  color: var(--tx0);
+  border-color: var(--line);
+}
+
+.iconbtn svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
+/* --- rail ---------------------------------------------------------------- */
+
+.rail {
+  background: var(--bg2);
+  border-right: 1px solid var(--line);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+}
+
+.railHead {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.railHead h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx0);
+}
+
+.railHeadSub {
+  margin-top: 4px;
+}
+
+.railBody {
+  overflow-y: auto;
+  padding: 4px 0 10px;
+  min-height: 0;
+}
+
+.railSec {
+  padding: 12px 12px 5px;
+}
+
+.railSecLabel {
+  color: var(--tx2);
+}
+
+.rrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 12px 4px 11px;
+  border-left: 2px solid transparent;
+  color: var(--tx2);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.rrow:hover {
+  background: var(--bg4);
+  color: var(--tx1);
+}
+
+.rrowOn {
+  background: var(--bg4);
+  border-left-color: var(--tx1);
+  color: var(--tx0);
+}
+
+.hash {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--tx2);
+  width: 9px;
+}
+
+.rrowName {
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rrowUnread .rrowName {
+  font-weight: 600;
+  color: var(--tx0);
+}
+
+.count {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+/* owed never hides: the badge is amber and it is not a hover affordance */
+.owedPill {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--amb2);
+  background: var(--ambbg);
+  border: 1px solid var(--ambbd);
+  border-radius: 8px;
+  padding: 0 5px 1px;
+  line-height: 1.3;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* humans are a roster, not navigation — non-interactive rows */
+.hrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3.5px 12px 3.5px 13px;
+}
+
+/* presence uses BLUE (= human), never green: green is reserved for "verified"
+
+   ROUND 4's GAUNTLET: the AWAY ring was --line3 at 1.93:1 light / 1.84:1 dark —
+   the THIRD place that token survived as a meaningful non-text graphic after
+   being rejected for the focus ring and for the claim underline. It survived
+   because the graphics registry in e2e/audit.ts had exactly one entry and the
+   guard counting graphics was satisfied by that entry's own instances.
+
+   A presence dot is a non-text graphic under WCAG 1.4.11 whatever else is on
+   the row: `here`, `idle` and `away` differ only by fill-versus-ring and hue.
+   --tx2 measures 6.26:1 light / 7.49:1 dark on --bg2, the rail's surface. And
+   the dot is no longer the only carrier at all — Rail.tsx puts the state in
+   words on the row, because a shape distinguished by hue is not something every
+   reader can distinguish and a `title` on an `aria-hidden` element is not
+   something any screen reader announces. */
+.pres {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.presHere {
+  background: var(--blu);
+}
+
+.presIdle {
+  background: transparent;
+  border: 1.5px solid var(--blu2);
+}
+
+.presAway {
+  background: transparent;
+  border: 1.5px solid var(--tx2);
+}
+
+/* A PERSON'S NAME IS NOT CLIPPED HERE ANY MORE. Round 7: its declared route was
+   "the row's title" — and `title=` is precisely what CONVENTIONS refuses as a
+   route ("invisible to touch, invisible to a keyboard, announced inconsistently
+   by screen readers"). The roster is not a deliberately compressed surface, it
+   is a column that happened to be laid out on one line, so the honest fix is to
+   stop cutting the name rather than to invent a route to it. The rail is also
+   the element the feed's actor column routes TO, and a route to a clip is a
+   route to nothing. */
+.hrowName {
+  font-size: 11.5px;
+  color: var(--tx2);
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hrowMe .hrowName {
+  color: var(--tx1);
+  font-weight: 500;
+}
+
+.railFoot {
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.railFootAvatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--replybg);
+  border: 1px solid var(--filebd);
+  display: grid;
+  place-items: center;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--blu2);
+}
+
+.railFootName {
+  font-size: 11.5px;
+  color: var(--tx1);
+  line-height: 1.25;
+}
+
+/* --- centre column ------------------------------------------------------- */
+
+.center {
+  background: var(--bg1);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.roomhead {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 16px 0;
+  background: var(--bg1);
+}
+
+.roomheadTop {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.roomheadTop h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--tx0);
+  flex: none;
+  white-space: nowrap;
+}
+
+.roomheadHash {
+  color: var(--tx2);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+/* the topic survives to the narrowest supported width — it is what the room is
+   for, and dropping it is a defect, not a responsive concession */
+/* The topic wraps rather than clipping, for the same reason as `.hrowName`: its
+   only route was the `title` attribute. */
+.topic {
+  font-size: 11.5px;
+  color: var(--tx2);
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+
+.faces {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.face {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg1);
+  background: var(--bg5);
+  display: grid;
+  place-items: center;
+  margin-left: -5px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--tx2);
+}
+
+/* --- surface indicators -------------------------------------------------- */
+/* the three surfaces are all on screen at once — these focus, they do not
+   navigate. That fact lives in the group's accessible name. */
+
+.surfaces {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.surf {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px 5px;
+  border-bottom: 2px solid transparent;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+/* The enabled label sits one step up the text ramp from the disabled one, so
+   the difference between "you can focus this surface" and "there is nothing on
+   it" is a real, measured step rather than a fade. --tx1 is 10.66:1 light and
+   12.27:1 dark on --bg1. */
+.surfLabel {
+  color: var(--tx1);
+  transition: color 0.12s ease;
+}
+
+.surf:hover {
+  background: var(--bg7);
+}
+
+.surf[aria-pressed='true'] {
+  border-bottom-color: var(--tx1);
+}
+
+.surf[aria-pressed='true'] .surfLabel {
+  color: var(--tx0);
+}
+
+.surf:hover .surfLabel {
+  color: var(--tx0);
+}
+
+/* DE-EMPHASIS MUST STAY READABLE (design/CONVENTIONS.md).
+
+   Round 2 shipped `opacity: .55` here. Re-measured in Chromium at 10px against
+   the r2 stylesheet: 2.49:1 light and 2.99:1 dark on the label, and 2.43:1 on
+   the count chip beside it, which nobody had measured at all — under AA, under
+   the 3:1 large-text floor, and below --tx4,
+   which globals.css bans from carrying text outright. The audit harness did not
+   see it because the harness skipped anything under `opacity 0.999` and named
+   "a disabled chip" as the reason. A guard written to excuse the rule it audits
+   is not a guard; both halves are fixed, and e2e/audit.ts now composites partial
+   opacity into the measurement instead of skipping it.
+
+   There is no fade that clears AA with this token set — CONVENTIONS records the
+   measurement that settled it for the feed filter, and the same arithmetic
+   applies here. So inactive is said with a TOKEN STEP and a SHAPE, exactly as
+   `.cnt[disabled]` in timeline.module.css already said it: the label drops one
+   step down the text ramp (--tx1 → --tx2, 6.79:1 light / 7.44:1 dark, still
+   past AA at 10px), the count chip goes dashed, and hover stops responding. */
+.surf[disabled] {
+  cursor: default;
+}
+
+.surf[disabled] .surfLabel {
+  color: var(--tx2);
+}
+
+.surf[disabled]:hover {
+  background: none;
+}
+
+.surf[disabled]:hover .surfLabel {
+  color: var(--tx2);
+}
+
+.surfCount {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  background: var(--bg7);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 4px;
+}
+
+.surfWarn .surfCount {
+  color: var(--amb2);
+  background: var(--ambbg);
+  border-color: var(--ambbd);
+}
+
+.surfWarn[disabled] .surfCount {
+  color: var(--tx2);
+  background: var(--bg7);
+  border-color: var(--line);
+}
+
+/* A count that counts nothing focuses nothing: dashed, like `.cnt[disabled]` in
+   timeline.module.css, which is disabled for the same reason. This chip was the
+   OTHER thing the audit's opacity exemption was hiding — at .55 it measured
+   2.43:1 and no receipt in two rounds had ever named it. */
+/* Dashed AND legible. The dash is the shape that says "nothing to focus"; a
+   --line hairline carrying it measured 1.32:1 light / 1.19:1 dark, so the shape
+   was there and the perceiving of it was not. --tx2 is 6.39:1 / 7.30:1 on
+   --bg7. In the registry, and measured. */
+.surf[disabled] .surfCount {
+  border-style: dashed;
+  border-color: var(--tx2);
+}
+
+/* --- composer ------------------------------------------------------------ */
+
+.composer {
+  border-top: 1px solid var(--line);
+  background: var(--bg1);
+  padding: 9px 16px 8px;
+}
+
+/* BRIEF concept 4: the binding banner. Your next message resolves the named
+   item and nothing is inferred from it.
+
+   THE BINDING BORDER IS A MEANINGFUL NON-TEXT GRAPHIC, AND IT WAS BELOW 3:1.
+
+   Round 4's gauntlet measured --ambbd at 1.76:1 light / 2.70:1 dark and
+   --filebd at 1.46:1 / 1.89:1 — the amber ANSWERING outline and the blue
+   REPLYING one. Rounds 3 and 4 both wrote about this border as the load-bearing
+   cue ("a state cue is not decoration for the resting state"), fixed which rule
+   won the cascade, and never measured what it was painted in.
+
+   The "there is a banner above it that says ANSWERING in words" argument is the
+   redundancy exemption this codebase has already rejected once, for the claim
+   underline: the banner scrolls, truncates and lives in a different box, while
+   the border is what ties the state to the FIELD. Both borders move to the
+   foreground token of their own hue — --amb2 at 4.84:1 light / 11.09:1 dark and
+   --blu2 at 6.59:1 / 11.78:1 on --bg1, and clear on --ambbg / --replybg / --bg3
+   too, which are the other surfaces they touch. Same hue, same 1px, same
+   meaning; a step up the ramp, which is the move the de-emphasis section already
+   prescribes for everything else. */
+.ctxbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--amb2);
+  border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+  background: var(--ambbg);
+  color: var(--amb2);
+  padding: 5px 9px 5px 10px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.ctxbarReply {
+  border-color: var(--blu2);
+  background: var(--replybg);
+  color: var(--blu2);
+}
+
+.ctxbar b {
+  font-weight: 600;
+  font-size: 10px;
+}
+
+.ctxbarPromise {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* The binding scope wraps. Its declared route was "the item's card in Needs
+   you", which does not state the OBJECTIVE at all and states the label under a
+   different sentence — a route that is not true is worse than none, because the
+   check reads it as satisfied (round 7, D4). */
+.ctxbarIn {
+  margin-left: auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ctxbarClose {
+  color: inherit;
+  padding: 0 2px;
+}
+
+.cbox {
+  border: 1px solid var(--line2);
+  border-radius: 5px;
+  background: var(--bg3);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  transition: border-color 0.12s ease;
+}
+
+.cbox:focus-within {
+  border-color: var(--line3);
+}
+
+.cboxBound {
+  border-color: var(--amb2);
+  border-radius: 0 0 5px 5px;
+}
+
+.cboxReplying {
+  border-color: var(--blu2);
+  border-radius: 0 0 5px 5px;
+}
+
+/* THE BINDING CUE SURVIVES FOCUS.
+
+   `.cbox:focus-within` and `.cboxBound` are both one class deep, so source
+   order decided which won — and `:focus-within` came second. Focusing the
+   composer therefore replaced the amber ANSWERING border with grey: the cue
+   saying "your next message resolves this item" was destroyed by focusing the
+   field you are meant to answer in, which is the one moment it has to hold.
+   (Round 3's gauntlet measured 1.19:1 between the two states.)
+
+   Both classes are on the same element, so `.cbox.cboxBound:focus-within` is
+   genuinely more specific rather than merely later — the fix does not depend on
+   where in the file it sits. The rule underneath: a state cue is not decoration
+   for the resting state, and a hover/focus rule may not out-rank the state the
+   surface is IN. */
+.cbox.cboxBound:focus-within {
+  border-color: var(--amb2);
+}
+
+.cbox.cboxReplying:focus-within {
+  border-color: var(--blu2);
+}
+
+.cbox textarea {
+  border: 0;
+  background: transparent;
+  resize: none;
+  font-family: Inter, sans-serif;
+  font-size: 12.5px;
+  color: var(--tx1);
+  padding: 8px 10px 8px 11px;
+  min-height: 36px;
+  min-width: 0;
+  width: 100%;
+  line-height: 1.45;
+}
+
+/* THE PRIMARY INPUT PAINTS THE SAME RING AS EVERY OTHER CONTROL.
+
+   `outline: none` used to sit in the block above. Being two classes deep it
+   out-ranked the global `:focus-visible` in globals.css, so 89 of the app's 90
+   controls painted the 2px --tx1 ring at 8.80:1 light / 11.20:1 dark and the
+   composer painted nothing — the app's primary input, and the control whose
+   keyboard contract the footer advertises, was the single one with no focus
+   indicator. Its only signal was the --line3 border at 2.23:1 light / 1.81:1
+   dark, the exact token this codebase rejected for this job in round 2.
+
+   Same colour and same width as everywhere else; the offset is NEGATIVE because
+   this control fills its container. A +1px ring would be drawn on top of
+   `.cbox`'s own border and read as a thickened box rather than a ring. Inset,
+   the ring's adjacent colour is `.cbox`'s --bg3 fill, which is what the rendered
+   audit measures it against. */
+.cbox textarea:focus-visible {
+  outline: 2px solid var(--tx1);
+  outline-offset: -1px;
+}
+
+.cbox textarea::placeholder {
+  color: var(--tx2);
+}
+
+.cboxRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 6px 0;
+}
+
+.cfoot {
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+.key {
+  border: 1px solid var(--line);
+  background: var(--bg7);
+  border-radius: 3px;
+  padding: 0 3px;
+  color: var(--tx1);
+}
+
+.cfootSpacer {
+  flex: 1;
+}
+
+/* --- lens ---------------------------------------------------------------- */
+
+.lens {
+  background: var(--bg3);
+  border-left: 1px solid var(--line);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+/* --- responsive: laptop -------------------------------------------------- */
+
+@media (max-width: 1439px) {
+  .app {
+    grid-template-columns: 48px 216px minmax(500px, 1fr) 344px;
+  }
+}
+
+@media (max-width: 1279px) {
+  .app {
+    grid-template-columns: 44px 198px minmax(440px, 1fr) 316px;
+  }
+
+  .faces {
+    display: none;
+  }
+}

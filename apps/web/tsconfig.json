@@ -12,6 +12,18 @@
       "@/*": ["./*"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "**/*.mjs", ".next/types/**/*.ts"],
+  "//": "allowJs is on, so a .js/.jsx file beside a .tsx is bundled and shipped identically. An include that names only the TypeScript globs leaves those files rooted by nothing — invisible to `tsc --noEmit` AND to every sweep that builds its program from this config. See test/printed-strings.test.tsx, 'every file this sweep reads is a file the compiler roots'.",
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.js",
+    "**/*.jsx",
+    "**/*.mjs",
+    "**/*.cjs",
+    "**/*.mts",
+    "**/*.cts",
+    ".next/types/**/*.ts"
+  ],
   "exclude": ["node_modules", ".next"]
 }
