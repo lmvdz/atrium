@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: every anchor in this
+// ledger is a VERBATIM SLICE OF ANOTHER FILE'S SOURCE, matched with
+// `String.includes`. Eleven of them quote a line that contains a template
+// literal, so the `${…}` has to be there character for character — the rule is
+// looking for a template written by mistake and finding one quoted on purpose.
+// Suppressed with a reason rather than left standing: r8 corrected the claim
+// "biome 0" to "0 errors, 12 warnings", and a dozen permanent warnings is how a
+// twelfth one stops being visible.
 /* ---------------------------------------------------------------------------
  * THE MUTATION LEDGER — re-runnable.
  *
