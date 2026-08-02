@@ -734,3 +734,81 @@ describe('per-job settlement', () => {
     expect(dlq.map((row) => row.room)).toEqual([poisoned]);
   });
 });
+
+/* ── acceptance, and what #86 does to it ────────────────────────────────── */
+
+describe('in-job acceptance', () => {
+  /**
+   * **A returned append is not an applied one, and this is the test that says so.**
+   *
+   * `ledger.append` throws for a *structural* refusal and returns normally for a
+   * *business* one: `applied_with_issue` writes its row, fans it out marked, and
+   * changes no state. The first draft of the worker read the accepted object off
+   * the returned event and counted it — so a run reported one object accepted
+   * while `accepted_objects` held zero rows and the fold held nothing. The
+   * ledger row existed, which is exactly what makes the mistake survive a
+   * glance.
+   *
+   * Mutation: go back to `if (accepted.event.type === 'object_accepted')` and
+   * drop the `issues` check. `objectsAccepted` fills with ids of objects that do
+   * not exist, and every count drawn from it — a health endpoint, #25's replay,
+   * a cost-per-accepted-object figure — is drawn from a fiction.
+   *
+   * ## THIS TEST IS ALSO THE #86 RECEIPT
+   *
+   * The refusal it observes is #86's. `atrium_receipt_window` snapshots exactly
+   * the cited messages; `packages/core` refuses to certify a window that ends at
+   * the citations. So on `merge/foundation` a model acceptance is refused
+   * whatever the reading says, and the assertion below is "the worker reports
+   * the refusal honestly", NOT "acceptance works". When #86 lands,
+   * `objectsAccepted` becomes 1 and `rejected` empties — and that flip is the
+   * signal that the model path is alive, which nothing else here produces.
+   */
+  it('does not count an acceptance the reducer refused', async () => {
+    const body = 'The control flow analysis work landed in the compiler last Tuesday.';
+    const first = await insertMessage(room.people.alice as string, body);
+    // A later message, so the *worker's own* acceptance window continues past
+    // the citation. Only the ledger's SQL-derived window is then narrow, which
+    // is what isolates #86 from an ordinary uncertifiable reading.
+    await insertMessage(room.people.bob as string, 'Good to know.');
+
+    provider.respond = () => [
+      {
+        type: 'claim',
+        text: body,
+        subject: room.people.alice as string,
+        confidence: 0.95,
+        quote: body,
+        messageIds: [first],
+      },
+    ];
+
+    const run = await runInterpretation(
+      {
+        db: handle.db,
+        ledger,
+        provider,
+        routing: { default: MODEL_DEFAULT, escalation: MODEL_ESCALATION },
+        logger,
+      },
+      { roomId: room.roomId },
+    );
+
+    // The reading is good enough to auto-accept — `decideAcceptance` said so,
+    // which is why the worker tried at all.
+    expect(run.proposalsRecorded).toHaveLength(1);
+    expect(run.rejected.map((entry) => entry.reason)).toEqual(['acceptance_refused']);
+    expect(run.rejected[0]?.decision?.verdict).toBe('auto_accept');
+
+    // And nothing was accepted, in the worker's report and in the database.
+    expect(run.objectsAccepted).toEqual([]);
+    const accepted = (await handle.db.execute(
+      sql`SELECT count(*)::int AS n FROM accepted_objects WHERE room_id = ${room.roomId}::uuid`,
+    )) as unknown as Array<{ n: number }>;
+    const [countRow] = accepted;
+    expect(countRow?.n).toBe(0);
+    // The proposal is still there as a `~` for a person to accept, which is the
+    // whole reason a refused acceptance must not fail the pass.
+    expect(await proposalRows()).toHaveLength(1);
+  });
+});

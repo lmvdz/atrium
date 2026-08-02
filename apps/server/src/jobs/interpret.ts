@@ -407,12 +407,26 @@ export async function runInterpretation(
       });
       run.proposalsRecorded.push(proposal.id);
     } else {
-      await deps.ledger.append<RoomEvent>({
+      const appended = await deps.ledger.append<RoomEvent>({
         roomId,
         actor: { kind: 'model', model: result.model },
         build: ({ id, at }) => ({ id, at, type: 'proposal_recorded', proposal }),
         project: (ctx) => projectRoomEvent(ctx),
       });
+      if (appended.issues.length > 0) {
+        run.rejected.push({
+          reason: 'proposal_refused',
+          detail: appended.issues.join(' | '),
+          reading,
+          decision,
+        });
+        deps.logger.warn('proposal recorded no reading — the reducer refused it', {
+          roomId,
+          proposalId: proposal.id,
+          issues: appended.issues,
+        });
+        continue;
+      }
       run.proposalsRecorded.push(proposal.id);
     }
 
@@ -421,7 +435,7 @@ export async function runInterpretation(
     // new run simply did not re-derive keeps its `~`.
     for (const prior of sameSentence) {
       if (run.proposalsSuperseded.includes(prior.id)) continue;
-      await deps.ledger.append<RoomEvent>({
+      const appended = await deps.ledger.append<RoomEvent>({
         roomId,
         actor: { kind: 'model', model: result.model },
         build: ({ id, at }) => ({
@@ -434,6 +448,14 @@ export async function runInterpretation(
         }),
         project: (ctx) => projectRoomEvent(ctx),
       });
+      if (appended.issues.length > 0) {
+        deps.logger.warn('supersession took no effect', {
+          roomId,
+          proposalId: prior.id,
+          issues: appended.issues,
+        });
+        continue;
+      }
       run.proposalsSuperseded.push(prior.id);
     }
 
@@ -453,8 +475,37 @@ export async function runInterpretation(
         }),
         project: (ctx) => projectRoomEvent(ctx),
       });
-      if (accepted.event.type === 'object_accepted') {
+      /**
+       * **`append` returning is not the reducer having applied it.**
+       *
+       * The ledger throws for `rejected` and `malformed`, and it does NOT throw
+       * for `applied_with_issue` — a *business* refusal writes its row, fans it
+       * out marked, and changes no state (see `LedgerEntry.issues`). The first
+       * draft of this block read the event back off the `AppendResult` and
+       * counted the object, which is a value that exists on a refused append
+       * too. So `objectsAccepted` reported acceptances that had not happened:
+       * `core_events` held an `object_accepted` row, `accepted_objects` held
+       * nothing, and the run said one object was accepted.
+       *
+       * That is the exact shape of the failure this codebase keeps finding —
+       * "the append returned" standing in for "the fold took it". `issues` is
+       * the fold's own record and is the only thing that answers it.
+       */
+      if (appended(accepted) && accepted.event.type === 'object_accepted') {
         run.objectsAccepted.push(accepted.event.object.id);
+      } else {
+        run.rejected.push({
+          reason: 'acceptance_refused',
+          detail: accepted.issues.join(' | '),
+          reading,
+          decision,
+        });
+        deps.logger.warn('auto-acceptance took no effect — the reducer refused it', {
+          roomId,
+          proposalId: proposal.id,
+          rule: decision.rule,
+          issues: accepted.issues,
+        });
       }
     } catch (error) {
       // A refused acceptance is not a failed job. The proposal is recorded and
@@ -801,6 +852,20 @@ function collectPriorProposals(
       quote: record.proposal.quote,
       provenance: [...record.proposal.provenance],
     }));
+}
+
+/**
+ * Whether the fold actually took an append, as against merely storing its row.
+ *
+ * One predicate, used by every append in this file, because the distinction is
+ * exactly the one that is easy to lose: `ledger.append` throws only for a
+ * *structural* refusal (`rejected`, `malformed`). A **business** refusal —
+ * `applied_with_issue` — returns normally, writes the row, and changes nothing.
+ * Anything that reads the returned event and believes the state moved is
+ * reporting an effect that did not occur.
+ */
+function appended(result: { issues: readonly string[] }): boolean {
+  return result.issues.length === 0;
 }
 
 /** The candidate whose message a reading cites, or `null` for a stray citation. */
