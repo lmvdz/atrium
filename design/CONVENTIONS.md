@@ -572,6 +572,86 @@ the sentence, and counts only rows that survive the viewport and every scroll bo
 them: its first cut listed `D1 at y=-58 in #feed (above)` underneath the words "no decision
 renders above it", which is a report contradicting its own evidence.
 
+**And a repro with a fixed route cannot keep a class pruned — r19 made it a render-time
+rule.** Round 11 cut this shape out of `V1.note`; round 17 cut it out of `K2.why` and wrote
+the repro above; round 18 shipped it twice more. `applyEffect`'s reschedule branch painted
+*"the date it moved from **stays above**, and it is still owed"* at y=252 with `yesterday
+17:00` rendering at 431 and 540 — 179px and 292px **below** it — and nothing but `today
+17:00` above it at 114 and 235, at every declared width in both themes; and `whyOf()`'s
+*synthesized* branch, four clicks from boot, still read *"and it is on the record below"* in
+the very surface `R17-D3` guards. R17-D3's own assertion reports that one when it is run on
+that state instead of on the one route it drives. **A scripted path checks the path.**
+
+So the enumeration was done exhaustively — every string literal in the file, comments
+stripped, cross-checked against a live DOM scan over thirty routes — and the sixteen
+sentences it found were each **named instead of pointed at**: *"the date it moved from is
+kept in the correction chain"*, *"the answer of record"*, *"in this chain"*, *"highlighted in
+the conversation"*. `checkLocatorInvariant()` now runs on every render, and it is flat:
+**no run the page authored carries a spatial locator.** Recited text is out (a person's typed
+words, a seeded message, a provenance excerpt), as it is for every page-integrity rule here,
+and a locator is non-compliant *wherever it is rendered* — scrolled out is not a defence, so
+the test is `shown()` and not "is it in the viewport". The word list is closed and short, and
+it is honest about its reach: a paraphrase ("the line you just read", "two panels left")
+walks past it. What it buys is that the **form** this file has shipped four times cannot ship
+a fifth time in silence.
+
+**And the rule has no exceptions, because the exception turned out to be the defect.**
+`C3.note` — *"The parity run **below** happens to agree with this"* — was excluded from r19's
+scope on the record: two prior reviews had filed it as a defect, both were judged wrong, and
+the standing ruling was that it holds at every reachable scroll position because the pane
+only scrolls ~155px. r19 built it a declaration channel — `data-locates="<object id>
+above|below"`, **measured** against the painted boxes rather than whitelisted — so that the
+one legitimate positional claim could survive a flat prohibition. The channel's own
+measurement then reported it 117 times across the state walk.
+
+By hand, on r18 as committed, at the declared height of 900: **three clicks from boot** —
+`C3` in the lens, its receipt, then the `·31 routine` strip every feed carries — the routine
+rows expand, `m9` leaves the viewport, and the only parity run a reader can see renders
+**above** the sentence claiming it is below, by 19px at 1440, 96px at 1366, 139px at 1279,
+123px at 1160 and 96px at 1120, in both themes. The prior adjudications asked whether
+*scrolling* could falsify it; what falsifies it is a control that changes what is in the
+feed. The word came out, the proposition stayed — *"The parity run happens to agree with
+this"* — the channel had no callers left and went with it, and this file already says why
+that is the better end state: **an audit may not exempt the case its own rule covers.**
+
+## A count names the set it counts over
+
+The pin trailer prints two statistics on one line and they had **different scopes, with only
+one saying so**: `6 of 10 unverified` counts the room's records *minus the ones in the pin*,
+while `1/3 objectives clear of you` counts the whole room. Nothing on the left named its set
+— no clause, no `title`, no `aria-label` — so clearing your queue walks the same sentence in
+the same place through `6 of 10` → `6 of 11` → `7 of 12` → `8 of 13` while the tab beside it
+says `13` throughout. Every statement is true of its unstated set, so this is ambiguity
+rather than falsehood; it is a defect because **watching "unverified" climb while you clear
+your queue reads as punishment**.
+
+Its cause is the general lesson. **Round 12 removed the clause that carried the fact** —
+`beyond the N above` — as part of a prune that was right about the *position* and wrong
+about the *scope*. A pruned clause took a denominator's subject with it. Every branch of the
+phrase now names the set (`outside your list`, which the failure branch has said since round
+12), and `N of M unverified` stays **contiguous** because two earlier repros read exactly
+that shape — a rewording that slid a word between the numerals would have turned `R13-D3`
+and `R14-D10` into checks that match nothing and pass in silence.
+
+## A person's draft is not the page's to delete
+
+`dropPrefill()`'s comment has said since round 8 that **"deleting somebody's draft to be safe
+is its own kind of dishonesty"**, and the page did not hold it. The verify box and the reopen
+box are rebuilt from `innerHTML` on every `render()`, so *any* re-render took the characters
+with them — type evidence, press `FOLD`, gone — and the composer's draft was destroyed by a
+room switch and by answering a decision or a question **from the pin**, writes that never
+read the composer at all. No sentence on screen claimed otherwise, so this was data loss
+rather than a lie; it is in scope because **an artifact citing an invariant it does not hold
+is the defect**, not the inconvenience.
+
+Focus already survived a render, through `focusKey()`/`restoreFocus()`, for exactly this
+reason. `S.drafts` is that mechanism's missing half and is keyed the same way — by what the
+draft is *for*, so a reason typed against `D1` can never reappear inside the box for `K0`.
+A draft is dropped when **the write consumed it** or **the reader dismissed the prompt**
+(Cancel, Escape), and by nothing else. The composer is cleared by a write only when the
+composer is what it wrote: `R19-D3c` asserts **both** directions, so a fix that merely
+stopped clearing fails its second half.
+
 **And no ellipsis is left.** `.trace .tx` was the last element in the file carrying
 `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`: at 1120, scrollWidth 624
 against clientWidth 328, painting `you came from #identity-service · following the sourc…`

@@ -1024,7 +1024,319 @@ const ECHO_SCAN = () => {
   return Array.from(new Set(out));
 };
 
+/* THE SCAN R19-D1 RUNS, AND IT IS A SCAN AND NOT A ROUTE. Every visible run the
+   page AUTHORED, held against a closed list of English spatial locators. A run
+   that carries one is a finding unless it declares which record it points at and
+   in which direction — and then the direction is measured against the painted
+   boxes, so a declaration is not an exemption.
+
+   THIS IS THE HARNESS'S COPY OF checkLocatorInvariant(), for the reason
+   ECHO_SCAN is the harness's copy of checkEchoInvariant(): it has to be
+   pointable at a build that predates the rule.
+
+   AN EARLIER CUT CARRIED A DECLARED TABLE — one row, C3's "the parity run BELOW
+   happens to agree with this", which this round was told was not a defect and
+   was twice adjudicated as holding at every reachable scroll position. The table
+   measured it rather than whitelisting it, and the measurement disagreed: three
+   clicks from boot on r18 as committed (C3 in the lens, its receipt, the `·31
+   routine` strip) the 31 routine rows expand, m9 leaves the viewport, and the
+   only parity run a reader can see renders 19-139px ABOVE that sentence at every
+   declared width in both themes. The adjudications had asked whether SCROLLING
+   could falsify it; what falsifies it is a control that changes what is in the
+   feed. So the sentence names its referent like the other fifteen, the table has
+   no rows left, and the rule is flat with no way through it.
+
+   WHAT IT DOES NOT COVER, before somebody discovers it next round: a paraphrase.
+   "the line you just read", "two panels left", "scroll down for it" walk past a
+   word list, and no word list can be complete over English. What it buys is that
+   the FORM this artifact has now shipped four times cannot ship a fifth time in
+   silence. Text the page RECITES rather than asserts is out — a person's typed
+   words, a seeded message, a provenance excerpt — for the same reason every
+   other page-integrity rule here exempts them. */
+const LOCATOR_WORDS = [
+  "above", "below", "beneath", "underneath", "overhead",
+  "beside", "alongside", "adjacent", "to the left", "to the right",
+  "on the left", "on the right", "leftmost", "rightmost",
+  "the row above", "the row below", "the row before", "the row after",
+  "the line above", "the line below", "further up", "further down",
+  "higher up", "lower down", "at the top", "at the bottom", "topmost"
+];
+const LOCATOR_SCAN = ({ words }) => {
+  const RECITED = '[data-voice="human"], .sysex, [data-cited], .prov';
+  const RE = new RegExp("\\b(?:" + words.join("|") + ")\\b", "i");
+  /* rendered at all, not "in the viewport": a locator is non-compliant wherever
+     it sits, and scrolled out is not a defence. Same test as the page's own
+     rule, which uses shown() for exactly this reason. */
+  const rendered = el => {
+    for (let p = el; p && p.nodeType === 1; p = p.parentElement) {
+      if (p.hidden) return false;
+      const cs = getComputedStyle(p);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+    }
+    return true;
+  };
+  const out = [];
+  const seen = {};
+  document.querySelectorAll("body *").forEach(el => {
+    if (el.children.length) return;
+    if (el.closest("script, style, template")) return;
+    if (el.closest(RECITED)) return;
+    if (el.getAttribute("aria-hidden") === "true") return;
+    if (!rendered(el)) return;
+    const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
+    const m = RE.exec(raw);
+    if (!m) return;
+    const word = m[0].toLowerCase();
+    const key = word + "|" + raw.slice(0, 80);
+    if (seen[key]) return;
+    seen[key] = 1;
+    out.push("a sentence this page wrote says " + JSON.stringify(word) +
+             " instead of naming what it means — " + JSON.stringify(raw.slice(0, 150)) +
+             " · painted in " + ((el.closest("[id]") || {}).id || el.className) +
+             " at y=" + Math.round(el.getBoundingClientRect().top));
+  });
+  return Array.from(new Set(out));
+};
+
 const REPROS = [
+  {
+    /* ROUND 19, D1 — THE THIRD INSTANCE OF ONE CLASS, AND THE ROUND IS THE
+       ENUMERATION RATHER THAN THE SENTENCE.
+
+       THE REPORTED ROUTE. Boot, #users-migration, open `Sign off the rollback
+       runbook` from the pin, `Reschedule to today 17:00`, open K2's receipt.
+       WHAT HAPPENED says "lars moved the due date from yesterday 17:00 to today
+       17:00 — THE DATE IT MOVED FROM STAYS ABOVE, and it is still owed", at
+       y=252 at 1440. Measured painted rects of every occurrence on that screen:
+
+         today 17:00       114   receipt state line   ABOVE
+         today 17:00       235   pin card             ABOVE
+         yesterday 17:00   252   the claim's own sentence
+         yesterday 17:00   431   correction chain     179px BELOW
+         yesterday 17:00   540   closing note         292px BELOW
+
+       No width and no theme puts `yesterday 17:00` above that sentence. Both
+       readings available to a person are false — either the old date was not
+       retained, or the commitment was never late — and by then the `overdue 16h`
+       chip is gone from every surface, so the reader with the most at stake is
+       the one checking that a reschedule did not quietly erase a missed
+       deadline. It fires on exactly the branch where the date MOVES.
+
+       WHY THIS IS A SCAN AND NOT A THIRD ROUTE-SHAPED REPRO. Round 17 removed
+       this shape from K2's seeded `why` and wrote R17-D3, which drives ONE route
+       and asserts on the pin's `.why`. The sentence came back through the
+       SYNTHESIZED branch of the same function, four clicks from boot — and
+       R17-D3's own assertion, run on that state instead of on the state it
+       drives, reports it on r18 as committed. A scripted path checks the path.
+       So this repro drives two routes into one scan over every visible run the
+       page authored, and the page itself now carries the rule on the render
+       (checkLocatorInvariant), which is the part a fixed route cannot do.
+
+       FIRES ON r18 AS COMMITTED at every width in both themes. */
+    id: "R19-D1-a-sentence-names-what-it-points-at",
+    what: "no run the page authored says where something is unless it declares a record and the geometry agrees",
+    async run(page) {
+      if (!await clickIn(page, '#pinList [data-open="K2"]')) return "K2 does not open on the pin";
+      if (!await clickIn(page, '[data-fx="resched"]')) return "K2 offers no reschedule";
+      if (!await clickIn(page, '[data-receipt="K2"]')) return "K2's receipt is not reachable";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(LOCATOR_SCAN, { words: LOCATOR_WORDS });
+    }
+  },
+  {
+    /* ROUND 19, D1b — THE SAME CLASS IN THE SURFACE ROUND 17 FIXED.
+       `whyOf()` has two branches. Round 17 rewrote the seeded one on K2 and left
+       the synthesized one, whose supporting clause reads "the call at <tm> was
+       <who>'s, AND IT IS ON THE RECORD BELOW". Reopen D1 and the pin paints it.
+       R17-D3's own assertion reports it verbatim on this state, on r18:
+         WHY on D1 points at a record below it — "you reopened this at 09:13, so
+         it is pending and only you can settle it · the call at 29 Jul 11:20 was
+         lars's, and it is on the record below."
+       That is not a new finding by a new instrument. It is round 17's instrument
+       driven four clicks further than round 17 drove it. */
+    id: "R19-D1b-the-pins-rationale-names-the-record",
+    what: "the synthesized rationale on the pin locates nothing by position",
+    async run(page) {
+      if (!await clickIn(page, '[data-lens-obj="D1"]')) return "D1 is not in the lens";
+      if (!await clickIn(page, '[data-receipt="D1"]')) return "D1's receipt is not reachable";
+      if (!await clickIn(page, "#rcReopen")) return "D1 offers no reopen";
+      const typed = await page.evaluate(() => {
+        const el = document.getElementById("rinput");
+        if (!el) return false;
+        el.focus(); el.value = "we need to revisit this"; el.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      });
+      if (!typed) return "the reopen prompt has no reason field";
+      if (!await clickIn(page, "#rgo")) return "the reopen prompt has no confirm";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(LOCATOR_SCAN, { words: LOCATOR_WORDS });
+    }
+  },
+  {
+    /* ROUND 19, D2 — A COUNT SCOPED TO A SET IT NEVER NAMES.
+       The pin trailer prints `~ 6 of 10 unverified · 1/3 objectives clear of
+       you`. The left half counts the room's records MINUS the ones in the pin;
+       the right half counts the whole room and says so. Nothing on the left
+       said which set it was — no clause, no title, no aria-label — so clearing
+       your queue walks the same sentence in the same place through 6 of 10 → 6
+       of 11 → 7 of 12 → 8 of 13 while the tab beside it says 13 throughout.
+       Every statement is true of its unstated set, which is why this is
+       ambiguity rather than falsehood and why a blind critic correctly declined
+       to hold on it. It is in scope because ROUND 12 REMOVED THE CLAUSE THAT
+       CARRIED THE FACT (`beyond the N above`) and that clause was the scope.
+
+       THE ASSERTION IS A COMPARISON, NOT A WORD COUNT: it takes the denominator
+       the trailer prints and the number of records the room holds, and only when
+       they DIFFER does it ask whether the sentence names a set. The compliant
+       forms are allowlisted — the page's own vocabulary for the pin — rather
+       than the violations being denylisted, which is unbounded.
+       FIRES ON r18 AS COMMITTED, at boot and after clearing an item. */
+    id: "R19-D2-a-count-names-the-set-it-counts-over",
+    what: "a trailer count over a subset of the room says which subset",
+    async run(page) {
+      if (!await clickIn(page, '#pinList [data-opt="0"]')) return "P1 offers no one-click option";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const el = document.getElementById("pinTrailer");
+        if (!el) return [];
+        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+        const m = /(\d+)\s+of\s+(\d+)\s+unverified/.exec(t);
+        if (!m) return [];
+        const held = (typeof room === "function" && room() && room().objects) ? room().objects.length : null;
+        if (held == null) return [];
+        if (Number(m[2]) === held) return [];        // it counts the room; the room is the default subject
+        /* the page's own words for the set outside the pin — the failure branch
+           of this very phrase has said "outside your list" since round 12 */
+        if (/outside your list|beyond your list|not in your list|everything else/i.test(t)) return [];
+        return ['the pin trailer says "' + m[0] + '" over ' + m[2] + " records while the room holds " + held +
+                ", so the number is scoped to the records outside the pin and the sentence does not say so — " +
+                "the other half of the same line is scoped to the room and does: " + JSON.stringify(t)];
+      });
+    }
+  },
+  {
+    /* ROUND 19, D3 — THREE INPUTS DESTROYED IN SILENCE, AGAINST THE FILE'S OWN
+       RULE. dropPrefill()'s comment, round 8: "deleting somebody's draft to be
+       safe is its own kind of dishonesty." The verify box and the reopen box are
+       rebuilt from innerHTML on every render(), so ANY re-render took the
+       characters with them: type evidence, press FOLD, gone. No sentence on
+       screen claims otherwise, so this is data loss rather than a lie, and a
+       blind critic correctly declined to hold on it — it is in scope because the
+       artifact was citing an invariant it does not hold. */
+    id: "R19-D3-a-typed-note-survives-a-render-it-did-not-cause",
+    what: "the verify box keeps the evidence a person typed when something else re-renders the page",
+    async run(page) {
+      if (!await clickIn(page, '#feed [data-verify="C3"]')) return "C3 offers no verify";
+      const typed = await page.evaluate(() => {
+        const el = document.getElementById("vinput");
+        if (!el) return false;
+        el.focus(); el.value = "the July AWS bill"; el.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      });
+      if (!typed) return "the verify prompt has no evidence field";
+      if (!await clickIn(page, "#pinFold")) return "the pin does not fold";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const el = document.getElementById("vinput");
+        if (!el) return ["folding the pin closed the verify prompt outright"];
+        return el.value === "the July AWS bill" ? []
+          : ['the evidence a person typed was destroyed by an unrelated re-render — the box now holds ' +
+             JSON.stringify(el.value) + ', and this file\'s own rule is that "deleting somebody\'s draft to be ' +
+             'safe is its own kind of dishonesty"'];
+      });
+    }
+  },
+  {
+    /* ROUND 19, D3b — the same defect in the other prompt. The reopen reason is
+       the one whose loss costs most: the hint under it promises the sentence is
+       kept "word for word and attributed to you", which is a promise about text
+       the next render was deleting. */
+    id: "R19-D3b-a-reopen-reason-survives-a-render-it-did-not-cause",
+    what: "the reopen box keeps the reason a person typed when something else re-renders the page",
+    async run(page) {
+      if (!await clickIn(page, '[data-lens-obj="K0"]')) return "K0 is not in the lens";
+      if (!await clickIn(page, '[data-receipt="K0"]')) return "K0's receipt is not reachable";
+      if (!await clickIn(page, "#rcReopen")) return "K0 offers no reopen";
+      const typed = await page.evaluate(() => {
+        const el = document.getElementById("rinput");
+        if (!el) return false;
+        el.focus(); el.value = "the flag was flipped back"; el.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      });
+      if (!typed) return "the reopen prompt has no reason field";
+      if (!await clickIn(page, "#pinFold")) return "the pin does not fold";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const el = document.getElementById("rinput");
+        if (!el) return ["folding the pin closed the reopen prompt outright"];
+        return el.value === "the flag was flipped back" ? []
+          : ["the reason a person typed was destroyed by an unrelated re-render — the box now holds " +
+             JSON.stringify(el.value) + ", under a hint promising it is kept word for word"];
+      });
+    }
+  },
+  {
+    /* ROUND 19, D3c — the composer half. A one-click answer from the pin reads
+       nothing out of the composer and emptied it anyway: type half a message,
+       answer P1 from the card, and the half-message is gone. The typed path must
+       still clear the box, because there the characters BECAME the statement of
+       record — so this asserts both directions, and a fix that simply stopped
+       clearing would fail its second half. */
+    id: "R19-D3c-a-write-clears-the-composer-only-when-the-composer-wrote-it",
+    what: "answering from the pin leaves a draft alone; answering from the composer consumes it",
+    async run(page) {
+      const typed = await page.evaluate(() => {
+        const el = document.getElementById("cinput");
+        if (!el) return false;
+        el.focus(); el.value = "half a message about the cutover";
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      });
+      if (!typed) return "there is no composer";
+      if (!await clickIn(page, '#pinList [data-opt="0"]')) return "P1 offers no one-click option";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(async () => {
+        const out = [];
+        const el = document.getElementById("cinput");
+        if (!el) return ["the composer is gone"];
+        if (el.value !== "half a message about the cutover")
+          out.push("answering a decision from the pin destroyed a draft it never read — the composer now holds " +
+                   JSON.stringify(el.value));
+        /* AND THE OTHER DIRECTION, in the same state: bind the composer, send,
+           and the box must be empty, because those characters are the statement
+           of record now. A fix that just stopped clearing passes the first half
+           of this repro and fails here. */
+        const bind = document.querySelector('#pinList [data-bind="1"], #feed [data-bind="1"]');
+        if (!bind) return out;
+        bind.click();
+        await new Promise(r => setTimeout(r, 120));
+        const box = document.getElementById("cinput");
+        box.focus(); box.value = "we hold until the freeze clears";
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        const send = document.getElementById("sendBtn");
+        if (!send) return out;
+        send.click();
+        await new Promise(r => setTimeout(r, 200));
+        const after = document.getElementById("cinput");
+        if (after && after.value !== "")
+          out.push("a typed answer left its own characters in the composer after recording them as the " +
+                   "statement of record — the box still holds " + JSON.stringify(after.value));
+        return out;
+      });
+    }
+  },
   {
     /* ROUND 18, D1 — THE ONE THREE BLIND REVIEWERS FOUND WITHOUT BEING ASKED.
        One click. Answer P1 from the pin and the feed appends two rows, one tick

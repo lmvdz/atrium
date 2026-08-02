@@ -1356,6 +1356,32 @@ const S = {
    * (b); and checkQuotationInvariant() proves it on every single render.
    * ------------------------------------------------------------------- */
   typed: [],
+  /* ---------------------------------------------------------------------
+   * WHAT A PERSON HAS TYPED AND NOT YET SENT (round 19, D3).
+   *
+   * This file's own rule, written in round 8 beside dropPrefill(): "deleting
+   * somebody's draft to be safe is its own kind of dishonesty." The artifact
+   * was citing an invariant it did not hold. Three inputs were destroyed with
+   * no sentence on screen claiming otherwise:
+   *   - the verify box's evidence and the reopen box's reason, by ANY
+   *     re-render — both boxes are rebuilt from innerHTML on every render(),
+   *     so typing evidence and pressing FOLD, or hovering a row that re-renders,
+   *     took the characters with it;
+   *   - the composer's draft, by a room switch, and by answering a decision or
+   *     a question from the pin — writes that never read the composer at all.
+   * Focus already survives a render, through focusKey()/restoreFocus(), for
+   * exactly this reason; the characters did not. This is that mechanism's
+   * missing half, and it is keyed the same way: by what the draft is FOR, so a
+   * draft cannot reappear against a different record or in a different room.
+   *
+   * WHEN A DRAFT IS DROPPED, and it is never the page being helpful:
+   *   - the write consumed it (doVerify, reopen, send, a typed answer);
+   *   - the reader dismissed the prompt themselves — Cancel, or Escape.
+   * Nothing else touches it. In particular an unrelated write does not: answer
+   * Q1 from the pin with a half-typed message in the composer and the message
+   * is still there afterwards.
+   * ------------------------------------------------------------------- */
+  drafts: {},
   people: [
     { id: "lars",   presence: "here", note: "you" },
     { id: "priya",  presence: "here", note: "now" },
@@ -1738,7 +1764,37 @@ S.rooms["users-migration"] = {
       history: [{ k: "claim", who: "priya", tm: "yest. 16:31", text: "said the backfill ran clean before any check had run — that line stayed a claim" }],
       provenance: [{ who: "priya", tm: "yest. 16:31", msg: "m2", ex: "Staging backfill ran clean — 4.2M rows in 38 minutes.", note: "message · seq 8990 · auto-accepted as a Claim (θ .58)" }],
       corrections: [],
-      note: "The parity run below happens to agree with this. It still is not the same object: one is a person's word, the other is a check."
+      /* THE FOURTH LIVE INSTANCE, AND THE ROUND WAS TOLD IT WAS NOT ONE (round
+         19, D1). This read "The parity run BELOW happens to agree with this",
+         and it was excluded from this round's scope on the record: two prior
+         reviews filed it as a defect, both were judged wrong, and the standing
+         ruling was that it holds at every reachable scroll position because the
+         pane only scrolls ~155px.
+
+         IT DOES NOT HOLD, and the counterexample is not a scroll. Three clicks
+         from boot — C3 in the lens, its receipt, then the `·31 routine` strip
+         that every feed carries — the 31 routine rows expand, m9 leaves the
+         viewport, and the ONLY parity run a reader can see is m3, ABOVE this
+         sentence. Measured on r18 as committed, at height 900, at all five
+         declared widths in both themes:
+
+           1440  note y=381  ·  only visible parity run at y=343   19px ABOVE
+           1366  note y=439  ·  only visible parity run at y=343   96px ABOVE
+           1279  note y=486  ·  only visible parity run at y=347  139px ABOVE
+           1160  note y=486  ·  only visible parity run at y=363  123px ABOVE
+           1120  note y=486  ·  only visible parity run at y=390   96px ABOVE
+
+         The earlier adjudications asked whether SCROLLING could falsify it. The
+         thing that falsifies it is a control that changes what is in the feed,
+         which is the same reason the other fifteen locators were liabilities:
+         the claim is re-derived by every reorder, and nothing in the record can
+         be read to check it.
+
+         So one word comes out. The proposition — that a run exists, that it
+         agrees, and that agreeing is not the same as being checked — is the
+         whole content and none of it was ever positional. "The parity run" is
+         already a name. */
+      note: "The parity run happens to agree with this. It still is not the same object: one is a person's word, the other is a check."
     },
     {
       id: "V1", kind: "claim", objectives: ["o1"], text: "Backfill parity: 4,218,904 / 4,218,904 rows, 0 checksum diffs",
@@ -3147,11 +3203,27 @@ function clearSummary(r) {
        and the pin's own lead says so in words. */
     const unver = vs.filter(v => isUnchecked(v.value)).length;
     const g = fail ? "✗" : overdue ? "◆" : unver ? "~" : owed.length ? "◆" : "✓";
+    /* EVERY BRANCH NAMES THE SET IT COUNTS OVER (round 19, D2). This phrase is
+       minted from `rest` — the room's records MINUS the ones in the pin — and
+       only the failure branch said so. `6 of 10 unverified` was true of a set
+       nothing on screen named, while the other half of the same line
+       (`1/3 objectives clear of you`) is scoped to the whole room and says so.
+       So as you clear your queue the same sentence in the same place counts
+       6 of 10 → 6 of 11 → 7 of 12 → 8 of 13 while the tab beside it says 13
+       throughout, and the number climbing reads as punishment for working.
+       Round 12 removed the clause that carried this fact — `beyond the N
+       above` — and the removal was right about the POSITION and wrong about
+       the scope: a pruned clause took the denominator's subject with it.
+       It comes back naming the set instead of pointing at it, which is the
+       other half of this round (D1): "your list" is the pin, by its own name.
+       `N of M unverified` stays contiguous because two earlier repros read it
+       — a rewording that slid a word between those numerals would have turned
+       R13-D3 and R14-D10 into checks that match nothing and pass in silence. */
     return [g,
       fail        ? `${fail} failure${fail === 1 ? "" : "s"} outside your list`
-    : overdue     ? `${overdue} thing${overdue === 1 ? " is" : "s are"} late, none failed`
-    : unver       ? `${unver} of ${vs.length} unverified`
-    : owed.length ? "the list above is all of it"
+    : overdue     ? `${overdue} thing${overdue === 1 ? " is" : "s are"} late outside your list, none failed`
+    : unver       ? `${unver} of ${vs.length} unverified outside your list`
+    : owed.length ? "your list is all that is left"
     :               "everything else is verified"];
   }, r.objects[0]);
   /* read back off the box rather than out of a closure the mutation replays
@@ -5403,6 +5475,111 @@ function checkProseInvariant() {
       JSON.stringify(f.text), f.el));
 }
 
+/* ===========================================================================
+ * THE LOCATOR RULE — A SENTENCE NAMES THE THING, IT DOES NOT POINT AT IT
+ * (round 19, D1)
+ *
+ * FOUR TIMES. Round 11 cut "…above" out of V1's note. Round 17 cut it out of
+ * K2's seeded `why` and wrote a repro for the pin's rationale. Round 18 shipped
+ * it in the reschedule entry's WHAT HAPPENED line — "the date it moved from
+ * stays above" with that date painted 179px and 292px BELOW the sentence at
+ * every width in both themes — and in the synthesized half of the very function
+ * round 17 fixed, where "it is on the record below" is four clicks from boot and
+ * round 17's own repro reports it the moment you drive that far.
+ *
+ * WHY A REPRO WAS NOT ENOUGH, said plainly, because it is the reason this is on
+ * the render instead. R17-D3 drives one route and asserts on `.why`. The
+ * sentence it was written for came back through a branch of the same function
+ * that route does not reach. A scripted path checks the path; a class needs
+ * something that looks at every frame anybody ever paints.
+ *
+ * THE COMPLIANT FORM, STATED POSITIVELY, AND IT HAS NO EXCEPTIONS. Every
+ * referent in a sentence this page writes is NAMED — an object, a field, a
+ * person, a value, a section of the receipt that has a heading. Position is not
+ * a name: it is a fact about the reader's viewport, re-derived by every reorder,
+ * every filter, every width and every scroll, and nothing in the record can be
+ * read to check it. So: NO RUN THIS PAGE AUTHORED CARRIES A SPATIAL LOCATOR.
+ *
+ * AN EARLIER CUT OF THIS RULE HAD A DECLARATION CHANNEL — `data-locates="<object
+ * id> above|below"`, measured against the painted boxes rather than trusted —
+ * for the one sentence this round was told to leave alone: C3's "the parity run
+ * BELOW happens to agree with this". Then the channel's own measurement reported
+ * that sentence 117 times across the state walk, and the state turned out to be
+ * three clicks from boot at every declared width in both themes (see the note on
+ * C3's seed). The exception was the defect. With the sentence named instead of
+ * pointing, nothing on the page needs the channel, and a mechanism kept alive
+ * for no caller is the dead work this file's own prune doctrine names — so it is
+ * gone and the rule is flat. That is also the stronger rule: CONVENTIONS already
+ * says an audit may not exempt the case its own rule covers.
+ *
+ * WHY THIS IS NOT AN UNBOUNDED DENYLIST, the same question checkProseInvariant
+ * answers about its own list. English spatial deixis in prose of this register
+ * is a closed set of adverbs and prepositional locators, and it is short. It is
+ * not the sentence-level test — a paraphrase ("the line you just read", "two
+ * panels left") walks past it, and this comment says so rather than leaving it
+ * to be discovered. What the word list buys is that the FORM this file has
+ * actually shipped four times cannot ship a fifth time in silence, and that a
+ * true instance and a false instance of the same clause can no longer sit 183px
+ * apart with nothing to tell them apart.
+ *
+ * WHAT IT DOES NOT COVER.
+ *   - Text the page RECITES rather than asserts: a person's typed words, a
+ *     seeded message, a provenance excerpt, an interpreter's own record. A
+ *     reader who writes "see above" is not this rule's business, for the same
+ *     reason round 5's defect was a defect.
+ *   - Containment in the DATA rather than on the screen: "sit under this
+ *     objective", "kept in the chain". Those name a structure the record holds
+ *     and stay true when the layout moves, which is the whole distinction.
+ *
+ * SCROLLED OUT IS NOT A DEFENCE. A locator is non-compliant wherever it is
+ * rendered, so the test is `shown()` and not "is it in the viewport" — a
+ * sentence is caught before a reader has scrolled to it, and a rule that waited
+ * for the scroll would be a rule about one scroll position. (The measurement in
+ * the other direction — is the thing it points AT on screen — is what the
+ * declaration channel needed, and the channel is gone.)
+ * ======================================================================== */
+const LOCATOR_RE = new RegExp("\\b(?:" + [
+  /* adverbs and prepositions of vertical position */
+  "above", "below", "beneath", "underneath", "overhead",
+  /* of lateral position */
+  "beside", "alongside", "adjacent", "to the left", "to the right",
+  "on the left", "on the right", "leftmost", "rightmost",
+  /* of order on the page */
+  "the row above", "the row below", "the row before", "the row after",
+  "the line above", "the line below", "further up", "further down",
+  "higher up", "lower down", "at the top", "at the bottom", "topmost"
+].join("|") + ")\\b", "i");
+
+function locatorFindings() {
+  const out = [];
+  const seen = {};
+  document.querySelectorAll("body *").forEach(el => {
+    if (el.children.length) return;                  // a run is what one element paints
+    if (el.closest("script, style, template")) return;
+    if (el.closest(RECITED_SEL)) return;             // recited, not asserted — see above
+    if (el.getAttribute("aria-hidden") === "true") return;
+    if (!shown(el)) return;
+    const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
+    const m = LOCATOR_RE.exec(raw);
+    if (!m) return;
+    const word = m[0].toLowerCase();
+    const key = word + "|" + raw.slice(0, 80);
+    if (seen[key]) return;
+    seen[key] = 1;
+    out.push({ word: word, text: raw, el: el });
+  });
+  return out;
+}
+window.__locatorFindings = () => locatorFindings().map(f => f.word + "  " + JSON.stringify(f.text));
+function checkLocatorInvariant() {
+  if (!DEV) return;
+  locatorFindings().forEach(f =>
+    console.error("[atrium invariant] a sentence this page wrote says where something is — " +
+      JSON.stringify(f.word) + " — instead of naming it. A position is not a name: it is " +
+      "re-derived by every reorder, filter, width and scroll, and no read of the record can " +
+      "check it:", JSON.stringify(f.text), f.el));
+}
+
 const CLIP_ALLOWED = "[data-clamp]";
 function checkLegibilityInvariant() {
   if (!DEV) return;
@@ -5916,7 +6093,15 @@ function whyOf(r, o) {
        if there is one, otherwise the objective it sits under. Two clauses keep it
        readable inside the pin's line budget; a rationale that gets clipped is not
        a rationale. */
-    if (prior) bits.push(`the call at ${prior.tm} was ${prior.who}'s, and it is on the record below`);
+    /* AND THIS ONE NAMES THE RECORD RATHER THAN POINTING DOWN AT IT (round 19,
+       D1). It read "…and it is on the record below". Round 17 removed exactly
+       this shape from K2's seeded `why` — and left the SYNTHESIZED branch of the
+       same function, which is reachable in four clicks: reopen D1 and its pin
+       card paints "the call at 29 Jul 11:20 was lars's, and it is on the record
+       below". Round 17's own repro, run on that state instead of on the one
+       route it drives, reports it. A repro with a fixed route cannot keep a
+       class pruned; that is why round 19 puts the rule on the render. */
+    if (prior) bits.push(`the call at ${prior.tm} was ${prior.who}'s, and it is on this record`);
     else if (titles.length) bits.push(`it sits under the objective ${titles[0]}`);
     return bits.join(" · ") + ".";
   });
@@ -6196,7 +6381,10 @@ function renderPin() {
       /* "highlighted" is now literally what happens — round 6 said this while
          dropping every other row to 1.5:1, so the word was doing the work of
          hiding a legibility failure. It says what the other rows get, too. */
-      ? ` · ${rows} linked row${rows === 1 ? "" : "s"} highlighted below · nothing else dimmed`
+      /* and "in the conversation" rather than "below" (round 19, D1) — the
+         conversation is a named surface with a tab of its own, and the rows are
+         only underneath this line while the pin happens to sit above the feed */
+      ? ` · ${rows} linked row${rows === 1 ? "" : "s"} highlighted in the conversation · nothing else dimmed`
       : " · hardest first");
   $("pinFold").setAttribute("aria-pressed", String(S.ui.pinFolded));
   $("pinFold").textContent = S.ui.pinFolded ? "UNFOLD" : "FOLD";
@@ -7056,6 +7244,37 @@ function rowActions(r, m, o) {
   return acts.join("");
 }
 
+/* --- DRAFTS SURVIVE A RENDER (round 19, D3) -------------------------------
+ * See S.drafts. Both prompts are rebuilt from innerHTML on every render, so the
+ * characters have to live somewhere that is not the DOM. The key names what the
+ * draft is FOR — the prompt and the record — so a reopen reason typed against
+ * D1 can never come back inside the box for K0.
+ * ---------------------------------------------------------------------- */
+/* WHAT AN ANSWER WRITE MAY TAKE FROM THE COMPOSER (round 19, D3). `typed` means
+   send() routed here with the reader's own characters as the statement of
+   record — the box has been consumed, so it is emptied and its context goes
+   with it. Otherwise the write came from the pin's card and never opened the
+   composer: the only thing it may touch is a binding to the very object it just
+   answered, because that binding is now a promise the composer cannot keep. */
+function clearComposerIfItWrote(typed, o) {
+  if (typed) {
+    S.ui.bound = null; S.ui.replyTo = null; S.ui.about = null; S.ui.prefill = null;
+    $("cinput").value = "";
+    return;
+  }
+  if (S.ui.bound === o.id) S.ui.bound = null;
+}
+function draftKey(kind, id) { return kind + ":" + id; }
+function readDraft(kind, id) { return S.drafts[draftKey(kind, id)] || ""; }
+function dropDraft(kind, id) { delete S.drafts[draftKey(kind, id)]; }
+/* the box carries the characters back into S on every keystroke rather than
+   being read at teardown: render() has a dozen callers and a capture that any
+   one of them can route around is the shape of defect this fixes. */
+function keepDraft(input, kind, id) {
+  input.value = readDraft(kind, id);
+  input.addEventListener("input", () => { S.drafts[draftKey(kind, id)] = input.value; });
+}
+
 /* the ~ → ✓ pair, exercisable: verifying asks for the evidence, and records it */
 /* AND ITS QUESTION IS SHORT ENOUGH TO BE READ AT THE NARROWEST SUPPORTED WIDTH
    (round 15, N5 — D3's class, one prompt over). `#vinput` asked `what checked
@@ -7082,12 +7301,16 @@ function verifyBox(o) {
      <div class="hint">${esc(o.claimant)} said it, you are checking it — that is what makes it green. Verifying your own claim is not offered.</div>`;
   box.querySelector("#vgo").addEventListener("click", () => doVerify(o.id, box.querySelector("#vinput").value.trim()));
   /* the prompt closes back onto the Verify button that opened it (D3) */
-  const closeVerify = () => { S.ui.verifying = null; focusOn(`[data-verify="${o.id}"]`, `[data-lens-obj="${o.id}"]`); render(); };
+  /* and closing it is the READER dismissing the prompt, which is the one thing
+     that may take their characters with it (round 19, D3) */
+  const closeVerify = () => { S.ui.verifying = null; dropDraft("verify", o.id);
+                              focusOn(`[data-verify="${o.id}"]`, `[data-lens-obj="${o.id}"]`); render(); };
   box.querySelector("#vcancel").addEventListener("click", closeVerify);
   box.querySelector("#vinput").addEventListener("keydown", e => {
     if (e.key === "Enter") { e.preventDefault(); doVerify(o.id, e.target.value.trim()); }
     if (e.key === "Escape") closeVerify();
   });
+  keepDraft(box.querySelector("#vinput"), "verify", o.id);
   return box;
 }
 /* render() has already scrolled the prompt clear of the sticky band, so focus
@@ -8045,7 +8268,7 @@ function answerDecision(objectId, answer, provenanceNote) {
   o.note = say([wasSt, nowSt], (ws, ns) => {
     const moved = !sameValue(ws.value, ns.value);
     return (typed
-      ? "Answer-binding skips the proposal machinery entirely: the statement above is your words, recorded verbatim. "
+      ? "Answer-binding skips the proposal machinery entirely: the statement of record is your words, recorded verbatim. "
       /* one fact, once — see the same cut in answerQuestion (round 18) */
       : "You chose one of the statements the card offered. It is recorded verbatim as the decision, and the page wrote that sentence, not you. ") +
            (moved && contradicts ? "It is not the same as what was proposed — that is allowed, and the correction chain records the swap. " : "") +
@@ -8071,9 +8294,15 @@ function answerDecision(objectId, answer, provenanceNote) {
                   say([wasVf, nowVf], (wv, nv) => !sameValue(wv.value, nv.value)
                     ? `${enumText(wv.value)} → ${enumText(nv.value)}`
                     : `${enumText(nv.value)} throughout`)], o, vAcc || change);
-  S.ui.bound = null; S.ui.replyTo = null; S.ui.pinOpen = null;
-  S.ui.prefill = null;
-  $("cinput").value = "";
+  /* A WRITE CLEARS THE COMPOSER WHEN THE COMPOSER IS WHAT IT WROTE (round 19,
+     D3). Both callers land here: send() with a sentence a person typed, and the
+     pin's one-click option with a statement off the card. The second one never
+     reads the composer at all, and it was emptying it anyway — type half a
+     message, answer P1 from the pin, and the half-message is gone with nothing
+     on screen having said it would be. The typed path still clears, because
+     there the characters became the statement of record. */
+  clearComposerIfItWrote(typed, o);
+  S.ui.pinOpen = null;
   /* the record of this write, most specific first: the correction entry it just
      added to an open receipt, then the row it appended, then the object's item
      in the lens. FOCUS FOLLOWS THE RECORD. */
@@ -8220,12 +8449,12 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
         ex: `${S.me} answered: ${label} — statement recorded: ${statement}`, note: provenanceNote });
   o.note = say([nowV2], v =>
     (typed
-      ? "The answer above is your own sentence, recorded verbatim as the answer of record. "
+      ? "The answer of record is your own sentence, recorded verbatim. "
       /* "the row that records it is in the system's voice", "the page wrote
          that sentence" and "it is not attributed to you as something you said"
          are one fact written three times (round 18). The row itself is on
          screen, in the system's voice, three panels left. One clause. */
-      : "The answer above is the statement the card carried, recorded verbatim — the page wrote that sentence, not you. ") +
+      : "The answer of record is the statement the card carried, recorded verbatim — the page wrote that sentence, not you. ") +
     `Answering a question is not the same as verifying the answer. It is ${enumText(v.value)} until a sign-off is attached, which is why the objectives it blocks are still blocked.`);
   /* the arrow is the verification the record moved through, not a literal
      "open →" that a re-answer would have made false (D2) */
@@ -8256,8 +8485,9 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
              change is the one that travels with it */
           o, vc3 || ac || sc2);
   o.fresh = true;
-  S.ui.bound = null; S.ui.replyTo = null; S.ui.about = null; S.ui.pinOpen = null; S.ui.prefill = null;
-  $("cinput").value = "";
+  /* same rule as answerDecision, same two callers (round 19, D3) */
+  clearComposerIfItWrote(typed, o);
+  S.ui.pinOpen = null;
   focusAfter(S.ui.receiptId === o.id ? ".rc-sec .corr:last-of-type .lnk" : null,
              `[data-msg="${sys.id}"] .tag`, `[data-msg="${sys.id}"] button`,
              `[data-lens-obj="${o.id}"]`);
@@ -8500,11 +8730,16 @@ function reopen(objectId, reason) {
         : enumText(nv.value) + " throughout") +
       (!sameValue(ws.value, ns.value) ? ", and it is no longer settled" : ", and it was not settled") +
       /* "the prior state is kept" was a quantifier over a history nothing here
-         asked (round 11). What this clause can honestly point at is the entry
-         directly below it, which carries the state it came from as a record
+         asked (round 11). What this clause can honestly say is that the entry
+         this transition just wrote carries the state it came from as a record
          read of its own — a structural fact about the chain, not a claim about
          everything the field has ever held. */
-      " · the state it came from is in the chain below, and it stays reachable from here") });
+      /* AND IT NAMES THE CHAIN INSTEAD OF POINTING AT IT (round 19, D1). "in the
+         chain below" was true of the receipt's section order and of nothing
+         else: this line is painted in WHAT HAPPENED, and WHAT HAPPENED is above
+         CORRECTION CHAIN only for as long as nobody reorders the sections. The
+         chain has a name and a heading; the sentence uses them. */
+      " · the state it came from is in the correction chain, and it stays reachable from here") });
 
   /* A TRANSITION HEADER NAMES WHAT MOVED (round 6 minor). Reopening a
      signed-off commitment puts back `self_reported` — the verification it
@@ -8563,7 +8798,7 @@ function reopen(objectId, reason) {
            (owed && back !== S.me
              ? `It went back to ${back}, who owed it — reopening undoes a state, it does not move ownership onto you. `
              : "") +
-           (reason ? "The reason above is your own sentence, recorded verbatim."
+           (reason ? "The reason on this record is your own sentence, recorded verbatim."
                    : "No reason was given, and the page does not write one for you."));
 
   /* THE PERMANENT ROW IS THE RECORD, AND IT GETS THE SAME RULE AS THE HEADER
@@ -8586,6 +8821,7 @@ function reopen(objectId, reason) {
                   say([wasSr, keptView], keptShort)],
                   o, vChange || sChange);
   S.ui.reopening = null;
+  dropDraft("reopen", o.id);              // the write consumed it (round 19, D3)
   /* the reopen is normally driven from the receipt, and the receipt stays open —
      so the record of this write is the correction entry that was just appended
      to the chain the reader is already looking at. */
@@ -8655,12 +8891,14 @@ function reopenBox(o) {
      <div class="hint">Leave it empty if you like — the state change is recorded either way, in the system's voice. Anything you do type is kept as your own sentence, word for word and attributed to you, and the chain is append-only: nothing here removes it later.${reopenConsequence(o)}</div>`;
   box.querySelector("#rgo").addEventListener("click", () => reopen(o.id, box.querySelector("#rinput").value.trim()));
   /* and this one back onto Reopen, which is where it came from (D3) */
-  const closeReopen = () => { S.ui.reopening = null; focusOn("#rcReopen", "#rcBack"); render(); };
+  const closeReopen = () => { S.ui.reopening = null; dropDraft("reopen", o.id);
+                              focusOn("#rcReopen", "#rcBack"); render(); };
   box.querySelector("#rcancel").addEventListener("click", closeReopen);
   box.querySelector("#rinput").addEventListener("keydown", e => {
     if (e.key === "Enter") { e.preventDefault(); reopen(o.id, e.target.value.trim()); }
     if (e.key === "Escape") closeReopen();
   });
+  keepDraft(box.querySelector("#rinput"), "reopen", o.id);
   return box;
 }
 
@@ -8748,7 +8986,10 @@ function doVerify(objectId, evidence) {
     after: say([nowVv], v =>
       `${enumText(v.value).replace(/^./, s => s.toUpperCase())} by ${S.me}, who is not the claimant`),
     change: vChange || sChange,
-    fact: say([nowVv], v => `${enumText(v.value)} by ${S.me} at ${t} · the evidence is ${S.me}'s own sentence and is quoted below`),
+    /* "quoted in this entry" rather than "quoted below" (round 19, D1) — the
+       quotation is part of this correction entry, which is a fact about the
+       entry rather than about where the reader's eye has to travel */
+    fact: say([nowVv], v => `${enumText(v.value)} by ${S.me} at ${t} · the evidence is ${S.me}'s own sentence and is quoted in this entry`),
     quote: { text: evidence, by: S.me, src: "typed" },
     msg: o.sourceMsg || (o.provenance[1] && o.provenance[1].msg) || null,
     /* this entry carried no `room` at all, so its route resolved against
@@ -8764,7 +9005,7 @@ function doVerify(objectId, evidence) {
      both in the correction chain, both provable — so that is what it promises. */
   o.note = say([nowVv], v => `${enumText(v.value).replace(/^./, s => s.toUpperCase())} by someone other than the claimant, ` +
            "which is the only thing that makes a line green. " +
-           "Reopening it puts the ~ back; this check and the evidence under it stay in the chain above, which is where the record is.");
+           "Reopening it puts the ~ back; this check and the evidence attached to it stay in the correction chain, which is where the record is.");
   /* the arrow states the move the record just made, both sides read from the
      minted change rather than from a literal that happened to be right (D2) */
   const sys = appendSystem(r, [`claim ${o.id} · `,
@@ -8777,6 +9018,7 @@ function doVerify(objectId, evidence) {
     ` · `, say([nowVv], v => `${enumText(v.value)} by ${S.me}`), ` · evidence: `, human(evidence)],
     o, vChange || sChange);
   S.ui.verifying = null;
+  dropDraft("verify", o.id);              // the write consumed it (round 19, D3)
   focusAfter(`[data-msg="${sys.id}"] .tag`, `[data-msg="${sys.id}"] button`,
              `[data-lens-obj="${o.id}"]`);
   render();
@@ -9012,8 +9254,17 @@ function applyEffect(objectId, fx) {
          because amend() records nothing when a value does not move, so there
          was no read of the past behind it at all. What these two reads support
          is a continuity claim about the date, and that is what is left. */
+      /* AND THE SAME LOCATOR CAME OUT OF THE TRUE COPY TOO (round 19, D1). This
+         one read "the date it was moved from is above, and it is in this chain"
+         and it WAS above — the entry's own `was` line paints it 40px higher —
+         so nothing here was false. It comes out anyway, because the identical
+         clause 183px higher in WHAT HAPPENED was false, and the reason the two
+         disagreed is that both were written from the author's memory of a
+         layout rather than from anything either sentence read. Leaving the true
+         copy standing leaves the next author a template to copy the false one
+         back from. `this chain` names the chain and carries the whole fact. */
       fact: say(rd, (was, now) => moved(was, now)
-        ? `rescheduled by ${S.me} at ${t} · the date it was moved from is above, and it is in this chain`
+        ? `rescheduled by ${S.me} at ${t} · the date it was moved from is in this chain`
         : `re-recorded by ${S.me} at ${t} · the date it was moved to is the date it already had, so the due date is unchanged`),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
       link: say([rd[1]], () => "the commitment " + routeHome(sourceRoomOf(o)))
@@ -9025,9 +9276,26 @@ function applyEffect(objectId, fx) {
        comparing the two ends of this transition, which cannot answer it. The
        sentence's actual content is that the date did not move, and that is a
        continuity claim two point reads do answer. */
+    /* THE POSITIONAL CLAIM, AND THE THIRD INSTANCE OF ITS CLASS (round 19, D1).
+       This read "the date it moved from stays above, and it is still owed", and
+       the WHAT HAPPENED line it is painted on is at y=252 at 1440: `yesterday
+       17:00` renders at 431 in the correction chain and at 540 in the closing
+       note, 179px and 292px BELOW it, and the only thing above it at 114 and
+       235 is `today 17:00`, the date it moved TO. Measured at seven widths in
+       both themes, no viewport puts the old date above that sentence. Both
+       readings a person can take are false: either the date it moved from was
+       not retained, or the commitment was never late — and by this point the
+       `overdue 16h` chip is gone from every surface, so the reader with the
+       most at stake is the one checking that a reschedule did not quietly erase
+       a missed deadline.
+       It fires on exactly the branch where the date MOVES, which is every time
+       the control does its job. Round 11 cut this shape out of V1's note and
+       round 17 cut it out of K2's `why`; the fix here is not a better locator
+       but the end of locating. The proposition is that the old date is kept,
+       and the record keeps it in a place with a name. */
     o.history.push({ k: "claim", who: S.me, tm: t,
       text: say(rd, (was, now) => moved(was, now)
-        ? `moved the due date from ${recordedLabel(was.value, "no due date at all")} to ${recordedLabel(now.value, "no date at all")} — the date it moved from stays above, and it is still owed`
+        ? `moved the due date from ${recordedLabel(was.value, "no due date at all")} to ${recordedLabel(now.value, "no date at all")} — the date it moved from is kept in the correction chain, and it is still owed`
         : `recorded the due date unchanged at ${recordedLabel(now.value, "no date at all")} — the due date did not move, and it is still owed`) });
     /* THE CLOSING NOTE READS THE FIELD IT IS ABOUT. "the commitment is still
        open, still yours, and still on your list" was three continuity claims —
@@ -9035,8 +9303,15 @@ function applyEffect(objectId, fx) {
        reads of the due date, and the first of them named a state K2's record
        has never held. What a reschedule can honestly say about standing is what
        the settlement says, so the settlement is what it reads. */
+    /* AND THE CLOSING NOTE'S COPY OF THE SAME LOCATOR (round 19, D1, the weaker
+       instance). "X is still on the record above Y" is satisfiable only by
+       reading the two dates inside this very sentence, where X does precede Y;
+       measured against the screen it is false, because the receipt's own state
+       line paints `today 17:00` at y=114, above every occurrence of the date it
+       moved from. The proposition is that both dates are on the record and
+       which one is current, and neither needs a position. */
     o.note = say(rd.concat([rst]), (was, now, st) => (moved(was, now)
-      ? `Rescheduling moves the date and nothing else: ${recordedLabel(was.value, "no due date at all")} is still on the record above ${recordedLabel(now.value)}. `
+      ? `Rescheduling moves the date and nothing else: the record still holds ${recordedLabel(was.value, "no due date at all")}, and ${recordedLabel(now.value)} is the date it moved to. `
       : `The date it was moved to is ${recordedLabel(now.value, "no date at all")}, the date it already had, so the due date is unchanged and the record has nothing new to hold. `) +
       `It is still ${enumText(st.value)}, and still owed.`);
     /* both sides of the arrow are the values the record moved between (D2) */
@@ -9186,7 +9461,9 @@ function applyEffect(objectId, fx) {
       was: say([rb[0]], n => backTo(n.value)),
       after: say([rb[1]], n => backTo(n.value)),
       change: bc,
-      fact: say(rb, (was, now, a) => `taken back by ${S.me} at ${t} · the hand-off to ${backTo(was.value)} is above, and it is in this chain` +
+      /* names the chain rather than pointing up at the entry's own `was` line
+         (round 19, D1) — the same cut as the reschedule entry, same reason */
+      fact: say(rb, (was, now, a) => `taken back by ${S.me} at ${t} · the hand-off to ${backTo(was.value)} is in this chain` +
         (a.everSet() ? " · the answer on the record is untouched" : " · nothing is recorded as its answer")),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
       link: say([rb[2]], a => (a.value == null ? "the question " : "the answer ") + routeHome(sourceRoomOf(o)))
@@ -9197,7 +9474,7 @@ function applyEffect(objectId, fx) {
     o.history.push({ k: "question", who: S.me, tm: t,
       text: say(rb, (was, now, a) => `took it back from ${backTo(was.value)} — it is on your list again` +
         (a.everSet() ? "; the answer on the record stays on it" : "; nothing is recorded as its answer")) });
-    o.note = say(rb, (was, now, a) => `Taking it back does not erase the hand-off to ${backTo(was.value)} — it is in the chain above. ` +
+    o.note = say(rb, (was, now, a) => `Taking it back does not erase the hand-off to ${backTo(was.value)} — it is in the correction chain. ` +
       (a.everSet() ? "The answer on the record is not touched by moving the question." : "Nothing is recorded as its answer."));
     line = [`question ${o.id} · `,
             say(rb, (was, now) => `taken back from ${backTo(was.value)} by ${S.me}`),
@@ -9484,13 +9761,25 @@ function unmarkSeen() {
 
 function switchRoom(id, quiet) {
   if (id === S.roomId) return;
+  /* THE DRAFT BELONGS TO THE ROOM IT WAS TYPED IN (round 19, D3). This cleared
+     the composer outright, so a half-written message and one click on the rail
+     — or a cross-room jump you did not choose, since jumpTo() comes through
+     here — was all it took. The composer's placeholder says `Message #<room>`,
+     so the box is per-room already; the characters follow it. The CONTEXT does
+     not: `bound`, `replyTo` and `about` name records and messages in the room
+     you are leaving, and carrying those across is how a reply ends up citing a
+     message that does not exist here (see the ctxIn note in renderComposer). */
+  S.drafts[draftKey("room", S.roomId)] = $("cinput").value;
   S.roomId = id;
   S.ui.feedFilter = null; S.ui.receiptId = null; S.ui.bound = null;
   S.ui.replyTo = null; S.ui.verifying = null; S.ui.pinOpen = null;
   S.ui.reopening = null; S.ui.trace = null; S.ui.about = null;
   S.ui.routineOpen = false; S.ui.routineOpenedByFilter = false; S.ui.routineAll = false;
+  /* the prefill is a claim about characters in a specific box: dropped with the
+     context that produced it, so dropPrefill() can never strip a person's own
+     words off the front of a draft it did not put there */
   S.ui.prefill = null;
-  $("cinput").value = "";
+  $("cinput").value = readDraft("room", id);
   if (quiet) return;                              // caller renders and reports
   render();
   bootScroll();
@@ -9749,6 +10038,7 @@ function render() {
   checkLayoutInvariant();
   checkLegibilityInvariant();
   checkProseInvariant();
+  checkLocatorInvariant();
   checkViewportFitInvariant();
   setTimeout(clearFresh, 400);
 }
