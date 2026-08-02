@@ -258,6 +258,27 @@ services:
       WS_SWEEP_FAILURE_LIMIT: ${WS_SWEEP_FAILURE_LIMIT:-3}
       WS_SWEEP_UNVERIFIED_MS: ${WS_SWEEP_UNVERIFIED_MS:-60000}
       INTERPRET_WORKER_CONCURRENCY: ${INTERPRET_WORKER_CONCURRENCY:-2}
+      # The interpretation worker (#23). The two model ids live HERE and not in
+      # TypeScript — a model id in the code is one this file cannot override,
+      # and whose wrong value is silent: the worker runs on and bills a model
+      # nobody chose. Unset, the server logs an error at boot and schedules no
+      # interpretation at all, which is the honest degradation.
+      #
+      # The defaults below are #7's pair, and they are defaults *of this file*:
+      # `apps/server/src/env.ts` has none, so a deployment that does not use
+      # this compose file must state them.
+      INTERPRET_MODEL_DEFAULT: ${INTERPRET_MODEL_DEFAULT:-openai/gpt-5.6-luna}
+      INTERPRET_MODEL_ESCALATION: ${INTERPRET_MODEL_ESCALATION:-anthropic/claude-sonnet-5}
+      # The credential the AI SDK reads for itself; the server never holds it.
+      # Empty is a running deployment whose every interpretation pass fails
+      # against the gateway and dead-letters, which is visible; a default would
+      # not be.
+      AI_GATEWAY_API_KEY: ${AI_GATEWAY_API_KEY:-}
+      # #8's coalescing window: a burst inside it is ONE provider call.
+      INTERPRET_COALESCE_SECONDS: ${INTERPRET_COALESCE_SECONDS:-10}
+      INTERPRET_MAX_WINDOW_MESSAGES: ${INTERPRET_MAX_WINDOW_MESSAGES:-50}
+      INTERPRET_CONTEXT_MESSAGES: ${INTERPRET_CONTEXT_MESSAGES:-25}
+      INTERPRET_RETRY_LIMIT: ${INTERPRET_RETRY_LIMIT:-5}
       S3_ENDPOINT: http://minio:9000
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-atrium-attachments}

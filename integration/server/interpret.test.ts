@@ -189,15 +189,19 @@ describe('coalescing a burst', () => {
   /**
    * The gauntlet bar, measured rather than declared.
    *
-   * Mutation: drop `singletonKey` from `enqueueInterpretation`, or drop the
-   * explicit `singletonSeconds` beside it (pg-boss's dedup silently no-ops
-   * without a window — #16's documented footgun). Either one turns twelve
-   * messages into twelve jobs and twelve provider calls.
+   * Mutation: drop `singletonKey` from `enqueueInterpretation`, or drop
+   * `policy: 'stately'` from the queue. Either one turns twelve messages into
+   * twelve jobs and twelve provider calls.
    *
-   * Mutation: drop `startAfter`. The job then runs at the *start* of the slot,
-   * drains message one, and the other eleven are refused by the singleton index
-   * for the rest of the window — one call, eleven messages lost, which is why
-   * "exactly one call" alone is not the assertion.
+   * Mutation: swap the policy for a `singletonSeconds` time bucket — the shape
+   * #16 describes, and the first thing this was built as. That bucket is epoch
+   * aligned, so a burst straddling a boundary lands in two of them and costs
+   * two calls; this test caught exactly that, on a burst lasting 374ms.
+   *
+   * Mutation: drop `startAfter`. The job then runs the instant the first
+   * message lands, drains it alone, and the other eleven are dropped by the
+   * dedup for the rest of the burst — one call, eleven messages lost, which is
+   * why "exactly one call" alone is not the assertion.
    */
   it('a 12-message burst costs exactly one provider call and reads all twelve', async () => {
     const ids: string[] = [];
@@ -564,10 +568,12 @@ describe('two-tier routing', () => {
    * contains a real supersession, so the escalation tier would be dead code
    * *and* the routing would need a second call to discover it.
    *
-   * Mutation: pass only the drained window to `evaluateEscalation` and drop
-   * `priorMessages`. A reply-blockquote of an earlier room message — the
-   * trigger the spike found on every real dispute in both windows — then never
-   * fires, because the message it quotes is not in the slice.
+   * Mutation: move the tier decision after the provider call — "call Luna,
+   * look at what it said, call Sonnet if it looks load-bearing". That is a
+   * second call per burst, which is the bar this suite exists to hold.
+   *
+   * (The history is passed too, but it does not decide the tier — see
+   * `apps/server/test/interpret-routing.test.ts` for what it does decide.)
    */
   it('a reply-blockquote of an earlier message routes the window to the escalation tier', async () => {
     await say(room.people.alice as string, 'We are going with Postgres for the queue.');

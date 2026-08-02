@@ -209,6 +209,69 @@ describe('loadEnv — the rest of the contract', () => {
 });
 
 /**
+ * The interpretation worker's configuration (#23), and the one value in this
+ * schema that deliberately has no default at all.
+ */
+describe('loadEnv — the interpretation worker', () => {
+  /**
+   * Mutation: give either model id a `.default(…)`. A model id compiled into
+   * this file is one a deployment cannot see and cannot override, and its wrong
+   * value is the invisible kind: the worker keeps running and bills a model
+   * nobody chose. `index.ts` reads `undefined` as "do not schedule
+   * interpretation, and say so at error level" — a degradation an operator can
+   * find, which a silently-wrong default is not.
+   *
+   * Asserted as `toBeUndefined` on a fully-populated development environment,
+   * because that is the case a default would quietly satisfy.
+   */
+  it('has no default model id, in development or anywhere else', () => {
+    const env = loadEnv({ ...BASE, NODE_ENV: 'development' });
+    expect(env.INTERPRET_MODEL_DEFAULT).toBeUndefined();
+    expect(env.INTERPRET_MODEL_ESCALATION).toBeUndefined();
+  });
+
+  it('takes both ids from the environment when they are given', () => {
+    const env = loadEnv({
+      ...BASE,
+      NODE_ENV: 'development',
+      INTERPRET_MODEL_DEFAULT: 'vendor/cheap',
+      INTERPRET_MODEL_ESCALATION: 'vendor/strong',
+    });
+    expect(env.INTERPRET_MODEL_DEFAULT).toBe('vendor/cheap');
+    expect(env.INTERPRET_MODEL_ESCALATION).toBe('vendor/strong');
+  });
+
+  /**
+   * Mutation: let `INTERPRET_CONTEXT_MESSAGES` be 0. Zero history is not "less
+   * context" — it is the `reply_blockquote` trigger unable to name which
+   * earlier message a quote-reply points at, and a receipt window that starts
+   * at the first unread line. Both degrade silently while looking configured,
+   * which is the shape every other bound in this file refuses.
+   */
+  it('refuses a zero-length history window rather than treating it as "off"', () => {
+    expect(() =>
+      loadEnv({ ...BASE, NODE_ENV: 'development', INTERPRET_CONTEXT_MESSAGES: '0' }),
+    ).toThrow(/INTERPRET_CONTEXT_MESSAGES/);
+  });
+
+  /**
+   * Mutation: allow a zero-second coalescing window. pg-boss's debounce is
+   * whole seconds, so zero is "run immediately on the first message" — one
+   * provider call per message, which is the cost profile the whole queue design
+   * exists to avoid, reached by setting one number to a plausible value.
+   */
+  it('refuses a zero-second coalescing window', () => {
+    expect(() =>
+      loadEnv({ ...BASE, NODE_ENV: 'development', INTERPRET_COALESCE_SECONDS: '0' }),
+    ).toThrow(/INTERPRET_COALESCE_SECONDS/);
+    expect(
+      loadEnv({ ...BASE, NODE_ENV: 'development', INTERPRET_COALESCE_SECONDS: '30' })
+        .INTERPRET_COALESCE_SECONDS,
+    ).toBe(30);
+  });
+});
+
+/**
  * The auth-shaped half of the same rule.
  *
  * A development default is a convenience in development and a silent
