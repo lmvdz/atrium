@@ -49,17 +49,24 @@ import { readFileSync } from 'node:fs';
 import { inspect, psAll } from './compose.mjs';
 import { isMainModule } from './main-module.mjs';
 import { BUILT_SERVICES, manifestPath } from './record-built-images.mjs';
-import { check, report } from './stack-client.mjs';
+import { check, compared, report } from './stack-client.mjs';
 
 /**
  * The comparison, as a pure function, so `gate-selftest.mjs` can put the
  * mismatches through it without a docker daemon.
  *
+ * Counts what it compared, for the reason `checkSchema` does (#40 round 10,
+ * D2): every problem here reaches `check` through one call site over this list,
+ * so a source-level floor of 1 is satisfied by a version of the caller that
+ * hands it nothing and compares nothing.
+ *
  * @param {Record<string, {image: string, id: string}>} manifest  what was built
  * @param {Record<string, {image: string, id: string}>} running   what is running
+ * @param {(count: number, what: string) => number} [record]
  */
-export function checkImageIdentity(manifest, running) {
+export function checkImageIdentity(manifest, running, record = compared) {
   const problems = [];
+  record(new Set([...BUILT_SERVICES, ...Object.keys(manifest ?? {})]).size, 'checkImageIdentity');
   for (const service of BUILT_SERVICES) {
     const built = manifest[service];
     const live = running[service];
@@ -95,10 +102,16 @@ if (isMainModule(import.meta.url)) {
   try {
     manifest = JSON.parse(readFileSync(path, 'utf8'));
   } catch (error) {
-    console.error(
-      `::error::assert-image-identity: no readable image manifest at ${path} (${error.message}). \`record-built-images.mjs\` runs right after the build for this reason; without it nothing binds the running containers to what was built.`,
+    // A recorded assertion, not a `console.error` and a literal exit (#40 round
+    // 10, D5). The two look the same in a log and are not the same thing: only
+    // one of them goes through `verdict`, and only what goes through `verdict`
+    // carries the `::error::assert-image-identity:` prefix its positive control
+    // is graded on or is counted towards the run's assertion floor.
+    check(
+      false,
+      `no readable image manifest at ${path} (${error.message}). \`record-built-images.mjs\` runs right after the build for this reason; without it nothing binds the running containers to what was built.`,
     );
-    process.exit(1);
+    report('assert-image-identity');
   }
 
   const containers = new Map(psAll().map((container) => [container.Service, container]));

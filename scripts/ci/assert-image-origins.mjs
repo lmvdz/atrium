@@ -57,23 +57,26 @@
 import { readFileSync } from 'node:fs';
 import { docker } from './compose.mjs';
 import { manifestPath } from './record-built-images.mjs';
-import { check, report } from './stack-client.mjs';
+import { check, compared, report } from './stack-client.mjs';
 
 const path = manifestPath();
 let image;
 try {
   image = JSON.parse(readFileSync(path, 'utf8')).app?.id;
 } catch (error) {
-  console.error(
-    `::error::assert-image-origins: no readable image manifest at ${path}: ${error.message}`,
-  );
-  process.exit(2);
+  // Recorded rather than printed-and-exited (#40 round 10, D5): only what goes
+  // through `verdict` carries the annotation prefix this script's positive
+  // control is graded on, and only what goes through `check` is counted towards
+  // the run floor that says the scan happened.
+  check(false, `no readable image manifest at ${path}: ${error.message}`);
+  report('assert-image-origins');
 }
 if (!image) {
-  console.error(
-    `::error::assert-image-origins: ${path} records no \`app\` image ID; \`record-built-images.mjs\` runs right after the build and is what this scan reads`,
+  check(
+    false,
+    `${path} records no \`app\` image ID; \`record-built-images.mjs\` runs right after the build and is what this scan reads`,
   );
-  process.exit(2);
+  report('assert-image-origins');
 }
 
 /**
@@ -158,6 +161,14 @@ const raw = docker([
 const { scanned, found } = JSON.parse(raw);
 
 check(scanned > 0, 'the scan found no compiled files at all — the paths in this script are wrong');
+
+// Every file, against every pattern, is one comparison — and that product is
+// what this script's `minRun` floor is over (#40 round 10, D2). Four recorded
+// assertions over a scan of nearly two hundred files is a count that stays four
+// when the scan reads nothing, which is the shape of floor this round exists to
+// stop trusting. `scanned` comes back from the container, so a version of this
+// that scanned nothing cannot report having scanned anything.
+compared(scanned * FORBIDDEN.length, 'assert-image-origins');
 
 // One violation per pattern, with the first location. Minified bundles repeat a
 // literal dozens of times and a hundred identical annotations hide the finding.

@@ -43,6 +43,8 @@ import { randomInt } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { join } from 'node:path';
+import { repoRoot } from './repo-root.mjs';
 
 /**
  * Where the stack is, and how to prove it is who it says it is.
@@ -118,9 +120,25 @@ export function stackTarget(env = process.env) {
  * it records why and reports immediately: everything after it would be a second
  * failure about the same absence, and one honest sentence beats twenty
  * `ECONNREFUSED`s. When the deployment *is* there it returns and the assertion
- * does its own work — this is a precondition, never a substitute, which is why
- * `expectationProblems` in positive-control.mjs refuses any control whose
- * expectation could be satisfied by this message alone.
+ * does its own work.
+ *
+ * ── WHAT THE CONTROLS ACTUALLY MATCH, SAID CORRECTLY (#40 round 10, D1) ─────
+ * Round 9's comment here claimed `expectationProblems` "refuses any control
+ * whose expectation could be satisfied by this message alone". Nothing did that,
+ * and nothing could: the cold world's red *is* this message, so a rule refusing
+ * it would refuse every deploy control there is. A sentence about a mechanism
+ * that does not exist is worse than no sentence, because it is read as one.
+ *
+ * What is true is narrower and is enforced. The message a *refused connection*
+ * produces is the only one the deploy controls may expect; every other sentence
+ * `absentDeployment` can return — the ones about a certificate authority that
+ * could not be read, or a peer that answered and could not be verified — is
+ * generated into the corpus `expectationProblems` refuses patterns against,
+ * because each of those describes a world other than "nothing is listening".
+ * And `distinguishProblems` runs the entry point against a closed port and
+ * against a decoy that accepts the connection, and requires the two outputs to
+ * differ: a precondition that answers the same way in both worlds is not a
+ * precondition anybody is measuring the deployment with.
  *
  * @param {string} what the assertion's name, for the annotations
  * @param {object} target from `stackTarget()`
@@ -142,6 +160,24 @@ export async function requireDeployment(what, target, get = once, finish = repor
 }
 
 /**
+ * Codes that mean the connection never reached a peer at all.
+ *
+ * The distinction this whole function turns on: a socket that was *refused* says
+ * nothing is there, and every other outcome says something is — a TLS error, a
+ * reset, a status. `ETIMEDOUT` is in here because a port with nothing behind it
+ * on a filtered host times out rather than refusing, and `ENOTFOUND`/`EAI_AGAIN`
+ * because a name that does not resolve is the same absence one layer up.
+ */
+const NO_PEER = new Set([
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
+/**
  * Why there is no deployment to ask questions of, or `undefined`.
  *
  * The decision, separated from the acting on it, for the reason `verdict` is
@@ -151,15 +187,48 @@ export async function requireDeployment(what, target, get = once, finish = repor
  * match, and a version that returned `undefined` unconditionally would put all
  * three of them back to being satisfied by a stack trace.
  *
+ * ── THE OBSERVATION COMES FIRST, AND THAT IS THE FIX (#40 round 10, D1) ─────
+ * Round 9 opened with `if (target?.caProblem !== undefined) return caProblem;`
+ * — before a single request. `ATRIUM_STACK_CA` is set at job level and the file
+ * it names is written by `trust-ca`, six steps *after* the positive control
+ * runs, so in the only world the control ever runs in that first line always
+ * fired and the deployment branch below it was dead code. A blind critic
+ * measured it: a live server on one port and nothing on another produced
+ * **byte-identical output**. A control that cannot tell its two worlds apart is
+ * not a control, whatever its expectation matches.
+ *
+ * So the request is made first and the *socket's answer* decides. Refused means
+ * nothing is there, and that is the sentence the cold controls are graded on —
+ * it is produced whether or not a certificate authority was readable, which is
+ * what makes the cold world's red about the deployment. Anything else means
+ * something answered, and *then* an unreadable CA is the thing worth saying,
+ * because a handshake that failed against a root we do not have is genuinely
+ * ambiguous and must not be read as "nothing is serving".
+ *
+ * Every branch returns a different sentence on purpose: `distinguishProblems` in
+ * positive-control.mjs runs an entry point against a closed port and against a
+ * decoy listener and requires the two outputs to differ, which is a property of
+ * this function and nothing else.
+ *
  * @param {object} target from `stackTarget()`
  * @param {{response?: object, error?: object}} outcome what one request did
  * @returns {string|undefined}
  */
 export function absentDeployment(target, outcome) {
-  if (target?.caProblem !== undefined) return target.caProblem;
-  if (outcome?.error !== undefined) {
-    const error = outcome.error;
-    return `nothing is serving this deployment: a request to ${target.origin}/ (${target.address}:${target.httpsPort}, SNI ${target.domain}) failed with ${error.code ?? error.message}. Every assertion in this file is a question about a running deployment, and there is not one to ask.`;
+  const where = `${target.origin}/ (${target.address}:${target.httpsPort}, SNI ${target.domain})`;
+  const error = outcome?.error;
+  if (error !== undefined) {
+    const code = error.code ?? error.message;
+    if (NO_PEER.has(error.code)) {
+      return `nothing is serving this deployment: a request to ${where} was refused with ${code}, so no process accepted the connection at all. Every assertion in this file is a question about a running deployment, and there is not one to ask.`;
+    }
+    if (target?.caProblem !== undefined) {
+      return `something accepted a connection on ${target.address}:${target.httpsPort} and the request to ${where} then failed with ${code} — and this run has no certificate authority to judge that by. ${target.caProblem} A handshake that fails against a root nothing here has is not evidence that the deployment is absent, and it is not evidence that it is healthy either.`;
+    }
+    return `something is answering on ${target.address}:${target.httpsPort} but it is not this deployment: the request to ${where} failed with ${code} against the certificate authority ${target.caPath ?? '(none configured)'} names. A peer that accepts the connection and then cannot complete the exchange is a different failure from an absent one, and this file may not treat it as the same.`;
+  }
+  if (target?.caProblem !== undefined) {
+    return `a request to ${where} completed without this run having a certificate authority to verify it against. ${target.caProblem} Certificate verification is the only thing making these assertions questions about *this* deployment, so an answer obtained without it is not one this file may use.`;
   }
   if (typeof outcome?.response?.status !== 'number') {
     return `a HEAD of ${target.origin}/ came back without a status, so nothing here can say what is answering on ${target.address}:${target.httpsPort}. An answer this file cannot read is not an answer it may assume was fine.`;
@@ -400,6 +469,11 @@ export async function buildAssetProblems(target, html, get = (path) => once(targ
  * @param {boolean} [options.cleartext] use the `:80` listener instead of TLS
  */
 export function once(target, path, options = {}) {
+  // Counted before anything can go wrong with it: what this records is that the
+  // script *asked the deployment something*, which is the observation a floor of
+  // recorded assertions cannot distinguish from `check(true, …)`. See
+  // `assertionsRun` below and `minRequests` in .github/ci-manifest.json.
+  observations.requests += 1;
   const { method = 'GET', headers = {}, body, jar, cleartext = false } = options;
   const send = cleartext ? httpRequest : httpsRequest;
   const requestHeaders = { Host: target.domain, ...headers };
@@ -661,9 +735,67 @@ export async function establishSession(target, mail, prefix) {
 
 export const failures = [];
 
+/**
+ * What this process actually did, as opposed to what its source code says.
+ *
+ * ── A FLOOR OVER A LOOP IS A FLOOR OVER NOTHING (#40 round 10, D2) ──────────
+ * Round 9's `assertionFloorProblems` counts `check()` **call sites** in the
+ * source. Four scripts record every problem through *one* site over a computed
+ * list — `for (const problem of problems) check(false, problem);` — and so
+ * carried a floor of 1. A blind critic replaced the `isMainModule` block of
+ * `assert-stack-schema.mjs` (529 lines, the one assertion standing between
+ * `migrate` exiting 0 and the schema existing) with a query for `select 1` and
+ * an empty list, and measured it against the live migrated stack:
+ * `assert-stack-schema: passed.` — **exit 0, zero schema compared**, with the
+ * positive control still red as required and every other gate green. A ratchet
+ * over a quantity the author sets in one line measures the author's cooperation.
+ *
+ * So the floors are also *runtime* quantities now, and these are the counters:
+ *
+ *   - `assertions` — one per `check(…)`, plus whatever `compared(n, …)` records
+ *     for a comparison that examined `n` subjects and found nothing wrong. A
+ *     comparison that produces no problem still happened, and counting only the
+ *     problems is what made a floor of 1 satisfiable by comparing nothing.
+ *   - `requests` — one per `once(…)`, i.e. per question actually put to the
+ *     deployment. This is the half a tautology cannot fake: round 10's D3
+ *     exploit was twenty-three `check(true, …)` calls, which satisfies any count
+ *     of recorded assertions and asks the deployment exactly one thing.
+ *
+ * `verdict` compares both against `.github/ci-manifest.json`, so a script that
+ * stops doing the work goes red *against the live stack* rather than being
+ * caught only by a reader of its source.
+ */
+export const observations = { assertions: 0, requests: 0 };
+
 export function check(condition, message) {
+  observations.assertions += 1;
   if (!condition) failures.push(message);
   return condition;
+}
+
+/**
+ * `n` subjects were compared and the comparison is what produced `problems`.
+ *
+ * The counterpart to `check` for the scripts whose assertions are a fold over a
+ * computed population: the population's size is the number of assertions made,
+ * and it must come from the comparison itself rather than from a literal beside
+ * it. `checkSchema` returns how many table, column, constraint and index
+ * comparisons it performed; a rewrite that skips the comparison cannot report
+ * that it performed them without performing them.
+ *
+ * @param {number} count how many subjects were examined
+ * @param {string} what  the comparison, for the message when `count` is not one
+ * @returns {number} `count`, so a caller can pass it straight through
+ */
+export function compared(count, what) {
+  if (!Number.isInteger(count) || count < 0) {
+    failures.push(
+      `${what} reported ${JSON.stringify(count)} comparisons, which is not a count of anything. The number of assertions a fold over a population makes is the population's size, and it has to be produced by the fold.`,
+    );
+    return 0;
+  }
+  observations.assertions += count;
+  return count;
 }
 
 /**
@@ -719,20 +851,100 @@ function dumpStackLogs() {
  * wrapper that acts on it, and `packages/ci-guard` asserts the decision from
  * outside `scripts/` with a registry row in `checker-graph.mjs` behind it.
  */
+/**
+ * The runtime floors this script is held to, out of the enrollment manifest.
+ *
+ * Read here rather than passed in, and read through `repoRoot()` rather than
+ * relative to the working directory, for the reason repo-root.mjs exists: a
+ * check that silently reads nothing from the wrong directory is a check that
+ * passes from the wrong directory. An unreadable manifest is a *failure* of this
+ * gate and not a reason to skip it — the same shape as `checkReadmeClaims`'
+ * round-9 hole, which was a `catch { return []; }` around a missing README.
+ *
+ * @param {string} what the script's bare name, as it is passed to `report`
+ * @param {typeof readFileSync} [read] injectable for the witnesses
+ * @returns {{floors?: {minRun?: number, minRequests?: number}, problem?: string}}
+ */
+export function runtimeFloors(what, read = readFileSync) {
+  const key = `scripts/ci/${what}.mjs`;
+  let manifest;
+  try {
+    manifest = JSON.parse(String(read(join(repoRoot(), '.github', 'ci-manifest.json'), 'utf8')));
+  } catch (error) {
+    return {
+      problem: `${what} could not read .github/ci-manifest.json to find out how much work it is required to have done (${error.message}). A floor nobody could read is a floor nobody is held to, and this one is the only thing that tells this script apart from one whose comparison was deleted.`,
+    };
+  }
+  const entry = manifest?.assertions?.scripts?.[key];
+  return { floors: entry === undefined ? undefined : entry };
+}
+
+/**
+ * Whether this run did as much as the manifest says this script does.
+ *
+ * Separated from `verdict` so the witnesses outside `scripts/` can put every
+ * shape through it — including the ones that are awkward to produce on purpose,
+ * like a script that made its assertions and asked the deployment nothing.
+ *
+ * @param {string} what
+ * @param {{assertions: number, requests: number}} counts
+ * @param {(what: string) => object} [floorsOf]
+ * @returns {string[]}
+ */
+export function runtimeFloorProblems(what, counts, floorsOf = runtimeFloors) {
+  const { floors, problem } = floorsOf(what);
+  if (problem !== undefined) return [problem];
+  if (floors === undefined) return [];
+  const problems = [];
+  if (typeof floors.minRun === 'number' && counts.assertions < floors.minRun) {
+    problems.push(
+      `${what} recorded ${counts.assertions} assertion(s) in this run and .github/ci-manifest.json says it makes at least ${floors.minRun}. This is the count of comparisons actually *evaluated*, not of \`check(…)\` call sites: four scripts here record every problem through one call site over a computed list, so a version of this file that computes an empty list passes a source-level floor of 1 while comparing nothing at all — measured on r9 against a live migrated stack as "assert-stack-schema: passed." with zero schema compared.`,
+    );
+  }
+  if (typeof floors.minRequests === 'number' && counts.requests < floors.minRequests) {
+    problems.push(
+      `${what} put ${counts.requests} request(s) to the deployment and .github/ci-manifest.json says it puts at least ${floors.minRequests}. A recorded assertion whose condition is a constant costs one line and satisfies any count of assertions; it cannot fake having asked the deployment anything, and the r10 D3 exploit — twenty-three \`check(true, …)\` calls after the precondition — asked it exactly once.`,
+    );
+  }
+  return problems;
+}
+
+/**
+ * The one line every failing assertion script ends with.
+ *
+ * Exported because `positive-control.mjs` derives a corpus entry from it (#40
+ * round 10, D6): two controls expected `/assert-stack-config: \d+ assertion\(s\)
+ * failed\./`, which is *any* recorded failure in that file — including one from
+ * a world the control did not plant. A corpus of wrong reds that is written down
+ * by hand goes stale the moment the code produces a new spelling, so the
+ * spellings this repository produces itself are generated from the code that
+ * produces them.
+ */
+export const failureSummary = (what, count) => `${what}: ${count} assertion(s) failed.`;
+
 export function verdict(what) {
+  failures.push(...runtimeFloorProblems(what, observations));
   if (failures.length > 0) {
     for (const failure of failures) console.error(`::error::${what}: ${failure}`);
-    console.error(`${what}: ${failures.length} assertion(s) failed.`);
+    console.error(failureSummary(what, failures.length));
     dumpStackLogs();
     return 1;
   }
-  console.info(`${what}: passed.`);
+  // The counts, printed on the way past, because a green line that says only
+  // "passed" is the one thing this whole round is about: `assert-stack-schema:
+  // passed.` was true of a run that compared no schema at all. What was
+  // observed, not what was hoped for.
+  console.info(
+    `${what}: passed. ${observations.assertions} assertion(s) recorded, ${observations.requests} request(s) to the deployment.`,
+  );
   return 0;
 }
 
 /** Every assertion recorded so far, forgotten. Only the tests need this. */
 export function resetFailures() {
   failures.length = 0;
+  observations.assertions = 0;
+  observations.requests = 0;
 }
 
 /** Print every failure as a GitHub annotation and exit accordingly. */

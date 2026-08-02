@@ -104,13 +104,15 @@ import { completedCommands } from './shell-command.mjs';
 import {
   absentDeployment,
   check,
+  compared,
   failures,
   mailpit,
   resetFailures,
+  runtimeFloorProblems,
   stackTarget,
   verdict,
 } from './stack-client.mjs';
-import { CI_SCRIPT_PATH, checkWorkflowFile, protectedCommandCoverage } from './workflow-policy.mjs';
+import { checkWorkflowFile, ciScriptName, protectedCommandCoverage } from './workflow-policy.mjs';
 
 /** Directories that hold source this repository wrote. */
 const SOURCE_ROOTS = ['scripts', 'packages', 'apps'];
@@ -462,11 +464,11 @@ export const ENFORCEMENT = [
     // The exit status of six of the deploy job's assertion scripts.
     check: 'verdict',
     definedIn: 'scripts/ci/stack-client.mjs',
-    fn: { check, verdict, failures, resetFailures },
+    fn: { check, compared, verdict, failures, resetFailures, runtimeFloorProblems },
     subjects: ['scripts/'],
     invokers: ['packages/ci-guard/test/checkers.test.ts'],
     because:
-      "`report()` is the last statement of six deploy assertions, so `check(false, …)` that records nothing, or a verdict that returns 0 with failures recorded, turns six red gates green in one edit — and every count claim in every receipt stays true. It is the round-7 critical finding's class one function over: a decision centralised for many callers, tested by none of them",
+      "`report()` is the last statement of six deploy assertions, so `check(false, …)` that records nothing, or a verdict that returns 0 with failures recorded, turns six red gates green in one edit — and every count claim in every receipt stays true. It is the round-7 critical finding's class one function over: a decision centralised for many callers, tested by none of them. Round 10 put the runtime floors in the same place, for the same reason: `compared` is what a fold over a computed population records, and a version of it that records nothing puts every loop-driven assertion back to a source floor of 1 that comparing nothing satisfies",
     contract: (client) => {
       // `verdict` prints, and a contract probe's output in the middle of a
       // self-test's is a receipt nobody can read. Muted for the two calls only.
@@ -478,6 +480,9 @@ export const ENFORCEMENT = [
       let failing;
       let afterTrue;
       let passing;
+      let counted;
+      let shortRun;
+      let longEnough;
       try {
         client.resetFailures();
         returned = client.check(false, 'a planted failure');
@@ -487,6 +492,21 @@ export const ENFORCEMENT = [
         client.check(true, 'a satisfied assertion');
         afterTrue = client.failures.length;
         passing = client.verdict('probe');
+        client.resetFailures();
+        // The runtime half: a fold that examined forty subjects records forty
+        // assertions, and a run below its floor is a failure rather than a pass.
+        counted = client.compared(40, 'a comparison over forty subjects');
+        const floors = (entry) => () => ({ floors: entry });
+        shortRun = client.runtimeFloorProblems(
+          'probe',
+          { assertions: 1, requests: 0 },
+          floors({ minRun: 230 }),
+        );
+        longEnough = client.runtimeFloorProblems(
+          'probe',
+          { assertions: 260, requests: 25 },
+          floors({ minRun: 230, minRequests: 18 }),
+        );
         client.resetFailures();
       } finally {
         console.error = speech.error;
@@ -501,6 +521,18 @@ export const ENFORCEMENT = [
         ),
         ...expectProblem(afterTrue === 0, 'a satisfied `check` records a failure anyway'),
         ...expectProblem(passing === 0, 'the verdict over a clean run is not a passing exit'),
+        ...expectProblem(
+          counted === 40,
+          '`compared` does not report back the population it was told about, so a caller cannot pass the count through',
+        ),
+        ...expectProblem(
+          shortRun.some((problem) => /recorded 1 assertion\(s\) in this run/.test(problem)),
+          'a run that made one assertion where the manifest says two hundred and thirty is not reported, which is the r10 D2 gutting exactly',
+        ),
+        ...expectProblem(
+          longEnough.length === 0,
+          'a run that did the work is reported anyway, which makes the floor noise rather than a gate',
+        ),
       ];
     },
     // Four names, one decision: `check` records, `failures` holds, `verdict`
@@ -508,19 +540,41 @@ export const ENFORCEMENT = [
     // Declared, because `sharedModuleProblems` counts *bindings* now and a row
     // that covered its module wholesale is how a new shared decision arrives in
     // an already-rowed file with nothing to test it.
-    covers: ['check', 'verdict', 'failures', 'resetFailures'],
+    covers: ['check', 'compared', 'verdict', 'failures', 'resetFailures', 'runtimeFloorProblems'],
     mutants: [
       {
         name: 'a `check` that records nothing',
-        fn: { check: () => false, verdict, failures, resetFailures },
+        fn: {
+          check: () => false,
+          compared,
+          verdict,
+          failures,
+          resetFailures,
+          runtimeFloorProblems,
+        },
       },
       {
         name: 'a verdict that always passes',
-        fn: { check, verdict: () => 0, failures, resetFailures },
+        fn: { check, compared, verdict: () => 0, failures, resetFailures, runtimeFloorProblems },
       },
       {
         name: 'a verdict that always fails',
-        fn: { check, verdict: () => 1, failures, resetFailures },
+        fn: { check, compared, verdict: () => 1, failures, resetFailures, runtimeFloorProblems },
+      },
+      {
+        name: 'a run floor nothing is ever under',
+        fn: {
+          check,
+          compared,
+          verdict,
+          failures,
+          resetFailures,
+          runtimeFloorProblems: () => [],
+        },
+      },
+      {
+        name: 'a `compared` that swallows the population it was told about',
+        fn: { check, compared: () => 0, verdict, failures, resetFailures, runtimeFloorProblems },
       },
     ],
   },
@@ -784,6 +838,22 @@ export const ENFORCEMENT = [
           {
             id: 'assert-x',
             entry: 'assert-x',
+            // The sentence the *planted* world produces. `/assert-x: \d+
+            // assertion\(s\) failed\./` was here until round 10's D6: that is
+            // the line `verdict` prints for any recorded failure whatever, so it
+            // was a pattern about the file rather than about the world, and
+            // `preconditionReds` generates it into the corpus now.
+            expect: /assert-x: nothing is serving this deployment/,
+            world: 'w',
+            because: 'b',
+          },
+        ],
+      };
+      const count = {
+        deploy: [
+          {
+            id: 'assert-x',
+            entry: 'assert-x',
             expect: /assert-x: \d+ assertion\(s\) failed\./,
             world: 'w',
             because: 'b',
@@ -791,6 +861,10 @@ export const ENFORCEMENT = [
         ],
       };
       return [
+        ...expectProblem(
+          rule(count).some((problem) => /is satisfied by/.test(problem)),
+          'it accepts an expectation that is only a count of failures, which any red in that file satisfies — the round-10 D6 finding, on two shipped controls',
+        ),
         ...expectProblem(
           rule(behaviour).length === 0,
           'it reports a problem about an expectation that matches the sentence an assertion records, which is the shape every control here is meant to have',
@@ -1049,6 +1123,74 @@ export const ENFORCEMENT = [
             return ['unreadable'];
           }
         },
+      },
+    ],
+  },
+  {
+    /**
+     * #40 round 10, D3. The half neither the cold control nor a count can
+     * reach: an assertion script that satisfies its precondition and then
+     * asserts nothing, by asserting constants.
+     */
+    check: 'assertionConditionProblems',
+    definedIn: 'scripts/ci/checker-graph.mjs',
+    fn: (root, read, list) => assertionConditionProblems(root, read, list),
+    subjects: ['scripts/'],
+    invokers: ['scripts/ci/gate-selftest.mjs', 'packages/ci-guard/test/checkers.test.ts'],
+    because:
+      'the measured exploit keeps the imports, keeps `requireDeployment`, keeps `report(…)` and makes twenty-three assertions about the constant `true` — which prints "assert-page-serves: passed." against the live stack and satisfies every floor exactly, because a floor counts assertions and cannot tell a claim from a constant',
+    contract: (conditions, { root, read, list }) => {
+      const planted = (path, encoding) =>
+        String(path).endsWith('assert-page-serves.mjs')
+          ? "import { check, report } from './stack-client.mjs';\ncheck(true, 'x');\nreport('assert-page-serves');\n"
+          : read(path, encoding);
+      const named = (path, encoding) =>
+        String(path).endsWith('assert-page-serves.mjs')
+          ? "import { check, report } from './stack-client.mjs';\nconst FINE = true;\ncheck(FINE, 'x');\nreport('assert-page-serves');\n"
+          : read(path, encoding);
+      const folded = (path, encoding) =>
+        String(path).endsWith('assert-page-serves.mjs')
+          ? "import { check, report } from './stack-client.mjs';\nfor (const problem of []) check(false, problem);\nreport('assert-page-serves');\n"
+          : read(path, encoding);
+      return [
+        ...expectProblem(
+          conditions(root, read, list).length === 0,
+          'it reports a problem against the real tree, where every recorded assertion reads something',
+        ),
+        ...expectProblem(
+          conditions(root, planted, list).some((problem) => /reads no value/.test(problem)),
+          'the measured D3 exploit — `check(true, …)` — is not reported, which is the whole rule',
+        ),
+        ...expectProblem(
+          conditions(root, named, list).some((problem) => /reads no value/.test(problem)),
+          'the same tautology with a module-scope constant in front of it walks through, which is one extra line',
+        ),
+        ...expectProblem(
+          conditions(root, folded, list).length === 0,
+          '`check(false, problem)` is reported — the form every fold over an already-computed problem list uses, which cannot make a script pass and must not be refused',
+        ),
+        ...expectProblem(
+          conditions(
+            root,
+            (path, encoding) =>
+              String(path).endsWith('assert-page-serves.mjs')
+                ? "import { check, compared, report } from './stack-client.mjs';\ncompared(40, 'nothing at all');\nreport('assert-page-serves');\n"
+                : read(path, encoding),
+            list,
+          ).some((problem) => /reads no value/.test(problem)),
+          "a fold that reports a literal count of comparisons walks through, which is the run floor's own version of `check(true, …)` and the exact plant the `selfcheck` group uses to make a control come back green",
+        ),
+      ];
+    },
+    mutants: [
+      { name: 'every condition reads something', fn: () => [] },
+      { name: 'no condition ever reads anything', fn: () => ['a condition'] },
+      {
+        name: 'refuses only the literal `true`, so any other constant walks through',
+        fn: (root, read, list) =>
+          assertionConditionProblems(root, read, list).filter((problem) =>
+            /\(`true`\)/.test(problem),
+          ),
       },
     ],
   },
@@ -2495,6 +2637,24 @@ export function assertionFloorProblems(
       );
       continue;
     }
+    // ── AND A FLOOR OVER A LOOP IS A FLOOR OVER NOTHING (#40 round 10, D2) ──
+    // Four scripts record every problem through one `check(…)` call site over a
+    // computed list, so their source-level floor was 1 and a version of the
+    // caller that computes an empty list satisfied it while comparing nothing.
+    // Measured against the live migrated stack as "assert-stack-schema:
+    // passed." with zero schema compared. The count that cannot be arranged
+    // that way is the one the run itself produces, which `verdict` in
+    // stack-client.mjs compares against `minRun` — so every script with a
+    // source floor must declare a run floor too, and it may not be smaller.
+    if (typeof floors[file]?.minRun !== 'number') {
+      problems.push(
+        `${file} declares a \`minChecks\` floor and no \`minRun\` floor in ${MANIFEST}. \`minChecks\` counts *call sites in the source*: a script whose assertions are a fold over a computed population has one of those and makes as many assertions as the population is big, so a rewrite that computes an empty population passes a source floor of ${floor} while asserting nothing at all. \`minRun\` is the count the run reports through \`compared(…)\` and \`check(…)\`, and \`verdict\` enforces it against the live deployment.`,
+      );
+    } else if (!Number.isInteger(floors[file].minRun) || floors[file].minRun < 1) {
+      problems.push(
+        `${file} declares \`minRun\` ${JSON.stringify(floors[file].minRun)} in ${MANIFEST}, which is not a count of assertions. A script allowed to make none is a script with no run floor written a longer way. (It is deliberately *not* required to be at least \`minChecks\`: a call site inside a loop over the problems a healthy comparison did not find runs zero times, so the two counts measure different things and the run count is the one that cannot be arranged.)`,
+      );
+    }
     if (calls < floor) {
       problems.push(
         `${file} makes ${calls} recorded assertion(s) and ${MANIFEST} declares a floor of ${floor}. A suite that shrank is the thing every floor in this manifest exists to catch, and this is the one whose shrinking the deploy job cannot see — lowering it is a decision that belongs in the ratchet's justifications, beside the number.`,
@@ -2508,6 +2668,180 @@ export function assertionFloorProblems(
     );
   }
   return problems;
+}
+
+/**
+ * Recorded assertions whose condition reads nothing.
+ *
+ * ── SATISFY THE PRECONDITION AND ASSERT NOTHING (#40 round 10, D3) ──────────
+ * A blind critic rewrote `assert-page-serves.mjs` as its imports, `stackTarget()`,
+ * `await requireDeployment(…)`, a `void kept` referencing every import so the
+ * shared-module staleness rule still counted it, **twenty-three `check(true, …)`
+ * calls** and `report(…)`. Against the live stack: `assert-page-serves: passed.`
+ * Every gate green, including the positive control, the source-level assertion
+ * floor and the coverage rule. The manifest's own comment conceded it: "a
+ * `check(true, …)` counts".
+ *
+ * The repository's standing rule is that denylists of evasions are unbounded and
+ * the compliant forms get allowlisted, so this is not a list of tautologies to
+ * refuse. It is the one thing a recorded assertion must do: **read a value**.
+ * A condition must contain at least one identifier, property access, element
+ * access or call — and that identifier must not be a module-scope constant bound
+ * to a literal, because `const OK = true; check(OK, …)` is the same assertion
+ * written with an extra line. `check(x === x, …)` still walks through, and the
+ * run floors on `minRequests` are the half that costs: an assertion that reads
+ * nothing asks the deployment nothing, and this repository's page assertion asks
+ * it a dozen questions.
+ *
+ * Deliberately scoped to `check` from stack-client.mjs, which is what `verdict`
+ * turns into an exit status. `compared(n, …)` is not covered: its argument is a
+ * population size produced *inside* a comparison function, and a literal there —
+ * `record(1, 'checkMigrationImage')` — is the honest spelling of "this branch is
+ * one comparison".
+ *
+ * @param {string} [root]
+ * @param {typeof readFileSync} [read]
+ * @param {typeof readdirSync} [list]
+ * @returns {string[]}
+ */
+export function assertionConditionProblems(
+  root = process.cwd(),
+  read = readFileSync,
+  list = readdirSync,
+) {
+  const problems = [];
+  for (const file of sourceFiles(root, list)) {
+    if (!file.startsWith('scripts/')) continue;
+    let source;
+    try {
+      source = String(read(join(root, file), 'utf8'));
+    } catch {
+      continue;
+    }
+    const parsed = parseOnce(file, source);
+    if (!importsCheck(parsed)) continue;
+    const constants = literalConstants(parsed);
+    for (const call of callsTo(parsed, 'check')) {
+      const condition = call.arguments[0];
+      if (condition === undefined) {
+        problems.push(
+          `${file}:${lineOf(parsed, call)} calls \`check()\` with no condition, so it records an assertion about nothing. A recorded assertion is a claim, and a claim with no subject is a line that makes a floor go up.`,
+        );
+        continue;
+      }
+      const reads = valuesRead(condition).filter((name) => !constants.has(name));
+      if (reads.length > 0) continue;
+      // `check(false, problem)` is the *other* compliant form and the one every
+      // fold uses: the comparison already happened, this records its answer, and
+      // no arrangement of it can make a script report `passed`. Only a condition
+      // that is constantly *true* buys a green — so the allowlist is "reads a
+      // value, or is a constant that cannot pass".
+      if (isFalsyLiteral(condition)) continue;
+      problems.push(
+        `${file}:${lineOf(parsed, call)} records an assertion whose condition (\`${condition.getText(parsed).slice(0, 80)}\`) reads no value: every leaf of it is a literal or a module-scope constant bound to one. That is the measured r10 D3 exploit — twenty-three \`check(true, …)\` calls after the precondition printed "assert-page-serves: passed." against the live stack with every gate green, and satisfied the assertion floors exactly, because a floor counts assertions and cannot tell a claim from a constant. A recorded assertion has to read something the deployment produced.`,
+      );
+    }
+    // And the same rule over the number a fold reports about itself. `compared`
+    // is what satisfies the `minRun` floor without a `check` per subject, so a
+    // literal there — `compared(40, 'nothing at all')` — is the run floor's own
+    // version of `check(true, …)`, and it is exactly the plant the `selfcheck`
+    // group now uses to produce a green control on purpose. The count has to be
+    // computed from the population; every legitimate caller in this tree either
+    // reads one (`scanned * FORBIDDEN.length`, `new Set([…]).size`) or passes it
+    // through the injected `record` parameter from inside the comparison, which
+    // is a different identifier and not this rule's subject.
+    for (const call of callsTo(parsed, 'compared')) {
+      const count = call.arguments[0];
+      if (count === undefined) continue;
+      if (valuesRead(count).filter((name) => !constants.has(name)).length > 0) continue;
+      problems.push(
+        `${file}:${lineOf(parsed, call)} reports \`compared(${count.getText(parsed).slice(0, 40)}, …)\` — a count of comparisons that reads no value. The run floor exists because a floor over \`check(…)\` call sites is a floor over nothing when every problem reaches one site through a loop; a literal handed to \`compared\` is that same defect one layer up, and it is how a script that examines nothing reports having examined a population.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** A constant this repository's `check` can only ever record a failure for. */
+function isFalsyLiteral(node) {
+  if (node.kind === ts.SyntaxKind.FalseKeyword || node.kind === ts.SyntaxKind.NullKeyword) {
+    return true;
+  }
+  if (ts.isNumericLiteral(node)) return Number(node.text) === 0;
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text === '';
+  return false;
+}
+
+/** Module-scope `const NAME = <literal>` bindings — a tautology with a name. */
+function literalConstants(sourceFile) {
+  const names = new Set();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) continue;
+      const value = declaration.initializer;
+      if (value === undefined) continue;
+      if (isLiteralValue(value)) names.add(declaration.name.text);
+    }
+  }
+  return names;
+}
+
+function isLiteralValue(node) {
+  return (
+    node.kind === ts.SyntaxKind.TrueKeyword ||
+    node.kind === ts.SyntaxKind.FalseKeyword ||
+    node.kind === ts.SyntaxKind.NullKeyword ||
+    ts.isNumericLiteral(node) ||
+    ts.isStringLiteral(node) ||
+    ts.isNoSubstitutionTemplateLiteral(node) ||
+    (ts.isPrefixUnaryExpression(node) && isLiteralValue(node.operand))
+  );
+}
+
+/**
+ * The identifiers a condition actually reads.
+ *
+ * Property *names* are not reads — `x.status` reads `x` — so the walk takes the
+ * expression side of a property access and skips the name side. A call's callee
+ * counts, because `regionsIn(body)` reads both.
+ */
+function valuesRead(node) {
+  const names = [];
+  const visit = (current) => {
+    if (ts.isPropertyAccessExpression(current)) {
+      visit(current.expression);
+      return;
+    }
+    if (ts.isIdentifier(current)) {
+      names.push(current.text);
+      return;
+    }
+    current.forEachChild(visit);
+  };
+  visit(node);
+  return names;
+}
+
+/** Every call site of a plain identifier, as nodes. */
+function callsTo(sourceFile, name) {
+  const found = [];
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === name
+    ) {
+      found.push(node);
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return found;
+}
+
+function lineOf(sourceFile, node) {
+  return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 }
 
 /** Every name a module exports, for the conservative namespace-import answer. */
@@ -2574,14 +2908,27 @@ function countCalls(sourceFile, name) {
  * host, which is there whether or not anything is running.
  */
 const CONTROL_EXEMPT = {
+  // ── AN EXEMPTION MAY NOT CITE MACHINERY NOTHING RUNS (#40 round 10, D7) ────
+  // All three reasons here used to be justified by cases in
+  // deploy-mutation-ledger.mjs — 1382 lines that **no job runs**; all four
+  // mentions of it in ci.yml are comments. A reason that points at a witness the
+  // pipeline never executes is an excuse with a citation on it, which is exactly
+  // the shape this repository deletes exemption lists for. `citedWitnesses`
+  // below now refuses one, so the reasons name what CI actually does.
   'assert-stack-teardown':
-    "it asserts that nothing of this project is left running, which is *true* before anything is brought up. A cold control for it would require it to fail at telling the truth. Its world is the other one — after `down` — and the `teardown-keeps-volumes` case in deploy-mutation-ledger.mjs mutates that stage's own flags and requires this script to catch the result.",
+    'it asserts that nothing of this project is left running, which is *true* before anything is brought up. A cold control for it would require it to fail at telling the truth: its world is the other one, after `down`, and the deploy job runs it there as the negative half of its pair.',
   'assert-deploy-preflight':
-    'it is the only check in the job about the *machine* rather than the deployment, so "no stack is up" is not a broken world for it. Its mutations are `old-engine` and `routed-gateway` in deploy-mutation-ledger.mjs, which change what it observes about the host.',
+    'it is the only check in the job about the *machine* rather than the deployment, so "no stack is up" is not a broken world for it — the engine, its default bridge and the resolved port publications are all there whether or not anything is running. Its comparisons are exercised from outside a stack by gate-selftest.mjs, which puts a pre-28 engine, both unsafe gateway modes and an undeclared publication through `checkHostNetworkPolicy` and `publishedPortProblems`.',
   // Reached the moment round 9 widened this rule from the deploy job's
   // `assert-*.mjs` steps to every entry point every job runs (D3/D5).
   'compose-stack':
-    'it is the verb, not the assertion: `build`, `up`, `trust-ca` and `down` are how a world is *made*, and a positive control over a world-maker would be a requirement that making a world fails. The argv it builds for all four verbs is asserted in gate-selftest.mjs from `composeStackArgv`, which is the code that runs rather than a copy of the text beside it, and the stages it drives are what deploy-mutation-ledger.mjs mutates.',
+    'it is the verb, not the assertion: `build`, `up`, `trust-ca` and `down` are how a world is *made*, and a positive control over a world-maker would be a requirement that making a world fails. The argv it builds for all four verbs is asserted in gate-selftest.mjs from `composeStackArgv`, which is the code that runs rather than a copy of the text beside it.',
+  // Reached the moment round 10 keyed this rule on where a word *resolves*
+  // rather than on how it is spelled (D4): the workflow names it as
+  // `--reporter=./scripts/ci/vitest-ci-reporter.mjs`, and the leading `./` made
+  // it invisible to the anchored pattern this rule used to match with.
+  'vitest-ci-reporter':
+    'it is not a program this job runs, it is a module Vitest loads: executing it as an entry point constructs nothing and reports nothing, so "it must fail with no stack up" would be a requirement that a class definition fails. What it writes is `vitest-ci-report.json`, and assert-vitest-report.mjs — which *is* controlled, in a world where no report was written — refuses to pass without it, so a gutted reporter is a red gate one step later rather than an unnoticed one.',
 };
 
 /**
@@ -2639,10 +2986,16 @@ export function controlCoverageProblems(
           // exiting 0 — a brand-new, entirely uncontrolled entry point, admitted
           // by spelling. Same for `verify-`. A coverage rule keyed on a filename
           // convention covers whatever the convention happens to be called.
-          const found = CI_SCRIPT_PATH.exec(String(word));
-          if (found === null) continue;
-          if (!run.has(found[1])) run.set(found[1], new Set());
-          run.get(found[1]).add(jobId);
+          //
+          // ── AND THEN IT WAS KEYED ON A SPELLING (#40 round 10, D4) ────────
+          // The replacement convention was `CI_SCRIPT_PATH`, which is anchored,
+          // so `node ./scripts/ci/invented-thing.mjs` — two characters — was
+          // invisible again: measured as coverage 0, policy clean, every gate
+          // green. `ciScriptName` asks where the word *resolves* instead.
+          const name = ciScriptName(word);
+          if (name === null) continue;
+          if (!run.has(name)) run.set(name, new Set());
+          run.get(name).add(jobId);
         }
       }
     }
@@ -2669,6 +3022,18 @@ export function controlCoverageProblems(
         `${name} is both controlled and exempted from control. One of the two is out of date, and the exemption is the one that reads as an excuse.`,
       );
     }
+    // ── A REASON THAT CITES SOMETHING NOTHING RUNS (#40 round 10, D7) ────────
+    // Three of these reasons were justified by cases in
+    // deploy-mutation-ledger.mjs, a 1382-line file **no job runs** — every
+    // mention of it in ci.yml is a comment. A witness the pipeline never
+    // executes cannot be the reason a control is unnecessary, and a citation
+    // reads as one until somebody checks. This checks.
+    for (const cited of citedWitnesses(why)) {
+      if (run.has(cited) || controlled.has(cited)) continue;
+      problems.push(
+        `${name}'s exemption from the positive controls is justified by scripts/ci/${cited}.mjs, and no job in ${WORKFLOW_DIRECTORY}/ci.yml runs it. The reason a control would be a false red has to rest on something this pipeline actually does; a citation to machinery nobody executes is an excuse with a filename in it, and it is how deploy-mutation-ledger.mjs came to justify three exemptions while never running.`,
+      );
+    }
   }
   // And a control for something the workflow does not run is a control whose
   // subject left: it costs a child process per gate run and proves nothing about
@@ -2685,6 +3050,11 @@ export function controlCoverageProblems(
     }
   }
   return problems;
+}
+
+/** Every `scripts/ci/<name>.mjs` a written reason leans on. */
+function citedWitnesses(why) {
+  return [...String(why ?? '').matchAll(/([a-z0-9-]+)\.mjs/g)].map((found) => found[1]);
 }
 
 function isPlainObject(value) {
@@ -2825,6 +3195,7 @@ export function checkerGraphProblems({
   // control proves a script is a function of the world, and a script cut down to
   // its precondition is a function of the world too.
   problems.push(...assertionFloorProblems(root, read, list));
+  problems.push(...assertionConditionProblems(root, read, list));
 
   // And every assertion the deploy job runs has to have a world in which it
   // must fail. `CONTROLS` is data in this same commit; the set it has to cover

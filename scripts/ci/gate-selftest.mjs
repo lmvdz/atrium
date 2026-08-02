@@ -41,6 +41,7 @@ import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
 import {
   assertedNames,
+  assertionConditionProblems,
   assertionFloorProblems,
   checkerGraphProblems,
   controlCoverageProblems,
@@ -52,7 +53,14 @@ import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
 import { entryDecisionProblems, mainGuardProblems } from './guard-scan.mjs';
 import { isMainModule } from './main-module.mjs';
-import { controlProblems, expectationProblems, runControls } from './positive-control.mjs';
+import {
+  controlProblems,
+  distinguishProblems,
+  expectationProblems,
+  preconditionReds,
+  runControls,
+  WRONG_REDS,
+} from './positive-control.mjs';
 import { repoRoot } from './repo-root.mjs';
 import { fail, readFreshReport } from './report-file.mjs';
 import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
@@ -62,6 +70,7 @@ import {
   buildAssets,
   forgeLike,
   mailpit,
+  runtimeFloorProblems,
   servableAssets,
   stackTarget,
 } from './stack-client.mjs';
@@ -74,7 +83,7 @@ const PROBE_TARGET = {
   domain: 'atrium.localhost',
 };
 
-import { workflowFiles } from './workflow-policy.mjs';
+import { ciScriptName, workflowFiles } from './workflow-policy.mjs';
 
 /**
  * The repository, found by walking up rather than by trusting the cwd.
@@ -1785,7 +1794,7 @@ const CASES = [
     expect: /nothing is serving this deployment/,
   },
   {
-    name: 'a certificate authority that could not be read is the deployment being absent',
+    name: 'a certificate authority that could not be read is its own sentence',
     run: () => [
       String(absentDeployment({ ...PROBE_TARGET, caProblem: 'ATRIUM_STACK_CA points at x' }, {})),
     ],
@@ -1795,6 +1804,287 @@ const CASES = [
     name: 'an answer with no status is not an answer this may assume was fine',
     run: () => [String(absentDeployment(PROBE_TARGET, { response: {} }))],
     expect: /came back without a status/,
+  },
+
+  // ---- and the two worlds have to be told apart (#40 round 10, D1) ---------
+  {
+    /**
+     * The defect, as a case. Round 9 answered the certificate-authority problem
+     * before making any request, and `ATRIUM_STACK_CA` names a file the job
+     * writes six steps after the control runs — so with the CA unreadable, a
+     * refused connection and a peer that accepts and resets produced the *same*
+     * sentence, and the control was scoring a red about a missing file as
+     * evidence that a deployment was missing. This fails on r9 as committed.
+     */
+    name: 'a refused connection and a peer that answers are different sentences, CA or no CA',
+    run: () => {
+      const withoutCa = { ...PROBE_TARGET, caProblem: 'ATRIUM_STACK_CA points at x' };
+      const problems = [];
+      for (const [world, target] of [
+        ['with the certificate authority the job has not written yet', withoutCa],
+        ['with the certificate authority present', PROBE_TARGET],
+      ]) {
+        const refused = String(absentDeployment(target, { error: { code: 'ECONNREFUSED' } }));
+        const answered = String(absentDeployment(target, { error: { code: 'ECONNRESET' } }));
+        if (refused === answered) {
+          problems.push(
+            `${world}, a refused connection and a peer that accepted one and reset it produce identical output: ${refused}`,
+          );
+        }
+        if (!/nothing is serving this deployment/.test(refused)) {
+          problems.push(`${world}, a refused connection does not say the deployment is absent`);
+        }
+        if (/nothing is serving this deployment/.test(answered)) {
+          problems.push(`${world}, a peer that answered is being called an absent deployment`);
+        }
+      }
+      return problems;
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'the corpus of wrong reds is generated from the precondition, not written down',
+    run: () => {
+      const reds = preconditionReds();
+      if (reds.length === 0)
+        return ['preconditionReds() produced nothing to test a pattern against'];
+      const missing = reds.filter(
+        (red) => !/ATRIUM_STACK_CA|answering on|without a status/.test(red.text),
+      );
+      return missing.length === 0
+        ? []
+        : [`a generated wrong red says none of the things it is generated for: ${missing[0].text}`];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'an expectation that admits the certificate-authority sentence is refused',
+    run: () =>
+      expectationProblems(
+        {
+          deploy: [
+            {
+              id: 'assert-page-serves',
+              entry: 'assert-page-serves',
+              // Round 9's own pattern, verbatim: the alternation that made the
+              // control pass on a file the job had not written yet.
+              expect:
+                /assert-page-serves: (?:nothing is serving this deployment|ATRIUM_STACK_CA points at)/,
+              world: 'nothing is listening',
+              because: 'the r9 defect',
+            },
+          ],
+        },
+        [
+          ...WRONG_REDS,
+          {
+            what: 'the certificate authority not being written yet',
+            text: '::error::%s: ATRIUM_STACK_CA points at /w/caddy-root.crt, which could not be read\n',
+          },
+        ],
+      ),
+    expect: /is satisfied by/,
+  },
+  {
+    name: 'two runs of a control that produced identical bytes are not a control',
+    run: () =>
+      distinguishProblems(
+        { id: 'assert-page-serves', expect: /nothing is serving this deployment/ },
+        { status: 1, output: 'assert-page-serves: 1 assertion(s) failed.\n' },
+        { status: 1, output: 'assert-page-serves: 1 assertion(s) failed.\n' },
+      ),
+    expect: /byte-identical output/,
+  },
+  {
+    name: 'a control whose expectation is also satisfied by the decoy is refused',
+    run: () =>
+      distinguishProblems(
+        { id: 'assert-page-serves', expect: /assert-page-serves/ },
+        { status: 1, output: 'assert-page-serves: nothing is serving this deployment\n' },
+        { status: 1, output: 'assert-page-serves: something is answering\n' },
+      ),
+    expect: /satisfied by its run against a decoy/,
+  },
+  {
+    name: 'a control that passes against a decoy that is not a deployment is refused',
+    run: () =>
+      distinguishProblems(
+        { id: 'assert-page-serves', expect: /nothing is serving this deployment/ },
+        { status: 1, output: 'assert-page-serves: nothing is serving this deployment\n' },
+        { status: 0, output: 'assert-page-serves: passed.\n' },
+      ),
+    expect: /exited 0 against a peer/,
+  },
+  {
+    name: 'two runs that said different things are the control working',
+    run: () =>
+      distinguishProblems(
+        { id: 'assert-page-serves', expect: /nothing is serving this deployment/ },
+        {
+          status: 1,
+          output: 'assert-page-serves: nothing is serving this deployment (ECONNREFUSED)\n',
+        },
+        {
+          status: 1,
+          output: 'assert-page-serves: something is answering on 127.0.0.1:1 (ECONNRESET)\n',
+        },
+      ),
+    expect: 'clean',
+  },
+
+  // ---- and the work has to have actually been done (#40 round 10, D2/D3) ---
+  {
+    name: 'a run that made fewer assertions than the manifest says it makes',
+    run: () =>
+      runtimeFloorProblems('assert-stack-schema', { assertions: 0, requests: 0 }, () => ({
+        floors: { minRun: 200 },
+      })),
+    expect: /recorded 0 assertion\(s\) in this run/,
+  },
+  {
+    name: 'a run that asked the deployment nothing',
+    run: () =>
+      runtimeFloorProblems('assert-page-serves', { assertions: 99, requests: 1 }, () => ({
+        floors: { minRun: 20, minRequests: 12 },
+      })),
+    expect: /put 1 request\(s\) to the deployment/,
+  },
+  {
+    name: 'a run that did the work is not reported',
+    run: () =>
+      runtimeFloorProblems('assert-page-serves', { assertions: 99, requests: 40 }, () => ({
+        floors: { minRun: 20, minRequests: 12 },
+      })),
+    expect: 'clean',
+  },
+  {
+    name: 'a manifest nobody could read is a floor nobody is held to',
+    run: () =>
+      runtimeFloorProblems('assert-page-serves', { assertions: 99, requests: 40 }, () => ({
+        problem: 'could not read .github/ci-manifest.json',
+      })),
+    expect: /could not read/,
+  },
+  {
+    name: 'the schema comparison counts what it compared',
+    run: () => {
+      let counted = 0;
+      const problems = checkSchema(schemaFixture(), deployedFixture(), (n) => {
+        counted = n;
+        return n;
+      });
+      if (problems.length > 0) return [`the fixture drifted: ${problems.join(' | ')}`];
+      // The population, counted here from the fixture rather than taken on
+      // trust: every table, every column, every constraint, every index, and the
+      // migration ledger. A `checkSchema` that reported a number unrelated to
+      // what it was handed would be the r10 D2 defect written the other way up.
+      const expected = schemaFixture();
+      let subjects = expected.tables.size + 1;
+      for (const table of expected.tables.values()) {
+        subjects += table.columns.size + table.constraints.size + table.indexes.size;
+      }
+      return counted === subjects
+        ? []
+        : [
+            `checkSchema reported ${counted} comparisons over a schema holding ${subjects} of them. The count has to be the population the comparison walked, or it is a number a rewrite can produce without comparing anything.`,
+          ];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'a comparison that compared nothing reports nothing',
+    run: () => {
+      let counted = -1;
+      checkSchema(
+        { tables: new Map(), migrations: 0 },
+        { tables: new Map(), migrations: 0 },
+        (n) => {
+          counted = n;
+          return n;
+        },
+      );
+      // One: the migration ledger. Nothing else was there to compare.
+      return counted === 1 ? [] : [`an empty comparison reported ${counted} comparisons`];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'every recorded assertion in this repository reads a value',
+    run: () => assertionConditionProblems(ROOT),
+    expect: 'clean',
+  },
+  {
+    name: 'the measured D3 exploit: twenty-three assertions about the constant `true`',
+    run: () =>
+      assertionConditionProblems(ROOT, (path, encoding) =>
+        String(path).endsWith('assert-page-serves.mjs')
+          ? "import { check, report } from './stack-client.mjs';\ncheck(true, 'x');\nreport('assert-page-serves');\n"
+          : readFileSync(path, encoding),
+      ),
+    expect: /reads no value/,
+  },
+  {
+    name: 'a fold that reports a literal count of comparisons it never made',
+    run: () =>
+      assertionConditionProblems(ROOT, (path, encoding) =>
+        String(path).endsWith('assert-page-serves.mjs')
+          ? "import { check, compared, report } from './stack-client.mjs';\ncompared(40, 'nothing at all');\nreport('assert-page-serves');\n"
+          : readFileSync(path, encoding),
+      ),
+    expect: /reads no value/,
+  },
+  {
+    name: 'the same tautology behind a module-scope constant',
+    run: () =>
+      assertionConditionProblems(ROOT, (path, encoding) =>
+        String(path).endsWith('assert-page-serves.mjs')
+          ? "import { check, report } from './stack-client.mjs';\nconst FINE = true;\ncheck(FINE, 'x');\nreport('assert-page-serves');\n"
+          : readFileSync(path, encoding),
+      ),
+    expect: /reads no value/,
+  },
+
+  // ---- an entry point is where it resolves, not how it is spelled (r10, D4) -
+  {
+    name: 'a `./`-prefixed entry point is the same entry point',
+    run: () => {
+      const spellings = [
+        'scripts/ci/assert-page-serves.mjs',
+        './scripts/ci/assert-page-serves.mjs',
+        '../../scripts/ci/assert-page-serves.mjs',
+        'scripts/./ci/assert-page-serves.mjs',
+        '/home/runner/work/atrium/atrium/scripts/ci/assert-page-serves.mjs',
+      ];
+      const wrong = spellings.filter((word) => ciScriptName(word) !== 'assert-page-serves');
+      return wrong.length === 0
+        ? []
+        : [`these spellings of one entry point were not read as one: ${wrong.join(', ')}`];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'a word that is not one of this repository’s entry points is not read as one',
+    run: () => {
+      const notOurs = ['node', 'pnpm', 'assert-page-serves.mjs', 'scripts/ci/Assert.mjs'];
+      const wrong = notOurs.filter((word) => ciScriptName(word) !== null);
+      return wrong.length === 0 ? [] : [`read as entry points: ${wrong.join(', ')}`];
+    },
+    expect: 'clean',
+  },
+  {
+    name: 'an uncontrolled entry point written with a leading `./` is still uncontrolled',
+    run: () =>
+      controlCoverageProblems(ROOT, (path, encoding) =>
+        String(path).endsWith('ci.yml')
+          ? readFileSync(path, encoding)
+              .toString()
+              .replace(
+                '      - name: Build the images',
+                '      - name: An invented thing\n        run: node ./scripts/ci/invented-thing.mjs\n\n      - name: Build the images',
+              )
+          : readFileSync(path, encoding),
+      ),
+    expect: /runs scripts\/ci\/invented-thing\.mjs and no positive control/,
   },
 
   // ---- the mail relay's address, which was a false debt entry (r9) ---------
@@ -3017,7 +3307,18 @@ function scannerCases() {
 
 async function main() {
   const failures = [];
+  // ── WHAT RAN, NOT WHAT THE TABLE HOLDS (#40 round 10, D8) ─────────────────
+  // The success line printed `CASES.length + scanner` — the size of the table,
+  // which is the same number whether or not the loop below ever executed. That
+  // is the exact shape this repository fixed in `positive-control.mjs`'s `main`
+  // one round earlier ("10 entry point(s) each failed" with no child process
+  // spawned), left standing in the file that checks everything else. So the
+  // names are collected as they are reached and cross-checked against the table
+  // afterwards: whatever silences the loop — an early return, a filter that
+  // selects nothing, a `break` — the names are what it has to have produced.
+  const ran = [];
   for (const { name, run, expect } of [...CASES, ...scannerCases()]) {
+    ran.push(name);
     let problems;
     try {
       // Awaited, because `buildAssetProblems` is async: the real fetch is, and a
@@ -3044,13 +3345,25 @@ async function main() {
 
   failures.push(...checkReadmeClaims());
 
+  const expected = CASES.length + scannerCases().length;
+  if (ran.length !== expected) {
+    failures.push(
+      `${expected} case(s) are declared and ${ran.length} ran. A case that did not run is not a case that passed, and a self-test that reports its table's size rather than the names it reached is one \`return\` away from announcing a full run it never made — measured on r8 as "10 entry point(s) each failed" with no child process spawned, in the file this one checks.`,
+    );
+  }
+  const duplicated = ran.filter((name, index) => ran.indexOf(name) !== index);
+  if (duplicated.length > 0) {
+    failures.push(
+      `${duplicated.length} case name(s) appear more than once (${[...new Set(duplicated)].join(', ')}). Two cases with one name make the count above satisfiable by a copy, and make a failure impossible to find.`,
+    );
+  }
+
   if (failures.length > 0) {
     for (const failure of failures) console.error(`::error::Gate self-test: ${failure}`);
     return 1;
   }
-  const scanner = scannerCases().length;
   console.info(
-    `Gate self-test passed: ${CASES.length + scanner} cases, every fail-open shape rejected and every clean report accepted — including ${Object.keys(EVADED_FORMS).length + Object.keys(HELPER_FORMS).length} spellings of \`it.fails\` the source scanner must see, ${Object.keys(NOT_ANNOTATIONS).length} lookalikes it must not, and ${Object.keys(BLIND_SPOTS).length} stated blind spots proved to fail closed through the reporter instead.`,
+    `Gate self-test passed: ${ran.length} cases ran of ${expected} declared, every fail-open shape rejected and every clean report accepted — including ${Object.keys(EVADED_FORMS).length + Object.keys(HELPER_FORMS).length} spellings of \`it.fails\` the source scanner must see, ${Object.keys(NOT_ANNOTATIONS).length} lookalikes it must not, and ${Object.keys(BLIND_SPOTS).length} stated blind spots proved to fail closed through the reporter instead.`,
   );
   return 0;
 }

@@ -48,7 +48,7 @@ import { readFileSync } from 'node:fs';
 import { docker } from './compose.mjs';
 import { isMainModule } from './main-module.mjs';
 import { imageNames, manifestPath } from './record-built-images.mjs';
-import { check, report } from './stack-client.mjs';
+import { check, compared, report } from './stack-client.mjs';
 
 /**
  * The comparison, as a pure function, so `gate-selftest.mjs` can put the
@@ -57,21 +57,30 @@ import { check, report } from './stack-client.mjs';
  * @param {{image: string, id: string} | undefined} built  the manifest's entry
  * @param {string} configured  the image name the resolved configuration gives it
  * @param {string} resolved    what that name currently resolves to
+ * @param {(count: number, what: string) => number} [record] counts what was
+ *   compared, for the reason `checkSchema` does (#40 round 10, D2)
  */
-export function checkMigrationImage(built, configured, resolved) {
+export function checkMigrationImage(built, configured, resolved, record = compared) {
   const problems = [];
+  // Three: the manifest has an entry, the configured name resolves to an image
+  // ID at all, and that ID is the one this run built. Each is a comparison this
+  // function performs, and the early returns below are refusals to make the rest
+  // of them — so the count is recorded as they are reached.
+  record(1, 'checkMigrationImage');
   if (!built?.id) {
     problems.push(
       'the image manifest records nothing for `migrate`, so nothing says which image this run built for the container that writes the schema. `record-built-images.mjs` runs right after the build for this reason.',
     );
     return problems;
   }
+  record(1, 'checkMigrationImage');
   if (!/^sha256:[0-9a-f]{64}$/.test(String(resolved))) {
     problems.push(
       `\`docker image inspect ${configured}\` gave ${JSON.stringify(resolved)}, which is not an image ID. The migration container's image cannot be identified, and it is about to run.`,
     );
     return problems;
   }
+  record(1, 'checkMigrationImage');
   if (resolved !== built.id) {
     problems.push(
       `the resolved configuration runs \`migrate\` from \`${configured}\`, which is image ${resolved}, but this run built ${built.id} as \`${built.image}\`. \`migrate\` executes inside \`docker compose up\` — \`server\` and \`app\` both wait on it — so letting the boot proceed would apply an unknown schema to a persistent volume and only then have it rejected. Refused here, before anything is started.`,
@@ -86,10 +95,13 @@ if (isMainModule(import.meta.url)) {
   try {
     manifest = JSON.parse(readFileSync(path, 'utf8'));
   } catch (error) {
-    console.error(
-      `::error::assert-migration-image: no readable image manifest at ${path} (${error.message}). Without it there is nothing to compare the migration image against, and the migration runs during the boot.`,
+    // Recorded, not a literal exit: see the same change in
+    // assert-image-identity.mjs (#40 round 10, D5).
+    check(
+      false,
+      `no readable image manifest at ${path} (${error.message}). Without it there is nothing to compare the migration image against, and the migration runs during the boot.`,
     );
-    process.exit(1);
+    report('assert-migration-image');
   }
 
   const configured = imageNames().migrate;

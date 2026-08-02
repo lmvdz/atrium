@@ -62,6 +62,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { posix } from 'node:path';
 import { isAlias, isCollection, parseDocument, visit } from 'yaml';
 import { isMainModule } from './main-module.mjs';
 import {
@@ -2257,6 +2258,45 @@ export const DEPLOYED_COMPOSE_FILES = ['docker-compose.yml', 'docker-compose.mai
 
 /** `scripts/ci/<name>.mjs`, however many `../` the step's directory needs. */
 export const CI_SCRIPT_PATH = /^(?:\.\.\/)*scripts\/ci\/([a-z0-9-]+)\.mjs$/;
+
+/**
+ * This repository's own entry point, by where the word *resolves* rather than by
+ * how it is spelled.
+ *
+ * ── `./` MADE AN ENTRY POINT INVISIBLE (#40 round 10, D4) ───────────────────
+ * `CI_SCRIPT_PATH` is anchored, so a leading `./` does not match it. That is
+ * correct for the *allowlist* it was written for — an allowlist should refuse
+ * anything it does not recognise, and the deploy job duly refuses
+ * `node ./scripts/ci/whatever.mjs` as not one of its two permitted shapes.
+ *
+ * It is exactly wrong for a *coverage* rule, where an unrecognised spelling
+ * means an entry point nobody controls. A blind critic measured it: `run: node
+ * ./scripts/ci/invented-thing.mjs` in the `verify` job left
+ * `controlCoverageProblems` reporting 0, the policy clean and every gate green —
+ * a brand-new, entirely uncontrolled entry point, admitted by two characters.
+ * The comment already in checker-graph.mjs diagnoses this class ("a coverage
+ * rule keyed on a filename convention covers whatever the convention happens to
+ * be called") and then replaced one convention with another.
+ *
+ * So the two uses get the shapes their direction of error needs. The allowlist
+ * keeps the anchored pattern, where a miss is a refusal. Coverage gets this:
+ * normalise `.`/`..` segments away and ask whether what is left *is* a path
+ * under `scripts/ci/`, wherever it was written from — `./scripts/ci/x.mjs`,
+ * `../../scripts/ci/x.mjs`, `scripts/./ci/x.mjs`, `packages/../scripts/ci/x.mjs`
+ * and `/home/runner/work/atrium/atrium/scripts/ci/x.mjs` are all one file.
+ *
+ * @param {string} word one argv word out of a parsed `run:` step
+ * @returns {string|null} the script's bare name, or null
+ */
+export function ciScriptName(word) {
+  const text = String(word ?? '').trim();
+  if (text === '') return null;
+  // `posix.normalize` collapses `.` and `..`; a leading `..` it cannot collapse
+  // is kept, which is what the anchored pattern's `(?:\.\.\/)*` was for.
+  const normalized = posix.normalize(text.replaceAll('\\', '/'));
+  const found = /(?:^|\/)scripts\/ci\/([a-z0-9-]+)\.mjs$/.exec(normalized);
+  return found ? found[1] : null;
+}
 
 /**
  * The two command shapes the deploy job may run, as predicates over one parsed

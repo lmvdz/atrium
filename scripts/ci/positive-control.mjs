@@ -45,6 +45,35 @@
  * makes the cold world produce a *recorded failure with a sentence in it*
  * instead of a crash, so there is something behavioural left to match.
  *
+ * ── AND THE CORPUS WENT STALE ON THE FIX ITSELF (#40 round 10, D1) ──────────
+ * That corpus was a **denylist**, written down by hand, and round 9's own fix
+ * changed the shape of the red out from under it. The thrown `ENOENT` became a
+ * *recorded assertion* — the right change — and the recorded spelling was in no
+ * corpus entry, so `expectationProblems` returned 0 while three controls'
+ * `expect` consisted of exactly that message, admitted as an alternative:
+ *
+ *     expect: /assert-page-serves: (?:nothing is serving this deployment
+ *              |ATRIUM_STACK_CA points at)/
+ *
+ * `ATRIUM_STACK_CA` is set at job level and written six steps after this step
+ * runs, so the second arm fired every time and the first was dead code. Measured
+ * by a blind critic: a live server on 18443 versus nothing on 18444 produced
+ * **byte-identical output**, both exit 1.
+ *
+ * Two answers, and the second is the one that matters.
+ *
+ *  1. **The corpus is derived, not written.** `preconditionReds` enumerates the
+ *     *worlds* the precondition distinguishes and runs the shipped
+ *     `absentDeployment` over them, so a branch added tomorrow enters the corpus
+ *     without anybody remembering it; and the summary line `verdict` prints for
+ *     any recorded failure whatever is generated from `verdict`'s own renderer.
+ *  2. **The control measures the distinction instead of matching a string.**
+ *     `distinguishProblems` runs the entry point against a closed port and
+ *     against a peer that accepts the connection, and requires the two outputs
+ *     to differ. **A control that produces identical output with and without a
+ *     deployment is not a control, whatever it matches**, and that is a property
+ *     no regular expression can carry.
+ *
  * ── AND THE CONTROLLER WAS THE ONE ENTRY POINT NOTHING CONTROLLED (D2) ──────
  * `main` printed `${CONTROLS[group].length} entry point(s) each failed` — the
  * table's size, not the number run. One line at the top of `runGroup`:
@@ -101,26 +130,37 @@
  * The cold world catches an assertion that checks *nothing*. It cannot, on its
  * own, catch one that checks *less than it claims*: a script cut down to its
  * `requireDeployment` precondition goes red here exactly like the real one.
- * That gap is closed from the other side and syntactically —
- * `assertionFloorProblems` in checker-graph.mjs holds every stack assertion to a
- * declared floor of recorded `check(…)` calls, ratcheted against `origin/main`
- * by the same machinery as the test floors and fingerprinted in the README — so
- * the twenty-line gutting fails a named gate whatever its exit status. The
- * strongest control of all is still the one this file does not run: perturbing a
- * *live* deployment (deleting the HSTS block from the Caddyfile and restarting
- * the proxy) and requiring the assertion to notice. That needs a running stack
- * to break and put back, which is a step this job does not have. Said plainly so
- * nobody reads the list below as complete.
+ * That gap is closed from the other side, in three pieces, and round 10 is about
+ * why the first of them was not enough:
+ *
+ *   - `assertionFloorProblems` counts `check(…)` **call sites**. Four scripts
+ *     record every problem through one site over a computed list, so their floor
+ *     was 1 and an empty list satisfied it — measured against the live migrated
+ *     stack as `assert-stack-schema: passed.` with zero schema compared.
+ *   - so `verdict` holds each run to a `minRun` floor over the assertions it
+ *     actually *evaluated*, a number `checkSchema` and its siblings produce from
+ *     inside their own traversal, and to a `minRequests` floor over the
+ *     questions it actually put to the deployment.
+ *   - and `assertionConditionProblems` requires a recorded assertion to read a
+ *     value, because twenty-three `check(true, …)` calls satisfy any count.
+ *
+ * All three are ratcheted against `origin/main` and fingerprinted in the README.
+ * The strongest control of all is still the one this file does not run:
+ * perturbing a *live* deployment (deleting the HSTS block from the Caddyfile and
+ * restarting the proxy) and requiring the assertion to notice. `distinguishes`
+ * below is the cheapest possible step towards it — a peer that accepts a
+ * connection is not a deployment — and it is not that. Said plainly so nobody
+ * reads the list below as complete.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { notAVerdict } from './child-verdict.mjs';
 import { isMainModule } from './main-module.mjs';
 import { repoRoot } from './repo-root.mjs';
-import { stackTarget } from './stack-client.mjs';
+import { absentDeployment, failureSummary, stackTarget } from './stack-client.mjs';
 
 /** Long enough for a cold assertion to give up, short enough to be a gate. */
 const TIMEOUT_MS = 180_000;
@@ -151,8 +191,23 @@ const NOT_COPIED = new Set([
   'playwright-report',
 ]);
 
-/** The gutting the whole file exists for, written into a copied script. */
-const gut = (name) => `import { report } from './stack-client.mjs';\nreport('${name}');\n`;
+/**
+ * The gutting the whole file exists for, written into a copied script.
+ *
+ * ── ONE TURN STRONGER THAN LAST ROUND'S (#40 round 10) ──────────────────────
+ * This was `import { report } … report('${name}');` — two lines, and it exited 0
+ * against no stack at all. It does not any more: `verdict` holds each run to a
+ * `minRun` floor now, so the two-line version goes *red* and this row would have
+ * been grading the machinery on the wrong branch, never reaching the `exited 0`
+ * one it exists for. So the plant is the version that survives the new floor —
+ * a script that reports having made forty comparisons and makes none — which is
+ * both the honest way to keep this control's world true and the next shape of
+ * the same attack. What it cannot survive is `compared` being a number the
+ * comparison itself produces, which is why `checkSchema` and its siblings count
+ * from inside their own traversal.
+ */
+const gut = (name) =>
+  `import { compared, report } from './stack-client.mjs';\ncompared(40, 'nothing at all');\nreport('${name}');\n`;
 
 /**
  * Every entry point this repository runs, and the world in which it must fail.
@@ -345,7 +400,11 @@ export const CONTROLS = {
       entry: 'assert-stack-config',
       argv: ['scripts/ci/assert-stack-config.mjs'],
       world: 'no stack has been brought up',
-      expect: /assert-stack-config: \d+ assertion\(s\) failed\./,
+      // Not `/\d+ assertion\(s\) failed\./` (#40 round 10, D6): that is the line
+      // `verdict` prints for *any* recorded failure, so it was satisfied by a
+      // red about anything at all in this file. `preconditionReds` generates it
+      // into the corpus now, so this shape cannot come back.
+      expect: /assert-stack-config: no `app` container to inspect/,
       because:
         'it reads the production configuration back out of the containers, so with no containers it must have nothing to read and say so',
     },
@@ -380,26 +439,41 @@ export const CONTROLS = {
       entry: 'assert-stack-schema',
       argv: ['scripts/ci/assert-stack-schema.mjs'],
       world: 'no stack has been brought up, so there is no database to read',
-      expect: /the stack has no `postgres` container to query/,
+      // The script's own annotation prefix, deliberately (#40 round 10, D5).
+      // This sentence used to reach the output as an *unhandled throw* out of
+      // `queryDatabase` in compose.mjs — a crash, which this repository's own
+      // rule says is not a verdict, and which is what made the D2 gutting work:
+      // the control was satisfied before the file's own comparison ran at all.
+      // `::error::assert-stack-schema: …` is written only by `verdict`.
+      expect: /assert-stack-schema: the stack has no `postgres` container to query/,
       because:
         'it is the difference between `migrate` exiting 0 and the schema being there, and it cannot make that claim about a database that does not exist',
     },
     {
       /**
-       * The row the round-9 D1 finding is about.
+       * The row the round-9 D1 finding is about, and the round-10 one.
        *
-       * Its `expect` was `/assert-page-serves/` and it was satisfied by an
-       * `ENOENT` for a certificate authority that does not exist yet at step 4.
-       * It is now the sentence `requireDeployment` records when nothing answers
-       * on the deployment's port — a thing no missing file, missing binary or
-       * syntax error produces.
+       * Round 8's `expect` was `/assert-page-serves/` — the script's own name,
+       * which every stack trace supplies for free. Round 9 replaced it with the
+       * sentence `requireDeployment` records **and then wrote the certificate-
+       * authority sentence into it as an accepted alternative**, which is the
+       * branch that actually fired: `ATRIUM_STACK_CA` is set at job level and
+       * written six steps after this control runs, so the CA arm matched every
+       * time and the deployment arm was dead code. A blind critic measured the
+       * consequence — a live server on 18443 against nothing on 18444 produced
+       * **byte-identical output**, both exit 1.
+       *
+       * So the alternation is gone: this is the refused-connection sentence and
+       * nothing else, `absentDeployment` reaches it before it looks at the CA,
+       * and `distinguishes` below makes the two-world difference a thing this
+       * step measures rather than a thing a reviewer has to.
        */
       id: 'assert-page-serves',
       entry: 'assert-page-serves',
       argv: ['scripts/ci/assert-page-serves.mjs'],
       world: 'nothing is listening on the deployment’s port',
-      expect:
-        /assert-page-serves: (?:nothing is serving this deployment|ATRIUM_STACK_CA points at)/,
+      expect: /assert-page-serves: nothing is serving this deployment/,
+      distinguishes: true,
       because:
         'the measured D3 exploit replaced this entire file with `report(…)` and got `passed.` with no stack running. This control is the thing that says no',
     },
@@ -408,8 +482,8 @@ export const CONTROLS = {
       entry: 'assert-signup-verifies',
       argv: ['scripts/ci/assert-signup-verifies.mjs'],
       world: 'nothing is listening on the deployment’s port',
-      expect:
-        /assert-signup-verifies: (?:nothing is serving this deployment|ATRIUM_STACK_CA points at)/,
+      expect: /assert-signup-verifies: nothing is serving this deployment/,
+      distinguishes: true,
       because: 'it drives a real form through a real SMTP relay, neither of which is up yet',
     },
     {
@@ -417,7 +491,8 @@ export const CONTROLS = {
       entry: 'assert-ws-upgrade',
       argv: ['scripts/ci/assert-ws-upgrade.mjs'],
       world: 'nothing is listening on the deployment’s port',
-      expect: /assert-ws-upgrade: (?:nothing is serving this deployment|ATRIUM_STACK_CA points at)/,
+      expect: /assert-ws-upgrade: nothing is serving this deployment/,
+      distinguishes: true,
       because: 'an upgrade handshake against nothing cannot complete',
     },
     {
@@ -425,7 +500,9 @@ export const CONTROLS = {
       entry: 'assert-rate-limit',
       argv: ['scripts/ci/assert-rate-limit.mjs'],
       world: 'no stack has been brought up, so there is no proxy to aim callers at',
-      expect: /assert-rate-limit: \d+ assertion\(s\) failed\./,
+      // Same D6 correction as assert-stack-config: the failure count is not a
+      // fact about this control's world.
+      expect: /assert-rate-limit: no `proxy` container to aim at/,
       because: 'it runs callers inside the compose network, which does not exist yet',
     },
   ],
@@ -471,6 +548,14 @@ const COLD_STACK_GROUPS = new Set(['deploy', 'selfcheck']);
  */
 export const WRONG_REDS = [
   {
+    what: 'the summary line any recorded failure in the file produces',
+    // Derived from `verdict` rather than written out: two controls on r9
+    // expected `/assert-stack-config: \d+ assertion\(s\) failed\./`, which is
+    // satisfied by *any* failure that file records, in any world. `1` because a
+    // pattern that accepts one accepts the shape.
+    text: `${failureSummary('%s', 1)}\n`,
+  },
+  {
     what: 'a Node stack trace from anywhere inside the script',
     text: 'file:///repo/scripts/ci/%s.mjs:110\nconst target = stackTarget();\n              ^\nTypeError: x is not a function\n    at file:///repo/scripts/ci/%s.mjs:110:16\n    at ModuleJob.run (node:internal/modules/esm/module_job:274:25)\n',
   },
@@ -501,6 +586,115 @@ export const WRONG_REDS = [
 ];
 
 /**
+ * A target with an unreadable certificate authority, obtained by asking for one.
+ *
+ * `stackTarget` is called with a path that cannot exist, so the sentence below
+ * is the one the shipped code produces rather than a copy of it. That is the
+ * whole point of `preconditionReds`: round 9 converted a thrown `ENOENT` into a
+ * recorded assertion — the right change — and the new spelling was in no corpus
+ * entry, so `expectationProblems` returned 0 while three controls' `expect`
+ * consisted of exactly that message.
+ */
+const UNREADABLE_CA = stackTarget({
+  ATRIUM_STACK_DOMAIN: 'atrium.localhost',
+  ATRIUM_STACK_CA: join(tmpdir(), 'atrium-no-such-certificate-authority', 'caddy-root.crt'),
+  ATRIUM_STACK_HTTPS_PORT: '443',
+});
+
+/** The same deployment, with the certificate authority the job eventually writes. */
+const TRUSTED_CA = {
+  ...UNREADABLE_CA,
+  ca: Buffer.from('-----BEGIN CERTIFICATE-----'),
+  caProblem: undefined,
+};
+
+/**
+ * Worlds a cold-stack control's red might have come from that are *not* its own.
+ *
+ * The planted world for every `deploy` control is "nothing is listening on the
+ * deployment's port", which `absentDeployment` answers with the refused-
+ * connection sentence. Every other answer that function can give describes a
+ * different world — the certificate authority not written yet, a peer that
+ * accepted the connection and failed the exchange, an answer with no status —
+ * and a red produced by one of those is a red this control did not cause.
+ *
+ * Enumerated as *inputs* rather than as messages, and run through the shipped
+ * function, so a branch added to `absentDeployment` tomorrow enters this corpus
+ * without anybody remembering to add it. That is the round-10 D1 lesson stated
+ * as machinery: **a denylist of wrong reds goes stale the moment a fix changes
+ * the shape of the red**, so the list enumerates the situations the code
+ * distinguishes and lets the code do the spelling.
+ *
+ * What it is *not* is exhaustive over branches: a branch reachable only from an
+ * input shape nobody listed here — a fourth field on `outcome`, say — still
+ * would not enter. This is a smaller list to keep honest than a list of
+ * sentences, and it is still a list. The half that does not depend on any list
+ * is `distinguishProblems`, which measures the difference rather than enumerating
+ * it, and the one entry below that fires when the planted sentence stops being
+ * distinct is what makes a collapse of the two loud rather than silent.
+ */
+const OTHER_WORLDS = [
+  {
+    what: 'the certificate authority not being written yet, with something on the port',
+    target: UNREADABLE_CA,
+    outcome: { error: { code: 'ECONNRESET' } },
+  },
+  {
+    what: 'a handshake that could not be verified because the job has not copied the CA out yet',
+    target: UNREADABLE_CA,
+    outcome: { error: { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' } },
+  },
+  {
+    what: 'a page obtained with no certificate authority to verify it against',
+    target: UNREADABLE_CA,
+    outcome: { response: { status: 200 } },
+  },
+  {
+    what: 'a peer that accepted the connection and then failed the exchange',
+    target: TRUSTED_CA,
+    outcome: { error: { code: 'ECONNRESET' } },
+  },
+  {
+    what: 'an answer this file could not read a status out of',
+    target: TRUSTED_CA,
+    outcome: { response: {} },
+  },
+];
+
+/** The sentence a cold-stack control is *allowed* to be graded on. */
+const PLANTED_RED = String(absentDeployment(TRUSTED_CA, { error: { code: 'ECONNREFUSED' } }));
+
+/**
+ * The corpus entries `absentDeployment` itself generates, rendered as a child's
+ * output would carry them.
+ *
+ * @param {object[]} [worlds]
+ * @param {(target: object, outcome: object) => string|undefined} [absent]
+ * @returns {{what: string, text: string}[]}
+ */
+export function preconditionReds(worlds = OTHER_WORLDS, absent = absentDeployment) {
+  const reds = [];
+  for (const world of worlds) {
+    const sentence = absent(world.target, world.outcome);
+    if (sentence === undefined) continue;
+    if (sentence === PLANTED_RED) {
+      // The one shape that makes this whole file wrong: if the precondition
+      // stops telling the planted world from another one, every deploy control
+      // is being graded on a sentence two worlds produce. Said as a corpus entry
+      // that no pattern can avoid, so the gate goes red loudly rather than the
+      // corpus quietly accepting everything.
+      reds.push({
+        what: `${world.what} — which now produces the *same* sentence as a refused connection, so no expectation can tell the two apart`,
+        text: `::error::%s: ${sentence}\n`,
+      });
+      continue;
+    }
+    reds.push({ what: world.what, text: `::error::%s: ${sentence}\n${failureSummary('%s', 1)}\n` });
+  }
+  return reds;
+}
+
+/**
  * Every control whose expectation is about an identity rather than a behaviour.
  *
  * This is the round-9 D1 rule, made checkable. A control's `expect` is what
@@ -518,7 +712,10 @@ export const WRONG_REDS = [
  *   a known-bad row without editing the real one
  * @returns {string[]}
  */
-export function expectationProblems(controls = CONTROLS) {
+export function expectationProblems(
+  controls = CONTROLS,
+  corpus = [...WRONG_REDS, ...preconditionReds()],
+) {
   const problems = [];
   for (const [group, rows] of Object.entries(controls)) {
     for (const control of rows) {
@@ -534,7 +731,7 @@ export function expectationProblems(controls = CONTROLS) {
           `${group}/${id}'s \`expect\` (${expect}) matches the empty string, so a child that printed nothing at all would satisfy it.`,
         );
       }
-      for (const wrong of WRONG_REDS) {
+      for (const wrong of corpus) {
         const rendered = wrong.text.replaceAll('%s', entry ?? id);
         if (!expect.test(rendered)) continue;
         problems.push(
@@ -604,6 +801,84 @@ export function worldProblems(group, listening = isListening) {
   return problems;
 }
 
+/**
+ * A decoy: something that accepts the connection and is not a deployment.
+ *
+ * Run as its own process, not as a server in this one, because `runControl`
+ * blocks the event loop in `execFileSync` — a listener inside this process would
+ * accept nothing while the child it exists for is running. It resets every
+ * connection immediately, so the child gets an answer from the socket layer and
+ * never hangs.
+ */
+const DECOY_SERVER =
+  "require('net').createServer((socket) => socket.destroy()).listen(Number(process.argv[1]), '127.0.0.1');";
+
+/** A port nothing was listening on a moment ago, asked of the kernel. */
+function freePort() {
+  return Number(
+    execFileSync(
+      process.execPath,
+      [
+        '-e',
+        "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{process.stdout.write(String(s.address().port));s.close()});",
+      ],
+      { encoding: 'utf8', timeout: 15_000 },
+    ).trim(),
+  );
+}
+
+/**
+ * Both worlds, and the requirement that the entry point can tell them apart.
+ *
+ * ── THE ACCEPTANCE TEST FOR THE ROUND-9 DEFECT (#40 round 10, D1) ───────────
+ * A blind critic's finding, in one sentence: *a control that produces identical
+ * output with and without a deployment is not a control, whatever it matches.*
+ * Round 9's did. `absentDeployment` returned the certificate-authority problem
+ * on its first line, before any request, and `ATRIUM_STACK_CA` names a file the
+ * job writes six steps after this step runs — so the CA branch fired in the only
+ * world this ever ran in, the deployment branch was dead code, and a live server
+ * on one port versus nothing on another gave byte-identical output.
+ *
+ * The remedy is not a better regular expression. It is to *make the measurement*:
+ * run the entry point against a closed port and against a peer that accepts the
+ * connection, and require the two outputs to differ. That is a property of the
+ * script's precondition and of nothing else, it needs no docker and no stack,
+ * and it fails on `fix/deploy-serves-r9` as committed.
+ *
+ * What the decoy is not is a deployment. It cannot be: standing one up is what
+ * the rest of the job does, six steps later. What it is is the cheapest possible
+ * *different world*, and a script that answers a refused connection and an
+ * accepted-then-reset one with the same bytes has a precondition that is not
+ * reading the socket at all.
+ *
+ * @param {object} control the row from `CONTROLS`
+ * @param {{status?: number, output?: string}} cold  the planted world's outcome
+ * @param {{status?: number, output?: string}} decoy the other world's outcome
+ * @returns {string[]}
+ */
+export function distinguishProblems(control, cold, decoy) {
+  const { id, expect } = control;
+  const coldOutput = String(cold.output ?? '');
+  const decoyOutput = String(decoy.output ?? '');
+  const problems = [];
+  if (coldOutput === decoyOutput) {
+    return [
+      `${id} produced byte-identical output against a port nothing is listening on and against a peer that accepts the connection and resets it (${coldOutput.length} bytes, exit ${cold.status ?? 'none'} and ${decoy.status ?? 'none'}). Its answer is therefore not a function of what is on the deployment's port, and every red this control has ever scored was about something else — a certificate authority the job had not written yet, on r9. A control that cannot tell its two worlds apart is not a control.`,
+    ];
+  }
+  if (decoy.status === 0) {
+    problems.push(
+      `${id} exited 0 against a peer that accepts a connection and resets it. That is not a deployment, and an assertion that reports \`passed\` against it is reporting on the fact that a socket answered.`,
+    );
+  }
+  if (expect instanceof RegExp && expect.test(decoyOutput)) {
+    problems.push(
+      `${id}'s expectation (${expect}) is satisfied by its run against a decoy that is not a deployment at all. The sentence this control is graded on has to be the one the *planted* world produces; one that a peer accepting a connection also produces is a sentence about neither world.`,
+    );
+  }
+  return problems;
+}
+
 /** A TCP connect that is allowed to fail, answered synchronously enough to gate on. */
 function isListening(address, port, timeoutMs = 1500) {
   const probe = execFileSync(
@@ -666,9 +941,9 @@ export function controlProblems(control, outcome) {
  * absolute against the real tree. A control that ran a copied script would be
  * checking the copy, and the copy is the one thing here nobody ships.
  */
-function runControl(control, cwd, root) {
+function runControl(control, cwd, root, overrides = {}) {
   const argv = [resolve(root, control.argv[0]), ...control.argv.slice(1)];
-  const env = { ...process.env, ...(control.env?.() ?? {}) };
+  const env = { ...process.env, ...(control.env?.() ?? {}), ...overrides };
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) delete env[name];
   }
@@ -687,6 +962,42 @@ function runControl(control, cwd, root) {
       output: `${error.stdout ?? ''}${error.stderr ?? ''}`,
       error,
     };
+  }
+}
+
+/**
+ * The second world, run, and the grading of the pair.
+ *
+ * The decoy listens on a port of its own rather than on the deployment's, so
+ * `worldProblems`' "nothing may be listening here" precondition stays true of
+ * the port every other control in the group is about. Only the child is pointed
+ * at it.
+ */
+function distinguish(control, cwd, root, cold) {
+  let port;
+  try {
+    port = freePort();
+  } catch (error) {
+    return [
+      `${control.id}: no port could be obtained to stand the decoy on (${error.message}), so the two worlds could not be compared. An inconclusive measurement is not a passing one.`,
+    ];
+  }
+  const server = spawn(process.execPath, ['-e', DECOY_SERVER, String(port)], { stdio: 'ignore' });
+  try {
+    let up = false;
+    for (let attempt = 0; attempt < 20 && !up; attempt += 1) up = isListening('127.0.0.1', port);
+    if (!up) {
+      return [
+        `${control.id}: the decoy never started listening on 127.0.0.1:${port}, so the world this control has to be told apart from was never created. Inconclusive is not a pass.`,
+      ];
+    }
+    const decoy = runControl(control, cwd, root, {
+      ATRIUM_STACK_ADDRESS: '127.0.0.1',
+      ATRIUM_STACK_HTTPS_PORT: String(port),
+    });
+    return distinguishProblems(control, cold, decoy);
+  } finally {
+    server.kill('SIGKILL');
   }
 }
 
@@ -765,9 +1076,12 @@ export function runControls(controls, root) {
       const outcome = runControl(control, cwd, root);
       ran.push(control.id);
       const found = controlProblems(control, outcome);
+      if (control.distinguishes === true) {
+        found.push(...distinguish(control, cwd, root, outcome));
+      }
       problems.push(...found);
       console.info(
-        `  ${found.length === 0 ? 'red as required' : 'DID NOT FAIL   '} ${control.id.padEnd(28)} exit=${outcome.status ?? 'none'} bytes=${(outcome.output ?? '').length}`,
+        `  ${found.length === 0 ? 'red as required' : 'DID NOT FAIL   '} ${control.id.padEnd(28)} exit=${outcome.status ?? 'none'} bytes=${(outcome.output ?? '').length}${control.distinguishes === true ? ' (+decoy)' : ''}`,
       );
     }
   } finally {

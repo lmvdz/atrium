@@ -68,7 +68,7 @@
 
 import { compose, docker } from './compose.mjs';
 import { isMainModule } from './main-module.mjs';
-import { check, report } from './stack-client.mjs';
+import { check, compared, report } from './stack-client.mjs';
 
 /**
  * The first engine that filters loopback-published ports against off-host
@@ -135,13 +135,23 @@ function atLeast(version, floor) {
  * @param {Record<string, {driver_opts?: Record<string,string>}>} observed.composeNetworks
  *        the `networks:` block of the *resolved* compose configuration
  */
-export function checkHostNetworkPolicy({
-  engineVersion,
-  defaultBridge = { present: false },
-  composeNetworks = {},
-}) {
+export function checkHostNetworkPolicy(
+  { engineVersion, defaultBridge = { present: false }, composeNetworks = {} },
+  record = compared,
+) {
   const problems = [];
   const defaultBridgeOptions = defaultBridge.present ? (defaultBridge.options ?? {}) : {};
+  // The engine's version, its default bridge's gateway mode under each option
+  // name, and each option on each network of this project. Counted here for the
+  // reason `checkSchema` counts (#40 round 10, D2): every problem below reaches
+  // `check` through one call site, so nothing at runtime told a full sweep from
+  // an empty one.
+  record(
+    2 +
+      GATEWAY_MODE_OPTIONS.length +
+      Object.keys(composeNetworks).length * GATEWAY_MODE_OPTIONS.length,
+    'checkHostNetworkPolicy',
+  );
 
   if (defaultBridge.error) {
     problems.push(
@@ -248,7 +258,9 @@ const PUBLISHED = {
  * the self-test reads the YAML rather than only the resolved configuration.
  */
 function splitPublication(publication) {
-  const masked = String(publication).replace(/\$\{[^}]*\}/g, (match) => ' '.repeat(match.length));
+  const masked = String(publication).replace(/\$\{[^}]*\}/g, (match) =>
+    '\u0000'.repeat(match.length),
+  );
   const text = String(publication);
   const fields = [];
   let start = 0;
@@ -266,9 +278,16 @@ function splitPublication(publication) {
  * @param {object} [expected] injectable so the self-tests can state a different world
  * @returns {string[]}
  */
-export function publishedPortProblems(services, expected = PUBLISHED) {
+export function publishedPortProblems(services, expected = PUBLISHED, record = compared) {
   const problems = [];
   const seen = new Set();
+  record(
+    Object.values(services ?? {}).reduce(
+      (total, definition) => total + (definition?.ports ?? []).length,
+      0,
+    ) + Object.keys(expected).length,
+    'publishedPortProblems',
+  );
   for (const [service, definition] of Object.entries(services ?? {})) {
     for (const publication of definition?.ports ?? []) {
       // Keyed on the *container* port. The host port is `${HTTPS_PORT}` and

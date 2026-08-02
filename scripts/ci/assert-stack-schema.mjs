@@ -101,9 +101,9 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { queryDatabase } from './compose.mjs';
+import { psAll, queryDatabase } from './compose.mjs';
 import { isMainModule } from './main-module.mjs';
-import { check, report } from './stack-client.mjs';
+import { check, compared, report } from './stack-client.mjs';
 
 const META = 'packages/db/drizzle/meta';
 
@@ -265,13 +265,36 @@ function renderIndex(name, unique, columns) {
  * The comparison, as a pure function, so `gate-selftest.mjs` can put a drifted
  * database through it without a stack.
  *
+ * ── WHY IT COUNTS WHAT IT COMPARED (#40 round 10, D2) ───────────────────────
+ * Every problem this file records goes through one `check(…)` call site — `for
+ * (const problem of problems) check(false, problem)` — so the source-level floor
+ * that was supposed to stop this script being gutted was **1**, and a healthy
+ * stack produces *zero* problems, so nothing at runtime distinguished a full
+ * comparison from no comparison at all. A blind critic replaced the
+ * `isMainModule` block with `queryDatabase('select 1')` and an empty list and
+ * measured `assert-stack-schema: passed.` against the live migrated stack: red
+ * cold, green hot, floor satisfied, **zero schema compared**.
+ *
+ * A comparison that found nothing wrong still happened, and the number of
+ * comparisons is the size of the population — which only this function knows. So
+ * it is recorded from inside the traversal, through the injectable `record`, and
+ * `verdict` holds the run to the `minRun` floor in .github/ci-manifest.json. A
+ * rewrite that skips the comparison cannot report having made it.
+ *
  * @param {{migrations: number, tables: Map<string, Set<string>>}} expected
  * @param {{migrations: number, tables: Map<string, Set<string>>}} actual
+ * @param {(count: number, what: string) => number} [record] injectable so the
+ *   self-test's fixture calls do not have to be a second implementation of this
  */
-export function checkSchema(expected, actual) {
+export function checkSchema(expected, actual, record = compared) {
   const problems = [];
+  let subjects = 0;
   const expectedNames = [...expected.tables.keys()].sort();
   const actualNames = [...actual.tables.keys()].sort();
+
+  // Every table named on either side is one comparison: the set equality below
+  // is a claim about each of them.
+  subjects += new Set([...expectedNames, ...actualNames]).size;
 
   const missing = expectedNames.filter((name) => !actual.tables.has(name));
   const extra = actualNames.filter((name) => !expected.tables.has(name));
@@ -289,6 +312,7 @@ export function checkSchema(expected, actual) {
     const want = expected.tables.get(name);
     const have = actual.tables.get(name);
     if (!have) continue;
+    subjects += new Set([...want.columns.keys(), ...have.columns.keys()]).size;
     const missingColumns = [...want.columns.keys()].filter((column) => !have.columns.has(column));
     const extraColumns = [...have.columns.keys()].filter((column) => !want.columns.has(column));
     if (missingColumns.length > 0 || extraColumns.length > 0) {
@@ -333,6 +357,7 @@ export function checkSchema(expected, actual) {
       ['constraint', 'constraints'],
       ['index', 'indexes'],
     ]) {
+      subjects += new Set([...want[key], ...have[key]]).size;
       const missing = [...want[key]].filter((entry) => !have[key].has(entry)).sort();
       const extra = [...have[key]].filter((entry) => !want[key].has(entry)).sort();
       if (missing.length > 0) {
@@ -347,11 +372,13 @@ export function checkSchema(expected, actual) {
       }
     }
   }
+  subjects += 1; // the migration ledger
   if (actual.migrations !== expected.migrations) {
     problems.push(
       `drizzle's own ledger records ${actual.migrations} applied migration(s); this tree ships ${expected.migrations}. A migration folder that never reached the image applies nothing to an already-migrated volume and exits 0, which is the quietest possible way for a deployment's schema to be a different tree's.`,
     );
   }
+  record(subjects, 'checkSchema');
   return problems;
 }
 
@@ -505,6 +532,22 @@ export function schemaTotals(expected) {
 }
 
 if (isMainModule(import.meta.url)) {
+  // ── THE PRECONDITION, RECORDED RATHER THAN THROWN (#40 round 10, D5) ───────
+  // With no stack, `queryDatabase` threw out of compose.mjs and the process died
+  // with a stack trace that happened to contain the sentence this script's
+  // positive control expected. That is a crash standing in for a verdict — the
+  // distinction `child-verdict.mjs` exists for — and it is what made the D2
+  // gutting invisible: the control was satisfied *before* the comparison below
+  // ever ran, so a version of this file with no comparison in it scored exactly
+  // the same red. `psAll()` asks the question first and `verdict` answers it.
+  if (
+    !check(
+      psAll().some((container) => container.Service === 'postgres'),
+      'the stack has no `postgres` container to query, so there is no deployed schema to compare the migrations against. Every assertion below is a question about a database this deployment brought up, and there is not one to ask.',
+    )
+  ) {
+    report('assert-stack-schema');
+  }
   const expected = expectedSchema();
   const actual = deployedSchema();
   if (actual.migrations === -1) {

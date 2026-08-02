@@ -129,9 +129,19 @@ export function floorsOf(manifest) {
   // to make a failing gate pass is to lower the number it compares against —
   // and reading them here is what makes lowering one require a justification
   // keyed to the script whose assertions went away.
+  //
+  // Round 10 added two more dimensions to each of those entries and they ratchet
+  // for the same reason: `minRun` is how many assertions the run actually made
+  // (the count a fold over an empty list cannot produce) and `minRequests` is
+  // how many questions it put to the deployment (the count a `check(true, …)`
+  // cannot produce). A floor nobody may quietly lower is the whole mechanism, so
+  // every number in that table is in here rather than the one that was there
+  // first.
   for (const [script, entry] of Object.entries(manifest?.assertions?.scripts ?? {})) {
-    if (typeof entry?.minChecks === 'number') {
-      floors.set(`assertions.scripts.${script}.minChecks`, entry.minChecks);
+    for (const dimension of ['minChecks', 'minRun', 'minRequests']) {
+      if (typeof entry?.[dimension] === 'number') {
+        floors.set(`assertions.scripts.${script}.${dimension}`, entry[dimension]);
+      }
     }
   }
   return floors;

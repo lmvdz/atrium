@@ -185,6 +185,26 @@ Three things make that control worth its own step rather than a comment:
   `requireDeployment` in `stack-client.mjs` is what leaves something behavioural
   to match: the cold world is now a recorded assertion with a sentence in it
   rather than a crash.
+- **And that corpus is generated, because the round-9 fix went stale on it.**
+  Converting the thrown `ENOENT` into a recorded assertion was the right change
+  and it produced a sentence no hand-written corpus entry held, so
+  `expectationProblems` reported nothing while three controls admitted exactly
+  that sentence as an alternative — and, since `ATRIUM_STACK_CA` names a file the
+  job writes six steps later, it was the arm that always fired. Measured: a live
+  server on one port and nothing on another gave **byte-identical output**. The
+  corpus now enumerates the *worlds* the precondition distinguishes and runs the
+  shipped code over them, so a new branch enters it without anybody remembering;
+  the summary line any recorded failure prints is generated from the function
+  that prints it, which retired two controls whose whole expectation was a count
+  of failures.
+- **And the control measures the distinction rather than matching a string.**
+  The three controls whose subject is the deployment's port are run twice — once
+  against a closed port and once against a peer that accepts the connection and
+  resets it — and their two outputs must differ. **A control that produces
+  identical output with and without a deployment is not a control, whatever it
+  matches**, and no regular expression can carry that property. A peer that
+  accepts a connection is not a deployment, and this is deliberately the cheapest
+  possible second world rather than a real one.
 - **It verifies the world it claims.** A red obtained against a stack that is
   quietly still up is a red about something else, so the deploy group refuses to
   treat any of its results as evidence unless nothing is listening on the
@@ -199,12 +219,35 @@ Three things make that control worth its own step rather than a comment:
   gutted to `report(…)`, requiring it to say so.
 
 What a cold control cannot do is tell a real assertion apart from one cut down to
-its precondition — both go red where there is no deployment. That half is
-syntactic and blunt: every script that records assertions through `check`
-declares a floor of call sites in `.github/ci-manifest.json`, derived subject set
-and all, so deleting twenty-three of `assert-page-serves`'s twenty-four checks
-fails a gate by name. Those floors sit in the same ratchet as the test floors and
-in the same README fingerprint, which is what makes lowering one loud.
+its precondition — both go red where there is no deployment. Three floors close
+that from the other side, and the first of them was not enough:
+
+- **`minChecks`**, a count of `check(…)` call sites in the source. Four scripts
+  record every problem through *one* site over a computed list — `for (const
+  problem of problems) check(false, problem)` — so their floor was 1, and a
+  version of `assert-stack-schema.mjs` that computed an empty list satisfied it
+  while comparing nothing. Measured against the live migrated stack:
+  `assert-stack-schema: passed.`, exit 0, **zero schema compared**, every other
+  gate green. *A ratchet over a quantity the author sets in one line measures the
+  author's cooperation.*
+- **`minRun`**, the number of assertions the run actually *evaluated* — recorded
+  by `check(…)` and by `compared(n, …)`, where `n` comes from inside the
+  comparison itself. `checkSchema` reports how many tables, columns, constraints
+  and indexes it walked (260 against this stack, floor 230), so a rewrite that
+  skips the comparison cannot report having made it. `verdict` enforces it, which
+  means the gutting goes red *against the live deployment* rather than only
+  against a reader of the source.
+- **`minRequests`**, the number of questions the script put to the deployment.
+  This is the half a tautology cannot fake: an exploit of twenty-three
+  `check(true, …)` calls satisfies any count of assertions and asks the
+  deployment exactly once. `assert-page-serves` asks it twenty-five times.
+
+And a recorded assertion must *read a value*: a condition every leaf of which is
+a literal, or a module-scope constant bound to one, is refused by name. That is
+an allowlist of the compliant forms rather than a list of tautologies to ban —
+`check(false, problem)` stays legal, because no arrangement of it makes a script
+pass. All three floors sit in the same ratchet as the test floors and in the same
+README fingerprint, which is what makes lowering one loud.
 
 **Docker Engine ≥ 28 is a hard deployment prerequisite, not a nicety.** Earlier
 engines insert their DNAT rules ahead of the filter chain, so a port published to
@@ -726,11 +769,11 @@ zero tests exits 0 just like one that passed 315:
   and checks only that every floor is at least 1.
 - **And the window where that is not yet a ratchet is covered by prose.** While
   `origin/main` carries no manifest, a floor can be lowered and nothing will
-  object — `packages/ci-guard`'s floor of 115 could be set to 1 today, the suite
+  object — `packages/ci-guard`'s floor of 180 could be set to 1 today, the suite
   would still pass, and seventy tests could then be deleted quietly. Nothing
   inside one commit can prove otherwise, because the checker and the checked come
-  out of the same revision. So the manifest declares **floors totalling 1588**,
-  with **floors fingerprint `095657143dfe`**, and `gate-selftest.mjs` reads both
+  out of the same revision. So the manifest declares **floors totalling 2434**,
+  with **floors fingerprint `94ae52ffaa0e`**, and `gate-selftest.mjs` reads both
   back out of this sentence and compares them against the file. The total says
   which direction the floors moved; the fingerprint — a digest over every
   `key=value` pair — says *that* they moved, which the total alone does not: 115
@@ -954,7 +997,7 @@ zero tests exits 0 just like one that passed 315:
   policy mutations plus 142 gate cases) with the workflow policy clean, biome
   clean, both steps green, and no output at all under `CI=true`.
   `scripts/ci/checker-graph.mjs` makes that a property with a test: an
-  invocation graph of 24 enforcement checks — what each one reads and every place
+  invocation graph of 25 enforcement checks — what each one reads and every place
   it is called from, its size read back out of this sentence because a deleted
   row is a check that quietly stops being in the graph — and three assertions
   over it: the discovered witnesses must equal the declared ones, every
@@ -1077,7 +1120,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 225 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 245 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

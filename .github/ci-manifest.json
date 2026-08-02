@@ -1,35 +1,36 @@
 {
   "_comment": [
     "Enrollment manifest for the CI test gates. Every workspace that pnpm-workspace.yaml",
-    "resolves must appear here \u2014 either with a floor under `vitest.workspaces`, or with a",
+    "resolves must appear here — either with a floor under `vitest.workspaces`, or with a",
     "written reason under `vitest.exempt`. A workspace that exists on disk and is missing",
     "from both fails the gate, so adding a package without adding tests is a red build",
     "rather than a global count that silently absorbs the gap.",
     "Floors are per project, not global: a package that stops contributing tests entirely",
     "cannot hide behind its neighbours' counts. Raising a floor is a normal part of adding",
-    "tests; lowering one is a decision that shows up in review \u2014 see `ratchet` below, and",
+    "tests; lowering one is a decision that shows up in review — see `ratchet` below, and",
     "scripts/ci/assert-floor-ratchet.mjs, which compares every number here against the same",
     "file on origin/main.",
     "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
     "target: the point is to catch a suite that shrank, not to go red every time a test is",
     "renamed away. Counted from a real run of this tree (fix/ci-r6 merged into fix/auth-r5,",
-    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 124 \u2014 766",
+    "plus #40): core 129, db 23, auth 220, ingest 150, server 104, web 16, ci-guard 124 — 766",
     "tests across 31 files. Round 7 took ci-guard from 49 to 124: the outside witness now",
     "tests the *behaviour* of every shared decision under scripts/ci/, not only the shape of",
-    "the guard in its callers \u2014 see scripts/ci/checker-graph.mjs. Its floor moved 40 -> 115,",
+    "the guard in its callers — see scripts/ci/checker-graph.mjs. Its floor moved 40 -> 115,",
     "because a floor a few under a real count is a loss detector and one 84 under it",
     "is a place seventy tests can be deleted from.",
     "packages/ci-guard is #40 round 6. It exists to run checks from *outside* scripts/: the",
     "main-module guard scanner was enforced only from gate-selftest.mjs, a file it scans, so",
     "one `&&` in that file removed 316 assertions with every gate green. Its floor is what",
-    "makes deleting those tests loud \u2014 see scripts/ci/checker-graph.mjs, which requires every",
+    "makes deleting those tests loud — see scripts/ci/checker-graph.mjs, which requires every",
     "enforcement check to have a witness that is not one of its own subjects, and requires that",
     "witness to assert on the result rather than merely call it.",
     "apps/web left `exempt` and acquired a floor in #40's merge: fix/auth-r5 gave it a Vitest",
     "project for its server-side modules (the boot conditions in `lib/env.ts`, and #40's",
     "rules about build-time constants in `next.config.ts`), which a browser suite cannot",
     "reach. Its Playwright suite is still the `playwright` section below.",
-    "Round 9 took ci-guard from 115 to 150: the outside witness now also covers the deployment precondition, the mail relay address, the report gates' exit status, the identity-vs-behaviour rule over control expectations, the assertion floors, and the round-4 entry decision over the whole repository \u2014 160 tests as measured. And it added `assertions.scripts` below, which is a second kind of floor entirely: see the comment there."
+    "Round 9 took ci-guard from 115 to 150: the outside witness now also covers the deployment precondition, the mail relay address, the report gates' exit status, the identity-vs-behaviour rule over control expectations, the assertion floors, and the round-4 entry decision over the whole repository — 160 tests as measured. And it added `assertions.scripts` below, which is a second kind of floor entirely: see the comment there.",
+    "Round 10 took ci-guard from 150 to 180: the outside witness now also covers the two-world measurement behind the deployment precondition, the generated corpus of reds a control did not plant, the runtime assertion and request floors, the rule that a recorded assertion must read a value, and the resolution-based reading of this repository's entry points out of a workflow — 188 tests as measured, 830 across the workspace."
   ],
   "vitest": {
     "workspaces": {
@@ -43,7 +44,7 @@
       },
       "packages/ci-guard": {
         "project": "ci-guard",
-        "minTests": 150
+        "minTests": 180
       },
       "packages/auth": {
         "project": "auth",
@@ -63,7 +64,7 @@
       }
     },
     "exempt": {},
-    "minTotalTests": 770
+    "minTotalTests": 800
   },
   "playwright": {
     "projects": {
@@ -76,14 +77,14 @@
   "ratchet": {
     "_comment": [
       "Floors ratchet up. scripts/ci/assert-floor-ratchet.mjs reads this same file from",
-      "origin/main and fails if any floor here is lower than the one there \u2014 including the",
+      "origin/main and fails if any floor here is lower than the one there — including the",
       "quiet version, where an enrolled workspace is moved into `exempt` instead.",
       "A decrease is allowed with a written reason keyed to exactly what came down, e.g.",
       "  \"vitest.workspaces.packages/core.minTests\": \"why the suite is legitimately smaller\".",
       "Justifications are checked in both directions: one that does not match an actual",
       "decrease fails too, so nobody can pre-authorise next month's cut by landing a blanket",
       "reason today.",
-      "There is no baseline until this branch merges \u2014 origin/main carries no manifest yet \u2014",
+      "There is no baseline until this branch merges — origin/main carries no manifest yet —",
       "so today the script says `no baseline` loudly and checks only that every floor is a",
       "whole number of at least 1. It becomes a real ratchet the moment a manifest exists on",
       "main."
@@ -92,58 +93,65 @@
   },
   "assertions": {
     "_comment": [
-      "Floors on how many assertions each stack assertion still records, added in #40 round 9.",
-      "The positive control in scripts/ci/positive-control.mjs proves a script is a function of",
-      "the deployment by running it where there is none. That catches a script that checks",
-      "nothing; it cannot catch one cut down to its `requireDeployment` precondition, which goes",
-      "red in that world exactly like the real thing. A blind critic counted what that leaves",
-      "uncontrolled: 48 `check()` calls across the three page/signup/socket assertions.",
-      "So each script that records assertions through `check` declares a floor here, and",
-      "scripts/ci/checker-graph.mjs derives the subject set from the imports rather than from",
-      "this table: a script that starts recording assertions and has no floor is an error, and a",
-      "floor for a script that stopped is an error too. These sit in `floorsOf`, so",
-      "assert-floor-ratchet.mjs ratchets them against origin/main like every test floor, and the",
-      "README's floors fingerprint moves when one of them does.",
-      "Set a little under the real counts, for the same reason the test floors are: this is a",
-      "loss detector, not a target. A `check(true, \u2026)` counts \u2014 what this claims is that the",
-      "assertions are still there, not that they are good."
+      "Floors on how many assertions each stack assertion still records, added in #40 round 9 and given a runtime half in round 10.",
+      "The positive control in scripts/ci/positive-control.mjs proves a script is a function of the deployment by running it where there is none. That catches a script that checks nothing; it cannot catch one cut down to its `requireDeployment` precondition, which goes red in that world exactly like the real thing.",
+      "`minChecks` is the round-9 half: how many `check(…)` call sites the source holds, counted by scripts/ci/checker-graph.mjs from the imports rather than from this table, so a script that starts recording assertions and has no floor is an error and a floor for a script that stopped is an error too.",
+      "`minRun` is the round-10 half, and it exists because a floor over a loop is a floor over nothing. Four scripts record every problem through ONE call site over a computed list — `for (const problem of problems) check(false, problem)` — so their source floor was 1, and a blind critic replaced the main block of assert-stack-schema.mjs (529 lines) with an empty list and measured `assert-stack-schema: passed.` against the live migrated stack: red cold, green hot, floor satisfied, zero schema compared. `minRun` is the count the RUN reports — `check(…)` plus whatever `compared(n, …)` records for comparisons that found nothing wrong — and `verdict` in scripts/ci/stack-client.mjs enforces it against the live deployment. The number comes from inside the comparison (checkSchema returns how many tables, columns, constraints and indexes it examined), so a rewrite that skips the comparison cannot report having made it.",
+      "`minRequests` is the third dimension and the one a tautology cannot fake: how many questions the script actually put to the deployment through `once(…)`. Round 10's D3 exploit was twenty-three `check(true, …)` calls after the precondition, which satisfies any count of assertions and asks the deployment exactly one thing.",
+      "These sit in `floorsOf`, so assert-floor-ratchet.mjs ratchets them against origin/main like every test floor, and the README's floors fingerprint moves when one of them does.",
+      "Measured against a live stack on this tree, and set a little under: preflight 18, image-identity 3, image-origins 589, migration-image 3, page-serves 29 with 25 requests, rate-limit 7, signup-verifies 15 with 8, stack-config 17, stack-health 45, stack-schema 260, teardown 3, ws-upgrade 9 with 8. This is a loss detector, not a target."
     ],
     "scripts": {
       "scripts/ci/assert-deploy-preflight.mjs": {
-        "minChecks": 1
+        "minChecks": 1,
+        "minRun": 14
       },
       "scripts/ci/assert-image-identity.mjs": {
-        "minChecks": 1
+        "minChecks": 1,
+        "minRun": 3
       },
       "scripts/ci/assert-image-origins.mjs": {
-        "minChecks": 1
+        "minChecks": 1,
+        "minRun": 400
       },
       "scripts/ci/assert-migration-image.mjs": {
-        "minChecks": 1
+        "minChecks": 1,
+        "minRun": 3
       },
       "scripts/ci/assert-page-serves.mjs": {
-        "minChecks": 23
+        "minChecks": 23,
+        "minRun": 24,
+        "minRequests": 18
       },
       "scripts/ci/assert-rate-limit.mjs": {
-        "minChecks": 6
+        "minChecks": 6,
+        "minRun": 6
       },
       "scripts/ci/assert-signup-verifies.mjs": {
-        "minChecks": 14
+        "minChecks": 14,
+        "minRun": 13,
+        "minRequests": 6
       },
       "scripts/ci/assert-stack-config.mjs": {
-        "minChecks": 11
+        "minChecks": 11,
+        "minRun": 14
       },
       "scripts/ci/assert-stack-health.mjs": {
-        "minChecks": 8
+        "minChecks": 8,
+        "minRun": 38
       },
       "scripts/ci/assert-stack-schema.mjs": {
-        "minChecks": 1
+        "minChecks": 1,
+        "minRun": 230
       },
       "scripts/ci/assert-stack-teardown.mjs": {
-        "minChecks": 2
+        "minChecks": 2,
+        "minRun": 3
       },
       "scripts/ci/assert-ws-upgrade.mjs": {
-        "minChecks": 8
+        "minChecks": 8,
+        "minRun": 8,
+        "minRequests": 6
       }
     }
   }
