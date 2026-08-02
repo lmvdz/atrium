@@ -1565,7 +1565,7 @@
       "id": "code_fence_left_to_the_segment_walk",
       "why": "r11, and this round's own probe found it. Removes the raw-text fence pass, leaving fences to the code-segment walk — where `CODE_SPAN`'s double-backtick alternative consumes the first two characters of a three-tick opener and re-emits the rest as prose, so a fence is named in the block-start inventory and invisible to the scanner reading it.",
       "file": "src/matching.ts",
-      "find": "  for (const line of text.replace(DELETABLE, '').split(LINE_BREAK_SPLIT)) {\n    if (CODE_FENCE.test(line)) out.push(line.replace(WHITESPACE_RUN, ' ').trim());\n  }",
+      "find": "  for (const line of prepare(text).split(LINE_BREAK_SPLIT)) {\n    if (CODE_FENCE.test(line)) out.push(line.replace(WHITESPACE_RUN, ' ').trim());\n  }",
       "replace": "  void CODE_FENCE;",
       "catches": ["sees a code fence, which the code-segment walk cannot"]
     }

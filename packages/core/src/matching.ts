@@ -598,8 +598,12 @@ const LINE_BREAK_SPLIT = /[\n\v\f\r\u0085\u2028\u2029]/;
 export function blockStructures(text: string): string[] {
   const out: string[] = [];
   // Fences first, on the raw text — see `CODE_FENCE` for why they cannot be read
-  // out of the segment walk below.
-  for (const line of text.replace(DELETABLE, '').split(LINE_BREAK_SPLIT)) {
+  // out of the segment walk below. Prepared exactly as the walk prepares a prose
+  // segment: two passes over one text that fold differently are two answers to
+  // one question, and the difference would show up as a descriptor that does not
+  // cancel against the quote's.
+  const prepare = (value: string): string => value.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+  for (const line of prepare(text).split(LINE_BREAK_SPLIT)) {
     if (CODE_FENCE.test(line)) out.push(line.replace(WHITESPACE_RUN, ' ').trim());
   }
   // The first line of the whole text is a line beginning; after that it depends
@@ -609,8 +613,7 @@ export function blockStructures(text: string): string[] {
   for (const [index, segment] of text.split(CODE_SPAN).entries()) {
     const isCode = index % 2 === 1;
     if (!isCode) {
-      const prepared = segment.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
-      const lines = prepared.split(LINE_BREAK_SPLIT);
+      const lines = prepare(segment).split(LINE_BREAK_SPLIT);
       for (const [position, line] of lines.entries()) {
         if (position === 0 && !atLineStart) continue;
         const opener = blockOpener(line);

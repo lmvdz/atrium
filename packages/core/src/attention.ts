@@ -341,8 +341,17 @@ function escapeIdPart(value: string): string {
  * different variants of that union, on the same grounds. The producer was
  * already on every stored item; nothing was reading it.
  *
- * So this is derived from data the schema already carries, and the storage
- * surface does not move.
+ * So this is derived from data the schema already carries, and **this package's**
+ * storage surface does not move: no field is added to `AttentionItem`, and a
+ * store that can round-trip `reason` can round-trip the producer.
+ *
+ * Stated precisely because the Postgres table cannot round-trip `reason` today
+ * and that is not r11's debt. `packages/db`'s `attention_items` still carries r1's
+ * `rationale text` — the *rendered sentence*, which r1 replaced here with this
+ * union precisely so a bare string could not be passed off as a rationale — and
+ * it has no `subject_kind` column and no writer. Persisting `reason` is owed to
+ * #22 whatever this round does; once it lands, r11 costs zero extra columns,
+ * because a derived fact is not a stored one.
  */
 export type AttentionProducer =
   /** `proposalItems` — a staged proposal, judged by `decideAcceptance`. */
