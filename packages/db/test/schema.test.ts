@@ -497,9 +497,10 @@ describe('the receipt window’s bound is one number, written twice, asserted eq
     // on either. A constant nothing reads is a comment with a type; use is
     // checked by looking for the use.
     const source = code();
-    expect(source, 'the tail must be bounded by the declared constant, not by a bare number').toMatch(
-      /LIMIT\s+c_later_messages_carried/,
-    );
+    expect(
+      source,
+      'the tail must be bounded by the declared constant, not by a bare number',
+    ).toMatch(/LIMIT\s+c_later_messages_carried/);
     // …and the tail must be ordered before it is cut, or the bound selects an
     // arbitrary 201 rows rather than the room's earliest — and the correction
     // this whole window exists to make findable is usually the very next message.
