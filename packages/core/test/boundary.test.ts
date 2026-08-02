@@ -781,11 +781,34 @@ describe('the receipt minima are policy, and are pinned by value', () => {
       maxAlignedTokens: 800,
       maxScannedSentences: 200,
       maxLaterMessagesScanned: 200,
+      maxLaterMessagesCarried: 201,
     });
     // …and `droppableTokens` is not in it. Asserted as an absence, because a
     // field that was removed is a rule somebody will otherwise re-add: every
     // entry it ever held was broken by a reviewer, the last of them in r6.
     expect('droppableTokens' in RECEIPT_POLICY).toBe(false);
+  });
+
+  it('has the supplier stop strictly later than the checker reads', () => {
+    // Catches: `receipt_policy_carried_equals_scanned`,
+    // `receipt_policy_carried_below_scanned`.
+    //
+    // #86, and it is the one relation in this table rather than a value in it.
+    // The window's supplier (`atrium_receipt_window`, drizzle/0011) stops at
+    // `maxLaterMessagesCarried`; `laterRevision` reads at most
+    // `maxLaterMessagesScanned`. If the first is not strictly greater than the
+    // second, a window the room outgrew and a room that simply ended are the
+    // same bytes to a check with no message table and no clock — and below it,
+    // the check certifies "nothing corrects this" about messages it was never
+    // handed.
+    //
+    // Written as the relation and not as `expect(201)`, because the pair above
+    // already pins both values: a test that restated 201 here would pass on a
+    // day somebody moved BOTH numbers to 500 and 500, which is exactly the
+    // configuration this sentence forbids.
+    expect(RECEIPT_POLICY.maxLaterMessagesCarried).toBeGreaterThan(
+      RECEIPT_POLICY.maxLaterMessagesScanned,
+    );
   });
 
   it('lets nothing at all differ between a quote and its statement', () => {

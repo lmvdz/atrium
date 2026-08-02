@@ -5,7 +5,9 @@ import {
   decideAcceptance,
   findDuplicate,
   hasContent,
+  isAboutTheWindow,
   isAssertion,
+  laterRevision,
   normalizeForReceipt,
   normalizeForRouting,
   orderedTokens,
@@ -16,6 +18,7 @@ import {
   QUESTION_MARKS,
   QUESTION_SHAPED_MARKS,
   RECEIPT_POLICY,
+  type ReceiptPolicy,
   readsAsQuestion,
   statementBearing,
   validateProposalProvenance,
@@ -1334,5 +1337,208 @@ describe('r7 — the two things the link rule was still deleting', () => {
         expect(normalizeForReceipt(text), `${fragment} in the receipt`).toContain(fragment);
       }
     }
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * #86 — A WINDOW THAT STOPS, AND THE TWO WINDOWS THAT ARE THE SAME BYTES.
+ *
+ * `laterRevision` refuses a window that ends at the citations, because it
+ * carries no evidence about what came after the quoted sentence. Widening the
+ * supplier to satisfy that (drizzle/0011) creates the question this block is
+ * about: a snapshot has to stop somewhere too, and the moment it does, a window
+ * the room OUTGREW and a room that simply ENDED arrive here as the same array.
+ * This function has no message table and no clock and cannot tell them apart by
+ * looking.
+ *
+ * It does not have to, under one contract: the supplier stops strictly later
+ * than this check reads. Then a truncated tail always lands over
+ * `maxLaterMessagesScanned` and is referred as `too_many_messages`, and any
+ * shorter tail is provably the room's own end.
+ *
+ * `window_carries_fewer_than_this_check_reads` is what refuses the
+ * configuration where that stops holding. Most tests below use a policy the
+ * shipped table does not — deliberately, because the whole point is that the
+ * shipped table makes this refusal unreachable, and a refusal you cannot reach
+ * is one you cannot test by shipping it.
+ * ------------------------------------------------------------------------- */
+describe('#86 — the supplier’s bound is checked, not trusted', () => {
+  const STATEMENT = 'We will deploy production Friday.';
+
+  /** The shipped table with the supplier's bound moved, and nothing else. */
+  const carrying = (carried: number): ReceiptPolicy => ({
+    ...RECEIPT_POLICY,
+    maxLaterMessagesCarried: carried,
+  });
+
+  /** A window: the cited sentence, then `tail` messages the room said after it. */
+  const windowWithTail = (tail: number): ProvenanceMessage[] => [
+    { id: 'msg_1', authorId: ALICE, body: STATEMENT },
+    ...Array.from({ length: tail }, (_, i) => ({
+      id: `after_${i}`,
+      authorId: BOB,
+      body: `Unrelated note ${i} about the build.`,
+    })),
+  ];
+
+  const subject = {
+    type: 'claim',
+    provenance: ['msg_1'],
+    quote: STATEMENT,
+    statement: STATEMENT,
+    proposer: { kind: 'model' },
+    attributedTo: ALICE,
+  } as const;
+
+  it('refuses a window standing at a ceiling no higher than the read bound', () => {
+    // Catches: `later_revision_drops_the_supplier_bound_check` — deleting the
+    // gate entirely. Without it this window scans its 40 messages, finds no
+    // correction, and returns `none`, which `validateProposalProvenance` reads
+    // as a clean receipt. Everything past 40 was never supplied and never read,
+    // and the reading auto-accepts against evidence nobody looked at. That is
+    // the under-supply direction, and it is the only direction of #86 that can
+    // mint a wrong fact rather than merely refuse a right one.
+    expect(laterRevision(STATEMENT, ['msg_1'], windowWithTail(40), carrying(40))).toEqual({
+      kind: 'unscanned',
+      why: 'window_carries_fewer_than_this_check_reads',
+    });
+  });
+
+  it('refuses at the ceiling even when carried and scanned are exactly equal', () => {
+    // Catches: `later_revision_supplier_bound_uses_strict_less_than` — writing
+    // the guard as `maxLaterMessagesCarried < maxLaterMessagesScanned`, which
+    // passes the test above and lets the equal case through. Equal is the
+    // ambiguous case and it is the whole reason the migration's literal is
+    // `+ 1` rather than the same number: a room that ended at exactly 200 and a
+    // window cut at exactly 200 are indistinguishable from in here, and
+    // certifying one of them is certifying the other.
+    const equal = carrying(RECEIPT_POLICY.maxLaterMessagesScanned);
+    const window = windowWithTail(RECEIPT_POLICY.maxLaterMessagesScanned);
+    expect(laterRevision(STATEMENT, ['msg_1'], window, equal)).toEqual({
+      kind: 'unscanned',
+      why: 'window_carries_fewer_than_this_check_reads',
+    });
+  });
+
+  it('leaves a short room alone under the same broken ceiling', () => {
+    // Catches: `later_revision_supplier_bound_ignores_the_tail` — refusing on
+    // the policy alone, without asking whether THIS window stands at the
+    // ceiling. That mutant refuses every acceptance in every room the moment
+    // the numbers are misconfigured, which is #86 again in a different costume:
+    // a dead model path, this time with a better error message.
+    //
+    // A room with 3 messages after the citation supplied everything it had. The
+    // window is complete, the scan reads all of it, and a broken ceiling did not
+    // touch it.
+    expect(laterRevision(STATEMENT, ['msg_1'], windowWithTail(3), carrying(40))).toEqual({
+      kind: 'none',
+      scannedAfterCitations: 3,
+    });
+  });
+
+  it('measures the tail from the newest citation, not from the scan floor', () => {
+    // Catches: `later_revision_supplier_bound_counts_from_the_scan_floor` —
+    // using `later.length` (which starts at `scanFloor`, at or before the
+    // earliest citation) instead of the run after `lastCited`. The supplier's
+    // bound governs only what it appended after the newest citation; comparing
+    // it against a count that also includes the cited messages makes the guard
+    // fire one message early per extra citation, and it makes a proposal able to
+    // move the guard by padding its own citation list — the padding attack this
+    // file has been through at three other boundaries.
+    //
+    // Two citations and 39 messages after the newest of them: one below the
+    // ceiling, so this is a complete window and the guard stays quiet. Counting
+    // from the scan floor would see 40, hit the ceiling, and refuse.
+    const window: ProvenanceMessage[] = [
+      { id: 'msg_1', authorId: ALICE, body: STATEMENT },
+      { id: 'msg_2', authorId: ALICE, body: 'And the changelog is out.' },
+      ...Array.from({ length: 39 }, (_, i) => ({
+        id: `after_${i}`,
+        authorId: BOB,
+        body: `Unrelated note ${i} about the build.`,
+      })),
+    ];
+    expect(laterRevision(STATEMENT, ['msg_1', 'msg_2'], window, carrying(40))).toEqual({
+      kind: 'none',
+      scannedAfterCitations: 40,
+    });
+  });
+
+  it('never fires on the shipped table, because a full tail is over-supply', () => {
+    // Catches: `receipt_policy_carried_equals_scanned` from the other side, and
+    // `window_migration_bound_drifts`.
+    //
+    // The shipped contract in one assertion: a window standing at
+    // `maxLaterMessagesCarried` is, by construction, over
+    // `maxLaterMessagesScanned` — so the answer is `too_many_messages`, the
+    // EXISTING over-supply refusal, and the new one is unreachable. That is what
+    // "the ambiguous window does not exist" means operationally, and it is why
+    // over-supply was chosen over a tighter bound: this path already refers.
+    const full = windowWithTail(RECEIPT_POLICY.maxLaterMessagesCarried);
+    expect(laterRevision(STATEMENT, ['msg_1'], full, RECEIPT_POLICY)).toEqual({
+      kind: 'unscanned',
+      why: 'too_many_messages',
+    });
+  });
+
+  it('reports the refusal as a fact about the window, never about the reading', () => {
+    // Catches: `problem_evidence_supersession_is_the_proposal`,
+    // `problem_evidence_supersession_is_the_cited_messages`.
+    //
+    // `fix/core-engine-r11` established that a verdict is either a fact about
+    // the reading or a fact about the window, and that a window-fact must refer
+    // rather than conclude — `attention.ts` used to read a `discard` from a
+    // truncated window as "this cycle judged this proposal and it owes nobody
+    // anything", resolving somebody's confirm forever from a cycle that could
+    // not see the message it was confirming.
+    //
+    // A window whose supplier stopped too early is a window-fact by exactly that
+    // argument: nothing about the READING was established, and what went wrong
+    // is how far the window reached. Asserted through
+    // `validateProposalProvenance` rather than on the union, because `about` is
+    // derived at the seal and it is the derived value `acceptance.ts` and
+    // `attention.ts` read.
+    const problems = validateProposalProvenance(subject, windowWithTail(40), carrying(40));
+    expect(problems.map((problem) => problem.kind)).toEqual(['superseded_by_later_message']);
+    expect(problems.every((problem) => problem.severity === 'refer')).toBe(true);
+    expect(problems.map((problem) => problem.about)).toEqual(['the_window']);
+    expect(isAboutTheWindow(problems)).toBe(true);
+  });
+
+  it('tells the room which question was declined, in its own words', () => {
+    // Catches: `unscanned_detail_collapses_to_one_sentence`.
+    //
+    // The detail was a two-armed ternary until #86: `window_ends_at_the_citations`
+    // got its own sentence and the other five reasons — a statement too long to
+    // align, a statement with no routing tokens, a citation list that reached no
+    // message, and both scan caps — all fell into the `else` and were reported
+    // as "the window carries more after this citation than this check will read".
+    // A fact about the window, stated about refusals that had nothing to do with
+    // the window, and the sentence a person reads is what decides whether they go
+    // looking at the window or at the proposal.
+    //
+    // Asserted as distinctness rather than by quoting the strings, because the
+    // property is that they do not collapse — quoting them would pin the prose
+    // and still let a future pair be made identical one word at a time.
+    const cases = [
+      { policy: carrying(40), window: windowWithTail(40) },
+      { policy: RECEIPT_POLICY, window: windowWithTail(0) },
+      {
+        policy: RECEIPT_POLICY,
+        window: windowWithTail(RECEIPT_POLICY.maxLaterMessagesCarried),
+      },
+    ];
+    const details = cases.map(({ policy, window }, index) => {
+      const problems = validateProposalProvenance(subject, window, policy);
+      const found = problems.find((problem) => problem.kind === 'superseded_by_later_message');
+      expect(found, `case ${index} did not refuse at all`).toBeDefined();
+      return found?.detail as string;
+    });
+    expect(new Set(details).size, 'each declined question gets its own sentence').toBe(
+      details.length,
+    );
+    // …and the new one names the ceiling it stopped at, so the sentence is
+    // actionable rather than merely distinct.
+    expect(details[0]).toContain('40');
   });
 });
