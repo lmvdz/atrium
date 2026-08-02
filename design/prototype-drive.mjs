@@ -894,7 +894,313 @@ async function hoverRow(page, msg) {
   return r;
 }
 
+/* the pin's one-click control for an object, by the object rather than by its
+   label — a label moves when a fixture is reworded, an object id does not */
+async function clickIn(page, sel) {
+  const ok = await page.evaluate(s => {
+    const el = document.querySelector(s);
+    if (!el) return false;
+    el.scrollIntoView({ block: "center" });
+    el.click();
+    return true;
+  }, sel);
+  await page.waitForTimeout(160);
+  return ok;
+}
+
+/* THE SCAN R17-D1 RUNS IN TWO STATES. Every surface painting an elapsed time
+   for an open question, against the record's own two timestamps — the ask time
+   the object holds and the room clock. It measures rather than pattern-matches,
+   so it reports by how much and from what. */
+const D1_SCAN = () => {
+  const out = [];
+  const mins = v => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(v == null ? "" : v).trim());
+                      return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+  const want = o => {
+    const a = mins(o.askedAt), b = mins(S.now);
+    if (a == null || b == null || b < a) return null;
+    const d = b - a;
+    return d < 60 ? d + "m" : Math.floor(d / 60) + "h" + (d % 60 ? " " + (d % 60) + "m" : "");
+  };
+  const open = {};
+  Object.keys(S.rooms).forEach(k => (S.rooms[k].objects || []).forEach(o => {
+    if (o.verification === "open" && o.askedAt && !o.reopenedAt) open[o.id] = o;
+  }));
+  const only = Object.keys(open);
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      const p = n.parentElement;
+      if (!p || p.closest("script, style, template")) return NodeFilter.FILTER_REJECT;
+      const r = p.getBoundingClientRect();
+      if (!r.width || !r.height) return NodeFilter.FILTER_REJECT;
+      return /\bopen\s+\d/i.test(String(n.nodeValue)) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  let n;
+  while ((n = walker.nextNode())) {
+    const m = /\bopen\s+(\d+\s*(?:h|m)(?:\s+\d+\s*m)?)\b/i.exec(String(n.nodeValue));
+    if (!m) continue;
+    const said = m[1].replace(/\s+/g, " ").trim();
+    const p = n.parentElement;
+    const host = p.closest("[data-obj], [data-lens-obj], [data-fact-obj]");
+    const id = host && (host.dataset.obj || host.dataset.lensObj || host.dataset.factObj);
+    const o = open[id] || (only.length === 1 ? open[only[0]] : null);
+    if (!o) { out.push("a surface paints " + JSON.stringify("open " + said) +
+                       " and nothing on it says which record it is about"); continue; }
+    const w = want(o);
+    if (w === said) continue;
+    out.push("a surface says " + o.id + " has been " + JSON.stringify("open " + said) + " — the record says it " +
+             "was asked at " + JSON.stringify(o.askedAt) + " and the room clock says " + JSON.stringify(S.now) +
+             ", which is " + JSON.stringify("open " + (w == null ? "a time this page cannot subtract" : w)) +
+             " · painted in " + ((p.closest("[id]") || {}).id || p.className));
+  }
+  return Array.from(new Set(out));
+};
+
 const REPROS = [
+  {
+    /* ROUND 17, D1. Zero clicks: at boot, on the pin and in the lens and in the
+       receipt, `open 3h` over a record that says 09:11 and a room clock that
+       says 09:12. Three hours before now is ~06:12, INSIDE the absence window
+       (17:41 yesterday → 09:12 today) where this room has no events at all, and
+       the earliest thing in today's record is 08:31 — so the record does not
+       merely fail to support the number, it excludes it.
+
+       Two sources, and the second is the one that mattered: `openFor: "3h"` on
+       the seed, and `{ read: "verification", post: " 3h" }` on the chip — a
+       literal pasted onto a genuine record read, which defeats say()'s
+       point-read mutation BY CONSTRUCTION. Flip the verification and the
+       sentence moves, so the read is provably load-bearing; the three characters
+       beside it never budge. The number rule then filed `open #h` as
+       `form:duration`, so the coverage artifact checked that a duration LOOKED
+       like a duration and nothing compared it with the timestamp it is a
+       duration FROM.
+
+       THIS MEASURES, IT DOES NOT PATTERN-MATCH. It reads the elapsed time off
+       every surface that paints one and subtracts the record's own two
+       timestamps, so it says by how much and from what. It fires on r16 at every
+       width on the load state, before any click. */
+    id: "R17-D1-an-elapsed-time-equals-the-record-it-measures",
+    what: "every rendered elapsed time is the distance between the two record timestamps it is about",
+    /* TWO STATES, BECAUSE THE RECEIPT REPLACES THE LENS ITEM IT IS OPENED FROM.
+       The pin and the lens both paint this at boot; opening the receipt swaps
+       the lens list out for the receipt, so one sample can only ever see two of
+       the three surfaces. Sample the load state, then open the receipt and
+       sample again, and report the union. */
+    async run(page) {
+      const found = await page.evaluate(D1_SCAN);
+      await page.evaluate(f => { window.__r17d1 = f; }, found);
+      await clickIn(page, '#lensBody .oitem[data-lens-obj="Q1"]');
+      return null;
+    },
+    async assert(page) {
+      const later = await page.evaluate(D1_SCAN);
+      const before = await page.evaluate(() => window.__r17d1 || []);
+      return Array.from(new Set(before.concat(later)));
+    }
+  },
+  {
+    /* ROUND 17, D2. In #users-migration: lens → expand `Retire the legacy
+       identity path` → D2 → Reopen → Reopen. The correction chain says `the
+       source is still in the room →`. FORTY PIXELS ABOVE IT, in the same panel,
+       the provenance entry for the same message says `jump to source in
+       #identity-service →`. Clicking the chain's route leaves the room, and the
+       page's own toast then reads "the source of that item lives here, not in
+       the room you came from".
+
+       `sourceRoom` is the fact both of the other two surfaces derive from, and
+       `linkedObject`/`isAttentionRow` are room-scoped precisely so that no
+       surface pretends an in-room row exists. This is behavioural: it captures
+       the label, clicks it, and asks whether the room moved. */
+    id: "R17-D2-a-route-label-says-where-it-goes",
+    what: "a correction-chain route that leaves the room does not say the thing is still in it",
+    async run(page) {
+      await clickIn(page, '#lensBody .obj-head[data-objective="o2"]');
+      if (!await clickIn(page, '#lensBody .oitem[data-lens-obj="D2"]')) return "D2 is not in this room's lens";
+      if (!await clickIn(page, "#rcReopen")) return "the receipt offers no Reopen";
+      if (!await clickIn(page, "#rgo")) return "the reopen prompt offers no confirm";
+      const before = await page.evaluate(() => {
+        const b = document.querySelector(".corr .bd button[data-jump]");
+        if (!b) return null;
+        return { label: (b.textContent || "").replace(/\s+/g, " ").trim(),
+                 room: S.roomId, declared: b.dataset.jumproom || null,
+                 note: (document.querySelector(".rc-foot .note") || {}).textContent || "",
+                 obj: (b.closest("[data-corr-obj]") || { dataset: {} }).dataset.corrObj || null };
+      });
+      if (!before) return "the reopen wrote no correction entry with a route";
+      await page.evaluate(() => { window.__r17d2 = null; });
+      await page.evaluate(b => { window.__r17d2 = b; }, before);
+      await clickIn(page, ".corr .bd button[data-jump]");
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const b = window.__r17d2;
+        if (!b) return [];
+        const out = [];
+        const now = S.roomId;
+        if (/still in the room/i.test(b.label) && now !== b.room)
+          out.push("a route labelled " + JSON.stringify(b.label) + " left #" + b.room + " for #" + now +
+                   " — and the page's own toast says the source lives here, not in the room you came from");
+        if (b.declared && b.label.indexOf("#" + b.declared) < 0)
+          out.push("a route that goes to #" + b.declared + " does not name it: " + JSON.stringify(b.label));
+        if (/the row that carried it re-renders to say so/i.test(b.note) && b.declared)
+          out.push("the receipt for " + b.obj + " says the row that carried it re-renders to say so — that row is in #" +
+                   b.declared + " and does not render here at all");
+        return out;
+      });
+    }
+  },
+  {
+    /* ROUND 17, D2, second instance — X1 in #identity-service, whose own record
+       note says "the sentence that raised it is in #users-migration and stays
+       there. The pin says so and goes there rather than pretending a row here
+       exists", while its correction chain said the proposal it replaced was
+       still in this room. Answering it is one click from the pin. */
+    id: "R17-D2b-a-cross-room-decisions-chain-says-which-room",
+    what: "answering a decision whose source is in another room labels the route with that room",
+    async run(page) {
+      if (!await clickIn(page, '#railRooms .rrow[data-room="identity-service"]')) return "no route to #identity-service";
+      if (!await clickIn(page, '#pinList [data-obj="X1"] button[data-opt="0"]'))
+        return "X1 offers no one-click option on the pin";
+      await clickIn(page, '#lensBody .obj-head[data-objective="p2"]');
+      await clickIn(page, '#lensBody .oitem[data-lens-obj="X1"]');
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll('.corr .bd button[data-jump]').forEach(b => {
+          const label = (b.textContent || "").replace(/\s+/g, " ").trim();
+          const room = b.dataset.jumproom || null;
+          if (!room) return;
+          if (/still in the room/i.test(label))
+            out.push("a route into #" + room + " says the thing is still in the room you are standing in: " +
+                     JSON.stringify(label));
+          else if (label.indexOf("#" + room) < 0)
+            out.push("a route into #" + room + " does not name it: " + JSON.stringify(label));
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
+  {
+    /* ROUND 17, D3. Boot → answer P1 from the pin. K2 becomes the topmost item
+       and its WHY line reads "yours — you own it, and the cutover decision above
+       cannot be executed until it is signed." Nothing above it is a decision:
+       the cutover renders at y≈203 in the lens and y≈379 in the feed, both
+       BELOW. Seeded as `K2.why`, rendered only in pinCard, never re-derived —
+       true in the seed state, false one click from boot.
+       The proposition survives (the runbook does block the cutover); the
+       LOCATOR does not. This measures the geometry rather than reading the
+       sentence, so it says where the thing actually is. */
+    id: "R17-D3-a-rationale-does-not-locate-by-position",
+    what: "no WHY line points at a neighbour by position that is not in that position",
+    async run(page) {
+      if (!await clickIn(page, '#pinList [data-obj="P1"] button[data-opt="0"]'))
+        return "P1 offers no one-click option on the pin";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        const objOf = id => {
+          let f = null;
+          Object.keys(S.rooms).forEach(k => (S.rooms[k].objects || []).forEach(o => { if (o.id === id) f = o; }));
+          return f;
+        };
+        document.querySelectorAll("#pinList [data-obj]").forEach(card => {
+          const why = card.querySelector(".why");
+          if (!why) return;
+          const t = (why.textContent || "").replace(/\s+/g, " ").trim();
+          const m = /\b([a-z]+)\s+(above|below)\b/i.exec(t);
+          if (!m) return;
+          const kind = m[1].toLowerCase(), where = m[2].toLowerCase();
+          const top = card.getBoundingClientRect().top;
+          /* A ROW SCROLLED OUT OF ITS OWN PANE IS NOT ON SCREEN, and counting
+             one would make this report contradict its own evidence — the first
+             cut of this listed `D1 at y=-58 in #feed (above)` under the words
+             "no decision renders above it". A rect is only where the reader sees
+             it if it survives the viewport and every scroll box over it. */
+          const onScreen = el => {
+            let r = el.getBoundingClientRect();
+            if (!r.width || !r.height) return false;
+            if (r.bottom <= 0 || r.top >= innerHeight) return false;
+            for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+              const cs = getComputedStyle(a);
+              if (!/(auto|scroll|hidden)/.test(cs.overflowY + cs.overflow)) continue;
+              const b = a.getBoundingClientRect();
+              if (r.bottom <= b.top || r.top >= b.bottom) return false;
+            }
+            return true;
+          };
+          const found = [];
+          ["pinList", "lensBody", "feed"].forEach(hostId => {
+            const host = document.getElementById(hostId);
+            if (!host) return;
+            host.querySelectorAll("[data-obj], [data-lens-obj]").forEach(el => {
+              const o = objOf(el.dataset.obj || el.dataset.lensObj);
+              if (!o || o.kind !== kind) return;
+              if (o.id === card.dataset.obj) return;
+              if (!onScreen(el)) return;
+              const r = el.getBoundingClientRect();
+              if (found.some(f => f.id === o.id && f.host === hostId)) return;
+              found.push({ id: o.id, host: hostId, y: Math.round(r.top),
+                           side: r.top < top ? "above" : "below" });
+            });
+          });
+          /* "above" is about the surface the reader is looking at — this
+             sentence is painted in the pin card, so the pin is where it has to
+             be true. The other two surfaces are reported as context. */
+          if (found.some(f => f.side === where && f.host === "pinList")) return;
+          out.push("the WHY line on " + card.dataset.obj + " points at a " + kind + " " + where + " it — " +
+                   JSON.stringify(t) + " — and no " + kind + " renders " + where + " it in the pin, which is where " +
+                   "this sentence is painted. On screen: " +
+                   (found.length ? found.map(f => f.id + " at y=" + f.y + " in #" + f.host + " (" + f.side + ")").join(", ")
+                                 : "there is no other " + kind + " on screen at all") +
+                   " · this card is at y=" + Math.round(top));
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
+  {
+    /* ROUND 17, D4. At 1120 — the declared floor — `.trace .tx` had scrollWidth
+       624 against clientWidth 328 and painted `you came from #identity-service ·
+       following the sourc…`, dropping "which #identity-service owes you". The
+       ellipsis discloses the truncation and the visible prefix is true, which is
+       why round 16's reviewer correctly declined to hold on it. It is here
+       because it was the one element left in the file carrying `overflow:hidden;
+       text-overflow:ellipsis; white-space:nowrap` — the same shape as round 12's
+       D4 — and this file's own doctrine says a minted sentence wraps.
+       The rule is the general one, so a new one cannot appear in silence. */
+    id: "R17-D4-nothing-paints-a-sentence-into-an-ellipsis",
+    what: "no visible element clips its own text behind an ellipsis",
+    async run(page) {
+      if (!await clickIn(page, '#railRooms .rrow[data-room="identity-service"]')) return "no route to #identity-service";
+      if (!await clickIn(page, '#pinList [data-obj="X1"] button[data-jumproom]'))
+        return "X1's pin card offers no cross-room route";
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll("body *").forEach(el => {
+          if (el.closest("script, style, template")) return;
+          const cs = getComputedStyle(el);
+          if (cs.textOverflow !== "ellipsis") return;
+          if (cs.display === "none" || cs.visibility === "hidden") return;
+          const r = el.getBoundingClientRect();
+          if (!r.width || !r.height) return;
+          if (el.scrollWidth <= el.clientWidth + 1) return;
+          out.push("a visible element paints its own text into an ellipsis: scrollWidth " + el.scrollWidth +
+                   " / clientWidth " + el.clientWidth + " on " + (el.id ? "#" + el.id : el.className || el.tagName) +
+                   " — " + JSON.stringify((el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 90)));
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
   {
     /* ROUND 16, D1. Round 15 closed round 14's D1 by giving the reply preview a
        route to the row it quotes — `go to it →`, revealed on the same hover as
@@ -1757,29 +2063,36 @@ const REPROS = [
    own defects is invisible at 1440 and live at every width below 1280; a repro
    suite pinned to one viewport would have shipped it again. A repro that fires
    at only some widths says which. */
+/* AND EVERY REPRO RUNS IN BOTH THEMES (round 17). Round 16's occlusion sweep
+   ran light and dark and its two repros did not, which is one instrument's
+   denominator being wider than another's inside the same run. The theme is one
+   extra context per width and it is what the round's own contract asks for. */
+const THEMES = String(argOf("--themes", "light,dark")).split(",").map(t => t.trim()).filter(Boolean);
 async function passRepros(browser, log) {
   const rows = [];
   for (const rp of REPROS) {
     const widths = rp.widths || WIDTHS;
     const merged = { id: rp.id, what: rp.what, skip: null, errors: [], classes: [], asserts: [], firedAt: [], ranAt: widths.slice() };
-    for (const width of widths) {
+    for (const width of widths) for (const theme of THEMES) {
+      const at = "@" + width + "/" + theme;
       const { ctx, page, errors } = await newPage(browser, width);
+      if (theme === "dark") { await page.click("#themeBtn"); await page.waitForTimeout(120); }
       const skip = await rp.run(page, width);
       await page.waitForTimeout(60);
       const inv = invariantsOnly(errors);
       const asserts = rp.assert ? await rp.assert(page, width) : [];
       await ctx.close();
-      if (skip && !merged.skip) merged.skip = skip + " @" + width;
-      inv.forEach(t => merged.errors.push("@" + width + "  " + t));
-      asserts.forEach(t => merged.asserts.push("@" + width + "  " + t));
-      if (inv.length + asserts.length) merged.firedAt.push(width);
+      if (skip && !merged.skip) merged.skip = skip + " " + at;
+      inv.forEach(t => merged.errors.push(at + "  " + t));
+      asserts.forEach(t => merged.asserts.push(at + "  " + t));
+      if (inv.length + asserts.length && merged.firedAt.indexOf(at) < 0) merged.firedAt.push(at);
     }
-    merged.classes = Array.from(new Set(merged.errors.map(t => classOf(t.replace(/^@\d+\s+/, "")))));
+    merged.classes = Array.from(new Set(merged.errors.map(t => classOf(t.replace(/^@[\d]+\/\w+\s+/, "")))));
     rows.push(merged);
     const bad = merged.errors.length + merged.asserts.length;
     log(`  ${bad ? "FIRES" : "clean"}  ${rp.id} — ${merged.errors.length} console error(s), ${merged.classes.length} class(es), ` +
-        `${merged.asserts.length} assertion(s) over ${widths.length} width(s)` +
-        (bad ? ` [fires at ${merged.firedAt.join(", ")} of ${widths.join(", ")}]` : "") +
+        `${merged.asserts.length} assertion(s) over ${widths.length} width(s) × ${THEMES.length} theme(s)` +
+        (bad ? ` [fires at ${merged.firedAt.join(", ")} of ${widths.length * THEMES.length} width/theme pairs]` : "") +
         (merged.skip ? ` [path incomplete: ${merged.skip}]` : ""));
     merged.errors.slice(0, 6).forEach(t => log(`      ${t.slice(0, 210)}`));
     /* AN ASSERTION THAT REPORTS A COUNT PER WIDTH NEEDS EVERY WIDTH PRINTED
@@ -1979,7 +2292,7 @@ const COUNTS_OUT = argOf("--counts", "");
 const numberLines = Array.from(sq.numbers).sort();
 if (!SKIP_WALK) {
   const wanted = path.join(HERE, "prototype-counts.txt");
-  const unread = numberLines.filter(l => /^mint\s+(UNREAD|UNDECLARED|DECLARED-NOTHING)/.test(l));
+  const unread = numberLines.filter(l => /^mint\s+(UNREAD|UNDECLARED|DECLARED-NOTHING|UNMEASURED|MISMEASURED)/.test(l));
   const header =
     "# EVERY NUMBER ON SCREEN, AND WHAT READ IT — generated, do not hand-edit.\n" +
     "#\n" +
@@ -1994,10 +2307,17 @@ if (!SKIP_WALK) {
     "#   quoted         a fragment the sentence reproduces verbatim out of the record\n" +
     "#   transcribed    the sentence declares no reads at all, so it computed nothing —\n" +
     "#                  a seeded fixture line, minted so the record owns its characters\n" +
-    "#   form:<id>      a declared non-count shape: a clock time, a date, a duration,\n" +
-    "#                  an amount of money, a percentage\n" +
+    "#   form:<id>      a declared non-count shape: a clock time, a date, an amount\n" +
+    "#                  of money, a percentage\n" +
+    "#   measured       a duration, re-derived from the two record timestamps the\n" +
+    "#                  sentence named — not a shape. A duration used to be filed as\n" +
+    "#                  form:duration, which asked whether `3h` LOOKED like a duration\n" +
+    "#                  and never what it was a duration FROM (round 17, D1).\n" +
     "#   UNREAD         no check on this page can read it. This is a defect and the\n" +
     "#                  page's console says so on the paint that renders it.\n" +
+    "#   UNMEASURED     a duration the sentence measured nothing for, and\n" +
+    "#   MISMEASURED    one whose two named timestamps no longer give it. Both are\n" +
+    "#                  defects and the console says so on the paint that renders them.\n" +
     "# page rows: a numeral in no minted sentence — row counters, message counters,\n" +
     "#   page furniture, and record text the page reprints outside a mint. Not an error\n" +
     "#   list: a count of rows is not a claim about a record. This is the set\n" +
@@ -2102,7 +2422,7 @@ const truncatedLevels = sq.levels.filter(l => l.truncated);
 log(`\nSUMMARY`);
 if (SKIP_WALK) log(`  --only ${ONLY}: no controls enumerated, no states walked, no artifact compared. This run reports ` +
                    `${SKIP_REPROS ? "the occlusion sweep" : SKIP_OCCL ? "the repro suite" : "passes 3 and 4"} at ` +
-                   `${WIDTHS.join(", ")} and NOTHING ELSE — it is not a denominator.`);
+                   `${WIDTHS.join(", ")} in ${THEMES.join(" and ")} and NOTHING ELSE — it is not a denominator.`);
 if (!SKIP_WALK) {
 log(`  controls enumerated (union over every state reached): ${inventory.size}`);
 log(`  controls driven:                                      ${drivenKeys}`);

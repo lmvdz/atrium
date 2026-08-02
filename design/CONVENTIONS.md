@@ -210,11 +210,33 @@ Four instruments, one sentence, silence: patch that badge to return `7` over a r
 holding two and five surfaces on one screen contradict each other with a clean
 console. **A denylist of phrasings is unbounded — enumerate the compliant forms
 instead and report what matches none of them.** Every numeral in a minted sentence
-is now read by one of four: a phrasing pattern, a predicate the sentence *declares*
+is now read by one of five: a phrasing pattern, a predicate the sentence *declares*
 (`say(views, phrase, owner, ["needsYou"])`, re-derived from those same records), a
-number the record itself holds, or a declared non-count shape (clock, date,
-duration, money, percentage). Anything else is reported on the paint that renders
-it. **And the reach is generated, not described**: `design/prototype-counts.txt` is
+number the record itself holds, a declared non-count shape (clock, date, money,
+percentage), or a duration re-derived from the two record timestamps it measures.
+Anything else is reported on the paint that renders it.
+
+**A duration is not a shape, and calling it one hid a lie for sixteen rounds** (r17).
+`duration` sat in that list of shapes, so the check asked whether `3h` *looked* like
+a duration and never what it was a duration *from*. `Q1.openFor: "3h"` was a seeded
+string beside an `askedAt` of `09:11` and a room clock of `09:12`, and the chip that
+carried it was `{ read: "verification", post: " 3h" }` — a literal pasted onto a
+genuine record read, which defeats `say()`'s point-read mutation by construction:
+flip the verification and the sentence moves, so the read is provably load-bearing,
+and the three characters beside it never budge. A clock, a date, an amount and a
+percentage are shapes — one quantity the record holds or reproduces, nothing behind
+them to recompute. **A duration is a subtraction, so it has an answer, so it is
+checked against it.** `elapsed(o, "askedAt")` is handed the *name* of the field, not
+its value, so the checker goes back to the record for both endpoints on every paint
+— which is also what makes a duration minted once and painted ten minutes later a
+reported defect instead of an invisible one.
+
+**And a fixture may not paste prose onto a record read.** The `{ read, pre, post }`
+fact-chip shape took two free strings either side of a real read; that is where the
+duration hid. The shape is an allowlist now — `label` (which may use only the
+field's own vocabulary), `also`+`join` (a second field of the same record, through a
+connective that may hold no digits), `when` (a gloss the value itself selects) and
+`none` — and a key outside it is refused on the paint that renders it. **And the reach is generated, not described**: `design/prototype-counts.txt` is
 every numeral on screen with what read it, digits normalised to `#`, produced by
 the same function the checker calls and compared against the live walk on every
 driver run. This paragraph may not describe that file's contents; it cites it.
@@ -451,6 +473,51 @@ was covering the toast's own words — the toast is `z-index: 40; pointer-events
 it is painted above the feed and the hit test looks straight through it. It invented a
 defect on its first run against the previous round, which is why the hit test now only
 *nominates* and the paint order decides.
+
+### And a fourth question: does the sentence still mean what it says once the page moves
+
+Three of round 17's four defects are one shape. **A sentence that was true when it was
+written, about a page that has since moved, and nothing re-derives it.**
+
+**A route says where it goes.** `sourceChip()` derives `source in #<room> →` from
+`sourceRoom`; the provenance header derives `jump to source in #<room> →` from the entry's
+own room. The correction chain's route labels were the one family that did not derive, and
+they are the family whose words *assert a location*. Reopen `D2` in `#users-migration` and
+the chain read `the source is still in the room →` **forty pixels under** a provenance
+entry, about the same message, reading `jump to source in #identity-service →`. Clicking
+it left the room, and the page's own toast then said *"the source of that item lives here,
+not in the room you came from."* `linkedObject` and `isAttentionRow` are room-scoped
+precisely so no surface pretends an in-room row exists; this was the one sentence doing it.
+Every route label ends in `routeHome()` now and is handed the same value the entry's `room`
+attribute is handed, so the words and the destination are one fact. One entry in that
+family carried **no `room` at all**, so its route resolved against whichever room you
+happened to be standing in — the same defect one attribute along.
+`R17-D2-a-route-label-says-where-it-goes` is behavioural: it captures the label, clicks it,
+and asks whether the room moved. `R17-D2b-a-cross-room-decisions-chain-says-which-room`
+covers the second instance from the other side.
+
+**A sentence does not locate a neighbour by position.** `K2.why` read *"the cutover
+decision **above** cannot be executed until it is signed"* — true in the seed state, false
+one click from boot. Answer `P1` from the pin and `K2` is the topmost item at y=93 with the
+cutover at y=190 in the lens and y=351 in the feed, both below, and no decision above it
+anywhere on screen. The proposition survived; the locator did not. **Name the thing rather
+than point at where it is** — a sentence that must be re-derived on every reorder is a
+liability, and this file has been bitten by exactly that four times.
+`R17-D3-a-rationale-does-not-locate-by-position` measures the geometry rather than reading
+the sentence, and counts only rows that survive the viewport and every scroll box over
+them: its first cut listed `D1 at y=-58 in #feed (above)` underneath the words "no decision
+renders above it", which is a report contradicting its own evidence.
+
+**And no ellipsis is left.** `.trace .tx` was the last element in the file carrying
+`overflow: hidden; text-overflow: ellipsis; white-space: nowrap`: at 1120, scrollWidth 624
+against clientWidth 328, painting `you came from #identity-service · following the sourc…`
+and dropping *"which #identity-service owes you"*. The ellipsis discloses the truncation
+and the visible prefix is true, so it is not a lie — it is fixed because it is a **minted
+sentence painted into a fragment**, and the rule that took the ellipsis off the pin's fact
+row in r12 and off the rail in r14 applies to it too. The repro is the general form —
+`R17-D4-nothing-paints-a-sentence-into-an-ellipsis` walks every visible element whose
+computed `text-overflow` is `ellipsis` and whose `scrollWidth` exceeds its `clientWidth` —
+so a new one cannot appear in silence.
 
 ## What is deliberately not here
 

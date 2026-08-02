@@ -564,7 +564,19 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--blu2);
 }
 .trace .g { flex: none; }
-.trace .tx { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* THE LAST ELLIPSIS IN THIS FILE (round 17, D4). At 1120 — the declared floor —
+   this had scrollWidth 624 against clientWidth 328 and painted `you came from
+   #identity-service · following the sourc…`, dropping "which #identity-service
+   owes you". The ellipsis discloses the truncation and the visible prefix is
+   true, which is why round 16's reviewer correctly declined to call it a lie.
+   It is fixed because it is a MINTED SENTENCE PAINTED INTO A FRAGMENT and this
+   file's own doctrine — the same rule that took the ellipsis off the pin's fact
+   row in round 12 and off the rail in round 14 — says it should wrap. The row
+   is in an `auto` grid track, so wrapping costs the feed a few pixels and
+   nothing else. */
+.trace .tx { min-width: 0; }
+.trace { align-items: flex-start; }
+.trace .g, .trace .back, .trace .x { line-height: 1.45; }
 .trace b { font-weight: 600; }
 .trace .back { margin-left: auto; flex: none; color: var(--blu2); border-bottom: 1px solid var(--filebd); }
 .trace .back:hover { color: var(--tx0); border-bottom-color: var(--line3); }
@@ -1509,7 +1521,7 @@ S.rooms["users-migration"] = {
     {
       id: "K0", kind: "commitment", objectives: ["o1"], text: "Land the shadow-write path behind users.dualwrite",
       claimant: "justin", verification: "verified", verifiedBy: "checks", verifiedAt: "yesterday 16:10",
-      facts: ["justin", { read: "verification", post: " by checks" }, "deploy 2f81c3"],
+      facts: ["justin", { read: "verification", also: "verifiedBy", join: " by " }, "deploy 2f81c3"],
       history: [
         { k: "claim",    who: "justin", tm: "29 Jul 14:02", text: "said the shadow-write path was ready to land" },
         { k: "verified", who: "checks", tm: "yest. 16:10",  text: "deploy 2f81c3 carried the flag into staging — checked by something other than the claimant" }
@@ -1526,7 +1538,7 @@ S.rooms["users-migration"] = {
          window opened, and the correction chain below is that amendment. */
       reading: "Decision",
       claimant: "priya", verification: "accepted", acceptedBy: "lars", acceptedAt: "29 Jul 11:20",
-      facts: [{ read: "verification", post: " by lars" }, "29 Jul 11:20", "3 sources"],
+      facts: [{ read: "verification", also: "acceptedBy", join: " by " }, "29 Jul 11:20", "3 sources"],
       history: [
         { k: "claim",    who: "priya",  tm: "29 Jul 09:41", text: "proposed keeping dual-write until parity was proven — self-reported, no check attached" },
         /* a history line may only assert what its cited source carries. Round 4
@@ -1583,7 +1595,7 @@ S.rooms["users-migration"] = {
       owedTo: "lars", priority: 20, askedBy: "priya", askedAt: "08:36", sourceMsg: "m6",
       waiting: 3, blocks: "1 objective",
       why: "needs you specifically — you set the freeze date, and nobody else can trade $900/mo against the 4.7% of sessions still on legacy tokens.",
-      facts: [{ read: "verification", post: " · not accepted" }, "conf .71", "from priya 08:36"],
+      facts: [{ read: "verification", when: { proposed: " · not accepted" } }, "conf .71", "from priya 08:36"],
       /* OPTION IDENTITY, NOT OPTION TEXT (round 4 D7). Whether an answer departs
          from the proposal is a fact about WHICH option was chosen, not about
          whether its wording happens to match `text`. `agrees: true` marks the
@@ -1613,7 +1625,17 @@ S.rooms["users-migration"] = {
       id: "K2", kind: "commitment", objectives: ["o1"], text: "Sign off the rollback runbook",
       claimant: "lars", verification: "self_reported", owner: "lars", due: "yesterday 17:00", overdue: "16h",
       owedTo: "lars", priority: 15, sourceMsg: "m0b",
-      why: "yours — you own it, and the cutover decision above cannot be executed until it is signed.",
+      /* A RATIONALE NAMES THE THING, IT DOES NOT POINT AT A POSITION (round 17,
+         D3). This said "the cutover decision ABOVE cannot be executed until it
+         is signed". True in the seed state and false one click from boot:
+         answer P1 from the pin and this commitment becomes the topmost item at
+         y=93, with the cutover rendering at y=190 in the lens and y=351 in the
+         feed at 1440 — both below it, and no decision at all above it anywhere
+         on screen, in either theme, at any of the five widths. The proposition
+         survives the reorder; the locator does not, and a sentence that has to
+         be re-derived on every reorder is a liability this file has been bitten
+         by four times. So it names what it is about. */
+      why: "yours — you own it, and the cutover cannot be executed until it is signed.",
       facts: ["lars", "overdue 16h", "blocks the cutover"],
       history: [
         { k: "claim", who: "lars", tm: "29 Jul 09:52", text: "committed to signing the runbook before the cutover — self-stated",
@@ -1631,7 +1653,7 @@ S.rooms["users-migration"] = {
     {
       id: "K1", kind: "commitment", objectives: ["o1", "o3"], text: "Ship the token-refresh fix",
       claimant: "dana", verification: "self_reported", owner: "dana", due: "Thu 31 Jul", sourceMsg: "m10",
-      facts: ["dana", { read: "due", pre: "due ", none: "no due date on record" }, "self-stated"],
+      facts: ["dana", { read: "due", label: "due ", none: "no due date on record" }, "self-stated"],
       history: [{ k: "claim", who: "dana", tm: "09:09", text: "said the fix lands Thursday — her own word, nothing verifies it yet" }],
       provenance: [{ who: "dana", tm: "09:09", msg: "m10", ex: "I'll have the token-refresh fix out Thursday, before the freeze.", note: "message · seq 9109 · self-stated commitment, extracted at θ .77" }],
       corrections: [],
@@ -1656,7 +1678,13 @@ S.rooms["users-migration"] = {
     },
     {
       id: "Q1", kind: "question", objectives: ["o1", "o2"], text: "Does legal approve 90-day retention of users_legacy?",
-      claimant: "priya", verification: "open", askedBy: "priya", askedAt: "09:11", openFor: "3h", assignee: null,
+      /* NO `openFor` HERE, AND THERE CANNOT BE ONE AGAIN (round 17, D1). How
+         long this has been open is `askedAt` against `S.now`, and it is derived
+         wherever it is said. A field holding the answer is a number nothing can
+         contradict — this one said `3h` beside an `askedAt` of 09:11 and an
+         `S.now` of 09:12, pointing at a moment inside the absence window where
+         this room has no events at all. */
+      claimant: "priya", verification: "open", askedBy: "priya", askedAt: "09:11", assignee: null,
       owedTo: "lars", priority: 10, sourceMsg: "m11",
       /* the card's one-click answer, in the same shape a decision's options use:
          a LABEL for the control and the STATEMENT that gets recorded if it is
@@ -1667,7 +1695,7 @@ S.rooms["users-migration"] = {
                       statement: "Legal approves 90-day retention of users_legacy, so retention is not what gates the drop" },
       reassignTo: "justin",
       why: "blocking — the retention answer gates the objective you own, Retire the legacy identity path.",
-      facts: [{ read: "verification", post: " 3h" }, "asked by priya", "blocks retiring the legacy path"],
+      facts: [{ read: "verification", also: "askedAt", join: " since " }, "asked by priya", "blocks retiring the legacy path"],
       history: [{ k: "question", who: "priya", tm: "09:11", text: "raised it as the one thing gating the drop",
         asks: { of: "assignee", say: a => a.everSet() ? " — it has been assigned since" : " — nobody has been assigned" } }],
       provenance: [{ who: "priya", tm: "09:11", msg: "m11", ex: "Nobody has confirmed whether legal is fine keeping users_legacy around for 90 days. That gates the drop.", note: "message · seq 9111 · open question, no assignee" }],
@@ -1709,7 +1737,7 @@ S.rooms["users-migration"] = {
     {
       id: "V1", kind: "claim", objectives: ["o1"], text: "Backfill parity: 4,218,904 / 4,218,904 rows, 0 checksum diffs",
       claimant: "checks", verification: "verified", verifiedBy: "the migration harness", verifiedAt: "09:07",
-      facts: ["checks", { read: "verification", post: " 09:07" }, "dry-run #418"],
+      facts: ["checks", { read: "verification", also: "verifiedAt", join: " " }, "dry-run #418"],
       history: [
         { k: "verified", who: "checks", tm: "09:07",       text: "dry-run #418 on the prod snapshot — 0 constraint violations, 11m42s" },
         { k: "verified", who: "checks", tm: "yest. 16:44", text: "parity #402 — identical row counts on both sides" }
@@ -1735,7 +1763,7 @@ S.rooms["users-migration"] = {
          says where it lives and jumps there, instead of counting an item the
          feed filter can never highlight. */
       sourceMsg: "n0", sourceRoom: "identity-service",
-      facts: [{ read: "verification", post: " by lars" }, "22 Jul", "source in #identity-service"],
+      facts: [{ read: "verification", also: "acceptedBy", join: " by " }, "22 Jul", "source in #identity-service"],
       history: [{ k: "accepted", who: "lars", tm: "22 Jul 15:40", text: "accepted directly in #identity-service — answer-bound" }],
       provenance: [{ who: "lars", tm: "22 Jul 15:40", msg: "n0", room: "identity-service", ex: "Once retention is up, the gateway refuses opaque tokens outright. No grace period.", note: "answer-bound reply · #identity-service · seq 7710" }],
       corrections: [],
@@ -1818,7 +1846,7 @@ S.rooms["identity-service"] = {
       owedTo: "lars", priority: 20, askedBy: "justin", askedAt: "08:14", sourceMsg: "n4",
       waiting: 2, blocks: "1 objective",
       why: "needs you specifically — strict rotation breaks any client that replays a refresh token, and you own the mobile compatibility call.",
-      facts: [{ read: "verification", post: " · not accepted" }, "conf .66", "from justin 08:14"],
+      facts: [{ read: "verification", when: { proposed: " · not accepted" } }, "conf .66", "from justin 08:14"],
       options: [
         { label: "Rotate on every use", agrees: true, statement: "Refresh tokens rotate on every use; replayed tokens are refused outright" },
         { label: "Sliding window", statement: "Refresh tokens rotate on a 24h sliding window so replays inside the window still succeed" }
@@ -1851,7 +1879,7 @@ S.rooms["identity-service"] = {
          `… · source in #users-migration · source in #users-migration →` — the
          same fact twice, once inert. The derived one is the one that survives:
          it is a control, and it cannot go stale. */
-      facts: [{ read: "verification", post: " · not accepted" }, "conf .58"],
+      facts: [{ read: "verification", when: { proposed: " · not accepted" } }, "conf .58"],
       options: [
         { label: "Stop with the cutover", agrees: true, statement: "Opaque-token issuance stops the day the users cutover lands" },
         { label: "Hold until the freeze", statement: "Opaque-token issuance stays open until the 14 Aug freeze, whatever the users cutover does" }
@@ -1869,7 +1897,7 @@ S.rooms["identity-service"] = {
     {
       id: "R2", kind: "claim", objectives: ["p1"], text: "Rotation load test: 12,000 req/s sustained, p99 41ms",
       claimant: "checks", verification: "verified", verifiedBy: "the load harness", verifiedAt: "08:22", sourceMsg: "n5",
-      facts: ["checks", { read: "verification", post: " 08:22" }, "run #91"],
+      facts: ["checks", { read: "verification", also: "verifiedAt", join: " " }, "run #91"],
       history: [{ k: "verified", who: "checks", tm: "08:22", text: "load run #91 against staging — 12k req/s, p99 41ms" }],
       provenance: [{ who: "checks", voice: "machine", tm: "08:22", msg: "n5", ex: "rotation load #91 — 12,000 req/s sustained · p99 41ms · 0 errors", note: "verified event · run #91" }],
       corrections: [],
@@ -1878,7 +1906,7 @@ S.rooms["identity-service"] = {
     {
       id: "R3", kind: "commitment", objectives: ["p2"], text: "Wire revocation into the gateway",
       claimant: "justin", verification: "self_reported", owner: "justin", due: "Fri 1 Aug", sourceMsg: "n6",
-      facts: ["justin", { read: "due", pre: "due ", none: "no due date on record" }, "self-stated"],
+      facts: ["justin", { read: "due", label: "due ", none: "no due date on record" }, "self-stated"],
       history: [{ k: "claim", who: "justin", tm: "08:31", text: "took it for Friday — his own word" }],
       provenance: [{ who: "justin", tm: "08:31", msg: "n6", ex: "I'll wire revocation into the gateway by Friday.", note: "message · seq 9061 · self-stated commitment, θ .74" }],
       corrections: [],
@@ -2008,6 +2036,28 @@ function offRoomItems(r) {
 }
 function sourceRoomOf(o) { return o.sourceRoom && o.sourceRoom !== S.roomId ? o.sourceRoom : null; }
 
+/* ---------------------------------------------------------------------------
+ * A ROUTE SAYS WHERE IT GOES (round 17, D2)
+ *
+ * `sourceChip()` derives `source in #<room> →` from `sourceRoom`. The provenance
+ * header derives `jump to source in #<room> →` from the entry's own room. The
+ * correction chain's route labels were the one family that did not derive, and
+ * they are the family whose words ASSERT A LOCATION: reopen D2 in
+ * #users-migration and the chain said `the source is still in the room →` forty
+ * pixels under a provenance entry, about the same message, reading `jump to
+ * source in #identity-service →`. Clicking it left the room, and the page's own
+ * toast then said so — "the source of that item lives here, not in the room you
+ * came from". X1 said `the proposal it replaced is still in the room →` while
+ * its own record note says the sentence that raised it is in #users-migration
+ * and stays there.
+ *
+ * `linkedObject`/`isAttentionRow` are room-scoped precisely so that no surface
+ * pretends an in-room row exists. This is the one sentence that was doing it.
+ * Every route label now ends here, and it is handed the SAME value the entry's
+ * own `room` is handed, so the words and the destination cannot disagree.
+ * ------------------------------------------------------------------------ */
+function routeHome(room) { return room ? `is in #${room} →` : "is still in the room →"; }
+
 /* a message's glyph is derived from the object it carries — never written down.
    When that object changes (accepted, reopened, verified), this row changes. */
 function msgGlyph(r, m) {
@@ -2058,6 +2108,91 @@ function fieldOr(v, fallback) {
   const s = String(v).trim();
   return s === "" ? fallback : v;
 }
+
+/* ===========================================================================
+ * A DURATION IS A RELATION BETWEEN TWO TIMESTAMPS, NEVER A FIELD (round 17 D1)
+ *
+ * `Q1.openFor: "3h"` was a seeded string. The record said the question was
+ * raised at 09:11, its one history entry said 09:11, its one provenance entry
+ * said 09:11, its source message said 09:11 and `S.now` said 09:12 — and five
+ * surfaces said `open 3h`, which is a moment inside the absence window where
+ * this room has no events at all. The record did not merely fail to support the
+ * number, it excluded it.
+ *
+ * WHY EVERY INSTRUMENT ON THIS PAGE WAS SILENT. The chip was
+ * `{ read: "verification", post: " 3h" }` — a LITERAL PASTED ONTO A GENUINE
+ * RECORD READ. say()'s point-read mutation flips the verification, the sentence
+ * moves, and the read is therefore provably load-bearing; the suffix riding
+ * along beside it never budges and nothing asks where it came from. The number
+ * rule then filed `open #h` as `form:duration`, "a declared non-count shape", so
+ * the coverage artifact checked that a duration LOOKED like a duration and
+ * nothing compared it to the timestamp it is a duration FROM.
+ *
+ * So a duration stops being a shape and becomes a derivation. `elapsed()` is the
+ * only thing on this page that produces one, and IT IS HANDED THE NAME OF THE
+ * FIELD IT MEASURES FROM RATHER THAN THE VALUE — `elapsed(o, "askedAt")`, not
+ * `elapsed("09:11", "09:12")`. That distinction is the whole check. A
+ * measurement that copied the two strings could only ever prove that the
+ * subtraction was done correctly ONCE, against operands the mint chose; a
+ * measurement that names its operands sends the checker back to the record for
+ * them on every paint, which is what "compared against the timestamp it claims
+ * to measure" has to mean. It is also what makes a duration minted at boot and
+ * painted ten minutes later a REPORTED defect rather than an invisible one.
+ *
+ * While a sentence is minting, `elapsed()` writes what it was asked into that
+ * sentence's own measurement log — exactly the way a history query writes into
+ * `SAYING`. readNumbers() then re-reads both fields and re-derives, on every
+ * paint; a duration with no measurement behind it, and a measurement whose
+ * answer has moved out from under the words, are both reported.
+ *
+ * `b < a` is not an error the page may paper over: a duration cannot run
+ * backwards, so `elapsed()` returns null and the caller has to say what the
+ * record supports instead of printing a number. Same for an endpoint this page
+ * cannot subtract — `22 Jul`, `yest. 16:10`, `Thu 31 Jul`. The page does not
+ * guess at a calendar it does not model; it says when, not how long ago.
+ * ======================================================================== */
+function clockMinutes(v) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(v == null ? "" : v).trim());
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2]);
+  return (h > 23 || mi > 59) ? null : h * 60 + mi;
+}
+/* the measurement log of the say() currently minting, or null outside one */
+let MEASURING = null;
+/* the two ENDPOINTS of a measurement, read out of the record by name. `to` is
+   null for "now", which is `S.now` and is a value the page moves — reading it
+   here rather than copying it is what makes a stale duration visible. */
+function elapsedEnds(o, fromField, toField) {
+  return [o ? o[fromField] : null, toField ? (o ? o[toField] : null) : S.now];
+}
+function elapsedOf(a, b) {
+  const x = clockMinutes(a), y = clockMinutes(b);
+  if (x == null || y == null || y < x) return null;
+  const d = y - x, h = Math.floor(d / 60), m = d % 60;
+  return d < 60 ? d + "m" : h + "h" + (m ? " " + m + "m" : "");
+}
+function elapsed(o, fromField, toField) {
+  const ends = elapsedEnds(o, fromField, toField);
+  const text = elapsedOf(ends[0], ends[1]);
+  if (MEASURING) MEASURING.push({ owner: o, from: fromField, to: toField || null, text: text });
+  return text;
+}
+/* the same question, asked again from outside the mint, against the record as it
+   stands now. This is the comparison the round exists for. */
+function elapsedAgain(mm) {
+  const ends = elapsedEnds(mm.owner, mm.from, mm.to);
+  return { text: elapsedOf(ends[0], ends[1]), a: ends[0], b: ends[1] };
+}
+/* how long an unanswered question has been open, said in the receipt's state
+   line and nowhere else. A record with no subtractable ask time says when it
+   was asked; it does not guess how long ago that was. */
+function openClause(o) {
+  const d = elapsed(o, "askedAt");
+  return d == null ? `open since ${fieldOr(o.askedAt, "a time the record does not keep")}` : "open " + d;
+}
+/* every duration-shaped run of characters, including the compound `1h 5m` form
+   `elapsed()` produces. Used to find the ones no measurement accounts for. */
+const DURATION_RE = /\b\d+\s*(?:d|h|m|s|ms|day|days|hour|hours|min|mins|minute|minutes|week|weeks|month|months)\b(?:\s+\d+\s*(?:d|h|m|s|ms|day|days|hour|hours|min|mins|minute|minutes|week|weeks|month|months)\b)*/gi;
 
 /* --- TWO SENTENCES ARE THE SAME SENTENCE (round 6 D1) ---------------------
  * The record compares statements in several places — an answer against the
@@ -2436,12 +2571,70 @@ function seedRecord() {
   });
 }
 
-/* a fixture fact chip that names a recorded field, read out of the record */
+/* ---------------------------------------------------------------------------
+ * A FIXTURE FACT CHIP NAMES A RECORDED FIELD, AND EVERYTHING ELSE IN IT COMES
+ * OUT OF THE RECORD TOO (round 17, D1, second half)
+ *
+ * The shape used to be `{ read, pre, none, post }`, and `pre`/`post` were free
+ * strings glued either side of a genuine read. That is not a formatting
+ * convenience, it is a hole in the instrument: `{ read: "verification",
+ * post: " 3h" }` renders `open 3h`, flipping the verification moves the
+ * sentence so say()'s point-read mutation is satisfied, and the three
+ * characters that make the claim are attached to nothing. It hid for sixteen
+ * rounds.
+ *
+ * So the shape is an ALLOWLIST of derivations, and there is no key that takes
+ * arbitrary prose. Every one of these is a function of the record:
+ *
+ *   { read: F }                     the value of F, in words
+ *   { read: F, none: N }            the words for a value the record does not hold
+ *   { read: F, label: L }           L PREFIXES the value and may only use F's own
+ *                                   vocabulary (RECORDED[F].words), so a label can
+ *                                   name the field and cannot carry a fact
+ *   { read: F, also: G, join: J }   the value of another field of THIS record,
+ *                                   appended through a connective. `join` may
+ *                                   hold no digits and no letters beyond a
+ *                                   lower-case connective, so a fact cannot ride
+ *                                   in on it; `also` must be a field the object
+ *                                   actually has, and an absent one says so
+ *   { read: F, when: { v: S } }     a gloss the VALUE selects. The value read is
+ *                                   the key, so the clause cannot outlive the
+ *                                   state it describes — and its words answer to
+ *                                   checkVocabulary and checkQuantifiers like
+ *                                   every other minted clause
+ *
+ * A key outside that list is refused and reported, so the next round cannot
+ * re-open this by inventing another way to append characters. What this does
+ * NOT do is judge the words inside `when` or `none` for truth — those are
+ * seeded prose, minted, and held to the same sentence rules as any other
+ * fixture line. What it forbids is prose with no record behind it AT ALL.
+ * ------------------------------------------------------------------------ */
+const FACT_KEYS = ["read", "none", "label", "also", "join", "when"];
 function seedFact(o, f) {
   if (!f || typeof f !== "object" || Array.isArray(f) || !f.read) return f;
   if (!RECORDED[f.read]) { console.error("[atrium invariant] a seeded fact names a field this record does not keep:", o.id, f.read); return String(f.read); }
-  return stated(o, [f.read], v => (f.pre || "") +
-    (v.value == null ? (f.none || "nothing on the record") : enumText(v.value)) + (f.post || ""));
+  Object.keys(f).forEach(k => {
+    if (FACT_KEYS.indexOf(k) < 0)
+      console.error("[atrium invariant] a seeded fact carries a key this page cannot derive from the record, so " +
+        "whatever it holds is a literal riding along on a real read:", o.id, k, JSON.stringify(f[k]));
+  });
+  const words = RECORDED[f.read].words || [];
+  if (f.label != null) String(f.label).split(/[^a-z-]+/i).filter(Boolean).forEach(w => {
+    if (!words.some(x => x.toLowerCase() === w.toLowerCase()))
+      console.error("[atrium invariant] a seeded fact's label says something that is not this field's own name — a " +
+        "label may name the field it prefixes and nothing else:", o.id, f.read, JSON.stringify(f.label), w);
+  });
+  if (f.also != null) {
+    if (f.join == null || !/^[ ·a-z]*$/.test(String(f.join)))
+      console.error("[atrium invariant] a seeded fact joins two record reads with something that is not a " +
+        "connective — a join carries no digits and no facts:", o.id, JSON.stringify(f.join));
+    if (!(f.also in o))
+      console.error("[atrium invariant] a seeded fact appends a field this record does not have:", o.id, f.also);
+  }
+  return stated(o, [f.read], v => (f.label || "") +
+    (v.value == null ? (f.none || "nothing on the record") : enumText(v.value)) +
+    (f.when && v.value != null && f.when[v.value] != null ? f.when[v.value] : "") +
+    (f.also ? (f.join || " ") + fieldOr(o[f.also], "nothing on the record") : ""));
 }
 
 /* THE ONLY WAY A RECORDED FIELD CHANGES, AND THE ONLY SOURCE OF A `change`. */
@@ -2640,8 +2833,13 @@ function flipAnswer(got, arg) {
    sentence declares it read on every paint, exactly as a pattern-read one is. */
 function say(views, phrase, owner, counted) {
   const outer = SAYING, log = (SAYING = []);
+  /* WHAT THIS SENTENCE MEASURED, and from which two timestamps (round 17, D1).
+     Collected the same way the history queries above are, and for the same
+     reason: the only place the phrase is in hand is here, so the only place a
+     derivation can be recorded beside the words it produced is here. */
+  const outerM = MEASURING, mlog = (MEASURING = []);
   let said;
-  try { said = phrase.apply(null, views); } finally { SAYING = outer; }
+  try { said = phrase.apply(null, views); } finally { SAYING = outer; MEASURING = outerM; }
   /* THE MUTATION, at the moment of minting rather than in a checker, because
      the phrase is only in hand here. Skipped inside a replay (a nested say
      would re-enter). */
@@ -2649,9 +2847,10 @@ function say(views, phrase, owner, counted) {
     const base = normText(quantText(said));
     const replay = (stubViews) => {
       const keep = SAYING; SAYING = [];
+      const keepM = MEASURING; MEASURING = null;
       try { return normText(quantText(phrase.apply(null, stubViews))); }
       catch (e) { return null; }
-      finally { SAYING = keep; }
+      finally { SAYING = keep; MEASURING = keepM; }
     };
     log.forEach((q, k) => {
       QSTUB = { n: 0, k: k, flip: flipAnswer };
@@ -2750,6 +2949,11 @@ function say(views, phrase, owner, counted) {
                    did not keep: `ever("verified")` decided a whole clause and
                    left nothing behind for a checker to re-ask. */
                 queries: log,
+                /* WHAT THIS SENTENCE MEASURED — one entry per elapsed() call the
+                   phrase made, carrying the two timestamps it was given. The
+                   number rule re-derives every duration in the sentence from
+                   these, so a duration is checked the way a count is. */
+                measured: mlog,
                 counted: counted || null };
   Object.defineProperty(box, "minted", { value: MINTED, enumerable: false });
   Object.defineProperty(box, "owner", { value: owner || (views.length ? views[0].owner : null), enumerable: false });
@@ -3631,11 +3835,23 @@ function checkStatedBox(where, id, box) {
  *      is transcribed into a mint with zero views so the record owns its
  *      characters; there is no count in a sentence that opened no field.
  *   4. IT IS ONE OF THE DECLARED NON-COUNT FORMS — a clock time, a calendar
- *      date, a duration, an amount, a percentage. NUMBER_FORMS, short by design.
+ *      date, an amount, a percentage. NUMBER_FORMS, short by design.
+ *   5. IT IS A DURATION THE SENTENCE MEASURED, and re-measuring the same two
+ *      timestamps gives the same characters. See the elapsed() block above.
  *
  * A numeral matching none of these is reported. That is a bounded rule: the
  * page cannot grow a new unreadable number without the console saying so on the
  * first paint that renders it.
+ *
+ * WHY A DURATION MOVED OUT OF FORM 4 AND INTO A FORM OF ITS OWN (round 17, D1).
+ * A duration was a SHAPE for three rounds: `open #h` matched the regex, the
+ * artifact filed it as "a declared non-count shape", and nothing on this page
+ * ever compared it with the timestamp it was a duration FROM. That is what let
+ * `open 3h` stand forty pixels above this page's own record of the ask at 09:11,
+ * on a room whose clock said 09:12, through sixteen rounds and six reviewers.
+ * A clock, a date, an amount and a percentage are genuinely shapes — each is one
+ * quantity the record holds or reproduces, with nothing behind it to recompute.
+ * A duration is a subtraction, so it has an answer, so it is checked against it.
  *
  * WHAT SHAPE OF INPUT THIS CHECK CANNOT SEE — asked of itself, because the
  * question round 13 did not ask is exactly what D1 was:
@@ -3657,6 +3873,39 @@ function checkStatedBox(where, id, box) {
  *   - A NUMBER THAT IS CORRECTLY DERIVED AND WRONGLY LABELLED. `needsYou`
  *     re-derives to 3 whether the sentence calls it items, objects or apples.
  *     checkVocabulary owns the label; this owns the arithmetic.
+ *   - AND, FOR FORM 5 SPECIFICALLY, four things the duration rule does not see.
+ *     It enumerates FROM the elapsed() calls a minted sentence made, so:
+ *       · A DURATION OUTSIDE A MINT is invisible to it. The rail's `back after
+ *         15h 31m`, K2's `overdue 16h` chip and the presence notes `2h` / `14m`
+ *         are seeded strings on unminted surfaces, and they are exactly the
+ *         shape `openFor` had. They are enumerated in the artifact's `page`
+ *         rows, which is a list and not a proof.
+ *       · A DURATION INSIDE A QUOTED RECORD FRAGMENT is consumed by form 3b
+ *         first, deliberately: `11m42s` inside a run line the receipt reprints
+ *         is the record's own characters and this page did not compute it.
+ *       · A DURATION IN A ZERO-VIEW MINT is transcription (form 3c) and returns
+ *         before this rule runs.
+ *       · WHETHER THE WORD BESIDE IT IS THE RIGHT WORD. elapsed() proves the
+ *         subtraction and its two operands. That the result is what "open"
+ *         means, rather than what "overdue" means, is checkVocabulary's half.
+ *         Nor does it know a wrong FIELD from a right one: measure from
+ *         `acceptedAt` and the check re-derives from `acceptedAt` and agrees.
+ *
+ * AND ITS FIRST FINDING WAS ABOUT ITSELF, WHICH IS NOW TWICE RUNNING ON THIS
+ * FILE. Round 16's occlusion rule reported, on its first run, that a message row
+ * was covering the toast's own words — false, because the toast is
+ * `pointer-events: none`. This rule's first run on this round's own build
+ * reported 222 violations at depth 4, all one class: `chose the answer retention
+ * is 90 days from the card` prints a duration that measures nothing. It measures
+ * nothing because IT IS NOT A MEASUREMENT — `retention is 90 days` is
+ * `Q1.answerOption.label`, a retention policy the record holds and the page
+ * reprints verbatim, and `quotedRecordSpans()` could not see it because the card
+ * wordings are nested objects rather than string fields. The characters were the
+ * record's all along; form 3b's reach was short, so form 5 was asked a question
+ * about a string nobody computed. The reach is fixed where it was short, and
+ * form 5 is left to govern what this page actually calculates. A duration-shaped
+ * run of characters is not an elapsed claim, and a rule that cannot tell the
+ * difference is a rule that will be turned off by whoever it cries wolf at.
  *
  * AND THE REACH IS GENERATED, NOT DESCRIBED. design/prototype-counts.txt is
  * numberReach()'s own output — every numeral-bearing sentence on screen, with
@@ -3730,11 +3979,16 @@ const COUNT_PREDICATES = {
 /* FORM 4 — THE NON-COUNT NUMERALS, DECLARED. Short on purpose: every entry here
    is a numeral this page prints that is not a claim about how many records
    there are, and each one has to be a shape, not a value. */
+/* AND A DURATION IS NO LONGER ONE OF THEM (round 17, D1). `duration` used to sit
+   in this list, which meant the check asked whether `3h` LOOKED like a duration
+   and never asked what it was a duration FROM. A clock time, a date, an amount
+   and a percentage are shapes: each is a single quantity the record either holds
+   or reproduces, and there is nothing behind them to re-derive. A duration is
+   not — it is the DIFFERENCE OF TWO TIMESTAMPS, so it has an answer, so it gets
+   checked against that answer instead of against a regex. See FORM 5. */
 const NUMBER_FORMS = [
   { id: "clock", re: /\b\d{1,2}:\d{2}\b/g,   what: "a clock time" },
   { id: "date",  re: /\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b/gi, what: "a calendar date" },
-  { id: "duration", re: /\b\d+\s*(?:d|h|m|s|ms|day|days|hour|hours|min|mins|minute|minutes|week|weeks|month|months)\b/gi,
-    what: "a duration" },
   /* a numeral welded to a unit is a MEASUREMENT, not a count of records — the
      unit is what makes the shape bounded, and a count of records has none */
   { id: "money",   re: /[$€£]\s?\d[\d,]*(?:\.\d+)?/g,  what: "an amount of money" },
@@ -3766,10 +4020,28 @@ function quotedRecordSpans(owners) {
     if (!o || typeof o !== "object") return;
     Object.keys(o).forEach(k => { if (typeof o[k] === "string" && k !== "id") add(o[k]); });
     Object.keys(o.recorded || {}).forEach(f => (o.recorded[f] || []).forEach(e => add(e && e.value)));
+    /* AND THE CARD'S OWN WORDINGS, WHICH ARE ALSO THE RECORD (round 17, D1, and
+       found by round 17's own new rule on round 17's own build — see below).
+       `answerOption` and `options` are nested objects, so the sweep above could
+       not reach them, and the page reprints their labels and statements
+       verbatim: "chose the answer retention is 90 days from the card". Those
+       characters are the card's, disclosed as the card's everywhere they are
+       rendered, and they become `o.text` / `o.answerText` the moment one is
+       chosen — the same status as any other field here.
+       WHY THIS IS NOT AN EXEMPTION. The bound is unchanged: three characters,
+       a non-digit, and the WHOLE span has to appear verbatim in the sentence.
+       `openFor: "3h"` — the field this round deleted — could never have hidden
+       here, because `3h` is two characters. What can hide is what has always
+       been able to hide in form 3b and is written down as such: a longer
+       forgery built around a real fragment. */
+    [].concat(o.answerOption || [], o.options || []).forEach(op => {
+      if (!op || typeof op !== "object") return;
+      add(op.label); add(op.statement);
+    });
   });
   return out.sort((a, b) => b.length - a.length);
 }
-function readNumbers(text, counted, owners, valueText, subjects) {
+function readNumbers(text, counted, owners, valueText, subjects, measured) {
   const rows = [];
   const BLANK = " ";
   let rest = String(text);
@@ -3807,6 +4079,33 @@ function readNumbers(text, counted, owners, valueText, subjects) {
       rows.push({ how: "quoted", saw: null, want: null,
                   what: "characters this sentence reproduces out of the record", phrase: span.slice(0, 40) });
     }
+  });
+  /* FORM 5 — A DURATION IS RE-DERIVED FROM THE TWO TIMESTAMPS IT MEASURES
+     (round 17, D1). Every elapsed() call the sentence made is in `measured`,
+     carrying the two timestamps it was handed. The duration is consumed by
+     asking elapsed() the same question again and requiring the same answer, so
+     what is checked is the ARITHMETIC and the OPERANDS rather than the shape.
+     It runs after form 3b on purpose: a run line the receipt reproduces
+     verbatim — `dry-run #418 … 0 constraint violations, 11m42s` — carries
+     durations the page did not compute, and those are the record's own
+     characters, already consumed above. Anything duration-shaped still standing
+     after this was neither quoted nor measured, and is reported. */
+  (measured || []).forEach(mm => {
+    if (!mm || !mm.text) return;
+    const at = rest.indexOf(mm.text);
+    if (at < 0) return;
+    const again = elapsedAgain(mm);
+    rest = rest.slice(0, at) + mm.text.replace(/\d/g, BLANK) + rest.slice(at + mm.text.length);
+    rows.push(again.text === mm.text
+      ? { how: "measured", saw: null, want: null, phrase: mm.text,
+          what: "a duration re-derived from the two timestamps it measures" }
+      : { how: "MISMEASURED", saw: mm.text, want: again.text, phrase: mm.text,
+          from: mm.from + " = " + JSON.stringify(again.a),
+          to: (mm.to || "now") + " = " + JSON.stringify(again.b) });
+  });
+  rest = rest.replace(new RegExp(DURATION_RE.source, DURATION_RE.flags), s => {
+    rows.push({ how: "UNMEASURED", saw: null, want: null, phrase: s.trim() });
+    return s.replace(/\d/g, BLANK);
   });
   /* form 4 — the declared non-count shapes, out of the way before anything is
      counted positionally */
@@ -3849,7 +4148,22 @@ function checkCountedClaims(where, id, box) {
   const valueText = (box.claims || []).map(c => String(c.value))
     .concat((box.queries || []).map(q => String(q.got && q.got.value != null ? q.got.value : q.got))).join("  ");
   const subjects = owners.concat(box.owner && owners.indexOf(box.owner) < 0 ? [box.owner] : []);
-  readNumbers(text, box.counted, owners, valueText, subjects).forEach(r => {
+  readNumbers(text, box.counted, owners, valueText, subjects, box.measured).forEach(r => {
+    /* ROUND 17, D1 — a duration that measures nothing, and one whose arithmetic
+       does not survive being asked again. The second cannot happen while a
+       sentence is minted and re-read on the same paint; it is the clause that
+       catches a duration minted once and painted later, which is exactly the
+       shape `openFor` had. */
+    if (r.how === "UNMEASURED")
+      return console.error("[atrium invariant] " + where + " prints a duration that is a duration from nothing — the " +
+        "sentence measured no pair of timestamps, so the characters are a literal beside whatever else it read and " +
+        "no check here can compare them with the record:", id, JSON.stringify(text),
+        "· the unmeasured duration is", JSON.stringify(r.phrase));
+    if (r.how === "MISMEASURED")
+      return console.error("[atrium invariant] " + where + " prints a duration that is not the distance between the " +
+        "two timestamps it says it measured — the words were minted once and the record has moved out from under " +
+        "them:", id, JSON.stringify(text), "says", JSON.stringify(r.saw),
+        "· " + r.from + " → " + r.to + " gives", JSON.stringify(r.want));
     if (r.how === "UNREAD")
       return console.error("[atrium invariant] " + where + " prints a number no check on this page can read — no " +
         "phrasing pattern matches it, the sentence declares no predicate for it, and it is neither a value the " +
@@ -3898,7 +4212,7 @@ function numberReach() {
     const valueText = (box.claims || []).map(c => String(c.value))
       .concat((box.queries || []).map(q => String(q.got && q.got.value != null ? q.got.value : q.got))).join("  ");
     const subjects = owners.concat(box.owner && owners.indexOf(box.owner) < 0 ? [box.owner] : []);
-    readNumbers(text, box.counted, owners, valueText, subjects).forEach(r => {
+    readNumbers(text, box.counted, owners, valueText, subjects, box.measured).forEach(r => {
       out.push("mint  " + r.how + "  " + JSON.stringify(digitless(text)));
     });
   });
@@ -7054,11 +7368,16 @@ function receiptState(o) {
   /* "until a human answers" named the `answer` field in a sentence that reads
      the verification — the noun is about acceptance, and that is what it says */
   if (st === "proposed") return ["PROPOSED", "not accepted", `confidence ${fieldOr(o.confidence, "—")}`, "renders as a claim until a human accepts it"];
-  /* `openFor` is how long it had been open when the record was loaded. Once a
-     question has been reopened that number is about the original ask, not about
+  /* HOW LONG IT HAS BEEN OPEN IS DERIVED FROM WHEN IT WAS ASKED (round 17, D1).
+     This read a seeded `openFor` and printed it, which is how `open 3h` came to
+     sit forty pixels above this receipt's own `priya raised it … 09:11`. It is
+     `askedAt` against `S.now` now, re-derived on every paint — and where the
+     record does not carry a clock time this page can subtract, it says when it
+     was asked rather than inventing how long ago that was. Once a question has
+     been reopened the elapsed time is about the original ask rather than about
      the state on screen, so the reopened case reports the reopen instead. */
   if (st === "open") return ["OPEN", "question",
-    o.reopenedAt ? `reopened ${o.reopenedAt}` : `open ${fieldOr(o.openFor, "—")}`,
+    o.reopenedAt ? `reopened ${o.reopenedAt}` : openClause(o),
     n.value != null ? `assigned to ${n.value}` : "nobody assigned"];
   if (st === "self_reported") return ["SELF-REPORTED", o.kind, `${fieldOr(o.owner || o.claimant, "no owner on record")}`,
     /* K3's due is the STRING "no due date" — a value the record genuinely holds,
@@ -7501,6 +7820,9 @@ function answerDecision(objectId, answer, provenanceNote) {
      happen, one silent about a change that did. Whether the statement moved is
      now the only question, and amend() has already answered it. */
   {
+    /* ONE FACT, TWO ATTRIBUTES: the room the route goes to and the room its
+       label names (round 17, D2). Read once, here. */
+    const linkRoom = prior ? null : sourceRoomOf(o);
     const c = {
       /* AND THE HEADER IS A READ TOO (round 9 D1b). `changed` is honest — it is
          `!!change` — but it was a value carried into a literal, and the literal
@@ -7566,16 +7888,19 @@ function answerDecision(objectId, answer, provenanceNote) {
               : "");
           }),
       msg: prior ? prior.id : (o.sourceMsg || null),
-      room: prior ? null : sourceRoomOf(o),
+      room: linkRoom,
       /* AND THE LABEL ON THE ROUTE IS A RECORD READ (round 11 minor). "the
          proposal it replaced" was unconditional, so a RE-AFFIRMED entry — the
          branch whose whole point is that nothing was replaced — routed the
          reader to a replacement that never happened. */
-      link: say([wasSt, nowSt], (ws, ns) => !sameValue(ws.value, ns.value)
-        ? (prior ? "the statement it superseded is still in the room →"
-                 : "the proposal it replaced is still in the room →")
-        : (prior ? "the identical statement it re-recorded is still in the room →"
-                 : "the proposal it re-affirmed is still in the room →"))
+      /* AND IT SAYS WHERE IT GOES (round 17, D2): `linkRoom` is the value this
+         entry's own `room` carries, so the label and the destination are one
+         fact. X1's chain said "still in the room" about a message its own note
+         says is in #users-migration and stays there. */
+      link: say([wasSt, nowSt], (ws, ns) => (!sameValue(ws.value, ns.value)
+        ? (prior ? "the statement it superseded " : "the proposal it replaced ")
+        : (prior ? "the identical statement it re-recorded " : "the proposal it re-affirmed ")) +
+        routeHome(linkRoom))
     };
     /* only a prior answer the human TYPED may be quoted back at them. A prior
        CHOSEN answer is a page-authored row; quoting it would re-open exactly
@@ -7729,7 +8054,7 @@ function answerQuestion(objectId, statement, provenanceNote, label) {
       (typed ? "typed — your own words are the answer of record" : `chosen: ${label} — the page wrote the sentence, ${S.me} chose it`) +
       ` · no sign-off is attached, so the answer is on the record and ${enumText(nv.value)}`),
     msg: o.sourceMsg || m.id, room: sourceRoomOf(o),
-    link: say([nowA], () => "the question is still in the room →")
+    link: say([nowA], () => "the question " + routeHome(sourceRoomOf(o)))
   });
   o.facts = ["answered by " + S.me + " " + t,
              say([nowA], a => ["recorded: ", ansFrag(a)]),
@@ -8032,6 +8357,12 @@ function reopen(objectId, reason) {
      a prettifier applied to one side, and an arrow claiming a verification
      change that did not happen. What changed there is that it stopped being
      settled, and that is what the header now says. */
+  /* ONE FACT, TWO ATTRIBUTES: the room this entry's route goes to and the room
+     its label names (round 17, D2). Reopen D2 in #users-migration and this said
+     "the source is still in the room →" about a message in #identity-service,
+     forty pixels under a provenance header deriving "jump to source in
+     #identity-service →" from the same fact. */
+  const linkRoom = o.answerMsg ? null : sourceRoomOf(o);
   const c = {
     /* and the header is a record read, so no branch of it can name a state the
        object was not in or a settlement it did not lose (round 9 D1b) */
@@ -8056,18 +8387,24 @@ function reopen(objectId, reason) {
       " · " + keptClause(ws, k) +
       (reason ? "" : " · no reason given, and none was invented")),
     msg: o.answerMsg || o.sourceMsg || (o.provenance[0] && o.provenance[0].msg) || null,
-    room: o.answerMsg ? null : sourceRoomOf(o),
-    link: say(wasContent ? [wasContent] : [], c => o.answerMsg && c && c.everSet()
-      ? `the ${c.of} on the record is still in the room →` : "the source is still in the room →")
+    room: linkRoom,
+    link: say(wasContent ? [wasContent] : [], c => (o.answerMsg && c && c.everSet()
+      ? `the ${c.of} on the record ` : "the source ") + routeHome(linkRoom))
   };
   /* the ONLY quotation this transition can produce: words the human typed into
      the reason field a moment ago, registered in the human-speech register. */
   if (reason) { S.typed.push(reason); c.quote = { text: reason, by: S.me, src: "typed" }; }
   o.corrections.push(c);
 
+  /* AND THE NOTE SAYS WHERE THE ROW IS, TOO (round 17, D2). This ended
+     "…still in this history, and the row that carried it re-renders to say so"
+     for every object — including D2, whose row is in #identity-service and does
+     not re-render here at all. Same fact as the route label above, same read. */
   o.note = say([nowVr], () => "Reopening is append-only. The state " +
            (settledAt ? "reached at " + settledAt : "it was settled in — no time was ever recorded for it —") +
-           " is still in the conversation, still in this history, and the row that carried it re-renders to say so. " +
+           " is still in the conversation, still in this history, and the row that carried it " +
+           (linkRoom ? `is in #${linkRoom}, where it re-renders to say so. `
+                     : "re-renders to say so. ") +
            (owed && back !== S.me
              ? `It went back to ${back}, who owed it — reopening undoes a state, it does not move ownership onto you. `
              : "") +
@@ -8259,7 +8596,11 @@ function doVerify(objectId, evidence) {
     fact: say([nowVv], v => `${enumText(v.value)} by ${S.me} at ${t} · the evidence is ${S.me}'s own sentence and is quoted below`),
     quote: { text: evidence, by: S.me, src: "typed" },
     msg: o.sourceMsg || (o.provenance[1] && o.provenance[1].msg) || null,
-    link: say([nowVv], () => "the claim is still in the room →")
+    /* this entry carried no `room` at all, so its route resolved against
+       whichever room you were standing in — the same defect as the label,
+       one attribute along (round 17, D2) */
+    room: sourceRoomOf(o),
+    link: say([nowVv], () => "the claim " + routeHome(sourceRoomOf(o)))
   });
   /* AND A NOTE MAY NOT PROMISE ITS OWN PERMANENCE (round 11, raised by the
      codex reviewer). `note` is not a recorded field: reopen() replaces it, and
@@ -8406,7 +8747,7 @@ function applyEffect(objectId, fx) {
         (!sameValue(ws.value, ns.value) ? "" : "it was already settled · ") +
         `${enumText(v.value)}: the owner's own word, which is why it stays ~`),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
-      link: say([nowV], () => "the commitment is still in the room →")
+      link: say([nowV], () => "the commitment " + routeHome(sourceRoomOf(o)))
     };
     o.facts = [S.me, "marked done " + t, say([nowV], v => enumText(v.value))];
     o.history.push({ k: "claim", who: S.me, tm: t,
@@ -8520,7 +8861,7 @@ function applyEffect(objectId, fx) {
         ? `rescheduled by ${S.me} at ${t} · the date it was moved from is above, and it is in this chain`
         : `re-recorded by ${S.me} at ${t} · the date it was moved to is the date it already had, so the due date is unchanged`),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
-      link: say([rd[1]], () => "the commitment is still in the room →")
+      link: say([rd[1]], () => "the commitment " + routeHome(sourceRoomOf(o)))
     };
     o.facts = [S.me,
                say([rd[1]], d => "due " + recordedLabel(d.value, "not set")),
@@ -8626,7 +8967,7 @@ function applyEffect(objectId, fx) {
         " · nothing about the question itself changed" +
         (answered(a) ? ", and the answer already on the record is untouched" : ", and it is still unanswered")),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
-      link: say([rn[2]], a => (a.value == null ? "the question" : "the answer") + " is still in the room →")
+      link: say([rn[2]], a => (a.value == null ? "the question " : "the answer ") + routeHome(sourceRoomOf(o)))
     };
     /* "still open" is a claim about the verification, which is a recorded field —
        so it is read, not written down beside it (round 10 self-review) */
@@ -8693,7 +9034,7 @@ function applyEffect(objectId, fx) {
       fact: say(rb, (was, now, a) => `taken back by ${S.me} at ${t} · the hand-off to ${backTo(was.value)} is above, and it is in this chain` +
         (a.everSet() ? " · the answer on the record is untouched" : " · nothing is recorded as its answer")),
       msg: o.sourceMsg || null, room: sourceRoomOf(o),
-      link: say([rb[2]], a => (a.value == null ? "the question" : "the answer") + " is still in the room →")
+      link: say([rb[2]], a => (a.value == null ? "the question " : "the answer ") + routeHome(sourceRoomOf(o)))
     };
     o.facts = ["asked by " + fieldOr(o.askedBy, "nobody on the record"),
                say([rb[1]], n => "back with " + (n.value == null ? S.me : recordedLabel(n.value))),

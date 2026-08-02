@@ -11,10 +11,17 @@
 #   quoted         a fragment the sentence reproduces verbatim out of the record
 #   transcribed    the sentence declares no reads at all, so it computed nothing —
 #                  a seeded fixture line, minted so the record owns its characters
-#   form:<id>      a declared non-count shape: a clock time, a date, a duration,
-#                  an amount of money, a percentage
+#   form:<id>      a declared non-count shape: a clock time, a date, an amount
+#                  of money, a percentage
+#   measured       a duration, re-derived from the two record timestamps the
+#                  sentence named — not a shape. A duration used to be filed as
+#                  form:duration, which asked whether `3h` LOOKED like a duration
+#                  and never what it was a duration FROM (round 17, D1).
 #   UNREAD         no check on this page can read it. This is a defect and the
 #                  page's console says so on the paint that renders it.
+#   UNMEASURED     a duration the sentence measured nothing for, and
+#   MISMEASURED    one whose two named timestamps no longer give it. Both are
+#                  defects and the console says so on the paint that renders them.
 # page rows: a numeral in no minted sentence — row counters, message counters,
 #   page furniture, and record text the page reprints outside a mint. Not an error
 #   list: a count of rows is not a claim about a record. This is the set
@@ -52,11 +59,8 @@ mint  form:clock  "taken back by lars at ##:## · the hand-off to justin is abov
 mint  form:clock  "verified by lars ##:##"
 mint  form:clock  "verified by lars at ##:## · the evidence is lars's own sentence and is quoted below"
 mint  form:clock  "you reopened this at ##:##, so it is pending and only you can settle it · the call at ## Jul ##:## was lars's, and it is on the record below."
-mint  form:date  "answered by lars at ##:## · chosen: Keep dual-write through ## Aug — the page wrote the sentence, lars chose it"
-mint  form:date  "chose the option Keep dual-write through ## Aug from the card — the statement it carries was recorded verbatim, and none of it is worded by lars"
-mint  form:duration  "OPEN · question · open #h · nobody assigned"
-mint  form:duration  "open #h"
 mint  form:money  "estimated the extra write cost at ~$###/mo — never checked against a bill"
+mint  measured  "OPEN · question · open #m · nobody assigned"
 mint  pattern:awaiting-you  "# of # unverified · # awaiting you"
 mint  pattern:awaiting-you  "# of ## unverified · # awaiting you"
 mint  pattern:awaiting-you  "## of ## unverified · # awaiting you"
@@ -90,15 +94,17 @@ mint  quoted  "Open commitment — was due yesterday ##:##, nobody had settled i
 mint  quoted  "PROPOSED · not accepted · confidence .## · renders as a claim until a human accepts it"
 mint  quoted  "Proposal: · Cut over Friday # Aug and drop legacy tokens"
 mint  quoted  "Reopening is append-only. The state reached at ## Jul ##:## is still in the conversation, still in this history, and the row that carried it re-renders to say so. The reason above is your own sentence, recorded verbatim."
-mint  quoted  "Reopening is append-only. The state reached at ## Jul is still in the conversation, still in this history, and the row that carried it re-renders to say so. The reason above is your own sentence, recorded verbatim."
+mint  quoted  "Reopening is append-only. The state reached at ## Jul is still in the conversation, still in this history, and the row that carried it is in #identity-service, where it re-renders to say so. The reason above is your own sentence, recorded verbatim."
 mint  quoted  "Reopening is append-only. The state reached at ##:## is still in the conversation, still in this history, and the row that carried it re-renders to say so. The reason above is your own sentence, recorded verbatim."
 mint  quoted  "Reopening is append-only. The state reached at ##:## today is still in the conversation, still in this history, and the row that carried it re-renders to say so. The reason above is your own sentence, recorded verbatim."
 mint  quoted  "Reopening is append-only. The state reached at yesterday ##:## is still in the conversation, still in this history, and the row that carried it re-renders to say so. It went back to justin, who owed it — reopening undoes a state, it does not move ownership onto you. The reason above is your own sentence, recorded verbatim."
 mint  quoted  "SELF-REPORTED · commitment · lars · due yesterday ##:## · nothing other than the claimant has checked it"
 mint  quoted  "answer reopened ##:## · still the answer on the record · question pending again"
 mint  quoted  "answer reopened ##:## · still the statement on the record · decision pending again"
+mint  quoted  "answered by lars at ##:## · chosen: Keep dual-write through ## Aug — the page wrote the sentence, lars chose it"
 mint  quoted  "answered by lars at ##:## · chosen: retention is ## days — the page wrote the sentence, lars chose it · no sign-off is attached, so the answer is on the record and unverified"
 mint  quoted  "chose the answer retention is ## days from the card — the statement it carries was recorded verbatim and none of it is worded by lars: · Legal approves ##-day retention of users_legacy, so retention is not what gates the drop · · unverified"
+mint  quoted  "chose the option Keep dual-write through ## Aug from the card — the statement it carries was recorded verbatim, and none of it is worded by lars"
 mint  quoted  "commitment · dana · Thu ## Jul ~"
 mint  quoted  "commitment · justin · Fri # Aug ~"
 mint  quoted  "commitment · lars · today ##:## ~"
@@ -106,6 +112,7 @@ mint  quoted  "commitment · lars · yesterday ##:## ~"
 mint  quoted  "commitment · priya · blocked on Q# ~"
 mint  quoted  "due Thu ## Jul"
 mint  quoted  "due today ##:##"
+mint  quoted  "open since ##:##"
 mint  quoted  "recorded: · Legal approves ##-day retention of users_legacy, so retention is not what gates the drop"
 mint  quoted  "reopened by lars ##:##"
 mint  quoted  "reopened by lars at ##:## · now open and no longer settled · the answer on the record, recorded at ##:##, stays on it"
