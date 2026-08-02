@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { decideAcceptance } from './acceptance.js';
 import { Id, Timestamp } from './common.js';
 import type { ProvenanceMessage } from './escalation.js';
-import type { AcceptedObject } from './objects.js';
+import { type AcceptedObject, AcceptedObjectType, payloadText } from './objects.js';
 import type { AcceptanceConfig } from './policy.js';
 import type { CoreState, ObjectRecord } from './state.js';
 
@@ -114,6 +114,19 @@ export const RationaleReason = z.discriminatedUnion('kind', [
   }),
   z.object({ kind: z.literal('question_names_you'), question: z.string().min(1) }),
   z.object({ kind: z.literal('mention'), request: z.string().min(1) }),
+  /**
+   * **r8.** A model reading that the engine staged for a person rather than
+   * accepting — today that is `type_not_certified`, whose refusal text promises
+   * this panel by name. It is not `decision_pending`: nobody is being asked to
+   * settle the underlying question, they are being asked what kind of act these
+   * words were, and a rationale that said "you are named as the one to decide
+   * this" about a claim would be false about both halves.
+   */
+  z.object({
+    kind: z.literal('reading_pending'),
+    statement: z.string().min(1),
+    proposedType: AcceptedObjectType,
+  }),
 ]);
 export type RationaleReason = z.infer<typeof RationaleReason>;
 
@@ -163,6 +176,8 @@ export function rationaleFor(userId: Id, reason: RationaleReason): Rationale {
       return `${you} — this open question names you: "${clip(reason.question)}".` as Rationale;
     case 'mention':
       return `${you} — you were named in a message that asks you something: "${clip(reason.request)}".` as Rationale;
+    case 'reading_pending':
+      return `${you} — a machine read this as a ${reason.proposedType} and nothing in the words settles that it was one, so it is staged rather than accepted and any member of the room can file it or decline it: "${clip(reason.statement)}".` as Rationale;
     default: {
       const exhaustive: never = reason;
       return `${you} — ${JSON.stringify(exhaustive)}` as Rationale;
@@ -230,7 +245,23 @@ export function sortAttention<T extends AttentionItem & { priority?: number }>(
   });
 }
 
-/** For items read back from storage, which carry a class but no priority. */
+/**
+ * For items read back from storage, which carry a class but no priority.
+ *
+ * **The exhaustive branch returns a number, r8.** It read
+ * `Number.MAX_SAFE_INTEGER + (exhaustive as unknown as number)`, which is
+ * `MAX_SAFE_INTEGER + NaN` — `NaN` — for any class outside the enum. `pa - pb`
+ * is then `NaN`, a comparator that returns `NaN` is not an ordering, and the
+ * item sorted **above `needs_decision`**: an unrecognised class took the top of
+ * somebody's Needs-you, which is the exact opposite of what a fail-safe default
+ * for an unknown class should do. The arithmetic was there to make the
+ * unreachable branch use `exhaustive`; it made it wrong instead.
+ *
+ * Reachable, despite the `never`: `AttentionItem` is parsed at the boundary but
+ * `sortAttention` is exported and takes anything shaped like one, and a store
+ * written by an older or newer version of this package is exactly where a
+ * fifth class comes from.
+ */
 function fallbackPriority(attentionClass: AttentionClass): number {
   switch (attentionClass) {
     case 'needs_decision':
@@ -241,11 +272,29 @@ function fallbackPriority(attentionClass: AttentionClass): number {
       return ATTENTION_PRIORITY.blocking_question;
     case 'mention':
       return ATTENTION_PRIORITY.mention;
-    default: {
-      const exhaustive: never = attentionClass;
-      return Number.MAX_SAFE_INTEGER + (exhaustive as unknown as number);
-    }
+    default:
+      return Number.MAX_SAFE_INTEGER;
   }
+}
+
+/**
+ * **An item id that cannot be forged out of its own components — r8.**
+ *
+ * The id was `attn:${userId}:${subjectId}:${class}` interpolated raw, and `Id` is
+ * `z.string().min(1)` with no charset restriction. A user id of
+ * `alice:obj_7:mention` collides with the mention item for `alice` on `obj_7`,
+ * and a proposal whose id equals an accepted object's id collides across the two
+ * sources that build `owned_commitment` items. A colliding id is not a cosmetic
+ * problem here: `reconcileAttention` keys on it, so one item inherits the other's
+ * dismissal, or replaces it in the panel outright.
+ *
+ * Two changes: the separator is escaped in every component, so no component
+ * content can imitate the structure; and `subjectKind` is part of the id, so the
+ * proposal namespace and the object namespace cannot meet.
+ */
+function itemId(userId: Id, subjectKind: AttentionSubjectKind, subjectId: Id, cls: string): string {
+  const part = (value: string): string => value.replace(/%/g, '%25').replace(/:/g, '%3A');
+  return `attn:${part(userId)}:${subjectKind}:${part(subjectId)}:${cls}`;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -391,7 +440,6 @@ function proposalItems(
     const record = state.proposals[proposalId];
     if (record?.status !== 'proposed') continue;
     const { proposal } = record;
-    if (proposal.type !== 'decision' && proposal.type !== 'commitment') continue;
 
     const verdict = decideAcceptance(proposal, {
       messages: ctx.messages as readonly ProvenanceMessage[],
@@ -424,7 +472,7 @@ function proposalItems(
       for (const userId of audience) {
         out.push(
           item({
-            id: `attn:${userId}:${proposal.id}:needs_decision`,
+            id: itemId(userId, 'proposal', proposal.id, 'needs_decision'),
             roomId: proposal.roomId,
             userId,
             objectId: proposal.id,
@@ -439,23 +487,68 @@ function proposalItems(
       continue;
     }
 
-    // A commitment only asks anybody anything when somebody else's sentence put
-    // their name on it — which is exactly `awaitingConfirmFrom`.
-    const owner = verdict.awaitingConfirmFrom;
-    if (owner === null) continue;
-    out.push(
-      item({
-        id: `attn:${owner}:${proposal.id}:owned_commitment`,
-        roomId: proposal.roomId,
-        userId: owner,
-        objectId: proposal.id,
-        subjectKind: 'proposal',
-        class: 'owned_commitment',
-        priority: ATTENTION_PRIORITY.commitment_confirm,
-        createdAt: ctx.now,
-        reason: { kind: 'commitment_confirm', statement: proposal.payload.statement },
-      }),
-    );
+    if (proposal.type === 'commitment') {
+      // A commitment only asks anybody anything when somebody else's sentence put
+      // their name on it — which is exactly `awaitingConfirmFrom`.
+      const owner = verdict.awaitingConfirmFrom;
+      if (owner === null) continue;
+      out.push(
+        item({
+          id: itemId(owner, 'proposal', proposal.id, 'owned_commitment'),
+          roomId: proposal.roomId,
+          userId: owner,
+          objectId: proposal.id,
+          subjectKind: 'proposal',
+          class: 'owned_commitment',
+          priority: ATTENTION_PRIORITY.commitment_confirm,
+          createdAt: ctx.now,
+          reason: { kind: 'commitment_confirm', statement: proposal.payload.statement },
+        }),
+      );
+      continue;
+    }
+
+    // ── The other three types, and the promise that was not kept — r8 ────────
+    //
+    // This loop began `if (proposal.type !== 'decision' && proposal.type !==
+    // 'commitment') continue;`, which was true of the panel r7 inherited: those
+    // were the only two types that could reach `needs_you`. r7 added
+    // `type_not_certified`, whose refusal text ends *"so at 0.95 it goes to
+    // Needs-you with its quote for a person to accept or decline"* — and the
+    // adjudication that let the type narrowing ship rested on that sentence.
+    //
+    // Executed, the engine said `pending / needs_you` and `projectAttention`
+    // returned **zero items and zero refusals**: a claim is not a decision and
+    // not a commitment, so the line above dropped it before anything looked at
+    // the verdict. The reading was staged in a panel nobody renders. A refusal
+    // that names a destination is a promise, and this is the second one in this
+    // round to have been painted on.
+    //
+    // The class is `needs_decision` because that is what is being asked — a
+    // person decides whether these words were a claim or an undertaking — and
+    // because inventing a fifth `AttentionClass` for it would push a schema
+    // change through #22's storage to say the same thing. The audience is the
+    // room, on the same argument an unassigned decision fans out: nothing in a
+    // laundered reading names who should rule on it. `AttentionContext.members`
+    // is what makes that non-empty; without it this is silent, exactly as an
+    // unassigned decision already is, and that contract is stated on the field.
+    const statement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);
+    if (statement.length === 0) continue;
+    for (const userId of [...(ctx.members?.[proposal.roomId] ?? [])].sort()) {
+      out.push(
+        item({
+          id: itemId(userId, 'proposal', proposal.id, 'needs_decision'),
+          roomId: proposal.roomId,
+          userId,
+          objectId: proposal.id,
+          subjectKind: 'proposal',
+          class: 'needs_decision',
+          priority: ATTENTION_PRIORITY.needs_decision,
+          createdAt: ctx.now,
+          reason: { kind: 'reading_pending', statement, proposedType: proposal.type },
+        }),
+      );
+    }
   }
 
   return out;
@@ -483,7 +576,7 @@ function commitmentItems(state: CoreState, ctx: AttentionContext): ComputedAtten
     const overdue = due !== null && due < ctx.now;
     out.push(
       item({
-        id: `attn:${owner}:${object.id}:owned_commitment`,
+        id: itemId(owner, 'object', object.id, 'owned_commitment'),
         roomId: object.roomId,
         userId: owner,
         objectId: object.id,
@@ -515,7 +608,7 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Compute
   const seen = new Set<string>();
 
   const push = (userId: Id, question: ObjectRecord, reason: RationaleReason): void => {
-    const id = `attn:${userId}:${question.object.id}:blocking_question`;
+    const id = itemId(userId, 'object', question.object.id, 'blocking_question');
     if (seen.has(id)) return;
     seen.add(id);
     out.push(
@@ -591,25 +684,50 @@ function compareQuestionMention(a: QuestionMentionSignal, b: QuestionMentionSign
   return a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0;
 }
 
-/** `mention` — a direct reference carrying a request, decided upstream. */
+/**
+ * `mention` — a direct reference carrying a request, decided upstream.
+ *
+ * **Deduplicated, r8.** Every other source in this file guards its ids —
+ * `blockingQuestionItems` has carried a `seen` set since it was written — and
+ * this one did not. Two `MentionSignal`s naming the same person on the same
+ * object (one message asking two things, or a caller that hands the same signal
+ * in twice) produced **two items with the same id and different `reason` text**.
+ * The projection's contract is that it is *"recomputable, byte for byte — the
+ * same property the reducer has"*: two items with one id sort as a tie, ties
+ * fall through to `id`, and a stable sort then hands back whichever order the
+ * caller happened to supply them in. Two callers with the same state disagreed.
+ *
+ * The request is part of the sort key, so "which one survives" is a fact about
+ * the signals rather than about their arrival order, and the first by that
+ * ordering is the one kept.
+ */
 function mentionItems(ctx: AttentionContext): ComputedAttentionItem[] {
   const signals = [...(ctx.mentions ?? [])].sort((a, b) => {
     if (a.objectId !== b.objectId) return a.objectId < b.objectId ? -1 : 1;
-    return a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0;
+    if (a.userId !== b.userId) return a.userId < b.userId ? -1 : 1;
+    return a.request < b.request ? -1 : a.request > b.request ? 1 : 0;
   });
-  return signals.map((signal) =>
-    item({
-      id: `attn:${signal.userId}:${signal.objectId}:mention`,
-      roomId: signal.roomId,
-      userId: signal.userId,
-      objectId: signal.objectId,
-      subjectKind: 'object',
-      class: 'mention',
-      priority: ATTENTION_PRIORITY.mention,
-      createdAt: ctx.now,
-      reason: { kind: 'mention', request: signal.request },
-    }),
-  );
+  const out: ComputedAttentionItem[] = [];
+  const seen = new Set<string>();
+  for (const signal of signals) {
+    const id = itemId(signal.userId, 'object', signal.objectId, 'mention');
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(
+      item({
+        id,
+        roomId: signal.roomId,
+        userId: signal.userId,
+        objectId: signal.objectId,
+        subjectKind: 'object',
+        class: 'mention',
+        priority: ATTENTION_PRIORITY.mention,
+        createdAt: ctx.now,
+        reason: { kind: 'mention', request: signal.request },
+      }),
+    );
+  }
+  return out;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -674,6 +792,33 @@ export function dismissAttention(attentionItem: AttentionItem): AttentionTransit
  *     commitment closed, the question got answered, the proposal was accepted.
  *     Nobody clicked anything and the item is done anyway.
  *  3. A computed item nobody has seen is new, and pending.
+ *
+ * ## …and a settled item that stops being computed stays settled — r8
+ *
+ * Rule 1 is what makes dismissal stick, and it only works while the item is in
+ * `stored`. This function used to **drop** every stored non-pending item that
+ * was not in the current computation: `if (entry.status !== 'pending')
+ * continue;`. So dismissal survived one cycle and not two.
+ *
+ * ```
+ * cycle 1  computed: [X]            stored: []       → X pending
+ *          user dismisses X                          → X dismissed
+ * cycle 2  computed: []   (window not supplied, or the proposal briefly judged
+ *                          `receipt_not_certifiable`, or the commitment closed)
+ *          → X is not computed and not pending, so it is dropped from the store
+ * cycle 3  computed: [X]            stored: []       → X pending again
+ * ```
+ *
+ * There is a documented path that empties `computed` wholesale: a projection
+ * with no `messages` raises nothing and reports refusals, which is deliberate
+ * and correct. One such cycle used to wipe every dismissal in the room, and the
+ * next recompute re-minted the lot as `pending` — the panel "learning to be
+ * ignored" that #6 names as the failure dismissal exists to prevent.
+ *
+ * A settled item is a **tombstone** now: it is carried through unchanged, so a
+ * later cycle that computes it again finds it in `stored` and rule 1 keeps it
+ * settled. That is not a new semantic, it is the one rule 1 already had — ids
+ * are deterministic, so a recomputed item has always been the same item.
  */
 export function reconcileAttention(
   stored: readonly AttentionItem[],
@@ -690,10 +835,12 @@ export function reconcileAttention(
 
   for (const entry of stored) {
     if (computedIds.has(entry.id)) continue;
-    if (entry.status !== 'pending') continue;
     out.push({
       ...entry,
-      status: 'resolved',
+      // Rule 2: a *pending* item that stopped being computed is done — the
+      // commitment closed, the question got answered, nobody clicked anything.
+      // A settled one is left exactly as it was.
+      status: entry.status === 'pending' ? 'resolved' : entry.status,
       priority: fallbackPriority(entry.class),
     });
   }

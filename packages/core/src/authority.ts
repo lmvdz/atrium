@@ -25,7 +25,7 @@ import { canonicalJson } from './state.js';
  *
  * | rule (#4)                                               | who may | where     |
  * | ------------------------------------------------------- | ------- | --------- |
- * | ~~Claims auto-accept at confidence ≥ θ~~ **(r7: human)**  | human   | **here**  |
+ * | Claims auto-accept at confidence ≥ θ, if the text certifies the type | model | **here** + `policy.ts` |
  * | OpenQuestions auto-accept at confidence ≥ θ              | model   | **here**  |
  * | **Commitments never auto-accept** (r5)                   | human   | **here**  |
  * | **Objectives never auto-accept** (r5)                    | human   | **here**  |
@@ -36,12 +36,30 @@ import { canonicalJson } from './state.js';
  * | **Acceptance citing no proposal at all**                 | human   | **here**  |
  * | **Declaring a question answered**                        | human   | **here**  |
  *
- * The struck row is r7. A claim is still #4's auto-accept *shape* — cheap to
- * correct, truth carried separately in `verification` — and the row moved
- * anyway, because nothing in a message's words says they were a claim rather
- * than a commitment, and `type` is supplied by the proposal. See
- * `typeCertifiableFromText`. The floor enforces it here; the engine's
- * `type_not_certified` row is its twin, and both derive from `modelMayMint`.
+ * **That row said "~~Claims auto-accept~~ (r7: human)" until r8, and it was
+ * false.** `MODEL_ACCEPTANCE_FLOOR.claim` is `0.7` at runtime — derived from
+ * `DEFAULT_ACCEPTANCE_RULES.claim.thetaAuto`, because `autoAccept` stayed `true`
+ * for claims — and a model lands a claim end-to-end at it, which is the path the
+ * product is built on. r7 built the `+Infinity` version, measured it deleting
+ * the auto-accept path entirely, and reverted it; `policy.ts` records the revert
+ * in full. This table and the comment on `modelMintingGate` below were written
+ * for the version that did not ship and were never brought back, so two comments
+ * in this file described a number that had not existed since the same afternoon.
+ * Both were found independently by two of r8's reviewers, which is what a
+ * comment stating a false fact about the code beside it usually costs.
+ *
+ * What is actually true: a claim is #4's auto-accept shape — cheap to correct,
+ * truth carried separately in `verification` — and it auto-accepts at θ_auto
+ * **when the words certify that they were a claim at all**. `type` is supplied
+ * by the proposal, so `typeCertifiableFromText` asks whether the sentence could
+ * equally be an undertaking, and a sentence that could is referred rather than
+ * accepted. That rule is about the *text*, so it cannot live in a table keyed by
+ * type; `MODEL_ACCEPTANCE_FLOOR` is the θ half and `typeCertifiableFromText` is
+ * the other, and `reduce.ts` runs both.
+ *
+ * `policy.test.ts` asserts the floor table against `DEFAULT_ACCEPTANCE_RULES`
+ * entry by entry, so a prose claim about a number in this file can be checked
+ * against the number.
  *
  * ## What round 2 moved down here, and why
  *
@@ -142,15 +160,20 @@ export type HumanOnlyGate =
  * nothing about why. `RETRO.md`: a rule applied at one site is not a rule, and a
  * refusal that does not name itself is a dead end.
  *
- * **Since r7 the two are no longer the same set, and that is deliberate too.**
- * `claim` has an unreachable floor and no gate here: its refusal is not "a
- * machine may not perform this act" — a machine reading a room and recording
- * what it found is the whole product — but "nothing proves this *was* a claim
- * rather than a commitment". That is a fact about the reading, so it rides with
- * θ, and `confidenceFloorRefusal` says it in words. Putting it here instead was
- * built and reverted: this switch runs before the verified-claim check, so a
- * gate on every claim shadows `claim_verification` into unreachability, and a
- * defence deleted by being shadowed costs more than the message it buys.
+ * **`claim` has no gate here and a perfectly reachable floor** — 0.7, the same
+ * θ_auto the engine reads. The r7 comment that stood here said the floor was
+ * `+Infinity`; see the table above for why that describes a draft rather than
+ * the code. A claim's *type* refusal is not "a machine may not perform this act"
+ * — a machine reading a room and recording what it found is the whole product —
+ * but "nothing in these words proves this was a claim rather than a commitment",
+ * which is a fact about the reading and rides with `typeCertifiableFromText`
+ * beside θ, not with the gates in this switch.
+ *
+ * Putting it here as a `claim_acceptance` gate was built and reverted for a
+ * separate reason worth keeping: this switch runs before the verified-claim
+ * check, so a gate on every claim shadows `claim_verification` into
+ * unreachability, and a defence deleted by being shadowed costs more than the
+ * message it buys.
  */
 export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null {
   switch (type) {
@@ -160,22 +183,23 @@ export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null
       return 'commitment_acceptance';
     case 'objective':
       return 'objective_acceptance';
-    // ── Why `claim` is not in this row, r7 ──────────────────────────────────
+    // ── Why `claim` is not in this row ─────────────────────────────────────
     //
-    // A model may not *land* a claim any more either — `MODEL_ACCEPTANCE_FLOOR`
-    // is `+Infinity` for it since r7, because `typeCertifiableFromText` says
-    // nothing in the words establishes that they were a claim rather than a
-    // commitment. That is enforced one screen down, at the floor.
+    // A model may land a claim: `MODEL_ACCEPTANCE_FLOOR.claim` is 0.7, and an
+    // unambiguous assertion quoted verbatim auto-accepting is the path the
+    // product exists for. What it may not do is land one whose words read as an
+    // undertaking — `typeCertifiableFromText`, enforced one screen down beside
+    // the floor rather than here.
     //
-    // It was implemented here first, as a `claim_acceptance` gate, and put back:
-    // this switch runs **before** the verified-claim check, so a named gate on
-    // every claim swallows `claim_verification` whole and makes it unreachable —
-    // a defence deleted by being shadowed, which is worse than the message it
-    // was buying. The gates in this row say *a machine may not perform this
-    // act*; the claim rule says *nothing proves this was that act*, which is a
-    // fact about the reading and belongs with θ. `confidenceFloorRefusal` names
-    // it in words rather than reporting an unreachable number, which is the
-    // objection the paragraph above raised against a floor-only refusal.
+    // (The r7 comment on these lines said the floor was `+Infinity` since r7. It
+    // was not; that was the draft r7 measured and reverted. Corrected in r8 —
+    // see the table at the top of this file.)
+    //
+    // A `claim_acceptance` gate was built here first and put back for an
+    // unrelated reason that still holds: this switch runs **before** the
+    // verified-claim check, so a named gate on every claim swallows
+    // `claim_verification` whole and makes it unreachable — a defence deleted by
+    // being shadowed, which is worse than the message it was buying.
     case 'claim':
     case 'open_question':
       return null;
