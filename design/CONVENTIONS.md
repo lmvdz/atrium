@@ -96,6 +96,224 @@ The system is deliberately dense — an operator surface, not a marketing page.
 - Small type at these sizes leans on `--tx2`/`--tx3` rather than on size alone for
   hierarchy. Do not go below 10px for anything a user must read.
 
+## A number that needs a disclaimer is the wrong number
+
+Every review round adds a clause. No round had ever removed one, and after eleven
+of them the most valuable real estate on this page — the top three lines of the
+CURRENT STATE pane — was spent on arithmetic disclaimers about its own counts:
+
+```
+13 objects · 4 settled · 8 unverified · 2 items awaiting you · updated 09:07
+4 + 8 + 1 open = 13 of 13 · awaiting you overlaps them, it does not add to them
+the need-you counts below sum to 4, not 3 — an object under two objectives is
+counted by both, and is still one item in Needs you
+```
+
+Three lines explaining why the numbers do not add, above the numbers. The pin
+trailer had the same shape from the other direction: **six unrelated statistics in
+one 30-word run-on** with nothing but middots between them. Each clause was
+demanded by a round that was individually right, and the accumulation is a defect
+none of those rounds could see from inside itself.
+
+**The rule. A count that needs a sentence beside it to be read correctly is the
+wrong count to show.** The honest fix is fewer numbers, not more prose about them.
+Ask what a returning reader needs on the first screen, show those, and delete the
+reconciliations. Three specific traps, each one a real line that was removed:
+
+- **Do not print an equation to apologise for a partition.** `4 + 8 + 1 = 13`
+  existed because "settled" and "unverified" were presented as slices of one pie
+  that "awaiting you" cut across. Stop claiming the partition and the equation has
+  nothing to reconcile.
+- **Do not apologise for a sum the page never showed.** The overlap caveat added
+  up the per-objective counts *on the reader's behalf* and then explained the
+  total. Each header is true of its own section; nothing on screen adds them
+  together but the note that regrets it.
+- **A count that duplicates a sentence beside it is not corroboration.** The
+  trailer printed `N failures` next to a lead whose first branch *is* the failure
+  count, and `N overdue` next to a lead that says how many things are late.
+
+And the counterweight, so this does not become licence: **remove displayed prose,
+never a guarantee.** Every invariant, every mint stays. What goes is the page
+explaining its own arithmetic to a reader who did not ask.
+
+**One honest exception, because a blind reviewer refused the blanket version.**
+Deleting `last check HH:MM` deleted the *read* behind it — the scan for the most
+recent dated verification in the room — and that was a freshness fact, not
+prose. `updated HH:MM` is not a replacement: it is `S.now`, which a chat message
+advances. So the room-level freshness signal is **gone, not relocated**, and the
+lead's `N of M unverified` is a different fact that happens to answer the same
+worry most of the time. Written down that way rather than as an equivalence,
+because a prune that quietly drops a read while claiming it drops only prose is
+the same defect as a count that needs a disclaimer. **And delete the arithmetic
+with the line** — the first cut left every removed statistic's computation
+standing in `clearSummary()`, dead work that reads like a guarantee and is the
+easiest way for a statistic to come back without a decision.
+
+Two things to preserve while pruning, both of which cost nothing on screen:
+
+- **A disclaimer that answers a real question moves off the screen, not out of
+  reach.** The objective-overlap explanation lives on the header's `title` now.
+  Be exact about what that is: a button with visible text takes its accessible
+  *name* from that text, so `title` is a description and a tooltip — available to
+  a pointer and to most screen readers, not to touch, and not a line anyone pays
+  for. That is the right trade for a caveat nobody asked for; it would be the
+  wrong trade for anything a reader needs to act.
+- **Fewer numbers is not fewer groups.** The trailer's remaining facts are
+  separated by a rule rather than by punctuation. The run-on was a legibility
+  problem as much as a count problem, and dropping four statistics without
+  grouping the rest would have fixed half of it.
+
+**Sweep the prune as a class, not where it was noticed.** #10 r12 pruned the pane
+and left the identical shape one column to its left, on every screen after the
+reader's first write: `SINCE YOU RETURNED · 0 NEED YOU · 0 CHANGES · 0 DISCUSSION ·
+0 ROUTINE`, then `0 unseen since 09:12 today · 4 rows here are yours — your own
+activity is never counted back to you as unseen`. Four permanently-disabled zero
+chips — *the same four controls that round's own driver reported as enumerated but
+never driven, because there is nothing to drive* — and a two-clause disclaimer
+explaining the zeros. **A chip that filters nothing is not a control**, and a group
+with nothing unseen says what is in it in one clause instead of four zeros and an
+apology for them. When a round writes a doctrine, its first job is to run the
+doctrine over the whole page.
+
+**And r13 did not sweep it either — the same divider, one clause over.** On the first
+screen, under the chips: `chips count rows · NEEDS YOU counts the items behind them`. A
+two-clause reconciliation whose entire job was to tell a reader that `2 NEED YOU` on the
+divider and `NEEDS YOU 3` on the tab count different things. That is the trap named at the
+top of this section — *a count that needs a sentence beside it to be read correctly is the
+wrong count to show* — written by the round that shipped it. **A count names its own
+unit and then nothing has to reconcile it**: the chips read `2 NEED-YOU ROWS`, `4 CHANGE
+ROWS`, `31 ROUTINE ROWS`, and the sentence explaining the collision is gone because the
+collision is. The same move fixed the other pair on that screen: the lens said `13 objects
+· 9 unverified` while the pin trailer said `~ 6 of 10 unverified` — two true counts of one
+word over two scopes, arithmetically consistent and unexplained. Both read `N of M` now,
+which is one number fewer and puts the difference in the count instead of in prose about it.
+
+**And when you delete an explanation, re-verify the thing it explained is still
+true.** r11 counted "unverified" with one predicate on both sides of the screen and
+printed the scope. r12 widened the lens predicate to include open questions — the
+right reading — and, in the same commit, deleted the scope clause. Neither change
+was wrong; together they left the lens saying `8 unverified` and the pin trailer
+saying `~ 7 of 13 unverified` over the same thirteen records with nothing owed, and
+the sentence that would have made a reader ask was gone. **One predicate, named
+once, called by every surface that counts it** — and a number in a minted sentence
+is re-derived from the records the sentence declares it read, on every paint, so
+two honest counts of the same thing cannot disagree on one screen.
+
+**And that sentence was unqualified for a round, which is how the largest hole on
+the page stayed open.** r13 shipped it as written above while the code beside
+`COUNTED_CLAIMS` was honest that the re-derivation only reached eight *phrasings*.
+The rail's owed badge minted thirteen verification reads and its entire sentence
+was the characters `3` — no phrasing to match, no field word for `checkVocabulary`
+or `checkQuantifiers`, and `say()`'s own point-read mutation gated on a field word
+appearing in the sentence, so all thirteen read-mutations were skipped as well.
+Four instruments, one sentence, silence: patch that badge to return `7` over a room
+holding two and five surfaces on one screen contradict each other with a clean
+console. **A denylist of phrasings is unbounded — enumerate the compliant forms
+instead and report what matches none of them.** Every numeral in a minted sentence
+is now read by one of five: a phrasing pattern, a predicate the sentence *declares*
+(`say(views, phrase, owner, ["needsYou"])`, re-derived from those same records), a
+number the record itself holds, a declared non-count shape (clock, date, money,
+percentage), or a duration re-derived from the two record timestamps it measures.
+Anything else is reported on the paint that renders it.
+
+**A duration is not a shape, and calling it one hid a lie for sixteen rounds** (r17).
+`duration` sat in that list of shapes, so the check asked whether `3h` *looked* like
+a duration and never what it was a duration *from*. `Q1.openFor: "3h"` was a seeded
+string beside an `askedAt` of `09:11` and a room clock of `09:12`, and the chip that
+carried it was `{ read: "verification", post: " 3h" }` — a literal pasted onto a
+genuine record read, which defeats `say()`'s point-read mutation by construction:
+flip the verification and the sentence moves, so the read is provably load-bearing,
+and the three characters beside it never budge. A clock, a date, an amount and a
+percentage are shapes — one quantity the record holds or reproduces, nothing behind
+them to recompute. **A duration is a subtraction, so it has an answer, so it is
+checked against it.** `elapsed(o, "askedAt")` is handed the *name* of the field, not
+its value, so the checker goes back to the record for both endpoints on every paint
+— which is also what makes a duration minted once and painted ten minutes later a
+reported defect instead of an invisible one.
+
+**And a fixture may not paste prose onto a record read.** The `{ read, pre, post }`
+fact-chip shape took two free strings either side of a real read; that is where the
+duration hid. The shape is an allowlist now — `label` (which may use only the
+field's own vocabulary), `also`+`join` (a second field of the same record, through a
+connective that may hold no digits), `when` (a gloss the value itself selects) and
+`none` — and a key outside it is refused on the paint that renders it. **And the reach is generated, not described**: `design/prototype-counts.txt` is
+every numeral on screen with what read it, digits normalised to `#`, produced by
+the same function the checker calls and compared against the live walk on every
+driver run. This paragraph may not describe that file's contents; it cites it.
+
+**A caveat is conditioned on the thing it is about.** r12 moved the objective-overlap
+explanation into the header's `title` and gated it on whether anything under that
+objective was owed — so the objective whose overlap is *total* carried no overlap
+sentence at all, because nothing under it needed you. Gate a caveat on whether the
+condition it describes exists. Better still, make the shape visible in the count
+itself: every objective header reads `N of 13 objects` now, one denominator, so the
+headers read as overlapping slices of one room rather than as parts of a sum, and
+the caveat has less work to do.
+
+**And the rule was never only about numbers.** Everything above is one sentence —
+*a count that needs a sentence beside it is the wrong count* — applied to counts,
+for six rounds, while the same shape grew unchecked in prose. By r17 a single
+click appended **two feed rows, one tick apart, about one object**, and the second
+printed the first back: the option label verbatim, the authorship boundary in
+different words, and `nothing inferred` twice. Three blind reviewers reached the
+same verdict independently, none of them asked to look for it: *"every correction
+added a clause, nothing ever removed one"*, *"two rows, ~50 words, one event"*,
+*"by the fourth action I was scrolling past my own audit trail to see the
+conversation"*.
+
+**The generalisation. A disclaimer that has to appear every time is a design
+defect, not honesty.** If a surface needs a sentence explaining that its number is
+not what a reader would assume, the number is wrong or the surface is. If an
+authorship boundary needs restating on every row, the boundary belongs in the
+*form* of the row — its voice, its actor column, its tag — not in prose repeated
+per instance. This page already had the form: a chosen answer is actored to
+`atrium`, painted in the system's monospace, and tagged `chosen from the card`. The
+three sentences saying so were describing a distinction the reader could already
+see.
+
+**Two rows that narrate one object in one tick may not paint the same words**, and
+`checkEchoInvariant()` refuses it on the paint that renders it. It is an allowlist
+in the sense this file means: it does not enumerate forbidden phrasings, it forbids
+any repeated run of words at all, so a clause reworded next round is caught by the
+same line of code. What it deliberately does not see is written into the code beside
+it — a human's own characters, two rows in different ticks, two rows about different
+objects, and a row's own state tag, which `objectTag()` re-derives on every row
+about the object *on purpose* and is round 1's B2.
+
+**And the largest thing it cannot see is a restatement.** Over the three paths repro
+R18-D1 drives, it reports exactly three runs on r17; it says nothing about `statement recorded verbatim, not worded by lars`
+sitting over a note reading `these are not lars's words`, because those share no
+words. No word-level rule can. **A mechanical rule keeps a prune pruned; it does not
+perform one** — the restatements were found by three people reading the screen, and
+the next round's will be too.
+
+**The division that makes the prune possible: the answer row states the answer, the
+ledger line states the transition.** The ledger line was carrying the label, the
+authorship and `nothing inferred` — every one of them painted forty pixels higher,
+by the row the same write had just appended. What only it can say is what the
+*record* did, which is the arrow, plus the consequence nothing else carries (`still
+blocking 2 objectives`). Everything else went.
+
+**A summary earns its place when the thing it summarises is not on screen.** The pin
+said its list was empty twice — `nothing owed — this is the whole list` in the count
+slot, over `NOTHING NEEDS YOU IN THIS ROOM — THAT IS A RESULT, NOT AN ABSENCE` — on
+the screen a reader reaches by doing the work. And the clause that was cut, *this is
+the whole list*, is a promise that nothing is folded away: worth making about a list
+with something in it, which is the state where it was never printed. The count is
+printed now only when the pin is folded, because that is the only state in which the
+list itself cannot speak.
+
+**For every clause you cut, name the fact it carried and where that fact now is. If
+the answer is "nowhere", put it back.** Three cuts were refused on exactly that test
+in r18 and are recorded here so the next round does not re-litigate them: `these are
+not lars's words` stays on every chosen-answer row, because a row a reader reaches
+six months later, under a filter, with no neighbour in view, has no other prose
+saying the sentence was not typed; `SINCE YOU RETURNED · 5 rows here, all yours`
+stays, because it *is* the group boundary and the count is the only content it has;
+and `THAT IS A RESULT, NOT AN ABSENCE` stays, because an empty surface that does not
+say why it is empty reads as a page that failed to load. **Removing prose is not the
+goal. Saying each thing once is.**
+
 ## Epistemic glyphs
 
 Every rendered fact carries exactly one glyph. The glyph is *derived from the
@@ -109,8 +327,14 @@ repeating: **a claim never dresses as a fact.**
 | `?` | explicitly unverified | `--amb` |
 | `·` | routine / informational | `--tx3` |
 | `◆` | needs you — escalation or decision pending | `--amb` |
-| `■` | destructive decision pending | `--red` |
+| `■` | destructive decision pending — **reserved; `glyphOf()` has no branch that produces it, and nothing in v1 is destructive** | `--red` |
 | `✗` | failed | `--red` |
+
+The `■` row is honest about being empty on purpose. It was load-bearing for ten
+rounds — the friction rule keyed on it — while no code path could assign it, so
+the rule it keyed had one side. Friction is decided by the reversibility audit
+now, not by this row; if something destructive arrives, it gets `■` *and* the
+audit will already have flagged it.
 
 `~` and `✓` are the load-bearing pair. An LLM-derived decision is a `~` claim
 until a human accepts it, at which point it becomes `✓`. The dotted underline on
@@ -128,25 +352,79 @@ Friction is applied in proportion to reversibility, not to importance. This is t
 most consistent single decision in the whole corpus — unchanged across every
 version and independently arrived at on both design branches.
 
-- **Reversible** (amber `◆` gates): **one click.** A yes/no answer, immediate, no
-  confirmation dialog. Making these fast is the whole reason the attention surface
-  is usable.
-- **Irreversible** (red `■` decisions — merges, deletions, anything destructive):
-  **press-and-hold for 2 seconds**, with a progress bar filling during the hold.
-  Click-only; the action records who armed it and when.
+**Reversibility is a fact about the control set, not a property of a glyph.** The
+rule used to read: amber `◆` gates get one click, red `■` decisions get a
+press-and-hold. #10 r11 reported honestly that the irreversible tier was
+unexercised, and a blind reviewer found the consequence: `glyphOf()` has no branch
+that can return `■`, so **the partition had one side**, and every action on the
+page defaulted to the safest tier by virtue of a glyph nothing could produce.
+Under it, `Ask justin instead` — one unconfirmed click — set the assignee, cleared
+`owedTo`, left `canAnswer` false and `canReopen` false, and **no control anywhere
+took it back**. A rule that classifies by appearance will exempt whatever does not
+wear the costume.
 
-Do not add a confirmation modal to a reversible action, and do not let an
-irreversible one through on a single click. The hold is the confirmation — it is
-cheaper to explain and impossible to muscle-memory through.
+So the question is asked of what the page actually offers, after the action:
+**does a control exist that puts this back?** Every action answers for its own
+irreversibility in one of exactly three ways, strongest first:
+
+1. **A control puts it back.** After the action the page offers you the control
+   that restores it — `reassign` ↔ `takeback`, `signed`/`answered`/`opt`/`verify`
+   ↔ `reopen`. This is the only one of the three that is an actual undo, and it
+   is the one to reach for: #10 r12 answered the reassign trap by *building the
+   way back*, not by putting a modal in front of it.
+2. **It asked first.** The control opens a prompt with a cancel instead of
+   writing — reopen wants the reason, verify wants the evidence — so the click
+   that commits is the second one. This is checked in the DOM (the control has to
+   be a disclosure, `aria-expanded`) rather than declared in a table, because a
+   table saying "this one asks" is the kind of claim this artifact has shipped
+   false four times.
+3. **It named what it writes.** The label carries the value — *"Reschedule to
+   today 17:00"* — and what it replaces stays on the record and in the chain.
+   **This is the weakest tier**, honest only for an action that erases nothing,
+   and it is written down as a tier rather than as an exemption precisely so the
+   next reviewer can see which actions are leaning on it. Today exactly one is.
+
+An action with none of the three is the defect, and `reversibilityAudit()` says so
+on every render, driven by the same `offeredActions()` the renders build their
+buttons from — so it cannot be an audit of a control set the page does not have.
+
+**And "the same function the renders use" is itself checked, over every control
+that reaches a write and not only the ones wearing `data-fx`.** The first draft
+of that check walked `[data-fx]` alone, which is the selector list r10 shipped
+and r11 replaced, one layer down — and a blind reviewer used it to find the gap:
+`Answer in your own words →` opens the composer, Send calls
+`answerQuestion`/`answerDecision`, and that write had no action id at all. On a
+question whose card carries no wording it is the *only* action the pin offers, so
+the friction rule was blind to the one move available. `WRITE_CONTROLS` maps each
+control's own markup to its action id — `[data-fx]`, `[data-opt]`,
+`[data-verify]`, `[data-bind]`, `#rcReopen` — and a new control has to name which
+action it is or the check says so. **A control that reaches a write and is not in
+the offered set is a write the friction rule cannot see.**
+
+Do not add a confirmation modal to an action that has an undo; **build the undo
+before you reach for the friction.** Where a hold is genuinely right — a
+destructive action with no way back and nothing to name — press-and-hold for 2
+seconds with a progress bar, click-only, recording who armed it and when. Nothing
+in v1 is in that class, and the audit is what will tell you when something is,
+rather than a glyph nobody assigns.
 
 ## Motion
 
 Three keyframes, and no others without a reason:
 
-- `gl-blink` — 1s infinite, hard on/off. Live/recording indicators only.
-- `gl-pulse` — 1.2s or 1.6s infinite, opacity 1 → .35. In-progress states.
+- `gl-blink` — 1s infinite, hard on/off. Live/recording indicators only. **v1 has
+  no live surface, so v1 defines no `gl-blink`** — it arrives in Phase 4 with the
+  call strip, alongside the `--live` token family kept unconsumed in `tokens.css`.
+  A keyframe defined and never used is a rule nobody is holding, and #10 r6 proved
+  it: `gl-blink` sat unused while the one animated dot on the page ran `gl-pulse`
+  in verified green. Define it when something is live; until then, don't.
+- `gl-pulse` — 1.2s or 1.6s infinite, opacity 1 → .35. In-progress states. A pane
+  that is continuously re-derived is in-progress, not live.
 - `gl-rise` — .15s / .2s / .25s ease, a 2px translate plus fade. New rows entering
   the timeline (`.mrow`) and content appearing.
+
+Colour is decided by the glyph table, not by the animation: nothing wears `--grn`
+unless it is `✓` verified, however alive it is.
 
 Everything is short. Nothing in this system eases in over half a second; a feed
 that animates slowly is a feed you cannot read while it moves.
@@ -170,6 +448,221 @@ and revealed on row hover over ~.12s. The row stays quiet until you are pointing
 at it. Anything that must be discoverable without hovering — anything that owes
 the user attention — is not a hover affordance.
 
+**And a control you cannot see must not take the pointer.** `.mrow .acts` was
+`position: absolute; z-index: 3` and was hit-testable at `opacity: 0`, clearing
+`#unmarkSeen` by **1.4px** at 1440. A blind reviewer drove 18 randomised sessions of 40
+real mouse clicks with pointer moves at three widths, plus a 12-width probe of all nine
+hit-test points, and could not steal a single click — and measured the mechanism anyway.
+**Delete the reachability, not the margin.** The rule is a pair, and both halves are
+checked:
+
+- a control a reader **can** see must have a point that hit-tests to itself;
+- a control a reader **cannot** see must have no such point;
+- and a control that refuses the pointer while *visible* is its own defect — painted, in
+  the tab order, and a click passes through it.
+
+The one thing this rule may not do is ask either question of a control mid-transition: a
+strip fading in is transparent for 120ms and is not a strip nobody can see. `effOpacity()`
+returns `null` while any ancestor has a running animation, and an unsettled control is
+skipped rather than reported. That caveat exists because the first cut of the rule fired
+on eleven honest controls before it fired on the real one.
+
+### And a third question: what is painted, against what is laid out
+
+**A control or a sentence you can see must not be painted over by another element you
+can also see.**
+
+The pair above is complete and it is not enough. Round 16 found two live defects that
+every instrument on this page passed, and none of the instruments was broken:
+
+- `scrollWidth === clientWidth` held on both elements. **Nothing was clipped. It was
+  painted over.** The legibility rule asks whether text overflows its own box, and
+  occlusion happens entirely outside that question.
+- Both halves of the reachability pair passed too, and that is the instructive part:
+  **the occluder was itself visible and itself reachable.** `go to it →` — the route
+  round 15 gave the reply preview — is 60px wide, and 42 of those 60px were painted over
+  by the `Reply` chip the same `:hover` reveals — 42px at 1440, 1366, 1279, 1160 and 1120
+  alike, structural rather than a width accident. `document.elementFromPoint` at the
+  label's own centre returned
+  `<button data-reply="1">Reply</button>`, so the click a reader aimed at "go to what I
+  am quoting" opened a reply to their own message. The same strip's `top: -9px` put it
+  across 11px of the row's own 15px first line: **5 of 17 rows lost characters at 1440
+  and 10 of 17 at 1120**, in both themes, mid-sentence, in the middle of somebody's
+  unverified claim. The row was unreadable at the moment you pointed at it to read it.
+
+Round 14 predicted this mechanism and guessed the trigger wrong: it wrote that a
+**row-spacing change** would turn the overlap into a repro. No row spacing ever changed.
+Round 15 added **a new control underneath the overlay**. So the rule is stated in the
+direction that catches both: **an overlay's blast radius changes when what is underneath
+it changes**, and the check must fire on a change to the covered as readily as on a
+change to the coverer.
+
+**Prefer a lane to an overlay.** The fix was not to move the strip; it was to stop it
+being an overlay — `.mrow` has a fifth grid track sized `auto`, so each row reserves the
+width of the strip *it* has and the text column can never reach into it. That costs
+44–93px of a row's text width and 35–70px of the feed's height, and it is the
+right trade on a surface whose stated job is that the record is painted whole. Slack does
+overlay a hover toolbar; Slack is not a 10–12.5px operator surface, and the characters it
+covers are not somebody's unverified claim.
+
+**Enforcement: `design/prototype-drive.mjs`, pass 4, plus the two repros
+`R16-D1-a-controls-label-is-not-painted-over` and
+`R16-D2-a-row-hover-covers-none-of-the-rows-own-words`.** It runs at every declared width
+**in both themes**, and it is measured **per painted character**: a `Range` per character,
+the character's own centre put to `document.elementFromPoint`, and a paint-order
+comparison to decide whether what answers is genuinely above it. The finding quotes the
+characters that were lost.
+
+It lives in the harness rather than on the page **because the strip exists only while a
+row is hovered**, and a render-time checker has no hover to look at. A fourth page-side
+instrument that cannot see the class it was built for is this file's own "wrong instrument"
+failure. One implementation, injected into whatever build the driver is pointed at, so the
+previous round and this one are measured by identical code.
+
+**What it enumerates from, and what it does not cover.** The occluder set is every
+*visible* element that is `position: absolute | fixed | sticky` or carries a positive
+`z-index` — the set that can paint over a sibling without the layout knowing. The covered
+set is every painted character under `<body>`; characters scrolled out of their own pane
+are counted as not painted. The states are the ones pass 4 drives: the load state, then
+one pointer position per on-screen control and per message row — **not** every state pass
+0's write-sequence walk reaches. It cannot see: an in-flow overlap made by a negative
+margin or a transform; anything covered that is not text (an icon, a rule, a focus ring); an overlay
+that is itself `pointer-events: none`, because the hit test never nominates it; and a
+sliver crossing the top of a glyph, because it samples one point per character. The
+paint-order comparison resolves at the two elements' common ancestor rather than through
+every stacking context between them.
+
+That last list is not decoration. The first cut of this rule reported that a message row
+was covering the toast's own words — the toast is `z-index: 40; pointer-events: none`, so
+it is painted above the feed and the hit test looks straight through it. It invented a
+defect on its first run against the previous round, which is why the hit test now only
+*nominates* and the paint order decides.
+
+### And a fourth question: does the sentence still mean what it says once the page moves
+
+Three of round 17's four defects are one shape. **A sentence that was true when it was
+written, about a page that has since moved, and nothing re-derives it.**
+
+**A route says where it goes.** `sourceChip()` derives `source in #<room> →` from
+`sourceRoom`; the provenance header derives `jump to source in #<room> →` from the entry's
+own room. The correction chain's route labels were the one family that did not derive, and
+they are the family whose words *assert a location*. Reopen `D2` in `#users-migration` and
+the chain read `the source is still in the room →` **forty pixels under** a provenance
+entry, about the same message, reading `jump to source in #identity-service →`. Clicking
+it left the room, and the page's own toast then said *"the source of that item lives here,
+not in the room you came from."* `linkedObject` and `isAttentionRow` are room-scoped
+precisely so no surface pretends an in-room row exists; this was the one sentence doing it.
+Every route label ends in `routeHome()` now and is handed the same value the entry's `room`
+attribute is handed, so the words and the destination are one fact. One entry in that
+family carried **no `room` at all**, so its route resolved against whichever room you
+happened to be standing in — the same defect one attribute along.
+`R17-D2-a-route-label-says-where-it-goes` is behavioural: it captures the label, clicks it,
+and asks whether the room moved. `R17-D2b-a-cross-room-decisions-chain-says-which-room`
+covers the second instance from the other side.
+
+**A sentence does not locate a neighbour by position.** `K2.why` read *"the cutover
+decision **above** cannot be executed until it is signed"* — true in the seed state, false
+one click from boot. Answer `P1` from the pin and `K2` is the topmost item at y=93 with the
+cutover at y=190 in the lens and y=351 in the feed, both below, and no decision above it
+anywhere on screen. The proposition survived; the locator did not. **Name the thing rather
+than point at where it is** — a sentence that must be re-derived on every reorder is a
+liability, and this file has been bitten by exactly that four times.
+`R17-D3-a-rationale-does-not-locate-by-position` measures the geometry rather than reading
+the sentence, and counts only rows that survive the viewport and every scroll box over
+them: its first cut listed `D1 at y=-58 in #feed (above)` underneath the words "no decision
+renders above it", which is a report contradicting its own evidence.
+
+**And a repro with a fixed route cannot keep a class pruned — r19 made it a render-time
+rule.** Round 11 cut this shape out of `V1.note`; round 17 cut it out of `K2.why` and wrote
+the repro above; round 18 shipped it twice more. `applyEffect`'s reschedule branch painted
+*"the date it moved from **stays above**, and it is still owed"* at y=252 with `yesterday
+17:00` rendering at 431 and 540 — 179px and 292px **below** it — and nothing but `today
+17:00` above it at 114 and 235, at every declared width in both themes; and `whyOf()`'s
+*synthesized* branch, four clicks from boot, still read *"and it is on the record below"* in
+the very surface `R17-D3` guards. R17-D3's own assertion reports that one when it is run on
+that state instead of on the one route it drives. **A scripted path checks the path.**
+
+So the enumeration was done exhaustively — every string literal in the file, comments
+stripped, cross-checked against a live DOM scan over thirty routes — and the sixteen
+sentences it found were each **named instead of pointed at**: *"the date it moved from is
+kept in the correction chain"*, *"the answer of record"*, *"in this chain"*, *"highlighted in
+the conversation"*. `checkLocatorInvariant()` now runs on every render, and it is flat:
+**no run the page authored carries a spatial locator.** Recited text is out (a person's typed
+words, a seeded message, a provenance excerpt), as it is for every page-integrity rule here,
+and a locator is non-compliant *wherever it is rendered* — scrolled out is not a defence, so
+the test is `shown()` and not "is it in the viewport". The word list is closed and short, and
+it is honest about its reach: a paraphrase ("the line you just read", "two panels left")
+walks past it. What it buys is that the **form** this file has shipped four times cannot ship
+a fifth time in silence.
+
+**And the rule has no exceptions, because the exception turned out to be the defect.**
+`C3.note` — *"The parity run **below** happens to agree with this"* — was excluded from r19's
+scope on the record: two prior reviews had filed it as a defect, both were judged wrong, and
+the standing ruling was that it holds at every reachable scroll position because the pane
+only scrolls ~155px. r19 built it a declaration channel — `data-locates="<object id>
+above|below"`, **measured** against the painted boxes rather than whitelisted — so that the
+one legitimate positional claim could survive a flat prohibition. The channel's own
+measurement then reported it 117 times across the state walk.
+
+By hand, on r18 as committed, at the declared height of 900: **three clicks from boot** —
+`C3` in the lens, its receipt, then the `·31 routine` strip every feed carries — the routine
+rows expand, `m9` leaves the viewport, and the only parity run a reader can see renders
+**above** the sentence claiming it is below, by 19px at 1440, 96px at 1366, 139px at 1279,
+123px at 1160 and 96px at 1120, in both themes. The prior adjudications asked whether
+*scrolling* could falsify it; what falsifies it is a control that changes what is in the
+feed. The word came out, the proposition stayed — *"The parity run happens to agree with
+this"* — the channel had no callers left and went with it, and this file already says why
+that is the better end state: **an audit may not exempt the case its own rule covers.**
+
+## A count names the set it counts over
+
+The pin trailer prints two statistics on one line and they had **different scopes, with only
+one saying so**: `6 of 10 unverified` counts the room's records *minus the ones in the pin*,
+while `1/3 objectives clear of you` counts the whole room. Nothing on the left named its set
+— no clause, no `title`, no `aria-label` — so clearing your queue walks the same sentence in
+the same place through `6 of 10` → `6 of 11` → `7 of 12` → `8 of 13` while the tab beside it
+says `13` throughout. Every statement is true of its unstated set, so this is ambiguity
+rather than falsehood; it is a defect because **watching "unverified" climb while you clear
+your queue reads as punishment**.
+
+Its cause is the general lesson. **Round 12 removed the clause that carried the fact** —
+`beyond the N above` — as part of a prune that was right about the *position* and wrong
+about the *scope*. A pruned clause took a denominator's subject with it. Every branch of the
+phrase now names the set (`outside your list`, which the failure branch has said since round
+12), and `N of M unverified` stays **contiguous** because two earlier repros read exactly
+that shape — a rewording that slid a word between the numerals would have turned `R13-D3`
+and `R14-D10` into checks that match nothing and pass in silence.
+
+## A person's draft is not the page's to delete
+
+`dropPrefill()`'s comment has said since round 8 that **"deleting somebody's draft to be safe
+is its own kind of dishonesty"**, and the page did not hold it. The verify box and the reopen
+box are rebuilt from `innerHTML` on every `render()`, so *any* re-render took the characters
+with them — type evidence, press `FOLD`, gone — and the composer's draft was destroyed by a
+room switch and by answering a decision or a question **from the pin**, writes that never
+read the composer at all. No sentence on screen claimed otherwise, so this was data loss
+rather than a lie; it is in scope because **an artifact citing an invariant it does not hold
+is the defect**, not the inconvenience.
+
+Focus already survived a render, through `focusKey()`/`restoreFocus()`, for exactly this
+reason. `S.drafts` is that mechanism's missing half and is keyed the same way — by what the
+draft is *for*, so a reason typed against `D1` can never reappear inside the box for `K0`.
+A draft is dropped when **the write consumed it** or **the reader dismissed the prompt**
+(Cancel, Escape), and by nothing else. The composer is cleared by a write only when the
+composer is what it wrote: `R19-D3c` asserts **both** directions, so a fix that merely
+stopped clearing fails its second half.
+
+**And no ellipsis is left.** `.trace .tx` was the last element in the file carrying
+`overflow: hidden; text-overflow: ellipsis; white-space: nowrap`: at 1120, scrollWidth 624
+against clientWidth 328, painting `you came from #identity-service · following the sourc…`
+and dropping *"which #identity-service owes you"*. The ellipsis discloses the truncation
+and the visible prefix is true, so it is not a lie — it is fixed because it is a **minted
+sentence painted into a fragment**, and the rule that took the ellipsis off the pin's fact
+row in r12 and off the rail in r14 applies to it too. The repro is the general form —
+`R17-D4-nothing-paints-a-sentence-into-an-ellipsis` walks every visible element whose
+computed `text-overflow` is `ellipsis` and whose `scrollWidth` exceeds its `clientWidth` —
+so a new one cannot appear in silence.
+
 ## What is deliberately not here
 
 The call-era tokens (`--live`, `--strip`, `--stile`, `--stileac`, `--stbd`,
@@ -189,6 +682,395 @@ Enforcement: any quotation-context element must carry provenance proving its tex
 
 **The rule covers authorship, not just invention.** A message the interface authors on a person's behalf — the text of an option they clicked, a template filled with their name — may never be attributed to them as their words, and may never satisfy the quotation check. Found in the #10 round-4 gauntlet: one-click answers appended a message authored as the user containing the card's sentence, and the checker then validated the quotation against that page-fabricated message, passing on exactly the class it exists to prevent. Messages carry their origin (`typed` vs `chosen`); only typed text and seeded human messages can be quoted; chosen answers render in system voice ("chose: <option>"), never in quotation marks.
 
+**A default branch may not name a person.** The same defect arrives through a missing `case` as readily as through a fabricated string. Found in the #10 round-5 gauntlet: `receiptState()` had no branch for an answered question, so it fell through to the claim branch and the receipt header read `CLAIM · unverified · claimant: priya` above a sentence priya had *asked*. Nobody wrote that attribution; the absence of a branch did. So: every fallback that renders a role — claimant, owner, verifier, asker — must be reachable only for kinds that actually have that role. When a kind has no branch, the fallback states what is missing, in words, and names nobody.
+
+**A record of an answer contains the answer.** Recording that something was answered while dropping what the answer said is not a record. The same round: clicking `Answer — retention is 90 days` wrote a transition and stored none of the answer's content, so the string on the button appeared nowhere in the object, the history, the feed, the lens or the receipt. Whatever the control promised to record is recorded verbatim, with its authorship disclosed by the rules above.
+
+## A correction's before and after come from the record, not from the render
+
+A chain entry that says one value became another has to read both values out of the object's own history of that field. Display strings — the sentence a row renders, an option's label, a state label composed for a header — may not enter a `change`, and cannot be checked by comparing them to each other, because two different fabrications differ just as convincingly as two real values do.
+
+Found three times in #10, through three different paths, each one invisible to the guard the previous round had added:
+
+- **r4 D7** compared an option's wording to a proposal's wording and recorded "not what was proposed" against an answer that agreed exactly. Fixed with a value (`agrees`).
+- **r6 D1** minted an option without that value, so a re-affirmation printed two byte-identical sentences either side of an arrow. Fixed by computing "did the record change" apart from "did the option depart", and by adding a guard: a `change` whose `from` and `to` are equal is a defect.
+- **r7 D1** computed that guard's operands against `prior.body` — the *system row's display sentence*, `"lars chose: Cut over Friday"`. The two operands differed, so the guard passed honestly, and every re-answer asserted an amendment from a string the record had never held. The mirror defect sat in the same function: answering with the *agreeing* option wrote no chain entry at all while the recorded statement genuinely changed.
+
+Each guard was correct about the relationship it checked and blind to where its operands came from. So the rule is structural, not procedural:
+
+1. **Recorded fields have histories.** One function writes the field, reads back what the object now holds, appends it, and returns the adjacent pair — or nothing, when nothing moved. There is no other way to change a recorded field, and a dev invariant proves it by comparing every field to the last value its own history contains. A future `o.text = …` is caught on the next render whether or not it ever reaches a chain.
+2. **Only that function can mint a `change`.** It marks what it produces; the checker refuses any entry carrying a change without the mark. That is what makes display strings *structurally* unable to reach a correction, rather than merely absent from one by convention.
+3. **The operands are validated, not merely compared.** A `change` whose `from` is not a value the object has ever held is a defect even when `from` and `to` differ, and so is a pair the record never moved through in that order.
+4. **Seeded corrections are corrections.** A fixture's historical amendments are replayed into the field history and minted the same way. An exemption for "this one is data, not behaviour" is exactly the shape every instance of this class arrived through.
+
+**And the two halves of a receipt agree about whether anything happened.** #10 r7 D5: reschedule moved a due date, WHAT HAPPENED said so, and CORRECTION CHAIN forty pixels below rendered "this object has never been amended". Every transition that amends a recorded field writes a chain entry; a field that has moved and an empty chain cannot both be right, and the invariant says so.
+
+**And every surface that narrates the record reads it — not the two that happen to be checked.** #10 r9 held a chain entry's two painted operands to the record and left the rest of the receipt writing about the same amendment from values composed beside it. Rescheduling a commitment to the date it already had produced, in one receipt: a chain body correctly reporting that nothing changed, a header stating `RESCHEDULED · DUE DATE AMENDED`, a WHAT HAPPENED line stating *"moved the due date from today 17:00 to today 17:00"*, a permanent feed row saying `rescheduled by lars`, a toast saying the original date stays, and a closing note saying it moves the date. Five surfaces asserting a move the record denied, at zero errors, because the rendered-record checker inspected `.corr` and `#feed .mrow` and nothing else.
+
+So the reader is a property of the TRANSITION, not of one surface: a write path takes its record reads **once**, and the header, the chain body, WHAT HAPPENED, the permanent row, the toast, the fact chips and the closing note are all minted from those same reads. Two consequences that are not obvious:
+
+- **A claim stated in an English word is still a claim.** The change-less guard was written as syntax (`/→/`) precisely because a keyword sniffer cannot tell "amended" from "nothing was amended" — correct, and it meant the word `AMENDED` went unread. The fix is not a word list, which is an unbounded denylist of phrasings; it is to make the header a record read, so the branch that produces the word is the branch that compared the two values. Every allowed form is then generated, and no disallowed form is reachable.
+- **The checker's surface list has to be derived, not remembered.** A hand-maintained list of selectors is the same denylist one layer up. Round 10 wrote six selectors — `.corr`, `.hap`, `[data-rstate-obj]`, `[data-fact-obj]`, `.rc-foot .note`, `#feed .mrow` — and this document asserted, in this bullet, that the list "is taken from the object's own shape, every property the page paints words from, with the reason each excluded one is already covered by a named invariant." **That sentence was false about the artifact when it was written, and it is the more dangerous half of the defect, because a reviewer reads the doctrine instead of checking the code.** The list was derived from nothing, and the surfaces it omitted are where all four of round 11's high-severity defects were found — plus `whyOf()`'s WHY YOU line, `objectTag()`'s row tags, `clearSummary()`'s pin trailer, the lens summary header and the correction entry's link label.
+
+  The list is the render now, not a list. **Every path that turns a minted sentence into output marks what it produced** — `voiced()` and `bodyHtml()` both go through `paintSaid` (`data-said`); `paintParts` marks the one surface the render takes apart into chips, the receipt's state line (`data-said-parts`); and the toast, which is text rather than HTML and is raised after the render it belongs to, is checked on the path that raises it. The checker then enumerates **every marked node in the document**. Nothing to remember and nothing to omit; a surface written next year is covered on the day it is written, provided it renders through one of those paths — which is the honest shape of the claim, and is why the completeness walk below exists to catch a surface that does not.
+
+  And the *completeness* claim is checked rather than asserted — with the reach of the check stated as narrowly as it actually is, because **this is the third round in a row where the mechanism was real and the claim about its reach was not.** r10 claimed a surface list "taken from the object's own shape" that was written from memory. r11 replaced it with a walk over `[data-obj]` — a real mechanism, which caught r12's D1 unprompted — and then wrote, in code and in this file, that the walk found `last check 09:07` in the pin trailer. `#pinTrailer` had no `data-obj` ancestor; the walk provably could not see it. **The comment proving the fix cited something the fix did not cover**, which is the same defect one layer in.
+
+  **The mechanism, exactly.** Two declarations, because there are two kinds of surface. `data-obj` says *this renders one object*; `data-agg` says *this speaks for many* — the lens summary over thirteen records, the pin trailer over ten, an objective header over eleven. A walk over every text node inside either refuses any clause pairing a history quantifier with a recorded field's vocabulary while sitting outside a minted sentence; **inside a `data-agg` host the rule is stricter — the field's vocabulary alone is enough**, no quantifier required, because an aggregate contains no human's characters and every one of them is the page's. `4 settled` needs no "still" to be a claim about `settlement`, and r11 computed it from `verification` and painted `settlement`'s word on it.
+
+  **And the value rule belongs to the walk, not to a selector list.** r10 wrote "an unminted chip may not state a value the record holds" and scoped it with three selectors — `.oitem .mt span`, `.acard .mt span`, `.acomp .fx span`, inside `[data-lens-obj]`. So a feed row's state tag painting `verified · checks`, `accepted · lars`, `claim · unverified` — and one branch interpolating `o.verification` raw — sat outside it permanently, on the surface that never goes away, and no instrument on the page could see it: the quantifier rule needs a quantifier and a state tag has none. Six branches of `objectTag()`, found by a blind reviewer in r12 after the rounds that minted the four branches above them had left them alone. **The list is the render**: the rule runs inside the walk now, over every text node in every declared subject, with its vocabulary derived from the object's own history — every field, every point — so there is nothing to maintain and an action label ("Mark signed off") never trips it, because an action name is not a value the record holds.
+
+  **One exception, and it is one string rather than a field.** `reading` records how a line was read — D1's history is `["Claim","Decision"]` — and *decision* is also the page's structural word for that object's kind, printed as a row prefix and a heading. Same characters, different claim: amend the reading and `o.kind` does not move, so minting the prefix from the reading would make a sentence move when the field it is not about moves. A value that **is** the object's own `kind` is the page naming the object, not the page quoting the record. That is the whole exception — derived from the object, not a list of forgiven fields.
+
+  **And what it does not cover is a function, not a sentence.** `uncoveredRecordWords()` returns every page-authored text node that uses a recorded field's own vocabulary while sitting inside no declared subject and no mint — computed on the live DOM on demand, instead of recalled. **One example from it, so the shape is concrete: the control label `Mark signed off`.** It uses `verification`'s vocabulary, declares no record, and is correct: it names an *action*, not a state, and the rule that governs it is the reversibility audit, not this one. Section labels, empty states and refusal sentences are in the list for the same reason: they use a field's word and speak for no record.
+
+  **And be exact about the function's reach, because a blind reviewer was.** It finds text that uses a field's *vocabulary*, so a counter carrying a bare number and no field word can never appear in it. Attributes are outside it too, including the objective header's `title`. **A claim in a doctrine file is subject to the same evidence rule as a claim in code — including the claim about how far a check reaches.**
+
+  **And the sentence that made that boundary concrete was itself a remembered list, and it was wrong.** It named six surfaces — *rail badges, surface tabs, `pinCount`, SINCE-YOU chips, the routine strip, the kind-group counts* — as "uncovered by every clause here, deliberately: they count messages and rows rather than speaking for a record". Two of the six had been covered for a round by the time a reviewer read it, and one of the remaining four was never true of itself: `pinCount` paints `3 items · hardest first` out of `attention(r).length`, which is `owedTo` AND a verification over every object in the room. It is the most prominent surface on the page and it was on a list of things that speak for no record, in a doctrine file, while a repro requiring exactly that coverage shipped in the same commit. **The uncovered counters are `design/prototype-counts.txt` now** — the `page` rows of a generated file, enumerated off the live DOM in every state the driver reaches, regenerated by the driver and compared against it on every run. A six-item list in prose could disagree with the code for a round; a generated file fails the run on the first render that changes it. **The rule this round earned: when a doctrine paragraph enumerates surfaces, the enumeration belongs in a file the mechanism writes, and the paragraph cites it.**
+
+  **And an aggregate is a sentence about many records, so it is minted from all of them.** A blind reviewer found the one surface that escaped both instruments: the pin trailer, which speaks for ten objects at once — `6 of 10 still unverified` — was a literal composed beside them, outside `paintSaid` and outside a walk scoped to elements that render *one* object. It was the exact escape the paragraph above said could not exist. So a claim and a query each carry **the record they were read out of**, rather than a box carrying one owner for all of them; the aggregate reads every object it counts, computes the counts inside the phrase, and the checkers re-read ten records instead of one. A sentence that speaks for a set is not exempt from speaking for each of them.
+
+  The same change closes a quieter one: a note on V1 said *"priya's line above is still ~ and stays that way"* — a claim about **C3's** verification, minted with V1 as its owner, so every checker on the page re-read it against the wrong record and verifying C3 made it false in silence. A sentence cannot be laundered through another object's mint when each claim names its own.
+- **A claim about one field may only be made about that field.** "so nothing was amended" is a sentence about the whole object, and a re-answer after a reopen moves the verification and the settlement in the same tick — so it was false beside a header that correctly announced the move. Scope it: *the answer itself was not amended*. A sentence written from one read may not generalise past it.
+
+### A sentence that quantifies over a field's history is produced by a query on that history
+
+Every rule above governs **the pair that moved** — from/to, validated operands, a header minted by the branch that compared. Nothing governed a claim about a field's *history*, and "again", "still", "preserved", "nobody has", "nothing other than", "already" and "throughout" are quantifiers over an entire field history. Round 10 built the query machinery to answer exactly these, used it at three call sites, and **required it at none** — so all four of round 11's high-severity defects are one rule nobody had written:
+
+| painted | read |
+| --- | --- |
+| *"the question itself is unchanged and still unanswered"*, beside a record holding an answer the same receipt paints twice | two views of `assignee` |
+| *"nothing other than the claimant has checked it"*, two rows above `✓ deploy 2f81c3 … checked by something other than the claimant` | nothing — a hardcoded literal inside a `say()` branch, using none of the four views it was handed |
+| *"the prior sign-off preserved on the record"*, on a commitment a deploy record verified and nobody has ever signed off | `settlement.ever("settled")` |
+| *"it is a unverified claim again"*, on a history reading `["verified","unverified"]` | nothing |
+
+**The rule.** A sentence quantifying over a field's history is produced by a **query on that history** — `ever` / `before` / `last` / `everSet` — not by comparing the two values at the ends of it. And it may only quantify over a field the transition actually **read**, which is structural rather than aspirational: a query exists only on a view, a view exists only because `reads()` took one, so a branch cannot ask about a field its transition never opened.
+
+Three families, calibrated to what would honestly answer each:
+
+- **whole-history** (`again`, `ever`, `never`) — only a query. "Again" asks whether the record has stood here *before*, and the two values at the ends of a transition cannot know.
+- **past** (`prior`, `preserved`, `earlier`, `before`, `nobody has`, `nothing … has`) — a query, or a read at a point that is not the end of the history. Reading the past is reading the past; a chain entry's `was` operand already is one.
+- **continuity** (`still`, `already`, `throughout`, `unchanged`, `no longer`, `stays`) — a read of *that* field at either end. A read of some other field is not one, which is the whole of the first defect above.
+
+Three consequences worth stating separately, because each was its own bug:
+
+- **A literal inside a `say()` branch is not covered by minting.** This is the residual both foreign lineages named at the end of round 10 — *`say()` mints, it does not prove the phrase used what it was handed* — and the second defect above is it, shipped. The sentence was minted, its point reads re-read, and it rendered a negation the record denies. Minting proves *where the operands came from*; only a query proves *what was asked*. So a query is now recorded on the sentence exactly as a point read is, and re-asked of the record on every render.
+- **A claim about HOW cannot be minted from a claim about WHETHER.** `settlement.ever("settled")` answers whether it settled; the word "sign-off" answers how. Name what is preserved from the value the verification history actually holds, never from the object's kind — a commitment can be settled by a deploy record exactly as a claim can.
+- **A default branch that can only produce one of its two sentences is the same shape as a missing `case`.** The same clause tested `p.value == null` on a field that, for a decision, is the statement — never null — so one arm was structurally unreachable and the other printed unconditionally. Unreachability is not a safety property; it is the *absence* of the branch that the rule needed.
+
+**What the enforcement is, and what it is not.** The quantifier words are a **detector**: they decide which sentences must show their working, never that a sentence is allowed. A sentence backed by a query passes whatever words it uses, so the list cannot be routed around by rephrasing. The other half of the pair, each field's own vocabulary, is declared on the data's shape beside its `get`/`set` — including the glyphs, because `~` is how this page says "self-reported" in one character and a vocabulary that omits it omits the shortest sentences on the page. And a quantifier binds inside its own clause: `reported 4.7% of sessions still on legacy tokens — unverified` is two statements, and asking the question of a whole paragraph is how a checker starts crying wolf.
+
+**Be exact about what a missing word costs.** An earlier draft of this section said a word missing from the vocabulary "costs a catch rather than granting an exemption". A blind reviewer pointed at `if (!words.length) return` and observed that for the sentence in front of it, those are the same thing — and it was right. The honest statement is narrower and worth having: **a missing word means a sentence goes unexamined, which is a hole, not a licence.** The difference from a denylist of phrasings is real but smaller than the first draft claimed: rephrasing a *caught* sentence does not release it, because the query is what makes it legal. What does not depend on the vocabulary at all is the pair of mutation clauses below — those examine every minted sentence on the page, whatever words it uses.
+
+**There is no seeded exemption, here either.** A fixture line reading *"nobody has been assigned"* or *"never checked against a bill"* supplies the words around the quantifier and the record supplies the quantifier itself — the same shape as a seeded correction supplying only its verb. And a view answers about the history **up to where it stands**, so priya's 09:11 sentence stays true when someone assigns it at 09:16 instead of quietly becoming false.
+
+**And the record's own words are not the page's sentence.** A recorded statement can contain the word "still"; a rule about what the *page* writes must not fire on a value the record holds, for exactly the reason the quotation rules already exempt a person's own characters. Multi-word recorded values are removed from the text before the test; a *state name* is not, because `unverified` on screen is the page's word for a state and removing it would open a hole the size of the vocabulary being policed.
+
+### A query that could not have changed the sentence did not produce it
+
+**"A query was run" is not "the sentence came from the query."** `v.ever("verified"); return "nothing other than the claimant has checked it";` runs the query, records it, satisfies every clause of the rule above, and prints the exact literal that rule was written to catch. This is the eighth door, and it is the same door as all seven before it: every layer of this class since r4 has been a guarantee about **where the operands came from**, and each one was escaped by a branch that took the operands and ignored them. Both blind foreign-lineage reviewers named it at the end of round 10 in its narrower form — *`say()` mints, it does not prove the phrase used what it was handed* — and concluded that no check for it existed short of reading English.
+
+There is one, and it is not a reading of English. **`say()` re-runs its own phrase with each recorded query's answer flipped. If the sentence does not move, the query is decoration and the words beside it are a literal.** A yes/no flips to its opposite; a point in a history flips to its absence, or to a presence. The mutation runs at the moment of minting, because that is the only moment the phrase is in hand.
+
+It fired eight times on the round that introduced it, against its own fix, in three shapes worth naming because each is a way to write a decorative query without noticing:
+
+- **A table literal computes every arm.** `{ decision: … s.before("pending") …, question: …, commitment: … }[o.kind]` asks the question for all four kinds and throws three answers away. Ask it in the branch that uses it.
+- **A fallback that can never be false.** `(a.everSet() || st.everSet())` — a decision's statement is always set, so the `answer` query could not decide anything. Pick the field the kind actually keeps the answer in.
+- **A query redundant with a value already in hand.** `v.last("self_reported")` asked of a record whose verification is standing at `self_reported` can only agree with it. If a clause cannot ask a question its own operands do not already answer, the clause is naming the wrong field — name the one its query is really about.
+
+**And the same mutation is owed to the point reads, not only to the queries.** Two of seven forgeries walked through everything above: *"the prior sign-off preserved on the record"* re-typed into a branch of a sentence that reads the verification somewhere *else*, and *"still unanswered"* re-typed into a sentence that still reads the answer in a branch it no longer takes. The quantifier rule asks whether the field was read; a literal sitting beside an unrelated read of the same field satisfies it. What it cannot satisfy is: **move the value the sentence says it read, and the sentence has to move.** With that, both forgeries are refused — 7 of 7 — and `claims` becomes an honest description rather than a list the checkers verify on the sentence's behalf for nothing.
+
+Three details that decide whether this rule is an instrument or a noise generator, each found by running it:
+
+- **The stubs must include the one that matters.** Half the sentences here are a *comparison* of two views of one field — "now settled" against "already settled" — and moving one end to a value nothing holds leaves the two ends unequal, so the branch does not move and an honest read looks like decoration. The third stub is the other end's own value; it is the only mutation that makes a comparison flip.
+- **Ask it only of a field whose own words are in the sentence.** A `receiptState` that reads four fields to serve six branches genuinely uses one per branch, and firing on the other three would be an audit firing on cases its rule does not cover. The rule is about a sentence that *talks about* a field and does not listen to it.
+- **A comparison belongs inside the phrase.** A sentence that reads one end and branches on a boolean computed twenty lines up is a sentence whose read could hold anything without a word on screen moving. `stMoved` was an honest comparison of two record reads and still had to move inside, which is the same fix line 228 already prescribes for the header.
+
+The generalisation, which is the useful part: **a guarantee about provenance is escaped by ignoring what was provided. Provenance is checked by construction; USE is checked by mutation.** Wherever this file says "read out of the record", the second half now has a test.
+
+**What survived a blind attack, recorded so it is not traded away.** A reviewer driving #10 r12's base tried to break the query mutation and could not: both arms of a two-branch clause move independently with no `||` short-circuit desynchronising the replay index; a sentence assembled from two queries moves when either is mutated; the `owner` field on each read record makes per-claim re-reads genuinely work; `enumText`/`enumLabel`/pluralisation are injective, so no two states collapse to the same characters. **The synthesis holds — do not simplify any of those four properties away for tidiness.** The one structural note it left: `say()`'s point-read mutation is skipped for a view whose field does not appear in the sentence and for a view whose history was queried. Round 12's D1 landed in that gap from the other side — a continuity claim about a field the transition never read, which `checkQuantifiers` caught and `say()` did not — so the two instruments cover each other's gap and neither is redundant.
+
+**And the completeness walk works where it reaches.** The same review classified every text node in the live DOM and found no un-minted quantified claim escaping on feed rows, pin cards, pin compacts, lens items or receipts, and the walk caught round 12's D1 unprompted, on the artifact the round shipped. The defect was never that the instrument was weak; it was that six surface families declared no subject for it to reach — which is what `data-agg` is for, and what `uncoveredRecordWords()` now enumerates rather than promises.
+
+**And a control may only offer an action whose write it can survive.** Same round, #10 r9 D4: the bound composer offered "Answer in your own words →" on four kinds and `send()` called the *decision* path for all of them, so typing at a commitment owned by someone else recorded the typist's sentence as the commitment's own text and accepted it in their name — around an ownership guard that had been enforced on the button beside it since r4. A dead attention item is one failure; an item offering an action it cannot honestly take is the other. The guard belongs on the **write path**, not only on the render, and the invariant that proves it asserts the rendered control against the same predicate.
+
+Two corollaries, both found by review of r10's own fix:
+
+- **Every control that reaches a write is gated, not just the one that was being discussed.** The pin's bound composer was fixed while the feed row's one-click Answer, which reaches the same write, had no ownership check at all. Gating the write path is what makes that survivable; gating only the controls means the next control added is unguarded by default.
+- **"Nobody owes it" is not "anybody may do it."** Handing a question on *clears* `owedTo` while setting the assignee, so a predicate that reads `owedTo` alone concludes that an item explicitly given to a named person is unclaimed. Ask who is being asked — the person owed it, or failing that the person it was assigned to — and only treat it as open when neither names anyone.
+
+## A painted claim is painted whole, or it is not painted
+
+A geometry tripwire set at `width < 1` catches nothing that matters. #10 r7 D2: an owed item's title rendered **5.36px** wide at 1124 — counted, glyphed, actionable, unidentifiable — and the guard was silent, because the same click path could also drive it to 0 and that was the case the guard had been written for. One pixel above the wire is the same defect.
+
+The rule that replaced it was **"a control whose label is being truncated must be at least six characters wide at its own font size"**, and #10 r11 shipped, under it, a pin row reading `reopened by lars 09:15 · answer ke…` and a cross-room title truncating mid-alternative — `…or hol…` — above a single button offering one of two options the reader could not see. Two things were wrong with it, and both are the same thing:
+
+- **It was scoped to controls.** A truncated *fact chip* is not a control, so the doctrine exempted exactly the case it exists for — the failure mode this file names two sections down, arriving inside the fix for the previous one.
+- **Six characters is a floor for aiming, not for reading.** `answer ke…` is thirteen characters wide and says nothing. A claim is not "legible" because you can tell roughly where it is.
+
+**The rule: a minted sentence is painted whole. A control's own label is painted whole. Not wide enough to guess at — whole.** And it is *measured*, not declared: `scrollWidth > clientWidth` and `scrollHeight > clientHeight` are what the browser knows about characters it did not draw. This matters because **`text-overflow: ellipsis` does not change `textContent`**, and every painted-equals-minted rule on this page compares `textContent` — so the entire apparatus that proves a chip says what the record minted passes on a chip that says nothing. A guarantee about the string is not a guarantee about the reader.
+
+The mechanism is `checkLegibilityInvariant()`, over `[data-said]`, the parts of `[data-said-parts]`, and every `button` and its leaf children, walking up to the ancestor that does the clipping. **What it does not cover, named here rather than discovered later:** `.prov .ex`, the provenance excerpt — a person's quoted words, line-clamped to one line, expanded by hover *and* focus, with the full note beneath. Human speech rather than a minted claim, and its truncation has an affordance a keyboard can reach. It is the one deliberate clip on the page, and it is one, not a category.
+
+**That sentence was false for six rounds and the second clip was the room's own purpose line.** `.roomhead .topic` ellipsised at *every* supported width — 468px of characters into 419px at 1280 and into 394px below it — and the CSS comment directly above it said the topic "survives to the narrowest supported width — dropping it was a round-1 defect". Neither the mechanism nor the doctrine saw it: it is not minted and not a control, so no clause reached it, and the count of deliberate clips was written from memory rather than measured. It wraps now, which is r7's own answer for the compact row, and the count is checked rather than asserted — `R14-D7-the-topic-is-painted-whole` measures `scrollWidth` and `scrollHeight` against the box at every declared width. **A count of exceptions is a claim, and it answers to the evidence rule like any other.**
+
+**And the deliberate clip is a FORM, not a fixture — because the alternative to clipping a quotation was cutting one.** #10 r15 D1: the feed's reply preview rendered `plain(t.body).slice(0, 60)` — a person's sentence shortened *in JavaScript, before painting*, with no ellipsis, no quotation marks, no title, no hover or focus expansion and no link to the row it came from. 11 of the 14 replyable rows in `#users-migration` were longer than that and 9 of them stopped mid-word: `↩ priya 29 Jul · Honestly I'd keep dual-write until we've had a full clean we`. **Both instruments passed it, honestly.** The provenance rule is satisfied because a 60-character prefix genuinely *is* contained in the message it cites; the legibility rule is satisfied because `scrollWidth === clientWidth` on a string that was cut before the browser ever measured it, so the `text-overflow: ellipsis` on the box had nothing left to elide. **The defect lived in the seam between two correct checks** — which is the reason the answer was a different rendering and not a third checker. What `.prov .ex` was doing is the general answer and always was: the whole string stays in the DOM so `textContent` is still the record, the *browser* paints the ellipsis, `data-clamp` declares the collapse, and the affordance expands on hover **and** focus. The reply preview and the composer's reply context now both wear it, and each is itself the route to the row it quotes. So the count is no longer "one deliberate clip"; it is **"every deliberate clip declares itself with `data-clamp`, and every `data-clamp` sits inside something a keyboard can focus"**, which is checked on every render rather than counted in a paragraph. `R15-D1-a-quotation-is-clamped-not-cut` states the compliant form positively — paint all of it, or paint a prefix that stops on a word boundary and declares itself — and fires 11 times per width on r14 as committed.
+
+**And a placeholder is text the document does not measure.** #10 r15 D3: `#rinput` asked `why are you reopening it? (optional — recorded as your words, verbatim)` — 422px of text — into a 193px box at 1440 and a 129px box at 1279 and below. A reader saw `why are you reopening it? (`, ending on an unclosed parenthesis, and `why are you reopen` under 1280. **`scrollWidth` does not see a placeholder**, because the characters are painted by the control rather than by the document, so *every* rule in this section — measured, not declared, and correct — passes on it. Two consequences, both now doctrine: a prompt's question is measured against the **narrowest** supported width by the harness (`R15-D3-a-prompt-is-readable-and-agrees-with-itself`, canvas-measured, fires on r14 for `#rinput` and `#vinput`), and **a disclosure never lives in a placeholder**, because a placeholder disappears at the exact moment it becomes load-bearing — when the reader starts typing the thing it was warning them about.
+
+**And the layout stops asking a row to fit.** The cause of r7's defect was a track template mixing `auto` and `1fr`: grid sizes auto tracks before it distributes free space, so `nowrap` metadata and buttons took their full max-content width and the title absorbed the entire shortfall. r7's fix made every flexible track `fr` so they *share* the shortfall — a ratio, not a floor, and every one of them still ended in an ellipsis. The compact row wraps now: title on the first line, meta on its own line under it, nothing cut at any width. **A row two lines tall is a cost; a chip reading `answer ke…` is not a cost, it is a defect.**
+
+## A count of clicks is not a count of paths
+
+#10 r11 reported **"0 errors across 900 randomised real clicks"** and shipped four
+live invariant violations reachable in three deliberate ones: open the page, click
+the compact row, click Reschedule, click the receipt. 900 random clicks never
+traverse one specific sequence, and the number is worse than useless because it
+*reads* like coverage. The walk that would have caught it shipped in the same
+round, and did catch it — the instrument was right and the verification was not.
+
+**Verification enumerates the controls the artifact offers and drives each one
+deliberately, then randomises on top.** Report the enumeration — how many controls
+exist, how many were driven, which were not and why — never a click total.
+
+Two things make the enumeration honest rather than another remembered list:
+
+- **The inventory is the page's own registrations, not a list somebody wrote.**
+  The *harness* patches `EventTarget.prototype.addEventListener` before the
+  artifact's script runs — the patch lives in `design/prototype-drive.mjs`, not
+  in the page — so every element the page attaches a click handler to is tagged
+  as it is attached. Nothing in the artifact changes and nothing has to be
+  remembered; the inventory is rebuilt with the DOM on every render. Say it that
+  way round: "the page declares its own inventory" reads as though the artifact
+  contained the patch, and it does not.
+- **Reachability is a property of a path, so exploration keeps moving.** Within a
+  session an undriven on-screen control is always preferred; when the screen
+  offers none, a random visible control is clicked to *move the state*. Sessions
+  run until a whole lap of fresh loads drives nothing new. The first screen is not
+  the page.
+
+And every defect gets a repro that **fires on the previous branch as committed**
+and is silent after — a named three-click path, not a seed. The repro asserts
+against the DOM and the record rather than against the artifact's own checkers,
+so a round cannot pass its own exam by grading it.
+
+**Run the pass until it changes nothing, and freeze the tree while somebody else
+reads it.** #10 r12's first enumeration pass, on the artifact r12 had just built,
+found a class r12 had fixed in one branch and not the branch beside it — the
+one-click *answer*'s provenance note stopped claiming things about the
+verification history in r11, and the one-click *re-affirmation*'s went on saying
+`the statement already on the record, recorded again verbatim`. Four deliberate
+clicks. **A pass that changes something is not the last pass.** In parallel, the
+frozen tree went to two foreign-lineage reviewers; between them they found six
+more of the same class, including a comment in that round's own pruning block
+that said the trailer keeps three facts while the code beside it painted two.
+That comment is corrected in place *and the correction says what it was*, because
+the alternative is a doctrine file that has never been wrong.
+
+## Enumeration has a depth, and the denominator is over states
+
+#10 r12 reported **"225 controls enumerated, 219 driven, 0 violations"** and shipped
+two live invariant violations at depth 5, on controls that *do not exist* until two
+prior writes have happened. Both numbers were true. Neither was a denominator.
+
+`Ask justin instead` is re-offered after a take-back and states a value the assignee
+history holds. Reaching it takes five deliberate clicks — clear P1, clear K2, hand Q1
+on, reopen Q1's card, take it back — and the first two are what turn Q1 from a compact
+pin row, which paints one button, into a full card, which paints two. **A control that
+does not exist cannot be enumerated, and a walk over one render enumerates renders, not
+states.** The same greedy walk enumerated 226 keys on one machine and 225 on another,
+because which keys it ever *saw* depended on which control it randomly clicked.
+
+**Enumerate write sequences over reachable states, to a stated depth, and report three
+numbers.**
+
+- **Controls enumerated** — the union over every state reached, not one render. Union
+  is monotone and does not depend on a seed.
+- **Controls driven.**
+- **States reached at depth N**, with N stated. These are three facts and they are not
+  interchangeable; one number that sounds like coverage is how the last two rounds
+  passed their own exam.
+
+Four things make it an enumeration rather than a longer walk:
+
+- **The alphabet is the page's own decision function**, not the DOM: `(object, action)`
+  out of `offeredActions()`, over every object in every room. A control the current
+  render does not paint is still in the alphabet.
+- **The harness brings the control into existence** before driving it — switch room,
+  force the pin card open, open the receipt — and then clicks the real element, so
+  every render invariant fires exactly as it would for a reader who navigated there.
+  An offered action with no reachable control anywhere is *reported*, not skipped;
+  that check found `typed` offered on Q1 with no control painted for it.
+- **A state is what the records hold.** Navigation is not part of the signature,
+  because the harness re-derives whatever frame it needs. That is what collapses the
+  space enough to walk it.
+- **A key is a control.** #10 r12 tagged `click`, `pointerdown` and `mousedown`, so the
+  Enter handlers on the composer, the verify prompt and the reopen prompt — three write
+  paths — were outside the 226-key denominator entirely.
+
+**Breadth that is not complete says so, loudly, per level.** The report prints how many
+states were left unexpanded at each depth and refuses to call a sampled level a covered
+one. A truncated frontier is a fact about the run, not a footnote.
+
+**And the enumeration states its own boundary, in the same breath as its numbers**,
+because a round whose subject is claims that outrun their mechanism does not get to
+make one about its own instrument:
+
+- the alphabet is **writes**; navigation, filters, folds, replies, mark-seen and the
+  unbound composer are driven by the DOM walks, not enumerated to a depth;
+- the state signature is the **records** — it does not distinguish two states that
+  differ only in a seen cursor or a message count;
+- the harness **navigates by assignment** (it sets the open card, the open receipt) and
+  then clicks a real control in that frame; the frame is one a reader can reach, but
+  the route to it is not itself driven.
+
+**And the instrument answers to the same evidence rule as the artifact.** #10 r13's
+first cut of the clause-splitter repair widened every middot run unconditionally; the
+sequence enumerator went from one violation class to nine, five of them sentences that
+were telling the truth. It was measured, narrowed, and measured again. *A wrong
+instrument invents defects, it does not merely miss them* — and the only way to know
+which you have is to run it against the previous round as committed and compare.
+
+## A claim about what a mechanism produces is generated by the mechanism
+
+Three rounds running, #10 shipped a real mechanism beside a false sentence about its
+reach. r10 claimed a derived surface list and shipped a hand-written one. r11 built the
+derivation and cited an example the walk provably could not see. r12 — the round that
+wrote *a comment is a claim and answers to the evidence rule* — described five families
+of text as being in its uncovered-set list, and **not one of them can ever appear**: the
+first is a control label inside a declared subject, which the walker's own guard rejects
+two lines below the comment, and the rest are bare integers with no recorded vocabulary
+to match.
+
+Each round apologised. **An apology is not a mechanism.**
+
+- **Print the actual output, commit it, and have the comment cite the file.** The page's
+  uncovered set is `design/prototype-uncovered.txt`, generated by the driver over every
+  state the enumeration reaches.
+- **The driver fails when the committed artifact and the live mechanism disagree.** A
+  generated file nobody regenerates is a remembered list with extra steps.
+- **The driver fails when the comment names an example the mechanism does not produce.**
+  Any hand-written "for example, this now catches X" is a claim awaiting falsification,
+  and here it has been falsified three times running.
+
+**And it happened a fourth time, in the round that wrote the three rules above.** r13's
+page comment beside `COUNTED_CLAIMS` was honest that only eight *phrasings* were read;
+`CONVENTIONS.md` said, unqualified, that "a number in a minted sentence is re-derived
+from the records the sentence declares it read, on every paint". The gap between those
+two sentences was the rail's owed badge, whose entire minted sentence was `3`. The fix
+is the same one, applied to the second mechanism: `design/prototype-counts.txt` is every
+numeral on screen with what read it, produced by the same function the checker calls,
+regenerated by the driver and compared on every run. **Two mechanisms now, two generated
+files, and the doctrine cites both rather than describing either.** The rule generalises:
+*if a paragraph in this file would need editing when the code's reach changes, it is the
+wrong place for the claim — put the claim in a file the mechanism writes.*
+
+## A search that ranks its frontier reports whether the ranking chose anything
+
+#10 r13's sequence enumerator ranked frontier states by how many control keys they
+painted that no state had painted yet, and its comment called the alternative — "the
+first N by signature" — *the weakest thing a bounded search can do*. Measured: frontier
+novelty was **zero for 70 of 83 states at depth 3, 81 of 92 at depth 4 and 83 of 88 at
+depth 5**. Past depth 2, where the budget does not yet bind, the tie-break *was* the
+policy. The weakest thing a bounded search can do, arriving inside the fix for it.
+
+r14 added a second key — offered-step novelty, since every control key exists by depth 3
+but the set of `(object, action)` pairs the page offers keeps growing — and then measured
+it: **117 of 184 states tied on controls at depth 3, and 117 still tied after steps.** The
+key did not help. It is kept because it costs nothing and separates at shallower levels,
+and **the honest artifact is the report line, not the key.**
+
+- **Report whether the ranking separated the states either side of the CUT**, not whether
+  it separated some states. The first version of this line asked whether *every* state on
+  the level tied, printed "the ranking discriminates at every truncated level", and was
+  false on the round's own first depth-3 run — the budget boundary sat in the middle of a
+  117-state block the ranking could not tell apart, so signature order picked 83 of them.
+- The rule generalises past search: **a tie-break that decides the outcome is the policy**,
+  whatever the comment above it says, and the only way to know which one you have is to
+  print how many candidates the ranking could still tell apart at the point it had to
+  choose.
+
+## The viewport is part of the denominator
+
+#10 r13 reported controls enumerated, controls driven and states reached at a stated
+depth — three numbers, three facts, and every one of them a fact about **1440×900**,
+because `newPage()` in `prototype-drive.mjs` hard-coded it, as did `prototype-shot.mjs`,
+`prototype-probe.mjs` and `prototype-smoke.mjs`. Thirteen rounds and six reviewers driving
+the page never opened it anywhere else.
+
+Live at 1279 and at every supported width below it: the rail painting `# users-migra…` —
+a control's own label in an ellipsis, on the room you are standing in, and it truncates
+**because you cleared your work**, since `· 40 unread` is wider than `◆3` and the name
+was the only flexible track. The page's own legibility invariant caught it instantly at
+1279. Nothing ever asked it at 1279.
+
+- **Every environmental constant a harness fixes is part of what its numbers are about.**
+  A viewport, a locale, a clock, a random seed, a colour scheme. Name them or vary them;
+  a constant nobody named is a denominator nobody stated.
+- **Vary the cheap ones.** The width set is declared (`--widths`, defaulting to a member
+  on each side of each of the page's two breakpoints plus the narrowest supported width),
+  the deliberate enumeration rotates through it, the random drive rotates through it, and
+  **every scripted repro runs at every width and reports which ones it fired at**.
+- **The colour scheme is one of the cheap ones too.** Round 16's occlusion sweep runs the
+  whole width set in light *and* dark, at the cost of one browser context per width,
+  because its two defects were reported in both and a rule that runs in one is a rule
+  about one. Nothing else on this harness varies the theme yet; that is stated here rather
+  than discovered.
+- **And "the narrowest supported width" was itself a phrase nobody had measured.** The CSS
+  comment above the breakpoints uses it; the number is **1120**. Below that the grid stops
+  shrinking and pushes the lens off the right edge — `documentElement.scrollWidth` stays at
+  1120 in a 1024px window, on r13 and r12 too. Driving 1024 would be driving a viewport the
+  page has never fitted. `checkViewportFitInvariant()` makes the floor a fact the page
+  asserts on every paint, so raising it costs a console error rather than a screenshot
+  three rounds later.
+- **Declare the expensive ones.** The state enumeration still runs at one width, because
+  a state walk at N widths is N times the work for the same states — so the report says
+  which width, in the same line as the number it qualifies.
+
+## Something reads the English
+
+Every rule in this file governs where a string **came from**: minted, read, queried,
+re-derived, measured for width. None of them reads what it **says**. A permanent divider
+on the first screen ended mid-sentence — *"…the seen cursor sits at the end of
+#users-migration, and only this room's"* — a dangling possessive introduced in **round 2**
+and painted, unchanged, through twelve review rounds, six of them with a reviewer driving
+the page. A sentence can be minted from thirteen honest reads and still not be a sentence.
+
+`checkProseInvariant()` reads the last word of every page-authored run. **It is not a
+denylist of ways to write badly** — that would be unbounded, which this file forbids two
+sections down. English function words are a *closed* class, and the compliant form is
+stated positively: a rendered run ends on a word that carries content.
+
+- **Only the part of the class that cannot end a clause in any register**: determiners,
+  coordinators, subordinators, and a possessive clitic with nothing possessed after it.
+- **Prepositions and auxiliaries are deliberately out.** English strands them — *"not the
+  clean week the proposal asked for"* is correct — and the first draft of this rule, which
+  included them, cried wolf on a receipt line on its first run. That is the "a wrong
+  instrument invents defects" failure arriving inside the fix for something else, caught
+  by running the instrument before believing it.
+- **What it does not cover**: it reads the last word and nothing else, so a run that is
+  ungrammatical in the middle, or grammatical and false, is invisible to it. Human-authored
+  text is exempt.
+
+It found two more on its first run, on this round's own build.
+
+## Focus goes somewhere usable after every interaction, not only after a write
+
+A spec that covers writes will be enforced on writes and nowhere else. #10 r7 wrote "focus follows the record", implemented it for writes, and its checker returned early unless a write flag was set — so routine peek, mark and unmark seen, expanding an objective, opening a receipt, closing it, switching rooms and expanding a pin card, between them the core navigation of the product, all left focus on `BODY` and nothing could see it.
+
+- **Every interaction that re-renders leaves focus somewhere a keyboard reader can act from** — a control, or a surface container that holds one. Never `BODY`, and never an element that survived the rebuild but is now hidden.
+- **A control replaced by what it opened declares its successor.** Same-key restore structurally cannot cover that case: the key it would restore is the element the interaction removed.
+- **A toggle that survives its own render carries a key**, so restore can find it, rather than relying on a declaration.
+- **The checker learns about the interaction from the browser, not from the handler** — a capture-phase listener ahead of every handler on the page. A check that depends on each new interaction remembering to announce itself is a check with the same blind spot as the code it is watching.
+
+## A machine's output is a record, not speech
+
+CI runs, deploy records and parity checks are verbatim and correctly credited, so rendering them is not fabrication — but rendering them in quotation marks with a human voice marker says a person said this about a job, and exempts a machine's string from the page-integrity rules that exist to catch `undefined` in a record. Found in #10 r7 D6. A non-human source's line renders as a record: mono, unquoted, no human-voice marker, disclosure on screen at rest. **It keeps its citation** — the cited message must exist and must contain the text, checked on every render — minus the one clause of the quotation contract that is about people. Dropping the check along with the quotation marks trades a presentation defect for an attribution hole.
+
+## Page-integrity rules are about the page's own text
+
+The invariants that police rendered output — no quotation marks outside a checked quotation context, no `undefined`/`null`/`NaN` in a rendered record — are assertions about what the *interface* writes. Applied to a human's own sentence they are false alarms on that person's words, and a checker that cries wolf on ordinary input is a checker people learn to ignore. Every surface that renders human-authored characters marks them (`data-voice="human"`), per fragment, so a page sentence that quotes a person keeps the page's half checked and exempts only the half the person typed. Found twice: round 4 for the quote-mark rule (feed bodies only), round 5 for the record-text rule (feed bodies only again — the correction chain's quote, the receipt's excerpt, an object's own text after a bound answer, and the facts a verification note lands in were all still held to a rule about the page).
+
 ## Measured contrast exceptions
 
 Verified against the tokens as extracted (not guesses — measured at the sizes actually used):
@@ -206,6 +1088,16 @@ A filtered-out or de-emphasised row keeps its text, so it must keep its legibili
 
 Found independently in two artifacts by two critics (#10 r6 and #39 r1) — the same `opacity: .3` decision, wrong in both.
 
+**And doctrine written from one artifact has to be swept across the others.** These two rules were written from #39's findings and then not applied to `design/prototype-frame.html`, which had shipped the exact defects they describe: `.surf[disabled] { opacity: .55 }` measured **2.49:1 light / 2.43:1 dark** and `✗` glyphs wore `--red2` at **4.21:1 dark** — the same three numbers this file already quoted, sitting unfixed one directory away for three review rounds, while `.cnt[disabled]` in the same stylesheet implemented the correct pattern. Corrected in #10 r10 (measured after: 6.79:1 light / 7.44:1 dark for the inactive control, 7.47:1 / 5.81:1 for the glyphs, **0 of 342 text elements below AA across 5 states × 2 themes**). Writing a rule down is half the work; the other half is running it against every artifact already in the tree, on the day it is written.
+
 **No exemption for inactive controls.** An earlier version of this rule exempted "a genuinely inactive control (a disabled button at ~2.5:1)". That exemption was wrong and was implemented faithfully by the audit harness, which is exactly how a disabled indicator at 2.49:1 and a count chip at 2.43:1 survived two review rounds (#39 r2/r3). **General corollary: an audit may not exempt the case its rule covers.** Express inactive state with a token step and a shape change (dashed chip, altered border), never with alpha.
 
-**Measured consequence (#39 r2, theme-corrected in r3): no fade clears AA.** The weakest thing a row can legitimately carry (`--amb2` on `--ambbg`) is **4.53:1 in light** at *full* opacity — the shell's own floor — so any opacity reduction drops it below. (The dark value is 9.65:1; earlier receipts quoting ~5.37:1 for dark came from a contrast harness whose block parser matched selector names inside `tokens.css`'s provenance comment and re-measured the light theme, fixed in #39 r3. The practical conclusion is unchanged and was independently confirmed by compositing measurements of real rendered rows in both themes: `opacity:.3` yields 1.47–1.75:1 light and 1.12–2.14:1 dark.) Therefore **de-emphasis is expressed by lifting the matches, not by dimming the rest**, and the affordance's copy says so. Do not reintroduce a fade with a gentler alpha; the arithmetic does not work at any value.
+**And its twin: an audit may not fire on cases its rule does not cover.** Found in #10 r11: the chip checker asked `text.indexOf(normText(enumText(v))) >= 0`, and `"reopened".indexOf("open")` is 2, so the console errored on every render for the whole window between answering a question and reassigning it — during ordinary use, on a chip that was telling the truth. It also flagged `no longer settled` against a record whose settlement is `settled`. The same single design choice was blind in the mirror direction: it compared each field's **last** value only, so a surface stating an *earlier* recorded value — the half of that class the page had actually shipped — was invisible to it. One decision, a false positive and a false negative.
+
+The two corollaries are one rule with two signs, and the second is not the lesser half. This file already names the failure mode: **a checker that cries wolf on ordinary input is a checker people learn to ignore**, and noise is what masks a real firing. So a value match is a **token** test, over the **whole** history — a word is matched as a word, and the record is the whole record.
+
+**Measured consequence (#39 r2, theme-corrected in r3): no fade clears AA.** The weakest thing a row can legitimately carry (`--amb2` on `--ambbg`) is **4.53:1 in light** at *full* opacity — the shell's own floor — so any opacity reduction drops it below. (The dark value is 9.65:1; earlier receipts quoting ~5.37:1 for dark came from a contrast harness whose block parser matched selector names inside `tokens.css`'s provenance comment and re-measured the light theme, fixed in #39 r3. The practical conclusion is unchanged.) Therefore **de-emphasis is expressed by lifting the matches, not by dimming the rest**, and the affordance's copy says so. Do not reintroduce a fade with a gentler alpha; the arithmetic does not work at any value.
+
+**Independently confirmed in #10 r7, on the prototype's own feed** — arrived at before that consequence was written down, and agreeing with it. Measured on the painted rows: `opacity: .3` gives 1.48–1.75:1 light and 1.12–2.14:1 dark, 57 of 57 text elements failing. Solved for the alpha that would clear 4.5:1 and there isn't a usable one — `--tx0` body text needs α ≥ .84 (not a dim, a rounding error) and `--tx2` at 10px, which every row's time/glyph/actor columns use, fails at *every* α below 1. Lifting the matches instead: 0 of 57 failing, 4.76–10.66:1 light and 6.46–12.27:1 dark.
+
+**And lift by BRIGHTENING, not by darkening.** A first pass gave matches a `--bg5` band, which reads as emphasis on paper — and took `--amb2` on the `◆` glyph from 4.84:1 to 3.99:1. A fix for a contrast defect that introduces a contrast defect is not a fix. The band is one step *brighter* than the row in both themes (`--bg3` light, `--bg5` dark), so every token on a highlighted row is on more contrast than it had unfiltered, not less. Emphasis that can only raise ratios cannot fail this rule.
