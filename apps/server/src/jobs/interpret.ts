@@ -1,7 +1,6 @@
 import {
   type AcceptanceDecision,
   acceptedObjectRef,
-  blockingProblems,
   decideAcceptance,
   type EscalationTriggerKind,
   evaluateEscalation,
@@ -10,6 +9,7 @@ import {
   Proposal,
   type ProvenanceMessage,
   type ProvenanceProblem,
+  rejectingProblems,
   statementBearing,
   validateProposalProvenance,
 } from '@atrium/core';
@@ -308,27 +308,67 @@ export async function runInterpretation(
       },
       context,
     );
-    const blocking = blockingProblems(problems);
-    if (blocking.length > 0) {
+    /**
+     * `reject`, and only `reject`.
+     *
+     * `packages/core` grades a provenance problem three ways and the grades
+     * mean different things to a worker. A `reject` is a statement about the
+     * words — the quote is not in the message, it only exists inside somebody
+     * else's reply-blockquote, the person named authored nothing — and a
+     * reading that fails one is not a reading, so it is dropped and never
+     * reaches the room. A `refer` is "a person has to look at this", which is
+     * exactly what a `~` is *for*: dropping those would delete the proposal
+     * instead of surfacing it, and on this branch every proposal citing the
+     * newest message in its window earns one (`superseded_by_later_message`,
+     * the #86 contradiction). `decideAcceptance` reads the same problems and
+     * turns a `refer` into `pending / quiet`, which is the correct destination.
+     *
+     * Using `blockingProblems` here — everything that is not `reclassify` —
+     * silently merges the two, and the symptom is a room with no readings at
+     * all rather than a room with readings nobody has confirmed.
+     */
+    const fatal = rejectingProblems(problems);
+    if (fatal.length > 0) {
       run.rejected.push({
         reason: 'provenance',
-        detail: blocking.map((problem) => `${problem.kind}: ${problem.detail}`).join(' | '),
+        detail: fatal.map((problem) => `${problem.kind}: ${problem.detail}`).join(' | '),
         reading,
-        problems: blocking,
+        problems: fatal,
       });
       continue;
     }
 
-    // Identical to a still-open reading from an earlier version of the same
-    // message? Then this run did not contradict it — it re-derived it. Record
-    // nothing and retire nothing: the spike measured two identical runs sharing
-    // only ~45% of objects, so "the new run did not mention it" is not evidence
-    // against a prior reading.
-    const identical = priorProposals.find(
+    /**
+     * What this reading is a re-reading *of*.
+     *
+     * Two prior readings drawn from the same message are not the same reading —
+     * one message routinely yields several — so "overlapping citation" alone
+     * would have every new reading retire every old one from that message. What
+     * identifies a reading is **the sentence it rests on**, and the quote is the
+     * only thing that names that sentence.
+     *
+     * The type is deliberately *not* part of this predicate. A re-read that
+     * turns yesterday's claim into a decision is the canonical correction (#5
+     * gave it a verb — `retype`), and it is a contradiction of the earlier
+     * reading rather than an addition to it. Requiring the types to match would
+     * leave both on screen, disagreeing, with nothing marking either as stale.
+     */
+    const sameSentence = priorProposals.filter(
       (prior) =>
-        prior.type === proposal.type && sameStatement(prior.statement, statementOf(proposal)),
+        prior.provenance.some((id) => proposal.provenance.includes(id)) &&
+        sameStatement(prior.quote, proposal.quote),
     );
-    if (identical) {
+
+    // The same sentence read the same way is a re-derivation, not a
+    // contradiction. Record nothing and retire nothing: the spike measured two
+    // identical runs sharing only ~45% of their objects, so "the new run did
+    // not mention it" is not evidence against a prior reading.
+    if (
+      sameSentence.some(
+        (prior) =>
+          prior.type === proposal.type && sameStatement(prior.statement, statementOf(proposal)),
+      )
+    ) {
       run.unchanged += 1;
       continue;
     }
@@ -347,7 +387,26 @@ export async function runInterpretation(
       continue;
     }
 
-    try {
+    /**
+     * A retry landing on its own earlier work.
+     *
+     * The reducer would refuse the duplicate on its own — that is the guarantee
+     * the content-addressed id buys — but it refuses it as `applied_with_issue`,
+     * which still writes a ledger row that changes nothing. Rows are history and
+     * history is replayed (#25), so a room that crashed once would replay with a
+     * second `proposal_recorded` for a proposal it already had. Checking the
+     * fold first makes the retry silent instead of merely harmless; the
+     * reducer's refusal stays underneath as the backstop for the case this
+     * cannot see, which is another instance recording it between these lines.
+     */
+    const alreadyRecorded = deps.ledger.coreState().proposals[proposal.id];
+    if (alreadyRecorded) {
+      deps.logger.debug('proposal already recorded — retry landing on its own work', {
+        roomId,
+        proposalId: proposal.id,
+      });
+      run.proposalsRecorded.push(proposal.id);
+    } else {
       await deps.ledger.append<RoomEvent>({
         roomId,
         actor: { kind: 'model', model: result.model },
@@ -355,22 +414,12 @@ export async function runInterpretation(
         project: (ctx) => projectRoomEvent(ctx),
       });
       run.proposalsRecorded.push(proposal.id);
-    } catch (error) {
-      if (error instanceof CommandError && error.code === 'rejected') {
-        // Already recorded — the retry path landing on its own earlier work.
-        deps.logger.debug('proposal already recorded', { roomId, proposalId: proposal.id });
-        run.proposalsRecorded.push(proposal.id);
-      } else {
-        throw error;
-      }
     }
 
-    // Everything this run contradicts: a still-open reading of the same type
-    // over the same messages that now says something else.
-    for (const prior of priorProposals) {
-      if (prior.type !== proposal.type) continue;
-      if (!prior.provenance.some((id) => proposal.provenance.includes(id))) continue;
-      if (sameStatement(prior.statement, statementOf(proposal))) continue;
+    // Everything this run contradicts: a still-open reading of the same
+    // sentence that now says something else. Only these — a prior reading the
+    // new run simply did not re-derive keeps its `~`.
+    for (const prior of sameSentence) {
       if (run.proposalsSuperseded.includes(prior.id)) continue;
       await deps.ledger.append<RoomEvent>({
         roomId,
@@ -381,14 +430,16 @@ export async function runInterpretation(
           type: 'proposal_superseded',
           proposalId: prior.id,
           supersededByProposalId: proposal.id,
-          reason: `re-interpreted at version ${candidate.interpretationVersion}: this reading of the same messages now says something else`,
+          reason: `re-interpreted at version ${candidate.interpretationVersion}: the same sentence now reads differently`,
         }),
         project: (ctx) => projectRoomEvent(ctx),
       });
       run.proposalsSuperseded.push(prior.id);
     }
 
-    if (decision.verdict !== 'auto_accept') continue;
+    // Same reason as the `proposal_recorded` check above: a retry must not
+    // re-append an acceptance the first attempt already landed.
+    if (decision.verdict !== 'auto_accept' || alreadyRecorded?.status === 'accepted') continue;
 
     try {
       const accepted = await deps.ledger.append<RoomEvent>({
@@ -482,6 +533,17 @@ function empty(roomId: string, model: string): InterpretRunResult {
 
 /* ── claiming ───────────────────────────────────────────────────────────── */
 
+/**
+ * A row of the drain query.
+ *
+ * The aliases in that query are **quoted camelCase on purpose**. `db.execute`
+ * hands back the driver's own rows, so column names arrive exactly as Postgres
+ * spelled them — an unquoted `AS interpretation_id` folds to `interpretation_id`
+ * and every read of `row.interpretationId` is `undefined`. TypeScript cannot
+ * catch it, because the cast on the query is the only thing that gives these
+ * rows a type at all; the symptom is a claim carrying `undefined` for an id,
+ * which reaches the driver as a parameter it refuses.
+ */
 interface PendingRow {
   id: string;
   seq: number;
@@ -511,11 +573,11 @@ async function claimWindow(
   const rows = (await db.execute(sql`
     SELECT m.id            AS id,
            m.seq           AS seq,
-           m.author_id     AS author_id,
+           m.author_id     AS "authorId",
            m.body          AS body,
-           i.id            AS interpretation_id,
-           i.interpretation_version AS interpretation_version,
-           i.status::text  AS interpretation_status
+           i.id            AS "interpretationId",
+           i.interpretation_version AS "interpretationVersion",
+           i.status::text  AS "interpretationStatus"
       FROM messages m
       LEFT JOIN LATERAL (
         SELECT x.id, x.interpretation_version, x.status
@@ -671,7 +733,14 @@ export async function countUninterpreted(db: Database, roomId: string): Promise<
      WHERE m.room_id = ${roomId}::uuid
        AND (i.status IS NULL OR i.status = 'pending')
   `)) as unknown as Array<{ n: number }>;
-  return rows[0]?.n ?? 0;
+  // Destructured rather than indexed, and not for taste. `rows` is derived from
+  // a `Database` handle, and `@atrium/auth`'s room-membership boundary check
+  // treats any element access on a handle-derived value with a non-string key as
+  // "we could not tell what this reads" — so `rows[0]` fails that test. The
+  // guard is over-broad there (a numeric literal cannot be a table name) but it
+  // is another lane's, and the safe direction is to write the shape it can read.
+  const [row] = rows;
+  return row?.n ?? 0;
 }
 
 /**
@@ -699,6 +768,8 @@ interface PriorProposal {
   id: string;
   type: string;
   statement: string;
+  /** The sentence it was read out of — what identifies a reading. */
+  quote: string | null;
   provenance: string[];
 }
 
@@ -727,6 +798,7 @@ function collectPriorProposals(
       id: record.proposal.id,
       type: record.proposal.type,
       statement: statementOf(record.proposal) ?? '',
+      quote: record.proposal.quote,
       provenance: [...record.proposal.provenance],
     }));
 }

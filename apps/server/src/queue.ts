@@ -35,20 +35,34 @@ import type { Logger } from './logger.js';
  * workers; `batchSize: 1` is what makes each job settle on its own. Also routed
  * out of #19's gauntlet.
  *
- * **3. One provider call per burst.** `singletonKey = roomId` with an explicit
- * `singletonSeconds` window collapses a burst into one job; `startAfter` equal
- * to the same window is the debounce that makes the job run at the *end* of the
- * burst rather than the start of it. pg-boss's dedup silently does nothing
- * without an explicit window (#16's documented footgun), and its uniqueness
- * index covers every non-cancelled state — so a send inside a slot whose job
- * has already finished is *dropped*, not queued. That is why the worker
- * re-counts unread messages before it returns and schedules a follow-up into
- * the **next** slot: coalescing that can silently lose the twelfth message is
- * not coalescing.
+ * **3. One provider call per burst.** The queue's policy is `stately` and every
+ * job's `singletonKey` is the room, which pg-boss enforces as *one queued and
+ * one active job per room*. A burst's first message creates the job; the other
+ * eleven sends conflict on that index and are dropped, so the burst is one job
+ * however long it runs. `startAfter` equal to the coalescing window is the
+ * debounce that makes the job run at the END of the burst rather than at the
+ * start of it.
  *
- * `groupConcurrency: 1` on the room keeps two passes over one room from
- * overlapping across the whole deployment, so "one call per burst" survives a
- * slow pass as well as a fast one.
+ * The policy is doing work a `singletonSeconds` window cannot, and the
+ * difference is the reason for the choice. A time-slot window dedups on
+ * `(name, singleton_key, singleton_on)` where `singleton_on` is an
+ * EPOCH-ALIGNED bucket — so a burst that happens to straddle a bucket boundary
+ * lands in two buckets and costs two calls, and the odds of that are simply the
+ * burst's duration over the window. Worse, that index covers every
+ * non-cancelled state, so a message committing inside a bucket whose job has
+ * already finished has its send silently dropped and nothing ever wakes up for
+ * it. `stately` has no clock in it: dedup is against what is *queued*, so a
+ * burst is one job wherever the second boundaries fall, and a message arriving
+ * while a pass is active creates the next job instead of vanishing.
+ *
+ * The worker still re-counts unread messages before it returns and schedules a
+ * follow-up when it finds any — that closes the millisecond between the drain's
+ * snapshot and the pass's own completion, which no queue policy can.
+ *
+ * `stately` also gives per-room serialization for free (one *active* job per
+ * key, deployment-wide), so there is no `groupConcurrency` here; it would be a
+ * second mechanism answering a question the policy already answers, with its
+ * own round trips.
  */
 
 export const INTERPRET_QUEUE = 'interpret-room';
@@ -60,9 +74,10 @@ export type { InterpretRoomJob } from './jobs/interpret.js';
 /**
  * The coalescing window, in seconds — #8's "~10s".
  *
- * It is three things at once and they must be the same number: the singleton
- * slot width, the debounce delay, and the offset a follow-up is pushed by. Two
- * of them drifting apart is a burst that costs two calls.
+ * With a `stately` queue this is purely the debounce: how long a job waits
+ * after the first unread message before it runs, and therefore how much of a
+ * burst it gets to see. It is not a dedup bucket, so it has no boundary a burst
+ * can fall across.
  */
 export const DEFAULT_COALESCE_SECONDS = 10;
 
@@ -76,6 +91,12 @@ export interface QueueOptions {
   concurrency: number;
   coalesceSeconds?: number;
   retryLimit?: number;
+  /**
+   * Seconds before a failed pass is retried. Exposed only so a test can make
+   * the retry ladder finish inside a test's patience; production keeps
+   * pg-boss's own default and the exponential backoff on top of it.
+   */
+  retryDelaySeconds?: number;
   logger: Logger;
   /**
    * Everything the job needs to actually interpret. Omit it and the queue still
@@ -101,6 +122,17 @@ export interface QueueHandle {
     tx: Tx,
     input: { roomId: string; messageId: string },
   ) => Promise<{ interpretationId: string; interpretationVersion: number }>;
+  /**
+   * Schedule a follow-up pass into the **next** coalescing slot.
+   *
+   * This is what the worker itself calls when it finishes and finds messages
+   * that arrived while it was running. Exposed on the handle so the behaviour
+   * can be driven from a test against the production function rather than a
+   * re-implementation of it — the failure it guards against (a send dropped
+   * inside a spent singleton slot, and nothing ever waking up for it) is
+   * invisible unless something exercises this exact call.
+   */
+  enqueueFollowUp: (roomId: string) => Promise<void>;
   /** The last run this process performed, for tests and for `/health` later. */
   lastRun: () => InterpretRunResult | null;
   stop: () => Promise<void>;
@@ -111,6 +143,7 @@ export async function startQueue({
   concurrency,
   coalesceSeconds = DEFAULT_COALESCE_SECONDS,
   retryLimit = 5,
+  retryDelaySeconds,
   logger,
   interpretation,
 }: QueueOptions): Promise<QueueHandle> {
@@ -129,30 +162,44 @@ export async function startQueue({
 
   await boss.start();
   await boss.createQueue(INTERPRET_DLQ);
+  const policy = 'stately';
   await boss.createQueue(INTERPRET_QUEUE, {
+    // One queued and one active job per `singletonKey` — see the header.
+    policy,
     retryLimit,
     retryBackoff: true,
+    ...(retryDelaySeconds === undefined ? {} : { retryDelay: retryDelaySeconds }),
     deadLetter: INTERPRET_DLQ,
   });
+
+  /**
+   * The policy is fixed at creation, and neither call above will say so:
+   * `createQueue` on an existing queue is a no-op, and `updateQueue` throws
+   * "queue policy cannot be changed after creation". So a deployment whose
+   * `interpret-room` queue predates this policy would quietly keep the old one,
+   * every message in a burst would become its own job and its own provider
+   * call, and nothing would be red. Read it back and refuse to serve instead —
+   * an operator can drop the queue, and a silent regression in "one call per
+   * burst" is the kind nobody notices until a bill arrives.
+   */
+  const registered = await boss.getQueue(INTERPRET_QUEUE);
+  if (registered && registered.policy !== policy) {
+    await boss.stop({ graceful: false });
+    throw new Error(
+      `queue "${INTERPRET_QUEUE}" already exists with policy "${registered.policy}", and pg-boss cannot change a queue's policy after creation. ` +
+        `Coalescing depends on "${policy}" — one queued and one active job per room; under "${registered.policy}" every message in a burst becomes its own job and its own provider call. ` +
+        'Drop the queue and let this process recreate it.',
+    );
+  }
 
   let lastRun: InterpretRunResult | null = null;
 
   const enqueueFollowUp = async (roomId: string): Promise<void> => {
-    // `singletonNextSlot`, and only here. On the message-insert path it would
-    // turn the second message of a burst into a second job — the exact thing
-    // the singleton key exists to prevent. Here the current slot is *known* to
-    // be spent (this run is the job that occupied it), so the next slot is the
-    // only place a follow-up can go.
-    await boss.send(
-      INTERPRET_QUEUE,
-      { roomId },
-      {
-        singletonKey: roomId,
-        singletonSeconds: coalesceSeconds,
-        singletonNextSlot: true,
-        group: { id: roomId },
-      },
-    );
+    // No `startAfter`: these messages have already waited out one debounce, and
+    // the pass that found them is the one that just ran. If a job is already
+    // queued for this room the policy drops this send, which is correct — that
+    // job will drain the same leftovers.
+    await boss.send(INTERPRET_QUEUE, { roomId }, { singletonKey: roomId });
   };
 
   await boss.work<InterpretRoomJob>(
@@ -163,10 +210,6 @@ export async function startQueue({
       batchSize: 1,
       // This is the concurrency knob. `batchSize` never was.
       localConcurrency: concurrency,
-      // At most one pass per room, deployment-wide. Two overlapping passes over
-      // one room would each drain a share of its unread messages and each spend
-      // a provider call on it.
-      groupConcurrency: 1,
     },
     async (jobs) => {
       for (const job of jobs) {
@@ -220,6 +263,7 @@ export async function startQueue({
   return {
     boss,
     enqueueInterpretation: (tx, roomId) => enqueueInterpretation(boss, tx, roomId, coalesceSeconds),
+    enqueueFollowUp,
     scheduleReinterpretation: async (tx, { roomId, messageId }) => {
       const staged = await stageReinterpretation(tx, messageId);
       await enqueueInterpretation(boss, tx, roomId, coalesceSeconds);
@@ -250,13 +294,12 @@ export function enqueueInterpretation(
     INTERPRET_QUEUE,
     { roomId },
     {
-      // One job per room per slot — the coalescing key.
+      // The coalescing key. Under the queue's `stately` policy this is "one
+      // queued and one active pass for this room" — no time bucket, so no
+      // boundary for a burst to fall across.
       singletonKey: roomId,
-      // Explicit, because pg-boss's dedup silently no-ops without it (#16).
-      singletonSeconds: coalesceSeconds,
-      // And the debounce: run at the end of the burst, not at the start.
+      // The debounce: run at the end of the burst, not at the start.
       startAfter: coalesceSeconds,
-      group: { id: roomId },
       db: fromDrizzle(tx, sql),
     },
   );
