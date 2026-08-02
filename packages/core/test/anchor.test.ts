@@ -423,9 +423,20 @@ describe('r12 — a break with no marker on it is still structure the author did
    * **Catches**: reporting a re-wrapped line as added structure — the
    * over-broad repair that would refuse every client that wraps a message
    * differently from the quote it produced. Also catches `LINE_BREAK_SPLIT`
-   * losing its CRLF alternative, which would read one CRLF break as two and
-   * report a paragraph break at every line ending of a statement whose line
-   * endings differ from its message's.
+   * losing its CRLF alternative, which reads one CRLF break as two and turns a
+   * CRLF **soft wrap** into a paragraph break the author never wrote.
+   *
+   * That second one is a mutant this test *failed to catch* on its first
+   * writing, and the escape is worth recording because the shape is this
+   * round's own: the assertion used `\r\n\r\n`, which is the input a test
+   * author reaches for when the subject is "CRLF". Both splitters agree on it —
+   * consecutive blank lines collapse into one descriptor, so cutting the pair
+   * into two line ends changes nothing that survives the collapse. **Only a
+   * single `\r\n` separates them**, because only there does the spurious empty
+   * line have a content line on both sides. Measured, not reasoned: with the
+   * real splitter `breakStructures('a\r\nb')` is `[]` and `('a\r\n\r\nb')` is
+   * one descriptor; the mutant cuts them to `['a','','b']` and
+   * `['a','','','','b']`, which differ in the first case and not the second.
    */
   it('leaves a re-wrapped line and the author’s own breaks alone', () => {
     // A bare newline where the author put a space: allowed, and stated residue.
@@ -445,7 +456,29 @@ describe('r12 — a break with no marker on it is still structure the author did
     expect(kinds({ body: paragraphed, quote: paragraphed, statement: BODY })).not.toContain(
       'statement_adds_block_structure',
     );
+    // **A single CRLF is a soft wrap, and this is the assertion that separates
+    // the two splitters** — see the docblock. Under the class-only split the
+    // spurious empty line sits between two content lines and reads as a
+    // paragraph break, so an ordinary CRLF client is refused.
+    expect(
+      kinds({
+        body: BODY,
+        quote: BODY,
+        statement: 'Do not deploy on Friday.\r\nBob agreed to the rollback plan.',
+      }),
+    ).not.toContain('statement_adds_block_structure');
+    // …in the other direction too: the message is CRLF-wrapped and the
+    // statement is not.
+    expect(
+      kinds({
+        body: 'Do not deploy on Friday.\r\nBob agreed to the rollback plan.',
+        quote: 'Do not deploy on Friday.\r\nBob agreed to the rollback plan.',
+        statement: BODY,
+      }),
+    ).not.toContain('statement_adds_block_structure');
     // CRLF against LF is one line ending spelled two ways, not a new paragraph.
+    // Kept, but it is not what catches the splitter — both spellings collapse a
+    // blank run to one descriptor.
     const crlf = 'Do not deploy on Friday.\r\n\r\nBob agreed to the rollback plan.';
     expect(kinds({ body: crlf, quote: crlf, statement: paragraphed })).not.toContain(
       'statement_adds_block_structure',
