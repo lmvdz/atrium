@@ -244,6 +244,23 @@ async function projectObjectCorrected(
   await tx
     .update(acceptedObjects)
     .set({
+      /**
+       * **`type` moves too.** It did not until #22 r10, and `retype` is the verb
+       * whose entire job is to change it: a `retype` from objective to
+       * commitment left the row reading `type = 'objective'` while its payload
+       * became a commitment's, permanently, since nothing but the insert ever
+       * wrote this column. The fold said one thing and the read model another,
+       * and they never reconverged — both partial indexes on `(room_id, type)`
+       * filed the object under the type it used to be, and a later
+       * `reattribute` that is only legal on a commitment succeeded against a row
+       * the database called an objective (r10, D3).
+       *
+       * Written from `after`, like everything else here (rule 2 at the top of
+       * this file). The general audit — every projection that writes a subset of
+       * the fold's fields — is #56 and stays there; this is the one field a verb
+       * in this event's own vocabulary changes.
+       */
+      type: record.object.type,
       payload: record.object.payload,
       revision: record.revision,
       retractedAt: record.retractedAt === null ? null : new Date(record.retractedAt),
@@ -330,6 +347,10 @@ async function syncObjectRow(
   await tx
     .update(acceptedObjects)
     .set({
+      // Same reason as `projectObjectCorrected`: this function's contract is
+      // "rewrite one object row from state", and a rewrite that skips the
+      // discriminator is a row that disagrees with the fold about what it is.
+      type: object.type,
       payload: object.payload,
       revision: record.revision,
       retractedAt: record.retractedAt === null ? null : new Date(record.retractedAt),
