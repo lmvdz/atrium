@@ -362,13 +362,13 @@ and revealed on row hover over ~.12s. The row stays quiet until you are pointing
 at it. Anything that must be discoverable without hovering — anything that owes
 the user attention — is not a hover affordance.
 
-**And a control you cannot see must not take the pointer.** `.mrow .acts` is
+**And a control you cannot see must not take the pointer.** `.mrow .acts` was
 `position: absolute; z-index: 3` and was hit-testable at `opacity: 0`, clearing
 `#unmarkSeen` by **1.4px** at 1440. A blind reviewer drove 18 randomised sessions of 40
 real mouse clicks with pointer moves at three widths, plus a 12-width probe of all nine
 hit-test points, and could not steal a single click — and measured the mechanism anyway.
-It is environmental today and a row-spacing change makes it a repro. **Delete the
-reachability, not the margin.** The rule is a pair, and both halves are checked:
+**Delete the reachability, not the margin.** The rule is a pair, and both halves are
+checked:
 
 - a control a reader **can** see must have a point that hit-tests to itself;
 - a control a reader **cannot** see must have no such point;
@@ -380,6 +380,77 @@ strip fading in is transparent for 120ms and is not a strip nobody can see. `eff
 returns `null` while any ancestor has a running animation, and an unsettled control is
 skipped rather than reported. That caveat exists because the first cut of the rule fired
 on eleven honest controls before it fired on the real one.
+
+### And a third question: what is painted, against what is laid out
+
+**A control or a sentence you can see must not be painted over by another element you
+can also see.**
+
+The pair above is complete and it is not enough. Round 16 found two live defects that
+every instrument on this page passed, and none of the instruments was broken:
+
+- `scrollWidth === clientWidth` held on both elements. **Nothing was clipped. It was
+  painted over.** The legibility rule asks whether text overflows its own box, and
+  occlusion happens entirely outside that question.
+- Both halves of the reachability pair passed too, and that is the instructive part:
+  **the occluder was itself visible and itself reachable.** `go to it →` — the route
+  round 15 gave the reply preview — is 60px wide, and 42 of those 60px were painted over
+  by the `Reply` chip the same `:hover` reveals — 42px at 1440, 1366, 1279, 1160 and 1120
+  alike, structural rather than a width accident. `document.elementFromPoint` at the
+  label's own centre returned
+  `<button data-reply="1">Reply</button>`, so the click a reader aimed at "go to what I
+  am quoting" opened a reply to their own message. The same strip's `top: -9px` put it
+  across 11px of the row's own 15px first line: **5 of 17 rows lost characters at 1440
+  and 10 of 17 at 1120**, in both themes, mid-sentence, in the middle of somebody's
+  unverified claim. The row was unreadable at the moment you pointed at it to read it.
+
+Round 14 predicted this mechanism and guessed the trigger wrong: it wrote that a
+**row-spacing change** would turn the overlap into a repro. No row spacing ever changed.
+Round 15 added **a new control underneath the overlay**. So the rule is stated in the
+direction that catches both: **an overlay's blast radius changes when what is underneath
+it changes**, and the check must fire on a change to the covered as readily as on a
+change to the coverer.
+
+**Prefer a lane to an overlay.** The fix was not to move the strip; it was to stop it
+being an overlay — `.mrow` has a fifth grid track sized `auto`, so each row reserves the
+width of the strip *it* has and the text column can never reach into it. That costs
+44–93px of a row's text width and 35–70px of the feed's height, and it is the
+right trade on a surface whose stated job is that the record is painted whole. Slack does
+overlay a hover toolbar; Slack is not a 10–12.5px operator surface, and the characters it
+covers are not somebody's unverified claim.
+
+**Enforcement: `design/prototype-drive.mjs`, pass 4, plus the two repros
+`R16-D1-a-controls-label-is-not-painted-over` and
+`R16-D2-a-row-hover-covers-none-of-the-rows-own-words`.** It runs at every declared width
+**in both themes**, and it is measured **per painted character**: a `Range` per character,
+the character's own centre put to `document.elementFromPoint`, and a paint-order
+comparison to decide whether what answers is genuinely above it. The finding quotes the
+characters that were lost.
+
+It lives in the harness rather than on the page **because the strip exists only while a
+row is hovered**, and a render-time checker has no hover to look at. A fourth page-side
+instrument that cannot see the class it was built for is this file's own "wrong instrument"
+failure. One implementation, injected into whatever build the driver is pointed at, so the
+previous round and this one are measured by identical code.
+
+**What it enumerates from, and what it does not cover.** The occluder set is every
+*visible* element that is `position: absolute | fixed | sticky` or carries a positive
+`z-index` — the set that can paint over a sibling without the layout knowing. The covered
+set is every painted character under `<body>`; characters scrolled out of their own pane
+are counted as not painted. The states are the ones pass 4 drives: the load state, then
+one pointer position per on-screen control and per message row — **not** every state pass
+0's write-sequence walk reaches. It cannot see: an in-flow overlap made by a negative
+margin or a transform; anything covered that is not text (an icon, a rule, a focus ring); an overlay
+that is itself `pointer-events: none`, because the hit test never nominates it; and a
+sliver crossing the top of a glyph, because it samples one point per character. The
+paint-order comparison resolves at the two elements' common ancestor rather than through
+every stacking context between them.
+
+That last list is not decoration. The first cut of this rule reported that a message row
+was covering the toast's own words — the toast is `z-index: 40; pointer-events: none`, so
+it is painted above the feed and the hit test looks straight through it. It invented a
+defect on its first run against the previous round, which is why the hit test now only
+*nominates* and the paint order decides.
 
 ## What is deliberately not here
 
@@ -729,6 +800,11 @@ was the only flexible track. The page's own legibility invariant caught it insta
   on each side of each of the page's two breakpoints plus the narrowest supported width),
   the deliberate enumeration rotates through it, the random drive rotates through it, and
   **every scripted repro runs at every width and reports which ones it fired at**.
+- **The colour scheme is one of the cheap ones too.** Round 16's occlusion sweep runs the
+  whole width set in light *and* dark, at the cost of one browser context per width,
+  because its two defects were reported in both and a rule that runs in one is a rule
+  about one. Nothing else on this harness varies the theme yet; that is stated here rather
+  than discovered.
 - **And "the narrowest supported width" was itself a phrase nobody had measured.** The CSS
   comment above the breakpoints uses it; the number is **1120**. Below that the grid stops
   shrinking and pushes the lens off the right edge — `documentElement.scrollWidth` stays at

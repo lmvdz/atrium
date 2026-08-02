@@ -21,7 +21,7 @@
  * Usage:
  *   node design/prototype-drive.mjs [--file <path>] [--depth N] [--random N]
  *                                   [--widths 1440,1279,1024] [--height 900]
- *                                   [--only repros] [--json out]
+ *                                   [--only repros|occlusion] [--json out]
  *                                   [--uncovered <path>] [--counts <path>]
  *
  * Point it at the previous round and quote the count:
@@ -291,10 +291,232 @@ const INIT = `
 })();
 `;
 
+/* ===========================================================================
+ * WHAT IS PAINTED, AGAINST WHAT IS LAID OUT (round 16, D1 and D2)
+ *
+ * The third question, and the one three instruments and fifteen rounds could
+ * not ask. `scrollWidth === clientWidth` held on both of round 16's defects:
+ * NOTHING WAS CLIPPED, it was PAINTED OVER, and occlusion happens entirely
+ * outside the question "does this text overflow its own box". The reachability
+ * rule could not see it either, and that is the interesting half: the rule is
+ * stated as a pair and the pair is complete — a control you can see must be
+ * reachable, a control you cannot see must not be touchable — and BOTH HALVES
+ * PASS on an element that is 70% covered, because the occluder is itself
+ * visible and itself reachable.
+ *
+ *   THE RULE: a control or a sentence you can see must not be painted over by
+ *   another element you can also see.
+ *
+ * HOW IT IS MEASURED. Per PAINTED CHARACTER, not per box. Every text node the
+ * page is painting gets a Range per character; the character's own centre is
+ * put to `document.elementFromPoint`; and if what answers is neither the
+ * character's owner nor inside it, and is itself visible, and `paintsAbove()`
+ * agrees that it really is on top (the hit test only NOMINATES — see (c)), and
+ * something between it and the two elements' common ancestor actually paints (a
+ * background with alpha, or a background image — an element that paints nothing
+ * hides nothing), then that character is covered and the finding names it.
+ * A box test would
+ * have reported the 2px of `.acts` that overhangs m10's line and would have
+ * missed nothing that matters; a character test says `Eyeballed off last week's
+ * b|ill — that's not|` and quotes the 14 characters a reader lost.
+ *
+ * WHY IT LIVES IN THE HARNESS AND NOT ON THE PAGE. The strip is painted only
+ * while a row is HOVERED. A render-time checker has no hover to look at, so a
+ * page-side version of this rule would be a fourth instrument that cannot see
+ * the class it was built for — which is this file's own "a wrong instrument
+ * invents defects" failure, arriving inside the fix for something else. The
+ * harness has a real mouse. It is also why there is ONE implementation: it is
+ * injected into whatever build `--file` points at, so r15 as committed and r16
+ * are measured by identical code, which is the whole value of a repro.
+ *
+ * WHAT IT ENUMERATES FROM, said plainly rather than discovered next round.
+ *   - THE OCCLUDER SET is every visible element that is `position: absolute |
+ *     fixed | sticky`, or carries a positive `z-index`. That is the set that can
+ *     paint over a sibling without the layout knowing. A text run is only
+ *     sampled per character if one of its line rects intersects one of those.
+ *   - THE COVERED SET is every text node under `<body>` that is displayed, not
+ *     transparent, and not inside `script/style/template`. Characters whose
+ *     centre falls outside their own element's visible box — scrolled out of a
+ *     pane, or off the viewport — are counted as not painted and skipped.
+ *   - THE STATES are whatever the caller drives. Pass 4 hovers every message row
+ *     and then every on-screen control, at every declared width, in both themes.
+ *
+ * AND WHAT IT DOES NOT COVER.
+ *   (a) IN-FLOW OVERLAP IS INVISIBLE TO IT. Two static boxes made to overlap by
+ *       a negative margin, a transform, or a collapsed track are not in the
+ *       occluder set. checkLayoutInvariant() catches that shape for `.center`'s
+ *       own children and for nothing else.
+ *   (b) IT ONLY SEES CHARACTERS. An icon, a rule, a chart, a focus ring or a
+ *       border painted over by an overlay is not text and is not reported.
+ *   (c) IT ASKS elementFromPoint FOR A CANDIDATE, so an overlay that is itself
+ *       `pointer-events: none` is never nominated and never reported, however
+ *       opaquely it paints. The toast is exactly that shape — and it is the
+ *       COVERED side there, which `paintsAbove()` now gets right; it is the
+ *       covering side that this cannot see. Nothing on this page covers text
+ *       while refusing the pointer today.
+ *   (c2) AND `paintsAbove()` IS AN APPROXIMATION OF THE PAINTING ALGORITHM,
+ *       resolved at the two elements' common ancestor rather than through every
+ *       stacking context between them. A z-index on an intermediate ancestor
+ *       that reorders the branches would be read wrong.
+ *   (d) IT IS A SAMPLE OF ONE POINT PER CHARACTER — the centre. A sliver of an
+ *       overlay crossing the top 2px of a glyph does not fire.
+ *   (e) IT CANNOT SEE A STATE NOBODY DRIVES. Pass 4's denominator is the rows
+ *       and controls on screen at load, not every state the walk reaches.
+ * ======================================================================== */
+const OCCL = `
+window.__occl = function () {
+  var MINOP = 0.05;
+  function cs(el) { return getComputedStyle(el); }
+  function effOp(el) {
+    var o = 1;
+    for (var p = el; p && p.nodeType === 1; p = p.parentElement) o *= Number(cs(p).opacity);
+    return o;
+  }
+  function shown(el) {
+    for (var p = el; p && p.nodeType === 1; p = p.parentElement) {
+      var s = cs(p);
+      if (s.display === "none" || s.visibility === "hidden") return false;
+    }
+    return true;
+  }
+  /* a character scrolled out of its own pane is not painted, and asking
+     elementFromPoint about it answers a question nobody asked */
+  function visibleBox(el) {
+    var r = el.getBoundingClientRect();
+    var b = { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    for (var p = el.parentElement; p && p.nodeType === 1; p = p.parentElement) {
+      var s = cs(p);
+      if (s.overflowX === "visible" && s.overflowY === "visible") continue;
+      var pr = p.getBoundingClientRect();
+      b.left = Math.max(b.left, pr.left); b.top = Math.max(b.top, pr.top);
+      b.right = Math.min(b.right, pr.right); b.bottom = Math.min(b.bottom, pr.bottom);
+    }
+    b.left = Math.max(b.left, 0); b.top = Math.max(b.top, 0);
+    b.right = Math.min(b.right, window.innerWidth); b.bottom = Math.min(b.bottom, window.innerHeight);
+    return b;
+  }
+  var ALPHA = /rgba?\\(\\s*[\\d.]+\\s*,\\s*[\\d.]+\\s*,\\s*[\\d.]+\\s*(?:,\\s*([\\d.]+)\\s*)?\\)/;
+  function paints(el) {
+    var s = cs(el);
+    if (s.backgroundImage && s.backgroundImage !== "none") return true;
+    var m = ALPHA.exec(s.backgroundColor || "");
+    return !!(m && (m[1] === undefined || Number(m[1]) > 0.05));
+  }
+  /* AND WHAT elementFromPoint ANSWERS IS NOT PAINT ORDER — it is hit order, and
+     the two differ wherever \`pointer-events: none\` does. The toast is
+     \`z-index: 40; pointer-events: none\`: it is painted OVER the feed and the
+     hit test looks straight through it, so the first cut of this rule reported
+     that a message row was covering the toast's own words. That is the
+     "a wrong instrument invents defects" failure, caught on this rule's first
+     run against the previous round. So the hit test only NOMINATES a candidate,
+     and this decides: find the two elements' common ancestor, take the branch
+     each one descends from, and compare those two siblings the way the painting
+     algorithm does — z-index first, then positioned over in-flow, then document
+     order. It is an approximation (it reads one level, at the common ancestor,
+     rather than resolving every stacking context between), and it is the level
+     at which every overlay on this page is decided. */
+  function zRank(el) {
+    var s = cs(el);
+    if (s.zIndex !== "auto" && !isNaN(Number(s.zIndex))) return Number(s.zIndex);
+    return s.position !== "static" ? 0.5 : 0;
+  }
+  function paintsAbove(a, b) {
+    var anc = a;
+    while (anc && !anc.contains(b)) anc = anc.parentElement;
+    if (!anc || anc === a || anc === b) return false;
+    var ba = a; while (ba.parentElement && ba.parentElement !== anc) ba = ba.parentElement;
+    var bb = b; while (bb.parentElement && bb.parentElement !== anc) bb = bb.parentElement;
+    if (ba === bb) return false;
+    var za = zRank(ba), zb = zRank(bb);
+    if (za !== zb) return za > zb;
+    return !!(bb.compareDocumentPosition(ba) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
+  var overlays = [], all = document.querySelectorAll("body *");
+  for (var i = 0; i < all.length; i++) {
+    var el = all[i], s = cs(el);
+    if (s.display === "none" || s.visibility === "hidden") continue;
+    var pos = s.position;
+    if (!(pos === "absolute" || pos === "fixed" || pos === "sticky") &&
+        !(s.zIndex !== "auto" && Number(s.zIndex) > 0)) continue;
+    if (effOp(el) < MINOP) continue;
+    var r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    if (r.right < 0 || r.bottom < 0 || r.left > window.innerWidth || r.top > window.innerHeight) continue;
+    overlays.push({ el: el, r: r });
+  }
+
+  var findings = [], chars = 0, tested = 0;
+  var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode: function (n) {
+      var p = n.parentElement;
+      if (!p || p.closest("script, style, template, title")) return NodeFilter.FILTER_REJECT;
+      if (!String(n.nodeValue).trim()) return NodeFilter.FILTER_REJECT;
+      if (!shown(p) || effOp(p) < MINOP) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  var rng = document.createRange(), n;
+  while ((n = w.nextNode())) {
+    var owner = n.parentElement;
+    rng.selectNodeContents(n);
+    var lines = rng.getClientRects(), reachable = false;
+    for (var L = 0; L < lines.length && !reachable; L++) {
+      var lr = lines[L];
+      if (lr.width < 0.5 || lr.height < 0.5) continue;
+      for (var o = 0; o < overlays.length; o++) {
+        var ov = overlays[o];
+        if (ov.el.contains(owner) || owner.contains(ov.el)) continue;
+        if (lr.right <= ov.r.left || lr.left >= ov.r.right || lr.bottom <= ov.r.top || lr.top >= ov.r.bottom) continue;
+        reachable = true; break;
+      }
+    }
+    if (!reachable) continue;
+    var vb = visibleBox(owner), text = String(n.nodeValue);
+    var covered = [], by = null, px0 = 0, px1 = 0;
+    for (var c = 0; c < text.length; c++) {
+      if (/\\s/.test(text[c])) continue;
+      rng.setStart(n, c); rng.setEnd(n, c + 1);
+      var cr = rng.getClientRects()[0];
+      if (!cr || cr.width < 0.2 || cr.height < 0.2) continue;
+      chars++;
+      var cx = cr.left + cr.width / 2, cy = cr.top + cr.height / 2;
+      if (cx < vb.left || cx > vb.right || cy < vb.top || cy > vb.bottom) continue;
+      tested++;
+      var hit = document.elementFromPoint(cx, cy);
+      if (!hit || hit === owner || owner.contains(hit) || hit.contains(owner)) continue;
+      if (effOp(hit) < MINOP) continue;                 // round 14 owns the invisible half
+      if (!paintsAbove(hit, owner)) continue;           // hit order is not paint order
+      var stop = hit;
+      while (stop && !stop.contains(owner)) stop = stop.parentElement;
+      var painter = null;
+      for (var p2 = hit; p2 && p2.nodeType === 1 && p2 !== stop; p2 = p2.parentElement)
+        if (paints(p2)) { painter = p2; break; }
+      if (!painter) continue;                           // on top, and putting no pixels there
+      if (!covered.length) px0 = cr.left;
+      px1 = cr.right; covered.push(text[c]); by = painter;
+    }
+    if (!covered.length) continue;
+    var host = owner.closest("[data-msg]") || owner.closest("[id]") || owner;
+    findings.push({
+      text: text.replace(/\\s+/g, " ").trim().slice(0, 80),
+      covered: covered.join(""), n: covered.length, px: Math.round((px1 - px0) * 10) / 10,
+      owner: owner.tagName.toLowerCase() + (owner.className ? "." + String(owner.className).split(" ")[0] : ""),
+      where: (host.getAttribute && host.getAttribute("data-msg")) || host.id || String(host.className || "?").split(" ")[0],
+      by: by.tagName.toLowerCase() + (by.className ? "." + String(by.className).split(" ")[0] : "") +
+          " :: " + String(by.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 26),
+      w: window.innerWidth
+    });
+  }
+  return { findings: findings, overlays: overlays.length, chars: chars, tested: tested };
+};
+`;
+
 /* --- one browser session ---------------------------------------------------- */
 async function newPage(browser, width) {
   const ctx = await browser.newContext({ viewport: { width: Number(width) || SEQ_WIDTH, height: HEIGHT } });
   await ctx.addInitScript(INIT);
+  await ctx.addInitScript(OCCL);
   const page = await ctx.newPage();
   const errors = [];
   page.on("console", m => {
@@ -656,7 +878,123 @@ async function clickText(page, text, opts = {}) {
  * check written after the fix, against the fixed build, measures nothing. Run
  * them against the previous round with --file and quote the count.
  * ======================================================================== */
+/* hover a row the way a reader does: a real pointer, parked in the row's text
+   column, well left of anything the hover reveals. Returns the row's geometry. */
+async function hoverRow(page, msg) {
+  const r = await page.evaluate(m => {
+    const el = document.querySelector(`#feed .mrow[data-msg="${m}"]`);
+    if (!el) return null;
+    el.scrollIntoView({ block: "center" });
+    const b = el.getBoundingClientRect();
+    return { top: b.top, left: b.left, right: b.right, h: b.height };
+  }, msg);
+  if (!r) return null;
+  await page.mouse.move(r.left + 160, r.top + Math.min(8, r.h / 2));
+  await page.waitForTimeout(140);
+  return r;
+}
+
 const REPROS = [
+  {
+    /* ROUND 16, D1. Round 15 closed round 14's D1 by giving the reply preview a
+       route to the row it quotes — `go to it →`, revealed on the same hover as
+       the row's `Reply` chip, which is `position: absolute` over the same strip
+       of pixels. 42 of the label's 60px were painted over by `Reply`, at 1440,
+       1366, 1279, 1160 and 1120 alike; `document.elementFromPoint` at the
+       label's own CENTRE returned `<button data-reply="1">Reply</button>`, and
+       the click that read "jump to what I am quoting" opened `REPLYING · lars`
+       — a reply to your own message. Nothing was clipped, so the legibility rule
+       passed; the occluder was visible and reachable, so both halves of the
+       reachability pair passed. This drives the whole path with a real mouse. */
+    id: "R16-D1-a-controls-label-is-not-painted-over",
+    what: "the reply preview's route control is painted whole, and the point at its own centre hit-tests to it",
+    async run(page) {
+      const r = await hoverRow(page, "m6");
+      if (!r) return "the 08:36 row is not in this room";
+      const rb = await page.evaluate(() => {
+        const b = document.querySelector('#feed .mrow[data-msg="m6"] .acts button[data-reply]');
+        if (!b) return null;
+        const q = b.getBoundingClientRect();
+        return { x: q.left + q.width / 2, y: q.top + q.height / 2 };
+      });
+      if (!rb) return "the 08:36 row offers no Reply";
+      await page.mouse.click(rb.x, rb.y);
+      await page.waitForTimeout(150);
+      await page.click("#cinput");
+      await page.keyboard.type("noted");
+      await page.click("#sendBtn");
+      await page.waitForTimeout(300);
+      /* the quotation is in the row the send just created */
+      const q = await page.evaluate(() => {
+        const rows = document.querySelectorAll("#feed .mrow");
+        const el = rows[rows.length - 1];
+        const m = el && el.querySelector(".mreply");
+        if (!m) return null;
+        el.scrollIntoView({ block: "center" });
+        const b = m.getBoundingClientRect();
+        return { x: b.left + 60, y: b.top + b.height / 2 };
+      });
+      if (!q) return "the sent reply carries no quotation";
+      await page.mouse.move(q.x, q.y);
+      await page.waitForTimeout(200);
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        const rows = document.querySelectorAll("#feed .mrow");
+        const el = rows[rows.length - 1];
+        const j = el && el.querySelector(".mreply .jump");
+        if (!j) return ["the reply row carries no route to the row it quotes"];
+        const b = j.getBoundingClientRect();
+        const label = (j.textContent || "").trim();
+        const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        if (!(hit === j || j.contains(hit)))
+          out.push("the point at the centre of " + JSON.stringify(label) + " hit-tests to something else — the click " +
+                   "a reader aims at this control lands on " + JSON.stringify((hit && hit.outerHTML || "").slice(0, 60)));
+        (window.__occl().findings || []).forEach(f => {
+          if (f.text.indexOf("go to it") < 0) return;
+          out.push("a control's own label is painted over by another control: " + JSON.stringify(label) + " loses " +
+                   f.n + " character(s) / " + f.px + "px — " + JSON.stringify(f.covered) + " — under " + f.by +
+                   " at " + f.w + "px");
+        });
+        return out;
+      });
+    }
+  },
+  {
+    /* ROUND 16, D2. The same overlay, on its own row. `top: -9px` put the strip
+       across 11px of the row's 15px first line box, so pointing at a row to read
+       it was the act that made it unreadable: at 1440 mateo's 08:41 claim
+       rendered `Eyeballed off last week's b` and then a chip, and at 1120 dana's
+       08:31 lost `— almost all iOS`, 92px, mid-sentence. Measured per painted
+       character, on the feed as it loads, it fires on 5 of 17 rows at 1440,
+       6 at 1279 and 10 at both 1160 and 1120, in both themes. The count is the
+       number this class is reported in, so the assertion prints it. */
+    id: "R16-D2-a-row-hover-covers-none-of-the-rows-own-words",
+    what: "hovering a message row paints its action strip over none of that row's own characters",
+    async run() { return null; },
+    async assert(page) {
+      const msgs = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("#feed .mrow")).map(el => el.dataset.msg).filter(Boolean));
+      const out = [];
+      /* ROWS, NOT FINDINGS. One hover can cover characters in two of the row's
+         own text nodes — the body and the note — and "6 of 18 rows" is the
+         number this defect is reported in. Counting findings would have printed
+         a bigger number for the same defect and called them rows. */
+      let rows = 0;
+      for (const m of msgs) {
+        if (!await hoverRow(page, m)) continue;
+        const f = await page.evaluate(m => window.__occl().findings.filter(x => x.where === m), m);
+        if (f.length) rows++;
+        f.forEach(x => out.push("hovering a row covers " + x.n + " of its own characters (" + x.px + "px) — " +
+          JSON.stringify(x.covered) + " out of " + JSON.stringify(x.text) + " — under " + x.by));
+      }
+      if (out.length) out.unshift(rows + " of " + msgs.length + " rows lose characters when hovered at " +
+                                  (await page.evaluate(() => window.innerWidth)) + "px");
+      return out;
+    }
+  },
   {
     /* ROUND 14, D1. The rail's owed badge mints thirteen verification reads and
        its entire sentence is the characters `3`. No COUNTED_CLAIMS pattern
@@ -872,10 +1210,17 @@ const REPROS = [
   },
   {
     /* ROUND 14, the unreproduced observation, closed by deleting the mechanism.
-       `.mrow .acts` is `position: absolute; z-index: 3; pointer-events: auto`
-       and was hit-testable at `opacity: 0`, clearing `#unmarkSeen` by 1.4px at
+       `.mrow .acts` was `position: absolute; z-index: 3; pointer-events: auto`
+       and hit-testable at `opacity: 0`, clearing `#unmarkSeen` by 1.4px at
        1440. Eighteen randomised sessions of 40 real mouse clicks could not steal
-       a click; a row-spacing change is all it would take. */
+       a click, and the round predicted that "a row-spacing change is all it
+       would take". THE MECHANISM WAS NAMED RIGHT AND THE TRIGGER WAS GUESSED
+       WRONG (round 16): no row spacing changed, round 15 added a control
+       UNDERNEATH the overlay, and the two defects that followed are R16-D1 and
+       R16-D2 above. This repro keeps the half it was written for — a control at
+       zero opacity may not take the pointer — and pass 4 asks the question this
+       one cannot: whether a control you CAN see is painted over by another one
+       you can also see. */
     id: "R14-D11-invisible-controls-are-untouchable",
     what: "no control a reader cannot see takes the pointer",
     async run() { return null; },
@@ -1437,9 +1782,84 @@ async function passRepros(browser, log) {
         (bad ? ` [fires at ${merged.firedAt.join(", ")} of ${widths.join(", ")}]` : "") +
         (merged.skip ? ` [path incomplete: ${merged.skip}]` : ""));
     merged.errors.slice(0, 6).forEach(t => log(`      ${t.slice(0, 210)}`));
-    merged.asserts.slice(0, 6).forEach(t => log(`      ! ${t}`));
+    /* AN ASSERTION THAT REPORTS A COUNT PER WIDTH NEEDS EVERY WIDTH PRINTED
+       (round 16). At 6 this printed the 1440 numbers and swallowed the other
+       four, on a round whose whole point is that the severity nearly doubles
+       from 1440 to 1120. A truncated report of a viewport-dependent measurement
+       is a report about one viewport again. */
+    merged.asserts.slice(0, 80).forEach(t => log(`      ! ${t}`));
   }
   return rows;
+}
+
+/* ===========================================================================
+ * PASS 4 — NOTHING VISIBLE IS PAINTED OVER (round 16)
+ *
+ * The repros above pin the two defects this round fixed. This is the rule they
+ * are instances of, driven over the surface rather than over a path: at every
+ * declared width AND IN BOTH THEMES, sample the load state, then park a real
+ * pointer on every on-screen control and every message row and sample again.
+ * A hover affordance only exists while something is hovered, which is why this
+ * pass and not a render-time checker is where the rule lives.
+ *
+ * BOTH THEMES, because r16's D2 was reported in both and a rule that runs in one
+ * is a rule about one. The extra cost is one context per width.
+ *
+ * The denominator this pass enumerates FROM, and what it cannot see, is written
+ * out where `OCCL` is defined. The short version: the occluder set is the
+ * positioned-or-raised visible elements; the covered set is every painted
+ * character; the states are the ones driven here, which is the load state plus
+ * one hover per control — not every state the walk in pass 0 reaches.
+ * ======================================================================== */
+async function passOcclusion(browser, log) {
+  const seen = new Map();
+  let samples = 0, hovers = 0;
+  for (const width of WIDTHS) {
+    for (const theme of ["light", "dark"]) {
+      const { ctx, page } = await newPage(browser, width);
+      await page.waitForTimeout(250);
+      if (theme === "dark") { await page.click("#themeBtn"); await page.waitForTimeout(250); }
+      const take = async where => {
+        samples++;
+        const res = await page.evaluate(() => window.__occl());
+        res.findings.forEach(f => {
+          const k = `${f.owner}|${f.by}|${f.covered.slice(0, 14)}|${f.w}`;
+          if (!seen.has(k)) seen.set(k, { ...f, at: where, theme });
+        });
+      };
+      await take("load");
+      const n = await page.evaluate(() => document.querySelectorAll("[data-ctl]").length);
+      for (let i = 0; i < n; i++) {
+        const at = await page.evaluate(i => {
+          const el = document.querySelectorAll("[data-ctl]")[i];
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return null;
+          if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return null;
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, i);
+        if (!at) continue;
+        await page.mouse.move(at.x, at.y);
+        await page.waitForTimeout(40);
+        hovers++;
+        await take("hovering control #" + i);
+      }
+      const msgs = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("#feed .mrow")).map(el => el.dataset.msg).filter(Boolean));
+      for (const m of msgs) {
+        if (!await hoverRow(page, m)) continue;
+        hovers++;
+        await take("hovering row " + m);
+      }
+      await ctx.close();
+    }
+  }
+  log(`  ${samples} samples over ${hovers} pointer positions, at ${WIDTHS.join(", ")} in light and dark`);
+  const list = Array.from(seen.values());
+  if (!list.length) log(`  nothing visible is painted over by anything else you can see`);
+  list.forEach(f => log(`  PAINTED OVER @${f.w} ${f.theme}: ${f.n} character(s) / ${f.px}px of ${f.owner} (${f.where}) — ` +
+    `${JSON.stringify(f.covered.slice(0, 40))} out of ${JSON.stringify(f.text)} — under ${f.by} [${f.at}]`));
+  return { findings: list, samples, hovers };
 }
 
 /* --- main ------------------------------------------------------------------ */
@@ -1451,9 +1871,9 @@ const docFails = [];
 const browser = await chromium.launch();
 log(`driving ${FILE}`);
 
-const SKIP_WALK = ONLY === "repros";
+const SKIP_WALK = ONLY === "repros" || ONLY === "occlusion";
 if (!SKIP_WALK) log("\n[0] write-sequence enumeration over reachable states");
-else log("\n[0] SKIPPED (--only repros): no state walk, so no denominator is reported for this run");
+else log(`\n[0] SKIPPED (--only ${ONLY}): no state walk, so no denominator is reported for this run`);
 const sq = SKIP_WALK
   ? { seen: new Map(), levels: [], violations: [], drivenSteps: new Set(), offeredSteps: new Set(),
       unreachable: new Map(), ctlSeen: new Map(), uncovered: new Set(), numbers: new Set(), depth: 0, budget: 0 }
@@ -1646,8 +2066,14 @@ if (!SKIP_WALK) {
   cls.forEach((v, c) => { log(`     ${c}`); log(`        path: ${v.path.slice(-4).join("  →  ")}`); });
 }
 
-log("\n[3] scripted repros");
-const rp = await passRepros(browser, log);
+const SKIP_REPROS = ONLY === "occlusion";
+log(SKIP_REPROS ? "\n[3] SKIPPED (--only occlusion)" : "\n[3] scripted repros");
+const rp = SKIP_REPROS ? [] : await passRepros(browser, log);
+
+const SKIP_OCCL = ONLY === "repros";
+log(SKIP_OCCL ? "\n[4] SKIPPED (--only repros): the occlusion sweep is not part of the repro suite"
+              : "\n[4] nothing visible is painted over (round 16)");
+const oc = SKIP_OCCL ? { findings: [], samples: 0, hovers: 0 } : await passOcclusion(browser, log);
 
 await browser.close();
 
@@ -1674,8 +2100,9 @@ const statesReached = sq.seen.size;
 const truncatedLevels = sq.levels.filter(l => l.truncated);
 
 log(`\nSUMMARY`);
-if (SKIP_WALK) log(`  --only repros: no controls enumerated, no states walked, no artifact compared. This run reports ` +
-                   `the repro suite at ${WIDTHS.join(", ")} and NOTHING ELSE — it is not a denominator.`);
+if (SKIP_WALK) log(`  --only ${ONLY}: no controls enumerated, no states walked, no artifact compared. This run reports ` +
+                   `${SKIP_REPROS ? "the occlusion sweep" : SKIP_OCCL ? "the repro suite" : "passes 3 and 4"} at ` +
+                   `${WIDTHS.join(", ")} and NOTHING ELSE — it is not a denominator.`);
 if (!SKIP_WALK) {
 log(`  controls enumerated (union over every state reached): ${inventory.size}`);
 log(`  controls driven:                                      ${drivenKeys}`);
@@ -1729,7 +2156,7 @@ else
 if (docFails.length) log(`  DOCUMENTATION CHECKS FAILED (${docFails.length}): ${docFails.join(" · ")}`);
 log(`  violations — sequence ${sq.violations.length} · enumeration ${en.violations.length} · ` +
     `random ${rn.violations.length} · repro console ${rp.reduce((n, r) => n + r.errors.length, 0)} · ` +
-    `repro assertions ${assertFails} · distinct classes ${totalClasses.size}`);
+    `repro assertions ${assertFails} · occlusions ${oc.findings.length} · distinct classes ${totalClasses.size}`);
 
 if (JSON_OUT) {
   fs.writeFileSync(JSON_OUT, JSON.stringify({
@@ -1740,8 +2167,9 @@ if (JSON_OUT) {
                  stepsOffered: Array.from(sq.offeredSteps).sort(),
                  stepsNotDriven: Array.from(sq.offeredSteps).filter(s => !sq.drivenSteps.has(s)).sort() },
     sequenceViolations: sq.violations, enumeration: en.violations, random: rn.violations, repros: rp,
+    occlusion: { samples: oc.samples, hovers: oc.hovers, findings: oc.findings },
     distinctClasses: Array.from(totalClasses)
   }, null, 2));
 }
 
-process.exit(totalClasses.size || assertFails || docFails.length ? 1 : 0);
+process.exit(totalClasses.size || assertFails || docFails.length || oc.findings.length ? 1 : 0);

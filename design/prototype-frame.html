@@ -622,7 +622,10 @@ html.atr-dark { --hitbg: var(--bg5); }
 
 .mrow {
   display: grid;
-  grid-template-columns: 44px 14px 76px 1fr;   /* time · glyph · actor · text */
+  /* time · glyph · actor · text · the action lane (round 16 — `auto`, so a row
+     reserves the width of the strip IT has and no more, and a row with no
+     actions renders none and reserves nothing but the gap) */
+  grid-template-columns: 44px 14px 76px 1fr auto;
   column-gap: 8px;
   padding: 2.5px 16px 2.5px 12px;
   position: relative;
@@ -717,29 +720,81 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
    observation, closed with its mechanism removed rather than its symptom).
    A blind reviewer drove 18 randomised sessions of 40 real mouse clicks at
    three widths and a 12-width probe of all nine hit-test points and got zero
-   reproductions — and then measured the mechanism anyway: this strip is
-   `position: absolute; z-index: 3` and, at `opacity: 0`, still takes the
-   pointer. At 1440 it clears `#unmarkSeen` by 1.4px. Nothing is wrong today and
-   a row-spacing change turns that into a repro, so the reachability is deleted
-   rather than the gap widened: what you cannot see cannot take your click. */
+   reproductions — and then measured the mechanism anyway: this strip was
+   `position: absolute; z-index: 3` and, at `opacity: 0`, still took the
+   pointer. At 1440 it cleared `#unmarkSeen` by 1.4px. The reachability was
+   deleted rather than the gap widened: what you cannot see cannot take your
+   click. `pointer-events: none` at `opacity: 0` is what is left of that fix,
+   and it is still the rule.
+   ---------------------------------------------------------------------------
+   AND THE PREDICTION UNDERNEATH IT WAS RIGHT ABOUT THE MECHANISM AND WRONG
+   ABOUT THE TRIGGER (round 16, D1 and D2). The sentence that stood here said
+   "nothing is wrong today and a ROW-SPACING CHANGE turns that into a repro".
+   No row-spacing change ever happened. What happened is that round 15 added a
+   NEW CONTROL — the reply preview's `go to it →` — into the strip this one
+   overlaps, and round 16 measured what the overlap had been doing to the row's
+   own words all along:
+
+     · `go to it →` is 60px wide and 42 of those 60px were painted over by the
+       `Reply` chip that the same `:hover` reveals. 42px at 1440, 1366, 1279,
+       1200, 1160 and 1120 — structural, not a width accident.
+       `document.elementFromPoint` at the label's own centre returned
+       `<button data-reply="1">Reply</button>`, so the click that looked like
+       "jump to the row I am quoting" opened `REPLYING · lars · 09:13` — a reply
+       to your own message.
+     · `top: -9px` put the strip across the FIRST TEXT LINE of the row it
+       belongs to — 11px of a 15px line box. Per painted character, on the feed
+       as it loads: 5 of 17 rows lost characters at 1440, 6 at 1279, 10 at 1160
+       and 10 at 1120, in both themes. At 1440 mateo's 08:41 claim read
+       `Eyeballed off last week's b` and then a chip, losing 14 characters;
+       at 1120 dana's 08:31 lost `— almost all iOS`, 92px, mid-sentence, out of
+       the middle of somebody's unverified claim. The row was unreadable at the
+       moment you pointed at it.
+
+   Both defects are one mechanism: AN OPAQUE OVERLAY OVER A TEXT COLUMN. So the
+   answer is not to move the overlay, it is to stop being one. The strip is a
+   fifth grid track now — a lane of its own at the right of the row, sized to
+   the strip that row actually has (`auto`, so a one-button row reserves 44px
+   and not the 93px a two-button row needs), which the text column can never
+   reach into. Nothing is painted over, so nothing has to be measured for
+   clearance, and `.mreply` shortens with `.m` because it is inside it.
+
+   THE TWO COSTS, NAMED. (a) The lane is reserved whether or not you are
+   hovering, because reserving it on hover would re-wrap the row under the
+   cursor: at 1120 that is 44px of a 388px text column on a one-button row and
+   93px on a two-button one, and 35px of feed height, all of it re-wrap and none
+   of it row growth. (b) The strip CONTRIBUTES one line box to the row and is
+   taller than one, which is what `margin: -2px 0` buys: the grid track sizes on
+   a 15px margin box, so a single-line row is still 20px and the feed's density
+   is unchanged, while the strip's own border box is 19px and its buttons are
+   17px — the same size as `.tag`, and inside the row's own 2.5px padding, where
+   there are no characters to cover. The alternative was a 13px button, which
+   would have been the smallest control on a page whose next smallest is 15.5px.
+   The negative margin is the only clever thing here and this is why. */
 .mrow .acts {
-  position: absolute; right: 12px; top: -9px;
+  grid-column: 5; align-self: start;
   display: flex; gap: 1px; opacity: 0; pointer-events: none;
+  height: 19px; margin: -2px 0;
   background: var(--bg3); border: 1px solid var(--line2); border-radius: 4px;
-  padding: 1px; transition: opacity .12s ease;
-  z-index: 3;
+  padding: 0; transition: opacity .12s ease;
 }
 .mrow:hover .acts, .mrow:focus-within .acts { opacity: 1; pointer-events: auto; }
 .mrow .acts button {
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
-  padding: 2px 6px 3px; border-radius: 3px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; line-height: 13px; color: var(--tx2);
+  padding: 2px 6px; border-radius: 3px;
   transition: background .12s ease, color .12s ease;
 }
 .mrow .acts button:hover { background: var(--bg7); color: var(--tx0); }
 
 /* inline verification prompt — the ~ → ✓ pair, exercisable */
+/* AND IT SPANS THE ACTION LANE, because the lane is reserved on the row's FIRST
+   grid row and nothing sits in it below that (round 16). Left at `grid-column:
+   4` it lost the lane's width as well, and `#vinput` went back under the width
+   its own question needs at 1160 and 1120 — round 15's D3, re-opened by round
+   16's fix for something else, and caught by round 15's repro rather than by a
+   reviewer. That is what a repro suite is for. */
 .vbox {
-  grid-column: 4; margin: 4px 0 6px;
+  grid-column: 4 / -1; margin: 4px 0 6px;
   border: 1px solid var(--grnbd); border-radius: 5px; background: var(--bg3);
   padding: 7px 9px 8px;
 }
@@ -820,7 +875,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .routine .strip .peek { margin-left: auto; color: var(--tx1); border-bottom: 1px solid var(--line2); }
 .routine .strip:hover .peek { border-bottom-color: var(--line3); }
 .peekbody { border-left: 1px solid var(--line); margin: 4px 0 4px 46px; padding: 2px 0; max-height: 300px; overflow-y: auto; }
-.peekbody .mrow { grid-template-columns: 34px 14px 76px 1fr; padding-left: 6px; }
+.peekbody .mrow { grid-template-columns: 34px 14px 76px 1fr auto; padding-left: 6px; }
 .peekbody .more {
   display: block; width: 100%; text-align: left;
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
@@ -1107,7 +1162,7 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 }
 @media (max-width: 1279px) {
   .app { grid-template-columns: 44px 198px minmax(440px,1fr) 316px; }
-  .mrow { grid-template-columns: 40px 14px 68px 1fr; }
+  .mrow { grid-template-columns: 40px 14px 68px 1fr auto; }
   .pin { padding: 7px 12px 8px; }
   .roomhead .faces { display: none; }
   .toast { right: 332px; max-width: 312px; }
@@ -4690,16 +4745,35 @@ function checkLayoutInvariant() {
       cx = (v.left + v.right) / 2; cy = (v.top + v.bottom) / 2;  // partially scrolled: test the reachable part
     }
     /* AND AN INVISIBLE CONTROL IS ASKED THE OPPOSITE QUESTION (round 14).
-       `.mrow .acts` is `position: absolute; z-index: 3` and was hit-testable at
+       `.mrow .acts` was `position: absolute; z-index: 3` and hit-testable at
        `opacity: 0` — an element nobody can see, sitting in front of the ones
        they can, clearing `#unmarkSeen` by 1.4px at 1440. A blind reviewer drove
        18 randomised sessions of 40 real mouse clicks at three widths and a
        12-width probe of all nine hit-test points and could not reproduce a
-       stolen click, and measured the mechanism anyway; a row-spacing change is
-       all it would take. So the pair is stated as a pair: a control you can see
-       must be reachable, and a control you cannot see must not be touchable.
-       The rule above cannot ask the first question of a transparent control —
-       it is not painted — and this asks the second one instead. */
+       stolen click, and measured the mechanism anyway. So the pair is stated as
+       a pair: a control you can see must be reachable, and a control you cannot
+       see must not be touchable. The rule above cannot ask the first question of
+       a transparent control — it is not painted — and this asks the second one
+       instead.
+
+       WHAT ROUND 14 PREDICTED, AND WHAT ACTUALLY HAPPENED (round 16). The
+       sentence that stood here said the observation was environmental and that
+       "a ROW-SPACING CHANGE is all it would take" to make it a repro. The
+       mechanism was named correctly and the trigger was guessed wrong. No row
+       spacing ever changed. Round 15 added a NEW CONTROL — `go to it →` — into
+       the band of pixels this strip was painted across, and 42px of that
+       control's own 60px label went under the `Reply` chip; the same overlay had been
+       painting across the row's first text line the whole time, on 5 of 17 rows
+       at 1440 and 10 of 17 at 1120. So the lesson is not about spacing: AN
+       OVERLAY'S BLAST RADIUS CHANGES WHEN WHAT IS UNDERNEATH IT CHANGES, and
+       neither half of the pair above can see it, because the occluder is itself
+       visible and itself reachable. The third question — a control or a
+       sentence you can see must not be painted over by another element you can
+       also see — is enforced by the harness rather than here, because the strip
+       is only painted while a row is hovered and a render-time checker has no
+       hover to look at. See prototype-drive.mjs, pass 4, and CONVENTIONS.md
+       "Hover affordances". `.mrow .acts` is a grid track now, not an overlay,
+       which is why this comment can be about the rule instead of about it. */
     const settledOpacity = effOpacity(el);
     /* A CONTROL THAT DOES NOT TAKE THE POINTER CANNOT HIT-TEST TO ITSELF, so the
        rule below would fire on every one of them. The question that is worth
@@ -6363,9 +6437,17 @@ function messageRow(r, m) {
      object's current state would contradict the row it sits on. */
   else if (m.sysFor && o) inner += sysTag(r, m, o);
 
+  /* THE ACTION STRIP IS A SIBLING OF THE TEXT, NOT A THING ON TOP OF IT (round
+     16, D1 and D2). It used to be the last child of `.m` and `position:
+     absolute`, which is how it came to be painted across the row's own first
+     line and across 42px of the `go to it →` label round 15 put beside it. It
+     is the row's fifth grid track now, so the text column ends where the lane
+     begins and there is nothing left to overlap. A row with no actions renders
+     NO strip: an empty one still painted a 4px box of `--bg3` on hover. */
+  const acts = rowActions(r, m, o);
   row.innerHTML =
     `<div class="t">${esc(m.t)}</div><div class="g" aria-hidden="true">${g}</div><div class="a">${esc(m.actor)}</div>
-     <div class="m">${inner}<div class="acts">${rowActions(r, m, o)}</div></div>`;
+     <div class="m">${inner}</div>${acts ? `<div class="acts">${acts}</div>` : ""}`;
 
   row.querySelectorAll("[data-receipt]").forEach(b => b.addEventListener("click", () => openReceipt(b.dataset.receipt, b.dataset.rcroom)));
   /* the reply preview's route to the row it quotes (round 15, D1) */
