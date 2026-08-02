@@ -1,6 +1,12 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AcceptedObjectType, AttentionClass, ProposalStatus, RelationKind } from '@atrium/core';
+import {
+  AcceptedObjectType,
+  AttentionClass,
+  ProposalStatus,
+  RECEIPT_POLICY,
+  RelationKind,
+} from '@atrium/core';
 import { is } from 'drizzle-orm';
 import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
@@ -416,5 +422,129 @@ describe('generated migration', () => {
     );
     expect(added).toBeGreaterThanOrEqual(0);
     expect(dropped).toBeGreaterThan(added);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * #86 — THE ONE NUMBER TWO LANGUAGES BOTH OWN.
+ *
+ * `atrium_receipt_window` (drizzle/0011) carries the cited messages plus the
+ * room's next N after the newest citation. `laterRevision`
+ * (packages/core/src/escalation.ts) reads at most
+ * `RECEIPT_POLICY.maxLaterMessagesScanned` of them and decides what a short tail
+ * MEANS from `RECEIPT_POLICY.maxLaterMessagesCarried`. A static SQL migration
+ * cannot read a TypeScript constant, and #86 rejected generating the migration
+ * from it — migrations must be readable and immutable after the fact, and a
+ * generated migration is one whose meaning lives elsewhere.
+ *
+ * So both are hand-written and this is what keeps them in step: the same shape
+ * `apps/web/test/token-contrast.test.ts` uses to hold `design/tokens.css`
+ * against its consumers, and it exists because #86 IS the failure of two
+ * hand-written rules drifting with nothing asserting agreement — and git
+ * produced no conflict marker, because they were in different files and
+ * different languages.
+ *
+ * The drift this catches is not hypothetical in either direction:
+ *
+ *  - literal LOWERED (say to 50) — the window stops at 50, the checker reads 50,
+ *    finds no correction and CERTIFIES, while 150 messages the policy says must
+ *    be read were never supplied and never looked at. Certifying against
+ *    evidence never seen is the one direction of #86 that is dangerous.
+ *  - literal RAISED without `maxLaterMessagesScanned` moving — costs an append
+ *    more rows than any check will read, for nothing.
+ *  - the two set EQUAL — a window the room outgrew and a room that simply ended
+ *    become the same bytes, and the checker cannot tell them apart. The `+ 1` is
+ *    the mechanism, not a margin.
+ * ------------------------------------------------------------------------- */
+describe('the receipt window’s bound is one number, written twice, asserted equal', () => {
+  const WINDOW_MIGRATION = '0011_the_window_reaches_past_the_citations.sql';
+
+  function windowMigration(): string {
+    return readFileSync(join(migrationsDir, WINDOW_MIGRATION), 'utf8');
+  }
+
+  /**
+   * Comments stripped before any rule reads the file. This migration argues for
+   * its own number in prose and names the constants it is pinned to, so a rule
+   * that read the documentation as evidence would pass on a file whose CODE said
+   * something else entirely — which is the `token-contrast.test.ts` house rule
+   * and the reason it is applied here rather than assumed.
+   */
+  function code(): string {
+    return windowMigration().replace(/--[^\n]*/g, '');
+  }
+
+  it('declares the carried-messages bound as a named constant with one literal', () => {
+    // Catches: `window_bound_becomes_anonymous` — inlining the number at the
+    // `LIMIT` so nothing names it, which makes the assertion below unable to
+    // find it and (before this test existed) makes it look absent rather than
+    // wrong. Also `window_bound_declared_twice`, which would let one of two
+    // spellings drift while the other passed.
+    const declarations = [
+      ...code().matchAll(/c_later_messages_carried\s+constant\s+integer\s*:=\s*(\d+)\s*;/g),
+    ];
+    expect(
+      declarations,
+      `${WINDOW_MIGRATION} must declare c_later_messages_carried exactly once, as an integer literal`,
+    ).toHaveLength(1);
+  });
+
+  it('uses the constant it declared, and uses it at the LIMIT', () => {
+    // Catches: `window_bound_declared_but_unused` — declaring `:= 201` and then
+    // writing `LIMIT 50`, or dropping the LIMIT altogether. Both leave the
+    // literal this file pins looking correct while the function carries a
+    // different number of messages, and the equality assertion below would pass
+    // on either. A constant nothing reads is a comment with a type; use is
+    // checked by looking for the use.
+    const source = code();
+    expect(source, 'the tail must be bounded by the declared constant, not by a bare number').toMatch(
+      /LIMIT\s+c_later_messages_carried/,
+    );
+    // …and the tail must be ordered before it is cut, or the bound selects an
+    // arbitrary 201 rows rather than the room's earliest — and the correction
+    // this whole window exists to make findable is usually the very next message.
+    expect(source, 'the bounded tail must be ordered by the room’s own message order').toMatch(
+      /ORDER\s+BY\s+m\."seq"\s+LIMIT\s+c_later_messages_carried/,
+    );
+  });
+
+  it('carries exactly one more message than the checker reads', () => {
+    // Catches: `receipt_policy_carried_equals_scanned`,
+    // `receipt_policy_carried_below_scanned`, `window_migration_bound_drifts`.
+    //
+    // Three numbers, one rule. `laterRevision` refuses at runtime
+    // (`window_carries_fewer_than_this_check_reads`) when carried <= scanned, so
+    // the product fails closed if this ever ships wrong — but it fails closed by
+    // refusing EVERY model acceptance, which is #86 all over again. This is the
+    // check that says so at build time instead.
+    const declared = Number(
+      /c_later_messages_carried\s+constant\s+integer\s*:=\s*(\d+)\s*;/.exec(code())?.[1],
+    );
+    expect(declared, 'the migration’s literal must parse as a number').not.toBeNaN();
+    expect(
+      declared,
+      `${WINDOW_MIGRATION} and RECEIPT_POLICY.maxLaterMessagesCarried are the same number written twice`,
+    ).toBe(RECEIPT_POLICY.maxLaterMessagesCarried);
+    expect(
+      RECEIPT_POLICY.maxLaterMessagesCarried,
+      'the supplier must stop strictly LATER than the checker reads, or a truncated window and a room that ended are the same bytes',
+    ).toBe(RECEIPT_POLICY.maxLaterMessagesScanned + 1);
+  });
+
+  it('is the migration the receipt window’s reach actually lives in', () => {
+    // Catches: `window_assertion_points_at_nothing`. Every assertion above reads
+    // one file by name. If the function is later redefined in a 0012 and this
+    // keeps reading 0011, all four go on passing while measuring a superseded
+    // definition — a stale anchor that reads as green, which is the failure mode
+    // this campaign has now recorded against its own mutation ledger.
+    const redefinitions = migrationFiles().filter((file) =>
+      /CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+"atrium_receipt_window"/.test(
+        readFileSync(join(migrationsDir, file), 'utf8').replace(/--[^\n]*/g, ''),
+      ),
+    );
+    expect(
+      redefinitions.at(-1),
+      'the assertions above read this file; the newest definition of the window must be in it',
+    ).toBe(WINDOW_MIGRATION);
   });
 });
