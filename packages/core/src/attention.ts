@@ -318,28 +318,111 @@ function escapeIdPart(value: string): string {
 }
 
 /**
+ * **Which half of the projection raised an item** — r11, and it is already
+ * stored.
+ *
+ * A `blocking_question` item has two producers. One reads `state.relations` and
+ * routes a question to whoever owns what it blocks; the other reads
+ * `ctx.questionMentions`, a caller signal, and routes a question to whoever it
+ * names. They share a class, a subject and a subject kind, so until r11 they
+ * shared an `ExaminedSubject` key — and the state half declares that key for
+ * every object in state, every cycle. A cycle handed **no** `questionMentions`
+ * therefore resolved every `question_names_you` item by absence: zero items,
+ * zero refusals, permanently resolved, which is precisely the slide
+ * `mentionItems` refuses to make and which r10 closed for `mention` alone.
+ *
+ * r10 recorded this as residue and said closing it "means recording on the item
+ * which producer raised it, which is an `AttentionItem` schema change and #22's
+ * storage surface". **It is not.** `AttentionItem.reason` is a discriminated
+ * union with one variant per producer and has been since r1 — r9 split
+ * `commitment_self_stated` out of `commitment_confirm` on exactly the argument
+ * that a rationale must be able to say truthfully *why this person
+ * specifically*. `question_names_you` and `question_blocks_commitment` are
+ * different variants of that union, on the same grounds. The producer was
+ * already on every stored item; nothing was reading it.
+ *
+ * So this is derived from data the schema already carries, and the storage
+ * surface does not move.
+ */
+export type AttentionProducer =
+  /** `proposalItems` — a staged proposal, judged by `decideAcceptance`. */
+  | 'staged_proposal'
+  /** `commitmentItems` — an accepted commitment that is open or overdue. */
+  | 'open_commitment'
+  /** `blockingQuestionItems`, the `blocks`-relation half. State. */
+  | 'blocking_relation'
+  /** `blockingQuestionItems`, the `questionMentions` half. A caller signal. */
+  | 'named_question'
+  /** `mentionItems`. A caller signal. */
+  | 'mention_signal'
+  /**
+   * A reason kind this build does not know — a store written by another version
+   * of this package. No source declares it, so no examination ever matches it
+   * and the item stays where it is. See `producerOf`.
+   */
+  | 'unrecognised';
+
+/**
+ * The producer of each rationale, total by its type.
+ *
+ * `tsc` refuses a new `RationaleReason` variant that does not appear here, which
+ * is the property that makes this safe to reconcile against: a producer added
+ * next round cannot inherit an existing one's examinations by omission.
+ */
+const PRODUCER_OF: Readonly<Record<RationaleReason['kind'], AttentionProducer>> = Object.freeze({
+  decision_pending: 'staged_proposal',
+  commitment_confirm: 'staged_proposal',
+  commitment_self_stated: 'staged_proposal',
+  reading_pending: 'staged_proposal',
+  commitment_overdue: 'open_commitment',
+  commitment_open: 'open_commitment',
+  question_blocks_commitment: 'blocking_relation',
+  question_blocks_objective: 'blocking_relation',
+  question_names_you: 'named_question',
+  mention: 'mention_signal',
+});
+
+/**
+ * Which producer raised a stored item, read off its rationale.
+ *
+ * The `??` is reachable for `fallbackPriority`'s reason and fails in the same
+ * direction it was taught to: `AttentionItem` is parsed at the boundary, this
+ * function takes anything shaped like one, and a store written by a newer
+ * version of this package is exactly where an eleventh reason kind comes from.
+ * An unrecognised producer matches no declaration, so the item is preserved
+ * rather than resolved — which is the whole disposition of rule 2 since r10.
+ */
+function producerOf(reason: RationaleReason | undefined): AttentionProducer {
+  // `reason` is required by the schema and optional here on purpose: a row that
+  // lost the column reaches this function as `undefined`, and a `TypeError`
+  // thrown mid-reconcile takes the whole room's panel down over one bad row.
+  // `fallbackPriority` made the same call for the same reason.
+  return (reason && PRODUCER_OF[reason.kind]) ?? 'unrecognised';
+}
+
+/**
  * **One subject a cycle reached a conclusion about**, and the whole of what
  * `reconcileAttention` is allowed to treat as "computed and found done".
  *
- * The key is the item id with the *person* taken out — an item is
- * `(user, subjectKind, subject, class)` and a source decides about
- * `(subjectKind, subject, class)` for everyone at once. A commitment whose owner
- * was amended is one examination that resolves the old owner's item and raises
- * the new one, which is the behaviour rule 2 already had for the case it could
- * see.
+ * The key is the item id with the *person* taken out, and the producer put in —
+ * an item is `(user, subjectKind, subject, class)` raised by one half of the
+ * projection, and a source decides about `(producer, subjectKind, subject,
+ * class)` for everyone at once. A commitment whose owner was amended is one
+ * examination that resolves the old owner's item and raises the new one, which
+ * is the behaviour rule 2 already had for the case it could see.
+ *
+ * `producer` is r11 and it is what stops one half of a shared class concluding
+ * on the other half's behalf. See `AttentionProducer`.
  */
 export interface ExaminedSubject {
   class: AttentionClass;
   subjectKind: AttentionSubjectKind;
   subjectId: Id;
+  producer: AttentionProducer;
 }
 
-function examinedKey(entry: {
-  class: AttentionClass;
-  subjectKind: AttentionSubjectKind;
-  subjectId: Id;
-}): string {
-  return `${entry.class}:${entry.subjectKind}:${escapeIdPart(entry.subjectId)}`;
+function examinedKey(entry: ExaminedSubject): string {
+  return `${entry.class}:${entry.subjectKind}:${escapeIdPart(entry.subjectId)}:${entry.producer}`;
 }
 
 /**
@@ -581,6 +664,7 @@ function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource
       class: classOf(proposal.type),
       subjectKind: 'proposal',
       subjectId: proposal.id,
+      producer: 'staged_proposal',
     });
   };
 
@@ -615,6 +699,47 @@ function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource
     // what they wrote is worse than asking them nothing.
     if (verdict.rule === 'receipt_not_certifiable') {
       refusals.push({ proposalId: proposal.id, reason: verdict.reason });
+      continue;
+    }
+    // ── A verdict about the window is not a judgement about the reading — r11 ─
+    //
+    // **Placed here, above the visibility dispatch, on purpose.** r10 wrote its
+    // own new link guard outside the `borne` branch and said why: *an invariant
+    // asserted on one branch of a dispatch does not constrain the others.* The
+    // same sentence governs this function, and r10 missed it here. That round
+    // moved one severity — `unknown_message` from `reject` to `refer` — which
+    // covers the window dropping **every** cited message, and left the branch
+    // that *consumes* severities reading `discard` as concluded. The window
+    // dropping **some** of them goes straight past it:
+    //
+    // ```
+    // p1  commitment, owner bob, quote = m1's body, cites m1 and m2
+    // cycle 1  window m0..m6   pending / needs_you / confirm bob  → pending
+    // cycle 2  window m2..m6   discard / provenance_failed        → RESOLVED
+    //                          "the quote appears in none of the cited messages"
+    // ```
+    //
+    // `m1` is gone, so `unknown_message` fires at `refer` — and is *shadowed* by
+    // `quote_not_found` at `reject`, computed over the one survivor. Bob's
+    // confirm leaves the panel and cannot come back, while `decideAcceptance` on
+    // the full window still says `needs_you` and the proposal is still
+    // `proposed`.
+    //
+    // The repair is not a third severity move. The class is wider than any list
+    // of kinds — `elided_quote`, `quote_only_in_reply_blockquote`,
+    // `ambiguous_quote` and a claim's `attributed_person_not_author` are all
+    // `reject` and all computed over whichever cited messages survived — so the
+    // question is asked of the finding rather than of its name. See
+    // `ProblemSubject`.
+    //
+    // A refusal rather than a silence, for `AttentionRefusal`'s stated reason: a
+    // required input was missing, and the honest answer to that is silence *plus
+    // a receipt for the silence*.
+    if (verdict.about === 'the_window') {
+      refusals.push({
+        proposalId: proposal.id,
+        reason: `this window does not hold every message the proposal cites, so the verdict that came back (${verdict.rule}) is a fact about the window rather than about the reading and nothing here judged this proposal: ${verdict.reason}`,
+      });
       continue;
     }
     // The one `continue` that owes nothing *in items*: `accepted`, `quiet` and
@@ -799,7 +924,12 @@ function commitmentItems(state: CoreState, ctx: AttentionContext): AttentionSour
   // hold, and those are exactly the ones it does not list.
   const examined: ExaminedSubject[] = Object.keys(state.objects)
     .sort()
-    .map((subjectId) => ({ class: 'owned_commitment', subjectKind: 'object', subjectId }));
+    .map((subjectId) => ({
+      class: 'owned_commitment',
+      subjectKind: 'object',
+      subjectId,
+      producer: 'open_commitment',
+    }));
 
   for (const objectId of Object.keys(state.objects).sort()) {
     const record = state.objects[objectId];
@@ -841,13 +971,53 @@ function commitmentItems(state: CoreState, ctx: AttentionContext): AttentionSour
 function blockingQuestionItems(state: CoreState, ctx: AttentionContext): AttentionSource {
   const out: ComputedAttentionItem[] = [];
   const seen = new Set<string>();
-  // Same argument as `commitmentItems` for the relation-driven half, which is
-  // the one that answers "the question got answered". The `question_names_you`
-  // half is caller-driven and shares this key, so it is covered by this
-  // declaration too — see the residue note on `reconcileAttention`.
-  const examined: ExaminedSubject[] = Object.keys(state.objects)
-    .sort()
-    .map((subjectId) => ({ class: 'blocking_question', subjectKind: 'object', subjectId }));
+  const examined: ExaminedSubject[] = [];
+
+  const openQuestion = (id: Id): ObjectRecord | null => {
+    const record = state.objects[id];
+    if (!isLive(record)) return null;
+    if (record.object.type !== 'open_question') return null;
+    return record.object.payload.status === 'open' ? record : null;
+  };
+
+  // ── Two producers, two declarations — r11 ────────────────────────────────
+  //
+  // The relation-driven half reads nothing but state, so for a subject that is
+  // *in* state "no item" is a conclusion: the question was answered, the
+  // `blocks` relation went away, the blocked commitment closed, its owner
+  // changed. That is `commitmentItems`' argument and it is unchanged.
+  //
+  // The `question_names_you` half is **caller-driven and reads no state at
+  // all**, exactly like `mentionItems`. "No item for `q7`" has two readings —
+  // nobody is named there, and nobody told this cycle who is — and until r11 the
+  // state half declared the key for both, so a cycle with no `questionMentions`
+  // resolved somebody's named question by absence. r10 filed that as residue
+  // requiring a schema change; `AttentionItem.reason` already records the
+  // producer, so it does not. See `AttentionProducer`.
+  //
+  // **But absence is not the only way a named question ends.** When the subject
+  // is no longer an open, live question, *no signal could raise an item about it
+  // any more* — the question is answered, retracted or superseded, and that is a
+  // fact about the subject rather than about what the caller was handed. So the
+  // state half concludes for the signal half exactly there, and nowhere else,
+  // which is one better than `mention` manages: a named question that gets
+  // answered leaves the panel without anybody clicking anything.
+  for (const subjectId of Object.keys(state.objects).sort()) {
+    examined.push({
+      class: 'blocking_question',
+      subjectKind: 'object',
+      subjectId,
+      producer: 'blocking_relation',
+    });
+    if (openQuestion(subjectId) === null) {
+      examined.push({
+        class: 'blocking_question',
+        subjectKind: 'object',
+        subjectId,
+        producer: 'named_question',
+      });
+    }
+  }
 
   const push = (userId: Id, question: ObjectRecord, reason: RationaleReason): void => {
     const id = itemId(userId, 'object', question.object.id, 'blocking_question');
@@ -868,15 +1038,13 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Attenti
     );
   };
 
-  const openQuestion = (id: Id): ObjectRecord | null => {
-    const record = state.objects[id];
-    if (!isLive(record)) return null;
-    if (record.object.type !== 'open_question') return null;
-    return record.object.payload.status === 'open' ? record : null;
-  };
-
   // A question that names somebody is theirs whether or not it blocks anything —
   // #6: "…or names you".
+  //
+  // No examination is declared here. A signal-driven producer can only conclude
+  // about what it was handed, and what it was handed is what it raised — so a
+  // declaration for a signal that arrived would say nothing rule 1 does not
+  // already say, and a declaration for one that did not arrive is the defect.
   for (const signal of [...(ctx.questionMentions ?? [])].sort(compareQuestionMention)) {
     const question = openQuestion(signal.questionObjectId);
     if (question?.object.type !== 'open_question') continue;
@@ -966,7 +1134,12 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
     const id = itemId(signal.userId, 'object', signal.objectId, 'mention');
     if (seen.has(id)) continue;
     seen.add(id);
-    examined.push({ class: 'mention', subjectKind: 'object', subjectId: signal.objectId });
+    examined.push({
+      class: 'mention',
+      subjectKind: 'object',
+      subjectId: signal.objectId,
+      producer: 'mention_signal',
+    });
     out.push(
       item({
         id,
@@ -1114,16 +1287,30 @@ export function dismissAttention(attentionItem: AttentionItem): AttentionTransit
  * its items. There is no spelling of "I computed nothing and I know why" left
  * for a caller to omit.
  *
- * **The residue, stated because it is a real one.** A `blocking_question` item
- * has two producers — a `blocks` relation, which is state, and a
- * `questionMentions` signal, which is the caller's — and they share an item id,
- * so they share an `ExaminedSubject` key. The state half declares the key, so a
- * cycle that supplies no `questionMentions` can still resolve a
- * `question_names_you` item by absence. That is r9's behaviour unchanged rather
- * than a new hole, and closing it means recording on the item which producer
- * raised it, which is an `AttentionItem` schema change and #22's storage
- * surface. `mention`, whose producer is caller-driven and *unshared*, is closed:
- * see `mentionItems`.
+ * ## …and one class with two producers is two questions — r11
+ *
+ * r10 left this as stated residue: a `blocking_question` item has two producers,
+ * a `blocks` relation (state) and a `questionMentions` signal (the caller's),
+ * they share an item id and therefore an `ExaminedSubject` key, the state half
+ * declares that key for every object every cycle, and so a cycle supplying no
+ * `questionMentions` resolved a `question_names_you` item by absence — the same
+ * slide `mentionItems` refuses, zero items and zero refusals, permanent. r10
+ * judged that closing it needed an `AttentionItem` schema change and #22's
+ * storage surface, and filed it.
+ *
+ * **This package's own standing rule is that a stated limit is not a
+ * disposition** — `escalation.ts` records it twice — and the schema change was
+ * never needed. `AttentionItem.reason` is a discriminated union with one variant
+ * per producer, stored since r1 and split further by r9 on exactly the argument
+ * that a rationale must say truthfully why *this* person. `question_names_you`
+ * and `question_blocks_commitment` are different variants of it. So the producer
+ * is derived from the stored item rather than recorded on it, the key carries it
+ * (`ExaminedSubject`), and the storage surface does not move.
+ *
+ * The half that reads state still concludes for the signal half in the one place
+ * it honestly can: when the subject is no longer an open live question, no
+ * signal could raise an item about it, so an answered question leaves the panel
+ * without anybody clicking anything. See `blockingQuestionItems`.
  */
 export function reconcileAttention(
   stored: readonly AttentionItem[],
@@ -1150,6 +1337,10 @@ export function reconcileAttention(
         class: entry.class,
         subjectKind: entry.subjectKind,
         subjectId: entry.objectId,
+        // r11: which half of the projection raised this, read off the rationale
+        // it has carried since r1. One class with two producers is two questions,
+        // and only the producer that owes an item may say it is finished.
+        producer: producerOf(entry.reason),
       }),
     );
     out.push({

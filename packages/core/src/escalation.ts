@@ -1,4 +1,5 @@
 import {
+  addedBlockStructure,
   addedLinkStructure,
   alignTokens,
   hasContent,
@@ -759,6 +760,12 @@ export interface ProvenanceMessage {
  *    words. The fold unfolds a link to `label dest title`, so the two normalize
  *    identically and every other check passes; the stored text is markup its
  *    named author never wrote. See `linkStructures`.
+ *  - `statement_adds_block_structure` — **r11**, and it is the entry above at
+ *    the other rule in the fold that can *build* structure rather than delete
+ *    it. The statement begins a line with a Markdown block marker the quote does
+ *    not, built by putting a line break where the author put a space; the
+ *    whitespace collapse forgives the difference, so the two normalize
+ *    identically and every other check passes. See `blockStructures`.
  *  - `ambiguous_quote` — two or more cited messages, by different people,
  *    contain the quote. Taking the first in window order picks an author by
  *    accident, and the author is the whole answer to "who said this".
@@ -784,11 +791,110 @@ export const PROVENANCE_PROBLEM_KINDS = [
   'statement_is_not_a_question',
   'statement_uncheckable',
   'statement_adds_link_structure',
+  'statement_adds_block_structure',
   'ambiguous_quote',
   'attributed_person_not_author',
 ] as const;
 
 export type ProvenanceProblemKind = (typeof PROVENANCE_PROBLEM_KINDS)[number];
+
+/**
+ * **What a finding is a fact *about*** — r11, and it is the distinction that
+ * decides whether a cycle may treat its own verdict as a judgement.
+ *
+ * A finding about *the reading* is true of the proposal wherever it is examined
+ * from: the quote is empty, the statement asserts words the quote does not, the
+ * record would carry markup its author never wrote. Re-run it against any window
+ * and it says the same thing.
+ *
+ * A finding about *the window* is a fact about **what the caller happened to
+ * supply**. `unknown_message` is the obvious one; `quote_not_found` on a
+ * two-citation proposal whose window dropped the bearing message is the same
+ * fact wearing a verdict's clothes, and it is what r11 was opened on. An
+ * ordinary sliding "last N messages" window produces it with no caller mistake,
+ * and `attention.ts` used to read the resulting `discard` as *this cycle judged
+ * this proposal and it owes nobody anything* — resolving somebody's confirm
+ * forever, from a cycle that could not see the message it was confirming.
+ *
+ * Carried on the finding rather than tested at the place that consumes it,
+ * because the consuming place is a *dispatch* and `RETRO.md` records what an
+ * invariant asserted on one branch of one is worth. r10 moved `unknown_message`
+ * from `reject` to `refer` — one severity, correct, and the branch that reads
+ * severities went on reading `discard` as concluded. Moving a second severity
+ * would be the same repair a third time; the class is wider than any list of
+ * kinds somebody has met.
+ */
+export type ProblemSubject = 'the_reading' | 'the_window';
+
+/**
+ * **What each check reads** — declared once, per kind, and total by its type.
+ *
+ * `about` is derived from this rather than written at the ~20 places a problem
+ * is pushed, which is the difference between a property of the finding and a
+ * list maintained at the call site. `tsc` refuses a new kind that does not
+ * appear here, so the classification cannot silently fall behind the taxonomy —
+ * the same construction `objectPayloadKeys` uses for payload fields.
+ *
+ *  - `the_proposal` — the check reads the quote, the statement, the type or the
+ *    citation list, and nothing else. Its answer cannot change with the window.
+ *  - `the_cited_messages` — the check reads the cited messages' bodies or
+ *    authors. Its answer is a fact about the window **exactly when the window
+ *    did not hold every message the proposal cites**, because then it was
+ *    computed over the survivors.
+ *  - `the_window` — the finding *is* a statement about the window's reach, in
+ *    every window. `unknown_message` says a citation was not reached;
+ *    `superseded_by_later_message` says what does or does not follow the
+ *    citations, and both of its arms change answer when the window slides.
+ */
+type ProblemEvidence = 'the_proposal' | 'the_cited_messages' | 'the_window';
+
+const PROBLEM_EVIDENCE: Readonly<Record<ProvenanceProblemKind, ProblemEvidence>> = Object.freeze({
+  no_provenance: 'the_proposal',
+  unknown_message: 'the_window',
+  missing_quote: 'the_proposal',
+  quote_not_found: 'the_cited_messages',
+  quote_only_in_reply_blockquote: 'the_cited_messages',
+  elided_quote: 'the_cited_messages',
+  quote_too_short: 'the_proposal',
+  quote_does_not_bear_statement: 'the_proposal',
+  quote_carries_more_than_statement: 'the_proposal',
+  statement_respaces_the_quote: 'the_proposal',
+  quote_is_a_fragment: 'the_cited_messages',
+  quote_span_unscanned: 'the_cited_messages',
+  quote_omits_surrounding_text: 'the_cited_messages',
+  superseded_by_later_message: 'the_window',
+  statement_is_not_an_assertion: 'the_proposal',
+  statement_is_not_a_question: 'the_proposal',
+  statement_uncheckable: 'the_proposal',
+  statement_adds_link_structure: 'the_proposal',
+  statement_adds_block_structure: 'the_proposal',
+  ambiguous_quote: 'the_cited_messages',
+  attributed_person_not_author: 'the_cited_messages',
+});
+
+/**
+ * `about`, derived. The one place the classification above is applied.
+ *
+ * A `the_cited_messages` finding on a **complete** window is a finding about the
+ * reading and must stay one: a quote that appears in none of the messages it
+ * cites, all of which were supplied, is a wrong receipt, and a cycle that says
+ * so has judged the proposal. Reading every such finding as a window-fact would
+ * close rule 2 altogether, which is a different way of being wrong.
+ */
+function problemSubject(
+  kind: ProvenanceProblemKind,
+  windowHoldsEveryCitation: boolean,
+): ProblemSubject {
+  const evidence = PROBLEM_EVIDENCE[kind];
+  if (evidence === 'the_proposal') return 'the_reading';
+  if (evidence === 'the_window') return 'the_window';
+  return windowHoldsEveryCitation ? 'the_reading' : 'the_window';
+}
+
+/** Whether any finding in a set is a fact about the window rather than the reading. */
+export function isAboutTheWindow(problems: readonly ProvenanceProblem[]): boolean {
+  return problems.some((problem) => problem.about === 'the_window');
+}
 
 /**
  * What a problem *means*, which is not the same as what it is.
@@ -836,7 +942,25 @@ export interface ProvenanceProblem {
   detail: string;
   /** The message involved, when one message is at fault. */
   messageId: string | null;
+  /**
+   * **Whether this is a fact about the reading or about the window** — r11. See
+   * `ProblemSubject`. Derived from `PROBLEM_EVIDENCE` and never written at a
+   * `push` site, so a new finding cannot claim to have judged a reading it could
+   * not see.
+   */
+  about: ProblemSubject;
 }
+
+/**
+ * A finding before `about` is put on it — the shape every check inside
+ * `validateProposalProvenance` builds.
+ *
+ * The field is deliberately absent here: a check states what it found, and
+ * whether that was a fact about the reading or about the window is a property of
+ * *which check it was* and of *what the window held*, decided in one place for
+ * all of them.
+ */
+type Finding = Omit<ProvenanceProblem, 'about'>;
 
 /** The slice of a proposal these checks read. */
 export interface ProvenanceSubject {
@@ -877,8 +1001,20 @@ export function validateProposalProvenance(
   messages: readonly ProvenanceMessage[],
   policy: ReceiptPolicy = RECEIPT_POLICY,
 ): ProvenanceProblem[] {
-  const problems: ProvenanceProblem[] = [];
+  const problems: Finding[] = [];
   const byId = new Map(messages.map((message) => [message.id, message]));
+  /**
+   * Whether this window reached everything the proposal cites — the one input
+   * `problemSubject` needs, computed before any check runs so that every finding
+   * is scoped against the same fact.
+   */
+  const windowHoldsEveryCitation = subject.provenance.every((id) => byId.has(id));
+  /** The single exit. Every `return` in this function goes through it. */
+  const sealed = (): ProvenanceProblem[] =>
+    problems.map((finding) => ({
+      ...finding,
+      about: problemSubject(finding.kind, windowHoldsEveryCitation),
+    }));
 
   // The strictness below is aimed at *machine* readings. A person staging their
   // own reading is the receipt (#4) and is not asked to quote themselves, so the
@@ -894,7 +1030,7 @@ export function validateProposalProvenance(
         messageId: null,
       });
     }
-    return problems;
+    return sealed();
   }
 
   const cited: ProvenanceMessage[] = [];
@@ -1276,6 +1412,49 @@ export function validateProposalProvenance(
           messageId: where,
         });
       }
+
+      // ── …and the author's line breaks are the author's too — r11 ──────────
+      //
+      // The mirror of the rule above at the *other* entry in the fold that can
+      // build structure rather than delete one. `foldProse` collapses
+      // `\p{White_Space}+` to a single space, in both directions, so a statement
+      // may put a **line break where its author put a space**, normalize to the
+      // identical text, be `borne`, and land:
+      //
+      //   alice wrote : Latency > 200ms is unacceptable for the search API.
+      //   record says : Latency\n> 200ms is unacceptable for the search API.
+      //
+      // The record then holds a block quote alice never wrote, out of alice's
+      // own characters. `- `, `# `, `| `, a four-column indent and the rest of
+      // the block-start inventory do the same thing; `blockStructures` is the
+      // list and says why it is a closed one.
+      //
+      // **The whitespace entry itself is not narrowed, and must not be.** It has
+      // the best argument of the four the fold admits — a client wraps a message
+      // and a quote copied out of it carries different line breaks — and r10's
+      // 1.7M-sample collision search found nothing else wrong with it. What is
+      // refused is not "a line break moved" but "a line break moved *and* the
+      // author's next character became a block marker because of it", which is
+      // the same shape `addedLinkStructure` has: markup the statement carries and
+      // the quote does not.
+      //
+      // Outside the `borne` branch, for r10's reason and in r10's words: an
+      // invariant asserted on one branch of a dispatch does not constrain the
+      // others.
+      //
+      // `reject`, matching its sibling: the statement is not the quoted
+      // sentence, it is the quoted sentence re-broken into lines by something
+      // that was not its author, and that is a wrong receipt rather than an
+      // unanswerable question.
+      const built = addedBlockStructure(quote, statement);
+      if (built.length > 0) {
+        problems.push({
+          kind: 'statement_adds_block_structure',
+          severity: 'reject',
+          detail: `the ${subject.type} being minted begins ${built.length === 1 ? 'a line' : `${built.length} lines`} with a Markdown block marker the quote does not — ${built.map((line) => `\`${clip(line, 60)}\``).join(', ')} — so the record would store block structure its named author never wrote, built by putting a line break where they put a space: a run of whitespace normalizes to one space whichever characters it is made of, which is why every other check on this receipt passes`,
+          messageId: where,
+        });
+      }
       if (bearingResult.undecidable !== null) {
         // Not "no problem found" — no check performed. The two are the same
         // shape in the code and opposite facts about the world, and every finding
@@ -1459,7 +1638,7 @@ export function validateProposalProvenance(
     }
   }
 
-  return problems;
+  return sealed();
 }
 
 /**

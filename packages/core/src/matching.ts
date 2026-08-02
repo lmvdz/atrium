@@ -453,17 +453,214 @@ export function linkStructures(text: string): string[] {
  * produces it.
  */
 export function addedLinkStructure(quote: string, statement: string): string[] {
+  return addedStructure(quote, statement, linkStructures);
+}
+
+/**
+ * **The one mechanism, since r11**: markup the statement has and the quote does
+ * not, counted rather than merely present.
+ *
+ * A multiset difference, so two identical structures in the statement need two
+ * in the quote, and one-directional for the reason `addedLinkStructure`'s
+ * docblock gives: a statement that *drops* markup keeps every word the author
+ * wrote, and a statement that *adds* it is text nobody wrote.
+ *
+ * Extracted so the block-structure guard below is the same rule with a different
+ * reader, rather than a second implementation of the same idea that can drift
+ * away from the first — `normalizeForRouting`'s own comment records what that
+ * costs ("one *implementation* now too, which is what makes the sentence true
+ * rather than aspirational").
+ */
+function addedStructure(
+  quote: string,
+  statement: string,
+  read: (text: string) => string[],
+): string[] {
   const available = new Map<string, number>();
-  for (const link of linkStructures(quote)) {
-    available.set(link, (available.get(link) ?? 0) + 1);
+  for (const structure of read(quote)) {
+    available.set(structure, (available.get(structure) ?? 0) + 1);
   }
   const added: string[] = [];
-  for (const link of linkStructures(statement)) {
-    const spare = available.get(link) ?? 0;
-    if (spare === 0) added.push(link);
-    else available.set(link, spare - 1);
+  for (const structure of read(statement)) {
+    const spare = available.get(structure) ?? 0;
+    if (spare === 0) added.push(structure);
+    else available.set(structure, spare - 1);
   }
   return added;
+}
+
+/**
+ * **A line-initial Markdown block marker — the closed inventory.**
+ *
+ * Every construct in CommonMark that a *line's own beginning* can open, plus
+ * GFM's table row. Enumerated from the specification's block-start table rather
+ * than from the constructions somebody thought of, which is the distinction this
+ * file already draws for `\p{White_Space}`: a closed published list is a safe
+ * enumeration, a list of the evasions somebody has met is not.
+ *
+ *  - `>` block quote (no space required after it)
+ *  - `#`–`######` ATX heading, which must be followed by space or end of line
+ *  - `-` `+` `*` bullet list, same requirement
+ *  - `1.` `1)` ordered list, same requirement
+ *  - `<` + tag character, HTML block
+ *  - `[label]:` link reference definition
+ *  - `|` GFM table row
+ *
+ * Thematic breaks (`---`, `***`, `___`), setext underlines (`===`, `---`) and
+ * code fences are whole-line shapes rather than prefixes, so they are matched
+ * separately below.
+ *
+ * **`<` is narrowed to a tag character** because `< 5 seconds` at the start of a
+ * line is prose in every flavour, and a refusal that fires on it would be a
+ * refusal that is false about the room's own words — the failure r7 measured
+ * 56,559 times one function over.
+ */
+const BLOCK_MARKER =
+  /^(?:#{1,6}(?=[ \t]|$)|>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)|<[a-zA-Z!/?]|\[[^\]]*\]:|\|)/;
+
+/** A whole line that is nothing but break/underline punctuation. */
+const THEMATIC_BREAK = /^(?:[-*_] ?){3,}$/;
+const SETEXT_UNDERLINE = /^=+$/;
+
+/**
+ * A fenced-code opener — **read off the raw text, before the code-span split.**
+ *
+ * r11's own probe of `blockStructures` found the hole: `CODE_SPAN`'s
+ * double-backtick alternative consumes the first two characters of a three-tick
+ * opener and re-emits the rest as ordinary prose, so a fence was named in the
+ * inventory above and invisible to the scanner reading it. A published list the
+ * code cannot see is worse than a shorter honest one, which is why this is a
+ * second pass rather than a line deleted from the docblock.
+ *
+ * Symmetric between quote and statement by construction — both are scanned the
+ * same way — so a fence the author wrote cancels and only one the statement
+ * built is reported.
+ */
+const CODE_FENCE = /^ {0,3}(?:`{3,}|~{3,})/;
+
+/**
+ * Where `blockStructures` splits lines — **the same answer `LINE_BREAK` gives**,
+ * and it has to be. `LINE_BREAK` is the single-character form of this and its
+ * docblock carries the argument: two answers to "where does a line end" in one
+ * package is one answer too many. A bare newline would not see U+0085, and a
+ * fold that already forgives a NEL as whitespace would then be a fold that can
+ * hide a heading behind one.
+ */
+const LINE_BREAK_SPLIT = /[\n\v\f\r\u0085\u2028\u2029]/;
+
+/**
+ * **Every block a text's line beginnings open** — the second many-to-one rule in
+ * the fold, read back out, and r11's finding.
+ *
+ * ## Why this exists
+ *
+ * `foldProse` collapses `\p{White_Space}+` to one space. That entry has the
+ * strongest argument of the four the fold admits — a client wraps a message and
+ * a quote copied out of it carries different line breaks — and it is not
+ * narrowed here. But the collapse runs in *both* directions, so a statement may
+ * put a **line break where its author put a space**, fold to the identical
+ * normal form, be `borne`, and land:
+ *
+ * ```
+ * author : Latency > 200ms is unacceptable for the search API.
+ * record : Latency\n> 200ms is unacceptable for the search API.     → a block quote
+ * author : See section # 4 of the runbook before the deploy.
+ * record : See section\n# 4 of the runbook before the deploy.       → a heading
+ * author : Do this before the freeze: run the migration script.
+ * record : Do this before the freeze:\n    run the migration script.
+ * ```
+ *
+ * Every one `auto_accept`, every one landing in `state.objects`, every one built
+ * out of the author's own characters. It is r10's link finding at the other rule
+ * that can *build* structure rather than delete it, and r10's own sentence
+ * governs it: the stored text is markup its named author never wrote, and this
+ * package is the only gatekeeper of that.
+ *
+ * ## What is claimed, and what is not
+ *
+ * The finding is mechanical and flavour-independent: **the statement begins a
+ * line with a marker the quote does not**. Whether a given renderer turns that
+ * line into a block is not claimed and is not this package's to know — the
+ * record is written here and rendered in another lane, which is the same
+ * asymmetry `linkStructures` was built on. Two of the shapes above are
+ * deliberately included on that ground rather than on a rendering claim:
+ * CommonMark says an indented chunk *cannot interrupt a paragraph*, and GFM
+ * needs a delimiter row before `|` is a table, so neither builds a block in a
+ * strict reader — and both are the author's characters re-broken into lines by
+ * something that was not the author.
+ *
+ * **Code segments are skipped**, on the same argument `linkStructures` gives:
+ * a backticked span is mention, not use, `normalizeForReceipt` passes one
+ * through byte for byte, and a `>` displayed inside a literal opens nothing. A
+ * segment that does not itself start at a line beginning has its first line
+ * skipped, because `` `x` > a `` is not a block quote.
+ */
+export function blockStructures(text: string): string[] {
+  const out: string[] = [];
+  // Fences first, on the raw text — see `CODE_FENCE` for why they cannot be read
+  // out of the segment walk below.
+  for (const line of text.replace(DELETABLE, '').split(LINE_BREAK_SPLIT)) {
+    if (CODE_FENCE.test(line)) out.push(line.replace(WHITESPACE_RUN, ' ').trim());
+  }
+  // The first line of the whole text is a line beginning; after that it depends
+  // on what the previous segment ended with, which is why this is carried across
+  // the code-segment boundary rather than reset per segment.
+  let atLineStart = true;
+  for (const [index, segment] of text.split(CODE_SPAN).entries()) {
+    const isCode = index % 2 === 1;
+    if (!isCode) {
+      const prepared = segment.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+      const lines = prepared.split(LINE_BREAK_SPLIT);
+      for (const [position, line] of lines.entries()) {
+        if (position === 0 && !atLineStart) continue;
+        const opener = blockOpener(line);
+        if (opener !== null) out.push(opener);
+      }
+    }
+    // An empty segment — `String.split` emits one whenever a delimiter starts or
+    // ends the text — says nothing about where the next one begins, so it must
+    // not be read as "not at a line start".
+    if (segment.length > 0) atLineStart = LINE_BREAK_SPLIT.test(segment.slice(-1));
+  }
+  return out.sort();
+}
+
+/**
+ * The block this line opens, as a descriptor — the marker with the rest of the
+ * line whitespace-collapsed behind it, so it reads in a refusal and compares as
+ * a key.
+ *
+ * Collapsed for the reason `linkStructures` collapses: the fold forgives
+ * whitespace inside the line, so a quote and a statement whose markers agree
+ * must produce one descriptor rather than two.
+ */
+function blockOpener(line: string): string | null {
+  // Leading whitespace in *columns*, because a tab advances to the next multiple
+  // of four and four columns is where an indented code block begins.
+  let column = 0;
+  let index = 0;
+  for (; index < line.length; index += 1) {
+    const character = line[index];
+    if (character === ' ') column += 1;
+    else if (character === '\t') column += 4 - (column % 4);
+    else break;
+  }
+  const rest = line.slice(index).replace(WHITESPACE_RUN, ' ').trim();
+  // A blank line opens nothing — it *ends* a block, which is a difference in the
+  // other direction and not one this rule reports.
+  if (rest.length === 0) return null;
+  if (column >= 4) return `    ${rest}`;
+  if (THEMATIC_BREAK.test(rest) || SETEXT_UNDERLINE.test(rest)) return rest;
+  return BLOCK_MARKER.test(rest) ? rest : null;
+}
+
+/**
+ * **Block markup the statement has and the quote does not** — `blockStructures`
+ * through the same multiset difference `addedLinkStructure` uses, for the same
+ * reason and in the same direction.
+ */
+export function addedBlockStructure(quote: string, statement: string): string[] {
+  return addedStructure(quote, statement, blockStructures);
 }
 
 /**

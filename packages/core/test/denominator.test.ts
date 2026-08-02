@@ -330,21 +330,61 @@ describe('r10 — dedup consults the whole payload, not the sentence', () => {
 
 describe('r10 — a cycle that went blind does not resolve anybody’s item', () => {
   const BODY = 'Bob will run the backfill before the Friday freeze, please.';
-  const full: ProvenanceMessage[] = [
-    { id: 'm1', authorId: CARL, body: BODY },
-    { id: 'm2', authorId: BOB, body: 'Ack, noted.' },
-  ];
+  const m1: ProvenanceMessage = { id: 'm1', authorId: CARL, body: BODY };
+  const m2: ProvenanceMessage = { id: 'm2', authorId: BOB, body: 'Ack, noted.' };
+  /**
+   * Uncited, and it has to be there — r11.
+   *
+   * A window that ends at the newest message a proposal cites is
+   * `window_ends_at_the_citations`, a `refer`, so cycle 1 would raise nothing at
+   * all and the sequence below would test a room where nobody was ever asked
+   * anything. `UNCITED_TAIL`'s docblock is the general form of this.
+   */
+  const m3: ProvenanceMessage = {
+    id: 'm3',
+    authorId: ALICE,
+    body: 'Anything else for the release week?',
+  };
+  const full: ProvenanceMessage[] = [m1, m2, m3];
   /** The ordinary shape of "the room's last N messages", one slide on. */
-  const slid: ProvenanceMessage[] = [
-    { id: 'm2', authorId: BOB, body: 'Ack, noted.' },
-    { id: 'm3', authorId: ALICE, body: 'Anything else for the release week?' },
-  ];
+  const slid: ProvenanceMessage[] = [m2, m3];
   const members = { [ROOM]: [ALICE, BOB, CARL] };
   const NOW = at(30);
 
+  /**
+   * **Two citations, and r11 is why.**
+   *
+   * This proposal cited **one** message when r10 wrote it, which is exactly the
+   * boundary where r10's repair already worked and the only count at which the
+   * defect it was written for cannot reproduce. With the sole citation gone the
+   * surviving `cited` list is empty, every quote check inside
+   * `validateProposalProvenance` is skipped, and `unknown_message` at `refer` is
+   * the only finding — so `decideAcceptance` answers `receipt_not_certifiable`
+   * and `proposalItems` refuses on that arm.
+   *
+   * With two, one survives. The quote checks *run*, over the survivor, and
+   * `quote_not_found` at `reject` shadows the referral: `discard /
+   * provenance_failed`, which r10's `proposalItems` read as a conclusion and
+   * turned into a permanent `resolved`. The repo's own canonical fixture cites
+   * two (`fixtures.ts`, `prop_1`). Measured on r10: `['m1']` preserved the item
+   * and `['m1','m2']` resolved it.
+   */
   const staged = reduce([
     proposalEvent({
       id: 'p_bob',
+      type: 'commitment',
+      payload: { statement: BODY, owner: BOB, due: null, status: 'open' },
+      cites: ['m1', 'm2'],
+      quote: BODY,
+      at: at(1),
+    }),
+  ]);
+  const ITEM = 'attn:user_bob:proposal:p_bob:owned_commitment';
+
+  /** The one-citation form, kept for the test below that still needs it. */
+  const stagedOne = reduce([
+    proposalEvent({
+      id: 'p_bob_one',
       type: 'commitment',
       payload: { statement: BODY, owner: BOB, due: null, status: 'open' },
       cites: ['m1'],
@@ -352,15 +392,16 @@ describe('r10 — a cycle that went blind does not resolve anybody’s item', ()
       at: at(1),
     }),
   ]);
-  const ITEM = 'attn:user_bob:proposal:p_bob:owned_commitment';
 
   /**
    * **Catches**: `status: entry.status === 'pending' ? 'resolved' :
    * entry.status` in `reconcileAttention` — rule 2 without the examination
-   * check. Sequence B from the brief, end to end and over three cycles: the
-   * window slides past the cited message, the projection computes nothing about
-   * a proposal that is still `proposed`, and on r9 Bob's confirm was resolved
-   * permanently with zero items and zero refusals to say so.
+   * check — and, since r11, `proposalItems` concluding from `visibility !==
+   * 'needs_you'`. Sequence B from r10's brief, end to end and over three cycles:
+   * the window slides past one of the cited messages, the projection computes
+   * nothing about a proposal that is still `proposed`, and on r9 *and on r10*
+   * Bob's confirm was resolved permanently with zero items and zero refusals to
+   * say so.
    */
   it('keeps a pending item pending across a slid window', () => {
     const cycle1 = projectAttention(staged, { now: NOW, messages: full, members });
@@ -371,7 +412,7 @@ describe('r10 — a cycle that went blind does not resolve anybody’s item', ()
     expect(cycle2.items).toEqual([]);
     // Half two of the fix: the window not reaching the message is now *said*.
     expect(cycle2.refusals.map((refusal) => refusal.proposalId)).toEqual(['p_bob']);
-    expect(cycle2.refusals[0]?.reason).toContain('not in the window');
+    expect(cycle2.refusals[0]?.reason).toContain('window');
     stored = reconcileAttention(stored, cycle2);
     expect(stored.map((entry) => [entry.id, entry.status])).toEqual([[ITEM, 'pending']]);
 
@@ -381,6 +422,29 @@ describe('r10 — a cycle that went blind does not resolve anybody’s item', ()
     // The proposal never moved, which is the point: nothing about the room
     // changed, only what one cycle could see.
     expect(staged.proposals.p_bob?.status).toBe('proposed');
+  });
+
+  /**
+   * The one-citation form, kept beside its replacement rather than deleted —
+   * **it pins a different arm**, and it is the arm r10 actually built.
+   *
+   * **Catches**: `unknown_message` going back to `reject` (which makes this
+   * `provenance_failed / discard`), and the `receipt_not_certifiable` branch of
+   * `proposalItems` concluding instead of refusing. Neither of those is the
+   * `about` guard the test above pins, and neither is reachable from the
+   * two-citation shape, which is why both cases are here.
+   */
+  it('keeps a pending item pending when the window dropped its only citation', () => {
+    const ONE = 'attn:user_bob:proposal:p_bob_one:owned_commitment';
+    const cycle1 = projectAttention(stagedOne, { now: NOW, messages: full, members });
+    let stored = reconcileAttention([], cycle1);
+    expect(stored.map((entry) => [entry.id, entry.status])).toEqual([[ONE, 'pending']]);
+
+    const cycle2 = projectAttention(stagedOne, { now: NOW, messages: slid, members });
+    expect(cycle2.items).toEqual([]);
+    expect(cycle2.refusals[0]?.reason).toContain('not in the window');
+    stored = reconcileAttention(stored, cycle2);
+    expect(stored.map((entry) => entry.status)).toEqual(['pending']);
   });
 
   /**
@@ -444,7 +508,12 @@ describe('r10 — a cycle that went blind does not resolve anybody’s item', ()
    * item, no refusal and no trace.
    */
   it('classes an unreached citation as unscanned rather than wrong', () => {
-    const proposal = staged.proposals.p_bob?.proposal;
+    // The one-citation proposal, on purpose: this test is about the *severity*
+    // `unknown_message` carries, and that finding only reaches a return when no
+    // `reject` outranks it. With two citations one survives, the quote checks
+    // run over it, and `quote_not_found` wins — which is r11's finding and is
+    // pinned above, not here.
+    const proposal = stagedOne.proposals.p_bob_one?.proposal;
     if (!proposal) throw new Error('unreachable');
 
     const problems = validateProposalProvenance(

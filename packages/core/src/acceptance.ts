@@ -1,6 +1,8 @@
 import type { Actor, Id, Timestamp } from './common.js';
 import {
   bearingMessage,
+  isAboutTheWindow,
+  type ProblemSubject,
   type ProvenanceMessage,
   type ProvenanceProblem,
   referringProblems,
@@ -179,6 +181,23 @@ export interface AcceptanceDecision {
   attribution: CommitmentAttribution | null;
   /** The accepted object this duplicates, when that is why it was discarded. */
   duplicateOf: Id | null;
+  /**
+   * **What this verdict is a fact about** — r11. See `ProblemSubject`.
+   *
+   * `'the_window'` means the answer is a function of what the caller's window
+   * happened to hold, not of the reading: no window at all, or the findings that
+   * drove the verdict were computed over a window that did not reach every
+   * message the proposal cites. Re-run the same proposal against a complete
+   * window and the verdict may be anything.
+   *
+   * It exists because a *consumer* — `attention.ts` — was treating "not
+   * `needs_you`" as "this cycle judged this subject and it owes nobody
+   * anything", and one of the ways to be not-`needs_you` is `discard /
+   * provenance_failed` on a window that slid past the bearing message. A
+   * verdict's disposition and a verdict's standing are two different facts and
+   * only one of them was on this type.
+   */
+  about: ProblemSubject;
 }
 
 /**
@@ -620,6 +639,8 @@ export function decideAcceptance(
   if (proposal.proposer.kind === 'model' && windowIsAbsent) {
     return {
       ...base,
+      // The purest window-fact there is: nothing about this reading was read.
+      about: 'the_window',
       verdict: 'discard',
       visibility: 'none',
       rule: 'missing_message_context',
@@ -664,6 +685,18 @@ export function decideAcceptance(
   if (rejecting.length > 0) {
     return {
       ...base,
+      // **Scoped to the findings that produced this verdict, not to every
+      // finding in the list** — r11. The two subsets disagree and the difference
+      // matters in both directions. A window that dropped a citation always
+      // carries `unknown_message` at `refer`, which is *shadowed* here by any
+      // `reject`: on the sequence this round was opened on, `quote_not_found`
+      // wins and the refer never reaches a return. Scoping to `rejecting`
+      // catches it anyway, because `quote_not_found` is itself computed over the
+      // survivors. And a proposal with no quote at all is `missing_quote` —
+      // `reject`, about the reading, true against any window — so it still
+      // concludes rather than being preserved forever by a citation the window
+      // happened to miss.
+      about: isAboutTheWindow(rejecting) ? 'the_window' : 'the_reading',
       verdict: 'discard',
       visibility: 'none',
       rule: 'provenance_failed',
@@ -702,6 +735,7 @@ export function decideAcceptance(
   if (referring.length > 0) {
     return {
       ...base,
+      about: isAboutTheWindow(referring) ? 'the_window' : 'the_reading',
       attribution,
       verdict: 'pending',
       visibility: 'quiet',
@@ -709,6 +743,25 @@ export function decideAcceptance(
       reason: `not accepted on a machine's word, and not thrown away: ${referring.map((problem) => problem.detail).join('; ')}`,
     };
   }
+
+  /**
+   * **Everything below here judged the reading, and it is provable rather than
+   * asserted** — r11.
+   *
+   * The two returns above are the only ones a receipt finding can produce. Past
+   * them the problem list holds no `reject` and no `refer`, and
+   * `unknown_message` — the finding that fires for *every* citation this window
+   * did not reach — is `refer`. So a window missing a citation cannot reach this
+   * line, and the remaining cells (`duplicate_of_accepted`, the θ rows,
+   * `third_party_commitment`, `human_proposer`) are answers about the proposal's
+   * own confidence, type and attribution.
+   *
+   * That is a claim about code that changes, so it is measured rather than
+   * trusted: `silence.test.ts`, "no verdict past the receipt gate is reachable
+   * with a window that missed a citation", drives every rule name against an
+   * incomplete window and asserts none of them appears.
+   */
+  const judged = { ...base, about: 'the_reading' } as const;
 
   // ── Already in the room ──────────────────────────────────────────────────
   //
@@ -731,7 +784,7 @@ export function decideAcceptance(
     : null;
   if (duplicate) {
     return {
-      ...base,
+      ...judged,
       attribution,
       verdict: 'discard',
       visibility: 'none',
@@ -758,7 +811,7 @@ export function decideAcceptance(
     const namesAnother =
       proposal.type === 'commitment' && attributedTo !== null && attributedTo !== staged;
     return {
-      ...base,
+      ...judged,
       verdict: 'pending',
       visibility: 'needs_you',
       attribution: proposal.type === 'commitment' ? (namesAnother ? 'third_party' : 'self') : null,
@@ -777,7 +830,7 @@ export function decideAcceptance(
   // model that is not convinced by its own reading.
   if (proposal.confidence < rule.thetaMin) {
     return {
-      ...base,
+      ...judged,
       attribution,
       verdict: 'discard',
       visibility: 'none',
@@ -793,7 +846,7 @@ export function decideAcceptance(
   // uncertain reading is not worth a person's turn, only their glance.
   if (proposal.confidence < rule.thetaAuto) {
     return {
-      ...base,
+      ...judged,
       attribution,
       verdict: 'pending',
       visibility: 'quiet',
@@ -811,7 +864,7 @@ export function decideAcceptance(
   // put it in front of the person being committed rather than the room.
   if (proposal.type === 'commitment' && attribution === 'third_party') {
     return {
-      ...base,
+      ...judged,
       attribution,
       verdict: 'pending',
       visibility: 'needs_you',
@@ -829,7 +882,7 @@ export function decideAcceptance(
   // one line of data.
   if (!rule.autoAccept) {
     return {
-      ...base,
+      ...judged,
       attribution,
       verdict: 'pending',
       visibility: 'needs_you',
@@ -891,7 +944,7 @@ export function decideAcceptance(
   const statement = normalizeForReceipt(payloadText(proposal.type, payload));
   if (!typeCertifiableFromText(proposal.type, statement)) {
     return {
-      ...base,
+      ...judged,
       attribution,
       verdict: 'pending',
       visibility: 'needs_you',
@@ -901,7 +954,7 @@ export function decideAcceptance(
   }
 
   return {
-    ...base,
+    ...judged,
     attribution,
     verdict: 'auto_accept',
     visibility: 'accepted',

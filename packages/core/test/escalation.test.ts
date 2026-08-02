@@ -1184,6 +1184,24 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           body: 'Read the runbook at https://safe.example do not run step 4.',
         }),
       ],
+      // statement_adds_block_structure — r11. The same shape one rule over: the
+      // statement is the author's own characters with a line break where they
+      // put a space, so the whitespace collapse folds the two to one text and
+      // the record holds a block quote nobody wrote.
+      [
+        {
+          type: 'claim',
+          provenance: ['m_block'],
+          quote: 'Latency > 200ms is unacceptable for the search API.',
+          statement: 'Latency\n> 200ms is unacceptable for the search API.',
+          proposer: { kind: 'model' },
+        },
+        room({
+          id: 'm_block',
+          authorId: JORDAN,
+          body: 'Latency > 200ms is unacceptable for the search API.',
+        }),
+      ],
     ];
     for (const args of cases) {
       for (const problem of validateProposalProvenance(...args)) seen.add(problem.kind);

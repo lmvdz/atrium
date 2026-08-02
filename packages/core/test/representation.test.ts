@@ -1041,8 +1041,16 @@ describe('r8 — attention bookkeeping', () => {
     items: ComputedAttentionItem[],
     examined: ExaminedSubject[] = [],
   ): AttentionProjection => ({ items, refusals: [], examined });
+  // r11: an examination names the producer that made it, because one class can
+  // have two of them. `commitment_open` — the rationale these items carry — is
+  // `commitmentItems`' work, so this is the declaration that half would make.
   const sawObj1: ExaminedSubject[] = [
-    { class: 'owned_commitment', subjectKind: 'object', subjectId: 'obj_1' },
+    {
+      class: 'owned_commitment',
+      subjectKind: 'object',
+      subjectId: 'obj_1',
+      producer: 'open_commitment',
+    },
   ];
 
   it('keeps a dismissal across a cycle that computes nothing', () => {
@@ -1081,11 +1089,31 @@ describe('r8 — attention bookkeeping', () => {
     expect(reconcileAttention(stored, cycle([])).map((entry) => entry.status)).toEqual(['pending']);
     // …and a different subject's examination is not this subject's.
     const elsewhere: ExaminedSubject[] = [
-      { class: 'owned_commitment', subjectKind: 'object', subjectId: 'obj_2' },
+      {
+        class: 'owned_commitment',
+        subjectKind: 'object',
+        subjectId: 'obj_2',
+        producer: 'open_commitment',
+      },
       // Same subject, different class: an item is `(class, kind, subject)`.
-      { class: 'mention', subjectKind: 'object', subjectId: 'obj_1' },
+      { class: 'mention', subjectKind: 'object', subjectId: 'obj_1', producer: 'mention_signal' },
       // Same subject and class, different namespace.
-      { class: 'owned_commitment', subjectKind: 'proposal', subjectId: 'obj_1' },
+      {
+        class: 'owned_commitment',
+        subjectKind: 'proposal',
+        subjectId: 'obj_1',
+        producer: 'staged_proposal',
+      },
+      // **r11**: same subject, same class, same namespace — a *different
+      // producer*. `commitmentItems` raised this item and only `commitmentItems`
+      // may say it is finished. Without the producer in the key this entry alone
+      // would resolve it.
+      {
+        class: 'owned_commitment',
+        subjectKind: 'object',
+        subjectId: 'obj_1',
+        producer: 'staged_proposal',
+      },
     ];
     expect(reconcileAttention(stored, cycle([], elsewhere)).map((entry) => entry.status)).toEqual([
       'pending',

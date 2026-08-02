@@ -1304,8 +1304,8 @@
       "id": "mention_items_undeduped",
       "why": "r8. Two signals naming one person on one object produced two items with one id, so the projection was not byte-identical across arrival orders.",
       "file": "src/attention.ts",
-      "find": "    if (seen.has(id)) continue;\n    seen.add(id);\n    examined.push({ class: 'mention', subjectKind: 'object', subjectId: signal.objectId });\n    out.push(",
-      "replace": "    seen.add(id);\n    examined.push({ class: 'mention', subjectKind: 'object', subjectId: signal.objectId });\n    out.push(",
+      "find": "    if (seen.has(id)) continue;\n    seen.add(id);\n    examined.push({\n      class: 'mention',",
+      "replace": "    seen.add(id);\n    examined.push({\n      class: 'mention',",
       "catches": ["is byte-identical whichever order the mentions arrive in"]
     },
     {
@@ -1452,8 +1452,8 @@
       "id": "mentions_declare_examinations_they_did_not_make",
       "why": "r10. Lets the state walk declare `mention` examinations alongside its own class. A mention is a caller signal and no source reads state for it, so 'no item for obj_7' cannot be told apart from 'nobody told this cycle about obj_7' — the state walk saying it looked resolves every mention in the room the moment the window slides past the message that raised it.",
       "file": "src/attention.ts",
-      "find": "    .map((subjectId) => ({ class: 'owned_commitment', subjectKind: 'object', subjectId }));",
-      "replace": "    .flatMap((subjectId) => [\n      { class: 'owned_commitment' as const, subjectKind: 'object' as const, subjectId },\n      { class: 'mention' as const, subjectKind: 'object' as const, subjectId },\n    ]);",
+      "find": "  const examined: ExaminedSubject[] = Object.keys(state.objects)\n    .sort()\n    .map((subjectId) => ({\n      class: 'owned_commitment',\n      subjectKind: 'object',\n      subjectId,\n      producer: 'open_commitment',\n    }));",
+      "replace": "  const examined: ExaminedSubject[] = Object.keys(state.objects)\n    .sort()\n    .flatMap((subjectId) => [\n      {\n        class: 'owned_commitment' as const,\n        subjectKind: 'object' as const,\n        subjectId,\n        producer: 'open_commitment' as const,\n      },\n      {\n        class: 'mention' as const,\n        subjectKind: 'object' as const,\n        subjectId,\n        producer: 'mention_signal' as const,\n      },\n    ]);",
       "catches": ["keeps a mention pending when the cycle was handed no signals"]
     },
     {
@@ -1475,6 +1475,99 @@
         "leaves a link the author actually wrote alone, in both directions",
         "covers every problem kind it declares"
       ]
+    },
+    {
+      "id": "proposal_concludes_from_visibility_alone",
+      "why": "r11. Restores r10's `proposalItems` exactly: the guard that refuses to conclude on a verdict which is a fact about the window is deleted, so `visibility !== 'needs_you'` falls straight through to `conclude`. A window that slid past one of two cited messages then returns `discard / provenance_failed` — the quote is in none of the survivors — the cycle declares it examined, and rule 1 pins the resulting `resolved` forever, while `decideAcceptance` on the full window still says `needs_you / confirm: bob` and the proposal is still `proposed`.",
+      "file": "src/attention.ts",
+      "find": "    if (verdict.about === 'the_window') {\n      refusals.push({\n        proposalId: proposal.id,",
+      "replace": "    if (false as boolean) {\n      refusals.push({\n        proposalId: proposal.id,",
+      "catches": [
+        "keeps a confirm pending when the window dropped one of two citations",
+        "keeps a whole room’s needs_decision pending across the same slide",
+        "keeps a pending item pending across a slid window"
+      ]
+    },
+    {
+      "id": "problem_about_never_says_the_window",
+      "why": "r11. Makes every finding a fact about the reading, which is the derivation the guard above stands on. A check computed over whichever cited messages survived then claims to have judged the proposal, and the `the_cited_messages` row of PROBLEM_EVIDENCE stops meaning anything.",
+      "file": "src/escalation.ts",
+      "find": "  if (evidence === 'the_proposal') return 'the_reading';\n  if (evidence === 'the_window') return 'the_window';\n  return windowHoldsEveryCitation ? 'the_reading' : 'the_window';",
+      "replace": "  void evidence;\n  void windowHoldsEveryCitation;\n  return 'the_reading';",
+      "catches": [
+        "makes “about the window” a property of the finding, derived from the window",
+        "keeps a confirm pending when the window dropped one of two citations",
+        "reaches no post-gate verdict with a window that missed a citation"
+      ]
+    },
+    {
+      "id": "problem_about_always_says_the_window",
+      "why": "r11. The over-correction in the other direction: every finding becomes a window fact, so no cycle ever concludes about a proposal and rule 2 is closed for the whole proposal source. A guard that never lets go is not a fix, it is a panel that only grows.",
+      "file": "src/escalation.ts",
+      "find": "  if (evidence === 'the_proposal') return 'the_reading';\n  if (evidence === 'the_window') return 'the_window';\n  return windowHoldsEveryCitation ? 'the_reading' : 'the_window';",
+      "replace": "  void evidence;\n  void windowHoldsEveryCitation;\n  return 'the_window';",
+      "catches": [
+        "still concludes when the window held every citation and the receipt is wrong",
+        "makes “about the window” a property of the finding, derived from the window"
+      ]
+    },
+    {
+      "id": "examined_key_drops_the_producer",
+      "why": "r11. One class with two producers shares an examination key again, so the half that reads state concludes on behalf of the half that reads a caller signal. This is r10's key, and it is what let a cycle handed no `questionMentions` resolve somebody's named question by absence.",
+      "file": "src/attention.ts",
+      "find": "  return `${entry.class}:${entry.subjectKind}:${escapeIdPart(entry.subjectId)}:${entry.producer}`;",
+      "replace": "  return `${entry.class}:${entry.subjectKind}:${escapeIdPart(entry.subjectId)}`;",
+      "catches": [
+        "keeps a question_names_you item pending across a cycle with no signal",
+        "leaves a pending item alone when the cycle never examined its subject",
+        "preserves an item whose rationale this build does not recognise"
+      ]
+    },
+    {
+      "id": "named_question_examined_by_the_state_half",
+      "why": "r11. Restores r10's declaration: the state walk claims a `named_question` examination for every object whether or not the subject has settled. A cycle with no `questionMentions` then resolves an open question that names somebody, with zero items and zero refusals, which is the slide `mentionItems` refuses to make.",
+      "file": "src/attention.ts",
+      "find": "    if (openQuestion(subjectId) === null) {\n      examined.push({\n        class: 'blocking_question',",
+      "replace": "    if (true as boolean) {\n      examined.push({\n        class: 'blocking_question',",
+      "catches": ["keeps a question_names_you item pending across a cycle with no signal"]
+    },
+    {
+      "id": "named_question_never_examined",
+      "why": "r11. The over-correction: the state half never concludes for the signal half, so a question that is answered, retracted or superseded leaves its `question_names_you` item owed forever. An item nothing can ever finish is the panel #6 says the room learns to ignore.",
+      "file": "src/attention.ts",
+      "find": "    if (openQuestion(subjectId) === null) {\n      examined.push({\n        class: 'blocking_question',",
+      "replace": "    if (false as boolean) {\n      examined.push({\n        class: 'blocking_question',",
+      "catches": ["resolves it when the question itself is answered"]
+    },
+    {
+      "id": "statement_may_add_block_structure",
+      "why": "r11. Removes the check that a statement opens no line with a Markdown block marker the quote lacks. `foldProse` collapses a whitespace run to one space in both directions, so a statement that puts a line break where its author put a space normalizes identically, is borne, and lands as their words — carrying a block quote, a heading, a list or a table row nobody wrote.",
+      "file": "src/escalation.ts",
+      "find": "      const built = addedBlockStructure(quote, statement);",
+      "replace": "      const built: string[] = [];",
+      "catches": [
+        "refuses a statement that re-breaks the author’s lines into markup",
+        "covers every problem kind it declares"
+      ]
+    },
+    {
+      "id": "block_marker_read_anywhere_in_the_line",
+      "why": "r11. Drops the line-beginning requirement, so a block marker anywhere in a line counts as structure. Ordinary prose containing `-`, `>`, `#` or `|` is then refused for markup nobody built — a refusal that is false about the room's own words, which is the failure r7 measured 56,559 of one function over.",
+      "file": "src/matching.ts",
+      "find": "  const rest = line.slice(index).replace(WHITESPACE_RUN, ' ').trim();",
+      "replace": "  const rest = line\n    .slice(index)\n    .replace(WHITESPACE_RUN, ' ')\n    .trim()\n    .replace(/^[^-+*>#|]*/, '');",
+      "catches": [
+        "reads a block marker as a block marker only at a line beginning",
+        "leaves the author’s own block structure alone, in both directions"
+      ]
+    },
+    {
+      "id": "code_fence_left_to_the_segment_walk",
+      "why": "r11, and this round's own probe found it. Removes the raw-text fence pass, leaving fences to the code-segment walk — where `CODE_SPAN`'s double-backtick alternative consumes the first two characters of a three-tick opener and re-emits the rest as prose, so a fence is named in the block-start inventory and invisible to the scanner reading it.",
+      "file": "src/matching.ts",
+      "find": "  for (const line of text.replace(DELETABLE, '').split(LINE_BREAK_SPLIT)) {\n    if (CODE_FENCE.test(line)) out.push(line.replace(WHITESPACE_RUN, ' ').trim());\n  }",
+      "replace": "  void CODE_FENCE;",
+      "catches": ["sees a code fence, which the code-segment walk cannot"]
     }
   ]
 }
