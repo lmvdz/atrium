@@ -224,7 +224,9 @@ export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean 
  * narrower answer (`payloadAttributedTo`) that returned `null` for a decision.
  * So two commands — stage `{statement: "We are cancelling the audit",
  * decidedBy: <victim>}`, accept it yourself — put the victim's name on a
- * cancelled audit with `issues: []` twice and nothing to correct it with. The
+ * cancelled audit with `issues: []` twice, no correction verb involved and no
+ * second person anywhere in it. (It was retractable afterwards, like anything
+ * else; what it was not was refusable at the point it became durable.) The
  * set is derived from one classification of every payload field now, so the
  * sentence cannot drift from the code again: an objective and an open question
  * name nobody, a decision, a commitment and a claim each name one person, and a
