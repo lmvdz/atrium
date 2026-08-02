@@ -60,8 +60,25 @@ export function retypeCarryOver(
   from: AcceptedObject,
   to: AcceptedObjectType,
 ): Record<string, unknown> {
-  const text = (from.payload as Record<string, unknown>)[TEXT_FIELD[from.type]];
-  return typeof text === 'string' ? { [TEXT_FIELD[to]]: text } : {};
+  const payload = from.payload as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  const text = payload[TEXT_FIELD[from.type]];
+  if (typeof text === 'string') out[TEXT_FIELD[to]] = text;
+  // **The person carries too, r8.** Only the text used to, so retyping a
+  // commitment to a claim dropped the owner on the floor and the patch had to
+  // supply a claimant — which meant a retype could put a *different* name on the
+  // sentence, and a retype back could put a third one on it, with no
+  // `reattribute` row in the log either time. `reduce.ts` refuses a patch that
+  // moves what this carries; the two halves are the verb split, which is #4's
+  // "nobody gets committed by someone else's sentence" read backwards through
+  // the correction log.
+  const fromField = ATTRIBUTION_FIELD[from.type];
+  const toField = ATTRIBUTION_FIELD[to];
+  if (fromField !== null && toField !== null) {
+    const held = payload[fromField];
+    if (typeof held === 'string' && held.length > 0) out[toField] = held;
+  }
+  return out;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────

@@ -9,9 +9,10 @@ import {
   proposalBindingRefusal,
   uncertifiedTypeRefusal,
 } from './authority.js';
-import type { Actor } from './common.js';
+import { type Actor, instantKey } from './common.js';
 import { ATTRIBUTION_FIELD, retypeCarryOver } from './corrections.js';
 import { type AuthoredEvent, CoreEvent, type TrustedContext } from './events.js';
+import { normalizeForReceipt } from './matching.js';
 import {
   AcceptedObject,
   type AcceptedObjectType,
@@ -326,9 +327,25 @@ export function cursorOf(event: CoreEvent): EventCursor {
   return { at: event.at, id: event.id };
 }
 
-/** The comparison `orderEvents` sorts by, exposed so callers can reason about order. */
+/**
+ * The comparison `orderEvents` sorts by, exposed so callers can reason about
+ * order.
+ *
+ * **Ordered by the instant, not by the spelling of it — r8.** This read
+ * `compare(a.at, b.at)` on the raw strings, and `Timestamp` admits several
+ * spellings of one moment. `'.'` sorts before `'Z'`, so `…T00:00:00.500Z`
+ * compared *earlier* than `…T00:00:00Z` — half a second later, rejected as
+ * `out_of_order`, unrecoverably. `instantKey` is the canonical form; see its
+ * docblock in `common.ts` for why the fix is here and not in the schema.
+ *
+ * Two spellings of the same instant now compare equal and fall through to the id
+ * tiebreak, which is the same total order the promise in `reduce`'s contract
+ * describes — and now the same one it delivers.
+ */
 export function compareCursor(a: EventCursor, b: EventCursor): number {
-  return a.at === b.at ? compare(a.id, b.id) : compare(a.at, b.at);
+  const ka = instantKey(a.at);
+  const kb = instantKey(b.at);
+  return ka === kb ? compare(a.id, b.id) : compare(ka, kb);
 }
 
 function compare(a: string, b: string): number {
@@ -822,7 +839,15 @@ function applyObjectAccepted(
       // Read over the **object's own payload text**, not the proposal's — those
       // are checked equal three screens up (`payload_binding`), and reading the
       // thing being minted is the honest place to ask what is being minted.
-      if (!typeCertifiableFromText(object.type, payloadText(object.type, object.payload))) {
+      // Over `normalizeForReceipt` of the payload text, r8 — the engine's twin
+      // read the raw statement and so did this, so the same zero-width splice
+      // walked through both. See `ReceiptText` in `common.ts`.
+      if (
+        !typeCertifiableFromText(
+          object.type,
+          normalizeForReceipt(payloadText(object.type, object.payload)),
+        )
+      ) {
         fail(state, event.id, uncertifiedTypeRefusal(actor, object.type, subject));
         return false;
       }
@@ -934,6 +959,7 @@ function applyObjectCorrected(
     }
     commitCorrection(state, event, record, actor, { retracted: false }, { retracted: true });
     record.retractedAt = event.at;
+    releaseSupersessions(state, record.object.id, event.at);
     return true;
   }
 
@@ -944,6 +970,7 @@ function applyObjectCorrected(
     }
     commitCorrection(state, event, record, actor, { retracted: true }, { retracted: false });
     record.retractedAt = null;
+    reapplySupersessions(state, record.object.id, event.at);
     return true;
   }
 
@@ -1076,7 +1103,61 @@ function applyRetype(
     return false;
   }
 
-  const payload = { ...retypeCarryOver(from, toType), ...event.patch };
+  // ── The invariants the fold enforces at creation, enforced here too — r8 ───
+  //
+  // **No mutant in the ledger touched this function, and no test reached past
+  // its payload.** A retype re-validates the *object* against its new schema and
+  // stopped there, so it was the one door into a state the reducer refuses to be
+  // handed directly. Two of them, both found by r8's blind review:
+  //
+  //  1. Retype an `objective` that other objects are filed under, and every one
+  //     of them now points at a `decision` through `objectiveId` — the exact
+  //     state `applyObjectAccepted` refuses three screens up ("belongs to X,
+  //     which is a decision, not an objective"). The control fires; this path
+  //     walked around it.
+  //  2. Retype an **answered** `open_question` to a `claim`, and the `answers`
+  //     edge that settled it now originates from a claim — which
+  //     `applyRelationAdded` refuses to create — while `status: 'answered'`
+  //     silently disappears, because `retypeCarryOver` moves the text and a
+  //     claim has no such field. The room loses the fact that the question was
+  //     settled and keeps the edge that settled it.
+  //
+  // Refused rather than repaired: a correction is a person saying the reading
+  // was wrong, and the honest answer to "this retype would break something else"
+  // is to name the something else, not to quietly rewrite it. Both messages say
+  // what to do first.
+  const structural = retypeStructuralRefusal(state, from, toType);
+  if (structural) {
+    fail(state, event.id, structural);
+    return false;
+  }
+
+  // ── …and the verb split survives a round trip — r8 ───────────────────────
+  //
+  // `applyPayloadPatch` refuses an `amend` that touches the attribution field
+  // with *"moving a commitment onto or off a person is a 'reattribute', so the
+  // correction log can be read by verb"*. A retype went around it in two hops:
+  // commitment(owner: alice) → claim(claimant: mallory) → commitment(owner:
+  // mallory), two `retype` rows and no `reattribute` row anywhere, and the
+  // correction log answers "who took this off Alice" with silence. The
+  // attribution now carries across a retype exactly as the text does
+  // (`retypeCarryOver`), and a patch that moves it gets the invariant's own
+  // sentence back.
+  const carried = retypeCarryOver(from, toType);
+  const toField = ATTRIBUTION_FIELD[toType];
+  if (toField !== null && carried[toField] !== undefined) {
+    const proposed = event.patch[toField];
+    if (proposed !== undefined && proposed !== carried[toField]) {
+      fail(
+        state,
+        event.id,
+        `"retype" on object "${event.objectId}" may not change "${toField}" from "${String(carried[toField])}" to "${String(proposed)}" — a retype says how the sentence was read, not who it is on; moving a ${toType} onto or off a person is a "reattribute", so the correction log can be read by verb`,
+      );
+      return false;
+    }
+  }
+
+  const payload = { ...carried, ...event.patch };
   const parsed = AcceptedObject.safeParse({
     id: from.id,
     roomId: from.roomId,
@@ -1108,6 +1189,151 @@ function applyRetype(
   );
   record.object = parsed.data;
   return true;
+}
+
+/**
+ * **Retracting the replacement un-retires what it replaced — r8, and the remedy
+ * this file already promises in words.**
+ *
+ * `applyReopen` refuses to reopen a superseded decision and tells the room what
+ * to do instead: *"a superseded decision is reopened by retracting the decision
+ * that replaced it"*. Executed, that did nothing. `supersededById` was set once
+ * by `applyRelationAdded` and never read again by any other path, so retracting
+ * the superseder left the superseded object exactly as superseded as before —
+ * not live, not in the panel, status `superseded` — and the second supersession
+ * gate refuses to point anything new at it. Supersession was a one-way door with
+ * a sign on it naming an exit that was painted on.
+ *
+ * A refusal that names a remedy is a promise, and r8's own adjudication turned
+ * on the same defect one file over (`acceptance.ts` promising Needs-you for a
+ * reading `projectAttention` skipped). So this is the remedy, implemented:
+ *
+ *  - **Retract X** → everything X superseded is released. `supersededById` goes
+ *    back to `null` (or to another superseder that is still live, if one exists
+ *    because this one was released and replaced), and a decision's status goes
+ *    back to `active`.
+ *  - **Restore X** → it takes back anything still unclaimed. Anything a *third*
+ *    object has since retired stays retired: two live objects claiming to
+ *    supersede one target is the state `applyRelationAdded` refuses, and restore
+ *    is not a door into it either.
+ *
+ * The relation is never removed — the log is append-only and the room is
+ * entitled to see that the retirement happened and was withdrawn. What moves is
+ * the derived field, which is what "supersession lives in the relation graph"
+ * meant all along.
+ */
+function supersessionEdges(state: CoreState, supersederId: string) {
+  return state.relations.filter(
+    (relation) =>
+      relation.kind === 'supersedes' &&
+      relation.fromObjectId === supersederId &&
+      relation.to.kind === 'object',
+  );
+}
+
+function releaseSupersessions(state: CoreState, supersederId: string, at: string): void {
+  for (const relation of supersessionEdges(state, supersederId)) {
+    if (relation.to.kind !== 'object') continue;
+    const target = state.objects[relation.to.objectId];
+    if (!target || target.supersededById !== supersederId) continue;
+    const stillLive = supersedersOf(state, target.object.id).find(
+      (id) => id !== supersederId && state.objects[id]?.retractedAt === null,
+    );
+    setSuperseded(target, stillLive ?? null, at);
+  }
+}
+
+function reapplySupersessions(state: CoreState, supersederId: string, at: string): void {
+  for (const relation of supersessionEdges(state, supersederId)) {
+    if (relation.to.kind !== 'object') continue;
+    const target = state.objects[relation.to.objectId];
+    if (!target || target.supersededById !== null) continue;
+    setSuperseded(target, supersederId, at);
+  }
+}
+
+function supersedersOf(state: CoreState, targetId: string): string[] {
+  return state.relations
+    .filter(
+      (relation) =>
+        relation.kind === 'supersedes' &&
+        relation.to.kind === 'object' &&
+        relation.to.objectId === targetId,
+    )
+    .map((relation) => relation.fromObjectId);
+}
+
+function setSuperseded(target: ObjectRecord, supersededById: string | null, at: string): void {
+  target.supersededById = supersededById;
+  target.updatedAt = at;
+  if (target.object.type === 'decision') {
+    target.object = {
+      ...target.object,
+      payload: {
+        ...target.object.payload,
+        status: supersededById === null ? 'active' : 'superseded',
+      },
+      updatedAt: at,
+    };
+  }
+}
+
+/**
+ * **Everything about a retype that is not about its own payload.**
+ *
+ * The schema re-validation inside `applyRetype` answers *"is the result a valid
+ * object of the new type"*. These answer *"is the result a valid **state**"* —
+ * the questions `applyObjectAccepted` and `applyRelationAdded` ask when the same
+ * shapes are built the ordinary way. Every entry here is a rule that already
+ * exists somewhere else in this file, and the reason it needs restating is the
+ * one `RETRO.md` keeps recording: a rule with one enforcement point is not a
+ * rule, and a correction verb is a second way in.
+ */
+function retypeStructuralRefusal(
+  state: CoreState,
+  from: AcceptedObject,
+  toType: AcceptedObjectType,
+): string | null {
+  if (from.type === 'objective' && toType !== 'objective') {
+    const filed = Object.keys(state.objects)
+      .sort()
+      .filter((id) => state.objects[id]?.object.objectiveId === from.id);
+    if (filed.length > 0) {
+      return `objective "${from.id}" cannot be retyped to a ${toType} — ${filed.length === 1 ? `object "${filed[0]}" is` : `${filed.length} objects (${filed.map((id) => `"${id}"`).join(', ')}) are`} filed under it, and an acceptance that pointed at a ${toType} this way is refused; move ${filed.length === 1 ? 'it' : 'them'} to another objective first`;
+    }
+  }
+
+  const answersFrom = liveAnswers(state).filter((relation) => relation.fromObjectId === from.id);
+  if (answersFrom.length > 0 && toType !== 'open_question') {
+    return `open question "${from.id}" cannot be retyped to a ${toType} — ${answersFrom.length === 1 ? `relation "${answersFrom[0]?.id}" answers it` : `${answersFrom.length} relations answer it`}, and an "answers" edge may only originate from an open question; reopen it first, so the room can see the question stopped being settled before it stopped being a question`;
+  }
+
+  const answersTo = liveAnswers(state).filter(
+    (relation) => relation.to.kind === 'object' && relation.to.objectId === from.id,
+  );
+  if (answersTo.length > 0 && toType !== 'decision' && toType !== 'claim') {
+    return `object "${from.id}" cannot be retyped to a ${toType} — ${answersTo.length === 1 ? `relation "${answersTo[0]?.id}" points at it as an answer` : `${answersTo.length} relations point at it as an answer`}, and an "answers" edge may only target a decision or a claim; reopen the question it settles first`;
+  }
+
+  return null;
+}
+
+/**
+ * `answers` edges that are still doing work.
+ *
+ * An edge listed in its question's `reopenedFromAnswers` is **history**: the room
+ * has said the question is no longer settled, `applyReopen` copied the edge onto
+ * that list precisely so the prior conclusion stays visible, and the edge is not
+ * holding any status in place any more. Scoping the retype gates to live edges
+ * is what makes their refusals name a remedy that works — `reopen` is a verb
+ * this reducer has, and "retract the relation" is not.
+ */
+function liveAnswers(state: CoreState): Extract<CoreState['relations'][number], object>[] {
+  return state.relations.filter(
+    (relation) =>
+      relation.kind === 'answers' &&
+      !(state.objects[relation.fromObjectId]?.reopenedFromAnswers ?? []).includes(relation.id),
+  );
 }
 
 /**
@@ -1306,6 +1532,39 @@ function applyRelationAdded(
         state,
         event.id,
         `relation "answers" must target a decision or a claim, got "${target.object.type}"`,
+      );
+      return false;
+    }
+    // ── The other three of `answerBindingRefusal`'s seven — r8 ──────────────
+    //
+    // `acceptance.ts` says of that function, in its own words: *"checked here so
+    // a caller can refuse before minting events, and checked again by the
+    // reducer because a check that only runs upstream is not a check."* The
+    // reducer repeated four of the seven. These are two of the three it did not,
+    // and both were live:
+    //
+    //  - A raw `answers` edge flipped a **retracted** question to `answered`, so
+    //    a question the room had withdrawn came back settled.
+    //  - Two `answers` edges landed on one question, which is verbatim round 1's
+    //    gauntlet finding — fixed then in the command layer only, which is the
+    //    shape this whole ticket keeps rediscovering.
+    //
+    // `reopen` is the route that stays open, and both messages name it: it is
+    // what puts an answered question back to `open` while keeping the prior
+    // answer on the record (`reopenedFromAnswers`).
+    if (from.retractedAt !== null) {
+      fail(
+        state,
+        event.id,
+        `open question "${from.object.id}" is retracted — restore it before answering, or an edge would mark a withdrawn question settled`,
+      );
+      return false;
+    }
+    if (from.object.type === 'open_question' && from.object.payload.status !== 'open') {
+      fail(
+        state,
+        event.id,
+        `open question "${from.object.id}" is already answered — reopen it before binding a different answer, so the room can see that it was settled twice`,
       );
       return false;
     }
