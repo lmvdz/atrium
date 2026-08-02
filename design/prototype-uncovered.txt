@@ -11,7 +11,7 @@
 # subject: the union over every state reachable in 0, 1 or 2 writes — complete
 # breadth at those depths, so this file does not depend on how far a run got.
 #
-# rows: 25
+# rows: 24
 answer  "answered · the card's wording recorded verbatim in the system's voice · it stays unverifie"  [answered]
 answer  "answered · your wording is the answer of record · it stays unverified with no sign-off, an"  [answer, answered]
 answer  "reopened · back in Needs you as an open question · the answer it came from is kept in the "  [answer]
@@ -24,7 +24,6 @@ statement  "reopened · back in Needs you as a proposed decision · the statemen
 verification  "OPEN QUESTIONS"  [open]
 verification  "answered · the card's wording recorded verbatim in the system's voice · it stays unverifie"  [unverified, sign-off]
 verification  "answered · your wording is the answer of record · it stays unverified with no sign-off, an"  [unverified, sign-off]
-verification  "interpretation runs on send · proposals land in Current state as ~ until accepted"  [accepted, ~]
 verification  "reassigned to justin · out of your list · still open · still blocking 2 objectives"  [open]
 verification  "reopened · back in Needs you as a proposed decision · the statement it came from is kept i"  [proposed]
 verification  "reopened · back in Needs you as a self-reported commitment · the sign-off it came from is "  [sign-off, self-reported]

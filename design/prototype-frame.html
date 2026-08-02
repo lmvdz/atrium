@@ -82,6 +82,13 @@ html.atr-dark {
  *   else. Quiet-but-legible is done with the mono/sans split and --line*,
  *   not with a grey a third of readers cannot resolve.
  *
+ *   THAT LAST SENTENCE WAS FALSE FOR THIRTEEN ROUNDS (round 15, N2). Two rules
+ *   below this block took --tx3: the lens header's `updated HH:MM` (4.25:1
+ *   light, 4.06:1 dark, on the first screen at every width — the only text
+ *   failure in the shell) and the rail's unread count. Both are --tx2 now and
+ *   the grep this paragraph invites returns the definitions and nothing else,
+ *   which is what makes the paragraph a rule rather than a memory of one.
+ *
  *   Amber and green foregrounds use --amb2 / --grn2, not --amb / --grn: the
  *   bare names measure 2.64–3.57:1 in light and cannot carry text. Amber text
  *   is only ever placed on --bg1 / --bg3 / --bg7 / --ambbg / --ambbg5 (4.53+).
@@ -254,8 +261,18 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 /* the unread count is LABELLED and glyphed, and it never wears the pill (round
    12 D5) — it must not be mistakable for the owed badge it replaces in the
    same slot */
+/* --tx3 here for the same reason and with a worse number (round 15, N2). The
+   sweep that found `updated 09:12` did not find this one — not because it
+   passed, but because the rail's unread count is not painted in any of the five
+   states it walked, and an element that is not on screen is not a leaf node. On
+   the surface it lands on when it IS painted it measures 3.69:1 light and
+   4.14:1 dark, further under the floor than the failure that was found. The
+   contrast sweep's denominator is the states it walked, exactly as round 14's
+   viewport was; a colour rule is answerable for where the token can land, not
+   only for where a walk happened to catch it. Both are --tx2 now, and the grep
+   the colour block invites returns the two definitions and nothing more. */
 .rrow .ct {
-  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx3);
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
   display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
 }
 .rrow .pill {
@@ -639,13 +656,43 @@ html.atr-dark { --hitbg: var(--bg5); }
 
 /* a claim never dresses as a fact */
 .claim { border-bottom: 1px dotted var(--line3); padding-bottom: 1px; }
+
+/* A LINE BREAK A PERSON TYPED IS A CHARACTER A PERSON TYPED (round 15, N4).
+   The composer footer advertises `⇧↵ newline`, Shift+Enter duly inserts one,
+   and every surface that painted the result was `white-space: normal` — so a
+   two-paragraph message posted as one run-on line, under a row that says
+   "recorded verbatim from lars's typed answer". Either the footer was wrong or
+   the render was; the render was. `[data-voice="human"]` is already the one
+   marker every human-authored fragment carries — the feed body, the correction
+   chain's quote, a bound answer that became the object's own text, an evidence
+   note — so the whitespace rule rides the same declaration rather than a list
+   of selectors somebody has to remember to extend. Clamped quotations keep
+   their clamp: this changes which characters are painted, not how many. */
+[data-voice="human"] { white-space: pre-wrap; }
 .mnote { display: block; margin-top: 2px; font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); }
+/* A QUOTATION IS CLAMPED, NEVER CUT (round 15, D1). The whole of the quoted
+   sentence is in the DOM — so `textContent` is the record and every checker
+   reads the characters a reader can reach — and the browser paints its own
+   ellipsis over what does not fit. `data-clamp` declares that on the element,
+   the expansion answers to hover AND focus, and the whole preview is a control
+   that jumps to the row it quotes: truncation owes the reader a route, and the
+   route is the row itself. */
 .mreply {
-  display: block; margin-bottom: 1px;
+  display: flex; align-items: flex-start; gap: 5px; width: 100%; text-align: left;
+  margin-bottom: 1px;
   font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--blu2);
-  border-left: 2px solid var(--filebd); padding-left: 6px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  border-left: 2px solid var(--filebd); padding-left: 6px; max-width: 100%; min-width: 0;
 }
+.mreply .rh { flex: none; white-space: nowrap; }
+.mreply .quoted {
+  flex: 1 1 auto; min-width: 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1;
+  overflow: hidden;
+}
+.mreply:hover .quoted, .mreply:focus-visible .quoted { -webkit-line-clamp: 8; line-clamp: 8; }
+.mreply .jump { flex: none; opacity: 0; transition: opacity .12s ease; }
+.mreply:hover, .mreply:focus-visible { border-left-color: var(--blu2); }
+.mreply:hover .jump, .mreply:focus-visible .jump { opacity: 1; }
 .mrow .m code {
   font-family: "IBM Plex Mono", monospace; font-size: 11px;
   background: var(--bg7); border: 1px solid var(--line); border-radius: 3px; padding: 0 3px;
@@ -697,9 +744,19 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
   padding: 7px 9px 8px;
 }
 .vbox .hd { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
-.vbox .row { display: flex; align-items: center; gap: 7px; }
+/* A PROMPT'S OWN QUESTION GETS THE WIDTH (round 15, D3). The row put the input
+   on the same line as two buttons, so `#rinput` was 193px wide at 1440 and
+   129px at 1279 and below, holding a 497px question. What a reader saw was `why
+   are you reopening it? (` — a sentence ending on an unclosed parenthesis — and
+   `why are you reopen` at every width under 1280. PLACEHOLDER TEXT DOES NOT
+   CONTRIBUTE TO `scrollWidth`, so no instrument on this page could see it: the
+   legibility rule measures painted characters and a placeholder is painted by
+   the control, not by the document. The row WRAPS — same fix as round 12 D4 on
+   the compact pin row, for the same reason: the thing a reader has to read does
+   not give way to the controls beside it. */
+.vbox .row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; row-gap: 6px; }
 .vbox input {
-  flex: 1; min-width: 0;
+  flex: 1 1 100%; min-width: 0;
   font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--tx1);
   background: var(--bg1); border: 1px solid var(--line2); border-radius: 4px;
   padding: 5px 7px;
@@ -764,7 +821,13 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .routine .strip:hover .peek { border-bottom-color: var(--line3); }
 .peekbody { border-left: 1px solid var(--line); margin: 4px 0 4px 46px; padding: 2px 0; max-height: 300px; overflow-y: auto; }
 .peekbody .mrow { grid-template-columns: 34px 14px 76px 1fr; padding-left: 6px; }
-.peekbody .more { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2); padding: 4px 0 4px 62px; }
+.peekbody .more {
+  display: block; width: 100%; text-align: left;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--tx2);
+  padding: 4px 0 4px 62px;
+  transition: color .12s ease;
+}
+.peekbody .more:hover, .peekbody .more:focus-visible { color: var(--tx0); }
 
 /* --- composer ------------------------------------------------------------ */
 .composer { border-top: 1px solid var(--line); background: var(--bg1); padding: 9px 16px 8px; }
@@ -778,6 +841,17 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .ctxbar.reply { border-color: var(--filebd); background: var(--replybg); color: var(--blu2); }
 .ctxbar b { font-weight: 600; font-size: 10px; }
 .ctxbar .in { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+/* THE SAME QUOTATION RULE ON THE COMPOSER'S CONTEXT BAR (round 15, D1). This
+   preview cut the quoted row at 70 characters in JS and then elided what was
+   left in CSS — a person's sentence shortened twice and presented whole. The
+   bar hands the clamp to the quotation itself, which carries all of it. */
+.ctxbar.quoting .in { overflow: visible; white-space: normal; }
+.ctxq { display: block; max-width: 100%; text-align: left; color: inherit; }
+.ctxq .quoted {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1;
+  overflow: hidden;
+}
+.ctxq:hover .quoted, .ctxq:focus-visible .quoted { -webkit-line-clamp: 6; line-clamp: 6; }
 .ctxbar .x { color: inherit; padding: 0 2px; }
 
 .cbox {
@@ -829,7 +903,14 @@ button.tag:hover { border-color: var(--line3); color: var(--tx0); }
 .lens-head .sub .derived { width: 5px; height: 5px; border-radius: 50%; background: var(--tx2); animation: gl-pulse 1.6s infinite; }
 /* `.lens-head .sums` and `.lensnote` were deleted in round 12 along with the
    two lines they styled — the reconciliation and the overlap caveat. */
-.lens-head .sub .upd { color: var(--tx3); }
+/* `updated 09:12` wore --tx3 on --bg3 at 10px: 4.25:1 light, 4.06:1 dark, both
+   under the 4.5:1 floor, on the first screen at every width in both themes — and
+   the only text failure in the whole shell. It falsified two sentences that were
+   already written down: the colour block above says --tx3 "is not referenced
+   anywhere below this block", and r10's receipt says 0 of 342 text elements
+   measured below AA. A rule is not true because it is written down. (round 15,
+   N2 — usage fix, per CONVENTIONS: never edit a token value to fix contrast.) */
+.lens-head .sub .upd { color: var(--tx2); }
 .lens-body { overflow-y: auto; overflow-x: hidden; min-height: 0; padding-bottom: 24px; }
 
 .obj { border-bottom: 1px solid var(--line); }
@@ -1226,6 +1307,7 @@ const S = {
     feedFilter: null,      // null | { k: 'need'|'change'|'discussion'|'routine', scope: 'absence'|'return'|'room' }
     routineOpen: false,
     routineOpenedByFilter: false,
+    routineAll: false,     // the peek's first six, or all of them — asked for by hand (round 15, N6)
     pinFolded: false,
     pinOpen: null,         // which owed item is expanded (turn-17: one open, rest compressed)
     lensFocus: false,
@@ -1708,7 +1790,13 @@ S.rooms["identity-service"] = {
       sourceMsg: "m5b", sourceRoom: "users-migration",
       waiting: 1, blocks: "1 objective",
       why: "needs you specifically — it is the same trade you owe #users-migration, and it was put to you over there, so this room has the decision without the line that raised it.",
-      facts: [{ read: "verification", post: " · not accepted" }, "conf .58", "source in #users-migration"],
+      /* NO HAND-WRITTEN COPY OF A DERIVED CHIP (round 15, N3). This carried the
+         literal "source in #users-migration" and sourceChip() derives exactly
+         that sentence from `sourceRoom` and puts a route on it, so the card read
+         `… · source in #users-migration · source in #users-migration →` — the
+         same fact twice, once inert. The derived one is the one that survives:
+         it is a control, and it cannot go stale. */
+      facts: [{ read: "verification", post: " · not accepted" }, "conf .58"],
       options: [
         { label: "Stop with the cutover", agrees: true, statement: "Opaque-token issuance stops the day the users cutover lands" },
         { label: "Hold until the freeze", statement: "Opaque-token issuance stays open until the 14 Aug freeze, whatever the users cutover does" }
@@ -4690,20 +4778,43 @@ function checkLayoutInvariant() {
  * a tier rather than an exemption: the affordance has to be REACHABLE BY A
  * KEYBOARD, which is checked (the declaring element must sit inside a focusable
  * control), and every declaration is countable, so the next round can see how
- * many there are — `document.querySelectorAll("[data-clamp]").length`, which is
- * TWO PER HUMAN PROVENANCE ENTRY and therefore however many sources a receipt
- * carries. An earlier draft of this comment said "two, both on the same
- * control"; a blind reviewer counted four on a receipt with two sources. A
- * number in a comment is a claim.
+ * many there are — `document.querySelectorAll("[data-clamp]").length`. An
+ * earlier draft of this comment said "two, both on the same control"; a blind
+ * reviewer counted four on a receipt with two sources. A number in a comment is
+ * a claim, so the claim this comment makes is a FORM and not a number: every
+ * deliberate clip declares itself here, and every declaration sits inside
+ * something a keyboard can focus. Both halves are checked below.
+ *
+ * ROUND 15 MADE IT A FORM IN PRACTICE AS WELL AS IN PRINCIPLE. The provenance
+ * excerpt was the only clip that wore it, and beside it the feed's reply
+ * preview was cutting a person's sentence at 60 characters IN JAVASCRIPT — so
+ * this rule saw nothing, the provenance rule saw nothing, and 9 of 14 replyable
+ * rows painted somebody's words stopped mid-word. What `.prov .ex` does was
+ * always the general answer: keep the whole string in the DOM so `textContent`
+ * stays the record, let the BROWSER paint the ellipsis, declare it here, and
+ * expand it on hover and on focus. The reply preview and the composer's reply
+ * context wear it now, and each is also the route to the row it quotes.
  *
  * AND WHAT THIS DOES NOT COVER, so it is not discovered later: (a) the check
  * proves a focusable ancestor EXISTS, not that focusing it reveals every
  * character — `.prov .full` expands to a 44px cap; (b) a button containing a
  * clamped descendant is exempted from the button-level measurement, though each
- * of its own leaves is still measured; (c) `.roomhead .topic` ellipsises the
- * seeded room topic at narrow widths and is neither minted nor a control, so no
- * clause here sees it — its full text is on its `title`, which is a tooltip and
- * not a reading.
+ * of its own leaves is still measured; (c) this list said `.roomhead .topic`
+ * ellipsises at narrow widths and is reached by no clause here — true when it
+ * was written, and round 14 made the topic wrap, so the entry outlived the
+ * defect by a round. It is corrected rather than deleted: a caveat is a claim
+ * and goes stale the same way a count does.
+ *
+ * AND (d), WHICH ROUND 15 FOUND THE HARD WAY: A PLACEHOLDER IS NOT MEASURED BY
+ * ANYTHING HERE. `scrollWidth` and `clientWidth` are about characters the
+ * DOCUMENT painted, and a placeholder is painted by the control, so an input
+ * holding 422px of question in a 129px box reports scrollWidth === clientWidth
+ * and is invisible to every clause above. That is not a hole this checker can
+ * close — the browser does not expose the metric — so it is closed where it can
+ * be: the prompts are measured against the NARROWEST supported width by the
+ * harness (`R15-D3-a-prompt-is-readable-and-agrees-with-itself`, canvas-
+ * measured), and no disclosure is written into a placeholder, because a
+ * placeholder disappears at the moment it becomes load-bearing.
  * ======================================================================== */
 function clipped(el) {
   const cs = getComputedStyle(el);
@@ -6201,7 +6312,30 @@ function messageRow(r, m) {
   let inner = "";
   if (m.replyTo) {
     const t = msg(r, m.replyTo);
-    if (t) inner += `<span class="mreply">↩ ${esc(t.actor)} ${esc(t.t)} · <span class="quoted" data-quoted="msg:${esc(t.id)}" data-voice="human">${esc(plain(t.body).slice(0, 60))}</span></span>`;
+    /* A QUOTATION IS NEVER SHORTENED BEFORE IT IS PAINTED (round 15, D1).
+       Round 2 wrote `plain(t.body).slice(0, 60)` here and it survived thirteen
+       review rounds because BOTH instruments passed it honestly. The provenance
+       rule is satisfied — a 60-character prefix genuinely IS contained in the
+       message it cites. The legibility rule is satisfied — `scrollWidth ===
+       clientWidth` on a string that was cut in JS before the browser ever
+       measured it, so `text-overflow: ellipsis` had nothing left to elide. The
+       defect lived in the SEAM BETWEEN TWO CORRECT CHECKS, which is why the
+       answer here is a different rendering and not a third checker.
+       What it painted was a person's sentence stopped mid-word, presented as
+       their words, with no ellipsis, no quotation marks and no route: `↩ priya
+       29 Jul · Honestly I'd keep dual-write until we've had a full clean we`.
+       11 of 14 replyable rows in #users-migration exceeded 60 characters and 9
+       of them cut mid-word, at every width, in both themes.
+       The whole quotation is in the DOM now; the clamp is CSS, so the browser
+       paints its own ellipsis and `textContent` is still the record. */
+    if (t) inner +=
+      `<button class="mreply" data-jump="${esc(t.id)}">` +
+        `<span class="rh">↩ ${esc(t.actor)} ${esc(t.t)} ·</span>` +
+        `<span class="quoted" data-quoted="msg:${esc(t.id)}" data-voice="human"` +
+        ` data-clamp="expands on hover and on focus; this control jumps to the row it quotes">` +
+        `“${esc(plain(t.body))}”</span>` +
+        `<span class="jump">go to it →</span>` +
+      `</button>`;
   }
   /* the dotted treatment is derived from the object's epistemic state, not from
      the glyph — so a proposal that is ALSO a gate renders ◆ and dotted.
@@ -6234,6 +6368,8 @@ function messageRow(r, m) {
      <div class="m">${inner}<div class="acts">${rowActions(r, m, o)}</div></div>`;
 
   row.querySelectorAll("[data-receipt]").forEach(b => b.addEventListener("click", () => openReceipt(b.dataset.receipt, b.dataset.rcroom)));
+  /* the reply preview's route to the row it quotes (round 15, D1) */
+  row.querySelectorAll("[data-jump]").forEach(b => b.addEventListener("click", () => jumpTo(b.dataset.jump, b.dataset.jumproom, b.dataset.why)));
   row.querySelectorAll("[data-reply]").forEach(b => b.addEventListener("click", () => startReply(m.id)));
   row.querySelectorAll("[data-verify]").forEach(b => b.addEventListener("click", () => { S.ui.verifying = b.dataset.verify; render(); focusVerify(); }));
   row.querySelectorAll("[data-fx]").forEach(b => b.addEventListener("click", () => applyEffect(b.dataset.obj, b.dataset.fx)));
@@ -6401,6 +6537,13 @@ function rowActions(r, m, o) {
 }
 
 /* the ~ → ✓ pair, exercisable: verifying asks for the evidence, and records it */
+/* AND ITS QUESTION IS SHORT ENOUGH TO BE READ AT THE NARROWEST SUPPORTED WIDTH
+   (round 15, N5 — D3's class, one prompt over). `#vinput` asked `what checked
+   it? e.g. July AWS bill, write-throughput line: $912` — 448px of text — into a
+   397px box at 1440 and a 193px box at 1120, so what a reader saw ended
+   `write-throughp`. A placeholder contributes nothing to `scrollWidth`, so no
+   instrument on the page could see it. Two things changed: the row wraps, and
+   the question is now measured against the 1120 floor rather than against 1440. */
 function verifyBox(o) {
   const box = document.createElement("div");
   box.className = "vbox rise-s";
@@ -6412,7 +6555,7 @@ function verifyBox(o) {
   box.innerHTML =
     `<div class="hd"><span class="lbl">VERIFY THIS CLAIM</span></div>
      <div class="row">
-       <input id="vinput" type="text" aria-label="Evidence note" placeholder="what checked it? e.g. July AWS bill, write-throughput line: $912">
+       <input id="vinput" type="text" aria-label="Evidence note" placeholder="what checked it? e.g. the July AWS bill, $912">
        <button class="btn sm" id="vgo">Attach &amp; verify</button>
        <button class="btn ghost sm" id="vcancel">Cancel</button>
      </div>
@@ -6548,7 +6691,7 @@ function routineStrip(r, rows) {
   const actors = [...new Set(rows.map(m => m.actor))];
   const routineFilter = !!S.ui.feedFilter && S.ui.feedFilter.k === "routine";
   const open = S.ui.routineOpen || routineFilter;
-  const showAll = routineFilter;
+  const showAll = routineFilter || S.ui.routineAll;
   const shown = open ? (showAll ? rows : rows.slice(0, 6)) : [];
 
   const strip = document.createElement("button");
@@ -6566,6 +6709,7 @@ function routineStrip(r, rows) {
   strip.addEventListener("click", () => {
     S.ui.routineOpen = !open;
     S.ui.routineOpenedByFilter = false;      // opened or closed by hand from here on
+    if (!S.ui.routineOpen) S.ui.routineAll = false;   // collapsing puts the peek back to a peek
     if (!S.ui.routineOpen && routineFilter) S.ui.feedFilter = null;
     render();
   });
@@ -6575,10 +6719,26 @@ function routineStrip(r, rows) {
     const body = document.createElement("div");
     body.className = "peekbody scroll rise-s";
     shown.forEach(m => body.appendChild(messageRow(r, m)));
+    /* A COUNT OF ROWS YOU CANNOT REACH IS NOT A DISCLOSURE (round 15, N6). The
+       peek expanded six of thirty-one and then printed `+ 25 more routine
+       events` as INERT TEXT: it named exactly what it was withholding and
+       offered no control anywhere on the page that would show it, so the only
+       route to those rows was the routine filter, which is a different
+       interaction reached from a different surface. "Wire it or delete it"
+       (round 1) applies to a sentence that promises rows as much as to a button
+       that promises a write, and the rows are real, so it is wired. */
     if (shown.length < rows.length) {
-      const more = document.createElement("div");
+      const more = document.createElement("button");
       more.className = "more";
-      more.textContent = `+ ${rows.length - shown.length} more routine events · none owed you attention`;
+      more.dataset.strip = "routine-all";
+      more.textContent = `show the other ${rows.length - shown.length} routine events · none owed you attention`;
+      more.addEventListener("click", () => {
+        S.ui.routineAll = true;
+        /* the control this replaces is gone once it has done its job, so the
+           successor is declared rather than left to fall through to BODY (D3) */
+        focusOn(`[data-strip="routine"]`);
+        render();
+      });
       body.appendChild(more);
     }
     wrap.appendChild(body);
@@ -7763,8 +7923,10 @@ function reopen(objectId, reason) {
                ? enumText(v.value) + (v.before(v.value) ? " again" : "")
                /* `pending again · justin's` ended on a possessive with nothing
                   possessed after it — found by round 14's prose rule */
-               : enumText(s.value) + (s.before(s.value) ? " again" : "") + (back === S.me ? "" : " · on " + back))]
-    .concat(sourceRoomOf(o) ? ["source in #" + o.sourceRoom] : []);
+               : enumText(s.value) + (s.before(s.value) ? " again" : "") + (back === S.me ? "" : " · on " + back))];
+  /* and this used to `.concat(["source in #" + o.sourceRoom])`, which put the
+     literal back on every reopen of a cross-room item — beside the chip that
+     derives the same sentence and carries the route (round 15, N3) */
   /* system voice: what happened, not what anyone said about it — and what it
      says moved is read out of the record rather than asserted beside it, so the
      first thing in the receipt cannot narrate a move the chain denies (D1a) */
@@ -7891,6 +8053,20 @@ function reopenConsequence(o) {
 }
 /* the optional reason prompt. Empty is fine and says so: a reason you did not
    give is not a reason the page may supply. */
+/* AND THE DISCLOSURE THAT MATTERS IS THE ONE ON SCREEN (round 15, D3). The
+   whole of "recorded as your words, verbatim" lived in the PLACEHOLDER, which
+   was clipped to `why are you reopening it? (` at 1440 and `why are you reopen`
+   at every width below 1280 — and which disappears the moment you start typing,
+   which is exactly when it is load-bearing. The only fully readable sentence in
+   the prompt was the hint, and the hint SAID THE OPPOSITE: "the correction chain
+   records the state change either way, in the system's voice — nothing is ever
+   written in yours". Type `parity broke overnight` and the chain renders it
+   attributed — `— lars, typed here` — permanently, with no control anywhere
+   that removes it. A reader who believed the readable sentence got the
+   unreadable one's consequences.
+   The placeholder now asks the question and nothing else; every consequence of
+   answering it is in the hint, which is on screen at rest, stays there while
+   you type, and no longer contradicts what the write actually does. */
 function reopenBox(o) {
   const box = document.createElement("div");
   box.className = "vbox rise-s";
@@ -7898,11 +8074,11 @@ function reopenBox(o) {
   box.innerHTML =
     `<div class="hd"><span class="lbl">REOPEN THIS ${esc(o.kind.toUpperCase())}</span></div>
      <div class="row">
-       <input id="rinput" type="text" aria-label="Reason for reopening (optional)" placeholder="why are you reopening it? (optional — recorded as your words, verbatim)">
+       <input id="rinput" type="text" aria-label="Reason for reopening (optional)" placeholder="why are you reopening it?">
        <button class="btn sm" id="rgo">Reopen</button>
        <button class="btn ghost sm" id="rcancel">Cancel</button>
      </div>
-     <div class="hint">Leave it empty if you like. The correction chain records the state change either way, in the system's voice — nothing is ever written in yours.${reopenConsequence(o)}</div>`;
+     <div class="hint">Leave it empty if you like — the state change is recorded either way, in the system's voice. Anything you do type is kept as your own sentence, word for word and attributed to you, and the chain is append-only: nothing here removes it later.${reopenConsequence(o)}</div>`;
   box.querySelector("#rgo").addEventListener("click", () => reopen(o.id, box.querySelector("#rinput").value.trim()));
   /* and this one back onto Reopen, which is where it came from (D3) */
   const closeReopen = () => { S.ui.reopening = null; focusOn("#rcReopen", "#rcBack"); render(); };
@@ -7915,13 +8091,23 @@ function reopenBox(o) {
 }
 
 /* --- the ~ → ✓ pair ----------------------------------------------------- */
+/* A REFUSED WRITE IS NOT A PENDING WRITE (round 15, N1). `beginAction("verify",
+   …)` ran BEFORE both guards, so pressing Attach & verify with an empty note —
+   or on your own claim — left `PENDING_ACTION` set with a projection nothing was
+   ever going to satisfy, and the NEXT render graded a write that never happened:
+   four clicks produced `[atrium invariant] … C3 verify verification projected
+   verified · record holds unverified`. Nothing a reader sees, and that is the
+   problem: it is console noise in the exact channel a real firing arrives on,
+   raised by the instrument that exists to catch a real one. The snapshot is
+   taken where the write begins, which is after the last thing that can refuse
+   it. */
 function doVerify(objectId, evidence) {
-  beginAction("verify", obj(room(), objectId));
   const r = room();
   const o = obj(r, objectId);
   if (!o) return;
   if (!evidence) { toast("verification needs a note — green means something checked it, and this records what", "bad"); focusVerify(); return; }
   if (o.claimant === S.me) { toast("you cannot verify your own claim — that is what ~ is for", "bad"); return; }
+  beginAction("verify", o);
   const t = tick();
   const vAt = recordOf(o, "verification").length - 1;
   const sAt3 = recordOf(o, "settlement").length - 1;
@@ -8460,6 +8646,31 @@ function applyEffect(objectId, fx) {
  * COMPOSER
  * ======================================================================== */
 
+/* ===========================================================================
+ * THE COMPOSER MAY NOT NAME A BEHAVIOUR THIS FILE DOES NOT HAVE (round 15, D2)
+ *
+ * `#cstate` sat under the composer on every screen in both rooms and read
+ * `interpretation runs on send · proposals land in Current state as ~ until
+ * accepted`. It does not. `send()` appends the message with `origin: "typed"`
+ * and does nothing else, and NOTHING IN THIS FILE EVER APPENDS TO `r.objects` —
+ * every reference is filter/find/map/forEach/length/indexOf. Not a missing
+ * case: an absent mechanism, stated in the present tense on the most-read strip
+ * of text on the page. Three typed messages that are structural twins of
+ * fixture rows which ARE objects all landed as plain routine rows.
+ *
+ * This is a prototype and no engine is expected here. The defect is that the
+ * page said otherwise, so the fix is the copy and not an engine: the design is
+ * described as a design, and what this frame actually does is stated beside it.
+ *
+ * AND THE BOUND VARIANT COMPOUNDED IT. `your wording is the record ·
+ * interpretation is skipped` teaches a reader that interpretation otherwise
+ * RUNS — a claim about the unbound composer, made from the bound one. What is
+ * true of the bound composer is that it records your characters verbatim, which
+ * is what it now says, and it says nothing about what the other one does.
+ * ======================================================================== */
+const COMPOSER_STATE = "by design, send interprets · this frame does not, and nothing lands in Current state";
+const REPLY_STATE = "reply · " + COMPOSER_STATE;
+
 function renderComposer() {
   const r = room();
   const bar = $("ctxbar"), input = $("cinput"), comp = $("composer");
@@ -8489,7 +8700,7 @@ function renderComposer() {
       : "Answer in your own words — this text becomes the decision";
     $("cstate").textContent = "bound to ◆ " + (o ? o.id : "") +
       (bk === "question" ? " · your wording is the answer of record · no sign-off is attached"
-                         : " · your wording is the record · interpretation is skipped");
+                         : " · your wording is the record, verbatim · nothing is inferred from it");
   } else if (S.ui.about) {
     /* THE HONEST ALTERNATIVE TO A BOUND COMPOSER (round 9 D4). It says, in the
        banner and in the state line, that nothing here reaches the record. */
@@ -8507,18 +8718,30 @@ function renderComposer() {
       (o ? "the " + o.kind + "'s" : "the") + " own words, and no field is amended";
   } else if (S.ui.replyTo) {
     const m = msg(r, S.ui.replyTo);
-    bar.hidden = false; bar.className = "ctxbar reply rise-s";
+    bar.hidden = false; bar.className = "ctxbar reply quoting rise-s";
     $("ctxGlyph").textContent = "↩";
     $("ctxLabel").textContent = "REPLYING";
     $("ctxText").textContent = m ? m.actor + " · " + m.t : "";
     /* the quoted context above the composer is a quotation of a real row, and
        says which one — the checker resolves it back to that message. */
-    $("ctxIn").className = "in quoted";
-    $("ctxIn").dataset.voice = "human";      // a quotation of a row a person wrote
-    if (m) $("ctxIn").dataset.quoted = "msg:" + m.id; else $("ctxIn").removeAttribute("data-quoted");
-    $("ctxIn").textContent = m ? "“" + plain(m.body).slice(0, 70) + "”" : "";
+    /* AND IT IS NOT SHORTENED BEFORE IT IS PAINTED (round 15, D1). This carried
+       `plain(m.body).slice(0, 70)` inside quotation marks and then handed the
+       remainder to a `text-overflow: ellipsis` — the same sentence cut twice and
+       presented as whole. The quotation is complete; the clamp is CSS, expands
+       on hover and on focus, and the control is the route back to the row. */
+    $("ctxIn").className = "in";
+    $("ctxIn").removeAttribute("data-quoted");
+    $("ctxIn").removeAttribute("data-voice");
+    $("ctxIn").innerHTML = m
+      ? `<button class="ctxq" data-jump="${esc(m.id)}">` +
+          `<span class="quoted" data-quoted="msg:${esc(m.id)}" data-voice="human"` +
+          ` data-clamp="expands on hover and on focus; this control jumps to the row it quotes">` +
+          `“${esc(plain(m.body))}”</span></button>`
+      : "";
+    const ctxq = $("ctxIn").querySelector("[data-jump]");
+    if (ctxq) ctxq.addEventListener("click", () => jumpTo(ctxq.dataset.jump));
     input.placeholder = "Message #" + r.name;
-    $("cstate").textContent = "reply · interpretation runs on send · anything derived lands in Current state as ~";
+    $("cstate").textContent = REPLY_STATE;
   } else {
     bar.hidden = true;
     /* A HIDDEN QUOTATION IS STILL A QUOTATION. Hiding the bar left its last
@@ -8533,7 +8756,7 @@ function renderComposer() {
     $("ctxIn").removeAttribute("data-voice");
     $("ctxIn").textContent = "";
     input.placeholder = "Message #" + r.name;
-    $("cstate").textContent = "interpretation runs on send · proposals land in Current state as ~ until accepted";
+    $("cstate").textContent = COMPOSER_STATE;
   }
 }
 
@@ -8687,7 +8910,7 @@ function switchRoom(id, quiet) {
   S.ui.feedFilter = null; S.ui.receiptId = null; S.ui.bound = null;
   S.ui.replyTo = null; S.ui.verifying = null; S.ui.pinOpen = null;
   S.ui.reopening = null; S.ui.trace = null; S.ui.about = null;
-  S.ui.routineOpen = false; S.ui.routineOpenedByFilter = false;
+  S.ui.routineOpen = false; S.ui.routineOpenedByFilter = false; S.ui.routineAll = false;
   S.ui.prefill = null;
   $("cinput").value = "";
   if (quiet) return;                              // caller renders and reports

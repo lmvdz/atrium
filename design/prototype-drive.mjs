@@ -1231,6 +1231,180 @@ const REPROS = [
         return out;
       });
     }
+  },
+  {
+    /* ROUND 15, D1. `plain(t.body).slice(0, 60)` in messageRow, unchanged since
+       round 2. 11 of the 14 replyable rows in #users-migration are longer than
+       60 characters and 9 of them were cut mid-word — presented as a person's
+       words, with no ellipsis, no quotation marks, no title, no hover or focus
+       expansion and no link to the source row.
+       THIS FIRES ON r14 AS COMMITTED AT EVERY WIDTH: 11 assertions per width.
+       WHY IT IS NOT A THIRD CHECKER OF THE SAME KIND. The page's provenance rule
+       and its legibility rule both PASS on this string, honestly — a 60-char
+       prefix really is contained in the message, and `scrollWidth ===
+       clientWidth` on a string cut before painting. Neither is wrong; the defect
+       is in the seam. So this states the COMPLIANT FORM positively rather than
+       enumerating ways to truncate: a quotation of a person paints all of it, or
+       paints a prefix that stops on a word boundary AND declares itself
+       collapsed with an affordance the page's own `data-clamp` rule then holds
+       to a keyboard. Anything else is a person being quoted saying something
+       they did not finish saying. */
+    id: "R15-D1-a-quotation-is-clamped-not-cut",
+    what: "no rendered quotation of a person is shortened before it is painted",
+    async run(page) {
+      /* the reply previews do not exist until somebody replies: no fixture row
+         carries `replyTo`, which is why thirteen rounds of state walks never
+         painted one. Reply to every replyable row in the room. */
+      return await page.evaluate(async () => {
+        const r = S.rooms[S.roomId];
+        const targets = r.messages.filter(m => !m.system && !m.routine).map(m => m.id);
+        if (!targets.length) return "no replyable rows in this room";
+        for (const id of targets) {
+          startReply(id);
+          document.getElementById("cinput").value = "ack " + id;
+          send();
+          await new Promise(res => setTimeout(res, 15));
+        }
+        return null;
+      });
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll('[data-quoted^="msg:"]').forEach(el => {
+          const cs = getComputedStyle(el);
+          if (cs.display === "none" || cs.visibility === "hidden") return;
+          const [id, roomId] = el.getAttribute("data-quoted").replace(/^msg:/, "").split("@");
+          const home = roomId ? S.rooms[roomId] : S.rooms[S.roomId];
+          const m = home && home.messages.filter(x => x.id === id)[0];
+          if (!m) return;                                   // the quotation rule owns that case
+          const full = plain(m.body).replace(/\s+/g, " ").trim();
+          let shown = (el.textContent || "").replace(/\s+/g, " ").trim();
+          const hadEllipsis = /…$/.test(shown);
+          shown = shown.replace(/…$/, "").trim();
+          if (shown.length > 1 && /^[“"]/.test(shown) && /[”"]$/.test(shown)) shown = shown.slice(1, -1).trim();
+          if (shown === full) return;                       // whole: compliant
+          const declared = el.hasAttribute("data-clamp") || !!el.closest("[data-clamp]");
+          const nextChar = full.charAt(shown.length);
+          const midWord = full.indexOf(shown) === 0 && /[\w'’-]/.test(nextChar) &&
+                          /[\w'’-]/.test(shown.charAt(shown.length - 1));
+          if (midWord)
+            out.push("a quotation stops mid-word and is presented as the person's words: …" +
+                     JSON.stringify(shown.slice(-34)) + " — the record continues " + JSON.stringify(nextChar + full.slice(shown.length + 1, shown.length + 12)));
+          else if (!declared && !hadEllipsis)
+            out.push("a quotation is shortened before it is painted, with nothing on it saying so: " +
+                     shown.length + " of " + full.length + " characters, …" + JSON.stringify(shown.slice(-34)));
+        });
+        return Array.from(new Set(out));
+      });
+    }
+  },
+  {
+    /* ROUND 15, D2. `#cstate` sat under the composer on every screen in both
+       rooms and read `interpretation runs on send · proposals land in Current
+       state as ~ until accepted`. `send()` appends the message and does nothing
+       else; nothing in the file ever appends to `r.objects`.
+       THIS FIRES ON r14 AS COMMITTED AT EVERY WIDTH, and it is a BEHAVIOURAL
+       check first: it types a message with the exact shape of the fixture rows
+       that ARE objects, sends it, and asks the record whether the sentence under
+       the box came true. The text clause only names which sentence made the
+       promise. On r14 the object count does not move and the claim is on screen;
+       on r15 the claim is gone, so neither half can fire. */
+    id: "R15-D2-the-composer-states-what-the-page-does",
+    what: "the composer's state line does not claim a behaviour sending does not produce",
+    async run(page) {
+      return await page.evaluate(async () => {
+        const r = S.rooms[S.roomId];
+        window.__r15d2 = { before: (r.objects || []).length,
+                           claim: (document.getElementById("cstate").textContent || "").trim() };
+        document.getElementById("cinput").value =
+          "Proposal: hold opaque-token issuance open until the 14 Aug freeze, not the cutover";
+        send();
+        await new Promise(res => setTimeout(res, 30));
+        return null;
+      });
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        const st = window.__r15d2 || {};
+        const r = S.rooms[S.roomId];
+        const after = (r.objects || []).length;
+        const grew = after > st.before;
+        /* the two things the sentence promised, in the present indicative */
+        const claimsInterpretation = /interpretation\s+runs\s+on\s+send/i.test(st.claim || "");
+        const claimsLanding = /(proposals?|anything derived)\s+lands?\s+in\s+current\s+state/i.test(st.claim || "");
+        if (!grew && (claimsInterpretation || claimsLanding))
+          out.push("the composer states a behaviour the artifact does not have: " + JSON.stringify(st.claim) +
+                   " — a proposal-shaped message was sent and the record went from " + st.before +
+                   " objects to " + after);
+        /* and the bound composer may not teach the unbound one's behaviour */
+        document.querySelectorAll("#cstate").forEach(el => {
+          if (/interpretation\s+is\s+skipped/i.test(el.textContent || ""))
+            out.push("the bound composer says interpretation is SKIPPED, which tells the reader it otherwise runs: " +
+                     JSON.stringify((el.textContent || "").trim()));
+        });
+        return out;
+      });
+    }
+  },
+  {
+    /* ROUND 15, D3 and N5. `#rinput`'s placeholder carried the only statement
+       anywhere that a typed reopen reason is recorded as your words verbatim —
+       422px of text in a 193px box at 1440 and a 129px box at 1279 and below, so
+       what a reader saw was `why are you reopening it? (`, ending on an unclosed
+       parenthesis. The one fully readable sentence in the prompt was the hint,
+       and the hint said the opposite: "nothing is ever written in yours".
+       PLACEHOLDERS DO NOT CONTRIBUTE TO `scrollWidth`, which is why the page's
+       own legibility rule cannot see this and a harness has to measure it: the
+       text is painted by the control, not by the document. `#vinput` is the same
+       class in the verify prompt (`…write-throughp` at 1279).
+       THIS FIRES ON r14 AS COMMITTED: two clipped placeholders per width, plus
+       the missing disclosure. */
+    id: "R15-D3-a-prompt-is-readable-and-agrees-with-itself",
+    what: "every placeholder fits its box at every supported width, and the reopen prompt discloses the attribution on screen",
+    async run(page) {
+      if (!await clickText(page, "Keep dual-write through 14 Aug")) return "P1's answer not offered";
+      if (!await clickText(page, "the receipt for P1")) return "the transition row offers no receipt";
+      if (!await clickText(page, "Reopen")) return "the receipt offers no Reopen";
+      await page.evaluate(() => { const b = document.querySelector("[data-verify]"); if (b) b.click(); });
+      await page.waitForTimeout(60);
+      return null;
+    },
+    async assert(page) {
+      return await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll("input[placeholder], textarea[placeholder]").forEach(el => {
+          const r = el.getBoundingClientRect();
+          if (!r.width || !r.height || !el.placeholder) return;
+          const cs = getComputedStyle(el);
+          const c = document.createElement("canvas").getContext("2d");
+          c.font = cs.fontStyle + " " + cs.fontWeight + " " + cs.fontSize + "/" + cs.lineHeight + " " + cs.fontFamily;
+          const need = c.measureText(el.placeholder).width;
+          const have = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+          if (need <= have) return;
+          let vis = el.placeholder;
+          while (vis.length && c.measureText(vis).width > have) vis = vis.slice(0, -1);
+          out.push("a prompt's own question is clipped at " + window.innerWidth + "px: #" + el.id + " needs " +
+                   Math.round(need) + "px and has " + Math.round(have) + "px — a reader sees " + JSON.stringify(vis));
+        });
+        /* and the consequence of answering it is on screen at rest, in text that
+           survives typing — not in the placeholder, which vanishes exactly when
+           it becomes load-bearing */
+        const box = document.querySelector('[data-prompt="reopen"]');
+        if (box) {
+          const hint = box.querySelector(".hint");
+          const t = ((hint && hint.textContent) || "").replace(/\s+/g, " ");
+          if (!/your own sentence|word for word|verbatim|attributed to you/i.test(t))
+            out.push("the reopen prompt never says on screen that a typed reason is kept as your own words: " +
+                     JSON.stringify(t.slice(0, 120)));
+          if (/nothing is ever written in yours/i.test(t))
+            out.push("the reopen prompt's only readable sentence contradicts what the write does — " +
+                     "a typed reason IS rendered attributed, permanently: " + JSON.stringify(t.slice(0, 120)));
+        }
+        return Array.from(new Set(out));
+      });
+    }
   }
 ];
 
