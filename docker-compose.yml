@@ -1,9 +1,31 @@
-# Atrium local + single-VPS stack (issue #18): one app server, one worker
-# process, one database, one object store. The same file runs both places —
-# only the .env differs.
+# Atrium single-VPS stack (issue #18): one app server, one worker process, one
+# database, one object store, behind one proxy that terminates TLS.
 #
 #   docker compose up -d postgres minio   # infra only, then `pnpm dev`
-#   docker compose up --build             # the whole stack in containers
+#   docker compose up --build             # the whole stack, over HTTPS
+#
+# ┌─ THIS FILE IS THE PRODUCTION STACK, AND IT IS HTTPS-ONLY ──────────────────
+# │ `ATRIUM_DOMAIN` is required — a hostname pointed at this box. Caddy takes
+# │ it as its site address and obtains a certificate over ACME on its own;
+# │ APP_URL and NEXT_PUBLIC_WS_URL below are derived from it as `https://` and
+# │ `wss://` and are not separately settable, because two variables that must
+# │ agree are two chances to disagree.
+# │
+# │ Round 4 shipped this file with the proxy on `:80`, an `http://` APP_URL
+# │ default, and a comment in deploy/Caddyfile telling the operator to change
+# │ it. Every session cookie and every verification link in that deployment
+# │ crossed the network in the clear. A comment is not a control, so there are
+# │ now three: compose refuses to interpolate an unset ATRIUM_DOMAIN, Caddy
+# │ refuses an empty site address, and both application processes refuse to
+# │ start in production with a non-TLS origin
+# │ (packages/auth/src/transport.ts — no override, by design).
+# │
+# │ For a plaintext localhost version of this same topology, use
+# │ `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`. It is
+# │ a separate file, marked development-only, and it also flips the services to
+# │ NODE_ENV=development — so it cannot be turned into a production stack by
+# │ changing one value.
+# └────────────────────────────────────────────────────────────────────────────
 #
 # ┌─ CREDENTIALS ──────────────────────────────────────────────────────────────
 # │ The values in `.env.example` — postgres `atrium:atrium`, MinIO
@@ -20,8 +42,67 @@
 # │ a guessed password costs everything.
 # │
 # │ Set real values in `.env` (or the deployment's own secret store) before
-# │ exposing any port to the internet, and do not publish 5432/9000/9001 at all
-# │ unless you mean to.
+# │ exposing any port to the internet. 5432/9000/9001 are published on
+# │ 127.0.0.1 only — that sentence used to read "do not publish them at all
+# │ unless you mean to", which is the same shape as the Caddyfile paragraph
+# │ rounds 4 and 5 replaced with a control: an instruction to the operator is
+# │ not a control. Only 80 and 443 reach a network, and only through `proxy`.
+# │ A deployment that genuinely needs the database from another host should
+# │ give it a private network or a tunnel, not widen this line.
+# └────────────────────────────────────────────────────────────────────────────
+#
+# ┌─ WHY THERE IS A PROXY IN FRONT ────────────────────────────────────────────
+# │ `proxy` (deploy/Caddyfile) is the single entrypoint: it serves the browser
+# │ and forwards to `app` and `server`. It is not decoration.
+# │
+# │ Round 3 of issue #26 published `app` and `server` directly and set
+# │ ATRIUM_TRUSTED_PROXY_HOPS=0 — the honest value for that topology. The
+# │ consequence, which both gauntlet critics found independently, is that a
+# │ Next.js Server Action then has **no caller address at all**: `headers()` is
+# │ the whole request, Next fills `x-forwarded-for` from the peer only when the
+# │ client sent none, so a present value is unfalsifiable and reading it would
+# │ be worse than reading nothing. The sign-in/sign-up limiter's IP dimension
+# │ was therefore inert in the deployment this file describes.
+# │
+# │ A proxy that appends to X-Forwarded-For is the fix, because it is the only
+# │ thing that can hand a Server Action an address nobody outside wrote. So
+# │ both services now run with hops=1 and one proxy in front, and the caller
+# │ the limiter counts is the caller. It is also where TLS terminates.
+# │
+# │ To go back to publishing the app directly, drop the `proxy` service, set
+# │ ATRIUM_TRUSTED_PROXY_HOPS=0, and know that you are choosing the degraded
+# │ mode: unresolvable callers share one global bucket rather than getting one
+# │ each (`unresolvedIpKey` in packages/auth/src/client-ip.ts). That is a real
+# │ cap and it is not a per-address cap — and you now own TLS termination
+# │ yourself, because APP_URL still has to be https:// or nothing boots.
+# └────────────────────────────────────────────────────────────────────────────
+#
+# ┌─ THIS FILE DOES NOT SERVE A REQUEST YET, AND HERE IS WHY ──────────────────
+# │ `app` runs NODE_ENV=production, and `resolveMailer`
+# │ (packages/auth/src/mailer.ts) refuses to hand out the console transport
+# │ there — deliberately, because it prints verification links and those links
+# │ are single-use account takeovers. There is no production transport in this
+# │ repository yet; wiring one belongs with the notification work.
+# │
+# │ The consequence, which round 4 found by actually bringing this stack up:
+# │ every page and every route in `app` answers 500. A runtime override does not
+# │ help, because `next build` inlines `process.env.NODE_ENV` into the
+# │ standalone bundle. `server`, `postgres`, `minio`, `migrate` and `proxy` all
+# │ come up healthy; the realtime upgrade routes through the proxy and reaches
+# │ its origin and session checks.
+# │
+# │ It is stated here rather than filed and forgotten because the fix is a real
+# │ transport at the composition root, not a change to this file — and because
+# │ three previous rounds described this stack as the deployment without anyone
+# │ running it.
+# │
+# │ Issue #40 owns it: a real transport plus a CI job that boots this stack and
+# │ asserts a page, not a health endpoint. The mailer gate is adjudicated
+# │ correct and must not be weakened to make this file come up. The HTTPS rules
+# │ added above are therefore *also* unproven against a fully-serving stack;
+# │ what has been checked is that `caddy validate` accepts this Caddyfile, that
+# │ `docker compose config` refuses an unset ATRIUM_DOMAIN, and that both
+# │ processes refuse an http:// origin under NODE_ENV=production (tested).
 # └────────────────────────────────────────────────────────────────────────────
 
 name: atrium
@@ -35,7 +116,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}
       POSTGRES_DB: ${POSTGRES_DB:-atrium}
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      # Loopback only. Published at all so `pnpm test:e2e` and psql can reach it
+      # from the host; reachable from nowhere else, because a bare
+      # `${POSTGRES_PORT}:5432` is `0.0.0.0` and puts the database on whatever
+      # network the host is attached to.
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -52,8 +137,11 @@ services:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header}
     ports:
-      - '${MINIO_PORT:-9000}:9000'
-      - '${MINIO_CONSOLE_PORT:-9001}:9001'
+      # Loopback only, same reason as postgres above — and the console on 9001
+      # is a login form for the object store, which is the last thing that
+      # should answer on a public interface by default.
+      - '127.0.0.1:${MINIO_PORT:-9000}:9000'
+      - '127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001'
     volumes:
       - minio-data:/data
     healthcheck:
@@ -120,7 +208,44 @@ services:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 4000
       DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}@postgres:5432/${POSTGRES_DB:-atrium}
+      # Must match the web app's value exactly, or every upgrade reads as
+      # unauthenticated. There is no default: production refuses to start without it.
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env}
+      # Derived from the one required hostname, not separately settable. Under
+      # NODE_ENV=production this process refuses to start on an http:// value
+      # (apps/server/src/env.ts → @atrium/auth's assertSecureTransport), so a
+      # cleartext deployment is not reachable from here by editing a variable.
+      APP_URL: https://${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env — the hostname pointed at this box; Caddy gets its certificate for it and both apps refuse to serve production over http://}
+      # What is in front of this process, for the rate limiter's IP dimension.
+      # Required in production — see apps/server/src/env.ts, which refuses to
+      # start without it *and* refuses a value it cannot parse. `1` is the
+      # honest answer for this file as written: exactly one proxy, the `proxy`
+      # service, appends the peer address to X-Forwarded-For. See the header for
+      # why there is a proxy at all.
+      ATRIUM_TRUSTED_PROXY_HOPS: ${ATRIUM_TRUSTED_PROXY_HOPS:-1}
+      # Which addresses in that chain are our own hops, by address or CIDR.
+      # Handed to Better Auth as `advanced.ipAddress.trustedProxies` as well, so
+      # its limiter and ours walk the chain by the same rule rather than two
+      # similar ones: without it, `getIp` in better-auth@1.6.x believes a chain
+      # only when it has exactly one entry, so a client that prefixes a forged
+      # entry makes the library's limiter fall back to a shared bucket while
+      # ours still reads the real caller. Same caller, two counters.
+      #
+      # `172.28.0.10` is the `proxy` service's fixed address (see `networks`
+      # below), which is why this can be a /32 rather than a guess at a range.
+      # Note that Caddy appends the *peer* address, not its own, so this entry
+      # normally matches nothing at all — it is what keeps the two limiters
+      # agreeing on a chain somebody prefixed.
+      ATRIUM_TRUSTED_PROXY_CIDRS: ${ATRIUM_TRUSTED_PROXY_CIDRS:-172.28.0.10/32}
       WS_HEARTBEAT_INTERVAL_MS: ${WS_HEARTBEAT_INTERVAL_MS:-30000}
+      # How long an open socket's session is trusted between re-validations,
+      # and how often idle sockets are swept for revoked sessions and lost room
+      # memberships. Both bound how long a revocation takes to land.
+      WS_REVALIDATE_TTL_MS: ${WS_REVALIDATE_TTL_MS:-5000}
+      WS_SWEEP_INTERVAL_MS: ${WS_SWEEP_INTERVAL_MS:-15000}
+      # And the bound on tolerating a sweep that cannot get an answer at all.
+      WS_SWEEP_FAILURE_LIMIT: ${WS_SWEEP_FAILURE_LIMIT:-3}
+      WS_SWEEP_UNVERIFIED_MS: ${WS_SWEEP_UNVERIFIED_MS:-60000}
       INTERPRET_WORKER_CONCURRENCY: ${INTERPRET_WORKER_CONCURRENCY:-2}
       S3_ENDPOINT: http://minio:9000
       S3_REGION: ${S3_REGION:-us-east-1}
@@ -130,8 +255,12 @@ services:
       # both of these — the development fallback does not apply here.
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header}
-    ports:
-      - '${SERVER_PORT:-4000}:4000'
+    # No published port, deliberately. `ATRIUM_TRUSTED_PROXY_HOPS=1` is a claim
+    # that every request arrived through the proxy; a second, un-proxied way in
+    # would make that claim false for anyone who used it — and a caller who
+    # reaches this port directly gets to write the whole X-Forwarded-For chain,
+    # which is exactly the forged dimension the hop count exists to refuse.
+    # Reach it at `wss://${ATRIUM_DOMAIN}/ws` through `proxy`.
     healthcheck:
       test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -146,14 +275,89 @@ services:
     depends_on:
       server:
         condition: service_started
+      # The web app owns signup and invitations, so it reads and writes the
+      # same tables the server does and needs them migrated first.
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       NODE_ENV: production
       PORT: 3000
       HOSTNAME: 0.0.0.0
-      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:4000/ws}
+      # Through the proxy, on the app's own origin — there is no separately
+      # published realtime port any more. `wss://`, and not settable to
+      # anything else here: a socket carrying a session cookie over `ws://` is
+      # the same exposure as a page served over `http://`, and
+      # `realtimeOrigin()` refuses it in production for that reason.
+      NEXT_PUBLIC_WS_URL: wss://${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env — the hostname pointed at this box; Caddy gets its certificate for it and both apps refuse to serve production over http://}/ws
+      # No default password here either: this service reads and writes the same
+      # tables the others do, so a fallback would reopen the hole the other two
+      # close.
+      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}@postgres:5432/${POSTGRES_DB:-atrium}
+      # The same secret the server uses — see the comment above.
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env}
+      # The same derived origin the server uses; see the comment there.
+      APP_URL: https://${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env — the hostname pointed at this box; Caddy gets its certificate for it and both apps refuse to serve production over http://}
+      # Same answer as the server's, and required for the same reason: the
+      # sign-in/sign-up throttle's IP dimension lives on this side. `apps/web`
+      # refuses to serve a request in production without it.
+      #
+      # This is the service the proxy exists for. A Server Action can only ever
+      # learn the caller's address from a forwarded header written by something
+      # in front, so `1` here is not a preference — it is the difference between
+      # a per-address limiter and one global bucket.
+      ATRIUM_TRUSTED_PROXY_HOPS: ${ATRIUM_TRUSTED_PROXY_HOPS:-1}
+      ATRIUM_TRUSTED_PROXY_CIDRS: ${ATRIUM_TRUSTED_PROXY_CIDRS:-172.28.0.10/32}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+    # No published port, for the reason given on `server`. The browser reaches
+    # this app through `proxy`, which is what gives a Server Action a caller
+    # address it can believe.
+
+  # The single entrypoint, and where TLS terminates. See the two headers at the
+  # top of this file.
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+      server:
+        condition: service_started
+    environment:
+      # Caddy's site address. Required here as well as in the URLs above, so
+      # compose stops before the container starts rather than leaving Caddy to
+      # fail on an empty address — and so `docker compose config` names the
+      # missing variable.
+      ATRIUM_DOMAIN: ${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env — the hostname pointed at this box; Caddy gets its certificate for it and both apps refuse to serve production over http://}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
     ports:
-      - '${WEB_PORT:-3000}:3000'
+      # Both, and both are load-bearing: 443 serves the site, 80 answers the
+      # ACME HTTP-01 challenge and redirects every cleartext request to it.
+      # `caddy-data` is a named volume so the certificate survives a restart
+      # rather than being re-issued into a rate limit.
+      - '${HTTPS_PORT:-443}:443'
+      - '${HTTP_PORT:-80}:80'
+    networks:
+      default:
+        # Fixed, so ATRIUM_TRUSTED_PROXY_CIDRS can name this process exactly
+        # instead of trusting a whole private range — which would have swallowed
+        # every caller on a private network as "one of ours".
+        ipv4_address: 172.28.0.10
+
+# A declared subnet, only so the proxy can have a fixed address in it.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
 
 volumes:
   postgres-data:
   minio-data:
+  caddy-data:
+  caddy-config:

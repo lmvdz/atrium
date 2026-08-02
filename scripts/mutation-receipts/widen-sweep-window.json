@@ -1,0 +1,65 @@
+{
+  "mutation": "widen-sweep-window",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T23:58:42.392Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "15f630d5e3e8da67",
+  "claim": "apps/server/test/ws-server.test.ts — the sweep-window tests; proves they measure a duration and not merely an eventual close",
+  "suites": [
+    {
+      "suite": "server:ws-server",
+      "verdict": "red",
+      "subjectHash": "339f1d94c7ae85ae",
+      "suiteFile": "apps/server/test/ws-server.test.ts",
+      "suiteHash": "51d9f003b20eeadd",
+      "files": [
+        "apps/server/src/ws-server.ts"
+      ],
+      "baseline": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 8231
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-server.json",
+        "cwd": "apps/server",
+        "exitCode": 0,
+        "total": 60,
+        "passed": 60,
+        "failed": 0,
+        "durationMs": 7248
+      },
+      "mutated": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 11155
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-widen-sweep-window.json",
+        "cwd": "apps/server",
+        "exitCode": 1,
+        "total": 60,
+        "passed": 53,
+        "failed": 7,
+        "durationMs": 13450
+      },
+      "caught": [
+        "a rejection value nobody can read cannot suspend the sweep keeps sweeping when something inside a pass throws an unreadable value",
+        "a rejection value nobody can read cannot suspend the sweep still evicts within the failure bound when session revalidation rejects unreadably",
+        "a rejection value nobody can read cannot suspend the sweep still evicts within the failure bound when the logger itself throws",
+        "a rejection value nobody can read cannot suspend the sweep still evicts within the failure bound when the membership lookup rejects unreadably",
+        "revocation reaches a subscription, not only a command closes the presence window within one sweep interval, measured",
+        "revocation reaches a subscription, not only a command closes the window on a bound even when the membership lookup never answers",
+        "revocation reaches a subscription, not only a command starts the next sweep even while a lookup from the last one is still hanging"
+      ]
+    }
+  ]
+}

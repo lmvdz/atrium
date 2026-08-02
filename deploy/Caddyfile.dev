@@ -1,0 +1,76 @@
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  DEVELOPMENT ONLY. THIS FILE SERVES CLEARTEXT HTTP ON localhost.           ║
+# ║                                                                           ║
+# ║  It is reachable only through `docker-compose.dev.yml`, which also sets    ║
+# ║  NODE_ENV=development on the services behind it. Under NODE_ENV=production ║
+# ║  those services refuse to start with an http:// APP_URL at all             ║
+# ║  (packages/auth/src/transport.ts), so this file cannot be pointed at a     ║
+# ║  production stack by editing one variable — which is the whole reason it   ║
+# ║  is a second file rather than a flag in deploy/Caddyfile.                  ║
+# ║                                                                           ║
+# ║  It answers only loopback Host headers, and docker-compose.dev.yml         ║
+# ║  publishes it on 127.0.0.1 only, so neither file alone can put it on a     ║
+# ║  network. Do not copy this over deploy/Caddyfile.                          ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+#
+# What it is for: reproducing the *proxy topology* on a laptop —
+# `ATRIUM_TRUSTED_PROXY_HOPS=1`, one proxy appending to `X-Forwarded-For`, no
+# published ports on `app` or `server`. That is the arrangement the rate
+# limiter's per-address dimension depends on, and the only honest way to
+# exercise it locally is to run it. TLS is the part that is missing here, and it
+# is missing because a self-signed certificate on localhost teaches nobody
+# anything about whether the production path works.
+#
+# The ordinary local loop does not need this file at all: `pnpm infra:up &&
+# pnpm dev` runs both apps directly on :3000 and :4000.
+{
+	admin off
+	# No automatic HTTPS: there is no hostname here to get a certificate for.
+	auto_https off
+}
+
+# Loopback names only. Round 5 wrote `:80`, which answers to any Host header, so
+# the only thing between this cleartext stack and the internet was the compose
+# file's port publishing — one variable away from `0.0.0.0`. That is now
+# `127.0.0.1:...` in docker-compose.dev.yml, and this is the second half.
+#
+# Measured, not assumed: `caddy adapt` turns these three addresses into
+# `"listen": [":80"]` plus `"match": [{"host": ["localhost","127.0.0.1","::1"]}]`.
+# The site address is a **Host matcher**, not a bind — and it has to be, because
+# binding the container's own loopback would make docker's published port
+# unreachable. The bind that matters is the host-side `127.0.0.1:` above.
+# All three names are listed because a laptop reaches this over any of them and
+# a 404 on `http://127.0.0.1:3000` would be a bad way to learn that.
+localhost:80, 127.0.0.1:80, [::1]:80 {
+	log {
+		output stdout
+		format console
+	}
+
+	handle /ws* {
+		reverse_proxy server:4000
+	}
+	handle /health {
+		reverse_proxy server:4000
+	}
+	handle {
+		reverse_proxy app:3000
+	}
+}
+
+# Anything arriving under some other name is refused, out loud.
+#
+# The site block above was written first, on its own, with a comment claiming a
+# foreign Host "gets a 404 rather than a working plaintext login page". Measured
+# against a running container, that was wrong: Caddy answers an unmatched Host
+# with an empty `200 OK`. No app content, but a live port that says "fine" — and
+# a proxy or a scanner in front of this would read that as a healthy service.
+#
+# 421 Misdirected Request is the accurate code: the request reached a server
+# that will not answer for that authority. The block is keyless, so it is the
+# fallback the specific host-matched block above always outranks — verified by
+# probing all four Hosts against the running pair rather than by reading the
+# routing rules.
+:80 {
+	respond "atrium dev proxy: this stack answers on localhost only (docker-compose.dev.yml)" 421
+}

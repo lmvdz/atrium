@@ -1,0 +1,47 @@
+{
+  "mutation": "boundary-type-alias-blind",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:09:49.306Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "f4e93ae88ebb5ddd",
+  "claim": "packages/auth/test/room-access.test.ts — the local-type-alias fixture",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "b067b0240a78fe70",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "8c54c29456cc8782",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 108,
+        "passed": 108,
+        "failed": 0,
+        "durationMs": 5207
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-type-alias-blind.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 108,
+        "passed": 107,
+        "failed": 1,
+        "durationMs": 9146
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted fires on a handle annotated through a local type alias"
+      ]
+    }
+  ]
+}

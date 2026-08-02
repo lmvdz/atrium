@@ -1,0 +1,255 @@
+/*
+ * Workspace, room and invitation screens. Token-only, like everything else —
+ * the real interface work is #25; this is the shape it will inherit.
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  width: 100%;
+  max-width: 840px;
+  margin: 0 auto;
+  padding: var(--sp-6) var(--sp-5);
+  overflow-y: auto;
+}
+
+.heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--tx0);
+}
+
+.roleTag {
+  padding: 1px var(--sp-2);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-pill);
+  background: var(--bg4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx3);
+}
+
+.lede {
+  margin: 0;
+  font-size: var(--fs-base);
+  color: var(--tx2);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg1);
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx3);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg3);
+}
+
+.rowMain {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.rowName {
+  color: var(--tx0);
+  font-size: var(--fs-base);
+}
+
+.rowMeta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--tx4);
+  overflow-wrap: anywhere;
+}
+
+.rowActions {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.empty {
+  margin: 0;
+  font-size: var(--fs-row);
+  color: var(--tx4);
+}
+
+.inlineForm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: flex-end;
+}
+
+.field {
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.label {
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx3);
+}
+
+.input,
+.select {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  background: var(--bg3);
+  color: var(--tx0);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+}
+
+.input:focus-visible,
+.select:focus-visible {
+  border-color: var(--blu);
+  outline: 2px solid var(--blu);
+  outline-offset: 1px;
+}
+
+.button {
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--grn2);
+  border-radius: var(--radius-card);
+  background: var(--grn);
+  color: var(--bg1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button:hover {
+  background: var(--grn2);
+}
+
+.secondaryButton {
+  padding: 1px var(--sp-3);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  background: var(--bg4);
+  color: var(--tx2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  cursor: pointer;
+}
+
+.secondaryButton:hover {
+  border-color: var(--line3, var(--line2));
+  color: var(--tx0);
+}
+
+.link {
+  color: var(--blu);
+}
+
+.error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--ambbd);
+  border-radius: var(--radius-card);
+  background: var(--ambbg);
+  color: var(--tx0);
+  font-size: var(--fs-row);
+}
+
+.notice {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--grnbd);
+  border-radius: var(--radius-card);
+  background: var(--grnbg);
+  color: var(--tx0);
+  font-size: var(--fs-row);
+}
+
+/* ── presence ─────────────────────────────────────────────────────────── */
+
+.presence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.presenceStatus {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--tx4);
+}
+
+.presenceMember {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-3);
+  border: 1px solid var(--grnbd);
+  border-radius: var(--radius-pill);
+  background: var(--grnbg);
+  color: var(--tx0);
+  font-size: var(--fs-row);
+}
+
+.presenceDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--grn);
+}
+
+.presenceError {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--red);
+}

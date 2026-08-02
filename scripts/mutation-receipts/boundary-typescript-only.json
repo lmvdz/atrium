@@ -1,0 +1,55 @@
+{
+  "mutation": "boundary-typescript-only",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:06:57.474Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "e910d3fead2c1eb0",
+  "claim": "packages/auth/test/room-access.test.ts — the extension fixtures and the denominator premises",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "b067b0240a78fe70",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "8c54c29456cc8782",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 108,
+        "passed": 108,
+        "failed": 0,
+        "durationMs": 5207
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-typescript-only.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 108,
+        "passed": 99,
+        "failed": 9,
+        "durationMs": 22239
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted does not descend into an excluded path, and says it did not",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted fires on a route written as .cjs",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted fires on a route written as .js",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted fires on a route written as .jsx",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted fires on a route written as .mjs",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted fires on the table reached off a handle in a .js route",
+        "room membership is not reachable outside @atrium/auth the premise, measured excludes only build output, by anchored path, and says which",
+        "room membership is not reachable outside @atrium/auth the premise, measured leaves nothing under a graph root unaccounted for",
+        "room membership is not reachable outside @atrium/auth the premise, measured parses every module extension Next and Node execute, not only TypeScript"
+      ]
+    }
+  ]
+}

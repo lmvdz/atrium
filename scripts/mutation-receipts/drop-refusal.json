@@ -1,0 +1,47 @@
+{
+  "mutation": "drop-refusal",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T23:56:05.828Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "954e545a49cd98b1",
+  "claim": "packages/auth/test/deployment.test.ts — the 421-fallback assertion",
+  "suites": [
+    {
+      "suite": "auth:deployment",
+      "verdict": "red",
+      "subjectHash": "920708c1f80484f1",
+      "suiteFile": "packages/auth/test/deployment.test.ts",
+      "suiteHash": "70cb1611b76bd0c1",
+      "files": [
+        "deploy/Caddyfile.dev"
+      ],
+      "baseline": {
+        "suite": "auth:deployment",
+        "builds": [],
+        "command": "pnpm exec vitest run test/deployment.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-deployment.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 5,
+        "passed": 5,
+        "failed": 0,
+        "durationMs": 1680
+      },
+      "mutated": {
+        "suite": "auth:deployment",
+        "builds": [],
+        "command": "pnpm exec vitest run test/deployment.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-drop-refusal.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 5,
+        "passed": 4,
+        "failed": 1,
+        "durationMs": 1393
+      },
+      "caught": [
+        "the dev compose pair cannot be put on a network proxies the app to loopback Hosts only, and refuses every other name"
+      ]
+    }
+  ]
+}

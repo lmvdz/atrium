@@ -1,0 +1,48 @@
+{
+  "mutation": "role-assert-joins-lists",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:08:53.433Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "d2de1a1689bd30c6",
+  "claim": "packages/auth/test/org.test.ts — the exactly-one-role tests",
+  "suites": [
+    {
+      "suite": "auth:org",
+      "verdict": "red",
+      "subjectHash": "ba9a0e3e48db6692",
+      "suiteFile": "packages/auth/test/org.test.ts",
+      "suiteHash": "3d71b1dc7dd666cc",
+      "files": [
+        "packages/auth/src/org.ts"
+      ],
+      "baseline": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 54,
+        "passed": 54,
+        "failed": 0,
+        "durationMs": 1912
+      },
+      "mutated": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-role-assert-joins-lists.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 54,
+        "passed": 52,
+        "failed": 2,
+        "durationMs": 10323
+      },
+      "caught": [
+        "assertKnownRole rejects a list of roles it *does* know, which is the whole point",
+        "assertKnownRole returns the role, canonical, rather than whatever spacing arrived"
+      ]
+    }
+  ]
+}

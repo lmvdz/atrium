@@ -128,10 +128,13 @@ const DEV_ENV_FILE = [
 describe('the entrypoint, booted with a planted .env', () => {
   it('does not let the file downgrade an unset NODE_ENV — it boots as production', async () => {
     const result = await boot({
-      // The file says development *and* supplies real credentials, so the
-      // process starts either way. What it prints is which environment it
-      // decided it was in, and a file does not get to decide that.
-      dotenv: `${DEV_ENV_FILE}S3_ACCESS_KEY_ID=AKIAREAL\nS3_SECRET_ACCESS_KEY=a-real-secret\n`,
+      // The file says development *and* supplies real credentials (including
+      // the ones only production demands), so the process starts either way.
+      // What it prints is which environment it decided it was in, and a file
+      // does not get to decide that.
+      dotenv:
+        `${DEV_ENV_FILE}S3_ACCESS_KEY_ID=AKIAREAL\nS3_SECRET_ACCESS_KEY=a-real-secret\n` +
+        'APP_URL=https://atrium.example\nATRIUM_TRUSTED_PROXY_HOPS=0\n',
       env: {},
       until: 'atrium server starting',
     });

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
+import { hasProxyStrategy, isSecureUrl } from '@atrium/auth';
 import { z } from 'zod';
 
 /**
@@ -77,10 +78,68 @@ const BaseEnvSchema = z.object({
 });
 
 const RawEnvSchema = BaseEnvSchema.extend({
+  /**
+   * Signing secret, shared with the web app. Not validated here: `@atrium/auth`
+   * owns that rule, so both processes fail the same way for the same reason.
+   */
+  BETTER_AUTH_SECRET: z.string().optional(),
+  /**
+   * The web app's public origin. Better Auth derives cookie names and the
+   * `secure` flag from it, so this must match what the browser actually used or
+   * every upgrade reads as unauthenticated — and the WebSocket upgrade checks
+   * the browser's `Origin` header against it. A localhost default in production
+   * would therefore refuse every real client while looking configured, which is
+   * why `assertProductionSafe` below takes it away there.
+   */
+  APP_URL: z.url().default('http://localhost:3000'),
+
   SERVER_HOST: z.string().min(1).default('0.0.0.0'),
   SERVER_PORT: z.coerce.number().int().positive().default(4000),
 
   WS_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  /**
+   * How long an open socket's session is trusted between re-validations. The
+   * window in which a revoked session still has authority is at most this long.
+   */
+  WS_REVALIDATE_TTL_MS: z.coerce.number().int().nonnegative().max(60_000).default(5_000),
+  /**
+   * How often every open socket is swept — session re-checked, room
+   * memberships re-checked — whether or not it has sent anything.
+   *
+   * A socket that only listens sends no commands, so a per-command check never
+   * runs for it; this is what bounds how long a removed member goes on
+   * *receiving* a room's broadcasts. Deliberately has no "off" value: the
+   * minimum is one second and the maximum five minutes, because a sweep nobody
+   * runs is the round 2 behaviour this closes.
+   */
+  WS_SWEEP_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(15_000),
+  /**
+   * How many consecutive sweeps may fail to verify a socket — session lookup or
+   * membership lookup throwing — before it is closed anyway, and the same bound
+   * in wall-clock time.
+   *
+   * Round 3 skipped an unverifiable socket forever, which meant a revoked member
+   * kept receiving broadcasts for as long as the database stayed down. Neither
+   * has an "off" value for the same reason `WS_SWEEP_INTERVAL_MS` does not: the
+   * unbounded case is the behaviour these close.
+   */
+  WS_SWEEP_FAILURE_LIMIT: z.coerce.number().int().min(1).max(100).default(3),
+  WS_SWEEP_UNVERIFIED_MS: z.coerce.number().int().min(1_000).max(900_000).default(60_000),
+  /**
+   * Whether a client that sends no `Origin` header may open a socket.
+   *
+   * Browsers always send one, so `false` — the default — is right for a
+   * browser-facing deployment and is what makes the origin check meaningful:
+   * an attacker who could simply omit the header would face no check at all.
+   * Set it only for a deployment with genuine non-browser clients (a load
+   * prober, a CLI), and know that doing so means any process that can reach the
+   * port and hold a cookie can open an authenticated socket.
+   */
+  WS_ALLOW_ORIGINLESS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
   INTERPRET_WORKER_CONCURRENCY: z.coerce.number().int().positive().max(50).default(2),
 
   S3_ENDPOINT: z.string().min(1).default('http://localhost:9000'),
@@ -132,6 +191,97 @@ export type Env = z.infer<typeof EnvSchema>;
 export type MigrationEnv = z.infer<typeof BaseEnvSchema>;
 
 /**
+ * Values whose development defaults are wrong in production, listed once.
+ *
+ * A default that is merely inconvenient in development is a silent
+ * misconfiguration in production: a server that starts, reports healthy, and
+ * signs nobody in. `apps/web/lib/env.ts` applies the same rule to the same
+ * variables, deliberately.
+ *
+ * `ATRIUM_TRUSTED_PROXY_HOPS` is here for the same reason and a sharper one.
+ * This process binds a port, so it *has* a peer address for every caller — but
+ * only a deployment can say whether that address is the caller or a proxy's.
+ * Unset, `clientIp` believes nothing and the rate limiter's IP dimension is
+ * inert while looking configured, which is exactly what round 2 shipped into
+ * compose. `0` is a perfectly good answer ("nothing is in front of me", which is
+ * true of a published port on a single-node VPS); what is not acceptable is
+ * nobody having answered. See `packages/auth/src/client-ip.ts`.
+ */
+const productionRequired = ['APP_URL', 'ATRIUM_TRUSTED_PROXY_HOPS'] as const;
+
+/** Why each of them, in the words the operator needs rather than a generic line. */
+const productionReason: Record<(typeof productionRequired)[number], string> = {
+  APP_URL:
+    'required in production — the development default is not a safe fallback for a' +
+    ' process serving real traffic',
+  ATRIUM_TRUSTED_PROXY_HOPS:
+    'required in production — say what is in front of this process: 0 for a directly' +
+    ' published port, or the number of reverse proxies that append to X-Forwarded-For.' +
+    ' Unset is not 0; it silently disables the rate limiter’s IP dimension',
+};
+
+/**
+ * The reason the gate reads the *parsed* strategy and not the raw string.
+ *
+ * Round 3 checked presence: `source[name]?.trim()` is truthy for `lots`, `-3`,
+ * `1.5` and `0x10`, every one of which `trustedProxyStrategy` refuses and
+ * degrades to `unconfigured`. So a production process booted, reported itself
+ * configured, and ran with the IP dimension dead — the exact failure the check
+ * exists to make loud, reached through the check itself. Both lineages found it
+ * in round 3's gauntlet. `apps/web/lib/env.ts` has always asked the parser; this
+ * now asks the same question of the same parser.
+ */
+const unparseableProxyHops =
+  'set but unreadable — ATRIUM_TRUSTED_PROXY_HOPS must be a non-negative whole' +
+  ' number (0 for a directly published port, N for N reverse proxies that append' +
+  ' to X-Forwarded-For). A value that does not parse is not a configuration: it' +
+  ' leaves the rate limiter’s IP dimension inert while looking configured';
+
+/**
+ * And the one that is *set* and still wrong: a plaintext public origin.
+ *
+ * `APP_URL` is the origin session cookies are minted for and the origin this
+ * process checks a WebSocket `Origin` header against. On `http://` every one of
+ * those cookies crosses the network readable by anything between the browser
+ * and the proxy. Round 4 shipped a compose stack listening on `:80` with a
+ * comment asking the operator to fix it, which is the failure this whole file
+ * exists to refuse in every other variable.
+ *
+ * The rule lives in `@atrium/auth` (`transport.ts`) so this process and the web
+ * app apply exactly one definition of "secure enough to serve", the same way
+ * both ask `trustedProxyStrategy` rather than each parsing the hop count.
+ */
+const insecureAppUrl =
+  'must be an https:// URL in production — it is the origin session cookies are' +
+  ' minted for and the origin the WebSocket upgrade checks against, so on http://' +
+  ' every session cookie and every verification link crosses the network in' +
+  ' cleartext. docker-compose.yml takes a domain in ATRIUM_DOMAIN and Caddy' +
+  ' obtains the certificate itself. There is deliberately no override';
+
+export function assertProductionSafe(source: NodeJS.ProcessEnv, env: Env): void {
+  if (env.NODE_ENV !== 'production') return;
+
+  const problems = productionRequired
+    .filter((name) => !source[name]?.trim())
+    .map((name) => `  ${name}: ${productionReason[name]}`);
+
+  // Present but unparseable is its own failure, and a different sentence: the
+  // operator did answer, and the answer was not one of the ones that exist.
+  if (source.ATRIUM_TRUSTED_PROXY_HOPS?.trim() && !hasProxyStrategy(source)) {
+    problems.push(`  ATRIUM_TRUSTED_PROXY_HOPS: ${unparseableProxyHops}`);
+  }
+
+  // Present, parseable, and still not a configuration anybody should serve.
+  const appUrl = source.APP_URL?.trim();
+  if (appUrl && !isSecureUrl(appUrl)) {
+    problems.push(`  APP_URL: ${insecureAppUrl} (got ${appUrl})`);
+  }
+
+  if (problems.length === 0) return;
+  throw new Error(`invalid environment:\n${problems.join('\n')}`);
+}
+
+/**
  * Every value, trimmed before anything looks at it.
  *
  * A secret pasted into a `.env` or a deployment console arrives with the
@@ -178,7 +328,11 @@ function parseOrThrow<T extends z.ZodType>(schema: T, source: NodeJS.ProcessEnv)
 
 /** The full server environment — realtime, workers, and object storage. */
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  return parseOrThrow(EnvSchema, source);
+  const env = parseOrThrow(EnvSchema, source);
+  // `parseOrThrow` may have populated `process.env` from a `.env` file; re-read
+  // it so a value that arrived that way counts as "configured" below.
+  assertProductionSafe(source === process.env ? process.env : source, env);
+  return env;
 }
 
 /**

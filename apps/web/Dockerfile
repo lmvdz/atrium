@@ -13,6 +13,10 @@ COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
+COPY packages/auth/package.json packages/auth/
+# See the note in apps/server/Dockerfile: the build below filters over every
+# package, so every package's manifest has to be installed here.
+COPY packages/ingest/package.json packages/ingest/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
 FROM deps AS build
@@ -21,7 +25,9 @@ COPY tsconfig.base.json ./
 COPY design design
 COPY packages packages
 COPY apps/web apps/web
-RUN pnpm --filter @atrium/core build && pnpm --filter @atrium/web build
+# The web app signs people in and reads workspaces, so it needs @atrium/db and
+# @atrium/auth built, not just the core.
+RUN pnpm --filter "./packages/*" build && pnpm --filter @atrium/web build
 
 FROM base AS runtime
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0

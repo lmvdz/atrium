@@ -1,0 +1,47 @@
+{
+  "mutation": "invitation-reads-error-message",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:03:29.908Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "d53eb29b46195907",
+  "claim": "packages/auth/test/org.test.ts — the unreadable-compensation test, which then rejects with a TypeError",
+  "suites": [
+    {
+      "suite": "auth:org",
+      "verdict": "red",
+      "subjectHash": "ba9a0e3e48db6692",
+      "suiteFile": "packages/auth/test/org.test.ts",
+      "suiteHash": "3d71b1dc7dd666cc",
+      "files": [
+        "packages/auth/src/org.ts"
+      ],
+      "baseline": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 54,
+        "passed": 54,
+        "failed": 0,
+        "durationMs": 1912
+      },
+      "mutated": {
+        "suite": "auth:org",
+        "builds": [],
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-invitation-reads-error-message.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 54,
+        "passed": 53,
+        "failed": 1,
+        "durationMs": 6354
+      },
+      "caught": [
+        "afterCreateInvitation — the time-of-check/time-of-use compensation fails loudly even when the compensation rejects with something unreadable"
+      ]
+    }
+  ]
+}

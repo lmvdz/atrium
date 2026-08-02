@@ -1,0 +1,48 @@
+{
+  "mutation": "boundary-grammar-fallthrough",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:08:21.511Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "39e00c3522bec0d4",
+  "claim": "packages/auth/test/room-access.test.ts — the tagged-template, `import =`/`export =` and unmodelled fixtures",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "b067b0240a78fe70",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "8c54c29456cc8782",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 108,
+        "passed": 108,
+        "failed": 0,
+        "durationMs": 5207
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-grammar-fallthrough.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 108,
+        "passed": 106,
+        "failed": 2,
+        "durationMs": 15135
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted fires on a handle laundered through a tagged template",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted reports an expression form it has no model of, and treats it as a handle"
+      ]
+    }
+  ]
+}

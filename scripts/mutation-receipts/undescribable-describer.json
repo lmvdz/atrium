@@ -1,0 +1,70 @@
+{
+  "mutation": "undescribable-describer",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:04:03.309Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "3f0640e1b135ecc3",
+  "claim": "packages/auth, across errors.test.ts and org.test.ts. **`apps/server` stays green, and that is the finding**: the realtime sites survive a non-total describer because the counter moves first and the log is guarded. Measured, not assumed — three layers, and each one is separately mutable (see `sweep-log-before-counting`, `sweep-counts-then-reads`, `sweep-unguarded-log`). Requires `pnpm --filter @atrium/auth build` to reach `apps/server` at all. **Repointed in round 10**, which rewrote `describeUnknown` to coerce a non-string `message`: this mutation stopped matching, `--verify` said so, and the receipt below is against the new body. Second time the self-check has caught its own drift, after `unguard-logger` in round 9.",
+  "suites": [
+    {
+      "suite": "auth:all",
+      "verdict": "red",
+      "subjectHash": "e07c0d28df684af0",
+      "suiteFile": null,
+      "suiteHash": "926e91c95335ee47",
+      "files": [
+        "packages/auth/src/errors.ts"
+      ],
+      "baseline": {
+        "suite": "auth:all",
+        "builds": [],
+        "command": "pnpm exec vitest run --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-all.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 390,
+        "passed": 390,
+        "failed": 0,
+        "durationMs": 15322
+      },
+      "mutated": {
+        "suite": "auth:all",
+        "builds": [],
+        "command": "pnpm exec vitest run --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-undescribable-describer.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 390,
+        "passed": 366,
+        "failed": 24,
+        "durationMs": 17971
+      },
+      "caught": [
+        "describeUnknown describes a non-string message rather than discarding it",
+        "describeUnknown describes ordinary primitives the way anyone would expect",
+        "describeUnknown returns a string for a prototype-less object",
+        "describeUnknown returns a string for a proxy that is an Error and throws from get",
+        "describeUnknown returns a string for a proxy that throws from getPrototypeOf and get",
+        "describeUnknown returns a string for an Error whose message cannot be converted",
+        "describeUnknown returns a string for an Error whose message is a Symbol",
+        "describeUnknown returns a string for an object whose Symbol.toPrimitive throws",
+        "describeUnknown returns a string for an object whose message getter throws",
+        "describeUnknown returns a string, not a Symbol, for an Error carrying a Symbol as its message",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit normalizing the rejection cannot itself become the failure survives a port rejecting with a prototype-less object",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit normalizing the rejection cannot itself become the failure survives a port rejecting with an object whose Symbol.toPrimitive throws",
+        "revocation hooks a reporter cannot escalate into a request failure or a process exit normalizing the rejection cannot itself become the failure survives a reporter that rejects with a prototype-less object too",
+        "toReportableError builds an Error with a string message for a prototype-less object",
+        "toReportableError builds an Error with a string message for a proxy that throws from getPrototypeOf and get",
+        "toReportableError builds an Error with a string message for an object whose Symbol.toPrimitive throws",
+        "toReportableError builds an Error with a string message for an object whose message getter throws",
+        "toReportableError hands back a proxy that is an Error and throws from get unchanged, and describing it is still a string",
+        "toReportableError hands back an Error whose message cannot be converted unchanged, and describing it is still a string",
+        "toReportableError hands back an Error whose message is a Symbol unchanged, and describing it is still a string",
+        "toReportableError returns something that is an Error for a prototype-less object",
+        "toReportableError returns something that is an Error for a proxy that throws from getPrototypeOf and get",
+        "toReportableError returns something that is an Error for an object whose Symbol.toPrimitive throws",
+        "toReportableError returns something that is an Error for an object whose message getter throws"
+      ]
+    }
+  ]
+}

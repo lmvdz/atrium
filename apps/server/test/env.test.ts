@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadEnv, loadMigrationEnv } from '../src/env.js';
+import { assertProductionSafe, loadEnv, loadMigrationEnv } from '../src/env.js';
 
 /**
  * Configuration is the one place where "it worked on my laptop" ships a public
@@ -12,6 +12,17 @@ import { loadEnv, loadMigrationEnv } from '../src/env.js';
 
 const BASE = {
   DATABASE_URL: 'postgres://atrium:atrium@localhost:5432/atrium',
+} as const;
+
+/**
+ * What a production process must state out loud beyond the connection string.
+ * `APP_URL` has no safe default there (see `assertProductionSafe`), so a case
+ * that means to test *S3* credentials in production has to supply it or it
+ * fails on the wrong variable.
+ */
+const PROD_ORIGIN = {
+  APP_URL: 'https://atrium.example',
+  ATRIUM_TRUSTED_PROXY_HOPS: '1',
 } as const;
 
 describe('loadEnv — S3 credentials', () => {
@@ -41,6 +52,7 @@ describe('loadEnv — S3 credentials', () => {
   it('accepts real credentials in production', () => {
     const env = loadEnv({
       ...BASE,
+      ...PROD_ORIGIN,
       NODE_ENV: 'production',
       S3_ACCESS_KEY_ID: 'AKIAREAL',
       S3_SECRET_ACCESS_KEY: 'a-real-secret',
@@ -95,6 +107,7 @@ describe('loadEnv — an unset NODE_ENV is production', () => {
   it('reports production as the effective environment when none was set', () => {
     const env = loadEnv({
       ...BASE,
+      ...PROD_ORIGIN,
       S3_ACCESS_KEY_ID: 'AKIAREAL',
       S3_SECRET_ACCESS_KEY: 'a-real-secret',
     });
@@ -127,6 +140,7 @@ describe('loadEnv — whitespace is not a value', () => {
   it('trims a credential that arrived with the newline it was pasted with', () => {
     const env = loadEnv({
       ...BASE,
+      ...PROD_ORIGIN,
       NODE_ENV: 'production',
       S3_ACCESS_KEY_ID: ' AKIAREAL\n',
       S3_SECRET_ACCESS_KEY: 'a-real-secret ',
@@ -191,5 +205,212 @@ describe('loadEnv — the rest of the contract', () => {
     expect(env.SERVER_PORT).toBe(4100);
     expect(env.INTERPRET_WORKER_CONCURRENCY).toBe(4);
     expect(env.S3_FORCE_PATH_STYLE).toBe(false);
+  });
+});
+
+/**
+ * The auth-shaped half of the same rule.
+ *
+ * A development default is a convenience in development and a silent
+ * misconfiguration in production: a server that starts, reports healthy, and is
+ * pointed at the wrong place. `APP_URL` is the sharp one — Better Auth derives
+ * cookie rules from it and the WebSocket upgrade checks browsers' `Origin`
+ * against it, so a production process defaulted to `http://localhost:3000`
+ * refuses every real client while looking configured.
+ */
+const DEV = { ...BASE, NODE_ENV: 'development' } as const;
+const PROD = {
+  ...BASE,
+  NODE_ENV: 'production',
+  S3_ACCESS_KEY_ID: 'AKIAREAL',
+  S3_SECRET_ACCESS_KEY: 'a-real-secret',
+} as const;
+
+describe('loadEnv — auth and realtime settings', () => {
+  it('fills the development defaults in development', () => {
+    const env = loadEnv({ ...DEV });
+    expect(env.APP_URL).toBe('http://localhost:3000');
+    expect(env.SERVER_PORT).toBe(4000);
+  });
+
+  it('refuses to fall back to a localhost APP_URL in production', () => {
+    expect(() => loadEnv({ ...PROD })).toThrow(/APP_URL/);
+  });
+
+  it('is satisfied when production says what its origin is', () => {
+    const env = loadEnv({ ...PROD, ...PROD_ORIGIN });
+    expect(env.APP_URL).toBe('https://atrium.example');
+  });
+
+  /**
+   * The rate limiter's second dimension, made honest.
+   *
+   * A process that binds a port has a peer address for every caller, but only
+   * the deployment can say whether that address is the caller or a proxy's.
+   * Round 2 read "unset" as 0 and 0 as "dimension off", so the compose stack
+   * shipped a limiter counting one dimension while looking like it had two.
+   */
+  it('refuses to start in production without being told what is in front of it', () => {
+    expect(() => loadEnv({ ...PROD, APP_URL: 'https://atrium.example' })).toThrow(
+      /ATRIUM_TRUSTED_PROXY_HOPS/,
+    );
+    expect(() => loadEnv({ ...PROD, APP_URL: 'https://atrium.example' })).toThrow(/Unset is not 0/);
+  });
+
+  /**
+   * Blocking finding, round 4 delta: the shipped compose served production auth
+   * over plaintext, and `deploy/Caddyfile` asked the operator to fix it in a
+   * comment. `APP_URL` is where that reaches this process — it is the origin
+   * session cookies are minted for and the origin the WebSocket upgrade checks
+   * a browser's `Origin` against, so `http://` there means every session cookie
+   * crosses the network readable.
+   *
+   * The rule itself lives in `@atrium/auth` (`isSecureUrl`), so this process and
+   * `apps/web` cannot end up with two definitions of "secure enough to serve".
+   */
+  it('refuses an http:// APP_URL in production, set or not', () => {
+    // Catches: deleting the scheme check from `assertProductionSafe` — every
+    // value below is present and non-empty, so the presence gate above passes
+    // all three.
+    for (const url of ['http://atrium.example', 'http://localhost:3000', 'ws://atrium.example']) {
+      expect(() => loadEnv({ ...PROD, APP_URL: url, ATRIUM_TRUSTED_PROXY_HOPS: '1' })).toThrow(
+        /APP_URL/,
+      );
+      expect(() => loadEnv({ ...PROD, APP_URL: url, ATRIUM_TRUSTED_PROXY_HOPS: '1' })).toThrow(
+        /https:\/\//,
+      );
+    }
+  });
+
+  it('says which value it refused, so the fix is one read of the error', () => {
+    // Catches: a generic "invalid environment" that makes an operator go
+    // looking. Same standard the proxy-hops message already meets.
+    expect(() =>
+      loadEnv({ ...PROD, APP_URL: 'http://atrium.example', ATRIUM_TRUSTED_PROXY_HOPS: '1' }),
+    ).toThrow(/got http:\/\/atrium\.example/);
+  });
+
+  it('leaves development alone, so a laptop still boots on localhost', () => {
+    // Catches: applying the TLS rule outside production, which would break
+    // `pnpm dev` and get the rule switched off.
+    expect(loadEnv({ ...DEV }).APP_URL).toBe('http://localhost:3000');
+  });
+
+  it('accepts 0 as a real answer — a published port has nothing in front of it', () => {
+    const env = loadEnv({
+      ...PROD,
+      APP_URL: 'https://atrium.example',
+      ATRIUM_TRUSTED_PROXY_HOPS: '0',
+    });
+    expect(env.NODE_ENV).toBe('production');
+  });
+
+  /**
+   * Blocking finding 2, half one: the gate has to ask the *parser*.
+   *
+   * Round 3's check was `!source[name]?.trim()` — presence. Every value below is
+   * present, truthy, and refused by `trustedProxyStrategy`, which degrades to
+   * `unconfigured`. So a production process booted, called itself configured,
+   * and ran with `clientIp` returning null for every caller: the exact failure
+   * the gate exists to make loud, reached through the gate itself. grok found it
+   * in round 3's gauntlet. `apps/web/lib/env.ts` has always asked the parser.
+   *
+   * Catches: reverting `assertProductionSafe` to a presence check — every case
+   * here starts passing.
+   */
+  it('refuses a value it cannot parse, not just a missing one', () => {
+    for (const value of ['lots', '-3', '1.5', '0x10', 'one', '3 hops']) {
+      expect(
+        () =>
+          loadEnv({
+            ...PROD,
+            APP_URL: 'https://atrium.example',
+            ATRIUM_TRUSTED_PROXY_HOPS: value,
+          }),
+        value,
+      ).toThrow(/ATRIUM_TRUSTED_PROXY_HOPS/);
+      expect(
+        () =>
+          loadEnv({
+            ...PROD,
+            APP_URL: 'https://atrium.example',
+            ATRIUM_TRUSTED_PROXY_HOPS: value,
+          }),
+        value,
+      ).toThrow(/set but unreadable/);
+    }
+  });
+
+  it('accepts the values that do parse, including a large clamped one', () => {
+    for (const value of ['0', '1', '2', '500']) {
+      expect(() =>
+        loadEnv({
+          ...PROD,
+          APP_URL: 'https://atrium.example',
+          ATRIUM_TRUSTED_PROXY_HOPS: value,
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it('says nothing about it outside production', () => {
+    expect(() => loadEnv({ ...DEV })).not.toThrow();
+    // …including for a value production would refuse: development is where
+    // somebody is mid-way through typing one.
+    expect(() => loadEnv({ ...DEV, ATRIUM_TRUSTED_PROXY_HOPS: 'lots' })).not.toThrow();
+  });
+
+  /**
+   * Major finding 4's configuration half. Both bounds exist so the sweep's
+   * tolerance for a dependency that will not answer is finite; neither has an
+   * "off" value, for the same reason `WS_SWEEP_INTERVAL_MS` does not.
+   *
+   * Catches: giving either field a `.optional()` or a zero floor.
+   */
+  it('bounds how long an unverifiable socket is tolerated', () => {
+    expect(loadEnv({ ...DEV }).WS_SWEEP_FAILURE_LIMIT).toBe(3);
+    expect(loadEnv({ ...DEV }).WS_SWEEP_UNVERIFIED_MS).toBe(60_000);
+    expect(loadEnv({ ...DEV, WS_SWEEP_FAILURE_LIMIT: '5' }).WS_SWEEP_FAILURE_LIMIT).toBe(5);
+    expect(loadEnv({ ...DEV, WS_SWEEP_UNVERIFIED_MS: '5000' }).WS_SWEEP_UNVERIFIED_MS).toBe(5_000);
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_FAILURE_LIMIT: '0' })).toThrow();
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_UNVERIFIED_MS: '0' })).toThrow();
+  });
+
+  it('bounds the idle sweep instead of offering a way to turn it off', () => {
+    expect(loadEnv({ ...DEV }).WS_SWEEP_INTERVAL_MS).toBe(15_000);
+    expect(loadEnv({ ...DEV, WS_SWEEP_INTERVAL_MS: '2000' }).WS_SWEEP_INTERVAL_MS).toBe(2_000);
+    // A sweep nobody runs is the behaviour this exists to close, so 0 is not a
+    // value — and neither is an interval long enough to be one.
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_INTERVAL_MS: '0' })).toThrow();
+    expect(() => loadEnv({ ...DEV, WS_SWEEP_INTERVAL_MS: '600000' })).toThrow();
+  });
+
+  it('refuses origin-less websocket clients unless told otherwise', () => {
+    expect(loadEnv({ ...DEV }).WS_ALLOW_ORIGINLESS).toBe(false);
+    expect(loadEnv({ ...DEV, WS_ALLOW_ORIGINLESS: 'true' }).WS_ALLOW_ORIGINLESS).toBe(true);
+    // Not a boolean-ish free-for-all: an unrecognised value is an error, not a
+    // quiet "false" that hides a typo in a security setting.
+    expect(() => loadEnv({ ...DEV, WS_ALLOW_ORIGINLESS: 'yes' })).toThrow();
+  });
+
+  it('bounds the session revalidation window', () => {
+    expect(loadEnv({ ...DEV }).WS_REVALIDATE_TTL_MS).toBe(5_000);
+    expect(loadEnv({ ...DEV, WS_REVALIDATE_TTL_MS: '0' }).WS_REVALIDATE_TTL_MS).toBe(0);
+    // A socket must not be trustable for an hour on one check.
+    expect(() => loadEnv({ ...DEV, WS_REVALIDATE_TTL_MS: '3600000' })).toThrow();
+  });
+});
+
+describe('assertProductionSafe', () => {
+  it('says nothing outside production', () => {
+    expect(() =>
+      assertProductionSafe({}, { ...loadEnv({ ...DEV }), NODE_ENV: 'development' }),
+    ).not.toThrow();
+  });
+
+  it('names the variable rather than failing vaguely', () => {
+    expect(() =>
+      assertProductionSafe({}, { ...loadEnv({ ...DEV }), NODE_ENV: 'production' }),
+    ).toThrow(/APP_URL/);
   });
 });

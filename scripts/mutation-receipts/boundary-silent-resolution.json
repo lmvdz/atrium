@@ -1,0 +1,49 @@
+{
+  "mutation": "boundary-silent-resolution",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:07:43.493Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "b0d27b40f058555e",
+  "claim": "packages/auth/test/room-access.test.ts — the out-of-graph and undeclared-package fixtures",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "b067b0240a78fe70",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "8c54c29456cc8782",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 108,
+        "passed": 108,
+        "failed": 0,
+        "durationMs": 5207
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-silent-resolution.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 108,
+        "passed": 105,
+        "failed": 3,
+        "durationMs": 24881
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted reports a bare specifier nobody declared, rather than assuming npm",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted reports a specifier that resolves outside the graph instead of trusting it",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted reports a workspace dependency that never reached the graph"
+      ]
+    }
+  ]
+}

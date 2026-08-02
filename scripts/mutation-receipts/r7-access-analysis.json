@@ -1,0 +1,65 @@
+{
+  "mutation": "r7-access-analysis",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T23:56:59.444Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "d993b9e16da98b3b",
+  "claim": "packages/auth/test/room-access.test.ts — the destructuring, computed-key and receiver fixtures. The limit fixtures are receiver controls too, and a receiver-blind check reports every one of them.",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "b067b0240a78fe70",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "8c54c29456cc8782",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 108,
+        "passed": 108,
+        "failed": 0,
+        "durationMs": 5207
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-r7-access-analysis.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 108,
+        "passed": 89,
+        "failed": 19,
+        "durationMs": 5187
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores a domain object that has a memberships field",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores the word on a value that never came from the database",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key held in a variable",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key it cannot resolve",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on the table destructured straight off a handle",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires through a handle declared only by its type annotation",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires when the destructured table is renamed",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires when the destructuring is nested",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores `??` and `||` between values that never came from the database",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores a conditional between two things that are not handles",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores an arithmetic or comparison expression that mentions a handle",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a conditional used directly as the receiver",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on the table destructured in a parameter default",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on the table destructured off an annotated parameter",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle arriving as an unannotated callback parameter",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle assigned after its declaration",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle held in a class field",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle held in an object property",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted the access half does not see these, and says so does not see a handle stored in an array or a Map"
+      ]
+    }
+  ]
+}

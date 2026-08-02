@@ -15,8 +15,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@atrium/auth": "workspace:*",
     "@atrium/core": "workspace:*",
     "@atrium/db": "workspace:*",
+    "drizzle-orm": "^0.45.2",
     "pg-boss": "^12.26.3",
     "ws": "^8.21.1",
     "zod": "^4.4.3"
