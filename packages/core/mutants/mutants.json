@@ -1583,7 +1583,10 @@
       "file": "src/escalation.ts",
       "find": "      const built = addedBlockStructure(authored, statement);",
       "replace": "      const built = addedBlockStructure(quote, statement);",
-      "catches": ["refuses a forgery the proposer wrote into the quote as well as the statement"]
+      "catches": [
+        "refuses a forgery the proposer wrote into the quote as well as the statement",
+        "does not care how the proposer spaced the quote, only what the message says"
+      ]
     },
     {
       "id": "structure_guard_unanchored_passes",

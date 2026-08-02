@@ -308,6 +308,41 @@ describe('r12 — the structure guards are anchored to the message, not to the q
   });
 
   /**
+   * **The invariant that says the anchoring is complete**: however the proposer
+   * spaced the quote, an honest statement is judged the same. Before r12 the
+   * quote's line structure and link punctuation *were* the guards' anchor, so
+   * this was the attack surface; after it, no verdict depends on them at all.
+   *
+   * Measured rather than reasoned about, because the reasoning is not obvious:
+   * `SENTENCE_BREAK` **does** split on line breaks, so a quote's line structure
+   * is not inert by construction. It is inert because `sentencesOf` is only ever
+   * applied to the *body* — `quoteSpansWholeSentences` tokenizes the quote with
+   * `significant`, which drops whitespace, and `quoteCoversOwnText` never splits
+   * at all.
+   *
+   * **Catches**: any repair that makes the quote-versus-body comparison
+   * structure-sensitive instead of moving the anchor — which would refuse an
+   * honest quote whose client re-wrapped it, the exact case the fold's
+   * whitespace entry has the strongest argument for admitting. It is the design
+   * this round considered and did not take, and this is what would have failed.
+   */
+  it('does not care how the proposer spaced the quote, only what the message says', () => {
+    const body = 'Latency > 200ms is unacceptable for the search API. Bob agreed to the plan.';
+    const reflowed =
+      'Latency\n> 200ms is unacceptable for the search API.\n\nBob agreed to the plan.';
+    const hardBroken = body.replace('. Bob', '.  \nBob');
+    // An honest statement, against three spellings of the same quote.
+    for (const quote of [body, reflowed, hardBroken]) {
+      expect(kinds({ body, quote, statement: body })).toEqual([]);
+    }
+    // …and the statement is still judged against the message, not against
+    // whichever of those the proposer chose to send.
+    expect(kinds({ body, quote: reflowed, statement: reflowed })).toContain(
+      'statement_adds_block_structure',
+    );
+  });
+
+  /**
    * **Fail-closed when there is no message to anchor to.** When no cited message
    * bears the quote in its own text there is no author's text at all, so every
    * structure in the statement is unattributed and is reported. The proposal is
