@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,10 +252,19 @@ describe('room membership is not reachable outside @atrium/auth', () => {
       /**
        * The only directories outside the denominator, each an anchored path.
        *
-       * Build output, and nothing else. `node_modules` is skipped by name
+       * Generated output, and nothing else. `node_modules` is skipped by name
        * wherever it occurs because it is a resolution boundary Node itself
        * defines; every other exclusion is a full path, so nothing is excused for
        * being *called* `dist` or `test` somewhere in the middle of a route.
+       *
+       * Every entry is in `.gitignore`, which is the test of whether something
+       * belongs here: a directory a human writes into is a directory this check
+       * is *for*. The last two are Playwright's, and they earned their place the
+       * hard way — a `--prove-all` leaves `trace.zip` files in `test-results/`
+       * from its deliberately-failing runs, which made the boundary suite red at
+       * baseline and cost seventeen receipts. The guard was right (nobody had
+       * decided what a `.zip` under `apps/` is) and the answer is that Playwright
+       * wreckage is not source.
        */
       excludedPaths: [
         'apps/web/.next',
@@ -255,6 +273,8 @@ describe('room membership is not reachable outside @atrium/auth', () => {
         'packages/core/dist',
         'packages/db/dist',
         'packages/ingest/dist',
+        'apps/web/test-results',
+        'apps/web/playwright-report',
       ],
       forbiddenAccessName: 'memberships',
       ...overrides,
@@ -397,6 +417,14 @@ describe('room membership is not reachable outside @atrium/auth', () => {
         analysis.unmodelled.map(describeUnmodelled),
         'an expression form the handle walk has no model of',
       ).toEqual([]);
+      /**
+       * And the fixpoints reached a fixpoint. The pass bound is a safety valve
+       * — if it ever fires, every verdict above is a lower bound, and this
+       * round's whole rule is that such a thing has to be said out loud rather
+       * than absorbed. Asked of the real tree because the bound is
+       * `modules.size + 2` and the module count is what it scales with.
+       */
+      expect(analysis.incomplete, 'an analysis that stopped before it converged').toEqual([]);
     });
 
     it('excludes only build output, by anchored path, and says which', () => {
@@ -419,6 +447,57 @@ describe('room membership is not reachable outside @atrium/auth', () => {
       }
       expect(analysis.unusedExclusions, 'an exclusion that excludes nothing').toEqual([]);
       expect(analysis.unusedExemptions, 'an exemption for a file that has moved').toEqual([]);
+    });
+
+    it('is entitled to assume the workspace layout it resolves against', () => {
+      /**
+       * The premise behind the resolver, asserted instead of assumed.
+       *
+       * `@atrium/<pkg>[/<sub>]` is resolved against `packages/<pkg>/src`, which
+       * is this repository's convention and *not* what Node does — Node reads
+       * `package.json` `exports`. The round-11 codex critic was right that the
+       * two can disagree; a subpath pointing at a file with no counterpart
+       * under `src/` would be resolved here to the package root instead.
+       *
+       * The cheap half of the answer is that the fallback is conservative: the
+       * root inherits the package's taint, so a mis-resolved subpath of a
+       * tainted package is still an offence. The rest of the answer is this
+       * test — no workspace package declares an `exports` map at all, so the
+       * convention *is* the resolution, and the day somebody adds one this goes
+       * red and the resolver has to learn about it.
+       */
+      const { resolveSpecifier } = repoAnalysis();
+      const packages = readdirSync(join(root, 'packages'));
+      expect(packages.length).toBeGreaterThan(0);
+      let checked = 0;
+      for (const name of packages) {
+        const manifest = join(root, 'packages', name, 'package.json');
+        if (!existsSync(manifest)) continue;
+        const json = JSON.parse(readFileSync(manifest, 'utf8')) as {
+          exports?: Record<string, { default?: string }>;
+          imports?: unknown;
+        };
+        // `#internal/…` would need a second resolver; the backstop reports such
+        // a specifier today, and this asserts nobody has quietly added one.
+        expect(json.imports, `packages/${name} declares an imports map`).toBeUndefined();
+        for (const [subpath, target] of Object.entries(json.exports ?? {})) {
+          const built = target?.default;
+          if (typeof built !== 'string') continue;
+          // `./dist/schema.js` is compiled from `src/schema.ts`; that source is
+          // what a source-level analysis must land on.
+          const source = built.replace(/^\.\/dist\//, 'src/').replace(/\.js$/, '.ts');
+          const expected = `packages/${name}/${source}`;
+          const specifier = `@atrium/${name}${subpath === '.' ? '' : subpath.slice(1)}`;
+          expect(existsSync(join(root, expected)), `${built} has no source at ${expected}`).toBe(
+            true,
+          );
+          expect(resolveSpecifier(specifier, 'apps/web/lib/workspaces.ts'), specifier).toBe(
+            expected,
+          );
+          checked += 1;
+        }
+      }
+      expect(checked).toBeGreaterThan(4);
     });
 
     it('resolves the `@/` alias the app actually writes', () => {
@@ -1449,6 +1528,32 @@ describe('room membership is not reachable outside @atrium/auth', () => {
         expect(accessesOf(rule)).toEqual([]);
       });
 
+      it('does not see the table named in a SQL string', () => {
+        /**
+         * A fifth kind of gap, and a different kind from the four above: they
+         * are about failing to *find the handle*, and this one is about the
+         * table not being named in the module graph at all.
+         *
+         * `db().execute(sql`select … from memberships`)` reaches the table with
+         * no import and no property access — the analysis sees a template
+         * literal, which is a declared terminal. Nothing under `apps/` does this
+         * today (no `sql` template and no `.execute(` outside the vetted
+         * package), and closing it would mean parsing SQL, which is a different
+         * instrument. Written down here because an unstated limit is the defect
+         * round 10 was called for.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'apps/web/lib/rooms.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'declare function sql(strings: TemplateStringsArray): unknown;\n' +
+            'export function load() {\n' +
+            '  return createDatabase().execute(sql`select * from memberships`);\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([]);
+      });
+
       it('still sees the same read when the parameter is annotated', () => {
         /**
          * The control for the whole block, and the reason "best-effort" is not
@@ -1640,6 +1745,75 @@ describe('room membership is not reachable outside @atrium/auth', () => {
         });
         expect(accessesOf(rule)).toEqual([
           { file: 'apps/web/app/app/actions.ts', kind: 'property' },
+        ]);
+      });
+
+      it('reports a workspace dependency that never reached the graph', () => {
+        /**
+         * The round-11 codex critic's fourth escape. A bare specifier was
+         * external if any `package.json` on the way up declared it — and
+         * `"leaker": "workspace:*"` declares a package **in this repository**
+         * that nobody parsed. The denominator hole one more time, wearing a
+         * dependency's clothes.
+         */
+        const rule = fixture({
+          'apps/web/package.json': JSON.stringify({
+            dependencies: { leaker: 'workspace:*', 'real-npm-package': '^1.0.0' },
+          }),
+          'apps/web/lib/rooms.ts':
+            "import { rows } from 'leaker';\n" +
+            "import { fine } from 'real-npm-package';\n" +
+            'export const t = [rows, fine];\n',
+        });
+        expect(
+          analyzeImportBoundary(rule).unresolved.map(
+            (entry) => `${entry.specifier} ${entry.reason}`,
+          ),
+        ).toEqual(['leaker outside-the-graph']);
+      });
+
+      it('follows a `paths` alias declared in an extended tsconfig', () => {
+        /**
+         * Also the codex critic's: `readConfigFile` reads the nearest config's
+         * raw `paths` and never merges `extends`, so a base config can declare
+         * an alias the analysis never sees. When the alias prefix happens to be
+         * a declared dependency the backstop answers "external" rather than
+         * reporting, and the edge is gone in silence.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'tsconfig.base.json': JSON.stringify({ compilerOptions: { paths: { '~/*': ['./*'] } } }),
+          'apps/web/tsconfig.json': JSON.stringify({ extends: '../../tsconfig.base.json' }),
+          'apps/web/lib/db.ts':
+            "import { createDatabase } from '@atrium/db';\n" +
+            'export function db() {\n' +
+            '  return createDatabase();\n' +
+            '}\n',
+          'apps/web/app/actions.ts':
+            "import { db } from '~/apps/web/lib/db';\n" +
+            'export const rows = db().query.memberships;\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/app/actions.ts', kind: 'property' }]);
+      });
+
+      it('reports a symlink rather than resolving it lexically', () => {
+        /**
+         * Node realpaths a module before resolving what *it* imports, so a
+         * symlinked entry point runs the neighbours of its **target** while a
+         * lexical walk reads the neighbours of the link. Modelling that
+         * properly is a second resolver; saying "this file is a symlink and I
+         * did not follow it" is one line and is the answer this round takes
+         * everywhere else. Found by the round-11 codex critic.
+         */
+        const rule = fixture({
+          'toolbox/rows.ts': "export { memberships } from '../packages/db/src/schema.js';\n",
+          'toolbox/entry.ts': "export { memberships } from './rows.js';\n",
+          'apps/web/lib/rows.ts': 'export const memberships = "harmless";\n',
+        });
+        symlinkSync(join(rule.root, 'toolbox/entry.ts'), join(rule.root, 'apps/web/lib/entry.ts'));
+        const { unparsed } = analyzeImportBoundary(rule);
+        expect(unparsed.map((entry) => `${entry.file} ${entry.reason}`)).toEqual([
+          'apps/web/lib/entry.ts symlink',
         ]);
       });
 
@@ -1837,6 +2011,65 @@ describe('room membership is not reachable outside @atrium/auth', () => {
         ).toEqual(['apps/web/lib/rooms.ts ImportEqualsDeclaration(entity)']);
       });
 
+      it('fires on a handle annotated through a local type alias', () => {
+        /**
+         * The codex critic's follow-up to the rename fix, and the same mistake
+         * one hop further out: `type DB = Database` binds no import, so
+         * `originalTypeName` had nothing to look up. The alias chain is walked
+         * now, which is what "a list of names the package exports" requires.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'packages/db/src/client.ts':
+            "import * as schema from './schema.js';\n" +
+            'export interface Database {\n' +
+            '  query: typeof schema;\n' +
+            '}\n' +
+            'export function createDatabase(): Database {\n' +
+            '  return { query: schema };\n' +
+            '}\n',
+          'apps/web/lib/rooms.ts':
+            "import type { Database } from '@atrium/db';\n" +
+            'type DB = Database;\n' +
+            'type Held = DB;\n' +
+            'export function load(db: Held) {\n' +
+            '  return db.query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
+      it('fires on a handle annotated with a renamed type import', () => {
+        /**
+         * Found by asking this round's own question of `handleTypeNames`: what
+         * does *it* enumerate from? A list of type names the declaring package
+         * exports — compared against the identifier somebody typed at the
+         * annotation. `import type { Database as DB }` is one word and the
+         * comparison fails, so `function load(db: DB)` was not a handle.
+         *
+         * The import table already knows what `DB` was imported as, so the
+         * comparison is now against the name the package exports rather than
+         * against what the file called it.
+         */
+        const rule = fixture({
+          ...handleFixture,
+          'packages/db/src/client.ts':
+            "import * as schema from './schema.js';\n" +
+            'export interface Database {\n' +
+            '  query: typeof schema;\n' +
+            '}\n' +
+            'export function createDatabase(): Database {\n' +
+            '  return { query: schema };\n' +
+            '}\n',
+          'apps/web/lib/rooms.ts':
+            "import type { Database as DB } from '@atrium/db';\n" +
+            'export function load(db: DB) {\n' +
+            '  return db.query.memberships;\n' +
+            '}\n',
+        });
+        expect(accessesOf(rule)).toEqual([{ file: 'apps/web/lib/rooms.ts', kind: 'property' }]);
+      });
+
       it('keeps every declared terminal quiet, so the report means something', () => {
         /**
          * The control that pays for the no-fall-through rule. If literals,
@@ -1911,11 +2144,70 @@ describe('room membership is not reachable outside @atrium/auth', () => {
         expect(offenders(rule)).toContain('apps/web/lib/rooms.ts');
       });
 
-      it('ignores a side-effect import, which binds nothing', () => {
+      it('fires on a side-effect import, which binds nothing and runs everything', () => {
+        /**
+         * **This test asserted the opposite through round 10, and the round-11
+         * codex critic was right about it.** "A bare `import 'x'` binds nothing,
+         * so it cannot reach the table" is true about *binding* and false about
+         * *reaching*: importing a module for its side effects executes it, and a
+         * tainted module can run the query at its top level.
+         *
+         *   packages/leak/src/index.ts:
+         *     import { memberships } from '@atrium/db';
+         *     export const rows = await db.select().from(memberships);
+         *
+         * One line in an app, no binding, no name to check — which is exactly
+         * the case rule 2 was written for and exactly the case the import half
+         * was letting through while claiming to be an invariant.
+         */
         const rule = fixture({
           'apps/web/lib/rooms.ts': "import '@atrium/db';\n",
         });
+        expect(offenders(rule)).toEqual(['apps/web/lib/rooms.ts']);
+      });
+
+      it('ignores a side-effect import of a module that holds nothing', () => {
+        // The control that keeps the rule above about the taint rather than
+        // about the punctuation: `import './styles.js'` is not an offence.
+        const rule = fixture({
+          'apps/web/lib/theme.ts': 'export const theme = 1;\n',
+          'apps/web/lib/rooms.ts': "import './theme.js';\n",
+        });
         expect(offenders(rule)).toEqual([]);
+      });
+
+      it('fires on a `require` that came from `createRequire`', () => {
+        /**
+         * The round-11 codex critic's second escape, and it executed the runtime
+         * half: from an app directory, `createRequire(import.meta.url)` resolves
+         * `@atrium/db/schema` to the built `packages/db/dist/schema.js` and
+         * hands over `memberships` with its real table name.
+         *
+         * The analysis recognised a call whose callee was literally the
+         * identifier `require`, which is one rename away from nothing.
+         * `createRequire` is the documented way an ES module gets a `require`,
+         * so every binding it mints is one — under any of the three spellings
+         * that reach it.
+         */
+        const rule = fixture({
+          'apps/web/lib/rooms.ts':
+            "import { createRequire } from 'node:module';\n" +
+            'const req = createRequire(import.meta.url);\n' +
+            "export const rows = req('@atrium/db').memberships;\n",
+          'apps/web/lib/renamed.ts':
+            "import { createRequire as make } from 'node:module';\n" +
+            'const load = make(import.meta.url);\n' +
+            "export const rows = load('@atrium/db').memberships;\n",
+          'apps/web/lib/namespaced.ts':
+            "import * as nodeModule from 'node:module';\n" +
+            'const take = nodeModule.createRequire(import.meta.url);\n' +
+            "export const rows = take('@atrium/db').memberships;\n",
+        });
+        expect(offenders(rule)).toEqual([
+          'apps/web/lib/namespaced.ts',
+          'apps/web/lib/renamed.ts',
+          'apps/web/lib/rooms.ts',
+        ]);
       });
 
       it('ignores the word in a comment', () => {

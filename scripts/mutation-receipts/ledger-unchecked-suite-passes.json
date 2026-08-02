@@ -1,0 +1,48 @@
+{
+  "mutation": "ledger-unchecked-suite-passes",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:08:43.027Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "bbb85cf5bec6cfd2",
+  "claim": "packages/auth/test/mutation-ledger.test.ts — the suite-drift tests",
+  "suites": [
+    {
+      "suite": "auth:ledger",
+      "verdict": "red",
+      "subjectHash": "8d48eaaaf1546ff9",
+      "suiteFile": "packages/auth/test/mutation-ledger.test.ts",
+      "suiteHash": "aad7a61cb08159dc",
+      "files": [
+        "scripts/mutation-ledger.mjs"
+      ],
+      "baseline": {
+        "suite": "auth:ledger",
+        "builds": [],
+        "command": "pnpm exec vitest run test/mutation-ledger.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-ledger.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 14,
+        "passed": 14,
+        "failed": 0,
+        "durationMs": 5084
+      },
+      "mutated": {
+        "suite": "auth:ledger",
+        "builds": [],
+        "command": "pnpm exec vitest run test/mutation-ledger.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-ledger-unchecked-suite-passes.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 14,
+        "passed": 12,
+        "failed": 2,
+        "durationMs": 4584
+      },
+      "caught": [
+        "suiteDrift — a receipt with no hash was never checked, and says so is unchecked when the *current* hash is the one that is missing",
+        "suiteDrift — a receipt with no hash was never checked, and says so is unchecked — not current — when the receipt carries no hash"
+      ]
+    }
+  ]
+}

@@ -263,6 +263,27 @@ describe('suiteDrift — a receipt with no hash was never checked, and says so',
     expect(suiteDrift({ suite: 'auth:all', verdict: 'red' }, null)).toBe('unchecked');
   });
 
+  it('is unchecked when the *current* hash is the one that is missing', () => {
+    /**
+     * Both ends have to be present for a comparison to mean anything, and the
+     * round-11 codex critic executed the case where only one is: a stored hash
+     * against a `null` current one answered `stale` — a definite verdict about
+     * a comparison that never happened, which is the fail-open shape being
+     * fixed here appearing inside the fix for it.
+     *
+     * `null` current means `suiteHashOf` failed (an unreadable file, a suite
+     * whose directory has moved). That is *unchecked*, and it is the same word
+     * a missing stored hash gets, because they are the same situation from
+     * different ends.
+     */
+    expect(suiteDrift({ suite: 'auth:org', suiteHash: 'abc', verdict: 'red' }, null)).toBe(
+      'unchecked',
+    );
+    expect(suiteDrift({ suite: 'auth:org', suiteHash: 'abc', verdict: 'red' }, undefined)).toBe(
+      'unchecked',
+    );
+  });
+
   it('exempts only the suite that never ran', () => {
     // `no-baseline` means the suite was already red or ran nothing, so the row
     // claims nothing and there is nothing to have drifted. That is the one

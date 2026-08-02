@@ -1,8 +1,8 @@
 {
   "mutation": "normalize-outside-guard",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:46:06.480Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-01T23:56:46.226Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "01562b73311b148a",
@@ -11,9 +11,9 @@
     {
       "suite": "auth:org",
       "verdict": "red",
-      "subjectHash": "e8b4f162dd072bde",
+      "subjectHash": "ba9a0e3e48db6692",
       "suiteFile": "packages/auth/test/org.test.ts",
-      "suiteHash": "232e38b363d86277",
+      "suiteHash": "3d71b1dc7dd666cc",
       "files": [
         "packages/auth/src/org.ts"
       ],
@@ -23,10 +23,10 @@
         "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
         "cwd": "packages/auth",
         "exitCode": 0,
-        "total": 52,
-        "passed": 52,
+        "total": 54,
+        "passed": 54,
         "failed": 0,
-        "durationMs": 1589
+        "durationMs": 1912
       },
       "mutated": {
         "suite": "auth:org",
@@ -34,10 +34,10 @@
         "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-normalize-outside-guard.json",
         "cwd": "packages/auth",
         "exitCode": 1,
-        "total": 52,
-        "passed": 50,
+        "total": 54,
+        "passed": 52,
         "failed": 2,
-        "durationMs": 1536
+        "durationMs": 4352
       },
       "caught": [
         "revocation hooks a reporter cannot escalate into a request failure or a process exit normalizing the rejection cannot itself become the failure survives a port rejecting with a prototype-less object",

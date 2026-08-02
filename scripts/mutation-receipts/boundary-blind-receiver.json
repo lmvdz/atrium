@@ -1,8 +1,8 @@
 {
   "mutation": "boundary-blind-receiver",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:46:22.115Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-01T23:57:14.503Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "3ee3ec3594464de2",
@@ -11,9 +11,9 @@
     {
       "suite": "auth:room-access",
       "verdict": "red",
-      "subjectHash": "5b0af1e36541e3d0",
+      "subjectHash": "b067b0240a78fe70",
       "suiteFile": "packages/auth/test/room-access.test.ts",
-      "suiteHash": "3468cfb8c6a39a5c",
+      "suiteHash": "8c54c29456cc8782",
       "files": [
         "packages/auth/test/support/import-boundary.ts"
       ],
@@ -23,10 +23,10 @@
         "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
         "cwd": "packages/auth",
         "exitCode": 0,
-        "total": 69,
-        "passed": 69,
+        "total": 108,
+        "passed": 108,
         "failed": 0,
-        "durationMs": 2317
+        "durationMs": 5207
       },
       "mutated": {
         "suite": "auth:room-access",
@@ -34,15 +34,16 @@
         "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-blind-receiver.json",
         "cwd": "packages/auth",
         "exitCode": 1,
-        "total": 69,
-        "passed": 56,
-        "failed": 13,
-        "durationMs": 2242
+        "total": 108,
+        "passed": 94,
+        "failed": 14,
+        "durationMs": 5963
       },
       "caught": [
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores a computed key on something that is not a handle",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores a domain object that has a memberships field",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the receiver, without which the widening is just noise ignores the word on a value that never came from the database",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted reports an expression form it has no model of, and treats it as a handle",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores `??` and `||` between values that never came from the database",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores a computed key on a defaulted parameter that is not a handle",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted and the receiver test still holds through every one of them ignores a conditional between two things that are not handles",

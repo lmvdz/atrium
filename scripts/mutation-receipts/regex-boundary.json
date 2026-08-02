@@ -1,19 +1,19 @@
 {
   "mutation": "regex-boundary",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:46:04.935Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-01T23:56:41.853Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
-  "mutationHash": "26bd1399189949b9",
+  "mutationHash": "c7b4336047ac2920",
   "claim": "packages/auth/test/room-access.test.ts — most of it; of the evasion fixtures, the named-import shapes the regex was written for are the ones that still fire",
   "suites": [
     {
       "suite": "auth:room-access",
       "verdict": "red",
-      "subjectHash": "5b0af1e36541e3d0",
+      "subjectHash": "b067b0240a78fe70",
       "suiteFile": "packages/auth/test/room-access.test.ts",
-      "suiteHash": "3468cfb8c6a39a5c",
+      "suiteHash": "8c54c29456cc8782",
       "files": [
         "packages/auth/test/support/import-boundary.ts"
       ],
@@ -23,10 +23,10 @@
         "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
         "cwd": "packages/auth",
         "exitCode": 0,
-        "total": 69,
-        "passed": 69,
+        "total": 108,
+        "passed": 108,
         "failed": 0,
-        "durationMs": 2317
+        "durationMs": 5207
       },
       "mutated": {
         "suite": "auth:room-access",
@@ -34,13 +34,23 @@
         "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-regex-boundary.json",
         "cwd": "packages/auth",
         "exitCode": 1,
-        "total": 69,
-        "passed": 37,
-        "failed": 32,
-        "durationMs": 2345
+        "total": 108,
+        "passed": 66,
+        "failed": 42,
+        "durationMs": 7808
       },
       "caught": [
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the controls, without which all of the above is noise allows an app to import a vetted reader that holds the table",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the controls, without which all of the above is noise fires on a `require` that came from `createRequire`",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the controls, without which all of the above is noise fires on a side-effect import, which binds nothing and runs everything",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted fires on the table reached off a handle in a .js route",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted follows a `paths` alias declared in an extended tsconfig",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 denominator admitted follows a `paths` alias into the handle graph",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted fires on a handle annotated through a local type alias",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted fires on a handle annotated with a renamed type import",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted fires on a handle laundered through a tagged template",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted fires on a handle taken through `import =` and `export =`",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted reports an expression form it has no model of, and treats it as a handle",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key held in a variable",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key it cannot resolve",
         "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a handle taken as an annotated parameter",

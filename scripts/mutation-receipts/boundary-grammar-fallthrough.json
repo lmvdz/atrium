@@ -1,12 +1,12 @@
 {
-  "mutation": "boundary-literal-keys-only",
+  "mutation": "boundary-grammar-fallthrough",
   "verdict": "red",
-  "recordedAt": "2026-08-01T23:57:08.512Z",
+  "recordedAt": "2026-08-02T00:08:21.511Z",
   "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
-  "mutationHash": "b54ea2af85c8bbc1",
-  "claim": "packages/auth/test/room-access.test.ts — the unresolvable-key fixtures",
+  "mutationHash": "39e00c3522bec0d4",
+  "claim": "packages/auth/test/room-access.test.ts — the tagged-template, `import =`/`export =` and unmodelled fixtures",
   "suites": [
     {
       "suite": "auth:room-access",
@@ -31,17 +31,17 @@
       "mutated": {
         "suite": "auth:room-access",
         "builds": [],
-        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-literal-keys-only.json",
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-grammar-fallthrough.json",
         "cwd": "packages/auth",
         "exitCode": 1,
         "total": 108,
         "passed": 106,
         "failed": 2,
-        "durationMs": 4496
+        "durationMs": 15135
       },
       "caught": [
-        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key held in a variable",
-        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key it cannot resolve"
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted fires on a handle laundered through a tagged template",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-10 grammar admitted reports an expression form it has no model of, and treats it as a handle"
       ]
     }
   ]

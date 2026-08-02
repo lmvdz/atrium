@@ -70,6 +70,17 @@ describe('authorize — the grants', () => {
   });
 
   it('lets higher roles do everything a lower role can', () => {
+    /**
+     * **Reads its expectation out of the table it is testing** — the round-11
+     * codex critic's finding, and kept deliberately. As a *monotonicity* check
+     * it is exactly right: whatever the table says, a higher role must be able
+     * to do what a lower one can, and deriving the threshold from the table is
+     * the only way to say that for every row at once.
+     *
+     * What it must not be mistaken for is a check that the thresholds are
+     * correct. That one is `grants each command to exactly the roles the
+     * protocol says` in "the policy table itself", against a literal list.
+     */
     for (const command of Object.keys(commandPolicy)) {
       const required = commandPolicy[command as keyof typeof commandPolicy].role;
       const allowed: Role[] =
@@ -205,25 +216,25 @@ describe('the policy table itself', () => {
    * cannot fail. Adding a command means editing two files, which is the review
    * moment deny-by-default is supposed to create.
    */
-  const protocol = [
-    'room.join',
-    'room.leave',
-    'room.presence',
-    'message.send',
-    'proposal.accept',
-    'proposal.reject',
-    'object.correct',
-    'room.rename',
-    'room.archive',
-    'workspace.read',
-    'room.create',
-    'workspace.invite',
-    'workspace.invitation.revoke',
-    'workspace.member.remove',
-    'workspace.member.role',
-    'workspace.update',
-    'workspace.delete',
-  ] as const;
+  const protocol: Record<string, { scope: string; role: string }> = {
+    'room.join': { scope: 'room', role: 'member' },
+    'room.leave': { scope: 'room', role: 'member' },
+    'room.presence': { scope: 'room', role: 'member' },
+    'message.send': { scope: 'room', role: 'member' },
+    'proposal.accept': { scope: 'room', role: 'member' },
+    'proposal.reject': { scope: 'room', role: 'member' },
+    'object.correct': { scope: 'room', role: 'member' },
+    'room.rename': { scope: 'room', role: 'admin' },
+    'room.archive': { scope: 'room', role: 'admin' },
+    'workspace.read': { scope: 'workspace', role: 'member' },
+    'room.create': { scope: 'workspace', role: 'member' },
+    'workspace.invite': { scope: 'workspace', role: 'admin' },
+    'workspace.invitation.revoke': { scope: 'workspace', role: 'admin' },
+    'workspace.member.remove': { scope: 'workspace', role: 'admin' },
+    'workspace.member.role': { scope: 'workspace', role: 'admin' },
+    'workspace.update': { scope: 'workspace', role: 'admin' },
+    'workspace.delete': { scope: 'workspace', role: 'owner' },
+  };
 
   it('names only roles and scopes that exist', () => {
     // Against the literals, not against `isRole` — a predicate defined over the
@@ -251,7 +262,30 @@ describe('the policy table itself', () => {
      * The property is real and this is what it takes to assert it: the table's
      * keys are the protocol, spelled out independently above.
      */
-    expect(Object.keys(commandPolicy).sort()).toEqual([...protocol].sort());
+    expect(commandPolicy).toEqual(protocol);
+  });
+
+  it('grants each command to exactly the roles the protocol says, from the list above', () => {
+    /**
+     * **The round-11 codex critic found the same tautology one test further
+     * down**, and it was the more dangerous of the two. `authorize — the
+     * grants > lets higher roles do everything a lower role can` reads
+     * `commandPolicy[command].role` and builds its expectation from it, so
+     * moving `room.rename` from `admin` to `member` leaves it green — and
+     * nothing else in any of these files independently denies `room.rename` to
+     * a member. A test that reads the table cannot notice the table changing.
+     *
+     * This asks the same question against the literal list above, so a policy
+     * edit has to be made twice or the suite says so.
+     */
+    const rank: Record<string, number> = { member: 1, admin: 2, owner: 3 };
+    for (const [command, expected] of Object.entries(protocol)) {
+      for (const role of roles) {
+        const allowed = rank[role] !== undefined && rank[role] >= (rank[expected.role] ?? 99);
+        expect(authorize(command, { role }).allowed, `${role} → ${command}`).toBe(allowed);
+      }
+      expect(commandScope(command as keyof typeof commandPolicy), command).toBe(expected.scope);
+    }
   });
 
   it('authorizes nothing outside that list, whatever the role', () => {

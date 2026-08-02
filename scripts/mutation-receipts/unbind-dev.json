@@ -1,8 +1,8 @@
 {
   "mutation": "unbind-dev",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:45:50.696Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-01T23:56:04.417Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "44d037163143d641",
@@ -13,7 +13,7 @@
       "verdict": "red",
       "subjectHash": "8db99949fbe2f5c8",
       "suiteFile": "packages/auth/test/deployment.test.ts",
-      "suiteHash": "5a6b2b0a7a2600e6",
+      "suiteHash": "70cb1611b76bd0c1",
       "files": [
         "deploy/Caddyfile.dev",
         "docker-compose.dev.yml"
@@ -27,7 +27,7 @@
         "total": 5,
         "passed": 5,
         "failed": 0,
-        "durationMs": 748
+        "durationMs": 1680
       },
       "mutated": {
         "suite": "auth:deployment",
@@ -38,7 +38,7 @@
         "total": 5,
         "passed": 3,
         "failed": 2,
-        "durationMs": 718
+        "durationMs": 1175
       },
       "caught": [
         "the dev compose pair cannot be put on a network proxies the app to loopback Hosts only, and refuses every other name",

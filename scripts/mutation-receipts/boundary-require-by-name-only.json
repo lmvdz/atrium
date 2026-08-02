@@ -1,12 +1,12 @@
 {
-  "mutation": "boundary-literal-keys-only",
+  "mutation": "boundary-require-by-name-only",
   "verdict": "red",
-  "recordedAt": "2026-08-01T23:57:08.512Z",
+  "recordedAt": "2026-08-02T00:09:21.629Z",
   "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
-  "mutationHash": "b54ea2af85c8bbc1",
-  "claim": "packages/auth/test/room-access.test.ts — the unresolvable-key fixtures",
+  "mutationHash": "0558a1c03a690c9d",
+  "claim": "packages/auth/test/room-access.test.ts — the createRequire fixture, in all three spellings",
   "suites": [
     {
       "suite": "auth:room-access",
@@ -31,17 +31,16 @@
       "mutated": {
         "suite": "auth:room-access",
         "builds": [],
-        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-literal-keys-only.json",
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-require-by-name-only.json",
         "cwd": "packages/auth",
         "exitCode": 1,
         "total": 108,
-        "passed": 106,
-        "failed": 2,
-        "durationMs": 4496
+        "passed": 107,
+        "failed": 1,
+        "durationMs": 13815
       },
       "caught": [
-        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key held in a variable",
-        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on a computed key it cannot resolve"
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the controls, without which all of the above is noise fires on a `require` that came from `createRequire`"
       ]
     }
   ]

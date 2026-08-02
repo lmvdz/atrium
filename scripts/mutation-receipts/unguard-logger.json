@@ -1,8 +1,8 @@
 {
   "mutation": "unguard-logger",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:45:55.749Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-01T23:56:13.462Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "e3479109719b306e",
@@ -13,7 +13,7 @@
       "verdict": "red",
       "subjectHash": "e07c0d28df684af0",
       "suiteFile": "packages/auth/test/org.test.ts",
-      "suiteHash": "232e38b363d86277",
+      "suiteHash": "3d71b1dc7dd666cc",
       "files": [
         "packages/auth/src/errors.ts"
       ],
@@ -23,10 +23,10 @@
         "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-org.json",
         "cwd": "packages/auth",
         "exitCode": 0,
-        "total": 52,
-        "passed": 52,
+        "total": 54,
+        "passed": 54,
         "failed": 0,
-        "durationMs": 1589
+        "durationMs": 1912
       },
       "mutated": {
         "suite": "auth:org",
@@ -34,10 +34,10 @@
         "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-unguard-logger.json",
         "cwd": "packages/auth",
         "exitCode": 1,
-        "total": 52,
-        "passed": 50,
+        "total": 54,
+        "passed": 52,
         "failed": 2,
-        "durationMs": 1529
+        "durationMs": 2355
       },
       "caught": [
         "revocation hooks a reporter cannot escalate into a request failure or a process exit survives a logger that throws, and still reaches the operator seam",
@@ -49,7 +49,7 @@
       "verdict": "red",
       "subjectHash": "e07c0d28df684af0",
       "suiteFile": "packages/auth/test/errors.test.ts",
-      "suiteHash": "72a563013bf42b03",
+      "suiteHash": "d7883e3bb0d2295a",
       "files": [
         "packages/auth/src/errors.ts"
       ],
@@ -62,7 +62,7 @@
         "total": 42,
         "passed": 42,
         "failed": 0,
-        "durationMs": 705
+        "durationMs": 1103
       },
       "mutated": {
         "suite": "auth:errors",
@@ -73,7 +73,7 @@
         "total": 42,
         "passed": 40,
         "failed": 2,
-        "durationMs": 706
+        "durationMs": 1106
       },
       "caught": [
         "guardedErrorLog swallows a field builder that throws, which is why fields are a thunk",

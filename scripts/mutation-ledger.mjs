@@ -63,7 +63,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const TOUCHED = [
   'packages/auth/src/room-access.ts',
@@ -146,10 +146,35 @@ function restore() {
  */
 let editedFiles = new Set();
 
+/**
+ * Rewrite one file, and refuse an ambiguous target.
+ *
+ * **The occurrence check is round 11's, and it caught a live false match in this
+ * very file within a minute of being written.** `ledger-unchecked-suite-passes`
+ * mutates `mutation-ledger.mjs` itself, so its search string appears *twice*:
+ * once in the function it means to change, and once in the table entry that
+ * declares it. `split().join()` replaced both, and when the real line later
+ * drifted the mutation went on "applying" cleanly against its own definition —
+ * a mutation that measures nothing while `--verify` says `ok`. That is the
+ * fail-open class this ticket has now found at five depths, and this is the
+ * fifth.
+ *
+ * A target that matches more than once is therefore an error rather than a
+ * broadcast. Where a mutation genuinely means "every occurrence", it says so.
+ */
 function edit(file, pairs) {
   let source = readFileSync(file, 'utf8');
-  for (const [from, to] of pairs) {
-    if (!source.includes(from)) throw new Error(`mutation target not found in ${file}:\n${from}`);
+  for (const pair of pairs) {
+    const [from, to, all] = pair;
+    const occurrences = source.split(from).length - 1;
+    if (occurrences === 0) throw new Error(`mutation target not found in ${file}:\n${from}`);
+    if (occurrences > 1 && all !== 'all') {
+      throw new Error(
+        `mutation target matches ${occurrences} places in ${file}, so which one it ` +
+          `rewrites is luck:\n${from}\n` +
+          "Pass 'all' as a third element if every occurrence is meant.",
+      );
+    }
     source = source.split(from).join(to);
   }
   writeFileSync(file, source);
@@ -163,7 +188,10 @@ const mutations = {
     'apps/web/e2e/room-access.spec.ts — the workspace-role paths; the positive controls hold',
     () =>
       edit('packages/auth/src/room-access.ts', [
-        ['    .innerJoin(workspaceMembers, roomWorkspaceMemberJoin)\n', ''],
+        // Three query sites join the same way, and round 5's read had none of
+        // them — so this one genuinely means every occurrence, and says so
+        // rather than relying on `split().join()` doing it quietly.
+        ['    .innerJoin(workspaceMembers, roomWorkspaceMemberJoin)\n', '', 'all'],
         [
           'export const roomAuthorizationRoles = {\n  role: memberships.role,\n  workspaceRole: workspaceMembers.role,\n} as const;',
           'export const roomAuthorizationRoles = {\n  role: memberships.role,\n} as const;',
@@ -668,20 +696,20 @@ const mutations = {
         // binding element with no default of its own, and `collectAccesses`
         // asking its destructuring question of variable declarations alone.
         [
-          '        if (referencesHandleType(declaration.type, handleTypeNames)) return true;\n' +
+          '        if (referencesHandleType(declaration.type, handleTypeNames, originalTypeName)) return true;\n' +
             '        /**\n' +
             '         * A **default** is not the caller',
-          '        return referencesHandleType(declaration.type, handleTypeNames);\n' +
+          '        return referencesHandleType(declaration.type, handleTypeNames, originalTypeName);\n' +
             '        /**\n' +
             '         * A **default** is not the caller',
         ],
         ['      if (element.initializer && isHandle(element.initializer)) return true;\n', ''],
         [
           '      if (ts.isParameter(owner)) {\n' +
-            '        if (referencesHandleType(owner.type, handleTypeNames)) return true;\n' +
+            '        if (referencesHandleType(owner.type, handleTypeNames, originalTypeName)) return true;\n' +
             '        return owner.initializer ? isHandle(owner.initializer) : false;\n' +
             '      }',
-          '      if (ts.isParameter(owner)) return referencesHandleType(owner.type, handleTypeNames);',
+          '      if (ts.isParameter(owner))\n        return referencesHandleType(owner.type, handleTypeNames, originalTypeName);',
         ],
         [
           '      (ts.isVariableDeclaration(node) || ts.isParameter(node)) &&\n' +
@@ -754,7 +782,10 @@ const mutations = {
           "    return { kind: 'external' };",
         ],
         [
-          "      if (declaredDependencies(fromPath).has(packageNameOf(specifier))) return { kind: 'external' };\n" +
+          "      if (declared?.startsWith('workspace:')) {\n" +
+            "        return { kind: 'unresolved', reason: 'outside-the-graph' };\n" +
+            '      }\n' +
+            "      if (declared !== undefined) return { kind: 'external' };\n" +
             "      return { kind: 'unresolved', reason: 'undeclared-package' };",
           "      return { kind: 'external' };",
         ],
@@ -797,9 +828,20 @@ const mutations = {
     'packages/auth/test/mutation-ledger.test.ts — the suite-drift tests',
     () =>
       edit('scripts/mutation-ledger.mjs', [
+        /**
+         * **Assembled rather than written**, and that is the whole point.
+         *
+         * This mutation rewrites the file it lives in, so any contiguous search
+         * literal also appears right here in its own definition — which is how
+         * round 11's first draft went on "applying" cleanly against itself after
+         * the real line had drifted. `edit`'s occurrence check catches the
+         * two-match case; a *one*-match case where the one match is this table
+         * entry is worse, because nothing looks wrong. Splitting the string
+         * means the file contains it exactly once, in the function.
+         */
         [
-          "  if (!suite.suiteHash) return 'unchecked';",
-          "  if (!suite.suiteHash) return 'current';",
+          `  if (!suite.suiteHash${" || !currentHash) return 'unchecked';"}`,
+          `  if (!suite.suiteHash${" || !currentHash) return 'current';"}`,
         ],
       ]),
   ],
@@ -813,6 +855,69 @@ const mutations = {
           "  const value = typeof raw === 'string' ? raw.trim() : null;\n  if (value === null || !isRole(value)) {",
           "  const value = Array.isArray(raw) ? raw.join(',') : raw;\n" +
             "  if (typeof value !== 'string' || parseRole(value) === null) {",
+        ],
+      ]),
+  ],
+
+  // ── round 11: what the round-11 critics found in round 11 ─────────────────
+
+  'boundary-side-effect-blind': [
+    "the reading every round before this one had: a bare `import 'x'` binds nothing, so it cannot reach the table — true about binding, false about running",
+    'packages/auth/test/room-access.test.ts — the side-effect import fixture and its control',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          "      if (!clause) {\n        module.imports.push({\n          specifier,\n          kind: 'side-effect-import',",
+          "      if (!clause) continue;\n      if (false) {\n        module.imports.push({\n          specifier,\n          kind: 'side-effect-import',",
+        ],
+      ]),
+  ],
+
+  'boundary-require-by-name-only': [
+    'a `require` is recognised only when the callee is literally the identifier `require`, so `const req = createRequire(import.meta.url)` walks past',
+    'packages/auth/test/room-access.test.ts — the createRequire fixture, in all three spellings',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          "        (node.expression.text === 'require' || requireBindings.has(node.expression.text));",
+          "        node.expression.text === 'require';",
+        ],
+        [
+          "          (ts.isIdentifier(node.expression) &&\n            (node.expression.text === 'require' ||\n              module.requireBindings.has(node.expression.text)));",
+          "          (ts.isIdentifier(node.expression) && node.expression.text === 'require');",
+        ],
+      ]),
+  ],
+
+  'boundary-workspace-dep-external': [
+    'a dependency declared `workspace:*` is treated as a package on npm rather than as a package in this repository nobody parsed',
+    'packages/auth/test/room-access.test.ts — the workspace-dependency fixture',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          "      if (declared?.startsWith('workspace:')) {\n        return { kind: 'unresolved', reason: 'outside-the-graph' };\n      }\n",
+          '',
+        ],
+      ]),
+  ],
+
+  'boundary-follows-symlinks-lexically': [
+    'a symlinked module is parsed as though it lived where the link is, which is not where Node resolves its imports from',
+    'packages/auth/test/room-access.test.ts — the symlink fixture',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        ['      const real = realpathSync.native(path);', '      const real = path;'],
+      ]),
+  ],
+
+  'boundary-type-alias-blind': [
+    'the handle-type comparison follows an import rename and stops there, so `type DB = Database` hides the annotation',
+    'packages/auth/test/room-access.test.ts — the local-type-alias fixture',
+    () =>
+      edit('packages/auth/test/support/import-boundary.ts', [
+        [
+          '      const alias = module.typeAliases.get(local);',
+          '      const alias = undefined as string | undefined;',
         ],
       ]),
   ],
@@ -1012,6 +1117,11 @@ const CREDITED = {
   'boundary-ignores-parse-errors': ['auth:room-access'],
   'ledger-unchecked-suite-passes': ['auth:ledger'],
   'role-assert-joins-lists': ['auth:org'],
+  'boundary-side-effect-blind': ['auth:room-access'],
+  'boundary-require-by-name-only': ['auth:room-access'],
+  'boundary-workspace-dep-external': ['auth:room-access'],
+  'boundary-follows-symlinks-lexically': ['auth:room-access'],
+  'boundary-type-alias-blind': ['auth:room-access'],
   'command-predicate-fail-open': ['auth:authz'],
 };
 
@@ -1061,7 +1171,34 @@ function sha(text) {
 function suiteHashOf(suiteName) {
   const suite = SUITES[suiteName];
   try {
-    if (suite.file) return sha(readFileSync(join(suite.cwd, suite.file), 'utf8'));
+    if (suite.file) {
+      /**
+       * The suite file **and the helpers it imports from its own `support/`**.
+       *
+       * The round-11 codex critic's point: "the content hash of what a suite
+       * actually runs" was one file, while `room-access.test.ts` gets most of
+       * its behaviour from `test/support/import-boundary.ts`. That one is now
+       * covered. What is still not is the *source* the suite exercises — which
+       * is `subjectHash`'s job for the files a mutation edits, and nobody's for
+       * the rest. Stated rather than implied.
+       */
+      const parts = [`${suite.file}\n${readFileSync(join(suite.cwd, suite.file), 'utf8')}`];
+      const support = join(suite.cwd, dirname(suite.file), 'support');
+      if (existsSync(support)) {
+        const helpers = [];
+        const walk = (dir) => {
+          for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const path = join(dir, entry.name);
+            if (entry.isDirectory()) walk(path);
+            else helpers.push(path);
+          }
+        };
+        walk(support);
+        helpers.sort();
+        for (const helper of helpers) parts.push(`${helper}\n${readFileSync(helper, 'utf8')}`);
+      }
+      return sha(parts.join('\n'));
+    }
     const root = join(suite.cwd, 'test');
     const files = [];
     const walk = (dir) => {
@@ -1602,7 +1739,16 @@ function readReceipt(key) {
  */
 export function suiteDrift(suite, currentHash) {
   if (suite.verdict === 'no-baseline') return 'current';
-  if (!suite.suiteHash) return 'unchecked';
+  /**
+   * Both ends have to be present for a comparison to mean anything. A missing
+   * *stored* hash is a receipt written before this check existed; a missing
+   * *current* hash is `suiteHashOf` having failed just now. Round 11's first
+   * draft reported the second as `stale` — a definite verdict about a
+   * comparison it could not make, which is the same shape as everything else
+   * this round is about, in the fix for it. Found by the round-11 codex critic,
+   * which executed the call.
+   */
+  if (!suite.suiteHash || !currentHash) return 'unchecked';
   return suite.suiteHash === currentHash ? 'current' : 'stale';
 }
 
@@ -1638,7 +1784,15 @@ function describeReceipt(key) {
     .map((suite) => {
       const mutated = suite.mutated;
       if (!mutated) return `${suite.suite}: ${suite.verdict}`;
-      return `${suite.suite} ${mutated.failed}/${mutated.total} red`;
+      /**
+       * The verdict, not the counts, decides the word. Round 11's first draft
+       * printed "${failed}/${total} red" whatever `judge` had decided, so a
+       * `green`, `unrelated` or `unmeasured` suite rendered as red inside a
+       * NOT PROVED line — the number contradicting the label beside it. Found
+       * by the round-11 codex critic.
+       */
+      const word = suite.verdict === 'red' ? 'red' : suite.verdict;
+      return `${suite.suite} ${mutated.failed}/${mutated.total} ${word}`;
     })
     .join(', ');
   const when = String(receipt.recordedAt).slice(0, 10);

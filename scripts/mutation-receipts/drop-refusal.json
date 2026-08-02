@@ -1,8 +1,8 @@
 {
   "mutation": "drop-refusal",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:45:51.402Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-01T23:56:05.828Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "954e545a49cd98b1",
@@ -13,7 +13,7 @@
       "verdict": "red",
       "subjectHash": "920708c1f80484f1",
       "suiteFile": "packages/auth/test/deployment.test.ts",
-      "suiteHash": "5a6b2b0a7a2600e6",
+      "suiteHash": "70cb1611b76bd0c1",
       "files": [
         "deploy/Caddyfile.dev"
       ],
@@ -26,7 +26,7 @@
         "total": 5,
         "passed": 5,
         "failed": 0,
-        "durationMs": 748
+        "durationMs": 1680
       },
       "mutated": {
         "suite": "auth:deployment",
@@ -37,7 +37,7 @@
         "total": 5,
         "passed": 4,
         "failed": 1,
-        "durationMs": 701
+        "durationMs": 1393
       },
       "caught": [
         "the dev compose pair cannot be put on a network proxies the app to loopback Hosts only, and refuses every other name"

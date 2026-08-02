@@ -1,8 +1,8 @@
 {
   "mutation": "undescribable-describer",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:48:47.331Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-02T00:04:03.309Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "3f0640e1b135ecc3",
@@ -13,7 +13,7 @@
       "verdict": "red",
       "subjectHash": "e07c0d28df684af0",
       "suiteFile": null,
-      "suiteHash": null,
+      "suiteHash": "926e91c95335ee47",
       "files": [
         "packages/auth/src/errors.ts"
       ],
@@ -23,10 +23,10 @@
         "command": "pnpm exec vitest run --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-all.json",
         "cwd": "packages/auth",
         "exitCode": 0,
-        "total": 342,
-        "passed": 342,
+        "total": 390,
+        "passed": 390,
         "failed": 0,
-        "durationMs": 2958
+        "durationMs": 15322
       },
       "mutated": {
         "suite": "auth:all",
@@ -34,10 +34,10 @@
         "command": "pnpm exec vitest run --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-undescribable-describer.json",
         "cwd": "packages/auth",
         "exitCode": 1,
-        "total": 342,
-        "passed": 318,
+        "total": 390,
+        "passed": 366,
         "failed": 24,
-        "durationMs": 2862
+        "durationMs": 17971
       },
       "caught": [
         "describeUnknown describes a non-string message rather than discarding it",

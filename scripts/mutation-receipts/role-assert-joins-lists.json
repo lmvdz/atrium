@@ -1,12 +1,12 @@
 {
-  "mutation": "invitation-reads-error-message",
+  "mutation": "role-assert-joins-lists",
   "verdict": "red",
-  "recordedAt": "2026-08-02T00:03:29.908Z",
+  "recordedAt": "2026-08-02T00:08:53.433Z",
   "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
-  "mutationHash": "d53eb29b46195907",
-  "claim": "packages/auth/test/org.test.ts — the unreadable-compensation test, which then rejects with a TypeError",
+  "mutationHash": "d2de1a1689bd30c6",
+  "claim": "packages/auth/test/org.test.ts — the exactly-one-role tests",
   "suites": [
     {
       "suite": "auth:org",
@@ -31,16 +31,17 @@
       "mutated": {
         "suite": "auth:org",
         "builds": [],
-        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-invitation-reads-error-message.json",
+        "command": "pnpm exec vitest run test/org.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-role-assert-joins-lists.json",
         "cwd": "packages/auth",
         "exitCode": 1,
         "total": 54,
-        "passed": 53,
-        "failed": 1,
-        "durationMs": 6354
+        "passed": 52,
+        "failed": 2,
+        "durationMs": 10323
       },
       "caught": [
-        "afterCreateInvitation — the time-of-check/time-of-use compensation fails loudly even when the compensation rejects with something unreadable"
+        "assertKnownRole rejects a list of roles it *does* know, which is the whole point",
+        "assertKnownRole returns the role, canonical, rather than whatever spacing arrived"
       ]
     }
   ]

@@ -1,8 +1,8 @@
 {
   "mutation": "sweep-unguarded-log",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:47:56.341Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-02T00:00:45.391Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "2b71b915f154f6e6",
@@ -13,7 +13,7 @@
       "verdict": "red",
       "subjectHash": "339f1d94c7ae85ae",
       "suiteFile": "apps/server/test/ws-server.test.ts",
-      "suiteHash": "6adaefa1d4427a66",
+      "suiteHash": "51d9f003b20eeadd",
       "files": [
         "apps/server/src/ws-server.ts"
       ],
@@ -23,7 +23,7 @@
           {
             "command": "pnpm --filter @atrium/auth build",
             "exitCode": 0,
-            "durationMs": 2089
+            "durationMs": 8231
           }
         ],
         "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-server.json",
@@ -32,7 +32,7 @@
         "total": 60,
         "passed": 60,
         "failed": 0,
-        "durationMs": 5034
+        "durationMs": 7248
       },
       "mutated": {
         "suite": "server:ws-server",
@@ -40,7 +40,7 @@
           {
             "command": "pnpm --filter @atrium/auth build",
             "exitCode": 0,
-            "durationMs": 2574
+            "durationMs": 9600
           }
         ],
         "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-sweep-unguarded-log.json",
@@ -49,7 +49,7 @@
         "total": 60,
         "passed": 59,
         "failed": 1,
-        "durationMs": 9811
+        "durationMs": 15032
       },
       "caught": [
         "a rejection value nobody can read cannot suspend the sweep still evicts within the failure bound when the logger itself throws"

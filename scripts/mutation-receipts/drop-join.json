@@ -1,11 +1,11 @@
 {
   "mutation": "drop-join",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:44:50.992Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-01T23:54:24.174Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
-  "mutationHash": "ec9665f82e9d6251",
+  "mutationHash": "e4955fbe1a2f46fb",
   "claim": "apps/web/e2e/room-access.spec.ts — the workspace-role paths; the positive controls hold",
   "suites": [
     {
@@ -13,7 +13,7 @@
       "verdict": "red",
       "subjectHash": "4bdc7f1bed5097db",
       "suiteFile": "apps/web/e2e/room-access.spec.ts",
-      "suiteHash": "84d91a68d33ea0d5",
+      "suiteHash": "853eec54fc31d935",
       "files": [
         "packages/auth/src/room-access.ts"
       ],
@@ -23,7 +23,7 @@
           {
             "command": "pnpm --filter ./packages/* build",
             "exitCode": 0,
-            "durationMs": 4834
+            "durationMs": 20048
           }
         ],
         "command": "pnpm exec playwright test e2e/room-access.spec.ts --reporter=json",
@@ -32,7 +32,7 @@
         "total": 7,
         "passed": 7,
         "failed": 0,
-        "durationMs": 39159
+        "durationMs": 49424
       },
       "mutated": {
         "suite": "e2e:room-access",
@@ -40,7 +40,7 @@
           {
             "command": "pnpm --filter ./packages/* build",
             "exitCode": 2,
-            "durationMs": 4996
+            "durationMs": 14102
           }
         ],
         "command": "pnpm exec playwright test e2e/room-access.spec.ts --reporter=json",
@@ -49,7 +49,7 @@
         "total": 7,
         "passed": 2,
         "failed": 5,
-        "durationMs": 50907
+        "durationMs": 71568
       },
       "caught": [
         "room-access.spec.ts › authorization does not depend on cleanup having succeeded › denies after a post-removal sweep fails on the lock timeout",

@@ -161,9 +161,35 @@ test.describe('websocket authorization', () => {
     await expect(owner.getByTestId('member-removed')).toBeVisible();
     await expect(owner.getByTestId('member-list')).not.toContainText(memberEmail);
 
-    // Same socket, next command. The membership row is gone, so the answer is.
+    /**
+     * Same socket, next command — and **the assertion has to name which of two
+     * mechanisms answered**, because the two are racing.
+     *
+     * Round 11 found this by running the suite on a slower machine: the sweep
+     * (`WS_SWEEP_INTERVAL_MS: 1000` in `e2e/support/config.mjs`) evicts a
+     * removed member's socket on its own, and if the UI round-trip above takes
+     * longer than one interval the socket is already closed when this line
+     * runs. `sendOnLiveSocket` then answers `{ closed: true, reply: null }` and
+     * the old single assertion failed with "received value must be a non-null
+     * object" — reproducibly, on `fix/auth-r10` as well, so it is an
+     * environment-sensitive test defect rather than a regression.
+     *
+     * Writing it as "either is fine" would be the wrong repair: that is a test
+     * that cannot say what it measured. So both outcomes are asserted, each
+     * with its own verdict, and neither admits the failure the test exists to
+     * catch — a socket that stayed open and answered `joined`, or one that
+     * closed for some unrelated reason. The sweep half has its own test below;
+     * this one is about authority being re-read per command *when there is a
+     * command to read it for*.
+     */
     const after = await sendOnLiveSocket(member, { command: 'room.join', roomId });
-    expect(after.reply).toMatchObject({ type: 'command_error', reason: 'not_a_member' });
+    if (after.closed) {
+      // The sweep won the race: the socket must be closed *as a revocation*
+      // (1008), which is the same close code the eviction test pins.
+      expect((await liveSocketStatus(member)).closeCode).toBe(1008);
+    } else {
+      expect(after.reply).toMatchObject({ type: 'command_error', reason: 'not_a_member' });
+    }
 
     // And the workspace itself is gone from their account.
     await member.goto('/app');

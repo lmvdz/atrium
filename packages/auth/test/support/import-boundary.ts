@@ -41,16 +41,34 @@
  * So every enumeration below now names what it enumerates *from*, and every
  * "could not tell" has somewhere to go:
  *
- *  | channel      | what it holds                                            |
- *  |--------------|----------------------------------------------------------|
- *  | `unparsed`   | a file under a graph root this analysis did not read      |
- *  | `unresolved` | a specifier it could not tie to a module it parsed        |
- *  | `unmodelled` | an expression or declaration form the handle walk lacks   |
- *  | `computed`   | a dynamic `import()`/`require()` with a non-literal        |
- *  | `excluded`   | every directory it declined to descend into, and why       |
+ *  | channel       | what it holds                                           |
+ *  |---------------|---------------------------------------------------------|
+ *  | `unparsed`    | a file under a graph root this analysis did not read     |
+ *  | `unresolved`  | a specifier it could not tie to a module it parsed       |
+ *  | `unmodelled`  | an expression or declaration form the handle walk lacks  |
+ *  | `computed`    | a dynamic `import()`/`require()` with a non-literal       |
+ *  | `incomplete`  | a fixpoint that stopped on its pass bound                |
+ *  | `excluded`    | every directory it declined to descend into              |
  *
- * The repository test asserts all five, so the denominator is now a thing a
- * reviewer reads rather than a thing they assume.
+ * The repository test asserts all six, so the denominator is now a thing a
+ * reviewer reads rather than a thing they assume. (`excluded` is a list of
+ * paths; the *reasons* live beside the rule in `room-access.test.ts`, which is
+ * where a human decides them.)
+ *
+ * ## What this rule does **not** cover, stated because a critic asked
+ *
+ * The subject is the **module graph**. Three ways to reach the table are outside
+ * it by construction, and none of them is a hole this rule can close:
+ *
+ *  - the table named in a **SQL string** — `` db.execute(sql`… memberships`) ``
+ *    — which needs a SQL parser and has a fixture beside the other known limits;
+ *  - a `package.json` **script** that runs `node -e` or `psql -f`, which is not
+ *    a module and is not imported by one;
+ *  - anything reached at runtime through a value this analysis cannot see —
+ *    the four handle gaps below.
+ *
+ * Declared-inert file types are inert **as modules**, which is the only claim
+ * made about them.
  *
  * ## Two halves, two different guarantees — read this before quoting either
  *
@@ -59,8 +77,10 @@
  *
  *  1. **The import half is an invariant.** "No file under a forbidden root can
  *     reach the forbidden binding by importing it" — through any specifier
- *     shape, any re-export chain, any wrapper in any package, resolved to a
- *     fixpoint over the whole module graph. Nothing about it is best-effort;
+ *     shape, any re-export chain, any wrapper in any package, **including a bare
+ *     `import 'x'` that binds nothing and runs everything, and a `require`
+ *     minted by `createRequire` under any name** (both round-11 escapes),
+ *     resolved to a fixpoint over the whole module graph. Nothing about it is best-effort;
  *     where it cannot resolve something it *reports* rather than shrugging.
  *     Round 11 is what makes the second sentence true: the invariant is over
  *     **the files this analysis parsed**, and everything outside that set is now
@@ -125,6 +145,13 @@
  *  - a handle arriving as an **un-annotated parameter the caller supplies**,
  *    including a callback's. (Five bullets, four kinds: the first two and the
  *    container are one missing capability — a model of what an object holds.)
+ *
+ * And a fifth kind, added in round 11 by asking what else can name the table:
+ * **the table named inside a SQL string** — `` db().execute(sql`select … from
+ * memberships`) `` reaches it with no import and no property access. That one is
+ * not about failing to find the handle; it is the table leaving the module graph
+ * altogether, and closing it means parsing SQL. Nothing under `apps/` writes one
+ * today. It has a fixture beside the other four.
  *
  * Those fixtures assert that nothing is reported, so they go red the moment a
  * future round closes one — which forces this header to be corrected in the
@@ -210,9 +237,20 @@
  *
  * **A bare specifier is external only if something says so.** `node:fs` is a
  * builtin and `drizzle-orm` is in a `package.json` on the way up to the root.
- * Anything else — an alias nobody declared, a typo, a workspace package that is
- * not in `graphRoots` — is `unresolved`, because "I assumed it was on npm" is
- * how `@/lib/db` disappeared.
+ * Anything else — an alias nobody declared, a typo — is `unresolved`, because
+ * "I assumed it was on npm" is how `@/lib/db` disappeared. And a dependency
+ * declared `workspace:*` is a package **in this repository**: if it did not
+ * resolve into the graph it is `outside-the-graph`, not external, because
+ * "declared" and "third-party" are different facts and the round-11 codex critic
+ * was right that conflating them reopened the hole under another name.
+ *
+ * **Workspace specifiers are resolved against `packages/<name>/src`**, which is
+ * this repository's layout and not what Node does — Node reads `exports`, which
+ * points at `dist`. The two agree here because every `exports` entry is the
+ * compiled counterpart of a `src` file, and `room-access.test.ts` asserts
+ * exactly that against the real manifests rather than assuming it. The fallback
+ * when a subpath does not resolve is the package root, which *inherits the
+ * package's taint* — so the failure direction is an over-report.
  *
  * ## What this analysis depends on the compiler for
  *
@@ -279,7 +317,7 @@
  * `export function db(): Database`, which is how both apps actually get theirs),
  * or when its `export default` / `export =` expression is one.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isBuiltin } from 'node:module';
 import { dirname, join, relative, resolve as resolvePath, sep } from 'node:path';
 import ts from 'typescript';
@@ -358,6 +396,8 @@ export type OffenceKind =
   | 'named-import'
   | 'default-import'
   | 'namespace-import'
+  /** `import '@atrium/leak'` — binds nothing, runs everything. */
+  | 'side-effect-import'
   | 'dynamic-import'
   | 'require'
   | 'import-equals'
@@ -395,7 +435,7 @@ export interface ComputedSpecifier {
  */
 export interface UnparsedFile {
   file: string;
-  reason: 'unknown-extension' | 'parse-error';
+  reason: 'unknown-extension' | 'parse-error' | 'symlink';
   detail: string;
 }
 
@@ -505,6 +545,10 @@ interface Module {
   reexports: Reference[];
   computed: ComputedSpecifier[];
   handles: HandleFacts;
+  /** Local names that are a `require` — including every `createRequire` alias. */
+  requireBindings: Set<string>;
+  /** `type DB = Database` — the local name and the one it stands for. */
+  typeAliases: Map<string, string>;
   /** Forms this file contains that the handle walk has no model for. */
   unmodelled: UnmodelledForm[];
 }
@@ -659,6 +703,29 @@ function collectSourceFiles(
       continue;
     }
     if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    /**
+     * A symlink is where this walk and Node's resolver stop agreeing.
+     *
+     * Node realpaths a module before resolving what *it* imports, so
+     * `apps/server/src/entry.mjs -> toolbox/entry.mjs` runs `toolbox/rows.mjs`
+     * while a lexical walk reads `apps/server/src/rows.mjs`. Modelling realpath
+     * resolution properly is a second resolver; reporting the symlink is one
+     * line and is the answer this round takes everywhere else. Found by the
+     * round-11 codex critic.
+     */
+    if (entry.isSymbolicLink()) {
+      const real = realpathSync.native(path);
+      if (real !== path) {
+        out.unparsed.push({
+          file: context.rel(path),
+          reason: 'symlink',
+          detail:
+            `it points at ${context.rel(real)}, and Node resolves what that file imports ` +
+            'relative to the real path rather than to this one',
+        });
+        continue;
+      }
+    }
     if (MODULE.test(entry.name)) {
       out.files.push(path);
       continue;
@@ -703,14 +770,27 @@ function isDefaultExported(node: ts.Node): boolean {
 }
 
 /** Does this type annotation name one of the handle types? */
-function referencesHandleType(type: ts.TypeNode | undefined, names: readonly string[]): boolean {
+function referencesHandleType(
+  type: ts.TypeNode | undefined,
+  names: readonly string[],
+  /**
+   * How a locally written type name maps back to the name it was imported
+   * under. `import type { Database as DB }` writes `DB` at the annotation and
+   * means `Database`, and matching the *written* name only is the same
+   * enumerate-from-the-wrong-place mistake as everything else this round fixed:
+   * the list is of type names the declaring package exports, not of identifiers
+   * somebody happened to type.
+   */
+  originalNameOf?: (local: string) => string | undefined,
+): boolean {
   if (!type) return false;
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
     if (ts.isTypeReferenceNode(node)) {
       const name = ts.isIdentifier(node.typeName) ? node.typeName.text : node.typeName.right.text;
-      if (names.includes(name)) {
+      const original = originalNameOf?.(name);
+      if (names.includes(name) || (original !== undefined && names.includes(original))) {
         found = true;
         return;
       }
@@ -738,6 +818,19 @@ function returnedExpressions(fn: ts.SignatureDeclaration): ts.Expression[] {
   };
   ts.forEachChild(body, visit);
   return out;
+}
+
+/**
+ * Is this callee `createRequire`, under any of the spellings that reach it?
+ *
+ * The named import (`createRequire(…)`), the namespace member
+ * (`mod.createRequire(…)`) and the default member — because "only the identifier
+ * `require` counts" was one rename away from nothing.
+ */
+function isRequireFactory(callee: ts.Expression, named: ReadonlySet<string>): boolean {
+  if (ts.isIdentifier(callee)) return named.has(callee.text);
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text === 'createRequire';
+  return false;
 }
 
 function lineOf(source: ts.SourceFile, node: ts.Node): number {
@@ -775,6 +868,8 @@ function readModule(absolute: string, path: string): { module: Module; parseErro
     reexports: [],
     computed: [],
     handles: { imported: new Map(), declared: new Map(), exportedLocals: new Map() },
+    requireBindings: new Set(),
+    typeAliases: new Map(),
     unmodelled: [],
   };
 
@@ -783,8 +878,31 @@ function readModule(absolute: string, path: string): { module: Module; parseErro
       const specifier = statement.moduleSpecifier.text;
       const line = lineOf(source, statement);
       const clause = statement.importClause;
-      // A bare `import 'x'` binds nothing, so it cannot reach the table.
-      if (!clause) continue;
+      /**
+       * `import '@atrium/leak'` binds nothing — **and runs the module**.
+       *
+       * Round 10 and every round before it wrote "binds nothing, so it cannot
+       * reach the table" and had a test blessing that reading. It is wrong for
+       * the reason rule 2 exists: a module that holds the table can do anything
+       * with it, and *executing it* is a thing an app can ask for in one line
+       * with no binding anywhere. `export const rows = await db.select().from(
+       * memberships)` at the top level of a tainted package runs the query the
+       * moment an app imports it for its side effects.
+       *
+       * Recorded as a whole-module reference: there is no name to check, so the
+       * conservative answer is the only sound one — the same rule namespace and
+       * dynamic imports already follow. Found by the round-11 codex critic.
+       */
+      if (!clause) {
+        module.imports.push({
+          specifier,
+          kind: 'side-effect-import',
+          names: [],
+          whole: true,
+          line,
+        });
+        continue;
+      }
       if (clause.name) {
         module.handles.imported.set(clause.name.text, { specifier, name: 'default' });
         module.imports.push({
@@ -919,6 +1037,20 @@ function readModule(absolute: string, path: string): { module: Module; parseErro
     }
   }
 
+  /**
+   * Local names for `createRequire`, and the `require` functions they mint.
+   *
+   * Seeded from the import statements above, because a module cannot get a
+   * `require` in an ES file without asking `node:module` for one by name.
+   */
+  const requireFactories = new Set<string>();
+  for (const [local, origin] of module.handles.imported) {
+    if (origin.specifier === 'node:module' || origin.specifier === 'module') {
+      if (origin.name === 'createRequire') requireFactories.add(local);
+    }
+  }
+  const requireBindings = module.requireBindings;
+
   // `import()` and `require()` are expressions, so they can be anywhere — inside
   // a function, a ternary, a template. The whole tree gets walked for them, and
   // for the declarations the handle analysis needs.
@@ -957,9 +1089,38 @@ function readModule(absolute: string, path: string): { module: Module; parseErro
       // local name; the expression path handles it.
       module.handles.defaultExport = node as unknown as ts.Expression;
     }
+    /**
+     * `const req = createRequire(import.meta.url)` — a `require` under any name.
+     *
+     * Round 11's first draft recognised a call whose callee was literally the
+     * identifier `require`, which is one rename away from nothing. `createRequire`
+     * is the *documented* way an ES module gets a `require`, so every binding it
+     * produces is one, whatever it is called; the names are collected here and
+     * the call site below treats them exactly like `require`. Found by the
+     * round-11 codex critic, which executed the runtime half: from an app
+     * directory `req('@atrium/db/schema')` resolves and hands over the table.
+     */
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer) &&
+      isRequireFactory(node.initializer.expression, requireFactories)
+    ) {
+      requireBindings.add(node.name.text);
+    }
+    if (
+      ts.isTypeAliasDeclaration(node) &&
+      ts.isTypeReferenceNode(node.type) &&
+      ts.isIdentifier(node.type.typeName)
+    ) {
+      module.typeAliases.set(node.name.text, node.type.typeName.text);
+    }
     if (ts.isCallExpression(node)) {
       const isDynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
-      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
+      const isRequire =
+        ts.isIdentifier(node.expression) &&
+        (node.expression.text === 'require' || requireBindings.has(node.expression.text));
       if (isDynamic || isRequire) {
         const kind = isDynamic ? 'dynamic-import' : 'require';
         const [argument] = node.arguments;
@@ -1117,6 +1278,15 @@ export interface BoundaryAnalysis {
   unmodelled: UnmodelledForm[];
   /** Directories not descended into, relative to `root`. */
   excluded: string[];
+  /**
+   * Either fixpoint stopping on its pass bound rather than on convergence.
+   *
+   * The bound exists so a pathological graph cannot spin forever; if it ever
+   * fires, every verdict below it is a *lower bound* and saying nothing would be
+   * the same fail-open as all the others. Empty on any graph this repository
+   * can produce — the bound is `modules.size + 2` and a hop costs a module.
+   */
+  incomplete: string[];
   /** Declared exclusions that matched no directory — a stale rule. */
   unusedExclusions: string[];
   /** Declared exemptions that matched no scanned file — a stale licence. */
@@ -1125,6 +1295,46 @@ export interface BoundaryAnalysis {
   exposureOf: (path: string) => { names: string[]; all: boolean };
   /** Specifier resolution, exposed so a test can prove the resolver works. */
   resolveSpecifier: (specifier: string, fromPath: string) => string | null;
+}
+
+/**
+ * A tsconfig's `paths`, following `extends` to the config that declares them.
+ *
+ * The round-11 codex critic's finding: reading only the nearest config's raw
+ * `paths` means a base config can declare an alias this analysis never sees,
+ * and if the alias prefix happens to be a declared dependency the backstop
+ * answers "external" instead of reporting. Following `extends` is what the
+ * compiler does, so it is what the check that models the compiler must do.
+ *
+ * Nearest wins: a config that declares its own `paths` replaces its base's,
+ * which is TypeScript's rule too.
+ */
+function readPathsWithExtends(
+  config: string,
+  seen = new Set<string>(),
+): { paths: Record<string, string[]>; baseUrl: string; dir: string } {
+  const dir = dirname(config);
+  if (seen.has(config)) return { paths: {}, baseUrl: '.', dir };
+  seen.add(config);
+  const { config: json } = ts.readConfigFile(config, (file) => {
+    try {
+      return readFileSync(file, 'utf8');
+    } catch {
+      return undefined;
+    }
+  });
+  const paths = json?.compilerOptions?.paths as Record<string, string[]> | undefined;
+  const baseUrl = (json?.compilerOptions?.baseUrl as string | undefined) ?? '.';
+  if (paths && Object.keys(paths).length > 0) return { paths, baseUrl, dir };
+  const extended = json?.extends as string | string[] | undefined;
+  for (const one of Array.isArray(extended) ? extended : extended ? [extended] : []) {
+    if (typeof one !== 'string' || !one.startsWith('.')) continue;
+    const next = resolvePath(dir, one.endsWith('.json') ? one : `${one}.json`);
+    if (!existsSync(next)) continue;
+    const inherited = readPathsWithExtends(next, seen);
+    if (Object.keys(inherited.paths).length > 0) return inherited;
+  }
+  return { paths: {}, baseUrl, dir };
 }
 
 /**
@@ -1210,21 +1420,13 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       const config = join(dir, 'tsconfig.json');
       if (existsSync(config)) {
         const parsed: { prefix: string; suffix: string; targets: string[] }[] = [];
-        const { config: json } = ts.readConfigFile(config, (file) => {
-          try {
-            return readFileSync(file, 'utf8');
-          } catch {
-            return undefined;
-          }
-        });
-        const paths = json?.compilerOptions?.paths as Record<string, string[]> | undefined;
-        const baseUrl = (json?.compilerOptions?.baseUrl as string | undefined) ?? '.';
-        for (const [pattern, targets] of Object.entries(paths ?? {})) {
+        const { paths, baseUrl, dir: owner } = readPathsWithExtends(config);
+        for (const [pattern, targets] of Object.entries(paths)) {
           const star = pattern.indexOf('*');
           parsed.push({
             prefix: star === -1 ? pattern : pattern.slice(0, star),
             suffix: star === -1 ? '' : pattern.slice(star + 1),
-            targets: targets.map((target) => join(dir, baseUrl, target)),
+            targets: targets.map((target) => join(owner, baseUrl, target)),
           });
         }
         for (const seen of chain) aliasCache.set(seen, parsed);
@@ -1244,7 +1446,7 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
    * Node builtin nor declared anywhere is the shape `@/lib/db` had, and it is
    * reported rather than assumed to be on npm.
    */
-  const dependencyCache = new Map<string, Set<string>>();
+  const dependencyCache = new Map<string, Map<string, string>>();
   /**
    * Memoized per *directory*, not per starting file: a cache entry keyed on a
    * parent directory must hold that parent's own answer, or a lookup from one
@@ -1252,14 +1454,14 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
    * exactly that by caching one accumulated set against every directory in the
    * chain.)
    */
-  const dependenciesAt = (dir: string): Set<string> => {
+  const dependenciesAt = (dir: string): Map<string, string> => {
     const cached = dependencyCache.get(dir);
     if (cached) return cached;
     const parent = dirname(dir);
     const inherited =
       (dir === rootDir || !dir.startsWith(rootDir + sep)) && dir !== parent
-        ? new Set<string>()
-        : new Set(dir === parent ? [] : dependenciesAt(parent));
+        ? new Map<string, string>()
+        : new Map(dir === parent ? [] : dependenciesAt(parent));
     const manifest = join(dir, 'package.json');
     if (existsSync(manifest)) {
       try {
@@ -1273,7 +1475,9 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
           'peerDependencies',
           'optionalDependencies',
         ]) {
-          for (const name of Object.keys(json[field] ?? {})) inherited.add(name);
+          for (const [name, version] of Object.entries(json[field] ?? {})) {
+            inherited.set(name, String(version));
+          }
         }
       } catch {
         // A manifest we cannot read declares nothing; the backstop reports.
@@ -1282,7 +1486,7 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
     dependencyCache.set(dir, inherited);
     return inherited;
   };
-  const declaredDependencies = (fromPath: string): Set<string> =>
+  const declaredDependencies = (fromPath: string): Map<string, string> =>
     dependenciesAt(dirname(join(rootDir, fromPath)));
 
   const packageNameOf = (specifier: string): string => {
@@ -1299,6 +1503,15 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
     // A `.json` or a `.css` import is a real thing to write and cannot carry the
     // table; anything else that exists on disk and was not parsed is a hole.
     if (extension && inertExtensions.has(extension)) return { kind: 'external' };
+    /**
+     * An edge *into* a directory somebody declared excluded is covered by that
+     * declaration rather than by a second report. `next dev` writes a
+     * `next-env.d.ts` referencing `./.next/dev/types/routes.d.ts`, and reporting
+     * that as an unresolved edge would be the check arguing with a decision it
+     * was given — noise, which is how a fail-closed channel stops being read.
+     */
+    if (declaredExclusions.some((excluded) => path === excluded || path.startsWith(`${excluded}/`)))
+      return { kind: 'external' };
     return { kind: 'unresolved', reason: 'outside-the-graph', resolved: path };
   };
 
@@ -1354,7 +1567,17 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
         return { kind: 'unresolved', reason: 'no-such-file' };
       }
       if (isBuiltin(specifier)) return { kind: 'external' };
-      if (declaredDependencies(fromPath).has(packageNameOf(specifier))) return { kind: 'external' };
+      const declared = declaredDependencies(fromPath).get(packageNameOf(specifier));
+      /**
+       * `"leaker": "workspace:*"` is a package **in this repository** that this
+       * analysis never parsed, and calling it a third-party dependency is the
+       * denominator hole one more time — the round-11 codex critic's point. A
+       * workspace dependency that did not resolve into the graph is reported.
+       */
+      if (declared?.startsWith('workspace:')) {
+        return { kind: 'unresolved', reason: 'outside-the-graph' };
+      }
+      if (declared !== undefined) return { kind: 'external' };
       return { kind: 'unresolved', reason: 'undeclared-package' };
     })();
     resolutionCache.set(key, answer);
@@ -1408,8 +1631,17 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
     return value !== undefined && (value.all || value.names.size > 0);
   };
 
-  // Fixpoint. Bounded by the module count because each pass can only ever add,
-  // and `all` is absorbing — so it terminates on any graph, cycles included.
+  /**
+   * Fixpoint. Bounded by the module count because each pass can only ever add,
+   * and `all` is absorbing — so it terminates on any graph, cycles included.
+   *
+   * The bound is a safety valve, not the termination argument, and round 11's
+   * own self-audit asked what happens if it ever fires: the loop would stop with
+   * facts still arriving and the verdict would be *under*-reported, silently.
+   * That is the round's rule again, so the valve is now a report — see
+   * `incomplete`.
+   */
+  const incomplete: string[] = [];
   let changed = true;
   let passes = 0;
   while (changed && passes <= modules.size + 2) {
@@ -1452,6 +1684,12 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
 
       if (before.names.size !== sizeBefore || before.all !== allBefore) changed = true;
     }
+  }
+  if (changed) {
+    incomplete.push(
+      `the table taint stopped after ${passes} passes with facts still arriving; ` +
+        'the offences below are a lower bound, not the answer',
+    );
   }
 
   /**
@@ -1516,6 +1754,28 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
    */
   function handleClassifier(module: Module) {
     const memo = new Map<string, boolean>();
+    /**
+     * `import type { Database as DB }` writes `DB` and means `Database`.
+     *
+     * `handleTypeNames` is a list of names the declaring package *exports*, so
+     * matching what somebody typed at the annotation is the wrong comparison —
+     * the same enumerate-from-the-wrong-place mistake as the file set. The
+     * import table already holds the mapping.
+     */
+    const originalTypeName = (local: string, depth = 0): string | undefined => {
+      const imported = module.handles.imported.get(local);
+      if (imported) return imported.name;
+      /**
+       * `import type { Database } from '@atrium/db'; type DB = Database;` —
+       * the round-11 codex critic's follow-up to the rename fix, and the same
+       * mistake one hop further out. A local alias chain is walked, with a depth
+       * cap standing in for a cycle check (`type A = B; type B = A` is not
+       * legal TypeScript, but the cap costs nothing and cannot loop).
+       */
+      const alias = module.typeAliases.get(local);
+      if (alias === undefined || depth > 8) return undefined;
+      return handleTypeNames.includes(alias) ? alias : originalTypeName(alias, depth + 1);
+    };
     const inProgress = new Set<string>();
 
     const bindingIsHandle = (name: string): boolean => {
@@ -1539,14 +1799,14 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       const declaration = module.handles.declared.get(name);
       if (!declaration) return false;
       if (ts.isVariableDeclaration(declaration)) {
-        if (referencesHandleType(declaration.type, handleTypeNames)) return true;
+        if (referencesHandleType(declaration.type, handleTypeNames, originalTypeName)) return true;
         return declaration.initializer ? isHandle(declaration.initializer) : false;
       }
       if (ts.isParameter(declaration)) {
         // An annotation is the author saying so. Without one there is nothing
         // syntactic to go on *for a value the caller supplies*, and guessing
         // would be the noise the round-7 gauntlet objected to.
-        if (referencesHandleType(declaration.type, handleTypeNames)) return true;
+        if (referencesHandleType(declaration.type, handleTypeNames, originalTypeName)) return true;
         /**
          * A **default** is not the caller's value, it is an initializer written
          * right here — `function load(db = createDatabase())`. The header's
@@ -1568,18 +1828,18 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       while (ts.isBindingElement(pattern.parent)) pattern = pattern.parent.parent;
       const owner = pattern.parent;
       if (ts.isVariableDeclaration(owner)) {
-        if (referencesHandleType(owner.type, handleTypeNames)) return true;
+        if (referencesHandleType(owner.type, handleTypeNames, originalTypeName)) return true;
         return owner.initializer ? isHandle(owner.initializer) : false;
       }
       if (ts.isParameter(owner)) {
-        if (referencesHandleType(owner.type, handleTypeNames)) return true;
+        if (referencesHandleType(owner.type, handleTypeNames, originalTypeName)) return true;
         return owner.initializer ? isHandle(owner.initializer) : false;
       }
       return false;
     };
 
     const functionYieldsHandle = (fn: ts.SignatureDeclaration): boolean => {
-      if (referencesHandleType(fn.type, handleTypeNames)) return true;
+      if (referencesHandleType(fn.type, handleTypeNames, originalTypeName)) return true;
       return returnedExpressions(fn).some((expression) => isHandle(expression));
     };
 
@@ -1620,10 +1880,16 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       if (ts.isAwaitExpression(node)) return isHandle(node.expression);
       if (ts.isNonNullExpression(node)) return isHandle(node.expression);
       if (ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
-        return referencesHandleType(node.type, handleTypeNames) || isHandle(node.expression);
+        return (
+          referencesHandleType(node.type, handleTypeNames, originalTypeName) ||
+          isHandle(node.expression)
+        );
       }
       if (ts.isTypeAssertionExpression(node)) {
-        return referencesHandleType(node.type, handleTypeNames) || isHandle(node.expression);
+        return (
+          referencesHandleType(node.type, handleTypeNames, originalTypeName) ||
+          isHandle(node.expression)
+        );
       }
       if (ts.isPartiallyEmittedExpression(node)) return isHandle(node.expression);
       /**
@@ -1649,7 +1915,9 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
         // module object, which for the declaring package is a handle source.
         const dynamic =
           node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-          (ts.isIdentifier(node.expression) && node.expression.text === 'require');
+          (ts.isIdentifier(node.expression) &&
+            (node.expression.text === 'require' ||
+              module.requireBindings.has(node.expression.text)));
         const [argument] = node.arguments;
         if (dynamic && argument && ts.isStringLiteral(argument)) {
           const target = resolveSpecifier(argument.text, module.path);
@@ -1697,7 +1965,7 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
      */
     const isHandleDeclaration = (node: ts.Declaration): boolean => {
       if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
-        if (referencesHandleType(node.type, handleTypeNames)) return true;
+        if (referencesHandleType(node.type, handleTypeNames, originalTypeName)) return true;
         return node.initializer ? isHandle(node.initializer) : false;
       }
       return false;
@@ -1764,6 +2032,12 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
 
       if (before.names.size !== sizeBefore || before.all !== allBefore) handlesChanged = true;
     }
+  }
+  if (handlesChanged) {
+    incomplete.push(
+      `the handle graph stopped after ${handlePasses} passes with facts still arriving; ` +
+        'the accesses below are a lower bound, not the answer',
+    );
   }
 
   const offences: BoundaryOffence[] = [];
@@ -1833,6 +2107,7 @@ export function analyzeImportBoundary(rule: BoundaryRule): BoundaryAnalysis {
       (a, b) => a.file.localeCompare(b.file) || a.line - b.line,
     ),
     excluded: collected.excluded.sort(),
+    incomplete,
     /**
      * A declared exclusion the walk never reached *and that exists on disk*.
      *

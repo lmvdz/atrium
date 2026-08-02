@@ -1,8 +1,8 @@
 {
   "mutation": "resolver-reads-error-message",
   "verdict": "red",
-  "recordedAt": "2026-08-01T15:48:39.878Z",
-  "commit": "812e3e702a0da27a3ea6f7434b4b5e0c085a9bbb",
+  "recordedAt": "2026-08-02T00:03:23.526Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
   "treeDirty": true,
   "node": "v24.5.0",
   "mutationHash": "d64bd5a12b77ce73",
@@ -13,7 +13,7 @@
       "verdict": "red",
       "subjectHash": "bfbc84985ad3058f",
       "suiteFile": "apps/server/test/ws-auth.test.ts",
-      "suiteHash": "aec8ce5280ccdc8f",
+      "suiteHash": "effdf932071c6303",
       "files": [
         "apps/server/src/ws-auth.ts"
       ],
@@ -23,7 +23,7 @@
           {
             "command": "pnpm --filter @atrium/auth build",
             "exitCode": 0,
-            "durationMs": 2208
+            "durationMs": 11253
           }
         ],
         "command": "pnpm exec vitest run test/ws-auth.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-auth.json",
@@ -32,7 +32,7 @@
         "total": 13,
         "passed": 13,
         "failed": 0,
-        "durationMs": 1295
+        "durationMs": 6908
       },
       "mutated": {
         "suite": "server:ws-auth",
@@ -40,7 +40,7 @@
           {
             "command": "pnpm --filter @atrium/auth build",
             "exitCode": 0,
-            "durationMs": 2276
+            "durationMs": 14196
           }
         ],
         "command": "pnpm exec vitest run test/ws-auth.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-resolver-reads-error-message.json",
@@ -49,7 +49,7 @@
         "total": 13,
         "passed": 12,
         "failed": 1,
-        "durationMs": 1258
+        "durationMs": 5696
       },
       "caught": [
         "createSessionResolver returns null even when the thrown value cannot be described"
