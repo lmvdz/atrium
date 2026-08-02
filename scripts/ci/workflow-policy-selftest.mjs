@@ -47,10 +47,12 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions, quoted verbatim
 
 import { readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { parse } from 'yaml';
 import { checkerGraphProblems } from './checker-graph.mjs';
 import { mainGuardProblems } from './guard-scan.mjs';
 import { isMainModule } from './main-module.mjs';
+import { repoRoot } from './repo-root.mjs';
 import { LAUNCHER_NAMES, PACKAGE_MANAGER_NAMES } from './shell-command.mjs';
 import {
   checkWorkflowFile,
@@ -60,6 +62,20 @@ import {
   protectedCommandCoverage,
   RULES,
 } from './workflow-policy.mjs';
+
+/**
+ * Every path this file reads, resolved against the repository rather than
+ * against whoever's working directory happened to be current (#40 round 9, D6).
+ *
+ * `repo-root.mjs` was written in round 8 for exactly this and this file was not
+ * converted: `readFileSync('README.md')` and `mainGuardProblems('scripts')` both
+ * meant "relative to cwd", and the README read had a `catch { return []; }`
+ * behind it, so from the wrong directory — or with the file deleted — every
+ * count claim in the prose went unchecked and this self-test still printed its
+ * full total.
+ */
+const ROOT = repoRoot();
+const repoFile = (relative) => (isAbsolute(relative) ? relative : join(ROOT, relative));
 
 const WORKFLOW = process.argv[2] ?? '.github/workflows/ci.yml';
 
@@ -2659,7 +2675,7 @@ const ENGINE_MUTATIONS = [
 ];
 
 function main() {
-  const pristine = readFileSync(WORKFLOW, 'utf8');
+  const pristine = readFileSync(repoFile(WORKFLOW), 'utf8');
   const failures = [];
 
   // Drained rather than counted-then-branched (#40 round 7). `checkerGraphProblems`
@@ -2682,7 +2698,7 @@ function main() {
   // disarmed. 316 assertions, two `&&`, every gate green. So the two self-tests
   // check each other now: disarming one leaves the other scanning it, and
   // `packages/ci-guard` is a third caller outside `scripts/` entirely.
-  for (const problem of mainGuardProblems('scripts')) {
+  for (const problem of mainGuardProblems(repoFile('scripts'))) {
     failures.push(`the main-module guard: ${problem}`);
   }
   for (const problem of checkerGraphProblems()) {
@@ -2847,9 +2863,21 @@ function main() {
 function checkReadmeClaims() {
   let readme;
   try {
-    readme = readFileSync('README.md', 'utf8');
-  } catch {
-    return []; // Run from somewhere else; the CI job runs from the repo root.
+    readme = readFileSync(repoFile('README.md'), 'utf8');
+  } catch (error) {
+    // ── A CHECK THAT SKIPS WHAT IT CANNOT FIND (#40 round 9, D6) ────────────
+    // This said `return []` and called it "run from somewhere else". Measured
+    // by a blind critic on the sibling copy of this function: `rm README.md`
+    // and the self-test exits 0 announcing its full case count, with every
+    // number claim in it unchecked. Round 7 wrote "a check that skips what it
+    // cannot find is a check with a hole shaped like a working directory"; the
+    // hole was still there, shaped like a missing file instead. The path is
+    // resolved from this file rather than from the caller's cwd, so "run from
+    // somewhere else" is no longer a thing that can happen — and if the file is
+    // genuinely gone, that is the failure, not the excuse for one.
+    return [
+      `README.md could not be read (${error.message}), so every count it states about this engine went unchecked. A check that skips what it cannot find is not a check: the numbers below are the ones two receipts in this ticket have already got wrong, and "the file was missing" is the cheapest way to stop looking at them.`,
+    ];
   }
   // Whitespace-tolerant: the README is hard-wrapped, so any of these phrases can
   // acquire a newline in the middle without changing what it claims.
@@ -2870,6 +2898,20 @@ function checkReadmeClaims() {
       what: 'step→prerequisite pairs',
       pattern: phrase('(\\d+) pairs across \\d+ steps'),
       actual: PREREQUISITE_PAIRS.length,
+    },
+    {
+      /**
+       * The other number in the same sentence (#40 round 9).
+       *
+       * The pattern above matched `\d+ steps` without capturing it, so the
+       * count of steps carrying a prerequisite was prose nobody read: the
+       * README said 23 over a table holding 22. A number inside a checked
+       * sentence reads as a checked number, which makes an unread one worse
+       * here than it would be on its own line.
+       */
+      what: 'steps carrying a prerequisite',
+      pattern: phrase('\\d+ pairs across (\\d+) steps'),
+      actual: new Set(PREREQUISITE_PAIRS.map((pair) => `${pair.job} ${pair.step}`)).size,
     },
     {
       what: 'legitimate rewrites that must stay clean',

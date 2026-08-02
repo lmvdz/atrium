@@ -163,11 +163,48 @@ saying so; the same file runs both self-tests against a copy of the tree with a
 real defect planted in it. The real steps later in the job are the other half of
 the pair. A script that always passes fails the first half, one that always fails
 fails the second, and only a script whose answer comes from the world passes
-both. Which scripts must be covered is read out of the `deploy` job's own steps
-rather than declared in that file, because a table of controls in the same commit
-as the scripts it controls is one deletion from covering nothing —
+both. Which scripts must be covered is read out of the workflow rather than
+declared in that file, because a table of controls in the same commit as the
+scripts it controls is one deletion from covering nothing —
 `controlCoverageProblems` found `assert-migration-image` uncontrolled the moment
-it was written.
+it was written, and found three more (`assert-tables`, `record-built-images`,
+`compose-stack`) the moment it stopped reading only the `deploy` job's
+`assert-*.mjs` steps and started reading every entry point every job runs.
+
+Three things make that control worth its own step rather than a comment:
+
+- **Its expectations are about behaviour, not identity.** Round 8 gave three
+  controls `expect: /assert-page-serves/` — the script's own name, which every
+  Node stack trace supplies for free. They were being scored "red as required"
+  against an `ENOENT` for a certificate authority the deploy job does not write
+  until six steps later: the control proved the assertion went red because a
+  *file* was missing, never because the *deployment* was. `expectationProblems`
+  runs every pattern against a corpus of reds nobody planted — a stack trace, an
+  ENOENT, a syntax error, `node: command not found`, a bare `ECONNREFUSED` — and
+  refuses any pattern one of them satisfies, before a single child is spawned.
+  `requireDeployment` in `stack-client.mjs` is what leaves something behavioural
+  to match: the cold world is now a recorded assertion with a sentence in it
+  rather than a crash.
+- **It verifies the world it claims.** A red obtained against a stack that is
+  quietly still up is a red about something else, so the deploy group refuses to
+  treat any of its results as evidence unless nothing is listening on the
+  deployment's port and the trust root really has not been written yet.
+- **It is itself controlled.** The step used to print `${CONTROLS[group].length}
+  entry point(s) each failed` — the *table's size*. One line at the top of
+  `runGroup` (`if (process.env.CI !== undefined) return [];`) made it announce
+  that ten entry points had failed with no child process spawned at all, every
+  other gate green. It reports the ids it actually ran now, cross-checks them
+  against the table, and the `verify` group carries a row that runs
+  `positive-control.mjs` itself against a copy of the tree with an assertion
+  gutted to `report(…)`, requiring it to say so.
+
+What a cold control cannot do is tell a real assertion apart from one cut down to
+its precondition — both go red where there is no deployment. That half is
+syntactic and blunt: every script that records assertions through `check`
+declares a floor of call sites in `.github/ci-manifest.json`, derived subject set
+and all, so deleting twenty-three of `assert-page-serves`'s twenty-four checks
+fails a gate by name. Those floors sit in the same ratchet as the test floors and
+in the same README fingerprint, which is what makes lowering one loud.
 
 **Docker Engine ≥ 28 is a hard deployment prerequisite, not a nicety.** Earlier
 engines insert their DNAT rules ahead of the filter chain, so a port published to
@@ -692,10 +729,15 @@ zero tests exits 0 just like one that passed 315:
   object — `packages/ci-guard`'s floor of 115 could be set to 1 today, the suite
   would still pass, and seventy tests could then be deleted quietly. Nothing
   inside one commit can prove otherwise, because the checker and the checked come
-  out of the same revision. So the manifest declares **floors totalling 1441**,
-  and `gate-selftest.mjs` reads that number back out of this sentence and
-  compares it against the sum of every floor in the file. Lowering one now costs
-  an edit to a sentence that says the floors got smaller. That is loudness, not
+  out of the same revision. So the manifest declares **floors totalling 1588**,
+  with **floors fingerprint `095657143dfe`**, and `gate-selftest.mjs` reads both
+  back out of this sentence and compares them against the file. The total says
+  which direction the floors moved; the fingerprint — a digest over every
+  `key=value` pair — says *that* they moved, which the total alone does not: 115
+  off `packages/ci-guard` and 20 onto `packages/auth` sums to the same 1441 and
+  deletes twenty tests from the one workspace that watches `scripts/` from
+  outside. Lowering a floor now costs an edit to a sentence that says the floors
+  got smaller, and moving one costs an edit either way. That is loudness, not
   proof, and it keeps working after the ratchet activates.
 - Skipped, todo and *expected-failure* tests all fail the gate. That last one is
   invisible in the stock reports: Vitest records `it.fails()` as `passed` with an
@@ -741,7 +783,7 @@ zero tests exits 0 just like one that passed 315:
   clone has no baseline, so the ratchet reports "no baseline" and exits 0 — a
   floor lowered in the same pull request sails through. So required steps declare
   their setup, and `required-step-prerequisites` fails the build unless the
-  prerequisite is in the same job *and earlier*. 31 pairs across 23 steps that
+  prerequisite is in the same job *and earlier*. 31 pairs across 22 steps that
   declare one: the ratchet's fetch of `origin/main`; both report resets, before
   the runs they reset for; both report gates, after those runs; the migration's
   wait for Postgres and the schema assertion's migration; the browser install and
@@ -912,7 +954,7 @@ zero tests exits 0 just like one that passed 315:
   policy mutations plus 142 gate cases) with the workflow policy clean, biome
   clean, both steps green, and no output at all under `CI=true`.
   `scripts/ci/checker-graph.mjs` makes that a property with a test: an
-  invocation graph of 19 enforcement checks — what each one reads and every place
+  invocation graph of 24 enforcement checks — what each one reads and every place
   it is called from, its size read back out of this sentence because a deleted
   row is a check that quietly stops being in the graph — and three assertions
   over it: the discovered witnesses must equal the declared ones, every
@@ -1035,7 +1077,7 @@ zero tests exits 0 just like one that passed 315:
   else it has not declared, so a mutation cannot pass for the wrong reason: two
   of round 4's deleted a step that was required in its own right, and would have
   gone red with the rule they claimed to test removed from the engine.
-  `gate-selftest.mjs` runs 206 cases, including extracting the `gate` job's
+  `gate-selftest.mjs` runs 225 cases, including extracting the `gate` job's
   verdict script from the workflow and **executing it** against synthetic
   `needs` payloads: a parser reads shapes, and a shape can be right while the
   logic is wrong.

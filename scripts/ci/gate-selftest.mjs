@@ -32,7 +32,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { checkHostNetworkPolicy, publishedPortProblems } from './assert-deploy-preflight.mjs';
-import { checkRatchet, floorsOf, readBaseline } from './assert-floor-ratchet.mjs';
+import { checkRatchet, floorFingerprint, floorsOf, readBaseline } from './assert-floor-ratchet.mjs';
 import { checkImageIdentity } from './assert-image-identity.mjs';
 import { checkMigrationImage } from './assert-migration-image.mjs';
 import { checkPlaywrightReport } from './assert-playwright-report.mjs';
@@ -41,6 +41,7 @@ import { checkVitestReports } from './assert-vitest-report.mjs';
 import { checkEnrollment } from './assert-workspace-enrollment.mjs';
 import {
   assertedNames,
+  assertionFloorProblems,
   checkerGraphProblems,
   controlCoverageProblems,
   ENFORCEMENT,
@@ -49,19 +50,30 @@ import {
 import { notAVerdict } from './child-verdict.mjs';
 import { composeArgs } from './compose.mjs';
 import { composeStackArgv, VERBS } from './compose-stack.mjs';
-import { mainGuardProblems } from './guard-scan.mjs';
+import { entryDecisionProblems, mainGuardProblems } from './guard-scan.mjs';
 import { isMainModule } from './main-module.mjs';
-import { controlProblems, runControls } from './positive-control.mjs';
+import { controlProblems, expectationProblems, runControls } from './positive-control.mjs';
 import { repoRoot } from './repo-root.mjs';
-import { readFreshReport } from './report-file.mjs';
+import { fail, readFreshReport } from './report-file.mjs';
 import { checkExpectedFailureWitness, scanForExpectedFailures } from './scan-expected-failures.mjs';
 import {
+  absentDeployment,
   buildAssetProblems,
   buildAssets,
   forgeLike,
+  mailpit,
   servableAssets,
   stackTarget,
 } from './stack-client.mjs';
+
+/** A target shaped like `stackTarget()`, for the precondition cases. */
+const PROBE_TARGET = {
+  origin: 'https://atrium.localhost',
+  address: '127.0.0.1',
+  httpsPort: 443,
+  domain: 'atrium.localhost',
+};
+
 import { workflowFiles } from './workflow-policy.mjs';
 
 /**
@@ -1660,6 +1672,7 @@ const CASES = [
         [
           {
             id: 'assert-gutted',
+            entry: 'assert-gutted',
             argv: [script],
             world: 'nothing is listening on the deployment’s port',
             expect: /assert-gutted: \d+ assertion\(s\) failed\./,
@@ -1667,9 +1680,226 @@ const CASES = [
           },
         ],
         ROOT,
-      );
+      ).problems;
     },
     expect: /exited 0 when/,
+  },
+  {
+    // ── AND THE NAMES IT REPORTS ARE THE CHILDREN IT SPAWNED (#40 round 9, D2)
+    // `main` used to print `${CONTROLS[group].length} entry point(s) each
+    // failed` — the table's size. `if (process.env.CI !== undefined) return [];`
+    // at the top of `runGroup` then produced "10 entry point(s) each failed"
+    // with no child process spawned at all, and every other gate clean. What
+    // `runControls` returns now is the list of ids it actually ran, and that is
+    // the list `main` prints and `runGroup` cross-checks.
+    name: 'the control mechanism reports the controls it ran, not the size of its table',
+    run: () => {
+      const workspace = mkdtempSync(join(tmpdir(), 'atrium-ran-'));
+      const script = join(workspace, 'assert-ran.mjs');
+      writeFileSync(
+        script,
+        "console.error('assert-ran: 1 assertion(s) failed.');\nprocess.exit(1);\n",
+      );
+      const { ran, problems } = runControls(
+        [
+          {
+            id: 'assert-ran',
+            entry: 'assert-ran',
+            argv: [script],
+            world: 'a child that always fails, so only the bookkeeping is under test',
+            expect: /assert-ran: \d+ assertion\(s\) failed\./,
+            because: 'the bookkeeping',
+          },
+        ],
+        ROOT,
+      );
+      return problems.length === 0 && ran.join(',') === 'assert-ran'
+        ? []
+        : [`runControls reported ran=[${ran.join(', ')}] problems=[${problems.join(' | ')}]`];
+    },
+    expect: 'clean',
+  },
+  {
+    // The round-9 D1 rule, on the shipped table: an expectation any unrelated
+    // red would satisfy is an expectation that proves nothing.
+    name: 'every shipped control expectation is about a behaviour, not an identity',
+    run: () => expectationProblems(),
+    expect: 'clean',
+  },
+
+  // ---- the assertions themselves have to still be there (r9) --------------
+  {
+    name: 'every script that records assertions meets its floor in the CI manifest',
+    run: () => assertionFloorProblems(ROOT),
+    expect: 'clean',
+  },
+  {
+    name: 'a stack assertion gutted below its declared floor',
+    run: () =>
+      assertionFloorProblems(ROOT, (path, encoding) =>
+        String(path).endsWith('ci-manifest.json')
+          ? JSON.stringify({
+              assertions: {
+                scripts: { 'scripts/ci/assert-page-serves.mjs': { minChecks: 9999 } },
+              },
+            })
+          : readFileSync(path, encoding),
+      ),
+    expect: /recorded assertion\(s\) and .* declares a floor of/,
+  },
+  {
+    name: 'the whole assertion-floor table deleted',
+    run: () =>
+      assertionFloorProblems(ROOT, (path, encoding) =>
+        String(path).endsWith('ci-manifest.json')
+          ? JSON.stringify({ vitest: {} })
+          : readFileSync(path, encoding),
+      ),
+    expect: /no `assertions\.scripts` object/,
+  },
+  {
+    name: 'a floor left behind by a script that stopped recording anything',
+    run: () =>
+      assertionFloorProblems(ROOT, (path, encoding) =>
+        String(path).endsWith('ci-manifest.json')
+          ? JSON.stringify({
+              assertions: { scripts: { 'scripts/ci/assert-gone.mjs': { minChecks: 1 } } },
+            })
+          : readFileSync(path, encoding),
+      ),
+    expect: /does not record assertions through `check`/,
+  },
+
+  // ---- the sentence the cold world says instead of crashing (r9, D1) -------
+  {
+    name: 'a deployment that answered with a status is not absent',
+    run: () =>
+      absentDeployment(PROBE_TARGET, { response: { status: 200 } }) === undefined
+        ? []
+        : ['absentDeployment called a live deployment absent'],
+    expect: 'clean',
+  },
+  {
+    name: 'a refused connection is a sentence, not a stack trace',
+    run: () => [String(absentDeployment(PROBE_TARGET, { error: { code: 'ECONNREFUSED' } }))],
+    expect: /nothing is serving this deployment/,
+  },
+  {
+    name: 'a certificate authority that could not be read is the deployment being absent',
+    run: () => [
+      String(absentDeployment({ ...PROBE_TARGET, caProblem: 'ATRIUM_STACK_CA points at x' }, {})),
+    ],
+    expect: /ATRIUM_STACK_CA/,
+  },
+  {
+    name: 'an answer with no status is not an answer this may assume was fine',
+    run: () => [String(absentDeployment(PROBE_TARGET, { response: {} }))],
+    expect: /came back without a status/,
+  },
+
+  // ---- the mail relay's address, which was a false debt entry (r9) ---------
+  {
+    name: 'an unset ATRIUM_MAILPIT_URL resolves the published mail port',
+    run: () =>
+      mailpit({}).base === 'http://127.0.0.1:8025'
+        ? []
+        : [`mailpit({}).base is ${mailpit({}).base}`],
+    expect: 'clean',
+  },
+  {
+    name: 'a blank ATRIUM_MAILPIT_URL is not an address',
+    run: () =>
+      mailpit({ ATRIUM_MAILPIT_URL: '  ' }).base === 'http://127.0.0.1:8025'
+        ? []
+        : ['a blank ATRIUM_MAILPIT_URL was taken as the relay address'],
+    expect: 'clean',
+  },
+
+  // ---- the exit status of both report gates (r9) ---------------------------
+  {
+    name: 'a list of problems is a failing status',
+    run: () => {
+      const said = console.error;
+      console.error = () => {};
+      const status = fail(['a problem'], 'the probe');
+      console.error = said;
+      return status === 1 ? [] : [`fail() returned ${status}`];
+    },
+    expect: 'clean',
+  },
+
+  // ---- the round-4 entry decision, asked of the whole repository (r9, D7) --
+  {
+    name: 'no file in this repository decides whether it was run by comparing a URL to a path',
+    run: () => [
+      ...entryDecisionProblems(at('scripts')),
+      ...entryDecisionProblems(at('packages')),
+      ...entryDecisionProblems(at('apps')),
+    ],
+    expect: 'clean',
+  },
+  {
+    name: 'the round-4 comparison, planted in a real file',
+    run: () =>
+      entryDecisionProblems(at('scripts'), (path) =>
+        path.endsWith('assert-tables.mjs')
+          ? 'if (import.meta.url === `file://${process.argv[1]}`) { main(); }'
+          : readFileSync(path, 'utf8'),
+      ),
+    expect: /comparing `import\.meta\.url` against a path/,
+  },
+  {
+    // The same decision written the way `packages/ingest/src/cli.ts` wrote it:
+    // `import.meta.url` on one side of one comparison and `process.argv[1]` on
+    // the other side of another, so neither line names both halves.
+    name: 'the two-line spelling, where one comparison names argv and the other names import.meta',
+    run: () =>
+      entryDecisionProblems(at('scripts'), (path) =>
+        path.endsWith('assert-tables.mjs')
+          ? "const entry = process.argv[1] === undefined ? '' : resolve(process.argv[1]);\nif (entry === fileURLToPath(import.meta.url)) { main(); }"
+          : readFileSync(path, 'utf8'),
+      ),
+    expect: /round-4 guard with the other half renamed/,
+  },
+  {
+    name: "round 8's expectation, which a stack trace naming the script satisfies",
+    run: () =>
+      expectationProblems({
+        deploy: [
+          {
+            id: 'assert-page-serves',
+            entry: 'assert-page-serves',
+            expect: /assert-page-serves/,
+            world: 'w',
+            because: 'b',
+          },
+        ],
+      }),
+    expect: /is satisfied by a Node stack trace/,
+  },
+  {
+    name: 'an expectation with no pattern at all',
+    run: () =>
+      expectationProblems({
+        deploy: [{ id: 'assert-x', entry: 'assert-x', world: 'w', because: 'b' }],
+      }),
+    expect: /has no `expect` regular expression/,
+  },
+  {
+    name: 'an expectation that matches the empty string',
+    run: () =>
+      expectationProblems({
+        deploy: [
+          {
+            id: 'assert-x',
+            entry: 'assert-x',
+            expect: /x?/,
+            world: 'w',
+            because: 'b',
+          },
+        ],
+      }),
+    expect: /matches the empty string/,
   },
 
   // ---- a premise in a comment is not a check (#40 round 8, D6) -------------
@@ -2838,8 +3068,19 @@ function checkReadmeClaims() {
   let readme;
   try {
     readme = readFileSync(at('README.md'), 'utf8');
-  } catch {
-    return [];
+  } catch (error) {
+    // ── THE HOLE, NOW SHAPED LIKE A MISSING FILE (#40 round 9, D6) ──────────
+    // Round 7 converted this read to `at(…)` so it could not miss the file by
+    // standing in the wrong directory, and left the `catch { return []; }`
+    // behind it. Measured by a blind critic on r8 as committed: `rm README.md`
+    // and this self-test exits **0** announcing "206 cases", with every count
+    // claim below — cases, spellings, lookalikes, blind spots, floors, registry
+    // rows — unchecked. Round 7's own sentence was "a check that skips what it
+    // cannot find is a check with a hole shaped like a working directory"; the
+    // sentence generalises past the directory, and the swallow did not.
+    return [
+      `README.md could not be read (${error.message}), so none of the counts it states about these gates were checked. That file is where four of this ticket's wrong numbers lived, and this readback is the only thing that reads them: a missing README is a failure of this check, not an excuse to skip it.`,
+    ];
   }
   const phrase = (words) => new RegExp(words.split(' ').join(String.raw`\s+`));
   const claims = [
@@ -2885,9 +3126,30 @@ function checkReadmeClaims() {
        */
       what: 'the sum of every floor in the CI manifest',
       pattern: phrase('floors totalling (\\d+)'),
-      actual: [
-        ...floorsOf(JSON.parse(readFileSync(at('.github/ci-manifest.json'), 'utf8'))),
-      ].reduce((total, [, floor]) => total + floor, 0),
+      actual: [...floorsOf(manifest())].reduce((total, [, floor]) => total + floor, 0),
+    },
+    {
+      /**
+       * And *which* floors they are (#40 round 9).
+       *
+       * The sum above is one scalar over ten keys, and a blind critic did the
+       * arithmetic a scalar invites: `packages/ci-guard` 115 → 95 with
+       * `packages/auth` 200 → 220 leaves the total at 1441, the sentence
+       * untouched and the gate green — twenty tests deletable from the one
+       * workspace that exists to witness `scripts/` from outside. A total is a
+       * loudness measure with a null space, and the null space is exactly the
+       * trade somebody lowering a floor wants to make.
+       *
+       * So the identity of every floor is in the sentence too, as a digest over
+       * the sorted `key=value` pairs. It is not a proof — the checker and the
+       * checked still come out of one revision, which the paragraph beside it
+       * says — and it is not readable prose. It is the property the sum was
+       * meant to have: *any* edit to *any* floor, in either direction and
+       * however compensated, changes a string a human has to retype.
+       */
+      what: 'the fingerprint of the CI manifest’s floors',
+      pattern: phrase('floors fingerprint `([0-9a-f]{12})`'),
+      actual: floorFingerprint(manifest()),
     },
     {
       // Found by attacking round 6's own fix. `checkerGraphProblems` asserts a
@@ -2911,13 +3173,22 @@ function checkReadmeClaims() {
       );
       continue;
     }
-    if (Number(found[1]) !== actual) {
+    // Compared as text, so a claim whose value is a digest rather than a count
+    // is compared at all: `Number('4b21…')` is NaN and `NaN !== NaN`, which
+    // would have made the fingerprint above fire on every run — or, with the
+    // comparison the other way round, never.
+    if (found[1] !== String(actual)) {
       failures.push(
         `README.md says ${found[1]} ${what}; the code says ${actual}. The prose is wrong, or the code is.`,
       );
     }
   }
   return failures;
+}
+
+/** The CI manifest, read once per claim set. */
+function manifest() {
+  return JSON.parse(readFileSync(at('.github/ci-manifest.json'), 'utf8'));
 }
 
 if (isMainModule(import.meta.url)) {

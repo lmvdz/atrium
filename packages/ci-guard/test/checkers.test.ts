@@ -55,6 +55,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
   assertedNames,
+  assertionFloorProblems,
   checkerGraphProblems,
   controlCoverageProblems,
   ENFORCEMENT,
@@ -63,18 +64,29 @@ import {
 } from '../../../scripts/ci/checker-graph.mjs';
 import { notAVerdict } from '../../../scripts/ci/child-verdict.mjs';
 import { composeArgs } from '../../../scripts/ci/compose.mjs';
-import { guardProblems, mainGuardProblems } from '../../../scripts/ci/guard-scan.mjs';
+import {
+  entryDecisionProblems,
+  guardProblems,
+  mainGuardProblems,
+} from '../../../scripts/ci/guard-scan.mjs';
 import { requireFrom } from '../../../scripts/ci/import-from.mjs';
 import { isMainModule } from '../../../scripts/ci/main-module.mjs';
-import { CONTROLS, controlProblems } from '../../../scripts/ci/positive-control.mjs';
+import {
+  CONTROLS,
+  controlProblems,
+  expectationProblems,
+} from '../../../scripts/ci/positive-control.mjs';
 import { manifestPath } from '../../../scripts/ci/record-built-images.mjs';
 import { repoRoot } from '../../../scripts/ci/repo-root.mjs';
-import { readFreshReport } from '../../../scripts/ci/report-file.mjs';
+import { fail, readFreshReport } from '../../../scripts/ci/report-file.mjs';
 import { scanForExpectedFailures } from '../../../scripts/ci/scan-expected-failures.mjs';
 import { completedCommands } from '../../../scripts/ci/shell-command.mjs';
 import {
+  absentDeployment,
   check,
   failures,
+  mailpit,
+  requireDeployment,
   resetFailures,
   stackTarget,
   verdict,
@@ -1046,6 +1058,68 @@ describe('the shared decisions many scripts depend on', () => {
     ).toEqual([]);
   });
 
+  /**
+   * The round-9 D1 rule, from outside `scripts/`.
+   *
+   * Round 8's three deploy controls expected the script's own name, and a Node
+   * stack trace supplies that for free — so the control was scored "red as
+   * required" against an `ENOENT` for a certificate authority the deploy job
+   * does not write until six steps after the control runs.
+   */
+  it('expectationProblems accepts the shipped table', () => {
+    expect(expectationProblems()).toEqual([]);
+  });
+
+  it("expectationProblems refuses an expectation that is the script's own name", () => {
+    expect(
+      expectationProblems({
+        deploy: [
+          { id: 'assert-x', entry: 'assert-x', expect: /assert-x/, world: 'w', because: 'b' },
+        ],
+      }).join(' | '),
+    ).toMatch(/satisfied by a Node stack trace/);
+  });
+
+  it('expectationProblems refuses an expectation an ENOENT naming the script would satisfy', () => {
+    expect(
+      expectationProblems({
+        deploy: [
+          {
+            id: 'assert-x',
+            entry: 'assert-x',
+            expect: /scripts\/ci\/assert-x\.mjs/,
+            world: 'w',
+            because: 'b',
+          },
+        ],
+      }).join(' | '),
+    ).toMatch(/a red this control did not plant/);
+  });
+
+  it('expectationProblems refuses a control with no expectation at all', () => {
+    expect(
+      expectationProblems({
+        deploy: [{ id: 'assert-x', entry: 'assert-x', world: 'w', because: 'b' }],
+      }).join(' | '),
+    ).toMatch(/no `expect` regular expression/);
+  });
+
+  it('expectationProblems accepts an expectation about the sentence an assertion records', () => {
+    expect(
+      expectationProblems({
+        deploy: [
+          {
+            id: 'assert-x',
+            entry: 'assert-x',
+            expect: /assert-x: \d+ assertion\(s\) failed\./,
+            world: 'w',
+            because: 'b',
+          },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
   it('every control names a group, an expectation and why the entry point matters', () => {
     const thin = Object.entries(CONTROLS).flatMap(([group, controls]) =>
       (controls as Array<Record<string, unknown>>)
@@ -1165,5 +1239,208 @@ describe('the workflow policy covers every workflow', () => {
   it('the coverage rule objects when the protected set is emptied', () => {
     const jobs = parse(readFileSync(at('.github/workflows/ci.yml'), 'utf8'))?.jobs ?? {};
     expect(protectedCommandCoverage(jobs, []).length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The precondition the deploy assertions now run first (#40 round 9, D1).
+ *
+ * `stackTarget()` used to read `ATRIUM_STACK_CA` with a bare `readFileSync` at
+ * module scope, and every stack assertion calls it at module scope, so the world
+ * the positive control actually runs in — six steps before `trust-ca` writes
+ * that file — killed all three with an `ENOENT` whose stack frame named the
+ * script. The control matched the name and called it evidence. These are the two
+ * answers that replaced the crash, checked from outside `scripts/`.
+ */
+describe('the deployment precondition', () => {
+  const target = {
+    origin: 'https://atrium.localhost',
+    address: '127.0.0.1',
+    httpsPort: 443,
+    domain: 'atrium.localhost',
+  };
+
+  it('calls a deployment that answered with a status present', () => {
+    expect(absentDeployment(target, { response: { status: 200 } })).toBeUndefined();
+  });
+
+  it('turns a refused connection into a sentence rather than a stack trace', () => {
+    expect(String(absentDeployment(target, { error: { code: 'ECONNREFUSED' } }))).toMatch(
+      /nothing is serving this deployment/,
+    );
+  });
+
+  it('reads an unreadable certificate authority as the deployment being absent', () => {
+    expect(
+      String(absentDeployment({ ...target, caProblem: 'ATRIUM_STACK_CA points at x' }, {})),
+    ).toMatch(/ATRIUM_STACK_CA/);
+  });
+
+  it('refuses to treat an answer with no status as a deployment', () => {
+    expect(String(absentDeployment(target, { response: {} }))).toMatch(
+      /came back without a status/,
+    );
+  });
+
+  it('requireDeployment reports exactly once when nothing is listening', async () => {
+    resetFailures();
+    const reported: string[] = [];
+    await requireDeployment(
+      'assert-probe',
+      target,
+      () => Promise.reject(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })),
+      (what: string) => reported.push(what),
+    );
+    expect(reported).toEqual(['assert-probe']);
+    expect(failures.join(' | ')).toMatch(/nothing is serving this deployment/);
+    resetFailures();
+  });
+
+  it('requireDeployment says nothing when the deployment answered', async () => {
+    resetFailures();
+    const reported: string[] = [];
+    await requireDeployment(
+      'assert-probe',
+      target,
+      () => Promise.resolve({ status: 200 }),
+      (what: string) => reported.push(what),
+    );
+    expect(reported).toEqual([]);
+    expect(failures).toEqual([]);
+  });
+});
+
+/**
+ * The mail relay's address, which was a debt entry with a false reason (r9).
+ *
+ * `mailpit` sat in `UNCONTRACTED` as "it talks to the mail catcher the overlay
+ * adds". It does no I/O: it resolves one environment variable and returns
+ * closures. It has a registry row now, and these are its outside witnesses.
+ */
+describe('the mail relay address', () => {
+  it('resolves the published port when nothing says otherwise', () => {
+    expect(mailpit({}).base).toBe('http://127.0.0.1:8025');
+  });
+
+  it('lets the overlay move the relay', () => {
+    expect(mailpit({ ATRIUM_MAILPIT_URL: 'http://relay:8025' }).base).toBe('http://relay:8025');
+  });
+
+  it('does not take a blank variable as an address', () => {
+    expect(mailpit({ ATRIUM_MAILPIT_URL: '   ' }).base).toBe('http://127.0.0.1:8025');
+  });
+
+  it('hands back both operations the signup assertion needs', () => {
+    expect(typeof mailpit({}).get).toBe('function');
+    expect(typeof mailpit({}).deleteAll).toBe('function');
+  });
+});
+
+/**
+ * The exit status of both report gates (#40 round 9).
+ *
+ * `fail` has two importers, which is under `SHARED_MODULE_THRESHOLD` and over
+ * the stake: `return 1` to `return 0` and both report assertions print every
+ * problem they found as a GitHub annotation and exit 0.
+ */
+describe('the report gates’ exit status', () => {
+  it('turns a list of problems into a failing status', () => {
+    // Silenced without a `try`: `assertedNames` deliberately does not enter one,
+    // so an assertion inside a `try` block is an assertion the invocation graph
+    // cannot see — which would make this file a declared witness that witnesses
+    // nothing, the exact shape checkerGraphProblems exists to report.
+    const said = console.error;
+    console.error = () => {};
+    const one = fail(['a problem'], 'the probe');
+    const two = fail(['a', 'b'], 'the probe');
+    console.error = said;
+    expect(one).toBe(1);
+    expect(two).toBe(1);
+  });
+});
+
+/**
+ * The round-4 entry decision, asked of the whole repository (#40 round 9, D7).
+ *
+ * `mainGuardProblems` is only ever pointed at `scripts/`. A blind critic pointed
+ * the shipped scanner at `packages/ingest/src` and got five problems, including
+ * the round-4 comparison in a published CLI: `node dist/cli.js` printed usage,
+ * and the same file through a symlink printed nothing and exited 0.
+ */
+describe('how anything in this repository decides it was run', () => {
+  it('no file under scripts/, packages/ or apps/ compares a URL against a path', () => {
+    expect(entryDecisionProblems(at('scripts'))).toEqual([]);
+    expect(entryDecisionProblems(at('packages'))).toEqual([]);
+    expect(entryDecisionProblems(at('apps'))).toEqual([]);
+  });
+
+  it('reports the comparison the ingest CLI used to ship', () => {
+    expect(
+      entryDecisionProblems(at('scripts'), (path: string) =>
+        String(path).endsWith('assert-tables.mjs')
+          ? "const entry = process.argv[1] === undefined ? '' : resolve(process.argv[1]);\nif (entry === fileURLToPath(import.meta.url)) { main(); }"
+          : readFileSync(path, 'utf8'),
+      ).join(' | '),
+    ).toMatch(/round-4 guard with the other half renamed/);
+  });
+
+  it('follows a symlinked directory rather than skipping it in silence', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'atrium-symlink-scan-'));
+    const real = join(workspace, 'real');
+    mkdirSync(real);
+    writeFileSync(
+      join(real, 'entry.mjs'),
+      'if (import.meta.url === `file://${process.argv[1]}`) { main(); }\n',
+    );
+    const root = join(workspace, 'root');
+    mkdirSync(root);
+    symlinkSync(real, join(root, 'linked'), 'dir');
+    expect(entryDecisionProblems(root).join(' | ')).toMatch(/comparing `import\.meta\.url`/);
+  });
+});
+
+/**
+ * The floors on how many assertions each stack assertion still records (r9).
+ *
+ * The positive control proves a script's answer is a function of the deployment
+ * by running it where there is none. It cannot tell that script apart from one
+ * cut down to its `requireDeployment` precondition, which goes red in exactly
+ * the same world — 48 `check()` calls' worth of difference, measured.
+ */
+describe('the assertion floors', () => {
+  const manifestOf = (json: unknown) =>
+    ((path: string, encoding: string) =>
+      String(path).endsWith('ci-manifest.json')
+        ? JSON.stringify(json)
+        : readFileSync(path, encoding as BufferEncoding)) as unknown as typeof readFileSync;
+
+  it('every script that records assertions meets its floor', () => {
+    expect(assertionFloorProblems(REPO)).toEqual([]);
+  });
+
+  it('reports a stack assertion gutted below its floor', () => {
+    expect(
+      assertionFloorProblems(
+        REPO,
+        manifestOf({
+          assertions: { scripts: { 'scripts/ci/assert-page-serves.mjs': { minChecks: 9999 } } },
+        }),
+      ).join(' | '),
+    ).toMatch(/recorded assertion\(s\) and .* declares a floor of/);
+  });
+
+  it('refuses a manifest with the whole table deleted', () => {
+    expect(assertionFloorProblems(REPO, manifestOf({ vitest: {} })).join(' | ')).toMatch(
+      /no `assertions\.scripts` object/,
+    );
+  });
+
+  it('reports a floor left behind by a script that records nothing', () => {
+    expect(
+      assertionFloorProblems(
+        REPO,
+        manifestOf({ assertions: { scripts: { 'scripts/ci/assert-gone.mjs': { minChecks: 1 } } } }),
+      ).join(' | '),
+    ).toMatch(/does not record assertions through `check`/);
   });
 });
