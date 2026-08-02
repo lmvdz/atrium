@@ -40,9 +40,17 @@
  *   lose its `__Secure-` prefix. Both are asserted below.
  */
 
-import { check, establishSession, mailpit, report, stackTarget } from './stack-client.mjs';
+import {
+  check,
+  establishSession,
+  mailpit,
+  report,
+  requireDeployment,
+  stackTarget,
+} from './stack-client.mjs';
 
 const target = stackTarget();
+await requireDeployment('assert-signup-verifies', target);
 const session = await establishSession(target, mailpit(), 'signup');
 
 check(session.form.status === 200, `GET /sign-up returned ${session.form.status}`);

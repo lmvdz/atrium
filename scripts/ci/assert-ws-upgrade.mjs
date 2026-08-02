@@ -64,7 +64,14 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { request as httpsRequest } from 'node:https';
 import { queryDatabase, sqlLiteral } from './compose.mjs';
-import { check, establishSession, mailpit, report, stackTarget } from './stack-client.mjs';
+import {
+  check,
+  establishSession,
+  mailpit,
+  report,
+  requireDeployment,
+  stackTarget,
+} from './stack-client.mjs';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
@@ -192,6 +199,7 @@ function decodeFrame(buffer) {
 }
 
 const target = stackTarget();
+await requireDeployment('assert-ws-upgrade', target);
 const session = await establishSession(target, mailpit(), 'ws');
 check(
   session.jar.has((name) => name.includes('session')),

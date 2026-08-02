@@ -44,10 +44,43 @@ import { readFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 
-/** Where the stack is, and how to prove it is who it says it is. */
+/**
+ * Where the stack is, and how to prove it is who it says it is.
+ *
+ * ── WHY AN UNREADABLE CA IS NOT A THROW ANY MORE (#40 round 9, D1) ──────────
+ * This read the CA at module scope with a bare `readFileSync`, and every stack
+ * assertion calls it at module scope too. `ATRIUM_STACK_CA` points at
+ * `caddy-root.crt`, which is written by `compose-stack.mjs trust-ca` — step 10
+ * of the deploy job, six steps after the positive control at step 4. So in the
+ * world the positive control actually runs in, every one of those scripts died
+ * with `Error: ENOENT … caddy-root.crt` and a stack frame naming itself.
+ *
+ * A blind critic measured what that made the control worth: its `expect` was
+ * `/assert-page-serves/`, the ENOENT frame says `assert-page-serves.mjs:110`,
+ * and **any** Node stack trace supplies the file's own name for free. The
+ * control proved the assertion went red because a file was missing, never
+ * because the deployment was missing — and with the CA present it would not
+ * have matched at all, because `connect ECONNREFUSED` names
+ * `TCPConnectWrap.afterConnect` and nothing else.
+ *
+ * So the missing CA is *recorded* rather than thrown: `caProblem` carries it,
+ * `requireDeployment` turns it into a failed assertion with a message, and the
+ * script reaches a verdict instead of a crash. A crash is not a verdict — this
+ * repository has a whole module (`child-verdict.mjs`) about that distinction,
+ * and the three cold controls were living on the wrong side of it.
+ */
 export function stackTarget(env = process.env) {
   const domain = env.ATRIUM_STACK_DOMAIN?.trim() || 'atrium.localhost';
-  const ca = env.ATRIUM_STACK_CA?.trim();
+  const path = env.ATRIUM_STACK_CA?.trim();
+  let ca;
+  let caProblem;
+  if (path) {
+    try {
+      ca = readFileSync(path);
+    } catch (error) {
+      caProblem = `ATRIUM_STACK_CA points at ${path}, which could not be read (${error.message}). That file is written by \`compose-stack.mjs trust-ca\`, out of the running proxy container, so this means the deployment has not been brought up — or its certificate authority never made it out of it. Every request below would fail certificate verification against a root nothing here has.`;
+    }
+  }
   return {
     domain,
     /** The address the published port is on. DNS's job, done explicitly. */
@@ -55,9 +88,83 @@ export function stackTarget(env = process.env) {
     httpsPort: Number(env.ATRIUM_STACK_HTTPS_PORT ?? 443),
     httpPort: Number(env.ATRIUM_STACK_HTTP_PORT ?? 80),
     /** Caddy's local root, copied out of the proxy container. */
-    ca: ca ? readFileSync(ca) : undefined,
+    ca,
+    /** Why there is no `ca`, when there was meant to be one. */
+    caProblem,
+    caPath: path || undefined,
     origin: `https://${domain}`,
   };
+}
+
+/**
+ * The world these assertions are about, established before any of them runs.
+ *
+ * ── AN EXPECTATION THAT MATCHES AN IDENTITY (#40 round 9, D1) ───────────────
+ * The positive control's job is to prove that an assertion's answer is a
+ * function of the deployment. Round 8's deploy controls asked only that the
+ * script go red and that its output contain its own name — which is what a
+ * stack trace, an ENOENT, a syntax error and "node: command not found" all
+ * contain. The exploit measured against it was twenty lines: re-import every
+ * binding the original file imported, call `stackTarget()`, call `report(…)`.
+ * `positive-control deploy` printed **"red as required"**, and the same file
+ * printed `passed.` against a live stack it had never looked at.
+ *
+ * The fix is not a better regular expression over a crash. It is that the cold
+ * run must produce a *recorded failure with a sentence in it*, so the control
+ * can be satisfied by behaviour — an assertion that ran and said no — rather
+ * than by the file's own name appearing somewhere in a stack.
+ *
+ * Called at the top of each stack assertion. When the deployment is not there
+ * it records why and reports immediately: everything after it would be a second
+ * failure about the same absence, and one honest sentence beats twenty
+ * `ECONNREFUSED`s. When the deployment *is* there it returns and the assertion
+ * does its own work — this is a precondition, never a substitute, which is why
+ * `expectationProblems` in positive-control.mjs refuses any control whose
+ * expectation could be satisfied by this message alone.
+ *
+ * @param {string} what the assertion's name, for the annotations
+ * @param {object} target from `stackTarget()`
+ * @param {(target: object, path: string, options?: object) => Promise<object>} [get]
+ *   injectable so the contracts can drive both answers without a stack
+ * @param {(what: string) => void} [finish] injectable for the same reason
+ */
+export async function requireDeployment(what, target, get = once, finish = report) {
+  let outcome;
+  try {
+    outcome = { response: await get(target, '/', { method: 'HEAD' }) };
+  } catch (error) {
+    outcome = { error };
+  }
+  const absent = absentDeployment(target, outcome);
+  if (absent === undefined) return;
+  check(false, absent);
+  finish(what);
+}
+
+/**
+ * Why there is no deployment to ask questions of, or `undefined`.
+ *
+ * The decision, separated from the acting on it, for the reason `verdict` is
+ * separated from `report`: a function that ends the process cannot be tested by
+ * anything in the process, and this one is load-bearing for every deploy control
+ * in `positive-control.mjs` — the sentence it returns is what those controls
+ * match, and a version that returned `undefined` unconditionally would put all
+ * three of them back to being satisfied by a stack trace.
+ *
+ * @param {object} target from `stackTarget()`
+ * @param {{response?: object, error?: object}} outcome what one request did
+ * @returns {string|undefined}
+ */
+export function absentDeployment(target, outcome) {
+  if (target?.caProblem !== undefined) return target.caProblem;
+  if (outcome?.error !== undefined) {
+    const error = outcome.error;
+    return `nothing is serving this deployment: a request to ${target.origin}/ (${target.address}:${target.httpsPort}, SNI ${target.domain}) failed with ${error.code ?? error.message}. Every assertion in this file is a question about a running deployment, and there is not one to ask.`;
+  }
+  if (typeof outcome?.response?.status !== 'number') {
+    return `a HEAD of ${target.origin}/ came back without a status, so nothing here can say what is answering on ${target.address}:${target.httpsPort}. An answer this file cannot read is not an answer it may assume was fine.`;
+  }
+  return undefined;
 }
 
 /** A cookie jar, because a session is a cookie and the flows depend on it. */

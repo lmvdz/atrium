@@ -103,11 +103,17 @@ import {
   mailpit,
   once,
   report,
+  requireDeployment,
   servableAssets,
   stackTarget,
 } from './stack-client.mjs';
 
 const target = stackTarget();
+// The world every check below is a question about, established first, so that
+// "no deployment" is a recorded failure with a sentence in it rather than an
+// ECONNREFUSED stack trace. See requireDeployment in stack-client.mjs for what
+// the positive control was worth while this was a crash (#40 round 9, D1).
+await requireDeployment('assert-page-serves', target);
 
 /** Regions come from `data-region` attributes the three-region shell renders. */
 function regionsIn(html) {
