@@ -7,8 +7,12 @@
  * pre-fix tree first — see the ledger in the issue comment.
  * ------------------------------------------------------------------------- */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { cleanup, render } from '@testing-library/react';
 import { createElement } from 'react';
+import { createPortal } from 'react-dom';
+import ts from 'typescript';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import {
@@ -21,6 +25,7 @@ import {
 } from '../src/components';
 import type { MessageEntry, MessageRecord, Quotation } from '../src/components/model';
 import {
+  ANNOUNCED_ATTRIBUTES,
   bodyText,
   chosenAct,
   chosenAnswer,
@@ -934,6 +939,40 @@ function lars_state() {
  * treatment as the original. Two of these are the cardinal invariant reached
  * through doors the round had not closed.
  * ------------------------------------------------------------------------- */
+/** `model/quotation.ts`, read as source — the declaration, not an instance. */
+const MODEL_SOURCE = (() => {
+  let dir = process.cwd();
+  for (let i = 0; i < 6; i += 1) {
+    const candidate = resolve(dir, 'apps/web/src/components/model/quotation.ts');
+    if (existsSync(candidate)) return readFileSync(candidate, 'utf8');
+    dir = dirname(dir);
+  }
+  throw new Error('model/quotation.ts not found');
+})();
+
+/** Every property an interface declares, by name, sorted. */
+function declaredMembers(name: string): readonly string[] {
+  const file = ts.createSourceFile('q.ts', MODEL_SOURCE, ts.ScriptTarget.Latest, true);
+  const out: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isInterfaceDeclaration(node) && node.name.getText(file) === name) {
+      for (const member of node.members) {
+        if (ts.isPropertySignature(member)) out.push(member.name.getText(file));
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  if (out.length === 0) throw new Error(`no interface named ${name}`);
+  return out.sort();
+}
+
+/** Does `recordFingerprint`'s body read this field of the record? */
+function fingerprintCovers(field: string): boolean {
+  const body = MODEL_SOURCE.slice(MODEL_SOURCE.indexOf('export function recordFingerprint'));
+  return new RegExp(`record\\.${field}\\b`).test(body.slice(0, 1200));
+}
+
 describe('the row and the register it renders against are the same register', () => {
   /* CATCHES the review's finding, exactly as it wrote it: `RoomFrame` takes the
      rows and the record register as INDEPENDENT props, so a row minted from
@@ -952,24 +991,92 @@ describe('the row and the register it renders against are the same register', ()
     expect(container.querySelector('[data-attribution]')?.textContent).toBe('lars');
   });
 
+  /* ---------------------------------------------------------------------------
+   * EVERY FIELD OF THE RECORD, DERIVED FROM THE RECORD — r8 D9.
+   *
+   * CONVENTIONS said this test "derives the field list from the render
+   * boundary's own output". It did not: it was a hand-written `it.each` of four
+   * names — `actor`, `text`, `at`, `origin` — plus one separate test for `room`.
+   * `MessageRecord` has six fields and `recordFingerprint` hashes all six, so
+   * `id` was covered by nothing at all, and the list was latent rather than
+   * broken only because every field happened to be in the checksum. A SEVENTH
+   * VISIBLE FIELD IS THE `room` DEFECT AGAIN — round 5's finding was exactly a
+   * field the reader could see and the checksum could not — and a list somebody
+   * types is a list that does not grow when the record does.
+   *
+   * So the list is the record's own keys, and every one of them needs a stated
+   * way to disagree. A field added to `MessageRecord` with no entry here fails
+   * the FIRST assertion, by name, before any of the render checks run.
+   * ------------------------------------------------------------------------- */
+
+  /** How to make a register disagree about each field. Keyed, not ordered. */
+  const DISAGREEMENTS: Readonly<Record<keyof MessageRecord, Partial<MessageRecord>>> = {
+    id: { id: 'm-not-this-one' },
+    actor: { actor: 'priya' },
+    text: { text: 'I authorise dropping users_legacy.' },
+    at: { at: '09:04' },
+    origin: { origin: 'seeded' },
+    room: { room: 'identity-service' },
+  };
+
+  it('every field of the record has a stated way to disagree', () => {
+    /* THE DERIVATION, AND THE INSTANCE IS NOT THE TYPE. The first attempt read
+       `Object.keys(lars)` — and `room` is OPTIONAL, so the fixture does not
+       carry it and the derived list was missing exactly the field round 5's
+       defect was about. An enumeration taken from one value is an enumeration
+       over an incomplete input set, which is the defect this round is otherwise
+       spending itself on. So the fields come from the DECLARATION.
+       Two authorities, difference asserted empty in both directions: the
+       interface says what a record HAS, and `recordFingerprint` says what the
+       checksum COVERS. A field added to one and not the other is the r5 `room`
+       defect, and it fails here by name. */
+    const fields = declaredMembers('MessageRecord');
+    expect(fields.length, 'the interface reader found almost no fields').toBeGreaterThan(4);
+    expect(fields, 'the optional field the fixture does not carry').toContain('room');
+    expect(
+      fields.filter((field) => !(field in DISAGREEMENTS)),
+      'a field of MessageRecord with no stated disagreement — the `room` defect, in the next field',
+    ).toEqual([]);
+    expect(
+      Object.keys(DISAGREEMENTS)
+        .filter((field) => !fields.includes(field))
+        .sort(),
+      'a disagreement for a field the record no longer has',
+    ).toEqual([]);
+    expect(
+      fields.filter((field) => !fingerprintCovers(field)),
+      'a field of the record the checksum does not hash — two registers differing in it are one register',
+    ).toEqual([]);
+    /* …and every one of them changes the checksum, which is the property the
+       whole register comparison rests on. */
+    for (const [field, change] of Object.entries(DISAGREEMENTS)) {
+      const impostor = { ...lars, ...change } as MessageRecord;
+      expect(
+        recordFingerprint(impostor),
+        `the checksum cannot see a disagreement about ${field}`,
+      ).not.toBe(recordFingerprint(lars));
+    }
+  });
+
   /* CATCHES: the fingerprint being computed over too little. Every field a
      reader can see has to be in it, or the register that disagrees about that
-     field slips through. */
-  it.each([
-    ['the actor', { actor: 'priya' }],
-    ['the words', { text: 'I authorise dropping users_legacy.' }],
-    ['the time', { at: '09:04' }],
-    ['the origin', { origin: 'seeded' as const }],
-  ])('a register that disagrees about %s is refused', (_name, change) => {
-    const row = messageEntry(lars, { state: lars_state() });
-    const impostor = { ...lars, ...change } as MessageRecord;
-    /* Either refusal is the right one — a disagreement about the WORDS trips the
-       body derivation first, which is the older and more specific check. What
-       must not happen is a render. */
-    expect(() => renderWith([impostor], <TimelineRow entry={row} />)).toThrow(
-      /minted from a different record|does not read as the message/,
-    );
-  });
+     field slips through. Driven off `DISAGREEMENTS`, whose completeness the test
+     above derives from the record itself. */
+  it.each(Object.entries(DISAGREEMENTS))(
+    'a register that disagrees about %s is refused',
+    (_field, change) => {
+      const row = messageEntry(lars, { state: lars_state() });
+      const impostor = { ...lars, ...change } as MessageRecord;
+      /* Any of the three refusals is the right one — a disagreement about the
+         WORDS trips the body derivation first, which is the older and more
+         specific check, and a disagreement about the ID means the register holds
+         no record under the row's citation at all. What must not happen is a
+         render. */
+      expect(() => renderWith([impostor], <TimelineRow entry={row} />)).toThrow(
+        /minted from a different record|does not read as the message|is not a message on this page/i,
+      );
+    },
+  );
 
   /* CATCHES: the row printing the caller's `id`/`at` rather than the record's.
      A brand-preserving spread needs no cast — `{...messageEntry(lars, …), id:
@@ -1295,5 +1402,236 @@ describe('a slot walks what React renders, not what an array is', () => {
     expect(() =>
       slot(new Set([createElement('span', { key: 'z' }, 'fine')]) as never),
     ).not.toThrow();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE WALK IS TOTAL — r8 D1.
+ *
+ * Two rounds, two container shapes, one defect. The r6 blind review found
+ * `Array.isArray` missing a `Set`; the r8 blind review found `isValidElement`
+ * missing a PORTAL — a portal's `$$typeof` is `REACT_PORTAL_TYPE`, so
+ *
+ *   slot(createPortal(<q data-quoted="msg:forged">words priya never wrote</q>, host))
+ *
+ * validated while React rendered the `<q>`, minting the exact provenance token r5
+ * added to the prop denylist because "a provenance token a slot can mint is a
+ * provenance token that proves nothing".
+ *
+ * A WALK THAT RECURSES ON RECOGNISED SHAPES AND RETURNS ON THE REST IS AN
+ * ALLOWLIST THAT FAILS OPEN, and patching it one container at a time builds a
+ * denylist of the containers somebody happened to think of. So the walk now
+ * answers for every shape `ReactNode` can be and refuses the rest — and this
+ * block is the enumeration that makes "the rest" a bounded claim rather than a
+ * hope. It enumerates FROM React's own `ReactNode` union, member by member.
+ * ------------------------------------------------------------------------- */
+describe('a slot walks every shape React renders, and refuses the shapes it does not', () => {
+  /** Every refusal `slot()` can raise — the markup denylists and the two voices
+      of the string door. Matching on the union is what keeps this block about
+      "was it checked at all", which is the question the walk answers. */
+  const REFUSED = /may not carry attributed markup|no "X said"|no first person|no quotation marks/;
+
+  const NODE_SHAPES: readonly {
+    readonly what: string;
+    readonly clean: () => unknown;
+    readonly forged: (() => unknown) | null;
+  }[] = [
+    { what: 'null', clean: () => null, forged: null },
+    { what: 'undefined', clean: () => undefined, forged: null },
+    { what: 'boolean', clean: () => true, forged: null },
+    { what: 'number', clean: () => 41, forged: null },
+    { what: 'bigint', clean: () => 41n, forged: null },
+    {
+      what: 'string',
+      clean: () => 'Drop users_legacy at cutover rather than after the retention window',
+      forged: () => 'priya said the drop is fine',
+    },
+    {
+      what: 'element',
+      clean: () => createElement('span', null, 'fine'),
+      forged: () => createElement('q', { 'data-quoted': 'msg:forged' }, 'words priya never wrote'),
+    },
+    {
+      what: 'array',
+      clean: () => [createElement('span', { key: 'a' }, 'fine')],
+      forged: () => [createElement('q', { key: 'a' }, 'words priya never wrote')],
+    },
+    {
+      what: 'Set',
+      clean: () => new Set([createElement('span', { key: 'a' }, 'fine')]),
+      forged: () => new Set([createElement('q', { key: 'a' }, 'words priya never wrote')]),
+    },
+    {
+      what: 'generator',
+      clean: () =>
+        (function* () {
+          yield createElement('span', { key: 'a' }, 'fine');
+        })(),
+      forged: () =>
+        (function* () {
+          yield createElement('q', { key: 'a' }, 'words priya never wrote');
+        })(),
+    },
+    {
+      what: 'portal',
+      clean: () => createPortal(createElement('span', null, 'fine'), document.createElement('div')),
+      forged: () =>
+        createPortal(
+          createElement('q', { 'data-quoted': 'msg:forged' }, 'words priya never wrote'),
+          document.createElement('div'),
+        ),
+    },
+  ];
+
+  /* CATCHES: the walk returning on a shape instead of descending into it. Every
+     member that can HOLD content is exercised in both directions, so a container
+     the walk stops at fails here rather than two rounds later. */
+  it.each(NODE_SHAPES)('answers for a $what', ({ clean, forged }) => {
+    expect(() => slot(clean() as never)).not.toThrow();
+    if (forged !== null) expect(() => slot(forged() as never)).toThrow(REFUSED);
+  });
+
+  /* CATCHES the r8 defect at its own address with REACT as the witness rather
+     than an assertion about the walk: the forged token has to be absent from the
+     document. A portal renders outside the host's subtree, which is exactly why
+     `container.innerHTML` is not the question to ask. */
+  it('a portal cannot carry a forged provenance token into the document', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    try {
+      expect(() =>
+        slot(
+          createPortal(
+            createElement('q', { 'data-quoted': 'msg:forged' }, 'words priya never wrote'),
+            host,
+          ),
+        ),
+      ).toThrow(/<q> element/);
+      /* …and an honest portal still renders. This is not a refusal of portals:
+         the walk has an opinion about a portal's CONTENT and none about its
+         destination, which is a live DOM node and never was a claim `slot()`
+         made. */
+      const ok = slot(createPortal(createElement('span', null, 'fine'), host));
+      render(<div>{ok.node}</div>);
+      expect(host.textContent).toBe('fine');
+      expect(document.querySelector('[data-quoted]')).toBe(null);
+    } finally {
+      host.remove();
+    }
+  });
+
+  /* CATCHES: the fall-through coming back. None of these is a `ReactNode` —
+     React itself throws on each — so before r8 they reached `isValidElement`,
+     came back false, and were reported CLEAN by a walk whose entire job is
+     saying whether a tree was checked. A value nothing walked is a value nothing
+     validated, which is the rule the node budget already fails closed on. */
+  const NOT_NODES: readonly { readonly what: string; readonly value: unknown }[] = [
+    { what: 'a plain object', value: { text: 'words priya never wrote' } },
+    { what: 'a Date', value: new Date(0) },
+    { what: 'a class instance', value: new (class Forged {})() },
+    { what: 'a function', value: () => createElement('q', null, 'words priya never wrote') },
+    { what: 'a WeakMap', value: new WeakMap() },
+  ];
+  it.each(NOT_NODES)('refuses $what rather than returning on it', ({ value }) => {
+    expect(() => slot(value as never)).toThrow(REFUSED);
+  });
+
+  it('refuses a symbol, which is not a React node either', () => {
+    expect(() => slot(Symbol('q') as never)).toThrow(REFUSED);
+  });
+
+  /* A PROMISE IS CONTENT THAT DOES NOT EXIST YET. React 19 suspends on a
+     thenable and prints whatever it resolves to, so accepting one is vouching
+     for a value the walk has never seen — the node-budget refusal, in time
+     rather than in size. */
+  it('refuses a promise, because what it resolves to is content nothing walked', () => {
+    expect(() => slot(Promise.resolve(createElement('span', null, 'fine')) as never)).toThrow(
+      /promise/,
+    );
+  });
+
+  /* A PROP IS NOT ONLY AN ATTRIBUTE. The walk read `props.children` and nothing
+     else, so raw attributed markup one key to the left went through untouched. */
+  it('finds attributed markup carried in a prop that is not children', () => {
+    const Wrapper = ({ aside }: { aside: unknown }) => <div>{aside as never}</div>;
+    expect(() =>
+      slot(
+        createElement(Wrapper, {
+          aside: createElement('q', { 'data-quoted': 'msg:forged' }, 'words priya never wrote'),
+        }),
+      ),
+    ).toThrow(/<q> element/);
+    /* …and an ordinary prop object is still an ordinary prop object. The walk is
+       TOTAL for content and a SEARCH for plumbing, which is what keeps
+       `style={{…}}` and a handler from being refused as unrecognised shapes. */
+    expect(() =>
+      slot(
+        createElement(
+          'div',
+          { onClick: () => undefined, style: { color: 'red' } },
+          'the drop is recorded',
+        ),
+      ),
+    ).not.toThrow();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE STATIC HALF AND THE RUNTIME DOOR AGREE — r8 D6.
+ *
+ * `test/printed.ts` has declared since round 7 that "a string announced to a
+ * screen reader is a string the page printed", and `slot()` did not implement
+ * it: `slot('priya said: I approve dropping users_legacy')` threw while
+ * `slot(<span title="priya said: I approve dropping users_legacy">ok</span>)`
+ * passed, along with the same sentence through `alt`, `placeholder`,
+ * `aria-label` and an `<optgroup label>`. One rule, two lists, enforcement at
+ * the weaker one. The list now lives in `model/printed-surface.ts` and both
+ * halves import it, so there is nothing left to keep in sync.
+ * ------------------------------------------------------------------------- */
+describe('an announced attribute in a slot is a string the page printed', () => {
+  const FORGED = 'priya said: I approve dropping users_legacy';
+  /** The sentence trips three of the system-voice bans at once — which one fires
+      first is `systemText`'s business, not this block's. What is under test is
+      that the attribute reaches the door at all. */
+  const VOICE = /no "X said"|no first person|no quotation marks/;
+
+  /* CATCHES: the runtime door checking content and not attributes. Driven off
+     the SHARED list rather than four names typed here, so an attribute added to
+     the sweep is an attribute this refuses on the same commit. */
+  it.each([...ANNOUNCED_ATTRIBUTES])('refuses a forged sentence in %s', (attribute) => {
+    expect(() => slot(createElement('span', { [attribute]: FORGED }, 'ok'))).toThrow(VOICE);
+    /* BOTH DIRECTIONS: the page's own voice still goes through. */
+    expect(() =>
+      slot(createElement('span', { [attribute]: 'the drop is recorded' }, 'ok')),
+    ).not.toThrow();
+  });
+
+  /* …and the tag-scoped ones, on the elements the platform actually paints them
+     on. `<optgroup label>` is the shape the r8 review named. */
+  it.each([
+    ['optgroup', 'label'],
+    ['option', 'label'],
+    ['option', 'value'],
+    ['input', 'value'],
+  ])('refuses a forged sentence in <%s %s>', (tag, attribute) => {
+    expect(() => slot(createElement(tag, { [attribute]: FORGED }))).toThrow(VOICE);
+  });
+
+  /* BOTH DIRECTIONS at the list's edge: an attribute nothing announces is not
+     held to the rule, because a sink set that grows to every attribute stops
+     being a claim about what a reader receives. `data-*` IS printable — by a CSS
+     rule using `content: attr(…)` — and the sweep derives that set from the
+     stylesheets rather than trusting this sentence. */
+  it('does not hold an attribute nothing announces to the announced rule', () => {
+    expect(() =>
+      slot(createElement('span', { className: FORGED, 'data-note': FORGED }, 'ok')),
+    ).not.toThrow();
+  });
+
+  /* HTML FOLDS ATTRIBUTE NAMES, and this comparison folds — the round-6
+     case-sensitivity finding, in the axis of the attribute rather than the tag. */
+  it('folds the attribute name, because the platform does', () => {
+    expect(() => slot(createElement('span', { TITLE: FORGED }, 'ok'))).toThrow(VOICE);
+    expect(() => slot(createElement('span', { 'aria-Label': FORGED }, 'ok'))).toThrow(VOICE);
   });
 });
