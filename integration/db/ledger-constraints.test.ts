@@ -1,7 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CANONICAL_TIMESTAMP, compareCursor, Timestamp } from '@atrium/core';
+import {
+  CANONICAL_TIMESTAMP,
+  compareCursor,
+  isAboutTheWindow,
+  type ProvenanceMessage,
+  RECEIPT_POLICY,
+  Timestamp,
+  validateProposalProvenance,
+} from '@atrium/core';
 import { type DatabaseHandle, migrationsFolder } from '@atrium/db';
 import {
   acceptedObjects,
@@ -2232,9 +2240,10 @@ describe('core_events — the receipt window is derived, not supplied', () => {
      * deriving from anything other than `object.provenance.messageIds`.
      */
     const alice = await seedUser('alice');
+    const before = await seedMessage(roomA, alice, 'said before either citation');
     const first = await seedMessage(roomA, alice, 'first');
     const second = await seedMessage(roomA, null, 'second');
-    const uncited = await seedMessage(roomA, alice, 'not cited');
+    const after = await seedMessage(roomA, alice, 'said after both citations');
 
     // Cited in the wrong order on purpose: the window is the room's order, not the
     // payload's.
@@ -2244,8 +2253,13 @@ describe('core_events — the receipt window is derived, not supplied', () => {
       // A message whose author is gone keeps its text and loses its name — '' and
       // not null, because attribution to '' matches no actor.
       { id: second, authorId: '', body: 'second' },
+      // …and what the room said afterwards — #86. See the block below for why.
+      { id: after, authorId: alice, body: 'said after both citations' },
     ]);
-    expect(JSON.stringify(appended.trustedMessages)).not.toContain(uncited);
+    // Uncited chatter from BEFORE the citations stays out. The widening is
+    // directional and this is the half of it that did not change: nothing before
+    // the sentence can be a correction of it, and a window is not "the room".
+    expect(JSON.stringify(appended.trustedMessages)).not.toContain(before);
   });
 
   it('will not put another room’s message in a room’s receipt window', async () => {
@@ -2294,6 +2308,163 @@ describe('core_events — the receipt window is derived, not supplied', () => {
     // for an acceptance with no citations, which would make every uncited model
     // acceptance replay as a receipt failure instead of as no receipt at all.
     expect((await append(acceptance(roomA, []))).trustedMessages).toBeNull();
+  });
+
+  /* -------------------------------------------------------------------------
+   * #86 — THE WINDOW REACHES PAST THE CITATIONS, AND STOPS ONE MESSAGE LATE.
+   *
+   * Two lanes shipped rules that were each internally consistent, each verified
+   * in isolation, and each right. `0006` made the window exactly the cited
+   * messages; `laterRevision` refuses any window that ends at the citations,
+   * because it carries no evidence about what came after the quoted sentence.
+   * Merged, the SQL could not produce a window the TypeScript would certify, so
+   * every non-human acceptance was refused and the model path was dead — and
+   * git produced no conflict marker, because the two rules are in different
+   * files and different languages.
+   *
+   * Asserted here, against a real database, rather than by reading the
+   * migration: `packages/db/test/schema.test.ts` holds the migration's LITERAL
+   * against `policy.ts`, and this holds the deployed FUNCTION against what the
+   * literal claims. A constraint that exists in a string but not in the database
+   * is the #19 finding this whole suite answers.
+   * ---------------------------------------------------------------------- */
+  it('carries what the room said after the newest citation, in the room’s order', async () => {
+    /**
+     * The headline of #86, and the smallest room that shows it: cite the
+     * sentence, then say something after it.
+     *
+     * Catches: `receipt_window_ends_at_the_citations` — reverting to 0006's
+     * cited-only SELECT, which is the merged tree's dead model path. Also
+     * `receipt_window_tail_ignores_the_room`, since the foreign message is
+     * newer than the citation in the global `messages.seq` and would be picked
+     * up by a tail that forgot `WHERE m.room_id = p_room_id`.
+     */
+    const alice = await seedUser('alice-tail');
+    const cited = await seedMessage(roomA, alice, 'the deploy pipeline is green');
+    // Another room's message, newer than the citation. `messages.seq` is global,
+    // so an unscoped tail reaches it.
+    await seedMessage(roomB, alice, 'said in another room after the citation');
+    const correction = await seedMessage(roomA, alice, 'Correction: it is not green.');
+
+    const appended = await append(acceptance(roomA, [cited]));
+    expect(appended.trustedMessages).toEqual([
+      { id: cited, authorId: alice, body: 'the deploy pipeline is green' },
+      { id: correction, authorId: alice, body: 'Correction: it is not green.' },
+    ]);
+  });
+
+  it('stops the tail at the bound `policy.ts` names, and takes the earliest', async () => {
+    /**
+     * The bound, measured rather than read. Two claims in one room:
+     *
+     *  1. the tail is cut at `RECEIPT_POLICY.maxLaterMessagesCarried` exactly —
+     *     catches `receipt_window_tail_is_unbounded` (dropping the LIMIT, which
+     *     makes an append cost the room's whole history) and any drift in the
+     *     migration's literal that `schema.test.ts` somehow let through;
+     *  2. it is the room's EARLIEST messages after the citation, not an
+     *     arbitrary N of them — catches `receipt_window_tail_is_unordered`,
+     *     dropping the `ORDER BY m."seq"` that precedes the LIMIT. Without it
+     *     the planner may return any N rows, and the correction this window
+     *     exists to make findable is usually the very next message.
+     *
+     * The second claim is the one a smaller room could not make: with a tail
+     * exactly at the bound, "cut at N" and "cut at the earliest N" are the same
+     * answer. This room posts one message MORE than the bound, so the two
+     * differ by exactly the last message — which must be the one left out.
+     */
+    const alice = await seedUser('alice-bound');
+    const room = await seedRoom(handle, ['zoe'], { slug: 'room-bound' });
+    const cited = await seedMessage(room.roomId, alice, 'the sentence being cited');
+
+    const carried = RECEIPT_POLICY.maxLaterMessagesCarried;
+    const tail: string[] = [];
+    for (let i = 0; i < carried + 1; i += 1) {
+      tail.push(await seedMessage(room.roomId, alice, `after ${i}`));
+    }
+
+    const window = (await append(acceptance(room.roomId, [cited]))).trustedMessages as {
+      id: string;
+    }[];
+    // The citation plus exactly `carried` after it, and not one more.
+    expect(window).toHaveLength(1 + carried);
+    expect(window.map((message) => message.id)).toEqual([cited, ...tail.slice(0, carried)]);
+    // Stated as its own assertion because it is the whole of the ordering claim:
+    // the message left out is the room's NEWEST, never an arbitrary one.
+    expect(window.map((message) => message.id)).not.toContain(tail.at(-1));
+  });
+
+  it('is the window @atrium/core certifies, for every shape the SQL can snapshot', async () => {
+    /**
+     * #86's acceptance criterion, and the reason it is written this way.
+     *
+     * > for every proposal shape the SQL can snapshot, the TypeScript either
+     * > certifies or refuses **for a reason about the reading rather than about
+     * > the window**.
+     *
+     * A test that only asserted "some acceptances succeed" would pass on a
+     * window one message too wide, and a test that asserted "no problems" would
+     * pass on a window that happened to dodge the one check being fixed. The
+     * property is about the SUBJECT of whatever verdict comes back — the
+     * `ProblemSubject` distinction `fix/core-engine-r11` introduced, where a
+     * window-fact must refer and may never conclude. A window-shaped refusal on
+     * every input is exactly the failure being fixed.
+     *
+     * Catches: `receipt_window_ends_at_the_citations` (every shape below comes
+     * back `the_window`, which is the merged tree), and any future narrowing of
+     * the window that trades a dead path for a wrong one.
+     *
+     * The two sides are joined here and nowhere else: the window comes out of
+     * the real `atrium_receipt_window` through the real append, and goes into
+     * the real `validateProposalProvenance`. No hand-built array in between —
+     * that is the seam the merge broke, so it is the seam the test has to cross.
+     */
+    const room = await seedRoom(handle, ['wren'], { slug: 'room-subject' });
+    const author = room.people.wren as string;
+    const QUOTE = 'the deploy pipeline is green after the migration landed';
+
+    const shapes = [
+      { label: 'one citation, ordinary room traffic after it', cites: 1, after: 1 },
+      { label: 'one citation, several messages after it', cites: 1, after: 4 },
+      { label: 'two citations, ordinary room traffic after them', cites: 2, after: 1 },
+      { label: 'two citations, several messages after them', cites: 2, after: 3 },
+    ];
+
+    for (const shape of shapes) {
+      const cited: string[] = [];
+      // The bearing message carries the quote; the extra citation is ordinary
+      // chatter, which is the shape that made `firstCited` a padding lever.
+      cited.push(await seedMessage(room.roomId, author, QUOTE));
+      for (let i = 1; i < shape.cites; i += 1) {
+        cited.push(await seedMessage(room.roomId, author, `and a further note ${i}`));
+      }
+      for (let i = 0; i < shape.after; i += 1) {
+        await seedMessage(room.roomId, author, `unrelated standup line ${i}`);
+      }
+
+      const window = (await append(acceptance(room.roomId, cited)))
+        .trustedMessages as ProvenanceMessage[];
+      expect(window, shape.label).not.toBeNull();
+
+      const problems = validateProposalProvenance(
+        {
+          type: 'claim',
+          provenance: cited,
+          quote: QUOTE,
+          statement: QUOTE,
+          proposer: { kind: 'model' },
+          attributedTo: author,
+        },
+        window,
+      );
+      // The criterion, stated as the criterion: not "no problems", but "no
+      // problem that is a fact about the window". A reading-fact here would be a
+      // real finding about a real proposal and is not what #86 is about.
+      expect(
+        problems.filter((problem) => problem.about === 'the_window'),
+        `${shape.label} — refused for a window-reason, which is the #86 deadlock`,
+      ).toEqual([]);
+      expect(isAboutTheWindow(problems), shape.label).toBe(false);
+    }
   });
 
   it('refuses a lifted room that disagrees with the room the payload declares', async () => {

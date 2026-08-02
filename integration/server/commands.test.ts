@@ -808,11 +808,12 @@ describe('live ≡ replay', () => {
    * append.
    */
   /* ------------------------------------------------------------------------
-   * KNOWN RED ON `merge/foundation`, AND IT IS A PRODUCT CONTRADICTION RATHER
-   * THAN A BROKEN TEST. Do not "fix" this by relaxing the assertion.
+   * WAS THE ONE RED TEST ON `merge/foundation`, AND IT WAS A PRODUCT
+   * CONTRADICTION RATHER THAN A BROKEN TEST. Closed by #86 / `drizzle/0011`.
+   * The history stays because the fix is only legible against it.
    *
    * The merge put two lanes' definitions of THE RECEIPT WINDOW in one tree, and
-   * they cannot both be satisfied:
+   * they could not both be satisfied:
    *
    *   · `fix/realtime-r11` — `atrium_receipt_window()` in
    *     `0006_derived_receipt_snapshot.sql` snapshots the window at append into
@@ -834,21 +835,29 @@ describe('live ≡ replay', () => {
    * the SQL cannot produce a window the TypeScript will certify, so EVERY
    * non-human acceptance is refused `refer` and the model path is dead.
    *
-   * The fix is one migration redefining the function to snapshot the cited
-   * messages PLUS the messages after the newest citation — which keeps the
-   * realtime lane's immutability (still a snapshot, still taken at append) and
-   * satisfies the core lane's evidence requirement. It is not done here because
-   * the bound has to agree with `RECEIPT_POLICY.maxLaterMessagesScanned` (200),
-   * a TypeScript constant a static migration cannot read, and deciding how the
-   * two are kept in step is a decision about the product's receipt semantics.
-   * The realtime lane solved the same coupling once, for
-   * `CANONICAL_TIMESTAMP`, by generating the CHECK from the regex's `.source`;
-   * a number owned by `policy.ts` needs the same treatment or an owner.
+   * THE FIX, and which side moved. `drizzle/0011` redefines the function to
+   * snapshot the cited messages PLUS the room's next messages after the newest
+   * citation — keeping the realtime lane's immutability (still a snapshot, still
+   * taken at append, still derived from the row and from nothing a caller says)
+   * and satisfying the core lane's evidence requirement. The TypeScript did not
+   * move: `window_ends_at_the_citations` is a real refusal with a real argument,
+   * and narrowing it would have traded a dead path for a wrong one.
    *
-   * The extra message this fixture now posts after the cited one is kept on
-   * purpose: it is necessary but not sufficient. Once the window widens, a room
-   * with nothing after the citation still cannot certify — so the fixture is
-   * already in the shape the fix needs.
+   * The bound had to agree with a TypeScript constant a static migration cannot
+   * read, which is what made this a decision rather than a merge resolution.
+   * Generating the migration from the constant was rejected — migrations are the
+   * one artifact here that must be readable and immutable after the fact. The
+   * migration carries a literal, `policy.ts` carries
+   * `RECEIPT_POLICY.maxLaterMessagesCarried`, and
+   * `packages/db/test/schema.test.ts` fails the build when they diverge. The
+   * literal is one MORE than `maxLaterMessagesScanned`, so a window the room
+   * outgrew is visibly over the checker's read bound rather than quietly
+   * truncated; `laterRevision` refuses by name if that relation is ever broken.
+   *
+   * The extra message this fixture posts after the cited one is what the rule
+   * asks for and is now load-bearing in both directions: the acceptance below
+   * needs it to land at all, and the window assertion further down reads it back
+   * out of the snapshot.
    * --------------------------------------------------------------------- */
   it('replays an accepted claim identically after its author is deleted', async () => {
     const alice = await connect(room.people.alice as string);
@@ -872,7 +881,7 @@ describe('live ≡ replay', () => {
        cheapest shape that satisfies the rule — and it is Alice's too, so the
        deletion below still removes the author of every message in the window. */
     await alice.command(send(room.roomId, 'and the changelog is out'));
-    await lastEvent<{ messageId: string }>(room.roomId);
+    const afterwards = (await lastEvent<{ messageId: string }>(room.roomId)).messageId;
 
     /**
      * Staged by a **model**, through the ledger's own append — as of r9, the only
@@ -968,13 +977,24 @@ describe('live ≡ replay', () => {
 
     // The snapshot the append recorded, read from the ledger row rather than
     // inferred — "we wrote a column" is the claim being made.
+    //
+    // TWO messages since #86: the cited one and what the room said after it. The
+    // second is not padding and its presence is the fix — `laterRevision` refuses
+    // a window that ends at the citations, so a window of one is precisely the
+    // deadlock that made this test red on the merged tree. Written out rather
+    // than sliced from a longer array, so the mutant that reverts
+    // `atrium_receipt_window` to 0006's cited-only SELECT
+    // (`receipt_window_ends_at_the_citations`) fails here as well as in
+    // `ledger-constraints.test.ts`.
+    const expectedWindow = [
+      { id: cited, authorId: room.people.alice as string, body: quote },
+      { id: afterwards, authorId: room.people.alice as string, body: 'and the changelog is out' },
+    ];
     const [row] = await handle.db
       .select({ trusted: coreEvents.trustedMessages })
       .from(coreEvents)
       .where(eq(coreEvents.type, 'object_accepted'));
-    expect(row?.trusted).toEqual([
-      { id: cited, authorId: room.people.alice as string, body: quote },
-    ]);
+    expect(row?.trusted).toEqual(expectedWindow);
 
     // The substrate moves. `messages.author_id` is ON DELETE SET NULL, so this is
     // the ordinary consequence of an ordinary product feature — not a corruption,
@@ -986,14 +1006,15 @@ describe('live ≡ replay', () => {
       .where(eq(messages.id, cited));
     expect(message?.authorId).toBeNull();
 
-    // The snapshot did not move with it.
+    // The snapshot did not move with it — the whole window, tail included. The
+    // tail is what #86 widened and it is snapshotted by the same mechanism, so it
+    // has to be as immutable as the cited half: a later message whose author is
+    // deleted keeps the name it had when the receipt was taken.
     const [stillThere] = await handle.db
       .select({ trusted: coreEvents.trustedMessages })
       .from(coreEvents)
       .where(eq(coreEvents.type, 'object_accepted'));
-    expect(stillThere?.trusted).toEqual([
-      { id: cited, authorId: room.people.alice as string, body: quote },
-    ]);
+    expect(stillThere?.trusted).toEqual(expectedWindow);
 
     // Under r3 this is where it breaks: the replay re-reads `messages`, finds
     // `author_id` NULL, maps it to `''`, raises `attributed_person_not_author`
