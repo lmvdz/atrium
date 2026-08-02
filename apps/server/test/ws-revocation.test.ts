@@ -60,7 +60,11 @@ function stubCommands(members: Set<string>): CommandService {
 
 const stubLedger = { head: () => Promise.resolve(0) } as unknown as Ledger;
 
-async function start(members: Set<string>, intervalMs: number): Promise<RealtimeServer> {
+async function start(
+  members: Set<string>,
+  intervalMs: number,
+  extra: Partial<Parameters<typeof createRealtimeServer>[0]> = {},
+): Promise<RealtimeServer> {
   const server = createRealtimeServer({
     host: '127.0.0.1',
     port: 0,
@@ -79,6 +83,7 @@ async function start(members: Set<string>, intervalMs: number): Promise<Realtime
     // fail-open to be useful.
     allowedOrigins: [],
     allowOriginless: true,
+    ...extra,
   });
   servers.push(server);
   await server.listen();
@@ -142,6 +147,71 @@ describe('the membership revalidation timer', () => {
     const told = await waitFor(client.frames, (f) => f.type === 'unsubscribed');
     expect(told).toEqual({ type: 'unsubscribed', roomId: ROOM });
     expect(server.hub.subscriberCount(ROOM)).toBe(0);
+  });
+
+  /* --------------------------------------------------------------------------
+   * A SOCKET DOES NOT OUTLIVE THE SESSION THAT OPENED IT.
+   *
+   * This is the auth lane's rule on the realtime lane's server, and it is here
+   * because the merge is what put it there. #26 ran session revalidation on a
+   * sweep of its own, inside the server that is now `ws-presence-server.ts`;
+   * the merged server has one timer and this rides it, so the session window
+   * and the membership window are the same number instead of two that drift.
+   *
+   * The seam had no coverage on this server after the graft — the auth lane's
+   * 57 cases still exercise the module they were written against, and neither
+   * harness in this package passes `revalidateSession`. Grafted security code
+   * that nothing runs is exactly the shape #22 r9 wrote the case above to
+   * refuse ("a perfect rule that only a test ever reaches"), so it gets the
+   * same treatment: connect a real socket, let the timer fire, touch nothing.
+   * ----------------------------------------------------------------------- */
+  it('closes a socket whose session stopped resolving, on the same timer', async () => {
+    let live = true;
+    const server = await start(new Set([membershipKey(USER, ROOM)]), 10, {
+      // Non-zero would let the first pass find the session still inside its
+      // window and make this test measure the TTL rather than the rule.
+      revalidateTtlMs: 0,
+      revalidateSession: () => Promise.resolve(live ? { userId: USER } : null),
+    });
+    const client = connect(server);
+    await client.opened;
+
+    client.socket.send(JSON.stringify({ type: 'subscribe', roomId: ROOM }));
+    await waitFor(client.frames, (f) => f.type === 'subscribed');
+
+    // Still open while the session resolves — otherwise "it closed" would be
+    // true of a server that closes every socket on the first pass.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(client.socket.readyState).toBe(WebSocket.OPEN);
+
+    const closed = new Promise<number>((resolve) => {
+      client.socket.on('close', (code) => resolve(code));
+    });
+    live = false;
+    // 4401, not 1000: a client is told this was authentication and not a
+    // deliberate goodbye, so a reconnect loop can stop rather than spin.
+    expect(await closed).toBe(4401);
+  });
+
+  it('leaves a socket open when the session lookup THROWS, rather than closing it', async () => {
+    // Fail-closed on "no session", fail-OPEN on "cannot tell". A database that
+    // is down is not evidence anybody was revoked, and a sweep that closed
+    // every socket on a blip is an outage amplifier — the membership half of
+    // this pass already makes that split, and this is the same call made the
+    // same way one question over.
+    const server = await start(new Set([membershipKey(USER, ROOM)]), 10, {
+      revalidateTtlMs: 0,
+      revalidateSession: () => Promise.reject(new Error('database is down')),
+    });
+    const client = connect(server);
+    await client.opened;
+
+    client.socket.send(JSON.stringify({ type: 'subscribe', roomId: ROOM }));
+    await waitFor(client.frames, (f) => f.type === 'subscribed');
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(client.socket.readyState).toBe(WebSocket.OPEN);
+    expect(server.hub.subscriberCount(ROOM)).toBe(1);
   });
 
   it('leaves a live subscription alone across many passes', async () => {
