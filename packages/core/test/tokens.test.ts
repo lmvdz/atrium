@@ -1025,3 +1025,103 @@ describe('r6 — the stated limits are the real ones', () => {
     ).toMatchObject({ kind: 'revision', added: ['not'] });
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * r7 — the union r6 built, and the three paths that merged it anyway
+ * ───────────────────────────────────────────────────────────────────────── */
+
+describe('r7 — "checked and clean" is not the value for "never looked"', () => {
+  // Found by this round's own foreign-lineage pass, in the code this round
+  // wrote. r6 split `LaterRevision` into a tagged union precisely so *nothing
+  // corrects this* and *nothing read the window* could not merge — and three
+  // paths returned `scanned(0)`, whose docblock reads "the scan ran to the end
+  // of the window and found nothing", for calls that opened nothing.
+  //
+  // None of the three is an acceptance today: `validateProposalProvenance`
+  // rejects every input that reaches them (`unknown_message`,
+  // `statement_uncheckable`). **That is the objection, not the defence.** The
+  // safety of this function's answer was a property of a different function, and
+  // this file's standing lesson is that a rule applied at one site is not a rule.
+  //
+  // Fails on `fix/core-engine-r6` as committed.
+  const room: ProvenanceMessage[] = [
+    { id: 'm1', authorId: BOB, body: 'We will deploy production Friday afternoon.' },
+    { id: 'm2', authorId: BOB, body: 'Correction: we will not deploy production Friday.' },
+    { id: 'm3', authorId: ALICE, body: 'understood, thanks' },
+  ];
+
+  it('says it read nothing, rather than reporting a clean scan of nothing', () => {
+    // A citation list none of whose ids are in the window. There is a correction
+    // sitting in `m2` and this call never looked at it.
+    expect(laterRevision('We will deploy production Friday afternoon.', ['ghost'], room)).toEqual({
+      kind: 'unscanned',
+      why: 'no_citation_in_the_window',
+    });
+    expect(laterRevision('We will deploy production Friday afternoon.', [], room)).toEqual({
+      kind: 'unscanned',
+      why: 'no_citation_in_the_window',
+    });
+
+    // …and the two statement-shaped ways in.
+    expect(laterRevision('   ', ['m1'], room)).toEqual({
+      kind: 'unscanned',
+      why: 'no_statement_to_scan_for',
+    });
+    expect(laterRevision('...', ['m1'], room)).toEqual({
+      kind: 'unscanned',
+      why: 'no_statement_to_scan_for',
+    });
+
+    // The anti-vacuity half: a real scan still reports `none` with its extent,
+    // so this is not "never say clean".
+    expect(
+      laterRevision(
+        'We will deploy production Friday afternoon.',
+        ['m1'],
+        [
+          room[0] as ProvenanceMessage,
+          { id: 'm2', authorId: ALICE, body: 'The staging cluster is green.' },
+          { id: 'm3', authorId: ALICE, body: 'understood, thanks' },
+        ],
+      ),
+    ).toEqual({ kind: 'none', scannedAfterCitations: 2 });
+  });
+
+  it('never reports a clean scan that read zero messages', () => {
+    // The property the three paths broke, stated as a property: `none` with
+    // `scannedAfterCitations: 0` claims a completed scan of nothing, and the
+    // window gate makes it unreachable. Ranged over every citation list this
+    // window admits, rather than over the three inputs that were found.
+    const ids = ['ghost', 'm1', 'm2', 'm3'];
+    const lists: string[][] = [[]];
+    for (const a of ids) {
+      lists.push([a]);
+      for (const b of ids) lists.push([a, b]);
+    }
+    for (const cites of lists) {
+      for (const statement of ['We will deploy production Friday afternoon.', '', '   ', '...']) {
+        const result = laterRevision(statement, cites, room);
+        if (result.kind !== 'none') continue;
+        expect(result.scannedAfterCitations, JSON.stringify([statement, cites])).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('reports the missing statement once, not twice', () => {
+    // The caller does not ask a question it has already refused: a proposal with
+    // no statement is `statement_uncheckable` / `reject`, and telling the room a
+    // second time that a check it could never have run did not run is noise, not
+    // evidence.
+    const problems = validateProposalProvenance(
+      {
+        type: 'claim',
+        provenance: ['m1'],
+        quote: 'We will deploy production Friday afternoon.',
+        proposer: { kind: 'model' },
+      },
+      room,
+    );
+    expect(problems.map((problem) => problem.kind)).toContain('statement_uncheckable');
+    expect(problems.every((problem) => problem.severity === 'reject')).toBe(true);
+  });
+});

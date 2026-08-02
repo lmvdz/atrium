@@ -748,8 +748,8 @@
       "id": "later_correction_unseen",
       "why": "Stops acceptance looking past the cited messages, so a window holding \"We will deploy production Friday.\" followed by \"Correction: we will not deploy production Friday.\" certifies the first on a proposal that cites only it.",
       "file": "src/escalation.ts",
-      "find": "    if (fromModel && cited.length > 0) {\n      const revisited = laterRevision(",
-      "replace": "    if (false && cited.length > 0) {\n      const revisited = laterRevision(",
+      "find": "    if (fromModel && cited.length > 0 && hasContent(subject.statement)) {\n      const revisited = laterRevision(",
+      "replace": "    if (false && cited.length > 0 && hasContent(subject.statement)) {\n      const revisited = laterRevision(",
       "catches": [
         "refuses to certify a sentence a later message in the window corrects",
         "refuses to certify when a later message takes something back in other words"
@@ -1074,6 +1074,22 @@
       "find": "  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;",
       "replace": "  return caption.length === 0 ? linked : `${linked} ${caption}`;",
       "catches": ["keeps the image marker, so an embed is not a link"]
+    },
+    {
+      "id": "later_revision_no_citation_reads_clean",
+      "why": "r7, found by the round's foreign-lineage pass. `laterRevision` returns the value meaning 'the scan ran to the end and found nothing' when no cited id is in the window — so 'checked, clean' and 'never looked' become one value again, which is the exact merge r6 built the tagged union to prevent. Guarded upstream by `unknown_message`, which is the objection: the safety of this answer becomes a property of a different function.",
+      "file": "src/escalation.ts",
+      "find": "  if (firstCited === -1) return unscanned('no_citation_in_the_window');",
+      "replace": "  if (firstCited === -1) return scanned(0);",
+      "catches": ["says it read nothing, rather than reporting a clean scan of nothing"]
+    },
+    {
+      "id": "later_revision_blank_statement_reads_clean",
+      "why": "The same merge on the other two paths: a blank statement, or one with no routing tokens, reported a completed scan of a window it never opened.",
+      "file": "src/escalation.ts",
+      "find": "  if (isBlank(statement)) return unscanned('no_statement_to_scan_for');",
+      "replace": "  if (isBlank(statement)) return scanned(0);",
+      "catches": ["says it read nothing, rather than reporting a clean scan of nothing"]
     }
   ]
 }

@@ -1093,7 +1093,14 @@ export function validateProposalProvenance(
     // without an opinion about which words are dangerous. An exact restatement
     // is not a correction and a message about something else does not align at
     // all.
-    if (fromModel && cited.length > 0) {
+    // `hasContent` is r7 and it is about *not reporting twice*, not about
+    // safety. A proposal with no statement is already `statement_uncheckable` /
+    // `reject` a few lines down; since r7 `laterRevision` answers `unscanned`
+    // rather than a false `none` for that input, so without this guard the room
+    // would be told a second time, in different words, that a check it could
+    // never have run did not run. The function is honest on its own and the
+    // caller does not ask a question it has already refused.
+    if (fromModel && cited.length > 0 && hasContent(subject.statement)) {
       const revisited = laterRevision(
         subject.statement ?? '',
         subject.provenance,
@@ -1392,7 +1399,10 @@ export type LaterRevision =
    */
   | {
       kind: 'unscanned';
-      why:
+      why: // r7: the three that used to be `scanned(0)`, which claimed a completed
+      // scan for a call that read nothing.
+        | 'no_statement_to_scan_for'
+        | 'no_citation_in_the_window'
         | 'statement_too_long'
         | 'window_ends_at_the_citations'
         | 'too_many_messages'
@@ -1404,6 +1414,15 @@ export type LaterRevision =
    *
    * `scannedAfterCitations` records **how far it read** — the count nothing kept
    * before r6, which is half of why a truncated window was invisible.
+   *
+   * **This sentence is now true, and r7 is why it was not.** Three paths
+   * returned `scanned(0)` without scanning — a blank statement, a statement with
+   * no routing tokens, and a citation list none of whose ids are in the window —
+   * so the value meaning *"checked, clean"* was also the value meaning *"never
+   * looked"*, which is the one merge this union exists to prevent. All three are
+   * `unscanned` with their own reason, and `scannedAfterCitations` is `0` only
+   * if the scan genuinely read nothing after the citations — which the window
+   * gate makes unreachable.
    */
   | { kind: 'none'; scannedAfterCitations: number };
 
@@ -1529,9 +1548,27 @@ export function laterRevision(
   messages: readonly ProvenanceMessage[],
   policy: ReceiptPolicy = RECEIPT_POLICY,
 ): LaterRevision {
-  if (isBlank(statement)) return scanned(0);
+  // ── Three ways to read nothing, and none of them is a clean scan ─────────
+  //
+  // **r7, found by the round's own foreign-lineage pass, in the code r7 wrote
+  // the union for.** These lines returned `scanned(0)` — the value whose
+  // docblock says *"the scan ran to the end of the window and found nothing"* —
+  // for a statement with no words in it, a statement with no routing tokens, and
+  // a citation list none of whose ids are in the window. The scan ran to the end
+  // of nothing. r6 built this tagged union precisely so *nothing corrects this*
+  // and *nothing read the window* could not merge, and then three paths merged
+  // them.
+  //
+  // Not reachable as an acceptance today: `validateProposalProvenance` calls
+  // this only with a resolved citation and a statement, and has already pushed
+  // `unknown_message` or `statement_uncheckable` — both `reject` — on the inputs
+  // that get here. **That is the whole objection.** The guard is in a different
+  // function, so the safety of `laterRevision`'s answer is a property of its
+  // caller, and this file's standing lesson is that a rule applied at one site
+  // is not a rule. Each path now says which question it declined to answer.
+  if (isBlank(statement)) return unscanned('no_statement_to_scan_for');
   const wanted = routingTokens(statement);
-  if (wanted.length === 0) return scanned(0);
+  if (wanted.length === 0) return unscanned('no_statement_to_scan_for');
   // Too long to align against anything is the same answer the bearing check
   // gives: not checked, therefore not passed.
   if (wanted.length > policy.maxAlignedTokens) return unscanned('statement_too_long');
@@ -1559,7 +1596,11 @@ export function laterRevision(
     if (firstCited === -1) firstCited = index;
     lastCited = index;
   }
-  if (firstCited === -1) return scanned(0);
+  // Not one cited id is in this window, so there is no sentence to find a
+  // correction *of* and nothing was read. See the paragraph at the top of this
+  // function: `unknown_message` rejects this upstream, and that is a fact about
+  // the caller rather than about this answer.
+  if (firstCited === -1) return unscanned('no_citation_in_the_window');
 
   // ── The window has to reach past the sentence, and that is checkable ──────
   //
