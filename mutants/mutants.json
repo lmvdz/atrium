@@ -1075,14 +1075,11 @@
       "id": "the_sentence_clause_ignores_whose_name_it_is",
       "suite": "unit",
       "kind": "file",
-      "why": "The same over-reach one clause down: the sentence may only be reworded by the person it names, and dropping the `isForeign` filter makes it rewordable by nobody at all. A person could no longer fix the wording of their own commitment, and a model's reading of somebody's words could never be refined by that person — which is the one correction the product most needs to keep, because it is what turns `~` into `✓`.",
+      "why": "The same over-reach one clause down: the sentence may only be reworded by the person it names, and dropping the `isForeign` filter makes it rewordable by nobody at all. A person could no longer fix the wording of their own commitment, and a model's reading of somebody's words could never be refined by that person — which is the one correction the product most needs to keep, because it is what turns `~` into `✓`. STALE CLAIM CORRECTED (#86): this also claimed `is confirmed the moment a person corrects it`, which never pinned it on this tree. That test's fixture is named `modelAcceptedClaim` and builds an OPEN QUESTION, and payloadAttributions returns nothing for one — \"a decision, an objective and an open question name nobody\" — so `namedAfter` is empty and dropping the isForeign filter cannot change an answer computed over an empty list. The claim survived because the root ledger needs a database and #86 kept it from running at all; the first run that could reach the unit half reported this as ESCAPED, which is what a stale anchor looks like from here.",
       "file": "packages/core/src/authority.ts",
       "find": "  const quoted = namedAfter.filter(isForeign)[0];",
       "replace": "  const quoted = namedAfter[0];",
-      "catches": [
-        "lets a person reword their own sentence",
-        "is confirmed the moment a person corrects it"
-      ]
+      "catches": ["lets a person reword their own sentence"]
     },
     {
       "id": "the_text_field_is_hand_written_again",

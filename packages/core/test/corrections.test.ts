@@ -972,12 +972,28 @@ describe('epistemic state — `~` until a person touches it', () => {
   });
 
   it('is confirmed the moment a person corrects it', () => {
-    // BOB is the claimant of the machine's reading, and since #22 r11 he is the
-    // only person who may reword a sentence standing under his name. That makes
-    // the fixture the archetypal case rather than an incidental one: a model
-    // read BOB's words, BOB refines the reading, and the refinement is what
-    // turns `~` into `✓`. Anyone else who thinks the reading is wrong retracts
-    // it and stages one a second person can accept.
+    // A model read BOB's words, a person refines the reading, and the refinement
+    // is what turns `~` into `✓`. That is the whole of what this test measures.
+    //
+    // **It is NOT the archetypal case for #22 r11's sentence clause, and the
+    // comment here said it was.** The claim was: "BOB is the claimant of the
+    // machine's reading, and since r11 he is the only person who may reword a
+    // sentence standing under his name." Both halves are false of this fixture.
+    // `modelAcceptedClaim` is named for a claim and builds an **open question**
+    // — `payloadAttributions` returns nothing for one, because "a decision, an
+    // objective and an open question name nobody" (`authority.ts`), so the
+    // sentence clause has no name to protect and `lets anybody reword a
+    // sentence that names nobody` is the rule that applies. BOB authored the
+    // message the question was read out of; the OBJECT names him nowhere.
+    //
+    // Left as an open question rather than switched to a claim, because what
+    // this test is for is the epistemic transition and the fixture serves it. The
+    // correction is to the sentence above, which is what the root mutant ledger
+    // believed: `the_sentence_clause_ignores_whose_name_it_is` claimed this test
+    // as one of its two pins, and it never was one — dropping the `isForeign`
+    // filter cannot change an answer computed over an empty list. `lets a person
+    // reword their own sentence`, thirty lines up, is the pin, and it says so
+    // itself.
     const state = reduce([
       ...modelAcceptedClaim(),
       corrected({
