@@ -273,10 +273,22 @@ declare const trustedContextBrand: unique symbol;
  *     be read from the room's own message table inside the same request, and it
  *     must continue past the messages the proposal cites — `laterRevision` reads
  *     nothing else, so a window that stops at the citations is a correction scan
- *     that cannot fire. Core refuses the one truncation it can see (a window
- *     holding *nothing but* the citations) and cannot see a window that stops
- *     one message later; distinguishing that from a room that genuinely ends
- *     there needs the message table, which core does not have.
+ *     that cannot fire. Core refuses the truncation it can see — a window
+ *     holding *nothing but* the citations — and cannot, by looking, tell a
+ *     window that stops one message later from a room that genuinely ends there:
+ *     they are the same bytes, and distinguishing them needs the message table,
+ *     which core does not have.
+ *
+ *     **#86 narrowed this to the shape of the supplier rather than the shape of
+ *     the window.** `RECEIPT_POLICY.maxLaterMessagesCarried` is a number the
+ *     supplier and the checker both know — `atrium_receipt_window`
+ *     (`drizzle/0011`) stops there, and it is one more than
+ *     `maxLaterMessagesScanned`, so a truncated tail always lands over the read
+ *     bound and refers while anything shorter is provably the room's end. That
+ *     closes it for a caller that honours the bound, and `laterRevision` refuses
+ *     by name if the two numbers are ever set so that it could not. It is still
+ *     an assertion by the caller — a caller free to fabricate a window is free
+ *     to fabricate a short one — which is why this stays on the list.
  *  3. **That a replay reconstructs the authority the live append had.** That
  *     needs the actor stored as immutable ledger columns and read back from
  *     them; core folds whatever the caller hands it. Replaying a payload under a

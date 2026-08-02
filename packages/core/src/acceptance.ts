@@ -323,10 +323,24 @@ export interface AcceptanceContext {
    * and emptiness were made one fact, and **truncation was left invisible**.
    * `laterRevision` now refuses a window that holds nothing but the citations —
    * a window the proposal chose is not a window — and reports how far it read on
-   * the way past. What core still cannot see is a window that reaches one
-   * message past the citations and stops short of the room's end; that is
-   * recorded beside the other things `TrustedContext` says core cannot check,
-   * and it is the caller's to honour.
+   * the way past.
+   *
+   * **A window that reaches one message past the citations and stops short of
+   * the room's end** was the remaining hole, and it was left here as "the
+   * caller's to honour" — a rule in prose, enforced nowhere, which is the shape
+   * every round of this ticket has been failed for. #86 closed it for the caller
+   * that ships, and not by looking harder: a truncated window and a room that
+   * ended are the same bytes, and no pure function of this array can tell them
+   * apart. What tells them apart is a number both sides know.
+   * `atrium_receipt_window` (`drizzle/0011`) stops at
+   * `RECEIPT_POLICY.maxLaterMessagesCarried`, one more than
+   * `maxLaterMessagesScanned`, so a truncated tail is always over the read bound
+   * and refers, and a shorter one is provably the room's end — and
+   * `laterRevision` refuses by name if that relation is ever broken.
+   *
+   * It remains the caller's to honour for a caller that is not that supplier,
+   * which is why the refusal exists at all rather than the contract being
+   * assumed.
    */
   messages: readonly ProvenanceMessage[];
   /**

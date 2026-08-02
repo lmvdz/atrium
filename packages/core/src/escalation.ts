@@ -1880,11 +1880,28 @@ function unscannedDetail(
  * citations — **any** message the proposal did not cite satisfies it, including
  * one that sits before the sentence and can therefore never be a correction of
  * it. Core cannot distinguish a truncated window from a room that genuinely ends
- * where the window does; it has no message table and no clock. That residue is
- * recorded beside the two other things `TrustedContext` says core cannot check,
- * and `scannedAfterCitations` on the `none` result reports how far this call
- * actually read, so a caller that wants to assert more has the number to assert
- * it against.
+ * where the window does; it has no message table and no clock.
+ *
+ * ## …and #86 is how much of that residue closed, and how
+ *
+ * The sentence above is still true of an **arbitrary** caller and was true of
+ * every caller until #86. It is no longer true of the one that ships.
+ *
+ * The residue was left as "the caller's to honour", which is the shape this file
+ * distrusts everywhere else: a rule stated in prose and enforced nowhere. What
+ * closed it is not a new way of looking at the window — the indistinguishability
+ * is real, and no pure function of `messages` can defeat it — but a **number the
+ * supplier and this check both know**. `atrium_receipt_window` (`drizzle/0011`)
+ * stops at `RECEIPT_POLICY.maxLaterMessagesCarried`, which is one MORE than
+ * `maxLaterMessagesScanned`, so a truncated tail always lands over the read
+ * bound and `too_many_messages` refers it, and any shorter tail is provably the
+ * room's own end. The window that was ambiguous does not exist, and the
+ * configuration in which it would exist is refused by name
+ * (`window_carries_fewer_than_this_check_reads`) rather than assumed away.
+ *
+ * `scannedAfterCitations` on the `none` result still reports how far this call
+ * actually read, for a caller that is not that supplier and wants to assert
+ * more.
  *
  * ## What this does **not** catch, and what the code does with it
  *
