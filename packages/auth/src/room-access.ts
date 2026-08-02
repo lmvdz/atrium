@@ -1,5 +1,5 @@
 import { type Database, memberships, rooms, workspaceMembers } from '@atrium/db';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { parseRole, type Role } from './authz.js';
 import { lowerOf, type ReconcileLogger } from './workspace.js';
 
@@ -212,4 +212,148 @@ export async function loadAuthorizedRoom(
   if (!row) return null;
   const role = effectiveRoomRole(row, logger);
   return role === null ? null : { id: row.id, slug: row.slug, name: row.name, role };
+}
+
+/* ---------------------------------------------------------------------------
+ * THE REALTIME SERVER'S TWO READS, ON THIS FILE'S QUERY.
+ *
+ * #22 built its own membership predicate in `apps/server/src/session.ts`, over
+ * `memberships` alone, because it was written before this file existed. Merging
+ * the two lanes put both predicates in one tree — the exact thing `room-access`
+ * exists to prevent, and `test/room-access.test.ts` fails on it by design: an
+ * app that can reach `memberships` can ask the question the stale-row way.
+ *
+ * The realtime predicate could not simply be deleted in favour of
+ * `loadRoomMembership`, because it does two things that one does not:
+ *
+ *   1. it runs INSIDE the append transaction and takes `FOR SHARE`, which is
+ *      #22 r1's fix for a time-of-check/time-of-use gap — a membership revoked
+ *      between the check and the write produced durable history authored by
+ *      somebody who had been removed from the room;
+ *   2. it asks about MANY (user, room) pairs in one statement, because the
+ *      fan-out set is re-checked every second and one query per subscriber is
+ *      not the cost that was budgeted for.
+ *
+ * So they are both here, with the join, rather than one of them being dropped.
+ * Same `roomWorkspaceMemberJoin`, same `effectiveRoomRole`, same fail-closed
+ * direction — and `apps/server` no longer names `memberships` at all.
+ * ------------------------------------------------------------------------- */
+
+/** The read surface these need: the database, or a transaction inside it. */
+export type RoomAccessRunner = Pick<Database, 'select'>;
+
+/** A room membership as the realtime server consumes it. */
+export interface RoomMembershipRow {
+  roomId: string;
+  userId: string;
+  role: Role;
+  seenSeq: number;
+}
+
+/**
+ * One membership, joined, optionally row-locked.
+ *
+ * `lock: 'share'` when the caller is inside the transaction that will write.
+ * Re-reading in the transaction closes most of the TOCTOU gap; the row lock
+ * closes the rest, by making a concurrent DELETE wait for the append to commit
+ * or abort instead of slipping between the read and the write. Cheap: one row,
+ * one shared lock, held for the length of an append.
+ *
+ * The lock is taken on `memberships` — the row whose disappearance is the race —
+ * and the joined `workspace_members` row is read without one: a workspace
+ * revocation that lands mid-append is caught by the next revalidation pass,
+ * which is the one-second window `MEMBERSHIP_REVALIDATE_INTERVAL_MS` names.
+ */
+export async function loadRoomMembershipRow(
+  runner: RoomAccessRunner,
+  roomId: string,
+  userId: string,
+  options: { lock?: 'share'; logger?: ReconcileLogger } = {},
+): Promise<RoomMembershipRow | null> {
+  const query = runner
+    .select({
+      roomId: memberships.roomId,
+      userId: memberships.userId,
+      seenSeq: memberships.seenSeq,
+      ...roomAuthorizationRoles,
+    })
+    .from(memberships)
+    .innerJoin(rooms, eq(memberships.roomId, rooms.id))
+    .innerJoin(workspaceMembers, roomWorkspaceMemberJoin)
+    .where(
+      and(eq(memberships.roomId, roomId), eq(memberships.userId, userId), isNull(rooms.archivedAt)),
+    )
+    .limit(1);
+
+  const [row] = await (options.lock === 'share' ? query.for('share', { of: memberships }) : query);
+  const role = effectiveRoomRole(row, options.logger ?? silent);
+  if (!row || role === null) return null;
+  return { roomId: row.roomId, userId: row.userId, role, seenSeq: Number(row.seenSeq) };
+}
+
+/**
+ * Which of these `(user, room)` pairs still hold authority — the fan-out check.
+ *
+ * Returns the pairs that are **still members**, keyed by `"userId:roomId"`.
+ * Deliberately that direction: an absent key is the answer for a revoked
+ * membership, a revoked workspace member, an archived room, a room that never
+ * existed, a malformed id, and a user who was never there. A "who was revoked"
+ * result would have to enumerate reasons, and every reason it failed to think
+ * of would read as "still a member".
+ */
+export async function roomMembershipsHeld(
+  db: Database,
+  pairs: readonly { userId: string; roomId: string }[],
+  logger: ReconcileLogger = silent,
+): Promise<Set<string>> {
+  const held = new Set<string>();
+  if (pairs.length === 0) return held;
+  // One statement for every subscription on the instance. A tuple `IN` list hits
+  // the memberships primary key once per pair; the alternative shape —
+  // `or(and(eq, eq), …)` — is the same plan written so that drizzle has to build
+  // a tree proportional to the socket count on every pass.
+  const tuples = sql.join(
+    pairs.map((pair) => sql`(${pair.userId}::uuid, ${pair.roomId}::uuid)`),
+    sql`, `,
+  );
+  const rows = await db
+    .select({
+      userId: memberships.userId,
+      roomId: memberships.roomId,
+      ...roomAuthorizationRoles,
+    })
+    .from(memberships)
+    .innerJoin(rooms, eq(memberships.roomId, rooms.id))
+    .innerJoin(workspaceMembers, roomWorkspaceMemberJoin)
+    .where(
+      and(sql`(${memberships.userId}, ${memberships.roomId}) IN (${tuples})`, isNull(rooms.archivedAt)),
+    );
+  for (const row of rows) {
+    // Present in the join but with no readable authority is still "not a member".
+    if (effectiveRoomRole(row, logger) === null) continue;
+    held.add(`${row.userId}:${row.roomId}`);
+  }
+  return held;
+}
+
+/**
+ * Move a member's read cursor forward, never backward.
+ *
+ * `apps/server`'s `room.ack` command owned this `UPDATE memberships` directly,
+ * which is the same boundary breach one write instead of one read. The clamp is
+ * the caller's business and stays there; what belongs here is that the row being
+ * written is a room membership.
+ */
+export async function advanceSeenSeq(
+  db: Database,
+  roomId: string,
+  userId: string,
+  roomSeq: number,
+): Promise<{ seenSeq: number } | null> {
+  const [row] = await db
+    .update(memberships)
+    .set({ seenSeq: sql`greatest(${memberships.seenSeq}, ${roomSeq})` })
+    .where(and(eq(memberships.roomId, roomId), eq(memberships.userId, userId)))
+    .returning({ seenSeq: memberships.seenSeq });
+  return row ? { seenSeq: Number(row.seenSeq) } : null;
 }

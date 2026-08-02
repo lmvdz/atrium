@@ -1,3 +1,4 @@
+import { ATTRIBUTION_FIELD, TEXT_FIELD } from './attribution.js';
 import type { CorrectionAction } from './events.js';
 import type { AcceptedObject, AcceptedObjectType } from './objects.js';
 import type { CoreState, CorrectionRecord, ObjectRecord } from './state.js';
@@ -18,6 +19,12 @@ import type { CoreState, CorrectionRecord, ObjectRecord } from './state.js';
  *  3. **Measurement.** "The eval harness tracks correction rate per type as the
  *     live quality metric." That is `correctionRateByType`.
  *
+ * `ATTRIBUTION_FIELD` and `TEXT_FIELD` used to be declared here and are now
+ * *derived* in `attribution.ts` from one classification of every payload field.
+ * They are imported rather than re-exported so the package has one declaration
+ * site for each — see that file for why two answers to "who does this payload
+ * name" is the defect r10 closed.
+ *
  * Note what is deliberately *not* here: the accepted-state block. The
  * interpretation spike measured supplying it in the extraction prompt as a
  * recall collapse from 19 objects to 11, with the dispute edge and the
@@ -26,26 +33,6 @@ import type { CoreState, CorrectionRecord, ObjectRecord } from './state.js';
  * counterexample rather than a comprehension aid: it says *don't read it that
  * way*, which is the one thing a model cannot infer from the window.
  */
-
-/** The field each type puts a person's name in. `reattribute` moves this one. */
-export const ATTRIBUTION_FIELD: Readonly<Record<AcceptedObjectType, string | null>> = Object.freeze(
-  {
-    decision: 'decidedBy',
-    commitment: 'owner',
-    claim: 'claimant',
-    open_question: null,
-    objective: null,
-  },
-);
-
-/** The field each type puts its text in. `retype` carries this across. */
-export const TEXT_FIELD: Readonly<Record<AcceptedObjectType, string>> = Object.freeze({
-  decision: 'statement',
-  commitment: 'statement',
-  claim: 'statement',
-  open_question: 'question',
-  objective: 'title',
-});
 
 /**
  * The payload a retype starts from: the old text, under the new type's key.

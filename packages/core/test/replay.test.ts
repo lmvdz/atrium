@@ -765,7 +765,12 @@ function gateProbes(seed: number): AuthoredEvent[] {
           updatedAt: stamp(24),
         },
       },
-      HUMAN,
+      // BOB, not ALICE. This probe exists to reach the dangling-objective gate,
+      // and since #22 r10 a direct acceptance naming somebody else is refused by
+      // the attribution gate one step earlier — so minting it under ALICE would
+      // have quietly stopped exercising the gate it is named for. The corpus
+      // noticed; `gatesSeen` is what noticed.
+      { kind: 'human', userId: BOB },
     ),
 
     // ── #21 r2's additions: the receipt, as a condition of folding ─────────
@@ -865,6 +870,58 @@ function gateProbes(seed: number): AuthoredEvent[] {
           body: `${tag} will land it on Friday afternoon. I think so.`,
         },
       ],
+    ),
+    // ── #22 r10 ─────────────────────────────────────────────────────────────
+    //
+    // Gate: a person mints an obligation against somebody else outright, with
+    // no proposal and therefore no second party anywhere in it. The fifth route
+    // to r10's end state, alongside `reattribute`, `retype` and `amend`.
+    row(
+      {
+        id: `${tag}_40`,
+        at: stamp(40),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_40`,
+          roomId: room,
+          type: 'commitment',
+          payload: { statement: `${tag} will work through the holidays`, owner: BOB },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: null },
+          createdAt: stamp(40),
+          updatedAt: stamp(40),
+        },
+      },
+      HUMAN,
+    ),
+    // Gate: a correction moves a name onto somebody who is not the corrector.
+    // ALICE owns this one legitimately and then hands it to BOB, which is D1.
+    row(
+      {
+        id: `${tag}_41`,
+        at: stamp(41),
+        type: 'object_accepted',
+        object: {
+          id: `pobj_${seed}_41`,
+          roomId: room,
+          type: 'commitment',
+          payload: { statement: `${tag} will write the migration`, owner: ALICE },
+          provenance: { messageIds: [`msg_${tag}`], proposalId: null },
+          createdAt: stamp(41),
+          updatedAt: stamp(41),
+        },
+      },
+      HUMAN,
+    ),
+    row(
+      {
+        id: `${tag}_42`,
+        at: stamp(42),
+        type: 'object_corrected',
+        objectId: `pobj_${seed}_41`,
+        action: 'reattribute',
+        patch: { owner: BOB },
+      },
+      HUMAN,
     ),
     // Gate: only a human declares a question answered.
     row(
@@ -1178,6 +1235,11 @@ const GATE_MARKERS = {
   // of a gate that only another gate makes unreachable.
   receipt_not_certifiable: 'declines to rule on',
   answer_relation: 'declares an open question answered',
+  // ── #22 r10: every route by which a name arrives on an object ────────────
+  /** A person mints somebody else's obligation with no second party in it. */
+  self_staged_reading: 'which they staged themselves',
+  /** A correction moves a name onto somebody who is not the corrector. */
+  correction_attribution: "so it may only put that person's own name on something",
 } as const;
 
 describe('live≡replay — generated logs, an independent oracle, adversarial redeliveries', () => {
@@ -1337,13 +1399,16 @@ describe('live≡replay — generated logs, an independent oracle, adversarial r
         id: 'obj_actor_probe',
         roomId: ROOMS[0],
         type: 'claim' as const,
+        // BOB claims it and BOB accepts it: since #22 r10 a direct acceptance
+        // may only put the accepter's own name on something, and this case is
+        // about the *actor column* changing the fold, not about attribution.
         payload: { statement: 'the build is green', claimant: BOB },
         provenance: { messageIds: ['msg_1'], proposalId: null },
         createdAt: stamp(1),
         updatedAt: stamp(1),
       },
     };
-    const asHuman = reduce([row(payload, HUMAN)]);
+    const asHuman = reduce([row(payload, { kind: 'human', userId: BOB })]);
     const asModel = reduce([row(payload, MODEL)]);
     expect(asHuman.issues).toEqual([]);
     // A model cannot accept anything directly, so the same bytes with a

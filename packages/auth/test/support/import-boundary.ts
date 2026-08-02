@@ -609,6 +609,25 @@ const DEFAULT_INERT_EXTENSIONS = [
    * hour, which is the friction behaving exactly as intended.
    */
   '.tsbuildinfo',
+  /**
+   * Shell scripts — `scripts/integration-test.sh`, which the realtime lane
+   * added to drive `pnpm test:integration`.
+   *
+   * INERT FOR THE QUESTION THIS RULE ASKS, WHICH IS NARROWER THAN "IS IT
+   * EXECUTABLE". It plainly executes; what it cannot do is participate in a
+   * JavaScript **import graph**. This analysis follows `import`/`require`
+   * specifiers to decide which files can reach `memberships`, and a `.sh` has no
+   * specifier to follow: it can only spawn a process, and whatever that process
+   * runs is itself a module in this tree and is reached on its own merits. A
+   * shell script that runs `node dist/x.js` does not give `dist/x.js` any
+   * authority it did not already have.
+   *
+   * Declared here rather than added to the ignore list, for the reason the list
+   * above exists: the rule is about FILE TYPES nobody has decided about, and
+   * `.sh` is now decided. The friction worked as designed — the file arrived
+   * from another lane on the merge and this went red within the hour.
+   */
+  '.sh',
 ];
 
 /** Files with no extension, or whose whole name is the type. */

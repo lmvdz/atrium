@@ -21,9 +21,20 @@ const nextConfig: NextConfig = {
   // Node requires. (The workspace packages are deliberately *not* listed — Next
   // compiles those from source, which is what makes `@/lib` imports work.)
   serverExternalPackages: ['postgres', 'drizzle-orm', 'better-auth'],
-  env: {
-    NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:4000/ws',
-  },
+
+  // There is deliberately no `env:` block, and no `NEXT_PUBLIC_WS_URL`.
+  //
+  // The auth lane put one here; the realtime lane took it out, and taking it
+  // out is the correct half. Anything named in `env:` is inlined into the
+  // client bundle at build time, which is what #19's gauntlet routed to #22 as
+  // a defect: the socket URL was frozen into the image, so one build could not
+  // be promoted between environments and an HTTPS deployment served a
+  // `ws://localhost` bundle that fails as mixed content. The URL is now
+  // resolved when the page runs — same-origin `/ws` by default, overridable per
+  // request through `app/api/runtime-config/route.ts`. See `src/lib/ws-url.ts`.
+  //
+  // `serverExternalPackages` above is the auth lane's and is unaffected: it
+  // governs the SERVER bundle and inlines nothing into the client.
 };
 
 export default nextConfig;

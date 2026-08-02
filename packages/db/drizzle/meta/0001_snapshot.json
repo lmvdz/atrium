@@ -1,5 +1,5 @@
 {
-  "id": "9aef64b9-c761-4109-86b8-20a5c6859b92",
+  "id": "fa9b4df2-0142-463c-8e8f-38e48d7571be",
   "prevId": "8b60c815-685b-4801-b284-d54cb86932e9",
   "version": "7",
   "dialect": "postgresql",
@@ -144,6 +144,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "accepted_objects_room_id_key": {
+          "name": "accepted_objects_room_id_key",
+          "columns": [
+            {
+              "expression": "room_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -160,45 +181,6 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "accepted_objects_objective_id_accepted_objects_id_fk": {
-          "name": "accepted_objects_objective_id_accepted_objects_id_fk",
-          "tableFrom": "accepted_objects",
-          "tableTo": "accepted_objects",
-          "columnsFrom": [
-            "objective_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "accepted_objects_proposal_id_proposals_id_fk": {
-          "name": "accepted_objects_proposal_id_proposals_id_fk",
-          "tableFrom": "accepted_objects",
-          "tableTo": "proposals",
-          "columnsFrom": [
-            "proposal_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "accepted_objects_superseded_by_id_accepted_objects_id_fk": {
-          "name": "accepted_objects_superseded_by_id_accepted_objects_id_fk",
-          "tableFrom": "accepted_objects",
-          "tableTo": "accepted_objects",
-          "columnsFrom": [
-            "superseded_by_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
         "accepted_objects_accepted_by_users_id_fk": {
           "name": "accepted_objects_accepted_by_users_id_fk",
           "tableFrom": "accepted_objects",
@@ -210,6 +192,51 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "accepted_objects_objective_same_room_fk": {
+          "name": "accepted_objects_objective_same_room_fk",
+          "tableFrom": "accepted_objects",
+          "tableTo": "accepted_objects",
+          "columnsFrom": [
+            "room_id",
+            "objective_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "accepted_objects_superseded_by_same_room_fk": {
+          "name": "accepted_objects_superseded_by_same_room_fk",
+          "tableFrom": "accepted_objects",
+          "tableTo": "accepted_objects",
+          "columnsFrom": [
+            "room_id",
+            "superseded_by_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "accepted_objects_proposal_same_room_fk": {
+          "name": "accepted_objects_proposal_same_room_fk",
+          "tableFrom": "accepted_objects",
+          "tableTo": "proposals",
+          "columnsFrom": [
+            "room_id",
+            "proposal_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -360,14 +387,16 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "attention_items_object_id_accepted_objects_id_fk": {
-          "name": "attention_items_object_id_accepted_objects_id_fk",
+        "attention_items_object_same_room_fk": {
+          "name": "attention_items_object_same_room_fk",
           "tableFrom": "attention_items",
           "tableTo": "accepted_objects",
           "columnsFrom": [
+            "room_id",
             "object_id"
           ],
           "columnsTo": [
+            "room_id",
             "id"
           ],
           "onDelete": "cascade",
@@ -385,6 +414,185 @@
       },
       "isRLSEnabled": false
     },
+    "public.core_events": {
+      "name": "core_events",
+      "schema": "",
+      "columns": {
+        "seq": {
+          "name": "seq",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "room_id": {
+          "name": "room_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "room_seq": {
+          "name": "room_seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "event_type",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor": {
+          "name": "actor",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "appended_at": {
+          "name": "appended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "core_events_room_seq_key": {
+          "name": "core_events_room_seq_key",
+          "columns": [
+            {
+              "expression": "room_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "room_seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "core_events_id_key": {
+          "name": "core_events_id_key",
+          "columns": [
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "core_events_room_order_idx": {
+          "name": "core_events_room_order_idx",
+          "columns": [
+            {
+              "expression": "room_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "room_seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "core_events_order_idx": {
+          "name": "core_events_order_idx",
+          "columns": [
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "core_events_room_id_rooms_id_fk": {
+          "name": "core_events_room_id_rooms_id_fk",
+          "tableFrom": "core_events",
+          "tableTo": "rooms",
+          "columnsFrom": [
+            "room_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "core_events_room_seq_positive": {
+          "name": "core_events_room_seq_positive",
+          "value": "\"core_events\".\"room_seq\" >= 1"
+        },
+        "core_events_payload_id_matches": {
+          "name": "core_events_payload_id_matches",
+          "value": "\"core_events\".\"payload\"->>'id' = \"core_events\".\"id\""
+        },
+        "core_events_payload_type_matches": {
+          "name": "core_events_payload_type_matches",
+          "value": "\"core_events\".\"payload\"->>'type' = \"core_events\".\"type\"::text"
+        },
+        "core_events_payload_has_at": {
+          "name": "core_events_payload_has_at",
+          "value": "jsonb_exists(\"core_events\".\"payload\", 'at')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.corrections": {
       "name": "corrections",
       "schema": "",
@@ -395,6 +603,12 @@
           "primaryKey": true,
           "notNull": true,
           "default": "gen_random_uuid()"
+        },
+        "room_id": {
+          "name": "room_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
         },
         "object_id": {
           "name": "object_id",
@@ -433,6 +647,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "event_id": {
+          "name": "event_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -462,15 +682,30 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "corrections_event_key": {
+          "name": "corrections_event_key",
+          "columns": [
+            {
+              "expression": "event_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
-        "corrections_object_id_accepted_objects_id_fk": {
-          "name": "corrections_object_id_accepted_objects_id_fk",
+        "corrections_room_id_rooms_id_fk": {
+          "name": "corrections_room_id_rooms_id_fk",
           "tableFrom": "corrections",
-          "tableTo": "accepted_objects",
+          "tableTo": "rooms",
           "columnsFrom": [
-            "object_id"
+            "room_id"
           ],
           "columnsTo": [
             "id"
@@ -489,6 +724,21 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "corrections_object_same_room_fk": {
+          "name": "corrections_object_same_room_fk",
+          "tableFrom": "corrections",
+          "tableTo": "accepted_objects",
+          "columnsFrom": [
+            "room_id",
+            "object_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -665,6 +915,13 @@
           "notNull": true,
           "default": "now()"
         },
+        "seen_seq": {
+          "name": "seen_seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "last_read_seq": {
           "name": "last_read_seq",
           "type": "integer",
@@ -742,7 +999,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "memberships_seen_seq_nonnegative": {
+          "name": "memberships_seen_seq_nonnegative",
+          "value": "\"memberships\".\"seen_seq\" >= 0"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.messages": {
@@ -864,6 +1126,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "messages_room_id_key": {
+          "name": "messages_room_id_key",
+          "columns": [
+            {
+              "expression": "room_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -893,17 +1176,19 @@
           "onDelete": "set null",
           "onUpdate": "no action"
         },
-        "messages_reply_to_id_messages_id_fk": {
-          "name": "messages_reply_to_id_messages_id_fk",
+        "messages_reply_to_same_room_fk": {
+          "name": "messages_reply_to_same_room_fk",
           "tableFrom": "messages",
           "tableTo": "messages",
           "columnsFrom": [
+            "room_id",
             "reply_to_id"
           ],
           "columnsTo": [
+            "room_id",
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -1067,45 +1352,6 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "relations_from_object_id_accepted_objects_id_fk": {
-          "name": "relations_from_object_id_accepted_objects_id_fk",
-          "tableFrom": "relations",
-          "tableTo": "accepted_objects",
-          "columnsFrom": [
-            "from_object_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "relations_to_object_id_accepted_objects_id_fk": {
-          "name": "relations_to_object_id_accepted_objects_id_fk",
-          "tableFrom": "relations",
-          "tableTo": "accepted_objects",
-          "columnsFrom": [
-            "to_object_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "relations_to_message_id_messages_id_fk": {
-          "name": "relations_to_message_id_messages_id_fk",
-          "tableFrom": "relations",
-          "tableTo": "messages",
-          "columnsFrom": [
-            "to_message_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
         "relations_created_by_users_id_fk": {
           "name": "relations_created_by_users_id_fk",
           "tableFrom": "relations",
@@ -1117,6 +1363,51 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "relations_from_object_same_room_fk": {
+          "name": "relations_from_object_same_room_fk",
+          "tableFrom": "relations",
+          "tableTo": "accepted_objects",
+          "columnsFrom": [
+            "room_id",
+            "from_object_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "relations_to_object_same_room_fk": {
+          "name": "relations_to_object_same_room_fk",
+          "tableFrom": "relations",
+          "tableTo": "accepted_objects",
+          "columnsFrom": [
+            "room_id",
+            "to_object_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "relations_to_message_same_room_fk": {
+          "name": "relations_to_message_same_room_fk",
+          "tableFrom": "relations",
+          "tableTo": "messages",
+          "columnsFrom": [
+            "room_id",
+            "to_message_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -1147,6 +1438,12 @@
       "name": "object_sources",
       "schema": "",
       "columns": {
+        "room_id": {
+          "name": "room_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
         "object_id": {
           "name": "object_id",
           "type": "uuid",
@@ -1162,12 +1459,12 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "object_sources_object_id_accepted_objects_id_fk": {
-          "name": "object_sources_object_id_accepted_objects_id_fk",
+        "object_sources_room_id_rooms_id_fk": {
+          "name": "object_sources_room_id_rooms_id_fk",
           "tableFrom": "object_sources",
-          "tableTo": "accepted_objects",
+          "tableTo": "rooms",
           "columnsFrom": [
-            "object_id"
+            "room_id"
           ],
           "columnsTo": [
             "id"
@@ -1175,14 +1472,31 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "object_sources_message_id_messages_id_fk": {
-          "name": "object_sources_message_id_messages_id_fk",
+        "object_sources_object_same_room_fk": {
+          "name": "object_sources_object_same_room_fk",
+          "tableFrom": "object_sources",
+          "tableTo": "accepted_objects",
+          "columnsFrom": [
+            "room_id",
+            "object_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "object_sources_message_same_room_fk": {
+          "name": "object_sources_message_same_room_fk",
           "tableFrom": "object_sources",
           "tableTo": "messages",
           "columnsFrom": [
+            "room_id",
             "message_id"
           ],
           "columnsTo": [
+            "room_id",
             "id"
           ],
           "onDelete": "cascade",
@@ -1207,6 +1521,12 @@
       "name": "proposal_sources",
       "schema": "",
       "columns": {
+        "room_id": {
+          "name": "room_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
         "proposal_id": {
           "name": "proposal_id",
           "type": "uuid",
@@ -1222,12 +1542,12 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "proposal_sources_proposal_id_proposals_id_fk": {
-          "name": "proposal_sources_proposal_id_proposals_id_fk",
+        "proposal_sources_room_id_rooms_id_fk": {
+          "name": "proposal_sources_room_id_rooms_id_fk",
           "tableFrom": "proposal_sources",
-          "tableTo": "proposals",
+          "tableTo": "rooms",
           "columnsFrom": [
-            "proposal_id"
+            "room_id"
           ],
           "columnsTo": [
             "id"
@@ -1235,14 +1555,31 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "proposal_sources_message_id_messages_id_fk": {
-          "name": "proposal_sources_message_id_messages_id_fk",
+        "proposal_sources_proposal_same_room_fk": {
+          "name": "proposal_sources_proposal_same_room_fk",
+          "tableFrom": "proposal_sources",
+          "tableTo": "proposals",
+          "columnsFrom": [
+            "room_id",
+            "proposal_id"
+          ],
+          "columnsTo": [
+            "room_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "proposal_sources_message_same_room_fk": {
+          "name": "proposal_sources_message_same_room_fk",
           "tableFrom": "proposal_sources",
           "tableTo": "messages",
           "columnsFrom": [
+            "room_id",
             "message_id"
           ],
           "columnsTo": [
+            "room_id",
             "id"
           ],
           "onDelete": "cascade",
@@ -1376,6 +1713,27 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "proposals_room_id_key": {
+          "name": "proposals_room_id_key",
+          "columns": [
+            {
+              "expression": "room_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1630,10 +1988,20 @@
       "values": [
         "amend",
         "retract",
-        "restore",
-        "retype",
-        "reattribute",
-        "reopen"
+        "restore"
+      ]
+    },
+    "public.event_type": {
+      "name": "event_type",
+      "schema": "public",
+      "values": [
+        "proposal_recorded",
+        "proposal_rejected",
+        "object_accepted",
+        "object_corrected",
+        "relation_added",
+        "message_posted",
+        "attention_resolved"
       ]
     },
     "public.interpretation_status": {

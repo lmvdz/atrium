@@ -3,8 +3,8 @@ import type { AtriumSession, MembershipLike } from '@atrium/auth';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { createLogger } from '../src/logger.js';
-import type { ServerFrame } from '../src/ws-server.js';
-import { createRealtimeServer } from '../src/ws-server.js';
+import type { ServerFrame } from '../src/ws-presence-server.js';
+import { createRealtimeServer } from '../src/ws-presence-server.js';
 
 /**
  * The realtime surface's trust boundary, exercised over a real socket.

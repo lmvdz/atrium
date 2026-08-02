@@ -286,8 +286,46 @@ describe('r8 — the canonical order is over the instant, not its spelling', () 
       },
     });
 
+  /* ---------------------------------------------------------------------------
+   * THE THREE CASES BELOW USED TO MINT EVENTS AT `PLAIN`, AND CANNOT ANY MORE.
+   *
+   * The defect r8 found here is a lexical comparison over two spellings of one
+   * instant: `'2026-01-01T00:00:00Z'` against `'…00:00.500Z'`, where `'Z'`
+   * (U+005A) sorts after `'.'` (U+002E) and the half-second-later event
+   * therefore sorted FIRST. `instantKey`/`compareCursor` fixed it by reading the
+   * fields instead of the characters, and the three unit cases at the top of
+   * this describe still measure exactly that — they call the comparator
+   * directly, over spellings including offsets and sub-millisecond fractions,
+   * and none of them go through a schema.
+   *
+   * What changed is that an EVENT can no longer carry `PLAIN`. The realtime lane
+   * narrowed `Timestamp` to the one canonical spelling, because `packages/db`
+   * generates the `core_events_payload_at_is_canonical_utc` CHECK out of the same
+   * regex — a value type looser than the CHECK is a type that admits rows the
+   * database refuses. So the two-spelling collision is now unrepresentable in a
+   * log rather than merely handled in the comparator.
+   *
+   * NEITHER LANE'S GUARANTEE IS DROPPED AND NOTHING IS SILENTLY DELETED. The
+   * ordering cases keep running, over the canonical spellings a log can actually
+   * hold — and the case that used to prove the comparator survives `PLAIN` is
+   * replaced by one that proves `PLAIN` cannot be minted at all, which is the
+   * stronger of the two claims and fails just as loudly if either lane regresses:
+   * red if the schema loosens, red if the comparator goes lexical again.
+   * ------------------------------------------------------------------------- */
+  const CANONICAL = '2026-01-01T00:00:00.000Z';
+
+  it('refuses the spelling that made the two orders disagree, at the schema', () => {
+    // The r8 collision, stated as the thing that can no longer be built.
+    expect(PLAIN < HALF).toBe(false);
+    expect(() => staged('ev_plain', PLAIN)).toThrow(/spelled exactly/);
+    // …and the comparator is still right about it, for values that reach it
+    // from outside this package — a row read back out of a database written by
+    // an older writer never passes through `CoreEvent`.
+    expect(compareCursor({ at: PLAIN, id: 'a' }, { at: HALF, id: 'a' })).toBeLessThan(0);
+  });
+
   it('orders a log by when things happened', () => {
-    const rows = [staged('ev_b', HALF), staged('ev_a', PLAIN)];
+    const rows = [staged('ev_b', HALF), staged('ev_a', CANONICAL)];
     expect(orderEvents(rows).map((row) => row.event.id)).toEqual(['ev_a', 'ev_b']);
   });
 
@@ -295,7 +333,7 @@ describe('r8 — the canonical order is over the instant, not its spelling', () 
     // The live disposition, and the reason this is a contract hole rather than
     // a cosmetic one: the cursor had already moved past the later instant, so
     // re-minting the event at that instant fails forever.
-    const a = staged('ev_a', PLAIN);
+    const a = staged('ev_a', CANONICAL);
     const b = staged('ev_b', HALF);
     const first = appendEvent(reduce([]), a.event, a);
     expect(first.outcome).toBe('applied');
@@ -556,7 +594,11 @@ describe('r8 — a retype cannot reach past an invariant the fold enforces', () 
         id: 'obj_claim',
         type: 'claim',
         objectiveId: 'obj_objective',
-        payload: { statement: 'the index landed cleanly', claimant: BOB },
+        // ALICE, not BOB: `acceptObject` acts as ALICE, and #22 r10's
+        // self-staged-reading gate refuses a human accepting a no-proposal object
+        // that names somebody else. The case is about `objectiveId` surviving a
+        // retype; whose claim it is has nothing to do with it.
+        payload: { statement: 'the index landed cleanly', claimant: ALICE },
       }),
       event({
         id: 'ev_3',
@@ -610,7 +652,11 @@ describe('r8 — a retype cannot reach past an invariant the fold enforces', () 
         objectId: 'obj_q',
         action: 'retype',
         toType: 'claim',
-        patch: { claimant: BOB },
+        // ALICE, not BOB: the merge brought in #22 r10/r11's rule that a
+        // correction may only put the corrector's own name on something, and it
+        // fires before the structural guard this case is about. Who is named is
+        // incidental here — the invariant under test is the `answers` edge.
+        patch: { claimant: ALICE },
       }),
     ]);
     // r7: applied — an `answers` edge from a claim, which
@@ -669,7 +715,11 @@ describe('r8 — a retype cannot reach past an invariant the fold enforces', () 
         objectId: 'obj_q',
         action: 'retype',
         toType: 'claim',
-        patch: { claimant: BOB },
+        // ALICE, not BOB: the merge brought in #22 r10/r11's rule that a
+        // correction may only put the corrector's own name on something, and it
+        // fires before the structural guard this case is about. Who is named is
+        // incidental here — the invariant under test is the `answers` edge.
+        patch: { claimant: ALICE },
       }),
     ]);
     expect(state.issues).toEqual([]);
@@ -819,7 +869,14 @@ describe('r8 — the reducer repeats the answer-binding preconditions it skipped
           id: 'obj_d2',
           roomId: ROOM,
           type: 'decision',
-          payload: { statement: 'Keep the flag', decidedBy: BOB },
+          // ALICE decides, not BOB. `event`'s default human actor is ALICE, and
+          // #22 r10's self-staged-reading gate refuses a human accepting a
+          // no-proposal object that names somebody else — so under the merged
+          // reducer `obj_d2` never landed and this case failed with "unknown
+          // target object" instead of the "already answered" it is about. The
+          // finding is that ONE question takes ONE answer; who decided is not
+          // part of it, and the sibling cases in this describe all name ALICE.
+          payload: { statement: 'Keep the flag', decidedBy: ALICE },
           createdAt: at(3),
           updatedAt: at(3),
         },
@@ -1204,7 +1261,13 @@ describe('r8 — attention bookkeeping', () => {
       event({
         id: 'ev_o',
         at: at(2),
-        actor: human(),
+        // BOB, not ALICE. #22 r10's self-staged-reading gate refuses a human
+        // accepting a no-proposal commitment that writes somebody ELSE's
+        // obligation, so under the merged reducer this object never landed and
+        // the collision this case is about could not occur. BOB accepting his
+        // own commitment is legal and is the same two-item state: the model's
+        // staged reading still waits on his confirm, beside the one he owns.
+        actor: human(BOB),
         type: 'object_accepted',
         object: {
           id: shared,

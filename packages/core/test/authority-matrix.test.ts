@@ -97,6 +97,22 @@ const GATES = {
   supersession: 'retires an accepted',
   answer_relation: 'declares an open question answered',
   correction: 'corrections (amend, retract, restore)',
+  // #4's sentence has two halves and so does the correction gate: a name
+  // arriving on a sentence, and a sentence arriving under a name. The markers
+  // are the two verbs the refusals lead with — `selfStagedReadingRefusal` also
+  // ends in "…'s name on it", so a marker cut there would swallow it.
+  correction_attribution: 'putting user',
+  correction_quotation: 'rewording a sentence',
+  // The core lane's verb-split guard, which the merge put IN FRONT of the two
+  // above for one shape: a `retype` whose patch moves the attribution field.
+  // It is not a weaker version of `correction_attribution` and it is not
+  // redundant with it — it refuses the move even ONTO the corrector, where the
+  // attribution gate has nothing to say, because what it is protecting is that
+  // the correction log can be read by verb ("who took this off Alice" must be
+  // answerable by looking for `reattribute` rows). `correction_attribution`
+  // still guards every other route a name can arrive by; this closes the one
+  // route where a name change would otherwise have been logged as a retype.
+  retype_moves_a_name: 'a retype says how the sentence was read',
   acceptance_binding: 'may only accept its own reading',
   rejection_binding: 'may only withdraw its own reading',
   supersession_binding: 'may only retire its own reading',
@@ -113,6 +129,9 @@ const GATES = {
   receipt_failed: 'on a receipt that does not hold',
   receipt_not_certifiable: 'on a receipt this check declines to rule on',
   third_party_confirm: 'waits for the named owner to confirm',
+  // Both grounds of the r9 gate, which is one gate: the marker is the clause the
+  // two refusals share, not the tail either of them ends in.
+  self_staged_reading: 'which they staged themselves',
 } as const;
 type Gate = keyof typeof GATES;
 
@@ -155,6 +174,20 @@ interface AcceptanceCase {
   type: AcceptedObjectType;
   /** Cited proposal, or none at all (the answer-binding shape). */
   cited: 'model_a' | 'human' | 'none';
+  /**
+   * Who *staged* the cited proposal, drawn independently of what it names as
+   * proposer and of who accepts it.
+   *
+   * A dimension as of r9, and it is a dimension because of what it cost to leave
+   * fixed: every acceptance cell above recorded its proposal as `model_proposer`,
+   * so "a **person** staged a **model**-attributed reading and then accepted it
+   * himself" was not a cell in this matrix at all. That is D1 — the gauntlet
+   * minted a commitment against a colleague through it, over one socket, from an
+   * ordinary membership. The lifecycle matrix below already varied `recordedBy`
+   * for rejection and supersession; acceptance is where it mattered most and was
+   * the one row that held it constant.
+   */
+  recordedBy: ActorKind;
   /** Whether the cited proposal clears this type's floor. */
   confidence: 'above' | 'below';
   /** Only meaningful for a claim. */
@@ -177,6 +210,27 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   if (testCase.cited === 'none' && !human) return 'direct_acceptance';
   if (testCase.cited !== 'none' && !ownsProposal(testCase.actor, testCase.cited)) {
     return 'acceptance_binding';
+  }
+  // "A person's acceptance is not a receipt for a reading they staged themselves,
+  // when that reading wears a machine's name or puts somebody else's name on
+  // something." Restated from `selfStagedReadingRefusal`, not imported from it.
+  //
+  // `recordedBy: 'human'` is ALICE and so is the human accepter, which is what
+  // makes those the same person. `NAMES` above says who each payload names:
+  // BOB for a `claim` and a `commitment`, ALICE for a `decision` — so a decision
+  // is *not* somebody else's here, and the r10 rule that added `decidedBy` to
+  // the checked set is exercised by `attention.test.ts` and `guards.test.ts`
+  // rather than by this cell.
+  //
+  // **`cited === 'none'` is inside the clause as of r10.** It used to be
+  // excluded, which made "a person mints an obligation against a colleague
+  // outright, with no proposal and no second party" an *allowed* cell of this
+  // matrix — the fifth route, alongside the three verbs r10's brief named. An
+  // acceptance citing no proposal has no stager but the accepter, so the
+  // self-staged clause applies to it by construction, not by analogy.
+  if (human && (testCase.cited === 'none' || testCase.recordedBy === 'human')) {
+    const namesSomebodyElse = NAMES[testCase.type] !== null && NAMES[testCase.type] !== ALICE;
+    if (testCase.cited === 'model_a' || namesSomebodyElse) return 'self_staged_reading';
   }
   if (testCase.cited !== 'none' && !human && testCase.confidence === 'below') {
     return 'confidence_floor';
@@ -264,9 +318,21 @@ function expectedForRelation(
 // ─────────────────────────────────────────────────────────────────────────────
 
 let clock = 0;
+/**
+ * The next distinct instant, in the one canonical spelling.
+ *
+ * One second apart rather than one minute: the old version spelled the hour as
+ * `10 + clock / 60`, which walks past `23` — and `24:00:00.000Z` is not a real
+ * instant, so `Timestamp` refuses it and every case built after the 840th event
+ * dies on a parse error nobody would read as "the matrix outgrew its clock".
+ * #22 r11 added twenty cells and found it. Seconds carry this file to nearly
+ * fifty thousand events, and `Date#toISOString` is the spelling `Timestamp`
+ * exists to insist on, so the format cannot drift from it by hand.
+ */
+const CLOCK_EPOCH = Date.parse('2026-07-31T10:00:00.000Z');
 function nextAt(): string {
   clock += 1;
-  return `2026-07-31T${String(10 + Math.floor(clock / 60)).padStart(2, '0')}:${String(clock % 60).padStart(2, '0')}:00.000Z`;
+  return new Date(CLOCK_EPOCH + clock * 1000).toISOString();
 }
 
 const parse = (input: unknown): CoreEvent => CoreEventSchema.parse(input);
@@ -274,11 +340,11 @@ const parse = (input: unknown): CoreEvent => CoreEventSchema.parse(input);
 /** One ledger row: payload, plus the trusted columns. */
 function row(
   input: unknown,
-  actor: ActorKind,
+  actor: ActorKind | Actor,
   messages?: readonly ProvenanceMessage[],
 ): AuthoredEvent {
   return authored(parse(input), {
-    actor: actorOf(actor),
+    actor: typeof actor === 'string' ? actorOf(actor) : actor,
     ...(messages === undefined ? {} : { messages }),
   });
 }
@@ -372,6 +438,50 @@ function payloadFor(type: AcceptedObjectType, verified = false): Record<string, 
   }
 }
 
+/**
+ * Who each fixture payload above names, restated rather than derived.
+ *
+ * Load-bearing since #22 r10: a direct acceptance (no proposal) may only put the
+ * accepter's own name on something, so a *setup* row that needs an object named
+ * for BOB has to be minted by BOB. The matrix cells that probe the rule keep
+ * minting as ALICE — that is the case under test.
+ */
+const NAMES: Record<AcceptedObjectType, string | null> = {
+  decision: ALICE,
+  commitment: BOB,
+  claim: BOB,
+  open_question: null,
+  objective: null,
+};
+
+/**
+ * **Which field** each type puts a person in, and which one holds its sentence —
+ * restated, never imported.
+ *
+ * `attribution.ts` derives both from `PAYLOAD_FIELD_ROLE`, which is exactly why
+ * this file writes them out by hand: an oracle that imported `ATTRIBUTION_FIELD`
+ * and `TEXT_FIELD` would agree with the classification under test by
+ * construction, and a payload field reclassified in error would move both sides
+ * together and be invisible here. Reclassify `commitment.statement` as a detail
+ * and the source stops calling it text; these two tables do not, and the matrix
+ * goes red.
+ */
+const NAME_KEY: Record<AcceptedObjectType, string | null> = {
+  decision: 'decidedBy',
+  commitment: 'owner',
+  claim: 'claimant',
+  open_question: null,
+  objective: null,
+};
+
+const TEXT_KEY: Record<AcceptedObjectType, string> = {
+  decision: 'statement',
+  commitment: 'statement',
+  claim: 'statement',
+  open_question: 'question',
+  objective: 'title',
+};
+
 function proposalEvent(input: {
   id: string;
   type: AcceptedObjectType;
@@ -423,18 +533,26 @@ function acceptEvent(input: {
   statement?: string;
   citing?: string[];
   messages?: readonly ProvenanceMessage[];
+  /**
+   * Whose name the object stands under, overriding `payloadFor`'s default —
+   * and, for a setup row, who mints it. The r11 matrix needs the same object
+   * named for the corrector and for somebody else, and "which field holds the
+   * name" is restated in `NAME_KEY` rather than imported, like every other rule
+   * this oracle knows.
+   */
+  names?: string;
+  /**
+   * This row is scaffolding, not the case under test: mint it under whoever the
+   * payload names, so #22 r10's attribution gate lets it through and the object
+   * exists for the verb or relation actually being probed.
+   */
+  setup?: true;
 }): AuthoredEvent {
   const at = nextAt();
   const payload = payloadFor(input.type, input.verified);
-  if (input.statement !== undefined) {
-    payload[
-      input.type === 'open_question'
-        ? 'question'
-        : input.type === 'objective'
-          ? 'title'
-          : 'statement'
-    ] = input.statement;
-  }
+  const nameKey = NAME_KEY[input.type];
+  if (input.names !== undefined && nameKey !== null) payload[nameKey] = input.names;
+  if (input.statement !== undefined) payload[TEXT_KEY[input.type]] = input.statement;
   return row(
     {
       id: `ev_${input.id}`,
@@ -453,7 +571,9 @@ function acceptEvent(input: {
         updatedAt: at,
       },
     },
-    input.actor,
+    input.setup && input.actor === 'human' && (input.names ?? NAMES[input.type]) !== null
+      ? { kind: 'human', userId: (input.names ?? NAMES[input.type]) as string }
+      : input.actor,
     input.messages === undefined ? WINDOW : input.messages,
   );
 }
@@ -506,15 +626,24 @@ for (const actor of ACTOR_KINDS) {
         // not a cell, it is the same cell twice.
         if (cited === 'none' && confidence === 'below') continue;
         const verifiedVariants = type === 'claim' ? [false, true] : [false];
+        // Who staged it, for the same reason: with nothing cited there is no
+        // staging to attribute. Two stagers rather than all four — a human and a
+        // model — because the rule this dimension exists for splits on exactly
+        // that, and the system actor cannot appear as a proposer at all.
+        const recordedByVariants: ActorKind[] =
+          cited === 'none' ? ['model_proposer'] : ['model_proposer', 'human'];
         for (const verified of verifiedVariants) {
-          acceptanceCases.push({
-            kind: 'object_accepted',
-            actor,
-            type,
-            cited,
-            confidence,
-            verified,
-          });
+          for (const recordedBy of recordedByVariants) {
+            acceptanceCases.push({
+              kind: 'object_accepted',
+              actor,
+              type,
+              cited,
+              recordedBy,
+              confidence,
+              verified,
+            });
+          }
         }
       }
     }
@@ -523,7 +652,7 @@ for (const actor of ACTOR_KINDS) {
 
 describe('authority matrix — object_accepted, every actor × type × citation × confidence', () => {
   for (const testCase of acceptanceCases) {
-    const label = `${testCase.actor} accepts ${testCase.type}${testCase.verified ? ' (verified)' : ''} via ${testCase.cited}${testCase.cited === 'none' ? '' : ` @${testCase.confidence} floor`}`;
+    const label = `${testCase.actor} accepts ${testCase.type}${testCase.verified ? ' (verified)' : ''} via ${testCase.cited}${testCase.cited === 'none' ? '' : ` staged by ${testCase.recordedBy} @${testCase.confidence} floor`}`;
     it(label, () => {
       const suffix = `${acceptanceCases.indexOf(testCase)}`;
       const events: AuthoredEvent[] = [];
@@ -549,7 +678,7 @@ describe('authority matrix — object_accepted, every actor × type × citation 
             confidence,
             verified: testCase.verified,
             // Independent of the proposer, and of the accepting actor.
-            recordedBy: 'model_proposer',
+            recordedBy: testCase.recordedBy,
           }),
         );
       }
@@ -791,6 +920,7 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
           type: 'open_question',
           actor: 'human',
           proposalId: null,
+          setup: true,
         }),
         acceptEvent({
           id: `a_${suffix}`,
@@ -798,6 +928,7 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
           type: 'decision',
           actor: 'human',
           proposalId: null,
+          setup: true,
         }),
         row(
           {
@@ -819,15 +950,23 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
       return { events, objectId };
     }
 
-    // Everything else acts on a commitment: it has both a text field and an
-    // attribution field, so `amend`, `reattribute` and `retype` all apply.
+    // `amend` acts on an objective: it has a text field and names nobody.
+    //
+    // It used to act on the same BOB-owned commitment as the verbs below, with
+    // `{statement: 'reworded'}` — which is #22 r11's defect written as a
+    // fixture. Rewording a sentence that stands under somebody else's name is
+    // now refused, so that cell was asserting `allowed` for the act the round
+    // exists to close. This axis of the matrix is *who may correct at all*, and
+    // an objective answers that without dragging a second rule into the cell;
+    // whose name is on the object is its own axis, in the matrix below.
     events.push(
       acceptEvent({
         id: `c_${suffix}`,
         objectId,
-        type: 'commitment',
+        type: verb === 'amend' ? 'objective' : 'commitment',
         actor: 'human',
         proposalId: null,
+        setup: true,
       }),
     );
     if (verb === 'restore') {
@@ -848,7 +987,7 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
   }
 
   function patchFor(verb: CorrectionAction): Record<string, unknown> {
-    if (verb === 'amend') return { statement: 'reworded' };
+    if (verb === 'amend') return { title: 'reworded, and nobody is named on it' };
     if (verb === 'reattribute') return { owner: ALICE };
     // Empty since r8: `retypeCarryOver` moves the commitment's `owner` onto the
     // claim's `claimant`, and a patch naming a *different* person is refused as
@@ -895,7 +1034,14 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
     // that would still apply if the other were ever relaxed.
     const objectId = 'obj_verify_probe';
     const state = reduce([
-      acceptEvent({ id: 'vp_setup', objectId, type: 'claim', actor: 'human', proposalId: null }),
+      acceptEvent({
+        id: 'vp_setup',
+        objectId,
+        type: 'claim',
+        actor: 'human',
+        proposalId: null,
+        setup: true,
+      }),
       row(
         {
           id: 'ev_vp',
@@ -910,6 +1056,229 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
     ]);
     expect(verdictOf(state, 'ev_vp')).toBe('claim_verification');
   });
+});
+
+/**
+ * The second axis of the correction matrix: **whose name the object stands
+ * under, and what the correction asserts under it.**
+ *
+ * The matrix above ranges over actors and answers *may this actor correct at
+ * all*. It cannot see #22 r11, because r11's defect is a human doing a
+ * human-only thing: ALICE rewording BOB's sentence, five times, `ack` with
+ * `issues: []` every time, ending at a `✓` claim in which BOB confesses to
+ * taking kickbacks and BOB wrote none of the words.
+ *
+ * So the same six verbs run again here, against the *same object* named for the
+ * corrector and named for somebody else, and each case declares two facts about
+ * itself: whom it leaves the object naming, and whether it leaves a different
+ * sentence. The oracle is #4's sentence with both halves in it — *nobody gets
+ * committed, or quoted, by someone else's sentence* — and it is written out
+ * rather than called.
+ *
+ * Every legal verb r10 made a named mutant of is in here as a cell that must
+ * stay `allowed` on somebody else's object: `retract`, `restore`, `reopen`,
+ * `amend` of a due date, `amend` of a status, and a `retype` that carries the
+ * sentence across unchanged. A gate that fired on a name being *present* rather
+ * than a sentence *changing* would freeze all six, which is the other bug and
+ * just as shipped.
+ */
+describe('authority matrix — object_corrected, every verb × whose name it stands under', () => {
+  /** What the object says before any correction; `REWORDED` is what it must not be made to say. */
+  const ORIGINAL = 'wire the flag into the server tomorrow';
+  const REWORDED = 'i have been taking kickbacks from the vendor';
+
+  interface AssertionCase {
+    label: string;
+    verb: CorrectionAction;
+    toType?: AcceptedObjectType;
+    /** Whose name the object stands under once this has been applied. */
+    namesAfter: (before: string) => string;
+    /** Does it leave a different sentence? */
+    rewords: boolean;
+    patch: (before: string) => Record<string, unknown>;
+    /** An extra correction to run first, so the verb has something to act on. */
+    prepare?: 'retract' | 'close';
+  }
+
+  /** The person a correction would hand it to: whoever is not already named. */
+  const theOther = (before: string) => (before === ALICE ? BOB : ALICE);
+
+  const CASES: AssertionCase[] = [
+    {
+      label: 'amend the sentence',
+      verb: 'amend',
+      namesAfter: (before) => before,
+      rewords: true,
+      patch: () => ({ statement: REWORDED }),
+    },
+    {
+      label: 'amend the due date',
+      verb: 'amend',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({ due: '2026-08-01T10:00:00.000Z' }),
+    },
+    {
+      label: 'amend the status',
+      verb: 'amend',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({ status: 'done' }),
+    },
+    {
+      label: 'retract it',
+      verb: 'retract',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({}),
+    },
+    {
+      label: 'restore it',
+      verb: 'restore',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({}),
+      prepare: 'retract',
+    },
+    {
+      label: 'reopen it',
+      verb: 'reopen',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: () => ({}),
+      prepare: 'close',
+    },
+    {
+      label: 'retype it, carrying the sentence',
+      verb: 'retype',
+      toType: 'claim',
+      namesAfter: (before) => before,
+      rewords: false,
+      patch: (before) => ({ claimant: before }),
+    },
+    {
+      label: 'retype it and reword it in the same act',
+      verb: 'retype',
+      toType: 'claim',
+      namesAfter: (before) => before,
+      rewords: true,
+      patch: (before) => ({ claimant: before, statement: REWORDED }),
+    },
+    {
+      label: 'retype it onto the other person',
+      verb: 'retype',
+      toType: 'claim',
+      namesAfter: theOther,
+      rewords: false,
+      patch: (before) => ({ claimant: theOther(before) }),
+    },
+    {
+      label: 'reattribute it onto the other person',
+      verb: 'reattribute',
+      namesAfter: theOther,
+      rewords: false,
+      patch: (before) => ({ owner: theOther(before) }),
+    },
+  ];
+
+  /**
+   * #4, restated: a correction is one person's act, so it may only assert
+   * things under its own author's name. A name arriving that is not the
+   * corrector's is the first half; a sentence changing under a name that is not
+   * the corrector's is the second. ALICE corrects throughout.
+   */
+  function expectedForAssertion(namedBefore: string, testCase: AssertionCase): Gate | 'allowed' {
+    const namedAfter = testCase.namesAfter(namedBefore);
+    // FIRST, BECAUSE IT FIRES FIRST. `retypeStructuralRefusal`'s sibling — the
+    // guard that a retype may not move the attribution field — lives inside
+    // `planRetype`, and a plan that never gets built never reaches the
+    // attribution gate in `applyObjectCorrected`. It refuses a name move on a
+    // retype unconditionally, including onto the corrector, so this arm is
+    // ahead of BOTH clauses below and is not conditioned on who is named.
+    if (testCase.verb === 'retype' && namedAfter !== namedBefore) return 'retype_moves_a_name';
+    if (namedAfter !== namedBefore && namedAfter !== ALICE) return 'correction_attribution';
+    if (testCase.rewords && namedAfter !== ALICE) return 'correction_quotation';
+    return 'allowed';
+  }
+
+  for (const standsUnder of ['the corrector', 'somebody else'] as const) {
+    const namedBefore = standsUnder === 'the corrector' ? ALICE : BOB;
+
+    for (const testCase of CASES) {
+      it(`ALICE tries to ${testCase.label}, on a commitment standing under ${standsUnder}`, () => {
+        const suffix = `${standsUnder === 'the corrector' ? 'own' : 'other'}_${testCase.label.replace(/[^a-z]+/g, '_')}`;
+        const objectId = `obj_a_${suffix}`;
+        const events: AuthoredEvent[] = [
+          acceptEvent({
+            // `acceptEvent` prefixes this with `ev_`, so it must not read as
+            // the correction's own id — two rows sharing one event id is a
+            // redelivery, and the reducer drops the second in silence.
+            id: `seed_${suffix}`,
+            objectId,
+            type: 'commitment',
+            actor: 'human',
+            proposalId: null,
+            names: namedBefore,
+            statement: ORIGINAL,
+            setup: true,
+          }),
+        ];
+
+        // Scaffolding runs as the person named, so a cell can never fail on the
+        // rule it is not testing.
+        const owner: Actor = { kind: 'human', userId: namedBefore };
+        if (testCase.prepare !== undefined) {
+          events.push(
+            row(
+              {
+                id: `ev_prep_${suffix}`,
+                at: nextAt(),
+                type: 'object_corrected',
+                objectId,
+                ...(testCase.prepare === 'retract'
+                  ? { action: 'retract' }
+                  : { action: 'amend', patch: { status: 'done' } }),
+              },
+              owner,
+            ),
+          );
+        }
+
+        const correctionId = `ev_a_${suffix}`;
+        events.push(
+          row(
+            {
+              id: correctionId,
+              at: nextAt(),
+              type: 'object_corrected',
+              objectId,
+              action: testCase.verb,
+              ...(testCase.toType === undefined ? {} : { toType: testCase.toType }),
+              patch: testCase.patch(namedBefore),
+            },
+            'human',
+          ),
+        );
+
+        const state = reduce(events);
+        const expected = expectedForAssertion(namedBefore, testCase);
+        expect(verdictOf(state, correctionId)).toBe(expected);
+        expect(state.corrections.some((entry) => entry.eventId === correctionId)).toBe(
+          expected === 'allowed',
+        );
+
+        // A refused correction leaves the sentence exactly as it was — the
+        // point of the round. `issues: []` with the object already rewritten is
+        // the shape r10 shipped.
+        const record = state.objects[objectId];
+        if (!record) throw new Error('setup did not produce an object');
+        const text = (record.object.payload as Record<string, unknown>)[
+          TEXT_KEY[record.object.type]
+        ];
+        expect(text).toBe(expected === 'allowed' && testCase.rewords ? REWORDED : ORIGINAL);
+      });
+    }
+  }
 });
 
 describe('authority matrix — relation_added, every actor × kind × retired type', () => {
@@ -941,6 +1310,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
               type: fromType,
               actor: 'human',
               proposalId: null,
+              setup: true,
             }),
             acceptEvent({
               id: `t_${suffix}`,
@@ -948,6 +1318,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
               type: toType,
               actor: 'human',
               proposalId: null,
+              setup: true,
             }),
             row(
               {
@@ -983,15 +1354,21 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
 });
 
 describe('the matrix as a whole', () => {
-  it('enumerates every cell it claims to — 4 actors × 5 types × 5 citation/confidence shapes', () => {
-    // Per actor, per type: two cited proposals × two confidence bands, plus the
-    // one direct shape (with nothing cited there is no band) = 5. Five types, of
-    // which `claim` is doubled for verified/unverified: 4×5 + 5×2 = 30.
-    expect(acceptanceCases).toHaveLength(4 * (4 * 5 + 5 * 2));
+  it('enumerates every cell it claims to — 4 actors × 5 types × 9 citation/staging/confidence shapes', () => {
+    // Per actor, per type: two cited proposals × two confidence bands × two
+    // stagers, plus the one direct shape (with nothing cited there is no band and
+    // no staging) = 9. Five types, of which `claim` is doubled for
+    // verified/unverified: 4×9 + 9×2 = 54 per actor.
+    //
+    // The staging dimension is r9's and is the one that was missing: every cell
+    // here used to be recorded by `model_proposer`, so the whole *human*-staged
+    // half of the space — where D1 lives — was outside the enumeration while the
+    // file's own header claimed the case space was enumerated.
+    expect(acceptanceCases).toHaveLength(4 * (4 * 9 + 9 * 2));
     const distinct = new Set(
       acceptanceCases.map(
         (entry) =>
-          `${entry.actor}|${entry.type}|${entry.cited}|${entry.confidence}|${entry.verified}`,
+          `${entry.actor}|${entry.type}|${entry.cited}|${entry.recordedBy}|${entry.confidence}|${entry.verified}`,
       ),
     );
     expect(distinct.size).toBe(acceptanceCases.length);
@@ -1005,9 +1382,50 @@ describe('the matrix as a whole', () => {
     expect(refused).toBeLessThan(acceptanceCases.length);
   });
 
-  it('leaves the human row entirely open — the floor gates machines, not people', () => {
-    for (const testCase of acceptanceCases.filter((entry) => entry.actor === 'human')) {
-      expect(expectedForAcceptance(testCase)).toBe('allowed');
+  it('leaves the human row open except where a person is the only judgement in the room', () => {
+    /**
+     * Until r9 this said "entirely open — the floor gates machines, not people",
+     * and that was the whole claim: θ, the receipt, and the attribution rules
+     * exist to bound *machines*, and a person's judgement is the receipt.
+     *
+     * It is still the claim, and r9 narrows it by one shape rather than weakening
+     * it. The narrowing is not about people being untrusted — it is that a person
+     * accepting a reading **they** staged is not a second judgement about a
+     * reading, and both things the human path skips on the strength of one (the
+     * receipt checks, and #4's third-party confirmation) assume there is one.
+     *
+     * Written as a partition rather than as "allowed unless refused", so a third
+     * refusal creeping into the human row fails here instead of being absorbed.
+     *
+     * **r10 widens the exception without widening the claim.** "The person
+     * accepting staged it" is true of an acceptance that cites *no* proposal too
+     * — there is nobody else in it at all — and r9's version excluded that shape
+     * with `cited !== 'none'`, which left a person free to mint an obligation
+     * against a colleague outright. Same rule, one fewer carve-out.
+     */
+    const humanRow = acceptanceCases.filter((entry) => entry.actor === 'human');
+    const namesSomebodyElse = (entry: AcceptanceCase) =>
+      NAMES[entry.type] !== null && NAMES[entry.type] !== ALICE;
+    const onlyJudgementInTheRoom = (entry: AcceptanceCase) =>
+      (entry.cited === 'none' || entry.recordedBy === 'human') &&
+      (entry.cited === 'model_a' || namesSomebodyElse(entry));
+
+    // The exception is a real part of the space, not an empty set the partition
+    // is trivially true over — and all three of its grounds are populated.
+    expect(
+      humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'model_a').length,
+    ).toBeGreaterThan(0);
+    expect(
+      humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'human').length,
+    ).toBeGreaterThan(0);
+    expect(
+      humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'none').length,
+    ).toBeGreaterThan(0);
+
+    for (const testCase of humanRow) {
+      expect(expectedForAcceptance(testCase)).toBe(
+        onlyJudgementInTheRoom(testCase) ? 'self_staged_reading' : 'allowed',
+      );
     }
     for (const shape of RECEIPT_SHAPES) {
       expect(expectedForReceipt('human', shape)).toBe('allowed');

@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type Actor,
   type AuthoredEvent,
   type CoreEvent,
   type CoreState,
   confirmedAt,
+  correctionAttributionRefusal,
   correctionChain,
   correctionChains,
   correctionCounterexamples,
@@ -33,6 +35,12 @@ const corrected = (
     at: string;
     objectId: string;
     action: 'amend' | 'retract' | 'restore' | 'retype' | 'reattribute' | 'reopen';
+    /**
+     * Who is correcting. ALICE unless a case says otherwise — and since #22 r11
+     * a case that rewords a sentence standing under somebody's name has to say
+     * otherwise, because only that person may reword it.
+     */
+    actor?: Actor;
   },
 ): AuthoredEvent =>
   event({
@@ -209,6 +217,26 @@ describe('retype — #5’s canonical fix', () => {
   });
 
   it('accepts the same retype once the patch supplies what the new type needs', () => {
+    // The owner is ALICE, who is the corrector. Until #22 r10 this fixture read
+    // `owner: BOB` and passed, which is D3 exactly: `retype` was the route that
+    // minted an obligation against somebody with no second party anywhere in it.
+    // What the case is about — a retype is refused until the patch supplies what
+    // the new type needs, and accepted once it does — is unchanged.
+    // THE FIXTURE IS THE REALTIME LANE'S, AND IT HAD TO BE. The core lane's copy
+    // of this case retyped a reopened `obj_question_1` with `patch: { owner: BOB }`
+    // and asserted it landed. Under #22 r10 that is now REFUSED — a correction
+    // may only put the corrector's own name on something — so the two are not
+    // merely different fixtures, the older one asserts the absence of the
+    // invariant the newer one adds. Retyping an open_question is still covered
+    // three tests up ("cannot retype … owner"), and `reopenTheQuestion` still
+    // has two other users, so nothing of the core lane's coverage goes with it.
+    // AND THE OBJECT IS THE QUESTION, REOPENED FIRST — the core lane's fixture,
+    // carrying the realtime lane's assertion. `obj_decision_2` answers
+    // `obj_question_1`, and since r8 `retypeStructuralRefusal` will not leave an
+    // `answers` edge pointing at a commitment; that guard fires before the plan
+    // exists, so on the merged reducer this case never reached the attribution
+    // gate it is about. Reopening the question is what the refusal says to do,
+    // and it is what the two tests on either side of this one already do.
     const state = reduce([
       ...sampleLog(),
       reopenTheQuestion,
@@ -218,12 +246,37 @@ describe('retype — #5’s canonical fix', () => {
         objectId: 'obj_question_1',
         action: 'retype',
         toType: 'commitment',
-        patch: { owner: BOB },
+        patch: { owner: ALICE },
       }),
     ]);
     expect(state.issues).toEqual([]);
     const record = state.objects.obj_question_1;
-    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(BOB);
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(ALICE);
+  });
+
+  it('refuses that same retype when the patch names somebody else', () => {
+    // D3, driven: an `objective` or a `decision` names nobody, so nothing has
+    // grounds to refuse it — and `retype` then mints a commitment owned by a
+    // colleague, with `ack` and `issues: []`, without ever staging one.
+    //
+    // Mutation this catches: drop the `correctionAttributionRefusal` call from
+    // `applyObjectCorrected`, or narrow it back to the `reattribute` branch, and
+    // this fails while every other correction test still passes.
+    const state = reduce([
+      ...sampleLog(),
+      reopenTheQuestion,
+      corrected({
+        id: 'ev_retype_foreign',
+        at: at(9),
+        objectId: 'obj_question_1',
+        action: 'retype',
+        toType: 'commitment',
+        patch: { owner: BOB },
+      }),
+    ]);
+    expect(state.issues.at(-1)?.reason).toContain(`putting user "${BOB}"'s name on it`);
+    expect(state.objects.obj_question_1?.object.type).toBe('open_question');
+    expect(state.corrections.some((entry) => entry.action === 'retype')).toBe(false);
   });
 
   it('refuses a retype with no target type, and one to the same type', () => {
@@ -302,6 +355,105 @@ describe('reattribute — the verb split that keeps the log readable', () => {
     });
   });
 
+  it('refuses moving an obligation onto somebody who is not the corrector', () => {
+    // #22 r10, D1, driven exactly as the gauntlet drove it: ALICE stages and
+    // accepts a commitment she owns — entirely legitimate, nobody else's name on
+    // it — and then hands it to BOB with one more command. Under r9 all three
+    // acked with `issues: []` and BOB owned it.
+    //
+    // Mutation this catches: delete the `correctionAttributionRefusal` call in
+    // `applyObjectCorrected`, or move it back inside the `reattribute` branch of
+    // `planPayloadEdit` — where it would still pass this test but fail the
+    // `retype` one below, which is the point of putting it at the choke.
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_own',
+        at: at(9),
+        actor: human(),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_mine',
+          roomId: ROOM,
+          type: 'commitment',
+          payload: { statement: 'I will write the migration', owner: ALICE },
+          createdAt: at(9),
+          updatedAt: at(9),
+        },
+      } as Parameters<typeof event>[0]),
+      corrected({
+        id: 'ev_handoff',
+        at: at(10),
+        objectId: 'obj_mine',
+        action: 'reattribute',
+        patch: { owner: BOB },
+      }),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain(`putting user "${BOB}"'s name on it`);
+    expect(state.issues[0]?.reason).toContain('nobody gets committed');
+    const record = state.objects.obj_mine;
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(ALICE);
+    expect(record?.revision).toBe(0);
+    expect(state.corrections.some((entry) => entry.objectId === 'obj_mine')).toBe(false);
+  });
+
+  it('refuses moving it onto a uuid that belongs to no user at all', () => {
+    // The same gate closes this without an FK and without a directory: the name
+    // is refused because it is not the corrector's, not because anybody looked
+    // it up. The reducer has no membership table and must not grow one.
+    //
+    // Mutation: weaken the gate to `after.some((id) => id === '')` or to a
+    // membership lookup that the core cannot perform. This fails.
+    const ghost = '00000000-0000-4000-8000-000000000000';
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_ghost',
+        at: at(9),
+        objectId: 'obj_commitment_1',
+        action: 'reattribute',
+        patch: { owner: ghost },
+      }),
+    ]);
+    expect(state.issues[0]?.reason).toContain(`putting user "${ghost}"'s name on it`);
+    const record = state.objects.obj_commitment_1;
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(BOB);
+  });
+
+  it('still lets every other verb touch an object that names somebody else', () => {
+    // The gate is about a name *arriving*, not a name being present — otherwise
+    // it would freeze BOB's commitment against every correction in the product.
+    // One `amend` of the due date, one `retract`, one `restore`, all by ALICE,
+    // all on an object owned by BOB.
+    //
+    // Mutation: drop the `!before.includes(userId)` filter from
+    // `correctionAttributionRefusal`. Every line below starts failing, which is
+    // how a gate that is too strong is caught rather than shipped.
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_due',
+        at: at(9),
+        objectId: 'obj_commitment_1',
+        action: 'amend',
+        patch: { due: at(11) },
+      }),
+      corrected({ id: 'ev_ret', at: at(10), objectId: 'obj_commitment_1', action: 'retract' }),
+      corrected({ id: 'ev_res', at: at(11), objectId: 'obj_commitment_1', action: 'restore' }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_commitment_1;
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(BOB);
+    expect(record?.object.type === 'commitment' && record.object.payload.due).toBe(at(11));
+    expect(record?.retractedAt).toBeNull();
+    expect(
+      state.corrections
+        .filter((entry) => entry.objectId === 'obj_commitment_1')
+        .map((entry) => entry.action),
+    ).toEqual(['amend', 'retract', 'restore']);
+  });
+
   it('refuses an amend that would move the obligation instead', () => {
     // The point of the split: "who took this off me" must be answerable by verb.
     const state = reduce([
@@ -357,17 +509,308 @@ describe('reattribute — the verb split that keeps the log readable', () => {
   });
 
   it('still lets amend change everything that is not the attribution field', () => {
+    // BOB corrects, because `obj_commitment_1` is BOB's and since #22 r11 the
+    // sentence under a person's name is theirs to reword. What the case is
+    // about — the verb split fences off the attribution field and *nothing
+    // else*, so an `amend` of the sentence is a plain, unrefused correction —
+    // is unchanged; only whose hand is on it moved.
     const state = reduce([
       ...sampleLog(),
       corrected({
         id: 'ev_ok',
         at: at(9),
+        actor: human(BOB),
         objectId: 'obj_commitment_1',
         action: 'amend',
         patch: { statement: 'Wire the flag into the server, behind the env var' },
       }),
     ]);
     expect(state.issues).toEqual([]);
+    const record = state.objects.obj_commitment_1;
+    expect(record?.object.type === 'commitment' && record.object.payload.statement).toBe(
+      'Wire the flag into the server, behind the env var',
+    );
+  });
+});
+
+/**
+ * #22 r11: the other half of #4's sentence.
+ *
+ * r10 closed *nobody gets committed by someone else's sentence* and left
+ * *nobody gets **quoted*** standing open while the refusal text went on citing
+ * it. The gate compared name sets and never looked at the field the sentence is
+ * in, so a member could take a colleague's own accepted commitment and rewrite
+ * the words under his name, as many times as he liked, `ack` with `issues: []`
+ * every time.
+ */
+describe('the sentence under a person’s name is theirs — #22 r11', () => {
+  const MALLORY = 'user_mallory';
+  const BOBS_OWN = "I'll review the Q3 deck before Friday";
+
+  /** BOB stages and self-accepts his own commitment. Entirely legal — his name. */
+  function bobsCommitment(): AuthoredEvent[] {
+    return [
+      event({
+        id: 'ev_bob',
+        at: at(1),
+        actor: human(BOB),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_bob',
+          roomId: ROOM,
+          type: 'commitment',
+          payload: { statement: BOBS_OWN, owner: BOB },
+          createdAt: at(1),
+          updatedAt: at(1),
+        },
+      } as Parameters<typeof event>[0]),
+    ];
+  }
+
+  /** The same object as a plain record — what the gate compares, without a log. */
+  function bobsCommitmentObject() {
+    return {
+      id: 'obj_bob',
+      roomId: ROOM,
+      type: 'commitment',
+      payload: { statement: BOBS_OWN, owner: BOB },
+      createdAt: at(1),
+      updatedAt: at(1),
+    } as Parameters<typeof correctionAttributionRefusal>[0]['before'];
+  }
+
+  /** A correction by a third person — neither the owner nor anybody named. */
+  const mallory = (overrides: Parameters<typeof corrected>[0]): AuthoredEvent =>
+    corrected({ ...overrides, actor: human(MALLORY) });
+
+  it('refuses the five commands that made BOB confess to taking kickbacks', () => {
+    // The gauntlet's sequence, verbatim and in order. Under r10 all five acked
+    // with `issues: []` and left `type=claim, claimant=BOB,
+    // verification=verified, revision=5` with a statement MALLORY wrote.
+    //
+    // Mutation this catches: delete the second clause of
+    // `correctionAttributionRefusal` — the one that compares
+    // `objectStatement(after)` with `objectStatement(before)`. Nothing else in
+    // the suite goes red for it, which is precisely how it shipped.
+    const state = reduce([
+      ...bobsCommitment(),
+      mallory({
+        id: 'ev_m1',
+        at: at(2),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { statement: 'I falsified the Q3 revenue figures' },
+      }),
+      mallory({
+        id: 'ev_m2',
+        at: at(3),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { due: at(20) },
+      }),
+      mallory({
+        id: 'ev_m3',
+        at: at(4),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'claim',
+        patch: { claimant: BOB },
+      }),
+      mallory({
+        id: 'ev_m4',
+        at: at(5),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { verification: 'verified' },
+      }),
+      mallory({
+        id: 'ev_m5',
+        at: at(6),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { statement: 'I have been taking kickbacks from the vendor' },
+      }),
+    ]);
+
+    // The two that put words under BOB's name are refused, by name, and the
+    // room is told which rule and whose name.
+    const refused = state.issues.map((issue) => issue.eventId);
+    expect(refused).toEqual(['ev_m1', 'ev_m5']);
+    for (const issue of state.issues) {
+      expect(issue.reason).toContain(`rewording a sentence that stands under user "${BOB}"'s name`);
+      expect(issue.reason).toContain('nobody gets committed, or quoted');
+    }
+
+    // …and the sentence in the current-state table is still the one BOB wrote.
+    const record = state.objects.obj_bob;
+    expect(record?.object.type === 'claim' && record.object.payload.statement).toBe(BOBS_OWN);
+    // What is deliberately still reachable, stated rather than hidden: the three
+    // acts that assert nothing under BOB's name all land. MALLORY may read his
+    // commitment as a claim and mark it verified — a reading of BOB's own words,
+    // recorded as MALLORY's act. Whether `verification: 'verified'` should be
+    // reachable by `amend` from any member at all is #68, and is not this round.
+    expect(record?.object.type === 'claim' && record.object.payload.claimant).toBe(BOB);
+    expect(record?.object.type === 'claim' && record.object.payload.verification).toBe('verified');
+    expect(record?.revision).toBe(3);
+    expect(state.corrections.map((entry) => entry.eventId)).toEqual(['ev_m2', 'ev_m3', 'ev_m4']);
+  });
+
+  it('lets a person reword their own sentence', () => {
+    // Mutation this catches: drop the `isForeign` filter from clause two, so it
+    // refuses on any name being present. The product would freeze — nobody
+    // could fix their own wording — which is the other bug and just as shipped.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_bob_fix',
+        at: at(2),
+        actor: human(BOB),
+        objectId: 'obj_bob',
+        action: 'amend',
+        patch: { statement: "I'll review the Q3 deck before Thursday" },
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_bob;
+    expect(record?.object.type === 'commitment' && record.object.payload.statement).toBe(
+      "I'll review the Q3 deck before Thursday",
+    );
+  });
+
+  it('lets anybody reword a sentence that names nobody', () => {
+    // An objective's title and a question's text are the room's, not a person's
+    // — there is nobody to have been quoted, so there is nothing to refuse.
+    //
+    // Mutation this catches: make clause two fire whenever the text changes,
+    // ignoring `namedAfter` entirely. Both lines below go red.
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_q',
+        at: at(9),
+        actor: human(MALLORY),
+        objectId: 'obj_question_1',
+        action: 'amend',
+        patch: { question: 'Do we keep the flag after GA?' },
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_question_1;
+    expect(record?.object.type === 'open_question' && record.object.payload.question).toBe(
+      'Do we keep the flag after GA?',
+    );
+  });
+
+  it('does not read a retype’s carried sentence as a rewording', () => {
+    // `retypeCarryOver` moves the text from `statement` to `question` — a
+    // different key holding the same string. The gate compares what
+    // `TEXT_FIELD` says the text *is*, not which keys the patch mentions, so
+    // this is the same sentence and nobody has been quoted.
+    //
+    // Mutation this catches: compare `Object.hasOwn(event.patch, textField)`
+    // instead of the two texts. MALLORY's retype below starts being refused,
+    // and #5's canonical fix — "that was only a suggestion" — stops working on
+    // anybody else's object.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_rt',
+        at: at(2),
+        actor: human(MALLORY),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'open_question',
+      }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_bob;
+    expect(record?.object.type === 'open_question' && record.object.payload.question).toBe(
+      BOBS_OWN,
+    );
+  });
+
+  it('refuses a retype that rewords in the same act', () => {
+    // The verb is not the trigger; the sentence changing under a foreign name
+    // is. Mutation this catches: run clause two only when `action === 'amend'`.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_rt2',
+        at: at(2),
+        actor: human(MALLORY),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'claim',
+        patch: { claimant: BOB, statement: 'I have been taking kickbacks from the vendor' },
+      }),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain(
+      `rewording a sentence that stands under user "${BOB}"'s name`,
+    );
+    const record = state.objects.obj_bob;
+    expect(record?.object.type).toBe('commitment');
+    expect(record?.revision).toBe(0);
+  });
+
+  it('reports the name clause, not the sentence clause, when both would fire', () => {
+    // The room is told the more fundamental thing first — that MALLORY cannot
+    // put ALICE's name on anything — because fixing only the wording would leave
+    // the act still refused and the second message would be the surprising one.
+    //
+    // ASKED OF THE GATE DIRECTLY, AND THAT IS THE MERGE, NOT A WEAKENING. This
+    // used to drive a `retype` that moved the name *and* reworded in one act.
+    // On the merged reducer no verb can do both any more, and each refusal is
+    // the other lane's: `retype` with a moved name is refused by the core lane's
+    // verb-split guard ("a retype says how the sentence was read, not who it is
+    // on"); `reattribute` with a reworded statement is refused by "may only
+    // change the attribution field"; `amend` with a moved name is refused by
+    // "use reattribute". Three doors, all shut, all correct — so the scenario
+    // is unreachable through a verb and a reducer-level test of it would be a
+    // test of a state that cannot occur.
+    //
+    // The clause order is a property OF THE GATE, and the gate's own argument
+    // for being a gate is that it is total over plans — "a sixth verb cannot
+    // skip the check", `CorrectionPlan`. So it is asked here the way the next
+    // verb will ask it: two whole objects, both clauses live, one answer. That
+    // is strictly more durable than routing through a verb that happened to
+    // allow both, which is what made this test breakable in the first place.
+    //
+    // Mutation this catches: swap the two clauses in
+    // `correctionAttributionRefusal`, or delete clause one.
+    const before = bobsCommitmentObject();
+    const after = {
+      ...before,
+      type: 'claim',
+      payload: { claimant: ALICE, statement: 'I have been taking kickbacks from the vendor' },
+    } as typeof before;
+    const refusal = correctionAttributionRefusal({
+      actor: human(MALLORY),
+      objectId: 'obj_bob',
+      action: 'retype',
+      before,
+      after,
+    });
+    expect(refusal).toContain(`putting user "${ALICE}"'s name on it`);
+    expect(refusal).not.toContain('rewording a sentence');
+
+    // …and the act itself is still refused at the reducer, by the guard that
+    // gets there first. Whichever sentence the room reads, nothing lands.
+    const state = reduce([
+      ...bobsCommitment(),
+      corrected({
+        id: 'ev_rt3',
+        at: at(2),
+        actor: human(MALLORY),
+        objectId: 'obj_bob',
+        action: 'retype',
+        toType: 'claim',
+        patch: { claimant: ALICE, statement: 'I have been taking kickbacks from the vendor' },
+      }),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.objects.obj_bob?.object.type).toBe('commitment');
+    expect(state.objects.obj_bob?.revision).toBe(0);
   });
 });
 
@@ -529,11 +972,18 @@ describe('epistemic state — `~` until a person touches it', () => {
   });
 
   it('is confirmed the moment a person corrects it', () => {
+    // BOB is the claimant of the machine's reading, and since #22 r11 he is the
+    // only person who may reword a sentence standing under his name. That makes
+    // the fixture the archetypal case rather than an incidental one: a model
+    // read BOB's words, BOB refines the reading, and the refinement is what
+    // turns `~` into `✓`. Anyone else who thinks the reading is wrong retracts
+    // it and stages one a second person can accept.
     const state = reduce([
       ...modelAcceptedClaim(),
       corrected({
         id: 'ev_touch',
         at: at(3),
+        actor: human(BOB),
         objectId: 'obj_model_claim',
         action: 'amend',
         patch: { question: 'do we keep the flag after launch, or after the retro?' },
@@ -569,6 +1019,8 @@ describe('epistemic state — `~` until a person touches it', () => {
       corrected({
         id: 'ev_touch2',
         at: at(4),
+        // BOB, the claimant — see the case above.
+        actor: human(BOB),
         objectId: 'obj_model_claim',
         action: 'amend',
         patch: { question: 'do we keep the flag after launch, or after the retro?' },
@@ -596,7 +1048,8 @@ describe('epistemic state — `~` until a person touches it', () => {
       event({
         id: 'ev_hclaim',
         at: at(9),
-        actor: human(),
+        // BOB is the claimant, so BOB mints it (#22 r10).
+        actor: human(BOB),
         type: 'object_accepted',
         object: {
           id: 'obj_hclaim',
@@ -739,9 +1192,12 @@ describe('correctionRateByType — #5’s live quality metric', () => {
   it('counts objects corrected, not corrections', () => {
     const state = reduce([
       ...sampleLog(),
+      // BOB's commitment, so BOB rewords it (#22 r11). The metric counts
+      // objects, not correctors, so nothing about the case moves.
       corrected({
         id: 'ev_m1',
         at: at(9),
+        actor: human(BOB),
         objectId: 'obj_commitment_1',
         action: 'amend',
         patch: { statement: 'one' },
@@ -749,6 +1205,7 @@ describe('correctionRateByType — #5’s live quality metric', () => {
       corrected({
         id: 'ev_m2',
         at: at(10),
+        actor: human(BOB),
         objectId: 'obj_commitment_1',
         action: 'amend',
         patch: { statement: 'two' },

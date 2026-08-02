@@ -12,8 +12,71 @@
     {
       "idx": 1,
       "version": "7",
-      "when": 1785557425308,
-      "tag": "0001_grey_tempest",
+      "when": 1785556820794,
+      "tag": "0001_realtime_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785556895609,
+      "tag": "0002_drop_last_read_seq",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785560065907,
+      "tag": "0003_append_enforcement",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785640000000,
+      "tag": "0004_trusted_actor_and_append_boundary",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785571559347,
+      "tag": "0005_receipt_snapshot_and_canonical_subset",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1785660000000,
+      "tag": "0006_derived_receipt_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1785581657869,
+      "tag": "0007_kind_discriminated_room",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785840000000,
+      "tag": "0008_invariants_on_the_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1785926400000,
+      "tag": "0009_the_guard_stops_claiming_an_author",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786012800000,
+      "tag": "0010_the_read_model_names_the_stager",
       "breakpoints": true
     }
   ]

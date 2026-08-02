@@ -1,3 +1,4 @@
+import { payloadAttributions } from './attribution.js';
 import type { Actor, Id, Timestamp } from './common.js';
 import {
   bearingMessage,
@@ -342,15 +343,24 @@ export interface AcceptanceContext {
   acceptedObjects?: readonly AcceptedObjectRef[];
 }
 
-/** The person a payload puts on the hook, if any. */
+/**
+ * The person a payload puts on the hook, if any.
+ *
+ * **Delegates now, and declares nothing.** Until #22 r10 this was a second,
+ * narrower answer to "who does this payload name" — it resolved `claim →
+ * claimant`, `commitment → owner` and `null` for everything else, while
+ * `ATTRIBUTION_FIELD` two files away already knew about `decision → decidedBy`.
+ * The acceptance path read this one, so a decision naming somebody else went
+ * through every gate unexamined (r10, D2). One derivation, in `attribution.ts`;
+ * this is the arity adapter for the callers that want at most one name, and it
+ * is safe because that module refuses at import to classify two attribution
+ * fields on one type.
+ */
 export function payloadAttributedTo(
   type: AcceptedObjectType,
   payload: Record<string, unknown>,
 ): Id | null {
-  const key = type === 'claim' ? 'claimant' : type === 'commitment' ? 'owner' : null;
-  if (key === null) return null;
-  const value = payload[key];
-  return typeof value === 'string' ? value : null;
+  return payloadAttributions(type, payload)[0] ?? null;
 }
 
 /**

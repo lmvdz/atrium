@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TEXT_FIELD } from './attribution.js';
 import { emptyProvenance, Id, Provenance, Timestamp } from './common.js';
 
 /**
@@ -138,9 +139,21 @@ export type Objective = z.infer<typeof Objective>;
  * where it started — `authority.ts` needs it to ask whether a quote bears the
  * sentence being minted, and it must not import the engine to find out (the
  * engine imports the reducer, which imports `authority.ts`).
+ *
+ * **The key comes from `TEXT_FIELD`, not from a ladder.** Until #22 r11 the
+ * ladder was written out right here — `type === 'open_question' ? 'question'
+ * : …` — which made this the *second* answer to "which field holds the
+ * sentence", beside the one `attribution.ts` derives from
+ * `PAYLOAD_FIELD_ROLE`. r10 closed exactly that shape for "which field holds a
+ * person" and found three hand-written answers where the brief said two; this
+ * was the same defect one field over, waiting for a sixth type whose text key
+ * is neither `statement`, `question` nor `title` to make the two disagree in
+ * silence. `attribution.ts` has no runtime import of this module (its imports
+ * of `objectPayloadByType` and `AcceptedObjectType` are `import type`, erased
+ * at emit), so the edge is one-way and there is no cycle.
  */
 export function payloadText(type: AcceptedObjectType, payload: Record<string, unknown>): string {
-  const value = payload[payloadTextKey(type)];
+  const value = payload[TEXT_FIELD[type]];
   return typeof value === 'string' ? value : '';
 }
 
@@ -151,9 +164,20 @@ export function payloadText(type: AcceptedObjectType, payload: Record<string, un
  * which it has already compared with the receipt's alignment — so it needs the
  * name of the one key to skip, and a second copy of this ternary is how the two
  * would drift.
+ *
+ * AND IT IS NO LONGER A TERNARY, for exactly the reason the paragraph above
+ * gives. The core lane added this accessor while the realtime lane was deleting
+ * the ladder out of `payloadText` and pointing it at `TEXT_FIELD`; keeping both
+ * verbatim would have left the ladder alive HERE, one function below a comment
+ * that says it is gone — the third hand-written answer to "which field holds the
+ * sentence", which is the defect one field over from the one r10 closed. So the
+ * accessor survives (its callers in `acceptance.ts` and its tests are real) and
+ * it reads the same table `payloadText` does. `attribution.test.ts` pins
+ * `TEXT_FIELD` against a written-out expectation, so this is value-identical
+ * today and single-sourced tomorrow.
  */
 export function payloadTextKey(type: AcceptedObjectType): string {
-  return type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';
+  return TEXT_FIELD[type];
 }
 
 /** `payloadText` for a whole object. */
