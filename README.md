@@ -27,6 +27,20 @@ no running process is wired to the core at all. [What is actually
 built](#what-is-actually-built) spells that out, and it is the section to read
 before believing anything above it.
 
+**And a machine drafted it.** This codebase was written by AI — an orchestrated
+campaign of Claude models building against a decision graph kept on [this repo's
+issues](https://github.com/lmvdz/atrium/issues/1). Each round of work was handed
+to blind reviewers: fresh-context critics, some from other model families, given
+the artifact and never the builder's notes. They found real defects in almost
+every round, including in the guards that had been written to catch defects, and
+including in the review receipts themselves. Those receipts are on the tickets,
+kept as written — the wrong calls and the retractions along with the rest.
+
+That is not a disclaimer bolted on at the end. It is the same distinction the
+product is built on, turned on the thing that built it: a machine can draft a
+codebase, and it cannot be what certifies one. The `~` on this repository is
+mine to make a `✓`, and where I have not, the tickets say so.
+
 ## What goes wrong now
 
 A transcript is a record of what was *said*. It has no position on what is
