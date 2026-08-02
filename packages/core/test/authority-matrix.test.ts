@@ -183,10 +183,20 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   // something." Restated from `selfStagedReadingRefusal`, not imported from it.
   //
   // `recordedBy: 'human'` is ALICE and so is the human accepter, which is what
-  // makes those the same person; every `claim` and `commitment` payload in this
-  // file names BOB, which is what makes them somebody else's.
-  if (human && testCase.recordedBy === 'human' && testCase.cited !== 'none') {
-    const namesSomebodyElse = testCase.type === 'claim' || testCase.type === 'commitment';
+  // makes those the same person. `NAMES` above says who each payload names:
+  // BOB for a `claim` and a `commitment`, ALICE for a `decision` — so a decision
+  // is *not* somebody else's here, and the r10 rule that added `decidedBy` to
+  // the checked set is exercised by `attention.test.ts` and `guards.test.ts`
+  // rather than by this cell.
+  //
+  // **`cited === 'none'` is inside the clause as of r10.** It used to be
+  // excluded, which made "a person mints an obligation against a colleague
+  // outright, with no proposal and no second party" an *allowed* cell of this
+  // matrix — the fifth route, alongside the three verbs r10's brief named. An
+  // acceptance citing no proposal has no stager but the accepter, so the
+  // self-staged clause applies to it by construction, not by analogy.
+  if (human && (testCase.cited === 'none' || testCase.recordedBy === 'human')) {
+    const namesSomebodyElse = NAMES[testCase.type] !== null && NAMES[testCase.type] !== ALICE;
     if (testCase.cited === 'model_a' || namesSomebodyElse) return 'self_staged_reading';
   }
   if (testCase.cited !== 'none' && !human && testCase.confidence === 'below') {
@@ -265,11 +275,11 @@ const parse = (input: unknown): CoreEvent => CoreEventSchema.parse(input);
 /** One ledger row: payload, plus the trusted columns. */
 function row(
   input: unknown,
-  actor: ActorKind,
+  actor: ActorKind | Actor,
   messages?: readonly ProvenanceMessage[],
 ): AuthoredEvent {
   return authored(parse(input), {
-    actor: actorOf(actor),
+    actor: typeof actor === 'string' ? actorOf(actor) : actor,
     ...(messages === undefined ? {} : { messages }),
   });
 }
@@ -320,6 +330,22 @@ function payloadFor(type: AcceptedObjectType, verified = false): Record<string, 
   }
 }
 
+/**
+ * Who each fixture payload above names, restated rather than derived.
+ *
+ * Load-bearing since #22 r10: a direct acceptance (no proposal) may only put the
+ * accepter's own name on something, so a *setup* row that needs an object named
+ * for BOB has to be minted by BOB. The matrix cells that probe the rule keep
+ * minting as ALICE — that is the case under test.
+ */
+const NAMES: Record<AcceptedObjectType, string | null> = {
+  decision: ALICE,
+  commitment: BOB,
+  claim: BOB,
+  open_question: null,
+  objective: null,
+};
+
 function proposalEvent(input: {
   id: string;
   type: AcceptedObjectType;
@@ -364,6 +390,12 @@ function acceptEvent(input: {
   statement?: string;
   citing?: string[];
   messages?: readonly ProvenanceMessage[];
+  /**
+   * This row is scaffolding, not the case under test: mint it under whoever the
+   * payload names, so #22 r10's attribution gate lets it through and the object
+   * exists for the verb or relation actually being probed.
+   */
+  setup?: true;
 }): AuthoredEvent {
   const at = nextAt();
   const payload = payloadFor(input.type, input.verified);
@@ -391,7 +423,9 @@ function acceptEvent(input: {
         updatedAt: at,
       },
     },
-    input.actor,
+    input.setup && input.actor === 'human' && NAMES[input.type] !== null
+      ? { kind: 'human', userId: NAMES[input.type] as string }
+      : input.actor,
     input.messages === undefined ? WINDOW : input.messages,
   );
 }
@@ -693,6 +727,7 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
           type: 'open_question',
           actor: 'human',
           proposalId: null,
+          setup: true,
         }),
         acceptEvent({
           id: `a_${suffix}`,
@@ -700,6 +735,7 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
           type: 'decision',
           actor: 'human',
           proposalId: null,
+          setup: true,
         }),
         row(
           {
@@ -730,6 +766,7 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
         type: 'commitment',
         actor: 'human',
         proposalId: null,
+        setup: true,
       }),
     );
     if (verb === 'restore') {
@@ -794,7 +831,14 @@ describe('authority matrix — object_corrected, every actor × verb', () => {
     // that would still apply if the other were ever relaxed.
     const objectId = 'obj_verify_probe';
     const state = reduce([
-      acceptEvent({ id: 'vp_setup', objectId, type: 'claim', actor: 'human', proposalId: null }),
+      acceptEvent({
+        id: 'vp_setup',
+        objectId,
+        type: 'claim',
+        actor: 'human',
+        proposalId: null,
+        setup: true,
+      }),
       row(
         {
           id: 'ev_vp',
@@ -840,6 +884,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
               type: fromType,
               actor: 'human',
               proposalId: null,
+              setup: true,
             }),
             acceptEvent({
               id: `t_${suffix}`,
@@ -847,6 +892,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
               type: toType,
               actor: 'human',
               proposalId: null,
+              setup: true,
             }),
             row(
               {
@@ -924,20 +970,30 @@ describe('the matrix as a whole', () => {
      *
      * Written as a partition rather than as "allowed unless refused", so a third
      * refusal creeping into the human row fails here instead of being absorbed.
+     *
+     * **r10 widens the exception without widening the claim.** "The person
+     * accepting staged it" is true of an acceptance that cites *no* proposal too
+     * — there is nobody else in it at all — and r9's version excluded that shape
+     * with `cited !== 'none'`, which left a person free to mint an obligation
+     * against a colleague outright. Same rule, one fewer carve-out.
      */
     const humanRow = acceptanceCases.filter((entry) => entry.actor === 'human');
+    const namesSomebodyElse = (entry: AcceptanceCase) =>
+      NAMES[entry.type] !== null && NAMES[entry.type] !== ALICE;
     const onlyJudgementInTheRoom = (entry: AcceptanceCase) =>
-      entry.cited !== 'none' &&
-      entry.recordedBy === 'human' &&
-      (entry.cited === 'model_a' || entry.type === 'claim' || entry.type === 'commitment');
+      (entry.cited === 'none' || entry.recordedBy === 'human') &&
+      (entry.cited === 'model_a' || namesSomebodyElse(entry));
 
     // The exception is a real part of the space, not an empty set the partition
-    // is trivially true over — and both of its grounds are populated.
+    // is trivially true over — and all three of its grounds are populated.
     expect(
       humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'model_a').length,
     ).toBeGreaterThan(0);
     expect(
       humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'human').length,
+    ).toBeGreaterThan(0);
+    expect(
+      humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'none').length,
     ).toBeGreaterThan(0);
 
     for (const testCase of humanRow) {

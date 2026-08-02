@@ -323,6 +323,125 @@ describe('the actor floor — gate 1: an acceptance with no proposal is human-on
     expect(state.consumedEventIds).toEqual(['ev_accept']);
   });
 
+  it('refuses a proposal-less acceptance that puts somebody else on the hook', () => {
+    /**
+     * #22 r10: the fifth route to "a member puts an obligation on another
+     * member's name", and the one the r10 brief did not name.
+     *
+     * r9 closed the acceptance path by refusing a *self-staged* reading that
+     * names a third party — and that gate lived inside `if (proposalId !== null)`.
+     * An acceptance citing no proposal has no stager but the accepter, so it is
+     * the same shape with the second party removed rather than merely absent,
+     * and it walked past. One command, one member, one durable commitment
+     * against a colleague.
+     *
+     * Unreachable from today's command layer (`objectFromProposal` always names
+     * a proposal) and *not* dead code: this is the documented "a person writing
+     * a fact outright" route, human-only by `humanOnlyRefusal`. The reducer is
+     * the boundary, so it is closed here rather than left to the command layer
+     * continuing not to expose it.
+     *
+     * Mutation this catches: move the `selfStagedReadingRefusal` call back
+     * inside the `if (proposalId !== null)` block. Every r9 test still passes.
+     */
+    const state = reduce([
+      acceptEvent({ proposalId: null, at: at(1), type: 'claim', actor: human(BOB) }),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('accepted no proposal');
+    expect(state.issues[0]?.reason).toContain('which they staged themselves');
+    expect(state.issues[0]?.reason).toContain(`puts user "${ALICE}"'s name on it`);
+  });
+
+  it('allows the same acceptance when the name on it is the accepter’s own', () => {
+    // The capability survives; only the part that spoke for somebody else is
+    // gone. Mutation: refuse every proposal-less acceptance that names anybody,
+    // and this fails — a gate that is too strong is caught as loudly as one that
+    // is too weak.
+    const state = reduce([
+      acceptEvent({ proposalId: null, at: at(1), type: 'claim', actor: human(ALICE) }),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+  });
+
+  it('refuses a self-staged decision that names somebody else as the decider', () => {
+    /**
+     * #22 r10, D2. Two commands: stage a decision whose `decidedBy` is a
+     * colleague, accept it yourself. Both acked with `issues: []` under r9, and
+     * the room's record then said the colleague made the decision — with no
+     * correction verb and no second party anywhere in it.
+     *
+     * It survived because `payloadAttributedTo` — the function the acceptance
+     * gate read — resolved `claim → claimant`, `commitment → owner` and `null`
+     * for everything else, while `ATTRIBUTION_FIELD` in the same package had
+     * always said `decision → decidedBy`. One question, two answers, and the
+     * narrower one sat on the path deciding whether the guard ran.
+     *
+     * Mutation this catches: restore `payloadAttributedTo`'s old body, or
+     * reclassify `decidedBy` as `detail` in `attribution.ts`.
+     */
+    const state = reduce([
+      proposalEvent({
+        type: 'decision',
+        proposer: { kind: 'human', userId: ALICE },
+        recordedBy: human(ALICE),
+      }),
+      event({
+        id: 'ev_accept',
+        at: at(2),
+        actor: human(ALICE),
+        messages: MSG_9,
+        type: 'object_accepted',
+        object: {
+          id: 'obj_x',
+          roomId: ROOM,
+          type: 'decision',
+          payload: { statement: 'We are cancelling the audit', decidedBy: BOB },
+          provenance: { messageIds: ['msg_9'], proposalId: 'prop_x' },
+          createdAt: at(2),
+          updatedAt: at(2),
+        },
+      } as Parameters<typeof event>[0]),
+    ]);
+    expect(state.objects).toEqual({});
+    expect(state.issues.at(-1)?.reason).toContain(`puts user "${BOB}"'s name on it`);
+    expect(state.proposals.prop_x?.status).toBe('proposed');
+  });
+
+  it('lets a different person accept that same decision — the second party is the point', () => {
+    // The design position r9 recorded and r10 does not touch: any human other
+    // than the stager may accept a reading that names a third party. What is
+    // refused is one person doing both, and this is the other half of that
+    // partition.
+    const state = reduce([
+      proposalEvent({
+        type: 'decision',
+        proposer: { kind: 'human', userId: ALICE },
+        recordedBy: human(ALICE),
+      }),
+      event({
+        id: 'ev_accept',
+        at: at(2),
+        actor: human(BOB),
+        messages: MSG_9,
+        type: 'object_accepted',
+        object: {
+          id: 'obj_x',
+          roomId: ROOM,
+          type: 'decision',
+          payload: { statement: 'We are cancelling the audit', decidedBy: BOB },
+          provenance: { messageIds: ['msg_9'], proposalId: 'prop_x' },
+          createdAt: at(2),
+          updatedAt: at(2),
+        },
+      } as Parameters<typeof event>[0]),
+    ]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_x).toBeDefined();
+  });
+
   it('lets a model actor accept its own claim proposal — the route that stays open', () => {
     // #4's auto-accept path, and the one this whole floor must not break: a
     // claim is inherently "X said Y", its truth status lives in `verification`,
@@ -408,7 +527,11 @@ describe('the actor floor — gate 3: only a human marks a claim verified', () =
     return event({
       id: overrides.id ?? 'ev_claim',
       at: minute,
-      actor: overrides.actor ?? human(),
+      // BOB, because BOB is the claimant. Since #22 r10 a direct acceptance may
+      // only put the accepter's own name on something, so ALICE minting a claim
+      // by BOB is refused before gate 3 is reached at all — and gate 3 is what
+      // these cases are about.
+      actor: overrides.actor ?? human(BOB),
       type: 'object_accepted',
       object: {
         id: overrides.objectId ?? 'obj_claim',
@@ -1152,7 +1275,9 @@ describe('the actor floor — gate 11: supersession follows the policy, all of i
     event({
       id: 'ev_newer',
       at: at(11),
-      actor: human(),
+      // BOB owns and claims these, so BOB mints them (#22 r10): the case under
+      // test is who may *retire* an object, not who may name one.
+      actor: human(BOB),
       type: 'object_accepted',
       object: {
         id: 'obj_newer',
@@ -1210,7 +1335,8 @@ describe('the actor floor — gate 11: supersession follows the policy, all of i
       event({
         id: 'ev_claim_old',
         at: at(10),
-        actor: human(),
+        // BOB is the claimant, so BOB mints it (#22 r10).
+        actor: human(BOB),
         type: 'object_accepted',
         object: {
           id: 'obj_claim_old',
@@ -1244,7 +1370,8 @@ describe('objectiveId — a fact filed under a heading the room cannot open', ()
     event({
       id,
       at: at(9),
-      actor: human(),
+      // BOB names himself: see `claimEvent` above (#22 r10).
+      actor: human(BOB),
       type: 'object_accepted',
       object: {
         id: 'obj_filed',
@@ -1676,7 +1803,8 @@ describe('relations — typed edges must actually type-check against their endpo
       event({
         id: 'ev_claim',
         at: at(9),
-        actor: human(),
+        // BOB is the claimant, so BOB mints it (#22 r10).
+        actor: human(BOB),
         type: 'object_accepted',
         object: {
           id: 'obj_claim_1',

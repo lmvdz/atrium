@@ -213,22 +213,31 @@ export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean 
  *
  *  1. it is machine-attributed — a reading nobody is answerable for, blessed by
  *     the person who typed it; or
- *  2. it attributes something to somebody other than the accepter — a `claim`
- *     whose claimant, or a `commitment` whose owner, is not the person accepting.
+ *  2. it attributes something to somebody other than the accepter — any payload
+ *     field `attribution.ts` classifies as holding a person's id, holding
+ *     somebody who is not the person accepting.
  *
- * The two types in (2) are exactly the two `acceptanceReceiptRefusal` calls
- * "the types that put a name on somebody", and for the same reason. A decision,
- * an objective and an open question name nobody, so a person staging one and
- * accepting it is asserting something in their own name, with their id on both
- * the proposal and the acceptance, and nothing is laundered.
+ * **(2) used to say "a `claim`'s claimant or a `commitment`'s owner", and the
+ * paragraph that stood here said a decision "names nobody". That was false, and
+ * r10's D2 is what it cost.** `DecisionPayload` carries `decidedBy`;
+ * `ATTRIBUTION_FIELD` had always said so; the *acceptance* path read a second,
+ * narrower answer (`payloadAttributedTo`) that returned `null` for a decision.
+ * So two commands — stage `{statement: "We are cancelling the audit",
+ * decidedBy: <victim>}`, accept it yourself — put the victim's name on a
+ * cancelled audit with `issues: []` twice and nothing to correct it with. The
+ * set is derived from one classification of every payload field now, so the
+ * sentence cannot drift from the code again: an objective and an open question
+ * name nobody, a decision, a commitment and a claim each name one person, and a
+ * payload that grows a name field nobody classified does not compile.
  *
  * ## What stays open, deliberately
  *
  *  - **A person staging and accepting their own commitment or claim.** "I will do
  *    X", "I said Y" — owner or claimant is the accepter, so there is no second
  *    person in it and nobody else's word is being spoken.
- *  - **A person staging and accepting a decision, objective or open question.**
- *    Names nobody; see above.
+ *  - **A person staging and accepting an objective or an open question**, and a
+ *    decision they did not put anybody else's name on. Those name nobody but the
+ *    person asserting them; see above.
  *  - **A different human accepting a machine-labelled reading**, and a different
  *    human confirming a third-party commitment. That is the design position,
  *    unchanged and load-bearing: they read it, and their judgement is the
@@ -251,33 +260,111 @@ export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean 
  */
 export function selfStagedReadingRefusal(input: {
   actor: Actor;
-  proposalId: string;
-  proposer: Proposer;
+  /** `null` when the acceptance cites no proposal at all — see below. */
+  proposalId: string | null;
+  /** `null` for the same reason: with no proposal there is no reading to describe. */
+  proposer: Proposer | null;
   stagedBy: Actor;
   /**
-   * Who the object being minted puts a name on — a `claim`'s claimant, a
-   * `commitment`'s owner, `null` for the three types that name nobody.
+   * Everybody the object being minted puts a name on — every field
+   * `attribution.ts` classifies as holding a person's id, in field order.
    *
    * Taken from the *object*, as `acceptanceReceiptRefusal` takes its statement
    * from the object: payload binding is not checked on the human path, so the
    * object is the thing whose attribution is about to become durable, and it is
-   * the one this must be computed from.
+   * the one this must be computed from. Computed by `payloadAttributions` and by
+   * nothing else — a caller that spelled the ladder out by hand is how the
+   * `decidedBy` hole (r10, D2) stayed open with the right table two files away.
    */
-  attributedTo: string | null;
+  attributedTo: readonly string[];
 }): string | null {
   const { actor, proposer, stagedBy, attributedTo } = input;
   if (actor.kind !== 'human') return null;
   // Only the person who typed it. Anybody else accepting is a second judgement,
   // which is what the human path is built on.
+  //
+  // An acceptance that cites *no* proposal has no second party by construction —
+  // there is no staged reading and no stager, only this one act — so the caller
+  // passes the accepter as `stagedBy` and every clause below applies to it. That
+  // route is human-only (`humanOnlyRefusal('direct_acceptance', …)`), unreachable
+  // from today's command layer, and was outside this gate entirely until r10.
   if (stagedBy.kind !== 'human' || stagedBy.userId !== actor.userId) return null;
 
-  if (proposer.kind === 'model') {
-    return `${actorName(actor)} accepted proposal "${input.proposalId}", which they staged themselves as a reading by model "${proposer.model}" — a human acceptance is the receipt for a machine's reading only when the person accepting is not the person who staged it; nobody validates their own attribution to a model. It needs somebody else in the room to accept it, or a non-human acceptance, which is checked against the messages it cites`;
+  const cites = input.proposalId === null ? 'no proposal' : `proposal "${input.proposalId}"`;
+  if (proposer !== null && proposer.kind === 'model') {
+    return `${actorName(actor)} accepted ${cites}, which they staged themselves as a reading by model "${proposer.model}" — a human acceptance is the receipt for a machine's reading only when the person accepting is not the person who staged it; nobody validates their own attribution to a model. It needs somebody else in the room to accept it, or a non-human acceptance, which is checked against the messages it cites`;
   }
-  if (attributedTo !== null && attributedTo !== actor.userId) {
-    return `${actorName(actor)} accepted proposal "${input.proposalId}", which they staged themselves and which puts user "${attributedTo}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a person confirming their own sentence is that sentence agreeing with itself. It waits for "${attributedTo}", or for somebody else in the room to accept it`;
+  const foreign = attributedTo.filter((userId) => userId !== actor.userId);
+  const named = foreign[0];
+  if (named !== undefined) {
+    return `${actorName(actor)} accepted ${cites}, which they staged themselves and which puts user "${named}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a person confirming their own sentence is that sentence agreeing with itself. It waits for "${named}", or for somebody else in the room to accept it`;
   }
   return null;
+}
+
+/**
+ * The same rule, one act later: **a correction may not put a name on somebody
+ * that was not already there** (#22 r10, D1/D3).
+ *
+ * ## Why this is `selfStagedReadingRefusal` again rather than a new policy
+ *
+ * r9 closed the forged-commitment class at the acceptance path and closed it
+ * correctly. What it left standing is that acceptance is not the only way a
+ * person's name arrives on an accepted object — `reattribute` moves one by
+ * definition, `retype` mints one on a type that never had it, and `amend` is
+ * only kept off it by a separate check. r10's gauntlet drove all three:
+ * `reattribute` onto a colleague, onto a colleague via `retype` from an
+ * objective, and onto a uuid belonging to no user at all, each with `ack`,
+ * `issues: []`.
+ *
+ * The rule is not a second, stricter one. It is the *same* rule, evaluated where
+ * its precondition is always true. `selfStagedReadingRefusal` refuses when the
+ * person who wrote the naming sentence is also the person who blessed it. A
+ * correction is one command by one actor: the sentence and the blessing are the
+ * same act, so there is never a second party, so the clause always applies.
+ * Read the other way round: what makes `Carol accepts Alice's reading that Bob
+ * committed` legal today is Carol's independent judgement, and no correction has
+ * an equivalent of Carol.
+ *
+ * ## `before`, and why the gate is about *arrival* rather than presence
+ *
+ * A commitment already owned by Bob may be amended (its due date), reopened, and
+ * retracted by anyone in the room, because none of those acts asserts Bob's
+ * name — it is already there, put there by an act this gate already judged.
+ * Only a name that is in `after` and not in `before` is a new assertion, and only
+ * new assertions are refused. That is what keeps every existing correction verb
+ * working while closing the three that move a name.
+ *
+ * ## What this closes without an FK
+ *
+ * `reattribute { owner: <a uuid that is no user> }` is refused by this too, and
+ * not because anything checked the uuid: it is refused because it is not the
+ * actor's own. The reducer has no membership table and should not grow one; a
+ * rule of "your own name only" needs no directory to enforce.
+ *
+ * ## The legitimate case it costs, stated rather than hidden
+ *
+ * "The interpreter attributed this to Alice; it is really Bob's" can no longer
+ * be fixed by a third party in one verb. Bob does it himself — which is #4 read
+ * literally — or the object is retracted and re-staged, and a *second* person
+ * accepts the re-reading. The two-person path is the point; the one-person path
+ * was the defect.
+ */
+export function correctionAttributionRefusal(input: {
+  actor: Actor;
+  objectId: string;
+  action: string;
+  /** Who the object named before this correction. */
+  before: readonly string[];
+  /** Who it would name after it. */
+  after: readonly string[];
+}): string | null {
+  const { actor, before, after } = input;
+  const arriving = after.filter((userId) => !before.includes(userId));
+  const foreign = arriving.filter((userId) => actor.kind !== 'human' || userId !== actor.userId);
+  const named = foreign[0];
+  if (named === undefined) return null;
+  return `${actorName(actor)} applied "${input.action}" to object "${input.objectId}", putting user "${named}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a correction is one person's act with no second party in it, so it may only put that person's own name on something. It waits for "${named}" to take it, or retract this and stage a reading somebody else can accept`;
 }
 
 /** A short name for a proposer, for refusal texts. */

@@ -1,15 +1,17 @@
 import type { z } from 'zod';
+import { ATTRIBUTION_FIELD, payloadAttributions } from './attribution.js';
 import {
   acceptanceReceiptRefusal,
   actorMatchesProposer,
   confidenceFloorRefusal,
+  correctionAttributionRefusal,
   humanOnlyRefusal,
   isHuman,
   proposalBindingRefusal,
   selfStagedReadingRefusal,
 } from './authority.js';
 import type { Actor } from './common.js';
-import { ATTRIBUTION_FIELD, retypeCarryOver } from './corrections.js';
+import { retypeCarryOver } from './corrections.js';
 import { type AuthoredEvent, CoreEvent, type TrustedContext } from './events.js';
 import {
   AcceptedObject,
@@ -752,29 +754,6 @@ function applyObjectAccepted(
       return false;
     }
 
-    // …and the case that rule lets through, because a human matches every
-    // proposer: the human who typed the machine attribution in the first place.
-    // `actorMatchesProposer` asks whether this actor may touch a reading of this
-    // *description*; this asks who wrote the description. See
-    // `selfStagedReadingRefusal` for why it is a refusal rather than a receipt
-    // check, and for what stays deliberately open (#22 r9, D1).
-    const selfStaged = selfStagedReadingRefusal({
-      actor,
-      proposalId,
-      proposer: proposal.proposal.proposer,
-      stagedBy: proposal.stagedBy,
-      attributedTo:
-        object.type === 'claim'
-          ? object.payload.claimant
-          : object.type === 'commitment'
-            ? object.payload.owner
-            : null,
-    });
-    if (selfStaged) {
-      fail(state, event.id, selfStaged);
-      return false;
-    }
-
     if (proposal.proposal.type !== object.type) {
       fail(
         state,
@@ -826,6 +805,33 @@ function applyObjectAccepted(
         return false;
       }
     }
+  }
+
+  // ── Attribution: the mint route ──────────────────────────────────────────
+  //
+  // **Outside the `proposalId !== null` block, which is where r9 left it.**
+  // `actorMatchesProposer` asks whether this actor may touch a reading of this
+  // *description*; this asks who wrote the description, and it has to be asked
+  // of every acceptance rather than only the ones that cite a proposal. An
+  // acceptance citing no proposal at all is human-only (above) and unreachable
+  // from today's command layer — `objectFromProposal` always names one — but the
+  // reducer is the boundary, not the command layer, and a route that only
+  // *happens* not to be reachable is a route the check has to cover anyway.
+  // With no proposal there is no stager but the accepter, and no reading to
+  // describe, so the gate reduces to its second clause: your own name only.
+  //
+  // See `selfStagedReadingRefusal` for why it is a refusal rather than a receipt
+  // check, and for what stays deliberately open (#22 r9 D1, r10 D2).
+  const selfStaged = selfStagedReadingRefusal({
+    actor,
+    proposalId,
+    proposer: proposal?.proposal.proposer ?? null,
+    stagedBy: proposal?.stagedBy ?? actor,
+    attributedTo: payloadAttributions(object.type, object.payload),
+  });
+  if (selfStaged) {
+    fail(state, event.id, selfStaged);
+    return false;
   }
 
   // An `objectiveId` that points at nothing is the same defect as a `proposalId`
@@ -888,6 +894,66 @@ function applyObjectAccepted(
   return true;
 }
 
+/**
+ * What a correction verb decided, before anything has been written.
+ *
+ * ## Why the verbs return this instead of assigning
+ *
+ * #22 r10's organizing finding: **#4's invariant was enforced where a reading is
+ * *accepted* and nowhere else, while three verbs reach the same end state.**
+ * `reattribute` moves a name by definition, `retype` mints one on a type that
+ * never carried it, `amend` is kept off one only by a separate check — and each
+ * of the three used to assign `record.object` itself, so the gate would have had
+ * to be four call sites, with the fifth verb somebody writes next year skipping
+ * it silently. That is the shape the core lane has hit three rounds running: *an
+ * invariant asserted on one branch of a dispatch does not constrain the others.*
+ *
+ * So the verbs are planners. They validate their own preconditions, they may
+ * `fail` and return `null`, and what they return is a *description* of the next
+ * state. **`commitPlan` is the only function in this file that assigns
+ * `record.object`, `record.retractedAt` or `record.reopenedFromAnswers`**, and it
+ * runs `correctionAttributionRefusal` over every plan before it writes anything.
+ *
+ * A sixth verb therefore cannot skip the check by forgetting to call it: to
+ * change anything at all it has to return a `CorrectionPlan`, and the exhaustive
+ * `switch` in `planCorrection` will not compile until it does.
+ */
+interface CorrectionPlan {
+  /**
+   * The object as it will read. Identical to the current one for a verb that
+   * only tombstones — the gate compares attributions, so "no payload change"
+   * says exactly that rather than being a case the gate has to know about.
+   */
+  object: AcceptedObject;
+  /** The correction log's `before` / `after`, verbatim. */
+  before: unknown;
+  after: unknown;
+  /** `retract` sets a timestamp, `restore` clears it, everything else omits it. */
+  retractedAt?: string | null;
+  /**
+   * `reopen`'s prior-answer bookkeeping. Runs after the correction is logged.
+   *
+   * Not called `then`: an object with a `then` property is a thenable, and a
+   * plan that `await` treats as a promise is a class of bug nobody would find
+   * twice.
+   */
+  afterCommit?: (record: ObjectRecord) => void;
+}
+
+/**
+ * A verb's verdict. `refused` and `noop` have both already called `fail`; the
+ * difference is what `dispatch` returns, and therefore whether `consume` reports
+ * the event as applied.
+ */
+type CorrectionOutcome =
+  | { kind: 'plan'; plan: CorrectionPlan }
+  | { kind: 'refused' }
+  | { kind: 'noop' };
+
+const refused: CorrectionOutcome = { kind: 'refused' };
+const noop: CorrectionOutcome = { kind: 'noop' };
+const planned = (plan: CorrectionPlan): CorrectionOutcome => ({ kind: 'plan', plan });
+
 function applyObjectCorrected(
   state: CoreState,
   event: EventOf<'object_corrected'>,
@@ -926,40 +992,104 @@ function applyObjectCorrected(
     return false;
   }
 
-  if (event.action === 'retract') {
-    if (record.retractedAt !== null) {
-      fail(state, event.id, `object "${event.objectId}" is already retracted`);
-      return false;
-    }
-    commitCorrection(state, event, record, actor, { retracted: false }, { retracted: true });
-    record.retractedAt = event.at;
-    return true;
-  }
+  const outcome = planCorrection(state, event, record);
+  if (outcome.kind === 'refused') return false;
+  if (outcome.kind === 'noop') return true;
 
-  if (event.action === 'restore') {
-    if (record.retractedAt === null) {
-      fail(state, event.id, `object "${event.objectId}" is not retracted`);
-      return false;
-    }
-    commitCorrection(state, event, record, actor, { retracted: true }, { retracted: false });
-    record.retractedAt = null;
-    return true;
-  }
-
-  // A retracted object is withdrawn, not editable. Editing one would quietly
-  // resurrect content the room already took back; restore it first, in the open.
-  if (record.retractedAt !== null) {
-    fail(
-      state,
-      event.id,
-      `object "${event.objectId}" is retracted — restore it before ${event.action === 'amend' ? 'amending' : `applying "${event.action}"`}`,
-    );
+  // ── Attribution: every correction route, one door ────────────────────────
+  //
+  // Not per-verb. `planCorrection` is a total function from `event.action` to a
+  // plan, and this is the only place a plan becomes state — so `reattribute`,
+  // `retype`, `amend`, `reopen`, `retract`, `restore` and whatever verb is added
+  // next are all checked here, by construction rather than by four remembered
+  // calls. See `CorrectionPlan`.
+  const attributionRefusal = correctionAttributionRefusal({
+    actor,
+    objectId: event.objectId,
+    action: event.action,
+    before: payloadAttributions(record.object.type, record.object.payload),
+    after: payloadAttributions(outcome.plan.object.type, outcome.plan.object.payload),
+  });
+  if (attributionRefusal) {
+    fail(state, event.id, attributionRefusal);
     return false;
   }
 
-  if (event.action === 'retype') return applyRetype(state, event, record, actor);
-  if (event.action === 'reopen') return applyReopen(state, event, record, actor);
+  commitPlan(state, event, record, actor, outcome.plan);
+  return true;
+}
 
+/**
+ * Every correction verb, as a total function from `action` to a plan.
+ *
+ * Exhaustive over `CorrectionAction` — the `never` in the default arm is what
+ * makes a new verb a compile error here rather than a silent fall-through past
+ * the gate in `applyObjectCorrected`.
+ */
+function planCorrection(
+  state: CoreState,
+  event: EventOf<'object_corrected'>,
+  record: ObjectRecord,
+): CorrectionOutcome {
+  switch (event.action) {
+    case 'retract':
+      if (record.retractedAt !== null) {
+        fail(state, event.id, `object "${event.objectId}" is already retracted`);
+        return refused;
+      }
+      return planned({
+        object: record.object,
+        before: { retracted: false },
+        after: { retracted: true },
+        retractedAt: event.at,
+      });
+
+    case 'restore':
+      if (record.retractedAt === null) {
+        fail(state, event.id, `object "${event.objectId}" is not retracted`);
+        return refused;
+      }
+      return planned({
+        object: record.object,
+        before: { retracted: true },
+        after: { retracted: false },
+        retractedAt: null,
+      });
+
+    case 'retype':
+    case 'reopen':
+    case 'reattribute':
+    case 'amend': {
+      // A retracted object is withdrawn, not editable. Editing one would quietly
+      // resurrect content the room already took back; restore it first, in the
+      // open.
+      if (record.retractedAt !== null) {
+        fail(
+          state,
+          event.id,
+          `object "${event.objectId}" is retracted — restore it before ${event.action === 'amend' ? 'amending' : `applying "${event.action}"`}`,
+        );
+        return refused;
+      }
+      if (event.action === 'retype') return planRetype(state, event, record);
+      if (event.action === 'reopen') return planReopen(state, event, record);
+      return planPayloadEdit(state, event, record);
+    }
+
+    default: {
+      const exhaustive: never = event.action;
+      fail(state, event.id, `unknown correction verb ${JSON.stringify(exhaustive)}`);
+      return refused;
+    }
+  }
+}
+
+/** `amend` and `reattribute`: the two verbs that patch a payload in place. */
+function planPayloadEdit(
+  state: CoreState,
+  event: EventOf<'object_corrected'>,
+  record: ObjectRecord,
+): CorrectionOutcome {
   const attributionField = ATTRIBUTION_FIELD[record.object.type];
   const touchesAttribution =
     attributionField !== null && Object.hasOwn(event.patch, attributionField);
@@ -971,7 +1101,7 @@ function applyObjectCorrected(
         event.id,
         `a ${record.object.type} has no attribution field — nothing to reattribute; use "amend"`,
       );
-      return false;
+      return refused;
     }
     const keys = Object.keys(event.patch);
     if (keys.length === 0) {
@@ -980,7 +1110,7 @@ function applyObjectCorrected(
         event.id,
         `"reattribute" on object "${event.objectId}" changed nothing — it must set "${attributionField}"`,
       );
-      return false;
+      return refused;
     }
     const strays = keys.filter((key) => key !== attributionField);
     if (strays.length > 0) {
@@ -989,7 +1119,7 @@ function applyObjectCorrected(
         event.id,
         `"reattribute" on object "${event.objectId}" may only change "${attributionField}", not ${strays.map((key) => `"${key}"`).join(', ')} — use "amend" for those`,
       );
-      return false;
+      return refused;
     }
   } else if (touchesAttribution) {
     // The verb split, enforced. Moving an obligation off a named person is the
@@ -1000,7 +1130,7 @@ function applyObjectCorrected(
       event.id,
       `"amend" on object "${event.objectId}" may not change "${attributionField}" — moving a ${record.object.type} onto or off a person is a "reattribute", so the correction log can be read by verb`,
     );
-    return false;
+    return refused;
   }
 
   const patched = applyPayloadPatch(record.object, event.patch);
@@ -1012,7 +1142,7 @@ function applyObjectCorrected(
         ? `invalid amendment to "${event.objectId}": ${patched.error}`
         : `invalid ${event.action} of "${event.objectId}": ${patched.error}`,
     );
-    return false;
+    return refused;
   }
 
   // An amendment that changes nothing is a no-op, not a correction. Bumping the
@@ -1029,12 +1159,14 @@ function applyObjectCorrected(
       event.id,
       `"${event.action}" on object "${event.objectId}" changed nothing — no correction was recorded and the revision did not move; an edit that matches what is already there is a no-op, not history`,
     );
-    return true;
+    return noop;
   }
 
-  commitCorrection(state, event, record, actor, patched.before, patched.after);
-  record.object = { ...patched.object, updatedAt: event.at };
-  return true;
+  return planned({
+    object: { ...patched.object, updatedAt: event.at },
+    before: patched.before,
+    after: patched.after,
+  });
 }
 
 /**
@@ -1050,12 +1182,11 @@ function applyObjectCorrected(
  * produce an invalid object is refused rather than half-applied — the same rule
  * amendments already follow.
  */
-function applyRetype(
+function planRetype(
   state: CoreState,
   event: EventOf<'object_corrected'>,
   record: ObjectRecord,
-  actor: Actor,
-): boolean {
+): CorrectionOutcome {
   const toType = event.toType;
   if (toType === null) {
     fail(
@@ -1063,7 +1194,7 @@ function applyRetype(
       event.id,
       `"retype" on object "${event.objectId}" did not say what to retype it to — set "toType"`,
     );
-    return false;
+    return refused;
   }
   const from = record.object;
   if (toType === from.type) {
@@ -1072,7 +1203,7 @@ function applyRetype(
       event.id,
       `object "${event.objectId}" is already a ${toType} — a retype to the same type is not a correction; use "amend"`,
     );
-    return false;
+    return refused;
   }
 
   const payload = { ...retypeCarryOver(from, toType), ...event.patch };
@@ -1094,19 +1225,14 @@ function applyRetype(
         .map(describeIssue)
         .join('; ')}`,
     );
-    return false;
+    return refused;
   }
 
-  commitCorrection(
-    state,
-    event,
-    record,
-    actor,
-    { type: from.type, payload: from.payload },
-    { type: toType, payload: parsed.data.payload },
-  );
-  record.object = parsed.data;
-  return true;
+  return planned({
+    object: parsed.data,
+    before: { type: from.type, payload: from.payload },
+    after: { type: toType, payload: parsed.data.payload },
+  });
 }
 
 /**
@@ -1121,60 +1247,51 @@ function applyRetype(
  * reopened question is indistinguishable from one that was never answered, and
  * the reopen has erased exactly the thing it promised to preserve.
  */
-function applyReopen(
+function planReopen(
   state: CoreState,
   event: EventOf<'object_corrected'>,
   record: ObjectRecord,
-  actor: Actor,
-): boolean {
+): CorrectionOutcome {
   const { object } = record;
 
   if (object.type === 'open_question') {
     if (object.payload.status !== 'answered') {
       fail(state, event.id, `open question "${event.objectId}" is already open`);
-      return false;
+      return refused;
     }
     const answers = state.relations
       .filter((relation) => relation.kind === 'answers' && relation.fromObjectId === object.id)
       .map((relation) => relation.id);
-    commitCorrection(
-      state,
-      event,
-      record,
-      actor,
-      { status: 'answered', answeredBy: answers },
-      { status: 'open', priorAnswers: answers },
-    );
-    record.object = {
-      ...object,
-      payload: { ...object.payload, status: 'open' },
-      updatedAt: event.at,
-    };
-    for (const id of answers) {
-      if (!record.reopenedFromAnswers.includes(id)) record.reopenedFromAnswers.push(id);
-    }
-    return true;
+    return planned({
+      object: {
+        ...object,
+        payload: { ...object.payload, status: 'open' },
+        updatedAt: event.at,
+      },
+      before: { status: 'answered', answeredBy: answers },
+      after: { status: 'open', priorAnswers: answers },
+      afterCommit: (target) => {
+        for (const id of answers) {
+          if (!target.reopenedFromAnswers.includes(id)) target.reopenedFromAnswers.push(id);
+        }
+      },
+    });
   }
 
   if (object.type === 'commitment') {
     if (object.payload.status === 'open') {
       fail(state, event.id, `commitment "${event.objectId}" is already open`);
-      return false;
+      return refused;
     }
-    commitCorrection(
-      state,
-      event,
-      record,
-      actor,
-      { status: object.payload.status },
-      { status: 'open' },
-    );
-    record.object = {
-      ...object,
-      payload: { ...object.payload, status: 'open' },
-      updatedAt: event.at,
-    };
-    return true;
+    return planned({
+      object: {
+        ...object,
+        payload: { ...object.payload, status: 'open' },
+        updatedAt: event.at,
+      },
+      before: { status: object.payload.status },
+      after: { status: 'open' },
+    });
   }
 
   // A decision's supersession lives in the relation graph, not in a status
@@ -1186,24 +1303,29 @@ function applyReopen(
     event.id,
     `a ${object.type} cannot be reopened — only an answered question or a closed commitment can; a superseded decision is reopened by retracting the decision that replaced it`,
   );
-  return false;
+  return refused;
 }
 
 /**
- * Write one correction to the log and move the record's bookkeeping with it.
+ * Write one correction to the log and move the record with it. **The only
+ * writer of `record.object`, `record.retractedAt` and `record.reopenedFromAnswers`
+ * on the correction path.**
  *
  * Every verb goes through here, so `revision`, `updatedAt` and `humanTouchedAt`
  * cannot drift apart per-verb — which they did the last time each branch kept
- * its own copy of these three lines.
+ * its own copy of these three lines. Since r10 the same singleness is what makes
+ * the attribution gate unskippable: the gate runs immediately before this call,
+ * over the plan this call is about to install, and there is no other way to
+ * install one.
  */
-function commitCorrection(
+function commitPlan(
   state: CoreState,
   event: EventOf<'object_corrected'>,
   record: ObjectRecord,
   actor: Actor,
-  before: unknown,
-  after: unknown,
+  plan: CorrectionPlan,
 ): void {
+  const { before, after } = plan;
   state.corrections.push({
     eventId: event.id,
     objectId: record.object.id,
@@ -1220,6 +1342,8 @@ function commitCorrection(
     note: event.note,
     at: event.at,
   });
+  record.object = plan.object;
+  if (plan.retractedAt !== undefined) record.retractedAt = plan.retractedAt;
   record.updatedAt = event.at;
   record.revision += 1;
   // Corrections are human-only, so reaching here means a person has now taken
@@ -1227,6 +1351,7 @@ function commitCorrection(
   if (record.humanTouchedAt === null && isHuman(actor)) {
     record.humanTouchedAt = event.at;
   }
+  plan.afterCommit?.(record);
 }
 
 function applyRelationAdded(

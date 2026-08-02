@@ -1,3 +1,4 @@
+import { ATTRIBUTION_FIELD, ATTRIBUTION_FIELDS } from './attribution.js';
 import type { AcceptedObjectType } from './objects.js';
 import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
 
@@ -660,7 +661,11 @@ export interface ProvenanceSubject {
   provenance: readonly string[];
   quote?: string | null;
   proposer?: { kind: 'model' | 'human' };
-  /** `claimant` for a claim, `owner` for a commitment. */
+  /**
+   * The person this payload names, from `payloadAttributions` — `claimant`,
+   * `owner` or `decidedBy`, whichever the type carries. Never spelled out by a
+   * caller: see `attribution.ts`.
+   */
   attributedTo?: string | null;
   /**
    * The sentence being asserted — `statement` / `question` / `title`, whichever
@@ -697,7 +702,14 @@ export function validateProposalProvenance(
   // own reading is the receipt (#4) and is not asked to quote themselves, so the
   // checks that would demand a quote of them are scoped rather than universal.
   const fromModel = subject.proposer?.kind === 'model';
-  const namesAPerson = subject.type === 'claim' || subject.type === 'commitment';
+  // Derived, not listed. This read `type === 'claim' || type === 'commitment'`
+  // until #22 r10 — a *third* place answering "does this type name a person",
+  // and the one that decides whether a model reading has to quote the person it
+  // names. It omitted `decision.decidedBy` exactly as the other two did, so a
+  // machine could file "the victim decided X" citing nothing that says so. One
+  // classification, in `attribution.ts`, and a payload that grows a name field
+  // nobody classified does not compile.
+  const namesAPerson = ATTRIBUTION_FIELDS[subject.type].length > 0;
 
   if (subject.provenance.length === 0) {
     if (fromModel) {
@@ -875,7 +887,28 @@ export function validateProposalProvenance(
         ? false
         : cited.some((message) => message.authorId === attributed);
     if (!supported) {
-      const claim = subject.type === 'claim';
+      /**
+       * `reject` discards; `reclassify` surfaces it to the person named.
+       *
+       * The split is **whether naming somebody starts a flow that asks them**,
+       * and it is not the same as "which type is it":
+       *
+       *  - A `commitment` names an owner, and a third-party one waits for that
+       *    owner's confirm (`awaitingConfirmFrom`, and `attention.ts`'s
+       *    `owned_commitment` confirm item). Discarding it would delete the
+       *    confirm flow rather than trigger it.
+       *  - A `decision` names a decider, and a decision *never auto-accepts* —
+       *    it goes to Needs-you, routed by `attention.ts` to `decidedBy`. So the
+       *    same argument holds, and it holds for the same reason. This arrived
+       *    here for the first time in r10, when `namesAPerson` stopped being a
+       *    hand-written pair and became the derived set: before that, "the
+       *    victim decided to cancel the audit" cited nothing that had to say so.
+       *  - A `claim` asserts *that this person said this*. There is nothing to
+       *    confirm — if the receipt does not support it, the reading is simply
+       *    wrong, and a wrong citation is worse than no reading.
+       */
+      const asksTheNamedPerson = subject.type === 'commitment' || subject.type === 'decision';
+      const field = ATTRIBUTION_FIELD[subject.type] ?? 'the named person';
       const where = bearing
         ? `the message bearing it ("${bearing.id}") was written by "${bearing.authorId}"`
         : ambiguous
@@ -885,14 +918,10 @@ export function validateProposalProvenance(
             : `authored none of the cited messages (${cited.map((message) => `"${message.authorId}"`).join(', ')})`;
       problems.push({
         kind: 'attributed_person_not_author',
-        // The split the spike's "or force `attribution: third_party`" implies.
-        // A claim whose claimant said nothing is a wrong receipt; a commitment
-        // whose owner said nothing is the third-party case #4 is entirely about,
-        // and discarding it would delete the confirm flow rather than trigger it.
-        severity: claim ? 'reject' : 'reclassify',
-        detail: claim
-          ? `claimant "${attributed}" ${where} — the receipt does not support "X said Y"`
-          : `owner "${attributed}" ${where} — this is third-party attribution, not a self-statement, so it needs their confirm`,
+        severity: asksTheNamedPerson ? 'reclassify' : 'reject',
+        detail: asksTheNamedPerson
+          ? `${field} "${attributed}" ${where} — this is third-party attribution, not a self-statement, so it needs their confirm`
+          : `${field} "${attributed}" ${where} — the receipt does not support "X said Y"`,
         messageId: bearing?.id ?? null,
       });
     }

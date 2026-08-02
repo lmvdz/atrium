@@ -8,6 +8,7 @@
  */
 export * from './acceptance.js';
 export * from './attention.js';
+export * from './attribution.js';
 export * from './authority.js';
 export * from './common.js';
 export * from './corrections.js';

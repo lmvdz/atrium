@@ -172,6 +172,11 @@ describe('retype — #5’s canonical fix', () => {
   });
 
   it('accepts the same retype once the patch supplies what the new type needs', () => {
+    // The owner is ALICE, who is the corrector. Until #22 r10 this fixture read
+    // `owner: BOB` and passed, which is D3 exactly: `retype` was the route that
+    // minted an obligation against somebody with no second party anywhere in it.
+    // What the case is about — a retype is refused until the patch supplies what
+    // the new type needs, and accepted once it does — is unchanged.
     const state = reduce([
       ...sampleLog(),
       corrected({
@@ -180,12 +185,36 @@ describe('retype — #5’s canonical fix', () => {
         objectId: 'obj_decision_2',
         action: 'retype',
         toType: 'commitment',
-        patch: { owner: BOB },
+        patch: { owner: ALICE },
       }),
     ]);
     expect(state.issues).toEqual([]);
     const record = state.objects.obj_decision_2;
-    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(BOB);
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(ALICE);
+  });
+
+  it('refuses that same retype when the patch names somebody else', () => {
+    // D3, driven: an `objective` or a `decision` names nobody, so nothing has
+    // grounds to refuse it — and `retype` then mints a commitment owned by a
+    // colleague, with `ack` and `issues: []`, without ever staging one.
+    //
+    // Mutation this catches: drop the `correctionAttributionRefusal` call from
+    // `applyObjectCorrected`, or narrow it back to the `reattribute` branch, and
+    // this fails while every other correction test still passes.
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_retype_foreign',
+        at: at(9),
+        objectId: 'obj_decision_2',
+        action: 'retype',
+        toType: 'commitment',
+        patch: { owner: BOB },
+      }),
+    ]);
+    expect(state.issues[0]?.reason).toContain(`putting user "${BOB}"'s name on it`);
+    expect(state.objects.obj_decision_2?.object.type).toBe('decision');
+    expect(state.corrections.some((entry) => entry.action === 'retype')).toBe(false);
   });
 
   it('refuses a retype with no target type, and one to the same type', () => {
@@ -262,6 +291,105 @@ describe('reattribute — the verb split that keeps the log readable', () => {
       action: 'reattribute',
       objectType: 'commitment',
     });
+  });
+
+  it('refuses moving an obligation onto somebody who is not the corrector', () => {
+    // #22 r10, D1, driven exactly as the gauntlet drove it: ALICE stages and
+    // accepts a commitment she owns — entirely legitimate, nobody else's name on
+    // it — and then hands it to BOB with one more command. Under r9 all three
+    // acked with `issues: []` and BOB owned it.
+    //
+    // Mutation this catches: delete the `correctionAttributionRefusal` call in
+    // `applyObjectCorrected`, or move it back inside the `reattribute` branch of
+    // `planPayloadEdit` — where it would still pass this test but fail the
+    // `retype` one below, which is the point of putting it at the choke.
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_own',
+        at: at(9),
+        actor: human(),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_mine',
+          roomId: ROOM,
+          type: 'commitment',
+          payload: { statement: 'I will write the migration', owner: ALICE },
+          createdAt: at(9),
+          updatedAt: at(9),
+        },
+      } as Parameters<typeof event>[0]),
+      corrected({
+        id: 'ev_handoff',
+        at: at(10),
+        objectId: 'obj_mine',
+        action: 'reattribute',
+        patch: { owner: BOB },
+      }),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain(`putting user "${BOB}"'s name on it`);
+    expect(state.issues[0]?.reason).toContain('nobody gets committed');
+    const record = state.objects.obj_mine;
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(ALICE);
+    expect(record?.revision).toBe(0);
+    expect(state.corrections.some((entry) => entry.objectId === 'obj_mine')).toBe(false);
+  });
+
+  it('refuses moving it onto a uuid that belongs to no user at all', () => {
+    // The same gate closes this without an FK and without a directory: the name
+    // is refused because it is not the corrector's, not because anybody looked
+    // it up. The reducer has no membership table and must not grow one.
+    //
+    // Mutation: weaken the gate to `after.some((id) => id === '')` or to a
+    // membership lookup that the core cannot perform. This fails.
+    const ghost = '00000000-0000-4000-8000-000000000000';
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_ghost',
+        at: at(9),
+        objectId: 'obj_commitment_1',
+        action: 'reattribute',
+        patch: { owner: ghost },
+      }),
+    ]);
+    expect(state.issues[0]?.reason).toContain(`putting user "${ghost}"'s name on it`);
+    const record = state.objects.obj_commitment_1;
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(BOB);
+  });
+
+  it('still lets every other verb touch an object that names somebody else', () => {
+    // The gate is about a name *arriving*, not a name being present — otherwise
+    // it would freeze BOB's commitment against every correction in the product.
+    // One `amend` of the due date, one `retract`, one `restore`, all by ALICE,
+    // all on an object owned by BOB.
+    //
+    // Mutation: drop the `!before.includes(userId)` filter from
+    // `correctionAttributionRefusal`. Every line below starts failing, which is
+    // how a gate that is too strong is caught rather than shipped.
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_due',
+        at: at(9),
+        objectId: 'obj_commitment_1',
+        action: 'amend',
+        patch: { due: at(11) },
+      }),
+      corrected({ id: 'ev_ret', at: at(10), objectId: 'obj_commitment_1', action: 'retract' }),
+      corrected({ id: 'ev_res', at: at(11), objectId: 'obj_commitment_1', action: 'restore' }),
+    ]);
+    expect(state.issues).toEqual([]);
+    const record = state.objects.obj_commitment_1;
+    expect(record?.object.type === 'commitment' && record.object.payload.owner).toBe(BOB);
+    expect(record?.object.type === 'commitment' && record.object.payload.due).toBe(at(11));
+    expect(record?.retractedAt).toBeNull();
+    expect(
+      state.corrections
+        .filter((entry) => entry.objectId === 'obj_commitment_1')
+        .map((entry) => entry.action),
+    ).toEqual(['amend', 'retract', 'restore']);
   });
 
   it('refuses an amend that would move the obligation instead', () => {
@@ -558,7 +686,8 @@ describe('epistemic state — `~` until a person touches it', () => {
       event({
         id: 'ev_hclaim',
         at: at(9),
-        actor: human(),
+        // BOB is the claimant, so BOB mints it (#22 r10).
+        actor: human(BOB),
         type: 'object_accepted',
         object: {
           id: 'obj_hclaim',
