@@ -264,17 +264,28 @@ describe('r12 — the structure guards are anchored to the message, not to the q
    * anchor is the **whole body**, so an author who really wrote a link and a
    * list is quoted, restated, and lands.
    *
-   * The body is read rather than `stripReplyBlockquotes(body)` for r5's reason,
-   * quoted in `quoteCoversOwnText`: a machine cannot tell the author quoting
-   * somebody from the author formatting an aside, and the wrong reading here
-   * would refuse an author's own `>` line.
+   * `bearing.body` is the *whole* body rather than `stripReplyBlockquotes(body)`
+   * for r5's reason, quoted in `quoteCoversOwnText`: a machine cannot tell the
+   * author quoting somebody from the author formatting an aside, so deleting
+   * every `>` line from the anchor would refuse a statement reproducing one.
+   * That choice is not observable through a quote, and this test learned it the
+   * hard way rather than asserting it: a quote containing a `>` line never
+   * reaches the anchor at all, because **authorship** is decided on the stripped
+   * text and a quote that is not in any cited author's own words is
+   * `quote_only_in_reply_blockquote` before any of this runs. The distinction is
+   * live for a body whose blockquote sits *outside* the quoted span — which
+   * `quoteCoversOwnText` then refuses as `quote_omits_surrounding_text`, a
+   * `refer` rather than a `reject`. So the anchor is the body, the argument for
+   * it is r5's, and the case that would separate it from the stripped text is
+   * unreachable through the receipt today.
    *
-   * **Catches**: anchoring to the stripped own-text, or to the empty string, or
-   * to the *statement* (which would make the difference always empty).
+   * **Catches**: anchoring to the empty string, or to the *statement* (which
+   * would make the difference always empty), or a guard that refuses any
+   * statement carrying structure.
    */
-  it('leaves the author’s own markup alone, links and blocks and blockquotes', () => {
+  it('leaves the author’s own markup alone, links and lists together', () => {
     const body =
-      '> Before the freeze:\n\n- read the [runbook](https://safe.example "step 4 is destructive")\n- verify the backfill';
+      'Before the freeze:\n\n- read the [runbook](https://safe.example "step 4 is destructive")\n- verify the backfill';
     expect(kinds({ body, quote: body, statement: body })).not.toContain(
       'statement_adds_link_structure',
     );
