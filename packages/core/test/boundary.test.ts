@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   type AcceptedObject,
+  type AcceptedObjectRef,
   acceptanceReceiptRefusal,
   appendEvent,
   bearingMessage,
@@ -851,14 +852,17 @@ describe('the receipt minima are policy, and are pinned by value', () => {
   });
 
   it('discards only a re-proposal of the same sentence', () => {
-    const accepted = [
-      {
-        objectId: 'obj_1',
-        type: 'claim' as const,
-        text: 'the migration is reversible and safe.',
-        messageIds: ['msg_1'],
-      },
-    ];
+    const claimOf = (statement: string) =>
+      ({ statement, claimant: ALICE, verification: 'unverified' }) as const;
+    const claimRef = (objectId: string, statement: string): AcceptedObjectRef => ({
+      objectId,
+      type: 'claim',
+      payload: claimOf(statement),
+      messageIds: ['msg_1'],
+      retractedAt: null,
+      supersededById: null,
+    });
+    const accepted = [claimRef('obj_1', 'the migration is reversible and safe.')];
     // The same sentence again, from the same message: a re-proposal.
     //
     // r9: this line read `'The migration is reversible and safe.'` against an
@@ -870,18 +874,23 @@ describe('the receipt minima are policy, and are pinned by value', () => {
     // matching an exact re-proposal, which is the mutation that would make the
     // whole deduplicator dead code.
     expect(
-      findDuplicate('claim', 'the migration is reversible and safe.', ['msg_1'], accepted)
+      findDuplicate('claim', claimOf('the migration is reversible and safe.'), ['msg_1'], accepted)
         ?.objectId,
     ).toBe('obj_1');
     // One word added — an aside, or a qualifier, and nothing here can tell.
     expect(
-      findDuplicate('claim', 'the migration is reversible and safe enough', ['msg_1'], accepted),
+      findDuplicate(
+        'claim',
+        claimOf('the migration is reversible and safe enough'),
+        ['msg_1'],
+        accepted,
+      ),
     ).toBeNull();
     // Reordered. r5: this scored 1.0 under the old set-similarity and was
     // discarded, which is the same blindness that makes "A blocks B" and "B
     // blocks A" one reading.
     expect(
-      findDuplicate('claim', 'the migration is safe and reversible', ['msg_1'], accepted),
+      findDuplicate('claim', claimOf('the migration is safe and reversible'), ['msg_1'], accepted),
     ).toBeNull();
   });
 
@@ -897,24 +906,26 @@ describe('the receipt minima are policy, and are pinned by value', () => {
      * standing. r3's gauntlet finding, surviving in the one path nobody re-read,
      * and worse here than there: not referred, not refused, destroyed.
      */
+    const claimOf = (statement: string) =>
+      ({ statement, claimant: ALICE, verification: 'unverified' }) as const;
+    const claimRef = (objectId: string, statement: string): AcceptedObjectRef => ({
+      objectId,
+      type: 'claim',
+      payload: claimOf(statement),
+      messageIds: ['msg_1'],
+      retractedAt: null,
+      supersededById: null,
+    });
     const accepted = [
-      {
-        objectId: 'obj_1',
-        type: 'claim' as const,
-        text: 'The migration is reversible',
-        messageIds: ['msg_1'],
-      },
-      {
-        objectId: 'obj_2',
-        type: 'claim' as const,
-        text: 'All services restart cleanly',
-        messageIds: ['msg_1'],
-      },
+      claimRef('obj_1', 'The migration is reversible'),
+      claimRef('obj_2', 'All services restart cleanly'),
     ];
     expect(
-      findDuplicate('claim', 'The migration is not reversible', ['msg_1'], accepted),
+      findDuplicate('claim', claimOf('The migration is not reversible'), ['msg_1'], accepted),
     ).toBeNull();
-    expect(findDuplicate('claim', 'Some services restart cleanly', ['msg_1'], accepted)).toBeNull();
+    expect(
+      findDuplicate('claim', claimOf('Some services restart cleanly'), ['msg_1'], accepted),
+    ).toBeNull();
   });
 });
 

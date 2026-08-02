@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type AcceptedObjectRef,
   type AttentionItem,
+  type AttentionProjection,
+  acceptedObjectRef,
   appendEvent,
   autoAcceptable,
+  type ComputedAttentionItem,
   canonicalJson,
   compareCursor,
   computeAttention,
   DEFAULT_ACCEPTANCE_RULES,
   decideAcceptance,
+  type ExaminedSubject,
   findDuplicate,
   instantKey,
   laterRevision,
@@ -308,21 +313,41 @@ describe('r8 — the canonical order is over the instant, not its spelling', () 
 });
 
 describe('r8 — dedup may not destroy a distinct reading', () => {
-  const accepted = [
-    {
-      objectId: 'obj_1',
-      type: 'claim' as const,
-      text: 'the p99 settled at 102 ms after the index landed',
-      messageIds: ['m1'],
-    },
-  ];
+  /**
+   * A claim payload and the ref that carries it. r10 turned `AcceptedObjectRef`
+   * from `{…, text}` into `{…, payload, retractedAt, supersededById}` — the
+   * sentence alone could not say who a reading was about, so a second person's
+   * commitment was destroyed by the first's. These helpers keep every row below
+   * asking the question it was written to ask: same claimant, same verification,
+   * so the only thing varying is the text.
+   */
+  const claimOf = (statement: string) =>
+    ({ statement, claimant: ALICE, verification: 'unverified' }) as const;
+  const claimRef = (
+    objectId: string,
+    statement: string,
+    messageIds: string[],
+  ): AcceptedObjectRef => ({
+    objectId,
+    type: 'claim',
+    payload: claimOf(statement),
+    messageIds,
+    retractedAt: null,
+    supersededById: null,
+  });
+  const accepted = [claimRef('obj_1', 'the p99 settled at 102 ms after the index landed', ['m1'])];
 
   it('keeps `10² ms` and `102 ms` apart', () => {
     // NFKC folds the superscript onto a digit, so 100 was discarded as a
     // duplicate of 102 — no proposal, no issue, no trace, and the accepted
     // object it contradicted stayed on the record.
     expect(
-      findDuplicate('claim', 'the p99 settled at 10² ms after the index landed', ['m1'], accepted),
+      findDuplicate(
+        'claim',
+        claimOf('the p99 settled at 10² ms after the index landed'),
+        ['m1'],
+        accepted,
+      ),
     ).toBeNull();
   });
 
@@ -356,8 +381,12 @@ describe('r8 — dedup may not destroy a distinct reading', () => {
    */
   it('still fires on the same sentence proposed twice', () => {
     expect(
-      findDuplicate('claim', 'the p99 settled at 102 ms after the index landed', ['m1'], accepted)
-        ?.objectId,
+      findDuplicate(
+        'claim',
+        claimOf('the p99 settled at 102 ms after the index landed'),
+        ['m1'],
+        accepted,
+      )?.objectId,
     ).toBe('obj_1');
   });
 
@@ -368,32 +397,20 @@ describe('r8 — dedup may not destroy a distinct reading', () => {
     // from `Hunter2` to `hunter2` was destroyed and the record kept the old
     // password.
     const password = [
-      {
-        objectId: 'obj_pw',
-        type: 'claim' as const,
-        text: 'Set the deploy password to `Hunter2` before you leave tonight.',
-        messageIds: ['m1'],
-      },
+      claimRef('obj_pw', 'Set the deploy password to `Hunter2` before you leave tonight.', ['m1']),
     ];
     expect(
       findDuplicate(
         'claim',
-        'Set the deploy password to `hunter2` before you leave tonight.',
+        claimOf('Set the deploy password to `hunter2` before you leave tonight.'),
         ['m1'],
         password,
       ),
     ).toBeNull();
     // …and in prose, where restricting the fold to code segments would have
     // left it: `Bill` is a person and a `bill` is an invoice.
-    const invoice = [
-      {
-        objectId: 'obj_b',
-        type: 'claim' as const,
-        text: 'Send the Bill to Acme',
-        messageIds: ['m1'],
-      },
-    ];
-    expect(findDuplicate('claim', 'Send the bill to Acme', ['m1'], invoice)).toBeNull();
+    const invoice = [claimRef('obj_b', 'Send the Bill to Acme', ['m1'])];
+    expect(findDuplicate('claim', claimOf('Send the bill to Acme'), ['m1'], invoice)).toBeNull();
   });
 
   /**
@@ -496,12 +513,9 @@ describe('r8 — dedup may not destroy a distinct reading', () => {
     if (!second) throw new Error('unreachable');
 
     // What a caller judging against the room's accepted state actually asks.
-    const accepted = Object.values(state.objects).map((record) => ({
-      objectId: record.object.id,
-      type: record.object.type,
-      text: (record.object.payload as { statement: string }).statement,
-      messageIds: record.object.provenance.messageIds,
-    }));
+    // `acceptedObjectRef` is the one derivation there is — a caller writing this
+    // projection by hand is how the tombstone fields get forgotten.
+    const accepted = Object.values(state.objects).map(acceptedObjectRef);
     const verdict = decideAcceptance(second, { messages, acceptedObjects: accepted });
     expect(verdict.rule).not.toBe('duplicate_of_accepted');
     expect(verdict.verdict).toBe('auto_accept');
@@ -1016,6 +1030,21 @@ describe('r8 — attention bookkeeping', () => {
       ...overrides,
     }) as AttentionItem;
 
+  /**
+   * A hand-built cycle. r10 made `reconcileAttention` take the whole
+   * `AttentionProjection` rather than its items, because an item list alone
+   * cannot say whether the cycle *looked* — so these tests now have to state
+   * which subjects were examined, which is the assumption they were making
+   * silently before.
+   */
+  const cycle = (
+    items: ComputedAttentionItem[],
+    examined: ExaminedSubject[] = [],
+  ): AttentionProjection => ({ items, refusals: [], examined });
+  const sawObj1: ExaminedSubject[] = [
+    { class: 'owned_commitment', subjectKind: 'object', subjectId: 'obj_1' },
+  ];
+
   it('keeps a dismissal across a cycle that computes nothing', () => {
     // r7 dropped every stored non-pending item that was not recomputed, so a
     // dismissal survived one cycle and not two — and there is a documented path
@@ -1024,16 +1053,43 @@ describe('r8 — attention bookkeeping', () => {
     const computed = [{ ...item({ id: 'attn:a' }), priority: 4 }];
     const afterDismiss = [{ ...item({ id: 'attn:a', status: 'dismissed' }), priority: 4 }];
 
-    const emptyCycle = reconcileAttention(afterDismiss, []);
+    const emptyCycle = reconcileAttention(afterDismiss, cycle([], sawObj1));
     expect(emptyCycle.map((entry) => [entry.id, entry.status])).toEqual([['attn:a', 'dismissed']]);
 
-    const backAgain = reconcileAttention(emptyCycle, computed);
+    const backAgain = reconcileAttention(emptyCycle, cycle(computed, sawObj1));
     expect(backAgain.map((entry) => [entry.id, entry.status])).toEqual([['attn:a', 'dismissed']]);
   });
 
   it('still resolves a pending item that stopped being computed', () => {
+    // The cycle looked at `obj_1` and raised nothing: that is rule 2's case and
+    // it still fires. Its twin is below — the same input with nothing examined.
     const stored = [item({ id: 'attn:b' })];
-    expect(reconcileAttention(stored, []).map((entry) => entry.status)).toEqual(['resolved']);
+    expect(reconcileAttention(stored, cycle([], sawObj1)).map((entry) => entry.status)).toEqual([
+      'resolved',
+    ]);
+  });
+
+  /**
+   * **Catches**: reverting rule 2 to `entry.status === 'pending' ? 'resolved' :
+   * entry.status` — r10's §2, at the unit. Two cycles that compute nothing are
+   * opposite facts about the world: one examined the subject and found it
+   * finished, one never got to look. r9 gave both the same answer, and the
+   * answer was the destructive one.
+   */
+  it('leaves a pending item alone when the cycle never examined its subject', () => {
+    const stored = [item({ id: 'attn:b' })];
+    expect(reconcileAttention(stored, cycle([])).map((entry) => entry.status)).toEqual(['pending']);
+    // …and a different subject's examination is not this subject's.
+    const elsewhere: ExaminedSubject[] = [
+      { class: 'owned_commitment', subjectKind: 'object', subjectId: 'obj_2' },
+      // Same subject, different class: an item is `(class, kind, subject)`.
+      { class: 'mention', subjectKind: 'object', subjectId: 'obj_1' },
+      // Same subject and class, different namespace.
+      { class: 'owned_commitment', subjectKind: 'proposal', subjectId: 'obj_1' },
+    ];
+    expect(reconcileAttention(stored, cycle([], elsewhere)).map((entry) => entry.status)).toEqual([
+      'pending',
+    ]);
   });
 
   it('sorts an out-of-enum class last instead of above everything', () => {

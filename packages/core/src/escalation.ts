@@ -1,4 +1,5 @@
 import {
+  addedLinkStructure,
   alignTokens,
   hasContent,
   isAssertion,
@@ -697,7 +698,9 @@ export interface ProvenanceMessage {
  *    `Proposal`, and checked again here because r2's gauntlet found the schema
  *    was never reached: `appendEvent`/`reduce` folded whatever object they were
  *    handed. A check that only runs one layer up is not a check.
- *  - `unknown_message` — cites a message id that is not in the window.
+ *  - `unknown_message` — cites a message id that is not in the window. `refer`
+ *    since r10, not `reject`: it is a fact about the window supplied, not about
+ *    the reading. See the check itself.
  *  - `missing_quote` — a model reading that quotes nothing. r3's gauntlet minted
  *    a model *objective* with `quote: null` through the version of this that was
  *    scoped to claims and commitments; it covers every model-minted type now.
@@ -751,6 +754,11 @@ export interface ProvenanceMessage {
  *    never discarded"*. r5 rejected it, so a 421-token design comment, quoted
  *    whole and correctly attributed, was **destroyed**, and the room was told its
  *    citation had failed when it had not.
+ *  - `statement_adds_link_structure` — the statement being minted carries
+ *    Markdown link markup the quote does not, built out of the author's own
+ *    words. The fold unfolds a link to `label dest title`, so the two normalize
+ *    identically and every other check passes; the stored text is markup its
+ *    named author never wrote. See `linkStructures`.
  *  - `ambiguous_quote` — two or more cited messages, by different people,
  *    contain the quote. Taking the first in window order picks an author by
  *    accident, and the author is the whole answer to "who said this".
@@ -775,6 +783,7 @@ export const PROVENANCE_PROBLEM_KINDS = [
   'statement_is_not_an_assertion',
   'statement_is_not_a_question',
   'statement_uncheckable',
+  'statement_adds_link_structure',
   'ambiguous_quote',
   'attributed_person_not_author',
 ] as const;
@@ -892,10 +901,32 @@ export function validateProposalProvenance(
   for (const id of subject.provenance) {
     const message = byId.get(id);
     if (!message) {
+      // ── An unread window is not a clean one, in the other direction — r10 ──
+      //
+      // This was `reject` — *the reading is wrong* — and the fact it has is *the
+      // window did not reach the message*. Those are different facts, and this
+      // file applies the distinction the other way everywhere else it appears:
+      // `quote_span_unscanned`, the `too_long` arm of `statement_uncheckable`,
+      // and `laterRevision`'s three `unscanned` answers are all `refer`, on the
+      // stated principle that **a check that declined to run is not a check that
+      // passed**. Here alone it was applied in the destructive direction, and
+      // `reject` is what `acceptance.ts` turns into `discard` — no proposal, no
+      // attention item, no refusal, no trace.
+      //
+      // It needs no caller mistake to fire. An ordinary sliding "last N
+      // messages" window that has moved past the cited message produces exactly
+      // this, on a proposal that is still staged and still waiting for somebody:
+      // the projection computed nothing, reported nothing, and
+      // `reconcileAttention` read the absence as completion. Both halves of that
+      // are fixed; this is the half that says *why* the item went missing.
+      //
+      // Not `reclassify`: nothing about the attribution changed. The reading may
+      // be perfectly good and nothing here can tell, which is the definition of
+      // the third severity.
       problems.push({
         kind: 'unknown_message',
-        severity: 'reject',
-        detail: `cites message "${id}", which is not in the window`,
+        severity: 'refer',
+        detail: `cites message "${id}", which is not in the window — the window supplied does not reach that message, so nothing about this citation was checked either way; an unread window is not a clean one, and a check that declined to run is not a check that passed`,
         messageId: id,
       });
       continue;
@@ -1213,6 +1244,38 @@ export function validateProposalProvenance(
       const statement = subject.statement ?? '';
       const bearingResult = statementBearing(quote, statement, policy);
       const where = bearing?.id ?? null;
+
+      // ── …in the author's words *and the author's punctuation* — r10 ────────
+      //
+      // `borne` is exactly `normalizeForReceipt(quote) ===
+      // normalizeForReceipt(statement)`, and the fold unfolds `[label](dest
+      // "title")` into `label dest title`. r4 and r7 closed the direction where a
+      // message carrying a link is reduced to a statement that hides where it
+      // goes; the mirror — a statement that *builds* link markup out of words the
+      // author wrote in prose — folds to the identical normal form and passed
+      // every check in this file.
+      //
+      //   alice wrote : Read the runbook at https://safe.example do not run step 4.
+      //   record says : Read the runbook at [https://safe.example]( "do not run step 4").
+      //
+      // Both `auto_accept` before this check. The click happens in the rendering
+      // lane and the record is written here, which makes this the only place that
+      // can refuse it. `reject`: the statement is not the quoted sentence, it is
+      // the quoted sentence with punctuation nobody wrote, and that is a wrong
+      // receipt rather than an unanswerable question.
+      //
+      // Run outside the `borne` branch on purpose — an invariant asserted on one
+      // branch of a dispatch does not constrain the others, which is r10's other
+      // finding one file over.
+      const added = addedLinkStructure(quote, statement);
+      if (added.length > 0) {
+        problems.push({
+          kind: 'statement_adds_link_structure',
+          severity: 'reject',
+          detail: `the ${subject.type} being minted carries link markup the quote does not — ${added.map((link) => `\`${clip(link, 60)}\``).join(', ')} — so the record would store markup its named author never wrote, assembled out of their own words: a link's text, destination and title normalize to the same words whether or not the brackets are there, which is why every other check on this receipt passes`,
+          messageId: where,
+        });
+      }
       if (bearingResult.undecidable !== null) {
         // Not "no problem found" — no check performed. The two are the same
         // shape in the code and opposite facts about the world, and every finding
@@ -1579,8 +1642,8 @@ export function laterRevision(
   //
   // Not reachable as an acceptance today: `validateProposalProvenance` calls
   // this only with a resolved citation and a statement, and has already pushed
-  // `unknown_message` or `statement_uncheckable` — both `reject` — on the inputs
-  // that get here. **That is the whole objection.** The guard is in a different
+  // `unknown_message` (`refer` since r10) or `statement_uncheckable` on the
+  // inputs that get here. **That is the whole objection.** The guard is in a different
   // function, so the safety of `laterRevision`'s answer is a property of its
   // caller, and this file's standing lesson is that a rule applied at one site
   // is not a rule. Each path now says which question it declined to answer.
@@ -1616,8 +1679,8 @@ export function laterRevision(
   }
   // Not one cited id is in this window, so there is no sentence to find a
   // correction *of* and nothing was read. See the paragraph at the top of this
-  // function: `unknown_message` rejects this upstream, and that is a fact about
-  // the caller rather than about this answer.
+  // function: `unknown_message` refers this upstream (`reject` until r10), and
+  // that is a fact about the caller rather than about this answer.
   if (firstCited === -1) return unscanned('no_citation_in_the_window');
 
   // ── …and the floor is where the SENTENCE is, not where a citation is — r8 ──

@@ -4,6 +4,7 @@ import {
   type AcceptanceRuleName,
   type AcceptanceVerdict,
   type AcceptanceVisibility,
+  type AcceptedObjectRef,
   type AcceptedObjectType,
   AcceptedObjectType as AcceptedObjectTypeSchema,
   answerBindingRefusal,
@@ -19,9 +20,11 @@ import {
   MODEL_ACCEPTANCE_FLOOR,
   modelMintingGate,
   normalizeForReceipt,
+  objectPayloadKeys,
   type Proposal,
   Proposal as ProposalSchema,
   type ProvenanceMessage,
+  payloadTextKey,
   readsAsCommitment,
   reduce,
   resolveAcceptanceConfig,
@@ -472,8 +475,10 @@ describe('#4 acceptance matrix — one test per cell', () => {
           {
             objectId: 'obj_1',
             type: 'claim',
-            text: QUOTE.claim,
+            payload: { statement: QUOTE.claim, claimant: ALICE, verification: 'unverified' },
             messageIds: [MESSAGE_ID.claim],
+            retractedAt: null,
+            supersededById: null,
           },
         ],
       }).rule,
@@ -759,15 +764,22 @@ describe('commitmentAttribution — nobody gets committed by someone else’s se
 });
 
 describe('deduplication against accepted state — the spike’s amendment 3', () => {
-  const accepted = [
+  const claimPayload = {
+    // The accepted object carries the sentence the proposal restates, full stop
+    // included: since r6 nothing is droppable, so a re-proposal is a re-proposal
+    // of the *same string*.
+    statement: QUOTE.claim,
+    claimant: ALICE,
+    verification: 'unverified' as const,
+  };
+  const accepted: AcceptedObjectRef[] = [
     {
       objectId: 'obj_existing',
-      type: 'claim' as const,
-      // The accepted object carries the sentence the proposal restates, full stop
-      // included: since r6 nothing is droppable, so a re-proposal is a re-proposal
-      // of the *same string*.
-      text: QUOTE.claim,
+      type: 'claim',
+      payload: claimPayload,
       messageIds: [MESSAGE_ID.claim],
+      retractedAt: null,
+      supersededById: null,
     },
   ];
 
@@ -784,16 +796,133 @@ describe('deduplication against accepted state — the spike’s amendment 3', (
   it('requires both statement similarity and provenance overlap', () => {
     // Same words, different messages: not a duplicate. Two people can say the
     // same thing twice and both are real.
-    expect(findDuplicate('claim', QUOTE.claim, ['msg_9'], accepted)).toBeNull();
+    expect(findDuplicate('claim', claimPayload, ['msg_9'], accepted)).toBeNull();
     // Same message, different words: also not a duplicate. One message carries
     // several readings, which is the ordinary case.
     expect(
-      findDuplicate('claim', 'The rollback script is untested', [MESSAGE_ID.claim], accepted),
+      findDuplicate(
+        'claim',
+        { ...claimPayload, statement: 'The rollback script is untested' },
+        [MESSAGE_ID.claim],
+        accepted,
+      ),
     ).toBeNull();
   });
 
   it('does not match across types', () => {
-    expect(findDuplicate('open_question', QUOTE.claim, ['msg_1'], accepted)).toBeNull();
+    expect(
+      findDuplicate('open_question', { question: QUOTE.claim }, ['msg_1'], accepted),
+    ).toBeNull();
+  });
+
+  /**
+   * **Catches**: deleting the `payloadsMatch` call from `findDuplicate`, or
+   * narrowing its key set to the text field — r10's §1. Every row below has the
+   * identical sentence, the identical provenance and the identical type, so the
+   * text comparison the r9 engine ran says "duplicate" for all of them, and a
+   * duplicate is `discard` / `visibility: 'none'`: no proposal, no attention
+   * item, no issue, nothing in the room to see.
+   *
+   * Driven off `objectPayloadKeys` rather than a written list, so a field added
+   * to a payload schema without a row here fails the exhaustiveness assertion at
+   * the end instead of silently going uncompared.
+   */
+  it('does not discard a reading that differs anywhere else in the payload', () => {
+    const commitmentPayload = {
+      statement: QUOTE.commitment,
+      owner: ALICE,
+      due: null,
+      status: 'open' as const,
+    };
+    const acceptedCommitment: AcceptedObjectRef[] = [
+      {
+        objectId: 'obj_commitment',
+        type: 'commitment',
+        payload: commitmentPayload,
+        messageIds: [MESSAGE_ID.commitment],
+        retractedAt: null,
+        supersededById: null,
+      },
+    ];
+
+    const differing: {
+      field: string;
+      type: AcceptedObjectType;
+      payload: Record<string, unknown>;
+    }[] = [
+      // One message naming two people: "Alice and Bob will each run the
+      // backfill". Accepting Alice's silently destroyed Bob's.
+      { field: 'owner', type: 'commitment', payload: { ...commitmentPayload, owner: BOB } },
+      {
+        field: 'due',
+        type: 'commitment',
+        payload: { ...commitmentPayload, due: '2026-03-01T00:00:00.000Z' },
+      },
+      {
+        field: 'status',
+        type: 'commitment',
+        payload: { ...commitmentPayload, status: 'done' },
+      },
+      { field: 'claimant', type: 'claim', payload: { ...claimPayload, claimant: BOB } },
+      // The `disputed` flag never landing is the one that matters most: the
+      // room goes on showing the claim as unchallenged.
+      {
+        field: 'verification',
+        type: 'claim',
+        payload: { ...claimPayload, verification: 'disputed' },
+      },
+    ];
+
+    for (const row of differing) {
+      const pool = row.type === 'commitment' ? acceptedCommitment : accepted;
+      expect(
+        findDuplicate(row.type, row.payload, [MESSAGE_ID[row.type]], pool),
+        `${row.type}.${row.field} differing must not read as a duplicate`,
+      ).toBeNull();
+    }
+
+    // …and the same payload with nothing changed still dedups, so the rows above
+    // are proving the field and not a broken matcher.
+    expect(
+      findDuplicate('commitment', commitmentPayload, [MESSAGE_ID.commitment], acceptedCommitment),
+    ).not.toBeNull();
+    expect(findDuplicate('claim', claimPayload, [MESSAGE_ID.claim], accepted)).not.toBeNull();
+
+    // Exhaustive over the schema, not over what somebody remembered: every key
+    // of every payload type is either the text (compared by the receipt's own
+    // alignment, three tests up) or has a row above.
+    const covered = new Set(differing.map((row) => `${row.type}.${row.field}`));
+    const uncovered: string[] = [];
+    for (const type of ['commitment', 'claim'] as const) {
+      for (const key of objectPayloadKeys(type)) {
+        if (key === payloadTextKey(type)) continue;
+        if (!covered.has(`${type}.${key}`)) uncovered.push(`${type}.${key}`);
+      }
+    }
+    expect(uncovered).toEqual([]);
+  });
+
+  /**
+   * **Catches**: removing the `retractedAt` / `supersededById` guard from
+   * `findDuplicate`. A tombstone is not something the room "already has", and
+   * discarding a re-reading against one means a retracted object can never be
+   * re-proposed — the room withdraws a claim and the next pass over the same
+   * window reads it again into nothing.
+   */
+  it('does not discard a reading against a tombstone', () => {
+    for (const tombstone of [
+      { retractedAt: at(4), supersededById: null },
+      { retractedAt: null, supersededById: 'obj_newer' },
+    ]) {
+      expect(
+        findDuplicate(
+          'claim',
+          claimPayload,
+          [MESSAGE_ID.claim],
+          [{ ...(accepted[0] as AcceptedObjectRef), ...tombstone } as AcceptedObjectRef],
+        ),
+      ).toBeNull();
+    }
   });
 });
 

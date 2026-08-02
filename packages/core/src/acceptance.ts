@@ -13,7 +13,10 @@ import {
   type AcceptedObjectType,
   type ClaimPayload,
   type DecisionPayload,
+  type ObjectPayloadOf,
+  objectPayloadKeys,
   payloadText,
+  payloadTextKey,
 } from './objects.js';
 import {
   type AcceptanceConfig,
@@ -22,7 +25,7 @@ import {
 } from './policy.js';
 import type { Proposal, StoredProposal } from './proposal.js';
 import { appendEvent, compareCursor } from './reduce.js';
-import type { CoreState } from './state.js';
+import { type CoreState, canonicalJson, type ObjectRecord } from './state.js';
 
 /**
  * The acceptance engine — #4's matrix, entire.
@@ -178,14 +181,92 @@ export interface AcceptanceDecision {
   duplicateOf: Id | null;
 }
 
-/** An already-accepted object, as the deduplicator needs it. */
-export interface AcceptedObjectRef {
-  objectId: Id;
-  type: AcceptedObjectType;
-  /** `statement` / `question` / `title`, whichever the type carries. */
-  text: string;
-  /** The messages it was drawn from. */
-  messageIds: readonly Id[];
+/**
+ * An already-accepted object, as the deduplicator needs it.
+ *
+ * ## The whole payload, and the reason it is not three named fields — r10
+ *
+ * This carried `{objectId, type, text, messageIds}` until r10: the *sentence*
+ * and nothing else. A duplicate is `discard` / `visibility: 'none'` — no
+ * proposal, no attention item, no issue, no trace — so every field the type
+ * could not express was a field whose difference destroyed a reading in
+ * silence. One message naming two people is enough:
+ *
+ * ```
+ * m1 (carol): "Alice and Bob will each run the backfill before the freeze."
+ *   → commitment{owner: alice}  accepted
+ *   → commitment{owner: bob}    discard / duplicate_of_accepted / o_alice
+ * ```
+ *
+ * Bob is never asked, and `state.objects` holds Alice's commitment and nothing
+ * else. The same shape, all `discard`: an `unverified` claim re-read as
+ * **disputed**, a commitment gaining a `due`, a commitment changing `owner`, a
+ * claim changing `claimant`.
+ *
+ * **No caller could close this**, which is why the repair is a type. The
+ * distinction has to be *expressible* before any filtering of `acceptedObjects`
+ * can reach it, and `text` had nowhere to put it.
+ *
+ * ## Exhaustive by construction, not by enumeration
+ *
+ * The obvious repair — add `owner` and `claimant`, the two fields the finding
+ * was demonstrated with — is the one `RETRO.md` refuses by name: it is a
+ * denylist of the fields somebody has thought of, and `due`, `status`,
+ * `verification` and `decidedBy` were all on the floor beside them. So the ref
+ * carries the **whole payload**, the union is keyed by `type` so the two cannot
+ * disagree, and `payloadsMatch` compares every key of the type's own schema plus
+ * every key either payload actually carries. A field added to
+ * `objectPayloadByType` next round is compared by strict equality from the
+ * moment it is added — the safe direction, because a difference the comparison
+ * does not understand makes two readings *distinct*, which stages a proposal
+ * rather than deleting one.
+ *
+ * ## …and whether the thing it matches is still standing
+ *
+ * `retractedAt` and `supersededById` are the record's own answer to "what state
+ * is it in" (`attention.ts`'s `isLive`, same two fields, same meaning).
+ * Discarding a re-reading against a tombstone means a retracted thing can never
+ * be re-proposed: the room withdraws a commitment, the next pass over the same
+ * window reads it again, and the reading dies against the tombstone of the thing
+ * it would have restored.
+ *
+ * Build one with `acceptedObjectRef` rather than by hand.
+ */
+export type AcceptedObjectRef = {
+  [K in AcceptedObjectType]: {
+    objectId: Id;
+    type: K;
+    /**
+     * The object's whole payload — every field, not the sentence alone. See the
+     * docblock above for why this is not `text`.
+     */
+    payload: Readonly<ObjectPayloadOf<K>>;
+    /** The messages it was drawn from. */
+    messageIds: readonly Id[];
+    /** Set by a `retract` correction; a tombstone is not a duplicate target. */
+    retractedAt: Timestamp | null;
+    /** Set when another object replaced this one; likewise not a target. */
+    supersededById: Id | null;
+  };
+}[AcceptedObjectType];
+
+/**
+ * The one derivation of an `AcceptedObjectRef` from the room's state.
+ *
+ * Exported because the alternative is every caller writing the projection by
+ * hand, and a caller that forgets `retractedAt` re-creates the defect the field
+ * exists to close. `#23`'s worker maps `Object.values(state.objects)` through
+ * this.
+ */
+export function acceptedObjectRef(record: ObjectRecord): AcceptedObjectRef {
+  return {
+    objectId: record.object.id,
+    type: record.object.type,
+    payload: record.object.payload,
+    messageIds: record.object.provenance.messageIds,
+    retractedAt: record.retractedAt,
+    supersededById: record.supersededById,
+  } as AcceptedObjectRef;
 }
 
 export interface AcceptanceContext {
@@ -374,23 +455,77 @@ export function commitmentAttribution(
  */
 export function findDuplicate(
   type: AcceptedObjectType,
-  text: string,
+  payload: Readonly<Record<string, unknown>>,
   messageIds: readonly Id[],
   accepted: readonly AcceptedObjectRef[],
 ): AcceptedObjectRef | null {
-  const wanted = orderedTokens(text);
+  const wanted = orderedTokens(payloadText(type, payload));
   if (wanted.length === 0) return null;
   const cited = new Set(messageIds);
   for (const candidate of accepted) {
     if (candidate.type !== type) continue;
+    // A withdrawn or replaced object is not a thing the room "already has". Two
+    // fields rather than one because that is `isLive`'s own answer to what
+    // standing means, and a second definition of it here would be exactly the
+    // drift this package keeps finding.
+    if (candidate.retractedAt !== null || candidate.supersededById !== null) continue;
     if (!candidate.messageIds.some((id) => cited.has(id))) continue;
-    const have = orderedTokens(candidate.text);
+    // Total on a ref the type forbids: a JS caller still carrying r9's
+    // `{objectId, type, text, messageIds}` reaches here with no payload at all,
+    // and `payloadText` would throw inside a path whose whole contract is that
+    // it never does. Skipping is the same direction every other guard here
+    // takes — a candidate nothing can compare is not a duplicate.
+    const candidatePayload = candidate.payload as unknown as Record<string, unknown> | undefined;
+    if (candidatePayload === null || typeof candidatePayload !== 'object') continue;
+    const have = orderedTokens(payloadText(type, candidatePayload));
     if (have.length === 0) continue;
     // Symmetric by construction: `borne` requires both sides accounted for, so
     // neither "the new one restates the old" nor the reverse is enough alone.
-    if (alignTokens(have, wanted).borne) return candidate;
+    if (!alignTokens(have, wanted).borne) continue;
+    if (!payloadsMatch(type, candidatePayload, payload)) continue;
+    return candidate;
   }
   return null;
+}
+
+/**
+ * **Is every other field of these two payloads the same fact?**
+ *
+ * The text field is excluded — `findDuplicate` has just compared it with the
+ * receipt's own alignment, which forgives the spacing `normalizeForReceipt`
+ * forgives and nothing else. Everything else is compared with `canonicalJson`,
+ * so key order is never a difference.
+ *
+ * **The key set is a union of three sources**, and that union is the whole point
+ * of the function:
+ *
+ *  - the type's schema keys (`objectPayloadKeys`), so a field added to
+ *    `objectPayloadByType` is compared from the commit that adds it rather than
+ *    from the round that finds it missing;
+ *  - the keys each side actually carries, because an `AcceptedObjectRef` comes
+ *    from a caller and need not have been through the parser, and a payload the
+ *    schema does not describe is still a payload somebody stored.
+ *
+ * A key nobody understands therefore makes two readings **distinct**, which
+ * stages a proposal. That is the safe direction and it is the one this whole
+ * finding is about: the failure being repaired deleted a reading in silence, and
+ * the worst this can do is ask a person about something twice.
+ */
+function payloadsMatch(
+  type: AcceptedObjectType,
+  a: Readonly<Record<string, unknown>>,
+  b: Readonly<Record<string, unknown>>,
+): boolean {
+  const textKey = payloadTextKey(type);
+  const keys = new Set([...objectPayloadKeys(type), ...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if (key === textKey) continue;
+    // `undefined` and an absent key are one state — a payload that omits `due`
+    // and one that carries `due: undefined` are the same fact — and neither is
+    // `null`, which is a value the schemas use.
+    if (canonicalJson(a[key] ?? null) !== canonicalJson(b[key] ?? null)) return false;
+  }
+  return true;
 }
 
 /**
@@ -592,7 +727,7 @@ export function decideAcceptance(
   // room has *never* been shown, carrying a discrepancy it has never seen, and
   // the two are not the same thing however similar the sentences look.
   const duplicate = context.acceptedObjects
-    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)
+    ? findDuplicate(proposal.type, payload, proposal.provenance, context.acceptedObjects)
     : null;
   if (duplicate) {
     return {

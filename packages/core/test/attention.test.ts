@@ -756,7 +756,8 @@ describe('transitions', () => {
 
 describe('reconciliation — resolution happens by acting on the object', () => {
   const state = reduce(sampleLog());
-  const computed = computeAttention(state, context());
+  const projection = projectAttention(state, context());
+  const computed = projection.items;
 
   it('resolves a pending item whose object no longer generates it', () => {
     const closed = reduce([
@@ -771,8 +772,10 @@ describe('reconciliation — resolution happens by acting on the object', () => 
         patch: { status: 'done' },
       }),
     ]);
-    // Nobody clicked anything; the commitment closed and the item is done.
-    const reconciled = reconcileAttention(computed, computeAttention(closed, context()));
+    // Nobody clicked anything; the commitment closed and the item is done. The
+    // object is still in `state.objects`, so the cycle examined it and raised
+    // nothing — which is what rule 2 now needs before it resolves anything.
+    const reconciled = reconcileAttention(computed, projectAttention(closed, context()));
     expect(reconciled).toHaveLength(1);
     expect(reconciled[0]?.status).toBe('resolved');
   });
@@ -780,13 +783,13 @@ describe('reconciliation — resolution happens by acting on the object', () => 
   it('keeps a dismissed item dismissed across a recompute', () => {
     const dismissed = dismissAttention(computed[0] as AttentionItem);
     if (!dismissed.ok) throw new Error('unreachable');
-    const reconciled = reconcileAttention([dismissed.item], computed);
+    const reconciled = reconcileAttention([dismissed.item], projection);
     expect(reconciled).toHaveLength(1);
     expect(reconciled[0]?.status).toBe('dismissed');
   });
 
   it('leaves a brand-new item pending', () => {
-    expect(reconcileAttention([], computed).map((entry) => entry.status)).toEqual(['pending']);
+    expect(reconcileAttention([], projection).map((entry) => entry.status)).toEqual(['pending']);
   });
 });
 

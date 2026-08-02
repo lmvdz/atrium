@@ -1166,6 +1166,24 @@ describe('validateProposalProvenance — the spike’s three post-checks', () =>
           body: 'Run `rm -rf / tmp/cache` on the box tonight, everyone.',
         }),
       ],
+      // statement_adds_link_structure — r10. The statement is the author's own
+      // words with Markdown link punctuation spliced through them; the fold
+      // unfolds `[label](dest "title")` to `label dest title`, so the two
+      // normalize identically and every other check on this receipt passes.
+      [
+        {
+          type: 'claim',
+          provenance: ['m_link'],
+          quote: 'Read the runbook at https://safe.example do not run step 4.',
+          statement: 'Read the runbook at [https://safe.example]( "do not run step 4").',
+          proposer: { kind: 'model' },
+        },
+        room({
+          id: 'm_link',
+          authorId: JORDAN,
+          body: 'Read the runbook at https://safe.example do not run step 4.',
+        }),
+      ],
     ];
     for (const args of cases) {
       for (const problem of validateProposalProvenance(...args)) seen.add(problem.kind);

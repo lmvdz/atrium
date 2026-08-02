@@ -384,6 +384,89 @@ function foldProse(text: string): string {
 }
 
 /**
+ * **Every link this text is made of, as markup rather than as words** — the one
+ * many-to-one rule in the fold above, read back out.
+ *
+ * ## Why this exists — r10, and it is r7's finding in a mirror
+ *
+ * `unfoldLink` is deliberately lossy in one direction: `[label](dest "title")`
+ * becomes `label dest title`, so nothing an author wrote can be *deleted* by a
+ * statement that drops the punctuation. r4 and r7 hardened that direction twice
+ * — the destination, then the title and the image marker — and both rounds asked
+ * only whether a **message** containing a link could be reduced to a statement
+ * that hides where it goes.
+ *
+ * The mirror was unguarded. A statement may **add** link syntax built out of the
+ * author's own words, fold to the identical normal form, and land:
+ *
+ * ```
+ * alice wrote : Read the runbook at https://safe.example do not run step 4.
+ * record says : Read the runbook at [https://safe.example]( "do not run step 4").
+ *
+ * alice wrote : Use https://safe.example and never https://evil.example for the runbook.
+ * record says : Use [https://safe.example and never](https://evil.example) for the runbook.
+ * ```
+ *
+ * Both `auto_accept`. A 400,000-sample collision search over the fold (313,699
+ * distinct normal forms) found exactly one structural collision class and this
+ * is it — every other rule in `foldProse` deletes only characters that paint
+ * nothing, or collapses spacing, and neither can build structure out of prose.
+ * The harm renders in another lane; the *stored text is markup its named author
+ * never wrote*, and this package is the only gatekeeper of that.
+ *
+ * ## What a descriptor is
+ *
+ * The rendered form of one link, with the components whitespace-collapsed —
+ * `[label](dest "title")`, `![label](dest)` — so it reads in a refusal and
+ * compares as a key. Whitespace inside a link is collapsed because the fold
+ * collapses it: a statement whose link differs from the quote's by a space is a
+ * statement that reproduced the author's link, and `whitespaceDiffers` is where
+ * that is reported.
+ *
+ * **Code segments are skipped**, on the same argument `normalizeForReceipt`
+ * splits on them: `` `[a](b)` `` is a literal its author displayed, not markup,
+ * and the fold never unfolds one.
+ */
+export function linkStructures(text: string): string[] {
+  const out: string[] = [];
+  for (const [index, segment] of text.split(CODE_SPAN).entries()) {
+    if (index % 2 === 1) continue;
+    const prepared = segment.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+    for (const match of prepared.matchAll(MARKDOWN_LINK)) {
+      const [, bang = '', label = '', destination = '', title] = match;
+      const collapse = (value: string): string => value.replace(WHITESPACE_RUN, ' ').trim();
+      const caption = title === undefined ? '' : ` "${collapse(title)}"`;
+      out.push(`${bang}[${collapse(label)}](${collapse(destination)}${caption})`);
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * **Link markup the statement has and the quote does not** — a multiset
+ * difference, so two identical links in the statement need two in the quote.
+ *
+ * One-directional on purpose, and the direction is the one r4 argued: a
+ * statement that *drops* a link keeps the destination and the title as words,
+ * because they are content, so nothing the author wrote disappears. A statement
+ * that *adds* one is text nobody wrote, and no reduction of the author's words
+ * produces it.
+ */
+export function addedLinkStructure(quote: string, statement: string): string[] {
+  const available = new Map<string, number>();
+  for (const link of linkStructures(quote)) {
+    available.set(link, (available.get(link) ?? 0) + 1);
+  }
+  const added: string[] = [];
+  for (const link of linkStructures(statement)) {
+    const spare = available.get(link) ?? 0;
+    if (spare === 0) added.push(link);
+    else available.set(link, spare - 1);
+  }
+  return added;
+}
+
+/**
  * The lossy normalization, for the questions where being lossy is the safe
  * direction: **which model reads this window**, and **is this reading a
  * duplicate of one the room already accepted**.

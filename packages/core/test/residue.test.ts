@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type AcceptedObjectRef,
   type AcceptedObjectType,
   decideAcceptance,
   findDuplicate,
@@ -944,8 +945,14 @@ describe('r5 — a detected fault is not weakness', () => {
         {
           objectId: 'obj_old',
           type: 'claim',
-          text: 'Bob will deploy production Friday.',
+          payload: {
+            statement: 'Bob will deploy production Friday.',
+            claimant: BOB,
+            verification: 'unverified',
+          },
           messageIds: ['msg_1'],
+          retractedAt: null,
+          supersededById: null,
         },
       ],
     });
@@ -1071,29 +1078,37 @@ describe('r5 — the audit"s own find: a contradiction is not a duplicate', () =
    * do so again" — and `findDuplicate` still scored similarity over it, while
    * *discarding* what it matched.
    */
-  const accepted = [
+  const claimOf = (statement: string) =>
+    ({ statement, claimant: BOB, verification: 'unverified' }) as const;
+  const accepted: AcceptedObjectRef[] = [
     {
       objectId: 'obj_1',
-      type: 'claim' as const,
-      text: 'The migration is reversible',
+      type: 'claim',
+      payload: claimOf('The migration is reversible'),
       messageIds: ['msg_1'],
+      retractedAt: null,
+      supersededById: null,
     },
     {
       objectId: 'obj_2',
-      type: 'claim' as const,
-      text: 'All services restart cleanly',
+      type: 'claim',
+      payload: claimOf('All services restart cleanly'),
       messageIds: ['msg_1'],
+      retractedAt: null,
+      supersededById: null,
     },
   ];
 
   it('does not discard the negation of an accepted claim as a re-proposal of it', () => {
     expect(
-      findDuplicate('claim', 'The migration is not reversible', ['msg_1'], accepted),
+      findDuplicate('claim', claimOf('The migration is not reversible'), ['msg_1'], accepted),
     ).toBeNull();
   });
 
   it('does not discard a quantifier substitution either', () => {
-    expect(findDuplicate('claim', 'Some services restart cleanly', ['msg_1'], accepted)).toBeNull();
+    expect(
+      findDuplicate('claim', claimOf('Some services restart cleanly'), ['msg_1'], accepted),
+    ).toBeNull();
   });
 });
 

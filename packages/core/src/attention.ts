@@ -310,8 +310,51 @@ function fallbackPriority(attentionClass: AttentionClass): number {
  * proposal namespace and the object namespace cannot meet.
  */
 function itemId(userId: Id, subjectKind: AttentionSubjectKind, subjectId: Id, cls: string): string {
-  const part = (value: string): string => value.replace(/%/g, '%25').replace(/:/g, '%3A');
-  return `attn:${part(userId)}:${subjectKind}:${part(subjectId)}:${cls}`;
+  return `attn:${escapeIdPart(userId)}:${subjectKind}:${escapeIdPart(subjectId)}:${cls}`;
+}
+
+function escapeIdPart(value: string): string {
+  return value.replace(/%/g, '%25').replace(/:/g, '%3A');
+}
+
+/**
+ * **One subject a cycle reached a conclusion about**, and the whole of what
+ * `reconcileAttention` is allowed to treat as "computed and found done".
+ *
+ * The key is the item id with the *person* taken out — an item is
+ * `(user, subjectKind, subject, class)` and a source decides about
+ * `(subjectKind, subject, class)` for everyone at once. A commitment whose owner
+ * was amended is one examination that resolves the old owner's item and raises
+ * the new one, which is the behaviour rule 2 already had for the case it could
+ * see.
+ */
+export interface ExaminedSubject {
+  class: AttentionClass;
+  subjectKind: AttentionSubjectKind;
+  subjectId: Id;
+}
+
+function examinedKey(entry: {
+  class: AttentionClass;
+  subjectKind: AttentionSubjectKind;
+  subjectId: Id;
+}): string {
+  return `${entry.class}:${entry.subjectKind}:${escapeIdPart(entry.subjectId)}`;
+}
+
+/**
+ * What one source of the projection produced — **items, refusals and
+ * examinations together**, because a source that reports one of the three
+ * without the others is how absence stops being distinguishable from silence.
+ *
+ * All three are required rather than optional for the reason `NeedsYouOutcome`
+ * is a type: the next source added to `projectAttention` cannot forget to say
+ * what it looked at, because `tsc` will not let it return without saying.
+ */
+interface AttentionSource {
+  items: ComputedAttentionItem[];
+  refusals: AttentionRefusal[];
+  examined: ExaminedSubject[];
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -393,6 +436,18 @@ export interface AttentionProjection {
    * the honest answer to that is silence *plus a receipt for the silence*.
    */
   refusals: AttentionRefusal[];
+  /**
+   * **Every subject this cycle actually reached a conclusion about** — the
+   * evidence `reconcileAttention` needs before it may read a missing item as a
+   * finished one. See `ExaminedSubject` and rule 2.
+   *
+   * A subject is in here when the source that owns it looked at it and decided
+   * no item was owed. It is *not* in here when the source could not decide: a
+   * proposal that was refused, a mention nobody supplied a signal for. Absence
+   * from this list is the difference between "done" and "the cycle went blind",
+   * which is the distinction r10 exists to restore.
+   */
+  examined: ExaminedSubject[];
 }
 
 /**
@@ -414,15 +469,18 @@ export function projectAttention(
   context: AttentionContext | Timestamp,
 ): AttentionProjection {
   const ctx: AttentionContext = typeof context === 'string' ? { now: context } : context;
-  const items: ComputedAttentionItem[] = [];
-  const refusals: AttentionRefusal[] = [];
+  const sources: readonly AttentionSource[] = [
+    proposalItems(state, ctx),
+    commitmentItems(state, ctx),
+    blockingQuestionItems(state, ctx),
+    mentionItems(ctx),
+  ];
 
-  for (const item of proposalItems(state, ctx, refusals)) items.push(item);
-  for (const item of commitmentItems(state, ctx)) items.push(item);
-  for (const item of blockingQuestionItems(state, ctx)) items.push(item);
-  for (const item of mentionItems(ctx)) items.push(item);
-
-  return { items: sortAttention(items), refusals };
+  return {
+    items: sortAttention(sources.flatMap((source) => source.items)),
+    refusals: sources.flatMap((source) => source.refusals),
+    examined: sources.flatMap((source) => source.examined),
+  };
 }
 
 /** `projectAttention`, when the caller only wants the panel. */
@@ -507,16 +565,35 @@ function raiseOrRefuse(
  * engine cannot judge (no messages) raises nothing rather than raising
  * everything.
  */
-function proposalItems(
-  state: CoreState,
-  ctx: AttentionContext,
-  refusals: AttentionRefusal[],
-): ComputedAttentionItem[] {
+function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource {
   const out: ComputedAttentionItem[] = [];
+  const refusals: AttentionRefusal[] = [];
+  const examined: ExaminedSubject[] = [];
+  /**
+   * A proposal raises exactly one class, decided by its type — the same split
+   * `needsYouOutcome` makes. Named here so "what this source could have raised
+   * about this subject" and "what it did raise" are one fact.
+   */
+  const classOf = (type: AcceptedObjectType): AttentionClass =>
+    type === 'commitment' ? 'owned_commitment' : 'needs_decision';
+  const conclude = (proposal: StoredProposal): void => {
+    examined.push({
+      class: classOf(proposal.type),
+      subjectKind: 'proposal',
+      subjectId: proposal.id,
+    });
+  };
 
   for (const proposalId of Object.keys(state.proposals).sort()) {
     const record = state.proposals[proposalId];
-    if (record?.status !== 'proposed') continue;
+    if (record === undefined) continue;
+    if (record.status !== 'proposed') {
+      // Accepted, rejected or superseded: the cycle looked at this proposal and
+      // it is settled. That is a conclusion, and it is the ordinary way a
+      // `needs_decision` item stops being owed.
+      conclude(record.proposal);
+      continue;
+    }
     const { proposal } = record;
 
     const verdict = decideAcceptance(proposal, {
@@ -540,20 +617,26 @@ function proposalItems(
       refusals.push({ proposalId: proposal.id, reason: verdict.reason });
       continue;
     }
-    // The one `continue` that owes nothing: `accepted`, `quiet` and `none` are
-    // the engine saying this proposal is not anybody's turn. Every other exit
-    // from here goes through `NeedsYouOutcome`, which has no silent arm.
-    if (verdict.visibility !== 'needs_you') continue;
+    // The one `continue` that owes nothing *in items*: `accepted`, `quiet` and
+    // `none` are the engine saying this proposal is not anybody's turn. It owes
+    // an examination, though — this is the branch that carries "the commitment
+    // closed, the question got answered" for a proposal, and rule 2 cannot fire
+    // for a subject nobody says was looked at.
+    if (verdict.visibility !== 'needs_you') {
+      conclude(proposal);
+      continue;
+    }
 
     const outcome = needsYouOutcome(proposal, verdict, ctx);
     if (outcome.kind === 'refuse') {
       refusals.push({ proposalId: proposal.id, reason: outcome.reason });
       continue;
     }
+    conclude(proposal);
     out.push(...outcome.items);
   }
 
-  return out;
+  return { items: out, refusals, examined };
 }
 
 /**
@@ -707,8 +790,16 @@ function needsYouOutcome(
  * commitment because it is a question, and below an overdue one because an
  * overdue commitment is already late.
  */
-function commitmentItems(state: CoreState, ctx: AttentionContext): ComputedAttentionItem[] {
+function commitmentItems(state: CoreState, ctx: AttentionContext): AttentionSource {
   const out: ComputedAttentionItem[] = [];
+  // Every object in state, whether or not it raises anything: this source reads
+  // nothing but state, so for a subject that is *in* state, "no item" is a
+  // conclusion — the commitment closed, was retracted, was retyped. The
+  // subjects it cannot conclude about are the ones a partial state does not
+  // hold, and those are exactly the ones it does not list.
+  const examined: ExaminedSubject[] = Object.keys(state.objects)
+    .sort()
+    .map((subjectId) => ({ class: 'owned_commitment', subjectKind: 'object', subjectId }));
 
   for (const objectId of Object.keys(state.objects).sort()) {
     const record = state.objects[objectId];
@@ -737,7 +828,7 @@ function commitmentItems(state: CoreState, ctx: AttentionContext): ComputedAtten
     );
   }
 
-  return out;
+  return { items: out, refusals: [], examined };
 }
 
 /**
@@ -747,9 +838,16 @@ function commitmentItems(state: CoreState, ctx: AttentionContext): ComputedAtten
  * no owner so it fans out to the room, and a question that names a person routes
  * to them whatever it blocks.
  */
-function blockingQuestionItems(state: CoreState, ctx: AttentionContext): ComputedAttentionItem[] {
+function blockingQuestionItems(state: CoreState, ctx: AttentionContext): AttentionSource {
   const out: ComputedAttentionItem[] = [];
   const seen = new Set<string>();
+  // Same argument as `commitmentItems` for the relation-driven half, which is
+  // the one that answers "the question got answered". The `question_names_you`
+  // half is caller-driven and shares this key, so it is covered by this
+  // declaration too — see the residue note on `reconcileAttention`.
+  const examined: ExaminedSubject[] = Object.keys(state.objects)
+    .sort()
+    .map((subjectId) => ({ class: 'blocking_question', subjectKind: 'object', subjectId }));
 
   const push = (userId: Id, question: ObjectRecord, reason: RationaleReason): void => {
     const id = itemId(userId, 'object', question.object.id, 'blocking_question');
@@ -818,7 +916,7 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Compute
     }
   }
 
-  return out;
+  return { items: out, refusals: [], examined };
 }
 
 function compareQuestionMention(a: QuestionMentionSignal, b: QuestionMentionSignal): number {
@@ -845,7 +943,18 @@ function compareQuestionMention(a: QuestionMentionSignal, b: QuestionMentionSign
  * the signals rather than about their arrival order, and the first by that
  * ordering is the one kept.
  */
-function mentionItems(ctx: AttentionContext): ComputedAttentionItem[] {
+function mentionItems(ctx: AttentionContext): AttentionSource {
+  // ── A signal-driven source can only conclude about what it was given — r10 ──
+  //
+  // This source reads no state at all. "No item for `obj_7`" therefore has two
+  // readings — nobody was mentioned there, and nobody told this cycle about the
+  // message that mentioned them — and the caller cannot mark the difference: an
+  // ordinary sliding window that has moved past the mentioning message produces
+  // the second while looking exactly like the first. So it declares an
+  // examination only for a subject it was actually handed, which means a mention
+  // item is never resolved by absence. It is resolved by the person, which is
+  // what #6's one-click dismiss is for.
+  const examined: ExaminedSubject[] = [];
   const signals = [...(ctx.mentions ?? [])].sort((a, b) => {
     if (a.objectId !== b.objectId) return a.objectId < b.objectId ? -1 : 1;
     if (a.userId !== b.userId) return a.userId < b.userId ? -1 : 1;
@@ -857,6 +966,7 @@ function mentionItems(ctx: AttentionContext): ComputedAttentionItem[] {
     const id = itemId(signal.userId, 'object', signal.objectId, 'mention');
     if (seen.has(id)) continue;
     seen.add(id);
+    examined.push({ class: 'mention', subjectKind: 'object', subjectId: signal.objectId });
     out.push(
       item({
         id,
@@ -871,7 +981,7 @@ function mentionItems(ctx: AttentionContext): ComputedAttentionItem[] {
       }),
     );
   }
-  return out;
+  return { items: out, refusals: [], examined };
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -963,28 +1073,88 @@ export function dismissAttention(attentionItem: AttentionItem): AttentionTransit
  * later cycle that computes it again finds it in `stored` and rule 1 keeps it
  * settled. That is not a new semantic, it is the one rule 1 already had — ids
  * are deterministic, so a recomputed item has always been the same item.
+ *
+ * ## …and a *pending* item that stops being computed is only done if the cycle
+ * looked — r10
+ *
+ * r8 fixed the `dismissed` half of that sequence and left the `pending` half on
+ * rule 2, whose own comment enumerated the benign reasons an item stops being
+ * computed — *"the commitment closed, the question got answered, nobody clicked
+ * anything"* — and treated **the cycle could not compute it** as one of them.
+ * Rule 1 then pinned the result: a later cycle that computes the item again
+ * finds it in `stored` and keeps the stored `resolved`. One blind cycle, resolved
+ * forever, while `decideAcceptance` still says `pending / needs_you / confirm:
+ * bob` and the proposal stays `proposed`.
+ *
+ * It needed no caller mistake. An ordinary sliding "last N messages" window that
+ * had moved past the cited message produced this:
+ *
+ * ```
+ * cycle 1 (full window)  items: [bob/owned_commitment]  refusals: 0   → pending
+ * cycle 2 (slid window)  items: []                      refusals: []  → resolved
+ * cycle 3 (full window)                                               → resolved
+ * ```
+ *
+ * Zero items, zero refusals, permanently resolved, and nothing anywhere saying
+ * a proposal routed to Bob had reached nobody.
+ *
+ * **The repair is an allowlist, not a list of the blindnesses somebody thought
+ * of.** Enumerating the ways a cycle can go blind is the shape `RETRO.md`
+ * records: r9 made the `needs_you` path total and the exit that produced this
+ * was `discard / provenance_failed`, which never reached that invariant — *an
+ * invariant asserted on one branch of a dispatch does not constrain the
+ * others.* So rule 2 no longer asks why the item is missing. It asks for
+ * **positive evidence that the cycle reached a conclusion about the subject**,
+ * and a source that cannot supply that evidence for a subject leaves the item
+ * exactly where it was: pending, in the panel, owed to somebody. A source added
+ * next round is silent about a subject by default, and silence now preserves
+ * rather than resolves.
+ *
+ * Which is why the second argument is the whole `AttentionProjection` and not
+ * its items. There is no spelling of "I computed nothing and I know why" left
+ * for a caller to omit.
+ *
+ * **The residue, stated because it is a real one.** A `blocking_question` item
+ * has two producers — a `blocks` relation, which is state, and a
+ * `questionMentions` signal, which is the caller's — and they share an item id,
+ * so they share an `ExaminedSubject` key. The state half declares the key, so a
+ * cycle that supplies no `questionMentions` can still resolve a
+ * `question_names_you` item by absence. That is r9's behaviour unchanged rather
+ * than a new hole, and closing it means recording on the item which producer
+ * raised it, which is an `AttentionItem` schema change and #22's storage
+ * surface. `mention`, whose producer is caller-driven and *unshared*, is closed:
+ * see `mentionItems`.
  */
 export function reconcileAttention(
   stored: readonly AttentionItem[],
-  computed: readonly ComputedAttentionItem[],
+  cycle: AttentionProjection,
 ): ComputedAttentionItem[] {
   const byId = new Map(stored.map((entry) => [entry.id, entry]));
-  const computedIds = new Set(computed.map((entry) => entry.id));
+  const computedIds = new Set(cycle.items.map((entry) => entry.id));
+  const examined = new Set(cycle.examined.map(examinedKey));
   const out: ComputedAttentionItem[] = [];
 
-  for (const entry of computed) {
+  for (const entry of cycle.items) {
     const previous = byId.get(entry.id);
     out.push(previous ? { ...entry, status: previous.status } : entry);
   }
 
   for (const entry of stored) {
     if (computedIds.has(entry.id)) continue;
+    // Rule 2: a *pending* item that stopped being computed is done — but only
+    // where the cycle says it examined the subject and raised nothing. Where it
+    // does not, the item is owed to somebody still and stays where it is. A
+    // settled item is left exactly as it was either way.
+    const concluded = examined.has(
+      examinedKey({
+        class: entry.class,
+        subjectKind: entry.subjectKind,
+        subjectId: entry.objectId,
+      }),
+    );
     out.push({
       ...entry,
-      // Rule 2: a *pending* item that stopped being computed is done — the
-      // commitment closed, the question got answered, nobody clicked anything.
-      // A settled one is left exactly as it was.
-      status: entry.status === 'pending' ? 'resolved' : entry.status,
+      status: entry.status === 'pending' && concluded ? 'resolved' : entry.status,
       priority: fallbackPriority(entry.class),
     });
   }

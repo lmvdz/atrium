@@ -156,8 +156,8 @@
       "id": "dedup_ignores_polarity",
       "why": "Puts the stopword-filtered similarity score back in `findDuplicate`. A duplicate is discarded, so the score decides what the room never sees — and `not`, `all` and `some` are stopwords, which made a contradiction of an accepted object score 1.0 against it.",
       "file": "src/acceptance.ts",
-      "find": "    if (alignTokens(have, wanted).borne) return candidate;",
-      "replace": "    const shared = new Set(have).size === 0 ? 0 : wanted.filter((t) => have.includes(t)).length;\n    if (shared / Math.max(wanted.length, have.length) >= 0.8) return candidate;",
+      "find": "    if (!alignTokens(have, wanted).borne) continue;",
+      "replace": "    const shared = new Set(have).size === 0 ? 0 : wanted.filter((t) => have.includes(t)).length;\n    if (shared / Math.max(wanted.length, have.length) < 0.8) continue;",
       "catches": ["does not discard a reading that says the opposite of the accepted one"]
     },
     {
@@ -365,8 +365,8 @@
       "id": "attention_reads_its_own_theta",
       "why": "The panel and the engine disagree about a proposal in the θ band — r1's major 9.",
       "file": "src/attention.ts",
-      "find": "    if (verdict.visibility !== 'needs_you') continue;",
-      "replace": "    if (verdict.visibility === 'nowhere-at-all') continue;",
+      "find": "    if (verdict.visibility !== 'needs_you') {\n      conclude(proposal);\n      continue;\n    }",
+      "replace": "    if (verdict.visibility === 'nowhere-at-all') {\n      conclude(proposal);\n      continue;\n    }",
       "catches": ["stays quiet about a decision the engine would not surface"]
     },
     {
@@ -861,7 +861,7 @@
       "why": "Puts the duplicate discard back above the referral, where it deletes a detected receipt discrepancy the room has never been shown — the same destruction the theta_min ordering was fixed for, through a different door.",
       "file": "src/acceptance.ts",
       "find": "  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
-      "replace": "  const dupFirst = context.acceptedObjects\n    ? findDuplicate(proposal.type, text, proposal.provenance, context.acceptedObjects)\n    : null;\n  if (dupFirst) {\n    return {\n      ...base,\n      verdict: 'discard',\n      visibility: 'none',\n      rule: 'duplicate_of_accepted',\n      duplicateOf: dupFirst.objectId,\n      reason: `the room already accepted \"${dupFirst.objectId}\"`,\n    };\n  }\n  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
+      "replace": "  const dupFirst = context.acceptedObjects\n    ? findDuplicate(proposal.type, payload, proposal.provenance, context.acceptedObjects)\n    : null;\n  if (dupFirst) {\n    return {\n      ...base,\n      verdict: 'discard',\n      visibility: 'none',\n      rule: 'duplicate_of_accepted',\n      duplicateOf: dupFirst.objectId,\n      reason: `the room already accepted \"${dupFirst.objectId}\"`,\n    };\n  }\n  const referring = referringProblems(problems);\n  if (referring.length > 0) {",
       "catches": ["does not let deduplication destroy a discrepancy nobody has seen"]
     },
     {
@@ -1284,8 +1284,8 @@
       "id": "reconcile_drops_dismissals",
       "why": "r8. A stored non-pending item that stopped being computed was dropped, so a dismissal survived one cycle and not two — and one documented refusal path empties the store.",
       "file": "src/attention.ts",
-      "find": "      status: entry.status === 'pending' ? 'resolved' : entry.status,",
-      "replace": "      status: entry.status !== 'pending' ? 'resolved' : entry.status,",
+      "find": "      status: entry.status === 'pending' && concluded ? 'resolved' : entry.status,",
+      "replace": "      status: entry.status !== 'pending' && concluded ? 'resolved' : entry.status,",
       "catches": [
         "resolves a pending item whose object no longer generates it",
         "keeps a dismissal across a cycle that computes nothing",
@@ -1304,15 +1304,15 @@
       "id": "mention_items_undeduped",
       "why": "r8. Two signals naming one person on one object produced two items with one id, so the projection was not byte-identical across arrival orders.",
       "file": "src/attention.ts",
-      "find": "    if (seen.has(id)) continue;\n    seen.add(id);\n    out.push(\n      item({\n        id,\n        roomId: signal.roomId,",
-      "replace": "    seen.add(id);\n    out.push(\n      item({\n        id,\n        roomId: signal.roomId,",
+      "find": "    if (seen.has(id)) continue;\n    seen.add(id);\n    examined.push({ class: 'mention', subjectKind: 'object', subjectId: signal.objectId });\n    out.push(",
+      "replace": "    seen.add(id);\n    examined.push({ class: 'mention', subjectKind: 'object', subjectId: signal.objectId });\n    out.push(",
       "catches": ["is byte-identical whichever order the mentions arrive in"]
     },
     {
       "id": "item_id_unescaped",
       "why": "r8. Ids interpolated `userId` and the subject id raw, and `Id` has no charset restriction, so one item could inherit another’s dismissal.",
       "file": "src/attention.ts",
-      "find": "  const part = (value: string): string => value.replace(/%/g, '%25').replace(/:/g, '%3A');\n  return `attn:${part(userId)}:${subjectKind}:${part(subjectId)}:${cls}`;",
+      "find": "  return `attn:${escapeIdPart(userId)}:${subjectKind}:${escapeIdPart(subjectId)}:${cls}`;",
       "replace": "  return `attn:${userId}:${subjectId}:${cls}`;",
       "catches": ["cannot be made to collide across the proposal and object namespaces"]
     },
@@ -1320,16 +1320,16 @@
       "id": "dedup_folds_compatibility_forms",
       "why": "r8. NFKC maps `10²` onto `102`, so a reading of 100 was discarded as a duplicate of 102 — silently, on the one path in the engine that destroys a reading.",
       "file": "src/acceptance.ts",
-      "find": "  const wanted = orderedTokens(text);\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = orderedTokens(candidate.text);",
-      "replace": "  const wanted = routingTokens(text);\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = routingTokens(candidate.text);",
+      "find": "  const wanted = orderedTokens(payloadText(type, payload));",
+      "replace": "  const wanted = routingTokens(payloadText(type, payload));",
       "catches": ["keeps `10² ms` and `102 ms` apart"]
     },
     {
       "id": "dedup_folds_case",
       "why": "r9. r8's surviving fold. The lower-casing ran through the code segment `normalizeForReceipt` preserves byte for byte, so a correction from `Hunter2` to `hunter2` was discarded and the record kept the old password — no proposal, no issue, no trace.",
       "file": "src/acceptance.ts",
-      "find": "  const wanted = orderedTokens(text);\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = orderedTokens(candidate.text);\n",
-      "replace": "  const wanted = orderedTokens(text.toLowerCase());\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    const have = orderedTokens(candidate.text.toLowerCase());\n",
+      "find": "  const wanted = orderedTokens(payloadText(type, payload));\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    // A withdrawn or replaced object is not a thing the room \"already has\". Two\n    // fields rather than one because that is `isLive`'s own answer to what\n    // standing means, and a second definition of it here would be exactly the\n    // drift this package keeps finding.\n    if (candidate.retractedAt !== null || candidate.supersededById !== null) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    // Total on a ref the type forbids: a JS caller still carrying r9's\n    // `{objectId, type, text, messageIds}` reaches here with no payload at all,\n    // and `payloadText` would throw inside a path whose whole contract is that\n    // it never does. Skipping is the same direction every other guard here\n    // takes — a candidate nothing can compare is not a duplicate.\n    const candidatePayload = candidate.payload as unknown as Record<string, unknown> | undefined;\n    if (candidatePayload === null || typeof candidatePayload !== 'object') continue;\n    const have = orderedTokens(payloadText(type, candidatePayload));\n",
+      "replace": "  const wanted = orderedTokens(payloadText(type, payload).toLowerCase());\n  if (wanted.length === 0) return null;\n  const cited = new Set(messageIds);\n  for (const candidate of accepted) {\n    if (candidate.type !== type) continue;\n    // A withdrawn or replaced object is not a thing the room \"already has\". Two\n    // fields rather than one because that is `isLive`'s own answer to what\n    // standing means, and a second definition of it here would be exactly the\n    // drift this package keeps finding.\n    if (candidate.retractedAt !== null || candidate.supersededById !== null) continue;\n    if (!candidate.messageIds.some((id) => cited.has(id))) continue;\n    // Total on a ref the type forbids: a JS caller still carrying r9's\n    // `{objectId, type, text, messageIds}` reaches here with no payload at all,\n    // and `payloadText` would throw inside a path whose whole contract is that\n    // it never does. Skipping is the same direction every other guard here\n    // takes — a candidate nothing can compare is not a duplicate.\n    const candidatePayload = candidate.payload as unknown as Record<string, unknown> | undefined;\n    if (candidatePayload === null || typeof candidatePayload !== 'object') continue;\n    const have = orderedTokens(payloadText(type, candidatePayload).toLowerCase());\n",
       "catches": [
         "r9 — keeps a re-cased literal apart from the literal it is not",
         "a machine-accepted reading cannot be destroyed by a re-cased duplicate"
@@ -1355,8 +1355,8 @@
       "id": "payload_text_reads_the_wrong_key",
       "why": "r8, and the first mutant on `objects.ts`. `payloadText` is what every text predicate in the package is handed; reading the wrong key for one type makes all of them blind to it.",
       "file": "src/objects.ts",
-      "find": "  const key = type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';",
-      "replace": "  const key = type === 'open_question' ? 'question' : 'statement';",
+      "find": "  return type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';",
+      "replace": "  return type === 'open_question' ? 'question' : 'statement';",
       "catches": ["places fixed confidences in the cells the table implies"]
     },
     {
@@ -1396,6 +1396,84 @@
       "catches": [
         "never emits an acceptance the reducer would refuse to fold",
         "discards a reading the table says to discard rather than surfacing it"
+      ]
+    },
+    {
+      "id": "dedup_reads_only_the_sentence",
+      "why": "r10. Puts back the comparison that consulted one field of a payload. Every other field — `owner`, `claimant`, `verification`, `due`, `status`, `decidedBy` — was invisible, so one message naming two people accepted the first reading and destroyed the second with no proposal, no attention item and no issue.",
+      "file": "src/acceptance.ts",
+      "find": "    if (!payloadsMatch(type, candidatePayload, payload)) continue;\n",
+      "replace": "",
+      "catches": [
+        "does not discard a reading that differs anywhere else in the payload",
+        "does not destroy a second person’s commitment drawn from one sentence"
+      ]
+    },
+    {
+      "id": "dedup_key_set_is_the_schema_only",
+      "why": "r10. Narrows `payloadsMatch` to the keys the schema declares, dropping the keys the payloads actually carry. A field a caller stores that this version of the package has not heard of then goes uncompared, which is the enumeration-by-hand failure the union exists to prevent.",
+      "file": "src/acceptance.ts",
+      "find": "  const keys = new Set([...objectPayloadKeys(type), ...Object.keys(a), ...Object.keys(b)]);",
+      "replace": "  const keys = new Set(objectPayloadKeys(type));",
+      "catches": ["treats a payload field it has never heard of as a difference"]
+    },
+    {
+      "id": "dedup_matches_a_tombstone",
+      "why": "r10. Disables the retracted/superseded guard, so a re-reading is discarded against a tombstone — which means a retracted object can never be re-proposed: the room withdraws it and the next pass over the same window reads it into nothing.",
+      "file": "src/acceptance.ts",
+      "find": "    if (candidate.retractedAt !== null || candidate.supersededById !== null) continue;",
+      "replace": "    if (candidate.retractedAt === undefined) continue;",
+      "catches": [
+        "lets a retracted reading be proposed again",
+        "does not discard a reading against a tombstone"
+      ]
+    },
+    {
+      "id": "reconcile_resolves_the_unexamined",
+      "why": "r10. Rule 2 without the examination check: a cycle that could not compute an item marks it resolved, and rule 1 then pins it forever. An ordinary sliding window is enough — zero items, zero refusals, permanently resolved, while the proposal is still staged and still waiting for somebody.",
+      "file": "src/attention.ts",
+      "find": "      status: entry.status === 'pending' && concluded ? 'resolved' : entry.status,",
+      "replace": "      status: entry.status === 'pending' ? 'resolved' : entry.status,",
+      "catches": [
+        "leaves a pending item alone when the cycle never examined its subject",
+        "keeps a pending item pending across a slid window",
+        "keeps a pending item pending across a cycle with no window"
+      ]
+    },
+    {
+      "id": "refusal_counts_as_a_conclusion",
+      "why": "r10. Makes a refused proposal declare an examination, so a missing member list — or any other reason the projection could not route a needs_you verdict — reads as evidence that somebody acted on it. A refusal is a receipt for the silence, not a resolution.",
+      "file": "src/attention.ts",
+      "find": "    const outcome = needsYouOutcome(proposal, verdict, ctx);\n    if (outcome.kind === 'refuse') {\n      refusals.push({ proposalId: proposal.id, reason: outcome.reason });",
+      "replace": "    const outcome = needsYouOutcome(proposal, verdict, ctx);\n    if (outcome.kind === 'refuse') {\n      conclude(proposal);\n      refusals.push({ proposalId: proposal.id, reason: outcome.reason });",
+      "catches": ["keeps a pending item pending when there is nobody left to ask"]
+    },
+    {
+      "id": "mentions_declare_examinations_they_did_not_make",
+      "why": "r10. Lets the state walk declare `mention` examinations alongside its own class. A mention is a caller signal and no source reads state for it, so 'no item for obj_7' cannot be told apart from 'nobody told this cycle about obj_7' — the state walk saying it looked resolves every mention in the room the moment the window slides past the message that raised it.",
+      "file": "src/attention.ts",
+      "find": "    .map((subjectId) => ({ class: 'owned_commitment', subjectKind: 'object', subjectId }));",
+      "replace": "    .flatMap((subjectId) => [\n      { class: 'owned_commitment' as const, subjectKind: 'object' as const, subjectId },\n      { class: 'mention' as const, subjectKind: 'object' as const, subjectId },\n    ]);",
+      "catches": ["keeps a mention pending when the cycle was handed no signals"]
+    },
+    {
+      "id": "unknown_message_rejects",
+      "why": "r10. Classes a citation the window does not reach as *the reading is wrong* rather than *the window did not read it*. `reject` is what the engine turns into `discard`, so the proposal produced no item, no refusal and no trace — the opposite of the disposition this file gives every other unread input.",
+      "file": "src/escalation.ts",
+      "find": "        kind: 'unknown_message',\n        severity: 'refer',",
+      "replace": "        kind: 'unknown_message',\n        severity: 'reject',",
+      "catches": ["classes an unreached citation as unscanned rather than wrong"]
+    },
+    {
+      "id": "statement_may_add_link_structure",
+      "why": "r10. Removes the check that a statement carries no Markdown link markup the quote lacks. The fold unfolds `[label](dest \"title\")` to `label dest title`, so a statement assembled out of the author's own words with brackets spliced through it normalizes identically, is borne, and lands as their words.",
+      "file": "src/escalation.ts",
+      "find": "      const added = addedLinkStructure(quote, statement);",
+      "replace": "      const added: string[] = [];",
+      "catches": [
+        "refuses a statement that splices link markup into the author’s own words",
+        "leaves a link the author actually wrote alone, in both directions",
+        "covers every problem kind it declares"
       ]
     }
   ]
