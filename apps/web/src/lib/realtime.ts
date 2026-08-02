@@ -114,6 +114,21 @@ const Envelope = z.object({
     .refine((body) => !('actor' in body), {
       message: 'a ledger payload carries no actor; the actor is beside the event',
     }),
+  /**
+   * Why the server refused this row, or `[]` when it applied (#22 r10, D4).
+   *
+   * **Defaulted rather than required**, for two readers that cannot be changed
+   * in lockstep with the server: a journal record persisted by an older build,
+   * which `StoredRoom` parses with this same schema and would otherwise discard
+   * whole — throwing away a room's resume cache on the deploy that added a
+   * field — and a server that has not been upgraded yet. Absent means "nothing
+   * said it was refused", which is what an older ledger row means.
+   *
+   * The default is safe in the direction that matters: it cannot invent a
+   * refusal, only fail to report one, and failing to report one is exactly the
+   * behaviour of every build before this field existed.
+   */
+  issues: z.array(z.string()).default([]),
 });
 
 /** One ledger row, as the wire carries it. */
@@ -931,7 +946,12 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         lastSeq: held.lastSeq,
         head: held.lastSeq,
         seenSeq: 0,
-        events: held.events,
+        // The same filter `applyEntry` applies live, applied to what was
+        // resumed: the journal holds every row it walked past — that is what
+        // makes its cursor meaningful — and the room holds only the rows that
+        // took effect. A record written by an older build has no `issues` on any
+        // entry and so resumes exactly as it always did.
+        events: held.events.filter((entry) => entry.issues.length === 0),
         pending: [],
         presence: {},
         typing: [],
@@ -1014,9 +1034,35 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     // own cursor where it was, so the entry is simply re-delivered by the next
     // catch-up rather than skipped.
     journal.commit(entry.roomId, entry, entry.roomSeq);
-    room.events.push(entry);
+    // ── A refused row is not an event that happened ──────────────────────────
+    //
+    // #22 r10, D4. The server appends a row whose business checks failed
+    // (`applied_with_issue`), because it *did* take a position in the log — but
+    // it changed nothing, and until r10 it arrived here indistinguishable from a
+    // row that changed everything. "Victim will work through the holidays",
+    // refused on the server, landed in this array on every socket in the room
+    // and survived a reload.
+    //
+    // Journalled but not shown, and both halves are load-bearing:
+    //
+    //  - **Journalled**, because `room_seq` is a gap-free sequence and the
+    //    journal's own record requires its cursor to name the last entry it
+    //    holds. Skipping the write would either strand the cursor ahead of the
+    //    history — making the whole record unparseable on the next load — or
+    //    leave a hole this same function would read as loss and re-request
+    //    forever.
+    //  - **Not shown**, because `room.events` is what the room *is*. A sentence
+    //    the server refused is not part of it, and rendering it with a badge
+    //    would still put somebody else's obligation in front of the person it
+    //    names.
+    //
+    // The actor already learns why, from the `issues` on their own `ack`.
+    if (entry.issues.length === 0) room.events.push(entry);
     room.lastSeq = entry.roomSeq;
     room.head = Math.max(room.head, entry.roomSeq);
+    // Called for a refused row too: the optimistic echo it would have confirmed
+    // has to be retired either way, or a send that the server refused sits in
+    // the timeline forever with nothing to clear it.
     reconcilePending(room, entry);
     changed(entry.roomId);
   }

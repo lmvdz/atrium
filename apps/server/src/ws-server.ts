@@ -530,6 +530,9 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
             seq: result.seq,
             actor: result.actor,
             event: result.event,
+            // The same list the `ack` carries, on the frame everybody else gets
+            // (#22 r10, D4). One value, two recipients — not two derivations.
+            issues: result.issues,
           };
           send(socket, {
             type: 'ack',
@@ -620,13 +623,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     for (const entry of entries) {
       hub.broadcast(entry.roomId, {
         type: 'event',
-        entry: {
-          roomId: entry.roomId,
-          roomSeq: entry.roomSeq,
-          seq: entry.seq,
-          actor: entry.actor,
-          event: entry.event,
-        },
+        entry: toWire(entry),
       });
     }
   }
@@ -837,6 +834,12 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   };
 }
 
+/**
+ * A ledger row, as the wire carries it. **The only converter** — the reconciler's
+ * fan-out used to spell the same five fields out inline, which is one more place
+ * for a field to be forgotten, and `issues` is exactly the field it would have
+ * been forgotten in (#22 r10, D4).
+ */
 function toWire(entry: LedgerEntry): WireEvent {
   return {
     roomId: entry.roomId,
@@ -844,6 +847,7 @@ function toWire(entry: LedgerEntry): WireEvent {
     seq: entry.seq,
     actor: entry.actor,
     event: entry.event,
+    issues: [...entry.issues],
   };
 }
 

@@ -36,6 +36,10 @@ function entry(roomId: string, roomSeq: number): LedgerEntry {
     roomSeq,
     roomId,
     actor: { kind: 'human', userId: 'u1' },
+    // Nothing here is refused: the reconciler's question is delivery, not
+    // verdicts. Present because `LedgerEntry` requires it (#22 r10, D4) — a row
+    // with no recorded issue is a row that applied.
+    issues: [],
     event: {
       id: `e${roomSeq}`,
       at: `2026-08-01T00:00:${String(roomSeq).padStart(2, '0')}.000Z`,

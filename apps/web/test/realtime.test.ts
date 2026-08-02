@@ -71,6 +71,7 @@ class FakeSocket implements SocketLike {
 }
 
 const ME = 'user-me';
+const OTHER = 'user-other';
 const ROOM = 'room-1';
 
 const sockets: FakeSocket[] = [];
@@ -82,11 +83,18 @@ function messageEvent(
   body: string,
   userId = ME,
   clientMessageId: string | null = null,
+  /**
+   * Why the server refused this row (#22 r10, D4). Empty is the ordinary case;
+   * a non-empty list is a row that took a position in the log and changed
+   * nothing, which the client must walk past without showing.
+   */
+  issues: string[] = [],
 ): RoomEventEnvelope {
   return {
     roomId: ROOM,
     roomSeq,
     seq: roomSeq,
+    issues,
     // Beside the event, never inside it: #21 took the actor out of the payload
     // and the wire follows. A fixture that put one back would be describing a
     // shape the server can no longer produce.
@@ -266,6 +274,102 @@ describe('subscribe and catch up', () => {
     // catches: seeding `lastSeq` from the store while leaving `events` empty,
     // which is what r2's `WatermarkStore` did by construction.
     expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  /**
+   * #22 r10, D4: a row the server refused is not an event that happened.
+   *
+   * The server appends it — `applied_with_issue` takes a position in the log —
+   * and fans the frame out to everybody, because `room_seq` is advertised
+   * gap-free and skipping the row would leave a hole this client would correctly
+   * read as loss. So the frame carries the refusal and the client walks past it
+   * without putting it in the room.
+   *
+   * Under r9 the refusal reached only the actor's own `ack`. "Victim will work
+   * through the holidays", refused on the server with nothing minted, landed in
+   * `room.events` on every other socket in the room and survived a reload.
+   */
+  it('walks past a refused row without putting it in the room', async () => {
+    const client = await clientWith({});
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver({ type: 'event', entry: messageEvent(1, 'a real one') });
+    latest().deliver({
+      type: 'event',
+      entry: messageEvent(2, 'Victim will work through the holidays', OTHER, null, [
+        'user "attacker" accepted proposal "p", which they staged themselves…',
+      ]),
+    });
+    latest().deliver({ type: 'event', entry: messageEvent(3, 'another real one') });
+
+    // Not in the room…
+    // Mutation this catches: drop the `if (entry.issues.length === 0)` guard in
+    // `applyEntry`, or strip `issues` from the wire in `toWire` / the ack path.
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    // …and yet fully walked past: the cursor is at 3, so nothing re-requests the
+    // gap and nothing stalls. Mutation: skip `room.lastSeq = entry.roomSeq` for a
+    // refused row, and the client asks for 2 forever.
+    expect(client.lastSeq(ROOM)).toBe(3);
+    expect(
+      latest()
+        .framesOfType('since')
+        .filter((f) => f.roomSeq === 1),
+    ).toEqual([]);
+  });
+
+  it('applies the same rule to a catch-up page as to a live frame', async () => {
+    // The half r9's refusal missed entirely: a cold reader gets the row from
+    // `since`, not from a broadcast. Mutation: mark the frame only in
+    // `handleCommand`'s live broadcast and leave `toWire` unmarked — this fails
+    // while the live test above still passes.
+    const client = await clientWith({});
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [
+        messageEvent(1, 'a real one'),
+        messageEvent(2, 'refused', OTHER, null, ['refused by the server']),
+        messageEvent(3, 'another real one'),
+      ],
+    });
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    expect(client.lastSeq(ROOM)).toBe(3);
+  });
+
+  it('keeps a refused row in the journal so the resumed cursor still names an entry', async () => {
+    // The journal is "the log I walked past" and the room is "what happened".
+    // They are not the same list, and conflating them breaks a real invariant:
+    // `StoredRoom` requires `lastSeq === events.at(-1).roomSeq`, so a journal
+    // that skipped the refused row would persist a cursor naming an entry it
+    // does not hold — and discard the whole room on the next load.
+    //
+    // Mutation: move `journal.commit` behind the `issues.length === 0` guard.
+    // The resumed cursor drops to 1 and the whole page is re-fetched.
+    const journal = memoryJournal();
+    const client = await clientWith({ journal });
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver({ type: 'event', entry: messageEvent(1, 'a real one') });
+    latest().deliver({
+      type: 'event',
+      entry: messageEvent(2, 'refused', OTHER, null, ['refused by the server']),
+    });
+    expect(journal.load(ROOM).lastSeq).toBe(2);
+    expect(journal.load(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+
+    const resumed = await clientWith({ journal });
+    resumed.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 2, seenSeq: 0 });
+    // Resumes at 2 — it does not re-ask for a row it already walked past — and
+    // the refused sentence is not in the room after the reload either.
+    expect(resumed.lastSeq(ROOM)).toBe(2);
+    expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1]);
   });
 
   it('asks for a bounded page when one is configured', async () => {

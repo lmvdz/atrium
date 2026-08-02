@@ -79,6 +79,18 @@ export interface WireEvent {
   /** The trusted actor, from the ledger row's own columns. Never the payload. */
   actor: Actor;
   event: RoomEvent;
+  /**
+   * Why the reducer refused this row, or `[]` when it applied.
+   *
+   * **A refused row is not an event that happened**, and until #22 r10 the wire
+   * could not say so: `issues` reached the actor in their own `ack` and nothing
+   * else, while this frame carried the full payload to every other subscriber
+   * and to every cold reader through `since`, unmarked. The frame carries the
+   * verdict now — on both paths, from one derivation in the ledger — so a client
+   * can advance its cursor past the row without putting the sentence in the
+   * room's history. `apps/web`'s client drops it; see `applyEntry` there.
+   */
+  issues: string[];
 }
 
 export type ServerFrame =

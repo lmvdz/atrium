@@ -263,6 +263,41 @@ export interface LedgerEntry {
   event: RoomEvent;
   /** The trusted actor, read back from the row's own columns. Never the payload. */
   actor: Actor;
+  /**
+   * Why the reducer refused this row, or empty when it applied cleanly — the
+   * `applied_with_issue` reasons, travelling *with* the row (#22 r10, D4).
+   *
+   * ## The defect this closes
+   *
+   * A business refusal is delivered to the actor's own socket in its `ack` and
+   * to nobody else, while the row itself — refused, changing nothing — is
+   * appended and fanned out to every subscriber as an ordinary `event` frame,
+   * and replayed to cold readers by `since`. So r9's refusal of "Victim will
+   * work through the holidays" was visible to the attacker and invisible to the
+   * room: every other socket got the full payload with no marker, the client
+   * put it in `room.events`, and it survived a reload in the durable journal.
+   * The refusal reached one person; the sentence reached everyone.
+   *
+   * ## Why the frame is marked rather than withheld
+   *
+   * Not broadcasting the row is the other option and it is not available.
+   * `room_seq` is advertised gap-free and is the client's cursor — it is what
+   * `since` walks and what the gap detector reads — so a row that is skipped
+   * live and present in catch-up desynchronises the two, and a row skipped in
+   * both leaves a hole the client correctly reads as loss and re-requests
+   * forever. The row happened; what it did not do is take effect. So it travels
+   * with the reason it took no effect, and the client drops it from the room's
+   * materialised history while still advancing past it.
+   *
+   * ## One producer
+   *
+   * Every path that hands out a `LedgerEntry` fills this from `issuesFor`, which
+   * reads `CoreState.issues` — the fold's own record. Live delivery, the
+   * reconciler's fan-out and the `since` page therefore answer from the same
+   * oracle rather than from three, which is what makes "the catch-up path says
+   * what the live path said" a fact about the code rather than a hope.
+   */
+  issues: readonly string[];
 }
 
 export interface AppendResult extends LedgerEntry {
@@ -423,6 +458,9 @@ export function actorToColumns(actor: Actor): { kind: Actor['kind']; id: string 
   }
 }
 
+/** One shared empty list, so a clean row costs no allocation on the fan-out path. */
+const EMPTY_ISSUES: readonly string[] = Object.freeze([]);
+
 export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger {
   let state: CoreState = emptyState();
   let lastSeq = 0;
@@ -440,6 +478,10 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
   let lastAtMs = 0;
   /** In-process serialization; see the module note on the two locks. */
   let tail: Promise<unknown> = Promise.resolve();
+  /** `state.issues`, keyed by event id — see `issuesFor`. */
+  const issuesByEvent = new Map<string, string[]>();
+  /** How much of `state.issues` is already in the map. */
+  let indexedIssues = 0;
 
   function runExclusive<T>(work: () => Promise<T>): Promise<T> {
     const run = tail.then(work, work);
@@ -496,9 +538,86 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         roomId: row.roomId,
         event,
         actor: actorFromColumns(row.actorKind, row.actorId),
+        // Filled by `withIssues` on the way out, never here: `catchUp` parses a
+        // page *before* it folds it, so a verdict read at parse time is the
+        // verdict of the previous state and would report every freshly folded
+        // refusal as clean.
+        issues: EMPTY_ISSUES,
       },
       trustedMessages: row.trustedMessages,
     };
+  }
+
+  /** The one place a `LedgerEntry` acquires its verdict. */
+  function withIssues(entry: LedgerEntry): LedgerEntry {
+    return { ...entry, issues: issuesFor(entry.event.id) };
+  }
+
+  /**
+   * Why the fold refused this event, or `EMPTY_ISSUES` — read off `CoreState`,
+   * which is the fold's own record of it.
+   *
+   * ## Why the fold and not a column
+   *
+   * The alternative was a durable `issues` column set by the append procedure,
+   * and it is worse in the way that matters here: the reasons would then be a
+   * *parameter* somebody supplies, so a direct caller of the granted append
+   * function could mark a real event refused or hide a real refusal. That is the
+   * exact shape of the r4-delta blocking finding about the receipt window
+   * (`trustToRecord`, below). `state.issues` cannot be supplied — it is produced
+   * by folding the row, and folding the row is what makes it durable and what
+   * every replay does again.
+   *
+   * ## Why the index is safe to answer from
+   *
+   * `hydrate` folds the whole ledger before the socket opens, and `catchUp`
+   * folds strictly forward from `lastSeq`, so this state has consumed every row
+   * up to `lastSeq` — and the read paths below make sure they have folded past
+   * the page they are about to answer with before they call this. An event that
+   * applied cleanly is absent from `state.issues`, which is why the callers'
+   * fold-first discipline is load-bearing: "no issues recorded" and "not folded
+   * yet" would otherwise be the same answer, and that answer would be a
+   * fail-open.
+   */
+  function issuesFor(eventId: string): readonly string[] {
+    reindexIssues();
+    return issuesByEvent.get(eventId) ?? EMPTY_ISSUES;
+  }
+
+  /**
+   * Fold `state.issues` into a by-event index, incrementally.
+   *
+   * `state.issues` is append-only and every state this module adopts is a
+   * continuation of the last one, so everything before `indexedIssues` is
+   * already in the map. Rebuilt from a prefix rather than from scratch because
+   * `since` is on the read path and the list is unbounded.
+   */
+  function reindexIssues(): void {
+    for (let index = indexedIssues; index < state.issues.length; index += 1) {
+      const issue = state.issues[index];
+      if (!issue) continue;
+      const held = issuesByEvent.get(issue.eventId);
+      if (held) held.push(issue.reason);
+      else issuesByEvent.set(issue.eventId, [issue.reason]);
+    }
+    indexedIssues = state.issues.length;
+  }
+
+  /**
+   * Fold everything committed up to `through`, so `issuesFor` can answer about
+   * it. Throws rather than guessing: an entry this instance has not folded has
+   * no verdict, and reporting "no issues" for it is the fail-open this whole
+   * field exists to close.
+   */
+  async function foldThrough(through: number): Promise<void> {
+    if (through <= lastSeq) return;
+    await runExclusive(() => catchUp(db));
+    if (through > lastSeq) {
+      throw new CommandError(
+        'conflict',
+        `the ledger has rows up to seq ${through} that this instance has not folded (at ${lastSeq}) — refusing to serve them without saying whether they applied`,
+      );
+    }
   }
 
   function parseEntry(row: Parameters<typeof parseRow>[0]): LedgerEntry {
@@ -674,7 +793,9 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       for (const entry of entries) {
         lastSeq = Math.max(lastSeq, entry.seq);
         lastAtMs = Math.max(lastAtMs, Date.parse(entry.event.at));
-        folded.push(entry);
+        // After the fold above, so a row refused on the way in carries the
+        // reason it was refused out to the fan-out (#22 r10, D4).
+        folded.push(withIssues(entry));
       }
       if (rows.length < PAGE) break;
     }
@@ -977,7 +1098,15 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           });
 
           return {
-            result: { seq, roomSeq, roomId, event: event as RoomEvent, actor, outcome },
+            result: {
+              seq,
+              roomSeq,
+              roomId,
+              event: event as RoomEvent,
+              actor,
+              outcome,
+              issues: EMPTY_ISSUES,
+            },
             staged: { state: after, seq, at: Date.parse(event.at) },
           };
         })
@@ -991,7 +1120,11 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       state = staged.state;
       lastSeq = Math.max(lastSeq, staged.seq);
       lastAtMs = Math.max(lastAtMs, staged.at);
-      return result;
+      // Through `issuesFor` like every other path, and only after the state has
+      // been adopted. Reading `outcome.issues` here instead would be a second
+      // derivation of the same fact — the one that lets a live frame and a
+      // `since` page disagree about whether a row applied.
+      return { ...result, issues: issuesFor(result.event.id) };
     });
   }
 
@@ -1027,7 +1160,12 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         .where(and(eq(coreEvents.roomId, roomId), gt(coreEvents.roomSeq, roomSeq)))
         .orderBy(asc(coreEvents.roomSeq))
         .limit(limit);
-      return rows.map(parseEntry);
+      const entries = rows.map(parseEntry);
+      // Fold first, then answer. A page can contain rows another instance
+      // committed a moment ago; asking `issuesFor` about one this process has
+      // not folded would answer "clean" for a row that was refused.
+      await foldThrough(entries.at(-1)?.seq ?? 0);
+      return entries.map(withIssues);
     },
     /**
      * The page and the head, read in **one transaction**.
@@ -1049,7 +1187,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       if (!Number.isInteger(roomSeq) || roomSeq < 0) {
         throw new CommandError('invalid', 'since cursor must be a non-negative integer');
       }
-      return db.transaction(
+      const page = await db.transaction(
         async (tx) => {
           const rows = await tx
             .select(ROW)
@@ -1072,6 +1210,12 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         // statement, which is the race this method exists to close.
         { isolationLevel: 'repeatable read', accessMode: 'read only' },
       );
+      // Outside the snapshot on purpose: the fold has to run *after* the page is
+      // read, so it covers every row in it. A refused row must reach a cold
+      // reader marked exactly as it reached a live one (#22 r10, D4) — this is
+      // the catch-up half of that, and it is the same `issuesFor`.
+      await foldThrough(page.entries.at(-1)?.seq ?? 0);
+      return { ...page, entries: page.entries.map(withIssues) };
     },
     head: async (roomId) => {
       const [row] = await db
