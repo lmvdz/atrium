@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -233,15 +232,10 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-/** Run only when this file is the process entry point, never when imported. */
-const entry = process.argv[1] === undefined ? '' : resolve(process.argv[1]);
-if (entry === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2))
-    .then((code) => {
-      process.exitCode = code;
-    })
-    .catch((error: unknown) => {
-      console.error(error instanceof Error ? error.message : String(error));
-      process.exitCode = 1;
-    });
-}
+/*
+ * There is no `if (this file was run)` here any more, and there is no shebang.
+ * `bin.ts` is the executable and runs `main` unconditionally — see the note at
+ * the top of that file for the round-4 comparison this deleted (#40 round 9,
+ * D7). A module that is only ever imported does not have to decide whether it
+ * was imported.
+ */
