@@ -125,6 +125,16 @@ export interface TestServerOptions {
   instanceId?: string;
   /** Shorten the reconciliation timer so a test does not wait on wall clock. */
   reconcileIntervalMs?: number;
+  /**
+   * Shorten the fan-out membership re-check (#22 r9, D2).
+   *
+   * Defaulted long here rather than short, and deliberately: a test that wants
+   * the revocation window measured drives `realtime.revalidateSubscriptions()`
+   * directly, so what it asserts is the *rule*. Leaving the timer at a hundred
+   * milliseconds for every other test would let a pass fire in the middle of an
+   * unrelated assertion and make the suite depend on wall clock.
+   */
+  membershipRevalidateIntervalMs?: number;
 }
 
 /** A realtime server on an ephemeral port, wired exactly as `index.ts` wires it. */
@@ -155,6 +165,7 @@ export async function startTestServer(
     ledger,
     bus,
     reconcileIntervalMs: options.reconcileIntervalMs ?? 200,
+    membershipRevalidateIntervalMs: options.membershipRevalidateIntervalMs ?? 60_000,
     session: createStubSessionAuthenticator(),
   });
   await realtime.listen();

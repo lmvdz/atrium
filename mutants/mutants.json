@@ -998,6 +998,29 @@
       "find": "    stagedByKind: record.stagedBy.kind,\n    stagedById: actorId(record.stagedBy),\n",
       "replace": "    stagedByKind: proposal.proposer.kind,\n    stagedById: proposal.proposer.kind === 'model' ? proposal.proposer.model : proposal.proposer.userId,\n",
       "catches": ["refuses a human accepting a machine-attributed reading they staged themselves"]
+    },
+    {
+      "id": "the_fan_out_set_is_never_rechecked",
+      "suite": "integration",
+      "kind": "file",
+      "why": "#22 r9 D2. Makes the revalidation pass return before it looks at anything, which is r8's shipped behaviour exactly: the hub holds a subscription until the socket closes, broadcast consults that map and not memberships, and a revoked member keeps receiving the room's event frames with full message bodies and its head frames until they disconnect — which the shipped client does not do voluntarily and undoes by reconnecting. The bound was not a duration; this restores it to not being one.",
+      "file": "apps/server/src/ws-server.ts",
+      "find": "    if (!commands) return;\n    const subscriptions: Array<{ roomId: string; connection: Connection }> = [];\n",
+      "replace": "    if (commands) return;\n    const subscriptions: Array<{ roomId: string; connection: Connection }> = [];\n",
+      "catches": [
+        "stops delivering a room’s content to a member whose membership was deleted",
+        "drops only the revoked room, not the socket or the rooms it is still in"
+      ]
+    },
+    {
+      "id": "the_revocation_pass_never_runs_on_its_own",
+      "suite": "unit",
+      "kind": "file",
+      "why": "#22 r9 D2, the other half: the rule can be perfect and unreached. Removes the body of the timer that drives it, so revalidateSubscriptions is only ever called by a test calling it directly — which is precisely the arrangement that would let this ship green while a revoked member reads the room forever, because every integration test above drives the pass by hand on purpose. The window it names stops being a window.",
+      "file": "apps/server/src/ws-server.ts",
+      "find": "  const revalidation = setInterval(() => {\n    void revalidateSubscriptions();\n  }, membershipRevalidateIntervalMs);\n",
+      "replace": "  const revalidation = setInterval(() => {}, membershipRevalidateIntervalMs);\n",
+      "catches": ["drives the membership revalidation pass on its own timer"]
     }
   ]
 }

@@ -9,7 +9,29 @@ import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
 import type { Logger } from './logger.js';
 import { ClientFrame, type EphemeralFrame, type ServerFrame, type WireEvent } from './protocol.js';
 import { createReconciler, DEFAULT_RECONCILE_INTERVAL_MS, type Reconciler } from './reconciler.js';
-import type { Session, SessionAuthenticator } from './session.js';
+import {
+  type MembershipPair,
+  membershipKey,
+  type Session,
+  type SessionAuthenticator,
+} from './session.js';
+
+/**
+ * How long a revoked member may still be receiving a room, in milliseconds.
+ *
+ * This is **the number** #22 r9 exists to make nameable: before it, the answer
+ * was "until the socket drops", which the shipped client does not do voluntarily
+ * and undoes by reconnecting. One second, because the cost of a pass is one
+ * primary-key probe per subscription in one statement, and because the thing on
+ * the other side of the window is the room's message bodies going to somebody
+ * who was removed from it.
+ *
+ * A second, not a tenth: the pass is a database round trip and the leak is
+ * bounded either way, so there is no reason to spend a query per 100 ms of a
+ * window that is already short enough that a revocation and the next message
+ * rarely fit inside it.
+ */
+export const MEMBERSHIP_REVALIDATE_INTERVAL_MS = 1_000;
 
 /**
  * Realtime transport. Ordinary WebSockets, server-authoritative state — no
@@ -30,19 +52,68 @@ import type { Session, SessionAuthenticator } from './session.js';
  * the append transaction — because a socket outlives a membership and "you were
  * a member when you connected" is not an answer to "may you write this now".
  *
- * **That sentence is about writing, and r8 stops it reading as more.** The
- * *fan-out* set is subscribe-time membership and is not re-checked: `hub` holds
- * the subscription until the socket closes or unsubscribes, and `broadcast`
- * consults that map, not `memberships`. So a member whose membership is revoked
- * while their socket is open **keeps receiving that room's `event` and `head`
- * frames** until they disconnect — their next command is refused, and their
- * next reconnect never subscribes, but the live stream does not stop. Found by
- * r8's own adversarial sweep of a claim, not of a code path; recorded here
- * rather than fixed, because closing it means either a membership read per
- * subscriber per event or a revocation signal the system does not have, and
- * both are a ticket rather than a comment. What is NOT open: the revoked member
- * cannot write (checked twice, the second time under the append lock), and
- * cannot re-enter after a reconnect.
+ * ## Membership at fan-out, with a window that is a number
+ *
+ * The sentence above is about **writing**. The *fan-out* set is a second thing
+ * and used to be a subscribe-time snapshot that nothing ever re-read: `hub`
+ * holds a subscription until the socket closes or unsubscribes, and `broadcast`
+ * consults that map, not `memberships`. r8 measured what that cost — a member
+ * whose membership was deleted kept receiving the room's `event` frames, **with
+ * full message bodies**, and its `head` frames, for as long as the socket
+ * stayed open. Measured on the production build at production defaults: six
+ * event frames and thirty head frames over sixty seconds, socket still open.
+ * r8 recorded it here and shipped it, on the grounds that closing it meant
+ * "either a membership read per subscriber per event or a revocation signal the
+ * system does not have".
+ *
+ * **Both halves of that were wrong, and r9 closes it.** The bound was never a
+ * duration — it was *until the socket drops*, and the shipped client does not
+ * drop it voluntarily and reconnects if the wire does. And the cost is neither
+ * of the two things named: it is **one statement per pass over every
+ * subscription on this instance** (`Authorizer.present`), which is a primary-key
+ * probe per pair, not a read per event and not a new signal.
+ *
+ * So `revalidateSubscriptions` runs on its own timer and drops any subscription
+ * whose membership row is gone: out of the hub, out of `headAcks`, and an
+ * `unsubscribed` frame to the socket so the client stops rendering the room
+ * rather than silently going quiet. The socket itself stays open — a person
+ * removed from one room is usually still in others, and closing the connection
+ * would make revocation a denial of service against every room they are still
+ * in. Rooms, not sockets, are the unit that was revoked.
+ *
+ * **The window is `MEMBERSHIP_REVALIDATE_INTERVAL_MS`, one second by default**
+ * (`WS_MEMBERSHIP_REVALIDATE_INTERVAL_MS`). That is the number: a revoked member
+ * may receive at most the frames this instance fans out in the second following
+ * the delete, and no frame after it. Not "until they disconnect", and not the
+ * fifteen seconds a revocation *sweep* over sockets would give — see below for
+ * why this is a poll and not an event.
+ *
+ * What was already true and stays true: the revoked member cannot write
+ * (checked twice, the second time under the append lock), their `since` is
+ * refused, and a reconnect never resubscribes.
+ *
+ * ### Why a timer and not a notification
+ *
+ * The tempting shape is a `pg_notify` on `memberships`, riding the LISTEN/NOTIFY
+ * plumbing this file already owns, for a millisecond-scale teardown. It is not
+ * the guarantee, for two reasons and the second is the one that decides it:
+ *
+ *  1. `bus` is **optional** — a single-instance deployment carries no listener —
+ *     and `NOTIFY` is at-most-once, lost on listener disconnect and on rollback.
+ *     A notification could only ever lower the latency under a bound that a
+ *     periodic re-read has to establish anyway. Once that bound is a second,
+ *     what is left to buy is most of a second.
+ *  2. `NOTIFY` requires **no privilege in Postgres** — r6's blocking finding, and
+ *     the reason `EphemeralNote` has a closed alphabet. A revocation channel's
+ *     alphabet is `(roomId, userId)`, in which *every* value is legitimately
+ *     shaped, so no schema can close it: anything that can connect to the
+ *     database could evict arbitrary people from arbitrary rooms. The poll has
+ *     no such surface, because the only thing it believes is a row.
+ *
+ * If a teardown signal does arrive from elsewhere — #26's revocation sweep closes
+ * the *socket* on a interval of its own — the two compose without either knowing
+ * about the other: this drops the subscription, that drops the connection, and
+ * whichever is faster is the one that decides.
  *
  * There is no anonymous fallback and no unauthenticated configuration. Round 1
  * defaulted an unresolved session to `{ userId: 'anonymous' }` when no
@@ -93,6 +164,15 @@ export interface RealtimeOptions {
    * removes it.
    */
   reconcileIntervalMs?: number;
+  /**
+   * How often the fan-out set is re-checked against `memberships` — and
+   * therefore the longest a revoked member can still be receiving the room.
+   *
+   * Like `reconcileIntervalMs` there is no way to switch it off, for the same
+   * reason: an option to disable it would be the r8 defect with a config flag in
+   * front of it. Tests shorten it; nothing removes it.
+   */
+  membershipRevalidateIntervalMs?: number;
 }
 
 export interface RealtimeServer {
@@ -102,6 +182,14 @@ export interface RealtimeServer {
   connectionCount: () => number;
   /** Run one reconciliation pass now — the timer's work, on demand, for tests. */
   reconcile: () => Promise<void>;
+  /**
+   * Run one membership revalidation pass now.
+   *
+   * The same function the timer calls, exposed for the same reason `reconcile`
+   * is: a test that waits on wall clock to observe a bound is a test that is
+   * measuring the timer rather than the rule.
+   */
+  revalidateSubscriptions: () => Promise<void>;
   listen: () => Promise<void>;
   close: () => Promise<void>;
 }
@@ -115,6 +203,16 @@ interface Connection {
 export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   const { logger, heartbeatIntervalMs, commands, ledger, session, bus } = options;
   const connections = new WeakMap<WebSocket, Connection>();
+  /**
+   * The same connections, reachable by the id the hub knows them by.
+   *
+   * `connections` is keyed by socket, and the revalidation pass starts from the
+   * hub's subscriber ids — it has to get from "this subscription" back to "whose
+   * membership is that". Deleted on close beside `hub.drop`, so it holds exactly
+   * the live connections and not one entry per connection for the life of the
+   * process.
+   */
+  const byConnectionId = new Map<string, Connection>();
   const hub = createHub<ServerFrame>();
   /**
    * What each socket has acknowledged holding, per room. The head frame's only
@@ -195,6 +293,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       session: resolved,
     };
     connections.set(socket, connection);
+    byConnectionId.set(connection.id, connection);
     logger.info('ws connected', {
       connectionId: connection.id,
       userId: connection.session.userId,
@@ -220,8 +319,9 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
 
     socket.on('close', (code) => {
       hub.drop(connection.id);
-      // Or the map grows one entry per connection for the life of the process.
+      // Or the maps grow one entry per connection for the life of the process.
       headAcks.forget(connection.id);
+      byConnectionId.delete(connection.id);
       logger.info('ws disconnected', { connectionId: connection.id, code });
     });
 
@@ -532,6 +632,84 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
   }
 
   /**
+   * Re-ask, of every subscription on this instance, the question `subscribe`
+   * answered once: is this person still a member of this room?
+   *
+   * See the file note ("Membership at fan-out") for why this exists and why it
+   * is a timer rather than a notification. Three properties are the whole design:
+   *
+   *  - **One statement, not one per subscriber.** Every `(user, room)` pair goes
+   *    into a single `IN` over the memberships primary key. Two sockets in one
+   *    room for one user collapse to one probe, because the pairs are deduped by
+   *    the same key the answer comes back in.
+   *  - **A missing answer is a revocation.** `present` returns who *is* still a
+   *    member, so anything it does not name — deleted row, deleted room, a
+   *    malformed id, a user who was never there — falls out. The direction
+   *    matters: a "who was revoked" result would have to enumerate reasons, and
+   *    every reason it did not think of would read as "still a member".
+   *  - **The room is dropped, not the socket.** `unsubscribe` + `forgetRoom` is
+   *    exactly what a client-requested `unsubscribe` does, and the client is told
+   *    with the same frame, so nothing downstream has to learn a new state. A
+   *    close would make losing one room a disconnection from all of them.
+   *
+   * A failed query logs and leaves the subscriptions alone, to be retried on the
+   * next pass. The alternative — evicting everyone when the database is
+   * unreachable — turns a blip into a room-wide disconnect, and buys nothing:
+   * every path that produces a frame to leak (the ledger read behind `fanOut`,
+   * the head query behind the reconciler) is reading the same database and is
+   * failing at the same moment.
+   */
+  async function revalidateSubscriptions(): Promise<void> {
+    if (!commands) return;
+    const subscriptions: Array<{ roomId: string; connection: Connection }> = [];
+    const probes = new Map<string, MembershipPair>();
+    for (const roomId of hub.activeRooms()) {
+      for (const subscriber of hub.subscribers(roomId)) {
+        const connection = byConnectionId.get(subscriber.id);
+        // A subscriber the connection map has already forgotten is a socket that
+        // closed between the two reads. `hub.drop` has run or is about to; there
+        // is nothing to revoke and nobody to tell.
+        if (!connection) continue;
+        subscriptions.push({ roomId, connection });
+        probes.set(membershipKey(connection.session.userId, roomId), {
+          userId: connection.session.userId,
+          roomId,
+        });
+      }
+    }
+    if (subscriptions.length === 0) return;
+
+    let held: Set<string>;
+    try {
+      held = await commands.stillMembers([...probes.values()]);
+    } catch (error) {
+      logger.error('membership revalidation failed — subscriptions left in place', {
+        error: describe(error),
+        subscriptions: subscriptions.length,
+      });
+      return;
+    }
+
+    for (const { roomId, connection } of subscriptions) {
+      if (held.has(membershipKey(connection.session.userId, roomId))) continue;
+      hub.unsubscribe(roomId, connection.id);
+      headAcks.forgetRoom(connection.id, roomId);
+      // Through the hub's own snapshot rather than the socket, so a subscription
+      // that vanished mid-pass is a no-op instead of a frame sent to a room the
+      // socket is no longer in.
+      for (const socket of wss.clients) {
+        if (connections.get(socket)?.id !== connection.id) continue;
+        send(socket, { type: 'unsubscribed', roomId });
+      }
+      logger.info('subscription revoked — membership is gone', {
+        connectionId: connection.id,
+        userId: connection.session.userId,
+        roomId,
+      });
+    }
+  }
+
+  /**
    * The durable delivery path. See `reconciler.ts` for what it covers and why it
    * cannot be turned off.
    */
@@ -562,6 +740,23 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       })
     : null;
 
+  /**
+   * The fan-out set's re-check. Started here rather than in `listen`, because it
+   * costs nothing while nobody is subscribed (`activeRooms()` is empty and the
+   * pass returns before it queries) and because a server that is accepting
+   * sockets must already be revoking them.
+   *
+   * `void`, with the errors handled inside: a rejected promise from a timer is
+   * the `unhandledRejection` this process exits on, and a database blip must not
+   * be a restart.
+   */
+  const membershipRevalidateIntervalMs =
+    options.membershipRevalidateIntervalMs ?? MEMBERSHIP_REVALIDATE_INTERVAL_MS;
+  const revalidation = setInterval(() => {
+    void revalidateSubscriptions();
+  }, membershipRevalidateIntervalMs);
+  revalidation.unref();
+
   // Heartbeat: a socket that misses one full interval without a pong is dead.
   const heartbeat = setInterval(() => {
     for (const socket of wss.clients) {
@@ -586,6 +781,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     reconcile: async () => {
       await reconciler?.reconcile();
     },
+    revalidateSubscriptions,
     listen: async () => {
       // Before the port opens, so no client can connect into a window where
       // this instance is serving but deaf to its peers.
@@ -630,6 +826,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     },
     close: async () => {
       clearInterval(heartbeat);
+      clearInterval(revalidation);
       reconciler?.stop();
       await bus?.close();
       for (const socket of wss.clients) socket.close(1001, 'server shutting down');

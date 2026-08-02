@@ -22,7 +22,7 @@ import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
 import { projectRoomEvent } from './projections.js';
 import { MessageAttachment, type RoomEvent } from './room-events.js';
-import type { Authorizer, Session } from './session.js';
+import type { Authorizer, MembershipPair, Session } from './session.js';
 
 /**
  * The command layer — #12's client→server verbs.
@@ -221,6 +221,14 @@ export interface CommandService {
   execute: (session: Session, command: Command) => Promise<CommandResult>;
   /** Membership check for the plain reads — subscribe and since. */
   requireMembership: (session: Session, roomId: string) => Promise<{ seenSeq: number }>;
+  /**
+   * Which of these subscriptions are still backed by a membership.
+   *
+   * The fan-out set's re-check, in one statement — see `Authorizer.present` and
+   * `ws-server.ts`. Not `execute`'s business and not a command: nothing is
+   * appended, nothing is authorized *for*, and the caller is a timer.
+   */
+  stillMembers: (pairs: readonly MembershipPair[]) => Promise<Set<string>>;
 }
 
 export function createCommandService({
@@ -457,7 +465,11 @@ export function createCommandService({
     }
   }
 
-  return { execute, requireMembership };
+  return {
+    execute,
+    requireMembership,
+    stillMembers: (pairs) => authorizer.present(pairs),
+  };
 }
 
 /**

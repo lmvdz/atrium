@@ -81,6 +81,19 @@ const RawEnvSchema = BaseEnvSchema.extend({
   SERVER_PORT: z.coerce.number().int().positive().default(4000),
 
   WS_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  /**
+   * How often the fan-out set is re-checked against `memberships`, and therefore
+   * the longest a revoked member can still be receiving a room's messages (#22
+   * r9, D2).
+   *
+   * `positive()`, so there is no spelling of "off" — an unset value is not "no
+   * revalidation", it is "the shipped window". Deliberately `.optional()` rather
+   * than carrying its own `.default()`: the number lives in
+   * `MEMBERSHIP_REVALIDATE_INTERVAL_MS` beside the timer it drives, and a default
+   * here would be a second copy of it, free to drift and invisible when it did.
+   * Same arrangement `reconcileIntervalMs` already uses.
+   */
+  WS_MEMBERSHIP_REVALIDATE_INTERVAL_MS: z.coerce.number().int().positive().optional(),
   INTERPRET_WORKER_CONCURRENCY: z.coerce.number().int().positive().max(50).default(2),
 
   S3_ENDPOINT: z.string().min(1).default('http://localhost:9000'),

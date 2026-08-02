@@ -49,6 +49,9 @@ async function main(): Promise<void> {
     host: env.SERVER_HOST,
     port: env.SERVER_PORT,
     heartbeatIntervalMs: env.WS_HEARTBEAT_INTERVAL_MS,
+    // Undefined when nobody set it, which is the shipped window rather than "no
+    // revalidation" — the option has no "off". See `ws-server.ts` (#22 r9, D2).
+    membershipRevalidateIntervalMs: env.WS_MEMBERSHIP_REVALIDATE_INTERVAL_MS,
     logger,
     isReady: () => ready,
     commands,

@@ -544,3 +544,124 @@ describe('authorization is inside the append transaction', () => {
     expect(Number(row?.seenSeq)).toBe(0);
   });
 });
+
+/**
+ * #22 r9, D2 — the same shape of mistake one more time, on the *reading* side.
+ *
+ * The section above is about a check made outside the transaction that writes.
+ * This is about a check made once and never made again: the fan-out set was
+ * subscribe-time membership, and `broadcast` consults the hub's map rather than
+ * `memberships`. r8 measured it on the production build at production defaults —
+ * a member whose row was deleted kept receiving the room's `event` frames, with
+ * full message bodies, and its `head` frames, for as long as the socket stayed
+ * open — wrote it into `ws-server.ts`'s doc comment, and shipped it, because
+ * closing it "means either a membership read per subscriber per event or a
+ * revocation signal the system does not have".
+ *
+ * It means neither. It means one statement over every subscription on the
+ * instance, on a timer, and the window becomes a number:
+ * `MEMBERSHIP_REVALIDATE_INTERVAL_MS`.
+ *
+ * These drive `revalidateSubscriptions()` rather than waiting for the timer, for
+ * the reason `reconcile()` is exposed too: a test that sleeps past an interval is
+ * measuring the interval, and what has to hold is the rule.
+ */
+describe('the fan-out set is re-checked against memberships', () => {
+  function revoke(userId: string, roomId = room.roomId) {
+    return handle.db
+      .delete(memberships)
+      .where(and(eq(memberships.roomId, roomId), eq(memberships.userId, userId)));
+  }
+
+  it('stops delivering a room’s content to a member whose membership was deleted', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    await alice.subscribe(room.roomId);
+    await bob.subscribe(room.roomId);
+
+    // Bob is a member and receives the room, which is what makes the assertion
+    // below about revocation rather than about a socket that never worked.
+    await post(alice, 'while bob is a member');
+    await bob.waitFor((f) => f.type === 'event');
+    expect(bob.events(room.roomId)).toHaveLength(1);
+
+    await revoke(room.people.bob as string);
+    await server.realtime.revalidateSubscriptions();
+
+    // The client is told, rather than going silently dead. Same frame a
+    // client-requested `unsubscribe` produces, so nothing downstream has to
+    // learn a new state.
+    await bob.waitFor((f) => f.type === 'unsubscribed' && f.roomId === room.roomId);
+
+    const mark = bob.frames.length;
+    await post(alice, 'after bob was removed');
+    await alice.waitFor((f) => f.type === 'event' && f.entry.roomSeq === 2);
+    // The head path too: `onHead` walks `hub.subscribers`, so a subscription
+    // that survived the pass would show up here even with no event delivered.
+    await server.realtime.reconcile();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const after = bob.frames.slice(mark);
+    expect(after.filter((f) => f.type === 'event')).toEqual([]);
+    expect(after.filter((f) => f.type === 'head')).toEqual([]);
+    expect(bob.events(room.roomId)).toHaveLength(1);
+  });
+
+  it('drops only the revoked room, not the socket or the rooms it is still in', async () => {
+    // The *same* person in a second room — `seedRoom` mints fresh users, so the
+    // membership is inserted directly rather than seeded, or this would be two
+    // different Bobs and the test would prove nothing.
+    const second = await seedRoom(handle, ['dave'], { slug: 'daves-room' });
+    await handle.db.insert(memberships).values({
+      roomId: second.roomId,
+      userId: room.people.bob as string,
+      role: 'member',
+    });
+
+    const bob = await connect(room.people.bob as string);
+    const dave = await connect(second.people.dave as string);
+    await bob.subscribe(room.roomId);
+    await bob.subscribe(second.roomId);
+
+    await revoke(room.people.bob as string);
+    await server.realtime.revalidateSubscriptions();
+    await bob.waitFor((f) => f.type === 'unsubscribed' && f.roomId === room.roomId);
+
+    // Still connected — a person removed from one room is usually still in
+    // others, and closing the connection would make revocation a denial of
+    // service against every room they kept.
+    bob.send({ type: 'ping' });
+    expect((await bob.waitFor((f) => f.type === 'pong')).type).toBe('pong');
+
+    // …and still receiving the room they are still in.
+    await dave.command({
+      name: 'send_message',
+      roomId: second.roomId,
+      body: 'the other room carries on',
+      clientMessageId: null,
+      replyToId: null,
+      attachments: [],
+    });
+    const event = await bob.waitFor((f) => f.type === 'event' && f.entry.roomId === second.roomId);
+    expect(event.type).toBe('event');
+    expect(bob.frames.filter((f) => f.type === 'unsubscribed')).toHaveLength(1);
+  });
+
+  it('leaves every live membership alone — the pass is not a disconnect', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    await alice.subscribe(room.roomId);
+    await bob.subscribe(room.roomId);
+
+    // Nobody was revoked. A pass that evicted on a query returning the wrong
+    // shape — or on the key being spelled differently on the two sides — would
+    // read as "everybody was revoked", and would do it silently.
+    await server.realtime.revalidateSubscriptions();
+    await server.realtime.revalidateSubscriptions();
+
+    await post(alice, 'still everybody’s room');
+    await bob.waitFor((f) => f.type === 'event');
+    expect(bob.events(room.roomId)).toHaveLength(1);
+    expect(bob.frames.filter((f) => f.type === 'unsubscribed')).toEqual([]);
+  });
+});
