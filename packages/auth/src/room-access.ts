@@ -292,9 +292,27 @@ export async function loadRoomMembershipRow(
 }
 
 /**
+ * The key {@link roomMembershipsHeld} answers in.
+ *
+ * A single string so the caller can use a `Set` rather than a nested map, and
+ * ONE function so the two sides cannot spell it differently — a mismatch here
+ * reads as "everybody was revoked", which is not a hypothetical: the merge that
+ * moved this query out of `apps/server/src/session.ts` first wrote the key as
+ * `${userId}:${roomId}` here while the caller went on building
+ * `${userId}\u0000${roomId}`, and three integration tests came back with every
+ * subscriber on the instance dropped, including the ones nobody had revoked.
+ *
+ * The separator is NUL because a uuid cannot contain one. `apps/server` re-exports
+ * this as `membershipKey`; there is no second definition.
+ */
+export function roomMembershipKey(userId: string, roomId: string): string {
+  return `${userId}\u0000${roomId}`;
+}
+
+/**
  * Which of these `(user, room)` pairs still hold authority — the fan-out check.
  *
- * Returns the pairs that are **still members**, keyed by `"userId:roomId"`.
+ * Returns the pairs that are **still members**, keyed by {@link roomMembershipKey}.
  * Deliberately that direction: an absent key is the answer for a revoked
  * membership, a revoked workspace member, an archived room, a room that never
  * existed, a malformed id, and a user who was never there. A "who was revoked"
@@ -334,7 +352,7 @@ export async function roomMembershipsHeld(
   for (const row of rows) {
     // Present in the join but with no readable authority is still "not a member".
     if (effectiveRoomRole(row, logger) === null) continue;
-    held.add(`${row.userId}:${row.roomId}`);
+    held.add(roomMembershipKey(row.userId, row.roomId));
   }
   return held;
 }
