@@ -1003,12 +1003,19 @@ function applyObjectCorrected(
   // `retype`, `amend`, `reopen`, `retract`, `restore` and whatever verb is added
   // next are all checked here, by construction rather than by four remembered
   // calls. See `CorrectionPlan`.
+  //
+  // The two objects go in whole. r10 passed two name arrays computed here, which
+  // left this call site holding half the question — and #22 r11 was the other
+  // half arriving unasked: the gate compared names, the text was never looked
+  // at, and five `amend`s rewrote a colleague's sentence into a confession under
+  // his name with `issues: []` every time. Both questions are answered inside
+  // the gate now, so a caller cannot answer either one narrowly.
   const attributionRefusal = correctionAttributionRefusal({
     actor,
     objectId: event.objectId,
     action: event.action,
-    before: payloadAttributions(record.object.type, record.object.payload),
-    after: payloadAttributions(outcome.plan.object.type, outcome.plan.object.payload),
+    before: record.object,
+    after: outcome.plan.object,
   });
   if (attributionRefusal) {
     fail(state, event.id, attributionRefusal);

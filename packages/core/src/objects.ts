@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TEXT_FIELD } from './attribution.js';
 import { emptyProvenance, Id, Provenance, Timestamp } from './common.js';
 
 /**
@@ -118,10 +119,21 @@ export type Objective = z.infer<typeof Objective>;
  * where it started — `authority.ts` needs it to ask whether a quote bears the
  * sentence being minted, and it must not import the engine to find out (the
  * engine imports the reducer, which imports `authority.ts`).
+ *
+ * **The key comes from `TEXT_FIELD`, not from a ladder.** Until #22 r11 the
+ * ladder was written out right here — `type === 'open_question' ? 'question'
+ * : …` — which made this the *second* answer to "which field holds the
+ * sentence", beside the one `attribution.ts` derives from
+ * `PAYLOAD_FIELD_ROLE`. r10 closed exactly that shape for "which field holds a
+ * person" and found three hand-written answers where the brief said two; this
+ * was the same defect one field over, waiting for a sixth type whose text key
+ * is neither `statement`, `question` nor `title` to make the two disagree in
+ * silence. `attribution.ts` has no runtime import of this module (its imports
+ * of `objectPayloadByType` and `AcceptedObjectType` are `import type`, erased
+ * at emit), so the edge is one-way and there is no cycle.
  */
 export function payloadText(type: AcceptedObjectType, payload: Record<string, unknown>): string {
-  const key = type === 'open_question' ? 'question' : type === 'objective' ? 'title' : 'statement';
-  const value = payload[key];
+  const value = payload[TEXT_FIELD[type]];
   return typeof value === 'string' ? value : '';
 }
 

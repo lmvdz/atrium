@@ -1,3 +1,4 @@
+import { payloadAttributions } from './attribution.js';
 import type { Actor } from './common.js';
 import {
   type ProvenanceMessage,
@@ -32,6 +33,16 @@ import { canonicalJson } from './state.js';
  * | **Corrections (amend / retract / restore / …)**          | human   | **here**  |
  * | **Acceptance citing no proposal at all**                 | human   | **here**  |
  * | **Declaring a question answered**                        | human   | **here**  |
+ * | **A name arriving on a sentence** (#4: *committed*)      | only its bearer | **here** |
+ * | **A sentence arriving under a name** (#4: *quoted*)      | only its bearer | **here** |
+ *
+ * The last two rows are one sentence of #4's split in half — *nobody gets
+ * committed, **or quoted**, by someone else's sentence* — and they are written
+ * as two rows because they were closed a round apart, the second only after the
+ * first shipped with the whole sentence quoted at a room and half of it
+ * enforced. A matrix row that describes a rule the code does not hold is the
+ * defect this lane has now hit three times; both rows are pinned by cells in
+ * `authority-matrix.test.ts` that drive the reducer and read what it said.
  *
  * ## What round 2 moved down here, and why
  *
@@ -305,8 +316,45 @@ export function selfStagedReadingRefusal(input: {
 }
 
 /**
- * The same rule, one act later: **a correction may not put a name on somebody
- * that was not already there** (#22 r10, D1/D3).
+ * The same rule, one act later: **a correction may not assert anything under a
+ * name that is not the actor's own** — neither putting somebody's name on a
+ * sentence (#22 r10, D1/D3) nor putting a sentence under somebody's name (#22
+ * r11).
+ *
+ * ## Two clauses, because #4's sentence has two halves
+ *
+ * *Nobody gets committed, **or quoted**, by someone else's sentence.* Until r11
+ * this function enforced the first half and quoted the whole thing. It compared
+ * name sets and never looked at the text, so:
+ *
+ * ```
+ * Bob:     accept  {statement: "I'll review the Q3 deck before Friday", owner: Bob}
+ * Mallory: amend   {statement: "I falsified the Q3 revenue figures"}
+ * Mallory: retype  → claim {claimant: Bob}      ← legal: Bob's name was already there
+ * Mallory: amend   {verification: "verified"}
+ * Mallory: amend   {statement: "I have been taking kickbacks from the vendor"}
+ * ```
+ *
+ * — five commands, every one `ack` with `issues: []`, ending at
+ * `type=claim, claimant=Bob, verification=verified, revision=5`, with a
+ * statement Bob never wrote and would never write. Not one name arrived, so
+ * clause one had nothing to say; the sentence under Bob's name was replaced
+ * wholesale. That is being quoted by someone else's sentence in the most
+ * literal reading the phrase has.
+ *
+ * So there are two clauses now and they are the same rule applied to the two
+ * things a correction can move:
+ *
+ *  1. **A name arriving on a sentence.** Refused unless it is the actor's own.
+ *  2. **A sentence arriving under a name.** Refused unless every name it lands
+ *     under is the actor's own.
+ *
+ * Both are computed *here*, from the two objects, rather than by the caller:
+ * `payloadAttributions` answers who, `objectStatement` answers what, and
+ * neither question is re-answered anywhere on this path. r10's finding was that
+ * a caller which spells the who-ladder out by hand is how the `decidedBy` hole
+ * stayed open with the right table two files away; passing the objects in makes
+ * the hand-spelled version unrepresentable rather than merely discouraged.
  *
  * ## Why this is `selfStagedReadingRefusal` again rather than a new policy
  *
@@ -337,6 +385,30 @@ export function selfStagedReadingRefusal(input: {
  * new assertions are refused. That is what keeps every existing correction verb
  * working while closing the three that move a name.
  *
+ * Clause two is `before`-relative in exactly the same way, and for exactly the
+ * same reason. The trigger is the sentence *changing*, not the sentence
+ * existing: `retract`, `restore` and `reopen` leave the text byte-identical and
+ * so assert nothing about it, and `amend {due}` moves a `detail` field and
+ * leaves the text alone. All of those keep working on somebody else's object,
+ * as r10 made a named mutant to ensure. `retype` also survives it — carrying a
+ * decision's `statement` into a claim's `statement` is the same string under a
+ * new key, which is a statement about how the sentence was *read* and not a new
+ * sentence. `TEXT_FIELD` is what makes that comparison possible across the key
+ * rename, and it is derived from `PAYLOAD_FIELD_ROLE` rather than listed here:
+ * a sixth type, or a renamed text key, is classified once in `attribution.ts`
+ * and checked here with nothing edited.
+ *
+ * ## Which names clause two measures against
+ *
+ * The names on the object **after**, not before. A name that departs in the
+ * same act is no longer borne by the sentence — `retype` from Bob's commitment
+ * to Mallory's own claim, reworded, leaves Mallory's words under Mallory's
+ * name, and there is nobody left to have been quoted. A name that stays is the
+ * whole case above. And by the time clause two runs, clause one has already
+ * refused every foreign name that *arrived*, so anything foreign still standing
+ * in `after` was in `before` too — put there by an act this gate judged, on a
+ * sentence that is now being replaced under it.
+ *
  * ## What this closes without an FK
  *
  * `reattribute { owner: <a uuid that is no user> }` is refused by this too, and
@@ -351,22 +423,56 @@ export function selfStagedReadingRefusal(input: {
  * literally — or the object is retracted and re-staged, and a *second* person
  * accepts the re-reading. The two-person path is the point; the one-person path
  * was the defect.
+ *
+ * Clause two costs the same thing one field over, and it is the larger of the
+ * two: **"the interpreter garbled Bob's sentence" can no longer be tidied by a
+ * colleague either.** That reads like a loss until you notice what the tidying
+ * does — a correction is human-only, so it sets `humanTouchedAt` and the object
+ * becomes `✓`. A third party rewording a machine's reading of Bob's words does
+ * not fix an attribution, it *ratifies* one, and it ratifies whatever it just
+ * typed. The route the gauntlet drove through an accepted commitment runs
+ * identically through a `~` claim, and comes out the same way: a verified
+ * sentence in Bob's name that Bob never wrote. So the affordance and the defect
+ * were one affordance. Bob refines his own reading — which is the correction
+ * the product most needs and the one this keeps — and anybody else retracts it
+ * and stages a re-reading a second person accepts.
  */
 export function correctionAttributionRefusal(input: {
   actor: Actor;
   objectId: string;
   action: string;
-  /** Who the object named before this correction. */
-  before: readonly string[];
-  /** Who it would name after it. */
-  after: readonly string[];
+  /**
+   * The object as the room reads it now, and as the plan would leave it.
+   *
+   * Whole objects rather than pre-computed name sets: both questions this gate
+   * asks — *who does this name* and *what does it say* — are answered here, by
+   * `payloadAttributions` and `objectStatement`, so no caller can answer either
+   * one differently. See the header.
+   */
+  before: AcceptedObject;
+  after: AcceptedObject;
 }): string | null {
   const { actor, before, after } = input;
-  const arriving = after.filter((userId) => !before.includes(userId));
-  const foreign = arriving.filter((userId) => actor.kind !== 'human' || userId !== actor.userId);
-  const named = foreign[0];
-  if (named === undefined) return null;
-  return `${actorName(actor)} applied "${input.action}" to object "${input.objectId}", putting user "${named}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a correction is one person's act with no second party in it, so it may only put that person's own name on something. It waits for "${named}" to take it, or retract this and stage a reading somebody else can accept`;
+  const isForeign = (userId: string): boolean => actor.kind !== 'human' || userId !== actor.userId;
+
+  const namedBefore = payloadAttributions(before.type, before.payload);
+  const namedAfter = payloadAttributions(after.type, after.payload);
+
+  // Clause one: a name arriving on a sentence.
+  const arriving = namedAfter.filter((userId) => !namedBefore.includes(userId)).filter(isForeign);
+  const gained = arriving[0];
+  if (gained !== undefined) {
+    return `${actorName(actor)} applied "${input.action}" to object "${input.objectId}", putting user "${gained}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a correction is one person's act with no second party in it, so it may only put that person's own name on something. It waits for "${gained}" to take it, or retract this and stage a reading somebody else can accept`;
+  }
+
+  // Clause two: a sentence arriving under a name. `TEXT_FIELD`, via
+  // `objectStatement`, is what makes this comparable across a retype's key
+  // rename — the text is the same string whether it is a `statement` or a
+  // `question`.
+  if (objectStatement(after) === objectStatement(before)) return null;
+  const quoted = namedAfter.filter(isForeign)[0];
+  if (quoted === undefined) return null;
+  return `${actorName(actor)} applied "${input.action}" to object "${input.objectId}", rewording a sentence that stands under user "${quoted}"'s name — nobody gets committed, or quoted, by someone else's sentence (#4), and a correction is one person's act with no second party in it, so it may only reword a sentence that names nobody but that person. It waits for "${quoted}" to reword it, or retract this and stage a reading somebody else can accept`;
 }
 
 /** A short name for a proposer, for refusal texts. */
