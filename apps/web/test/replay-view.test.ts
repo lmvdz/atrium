@@ -615,6 +615,15 @@ describe('live room view', () => {
     expect(loader).toContain('loadedThrough: roomCursor[0]?.loadedThrough ?? 0');
     expect(loader).toContain('loadReceipt: randomUUID()');
     expect(loader).toContain('.where(eq(coreEvents.roomId, roomId))');
+    /**
+     * Mutation: remove the repeatable-read boundary around the loader. The
+     * parallel proposal/object/attention reads can then publish an attention
+     * subject whose semantic record came from the preceding database fold.
+     */
+    expect(loader).toContain("{ isolationLevel: 'repeatable read', accessMode: 'read only' }");
+    expect(loader.indexOf('database.transaction(')).toBeLessThan(
+      loader.indexOf('loadReplayDataSnapshot('),
+    );
   });
 
   /**

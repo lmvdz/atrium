@@ -92,6 +92,31 @@ describe('deterministic acceptance provider', () => {
     expect(result.output.readings[0]?.text).toBe('Objective: Preserve the exact receipt.');
   });
 
+  /**
+   * Mutation: treat the visible `Mention for` request marker as ordinary prose.
+   * The live mention would then have no accepted object to attach its attention
+   * signal to, even though the exact authored request reached the worker.
+   */
+  it('extracts the semantic reading carried by an explicit mention request', async () => {
+    const body = `Mention for ${owner}: Open question: Which trace proves catch-up?`;
+    const result = await createAcceptanceProvider().generate({
+      model: ACCEPTANCE_MODEL,
+      system: '',
+      prompt: '',
+      sourceMessages: sourceMessages([decision, author, body]),
+    });
+    expect(result.output.readings).toEqual([
+      {
+        type: 'open_question',
+        text: body,
+        subject: null,
+        confidence: 0.95,
+        quote: body,
+        messageIds: [decision],
+      },
+    ]);
+  });
+
   /** Mutation: accept a routed gateway model and create a false zero-cost receipt. */
   it('refuses every model id except its exact deterministic receipt id', async () => {
     await expect(

@@ -26,6 +26,21 @@ import { and, asc, desc, eq, inArray } from 'drizzle-orm';
  * message, an acceptance, or a provenance edge that is absent here.
  */
 export async function loadReplayData(database: Database, roomId: string) {
+  return database.transaction(
+    async (transaction) =>
+      // Drizzle's transaction handle deliberately omits the ability to begin a
+      // nested transaction, but exposes the same schema-bound query surface
+      // this loader uses. Keeping the cast at this boundary prevents any caller
+      // from accidentally treating the handle as a general Database.
+      loadReplayDataSnapshot(transaction as unknown as Database, roomId),
+    // CATCHES: publishing an attention row from the new fold beside proposals
+    // or accepted objects read from the prior fold. A live refresh must render
+    // one database fact, not a READ COMMITTED collage of consecutive facts.
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
+}
+
+async function loadReplayDataSnapshot(database: Database, roomId: string) {
   const [room] = await database
     .select({
       id: rooms.id,

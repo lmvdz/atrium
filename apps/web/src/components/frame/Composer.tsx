@@ -64,6 +64,9 @@ export interface ComposerProps {
   readonly onSend?: (draft: string) => void;
   readonly onAttach?: (file: File) => void;
   readonly attachmentNote?: string;
+  /** Explicit request targeting; choosing one inserts the visible authored marker. */
+  readonly mentionTargets?: readonly { readonly id: string; readonly label: string }[];
+  readonly onMention?: (userId: string) => void;
   /** A replay may permit only a bound answer, never free historical chat. */
   readonly disabled?: boolean;
 }
@@ -80,6 +83,8 @@ export function Composer({
   onSend,
   onAttach,
   attachmentNote,
+  mentionTargets = [],
+  onMention,
   disabled = false,
 }: ComposerProps) {
   const own = useRef<HTMLTextAreaElement | null>(null);
@@ -223,6 +228,29 @@ export function Composer({
       {binding.mode === 'replying' ? (
         <ReplyBanner onCancel={onCancelBinding} to={binding.to} />
       ) : null}
+
+      {binding.mode !== 'free' || mentionTargets.length === 0 || onMention === undefined ? null : (
+        <label className={styles.mentionBar}>
+          <span className="atr-lbl">MENTION</span>
+          <select
+            aria-label="Mention a person"
+            disabled={disabled}
+            onChange={(event) => {
+              if (event.target.value) onMention(event.target.value);
+              event.target.value = '';
+            }}
+            defaultValue=""
+          >
+            <option value="">Choose a person…</option>
+            {mentionTargets.map((target) => (
+              <option key={target.id} value={systemText(target.id, 'Composer mention target id')}>
+                {systemText(target.label, 'Composer mention target')}
+              </option>
+            ))}
+          </select>
+          <span data-voice="system">inserts a visible request marker; remove it to cancel</span>
+        </label>
+      )}
 
       {/* `data-composer-box` names the element whose BORDER is the binding cue,
           so the rendered non-text-graphic audit can measure it by something

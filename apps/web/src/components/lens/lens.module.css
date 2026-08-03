@@ -466,11 +466,27 @@
 }
 
 .rcFootNote {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: inherit;
   font-size: 10px;
   color: var(--tx2);
   flex: 1;
   line-height: 1.4;
+}
+
+.rcAccept,
+.rcAccept label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rcAccept select {
+  max-width: 180px;
+  border: 1px solid var(--line2);
+  background: var(--bg1);
+  color: var(--tx0);
+  font: inherit;
+  font-size: 10px;
 }
 
 .rcSupersede {

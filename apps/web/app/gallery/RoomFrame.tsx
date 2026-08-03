@@ -33,8 +33,8 @@ import {
   surfaceIndicators,
   systemText,
   Timeline,
-  WorkspaceSpacer,
   WorkspaceMark,
+  WorkspaceSpacer,
   WorkspaceTile,
   WorkspaceYou,
 } from '../../src/components';
@@ -92,7 +92,7 @@ export interface RoomFrameHandlers {
   readonly onCloseReceipt?: () => void;
   readonly onReopen?: (receiptId: string) => void;
   readonly onRetypeToClaim?: (receiptId: string) => void;
-  readonly onAcceptReceipt?: (receiptId: string) => void;
+  readonly onAcceptReceipt?: (receiptId: string, objectiveId: string | null) => void;
   readonly onAnswerReceipt?: (receiptId: string) => void;
   readonly onSupersedeReceipt?: (retiredObjectId: string, replacementObjectId: string) => void;
   readonly onJumpToMessage?: (messageId: string) => void;
@@ -132,6 +132,7 @@ export interface RoomFrameHandlers {
   readonly composerRef?: Ref<HTMLTextAreaElement>;
   readonly onSend?: (draft: string) => void;
   readonly onAttach?: (file: File) => void;
+  readonly onMention?: (userId: string) => void;
   readonly attachmentNote?: string;
   readonly onCancelBinding?: () => void;
 }
@@ -173,6 +174,8 @@ export interface RoomFrameProps {
   readonly receipt?: ReceiptRecord;
   readonly supersessionCandidates?: readonly StateObject[];
   readonly pendingReplacementId?: string;
+  readonly acceptObjectives?: readonly { readonly id: string; readonly label: string }[];
+  readonly mentionTargets?: readonly { readonly id: string; readonly label: string }[];
   readonly boxed?: boolean;
   readonly label?: string;
   readonly handlers?: RoomFrameHandlers;
@@ -217,6 +220,7 @@ function Frame(props: RoomFrameProps) {
                     onBack={on.onCloseReceipt}
                     onJump={on.onJumpToMessage}
                     onAccept={on.onAcceptReceipt}
+                    acceptObjectives={props.acceptObjectives}
                     onAnswer={on.onAnswerReceipt}
                     onReopen={on.onReopen}
                     onRetypeToClaim={on.onRetypeToClaim}
@@ -330,6 +334,8 @@ function Frame(props: RoomFrameProps) {
             onKeyDown={on.onComposerKeyDown}
             onSend={on.onSend}
             onAttach={on.onAttach}
+            onMention={on.onMention}
+            mentionTargets={props.mentionTargets}
             attachmentNote={on.attachmentNote}
             roomName={props.room.name}
             textareaRef={on.composerRef}

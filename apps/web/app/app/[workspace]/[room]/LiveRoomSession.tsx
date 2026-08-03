@@ -240,6 +240,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         (object) => object.id !== receiptObject.id && acceptedActiveIds.has(object.id),
       )
     : [];
+  const acceptObjectives = objectives
+    .filter((objective) => objective.status !== 'proposed')
+    .map((objective) => ({ id: objective.id, label: objective.title }));
+  const mentionTargets = view.humans
+    .filter((human) => human.id !== viewerId)
+    .map((human) => ({ id: human.id, label: human.name }));
   const owed = view.attention.filter((item) => needsViewer(item.state)).length;
   const subscribed = live.subscribed && connection === 'open';
   const unreadFilterScope = view.entries.find((entry) => entry.type === 'since-you-left')?.entryIds;
@@ -303,6 +309,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
       data-room-id={roomId}
     >
       <RoomFrame
+        acceptObjectives={acceptObjectives}
         attention={view.attention}
         binding={binding}
         boxed={false}
@@ -374,6 +381,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
                 setUploading(pendingUploads.current > 0);
               });
           },
+          onMention: (userId) => {
+            setDraft((current) => {
+              const withoutPrior = current.replace(/^Mention for [0-9a-f-]{36}:\s*/, '');
+              return `Mention for ${userId}: ${withoutPrior}`;
+            });
+          },
           attachmentNote,
           onCancelBinding: () => {
             if (boundSubmission === null) setBinding({ mode: 'free' });
@@ -420,7 +433,14 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               jumpToMessage(record.id);
             }
           },
-          onAcceptReceipt: (proposalId) => clientRef.current?.acceptProposal(roomId, proposalId),
+          onAcceptReceipt: (proposalId, objectiveId) => {
+            const proposal = data.proposals.find((candidate) => candidate.id === proposalId);
+            clientRef.current?.acceptProposal(
+              roomId,
+              proposalId,
+              proposal?.type === 'objective' ? null : objectiveId,
+            );
+          },
           onRetypeToClaim: (objectId) =>
             clientRef.current?.correctObject(roomId, objectId, 'retype', { toType: 'claim' }),
           onReopen: (objectId) => clientRef.current?.correctObject(roomId, objectId, 'reopen'),
@@ -460,7 +480,17 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             const subjectId = subjectByAttention.get(attentionId);
             if (!item || !subjectId) return;
             if (actionId === 'confirm') {
-              clientRef.current?.acceptProposal(roomId, subjectId);
+              const proposal = data.proposals.find((candidate) => candidate.id === subjectId);
+              if (proposal?.type === 'objective') {
+                clientRef.current?.acceptProposal(roomId, subjectId);
+              } else {
+                // A temporary view with no accepted objective options must not
+                // turn confirmation into an unfiled acceptance. Open the
+                // persisted proposal receipt; a projection refresh can add the
+                // filing choices without changing the person's action.
+                setReceiptId(subjectId);
+                setFocused('current-state');
+              }
               return;
             }
             if (actionId === 'decline') {
@@ -468,6 +498,11 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               return;
             }
             if (actionId === 'answer') {
+              const proposal = data.proposals.find((candidate) => candidate.id === subjectId);
+              if (proposal?.type === 'objective') {
+                clientRef.current?.acceptProposal(roomId, subjectId);
+                return;
+              }
               const subject = view.objects.find((candidate) => candidate.id === subjectId);
               if (subject?.kind !== 'question') {
                 setReceiptId(subjectId);
@@ -490,6 +525,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         label="live"
         lastCheck={view.updatedAt}
         messages={view.records}
+        mentionTargets={mentionTargets}
         objectives={objectives}
         objects={view.objects}
         openAttentionId={openAttentionId}

@@ -20,7 +20,10 @@ export function ThemeToggle() {
   }, []);
 
   const toggle = () => {
-    const next = !dark;
+    // Read the binding source at the instant of action. The pre-paint bootstrap,
+    // browser history and another same-page control can all change the class
+    // without changing this component's last render.
+    const next = !document.documentElement.classList.contains('atr-dark');
     setDark(next);
     document.documentElement.classList.toggle('atr-dark', next);
     try {

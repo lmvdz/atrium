@@ -624,7 +624,7 @@ function reasonFor(reason: ReplayData['attention'][number]['reason'], viewer: st
     case 'question_names_you':
       return `${viewer} is named on this open question`;
     case 'mention':
-      return `${viewer} was named in a message asking for attention`;
+      return `${viewer} has a direct request routed here for action`;
     case 'reading_pending':
       return `a machine staged this as a ${reason.proposedType}; a person must file or decline it`;
   }

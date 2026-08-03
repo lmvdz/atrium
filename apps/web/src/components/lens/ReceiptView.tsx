@@ -38,7 +38,9 @@ export type ReceiptViewProps = {
   readonly onBack?: () => void;
   readonly onReopen?: (receiptId: string) => void;
   readonly onRetypeToClaim?: (receiptId: string) => void;
-  readonly onAccept?: (receiptId: string) => void;
+  readonly onAccept?: (receiptId: string, objectiveId: string | null) => void;
+  /** Accepted objectives a staged child can be filed under. Empty for objectives themselves. */
+  readonly acceptObjectives?: readonly { readonly id: string; readonly label: string }[];
   readonly onAnswer?: (receiptId: string) => void;
   readonly onJump?: (messageId: string) => void;
   readonly supersessionCandidates?: readonly {
@@ -57,6 +59,7 @@ export function ReceiptView({
   onReopen,
   onRetypeToClaim,
   onAccept,
+  acceptObjectives = [],
   onAnswer,
   onJump,
   supersessionCandidates = [],
@@ -64,6 +67,7 @@ export function ReceiptView({
   onSupersede,
 }: ReceiptViewProps) {
   const [replacementId, setReplacementId] = useState<string | null>(pendingReplacementId ?? null);
+  const [acceptObjectiveId, setAcceptObjectiveId] = useState('');
   const replacement = supersessionCandidates.find((candidate) => candidate.id === replacementId);
   return (
     <section
@@ -188,13 +192,35 @@ export function ReceiptView({
         </span>
         <span>
           {receipt.acceptable === true && onAccept !== undefined ? (
-            <button
-              className="atr-btn atr-btn-sm"
-              onClick={() => onAccept(receipt.id)}
-              type="button"
-            >
-              Accept reading
-            </button>
+            <span className={styles.rcAccept}>
+              {acceptObjectives.length === 0 ? null : (
+                <label>
+                  <span className="atr-lbl">FILE UNDER</span>
+                  <select
+                    aria-label="File accepted reading under"
+                    onChange={(event) => setAcceptObjectiveId(event.target.value)}
+                    value={acceptObjectiveId}
+                  >
+                    <option value="">Unfiled</option>
+                    {acceptObjectives.map((objective) => (
+                      <option
+                        key={objective.id}
+                        value={systemText(objective.id, 'ReceiptView objective id')}
+                      >
+                        {systemText(objective.label, 'ReceiptView objective label')}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <button
+                className="atr-btn atr-btn-sm"
+                onClick={() => onAccept(receipt.id, acceptObjectiveId || null)}
+                type="button"
+              >
+                Accept reading
+              </button>
+            </span>
           ) : null}
           {receipt.answerable === true && onAnswer !== undefined ? (
             <button

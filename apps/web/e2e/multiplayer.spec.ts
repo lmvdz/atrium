@@ -110,6 +110,34 @@ async function eventually<T>(
     .toBe(true);
 }
 
+async function actOnAttention(page: Page, attentionId: string, action: string): Promise<void> {
+  const pin = page.getByRole('region', { name: 'Needs you' });
+  const visited = new Set<string>();
+  for (;;) {
+    const item = pin.locator(`[data-attention-id="${attentionId}"]`);
+    if ((await item.count()) > 0) {
+      const control = item.getByRole('button', { name: action, exact: true });
+      await expect(control).toBeVisible();
+      if ((await control.getAttribute('data-hold')) !== null) {
+        await control.hover();
+        await page.mouse.down();
+        await page.waitForTimeout(2_100);
+        await page.mouse.up();
+      } else {
+        await control.click();
+      }
+      return;
+    }
+    const next = pin.locator('[data-pin-overflow]');
+    if ((await next.count()) === 0) break;
+    const pageNumber = await next.getAttribute('data-pin-page');
+    if (pageNumber === null || visited.has(pageNumber)) break;
+    visited.add(pageNumber);
+    await next.click();
+  }
+  throw new Error(`attention item ${attentionId} is not reachable through the live pin`);
+}
+
 test.describe
   .serial('Phase 2 multiplayer acceptance', () => {
     requireBrowser();
@@ -238,7 +266,18 @@ test.describe
         await absentee.goto('/app');
 
         for (const message of manifest.messages.slice(40, 160)) {
-          if (message.attachment) {
+          if (message.mention !== null) {
+            const sender = pages[message.author] as Page;
+            const targetId = users[message.mention];
+            const prefix = `Mention for ${targetId}: `;
+            await sender.getByLabel('Mention a person').selectOption(targetId);
+            const composer = sender.getByRole('textbox', { name: 'Message #general' });
+            await expect(composer).toHaveValue(prefix);
+            await composer.click();
+            await composer.press('End');
+            await composer.type(message.body.slice(prefix.length));
+            await sender.getByRole('button', { name: 'Send' }).click();
+          } else if (message.attachment) {
             const sender = pages[message.author] as Page;
             await sender.getByLabel('Choose an attachment').setInputFiles({
               name: `trace-${runId}.txt`,
@@ -297,10 +336,12 @@ test.describe
         >`
           SELECT a.id::text, a.subject_kind AS "subjectKind", p.id::text AS "proposalId",
                  p.status::text AS "proposalStatus", a.reason->>'kind' AS "reasonKind",
-                 COALESCE(p.payload->>'statement', p.payload->>'question', p.payload->>'title')
+                 COALESCE(p.payload->>'statement', p.payload->>'question', p.payload->>'title',
+                          o.payload->>'statement', o.payload->>'question', o.payload->>'title')
                    AS statement
           FROM attention_items a
           LEFT JOIN proposals p ON p.room_id=a.room_id AND p.id=a.subject_id
+          LEFT JOIN accepted_objects o ON o.room_id=a.room_id AND o.id=a.subject_id
           WHERE a.room_id=${roomId}::uuid AND a.user_id=${users[4]}::uuid
             AND a.status='pending'
           ORDER BY a.id
@@ -326,6 +367,11 @@ test.describe
                   : 'reading_pending',
             statement: message.body,
           }))
+          .concat(
+            manifest.messages
+              .filter((message) => message.mention === manifest.absentee)
+              .map((message) => ({ reasonKind: 'mention', statement: message.body })),
+          )
           .sort((left, right) => left.statement.localeCompare(right.statement));
         expect(
           pendingAttention
@@ -384,12 +430,24 @@ test.describe
         const objectiveProposals = pending.filter((proposal) => proposal.type === 'objective');
         expect(objectiveProposals).toHaveLength(2);
         for (const proposal of objectiveProposals) {
-          await scenarioCommand(pages[0] as Page, {
-            name: 'accept_proposal',
-            roomId,
-            proposalId: proposal.id,
-            objectiveId: null,
-          });
+          const actor = pages[0] as Page;
+          const [attention] = await sql<{ id: string }[]>`
+            SELECT id::text FROM attention_items
+            WHERE room_id=${roomId}::uuid AND subject_id=${proposal.id}::uuid
+              AND user_id=${users[0]}::uuid AND status='pending'
+          `;
+          if (!attention) throw new Error(`objective ${proposal.id} has no live attention route`);
+          await actOnAttention(actor, attention.id, 'answer');
+          await eventually(
+            async () =>
+              String(
+                (
+                  await sql`SELECT status::text FROM proposals WHERE room_id=${roomId}::uuid AND id=${proposal.id}::uuid`
+                )[0]?.status ?? '',
+              ),
+            (status) => status === 'accepted',
+            `objective ${proposal.id} to be accepted through the live receipt`,
+          );
         }
         await eventually(
           async () =>
@@ -424,13 +482,26 @@ test.describe
             );
           }
           const actor = proposal.type === 'commitment' ? absentee : (pages[0] as Page);
-          await scenarioCommand(actor, {
-            name: 'accept_proposal',
-            roomId,
-            proposalId: proposal.id,
-            objectiveId: objectiveIds[fixture.objective] as string,
-          });
           const expectedObjectiveId = objectiveIds[fixture.objective] as string;
+          const actorId = proposal.type === 'commitment' ? users[manifest.absentee] : users[0];
+          const [attention] = await sql<{ id: string }[]>`
+            SELECT id::text FROM attention_items
+            WHERE room_id=${roomId}::uuid AND subject_id=${proposal.id}::uuid
+              AND user_id=${actorId}::uuid AND status='pending'
+          `;
+          if (!attention)
+            throw new Error(`${proposal.type} ${proposal.id} has no live attention route`);
+          await actOnAttention(
+            actor,
+            attention.id,
+            proposal.type === 'commitment' ? 'confirm' : 'answer',
+          );
+          const receipt = actor.locator(`[data-receipt-id="${proposal.id}"]`);
+          await expect(receipt).toBeVisible();
+          await receipt
+            .getByRole('combobox', { name: 'File accepted reading under' })
+            .selectOption(expectedObjectiveId);
+          await receipt.getByRole('button', { name: 'Accept reading' }).click();
           await eventually(
             async () =>
               (

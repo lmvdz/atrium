@@ -3,6 +3,7 @@ import {
   AttentionItem,
   attentionItemId,
   type CoreState,
+  type MentionSignal,
   type ProvenanceMessage,
   projectAttention,
   reconcileAttention,
@@ -41,6 +42,7 @@ export async function reconcileStoredAttention(input: {
     now: input.now,
     members: { [input.roomId]: memberRows },
     messages: input.messages,
+    mentions: mentionSignals(input.state, input.roomId, input.messages, memberRows),
   });
   const reconciled = reconcileAttention(stored, projection);
 
@@ -76,4 +78,35 @@ export async function reconcileStoredAttention(input: {
   });
 
   return { ...projection, items: reconciled };
+}
+
+/**
+ * Explicit composer mentions, attached to accepted objects borne by the same
+ * authored message. `Mention for <user-id>:` is an opt-in request marker, not
+ * a scan for bare names; the request remains the author's verbatim suffix.
+ */
+export function mentionSignals(
+  state: CoreState,
+  roomId: string,
+  messages: readonly ProvenanceMessage[],
+  memberIds: readonly string[],
+): MentionSignal[] {
+  const members = new Set(memberIds);
+  const mentioned = new Map<string, { userId: string; request: string }>();
+  for (const message of messages) {
+    const match = /^Mention for ([0-9a-f-]{36}): (\S[^\r\n]*)$/.exec(message.body);
+    if (match?.[1] && match[2] && members.has(match[1])) {
+      mentioned.set(message.id, { userId: match[1], request: match[2] });
+    }
+  }
+
+  return Object.values(state.objects).flatMap((record) => {
+    if (record.object.roomId !== roomId) return [];
+    return record.object.provenance.messageIds.flatMap((messageId) => {
+      const signal = mentioned.get(messageId);
+      return signal
+        ? [{ roomId, objectId: record.object.id, userId: signal.userId, request: signal.request }]
+        : [];
+    });
+  });
 }

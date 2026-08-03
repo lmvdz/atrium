@@ -54,6 +54,10 @@ export const serverDir = join(repoRoot, 'apps', 'server');
 export function serverEnvironment() {
   return {
     NODE_ENV: 'development',
+    // The injected Next development control sits over WIRE's bottom-left
+    // workspace strip. It is framework chrome, absent from production, and
+    // must not intercept product controls during browser acceptance.
+    ATRIUM_E2E: '1',
     DATABASE_URL: databaseUrl,
     BETTER_AUTH_SECRET: authSecret,
     APP_URL: appUrl,

@@ -365,6 +365,12 @@ jobs:
         # over zero executed browser tests.
         run: pnpm --filter @atrium/web exec node ../../scripts/ci/assert-chromium.mjs
 
+      - name: Prepare the e2e database and object store
+        # Playwright starts both application servers before global setup. The
+        # same preparer used by `pnpm test:e2e` must therefore run first on a
+        # clean runner; without it the browser gate is present but cannot boot.
+        run: pnpm --filter @atrium/web exec node e2e/support/ensure-database.mjs
+
       - name: Reset the e2e report
         run: |
           set -euo pipefail
@@ -376,7 +382,7 @@ jobs:
           # Absolute: the json reporter resolves this against the Playwright
           # process's own cwd, which is apps/web here, not the repo root.
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/playwright-report.json
-        run: pnpm --filter @atrium/web exec playwright test --reporter=list,json
+        run: pnpm --filter @atrium/web exec playwright test --workers=2 --reporter=list,json
 
       - name: Assert the e2e suite actually ran
         # Per project, against .github/ci-manifest.json, and rejecting every

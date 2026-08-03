@@ -16,6 +16,7 @@ const nextConfig: NextConfig = {
   // Dev-only: keeps client assets served when the browser reaches the dev
   // server by IP (Playwright, a phone on the LAN) instead of `localhost`.
   allowedDevOrigins: ['localhost', '127.0.0.1'],
+  devIndicators: process.env.ATRIUM_E2E === '1' ? false : undefined,
   // These load drivers and crypto at runtime; bundling them into the server
   // build is at best pointless and at worst breaks them. Leave them as real
   // Node requires. (The workspace packages are deliberately *not* listed — Next

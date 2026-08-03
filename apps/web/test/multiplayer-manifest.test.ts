@@ -52,6 +52,12 @@ describe('the #27 multiplayer manifest', () => {
       [130, 'claim'],
     ]);
     expect(manifest.messages[40]?.body).toContain(users[4]);
+    /** Mutation: keep an open question but remove the explicit live mention. */
+    expect(
+      manifest.messages
+        .filter((message) => message.mention !== null)
+        .map((message) => [message.seq, message.mention]),
+    ).toEqual([[75, 4]]);
     expect(
       manifest.messages.filter((message) => message.attachment).map((message) => message.seq),
     ).toEqual([145]);

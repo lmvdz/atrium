@@ -7,6 +7,7 @@ export interface ScenarioMessage {
   clientMessageId: string;
   semantic: 'objective' | 'decision' | 'commitment' | 'open_question' | 'claim' | null;
   objective: 0 | 1 | null;
+  mention: Participant | null;
   attachment: boolean;
 }
 
@@ -38,6 +39,7 @@ export function multiplayerManifest(
     let body = `Run ${runId} message ${seq}: ordinary project discussion.`;
     let semantic: ScenarioMessage['semantic'] = null;
     let objective: ScenarioMessage['objective'] = null;
+    let mention: ScenarioMessage['mention'] = null;
     if (seq === 5) {
       body = `Objective: Run ${runId} ship reconnect correctness.`;
       semantic = 'objective';
@@ -53,8 +55,9 @@ export function multiplayerManifest(
       semantic = 'decision';
       objective = 0;
     } else if (seq === 75) {
-      body = `Open question: Run ${runId} which trace proves ordered catch-up?`;
+      body = `Mention for ${userIds[4]}: Open question: Run ${runId} which trace proves ordered catch-up?`;
       semantic = 'open_question';
+      mention = 4;
     } else if (seq === 90) {
       body = `Claim: Run ${runId} the first reconnect trace contains every committed message.`;
       semantic = 'claim';
@@ -75,6 +78,7 @@ export function multiplayerManifest(
       clientMessageId: `${runId}-message-${seq}`,
       semantic,
       objective,
+      mention,
       attachment: seq === 145,
     });
   }
