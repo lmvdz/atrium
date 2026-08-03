@@ -156,6 +156,18 @@ beforeEach(async () => {
   latest().open();
 });
 
+describe('authentication boundary', () => {
+  /**
+   * Mutation: append the caller-supplied `userId` to the WebSocket URL. That
+   * makes a local rendering key look like server authentication again and
+   * leaks it through URLs even though the upgrade is authenticated by cookie.
+   */
+  it('does not send the viewer identity in the socket URL', () => {
+    expect(latest().url).toBe('ws://test/ws');
+    expect(latest().url).not.toContain(ME);
+  });
+});
+
 describe('subscribe and catch up', () => {
   it('asks for everything it has never seen when it first joins', () => {
     client.join(ROOM);

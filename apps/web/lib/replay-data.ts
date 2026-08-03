@@ -3,6 +3,7 @@ import type { Database } from '@atrium/db';
 import {
   acceptedObjects,
   attentionItems,
+  coreEvents,
   corrections,
   interpretations,
   messages,
@@ -59,48 +60,66 @@ export async function loadReplayData(database: Database, roomId: string) {
   const messageIds = roomMessages.map((message) => message.id);
 
   const participantIds = await roomMemberIds(database, roomId);
-  const [participants, roomInterpretations, roomProposals, objects, relations, attention, fixes] =
-    await Promise.all([
-      participantIds.length === 0
-        ? Promise.resolve([])
-        : database
-            .select({ id: users.id, name: users.displayName, avatarUrl: users.avatarUrl })
-            .from(users)
-            .where(inArray(users.id, participantIds))
-            .orderBy(asc(users.displayName), asc(users.id)),
-      messageIds.length === 0
-        ? Promise.resolve([])
-        : database
-            .select()
-            .from(interpretations)
-            .where(inArray(interpretations.messageId, messageIds))
-            .orderBy(asc(interpretations.createdAt), asc(interpretations.id)),
-      database
-        .select()
-        .from(proposals)
-        .where(eq(proposals.roomId, roomId))
-        .orderBy(asc(proposals.createdAt), asc(proposals.id)),
-      database
-        .select()
-        .from(acceptedObjects)
-        .where(eq(acceptedObjects.roomId, roomId))
-        .orderBy(asc(acceptedObjects.createdAt), asc(acceptedObjects.id)),
-      database
-        .select()
-        .from(objectRelations)
-        .where(eq(objectRelations.roomId, roomId))
-        .orderBy(asc(objectRelations.createdAt), asc(objectRelations.id)),
-      database
-        .select()
-        .from(attentionItems)
-        .where(eq(attentionItems.roomId, roomId))
-        .orderBy(asc(attentionItems.createdAt), asc(attentionItems.id)),
-      database
-        .select()
-        .from(corrections)
-        .where(eq(corrections.roomId, roomId))
-        .orderBy(asc(corrections.createdAt), asc(corrections.id)),
-    ]);
+  const [
+    participants,
+    roomInterpretations,
+    roomProposals,
+    objects,
+    relations,
+    attention,
+    fixes,
+    messageEvents,
+  ] = await Promise.all([
+    participantIds.length === 0
+      ? Promise.resolve([])
+      : database
+          .select({ id: users.id, name: users.displayName, avatarUrl: users.avatarUrl })
+          .from(users)
+          .where(inArray(users.id, participantIds))
+          .orderBy(asc(users.displayName), asc(users.id)),
+    messageIds.length === 0
+      ? Promise.resolve([])
+      : database
+          .select()
+          .from(interpretations)
+          .where(inArray(interpretations.messageId, messageIds))
+          .orderBy(asc(interpretations.createdAt), asc(interpretations.id)),
+    database
+      .select()
+      .from(proposals)
+      .where(eq(proposals.roomId, roomId))
+      .orderBy(asc(proposals.createdAt), asc(proposals.id)),
+    database
+      .select()
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.roomId, roomId))
+      .orderBy(asc(acceptedObjects.createdAt), asc(acceptedObjects.id)),
+    database
+      .select()
+      .from(objectRelations)
+      .where(eq(objectRelations.roomId, roomId))
+      .orderBy(asc(objectRelations.createdAt), asc(objectRelations.id)),
+    database
+      .select()
+      .from(attentionItems)
+      .where(eq(attentionItems.roomId, roomId))
+      .orderBy(asc(attentionItems.createdAt), asc(attentionItems.id)),
+    database
+      .select()
+      .from(corrections)
+      .where(eq(corrections.roomId, roomId))
+      .orderBy(asc(corrections.createdAt), asc(corrections.id)),
+    database
+      .select({ roomSeq: coreEvents.roomSeq, payload: coreEvents.payload })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, roomId), eq(coreEvents.type, 'message_posted')))
+      .orderBy(asc(coreEvents.roomSeq)),
+  ]);
+
+  const messagePositions = messageEvents.flatMap((event) => {
+    const messageId = event.payload.messageId;
+    return typeof messageId === 'string' ? [{ messageId, roomSeq: event.roomSeq }] : [];
+  });
 
   const proposalIds = roomProposals.map((proposal) => proposal.id);
   const objectIds = objects.map((object) => object.id);
@@ -138,10 +157,15 @@ export async function loadReplayData(database: Database, roomId: string) {
     relations,
     attention,
     corrections: fixes,
+    messagePositions,
   };
 }
 
-export type ReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
+type LoadedReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
+export type ReplayData = Omit<LoadedReplayData, 'messagePositions'> & {
+  /** Optional only so hand-built unit fixtures can describe pre-ledger imports. */
+  readonly messagePositions?: LoadedReplayData['messagePositions'];
+};
 
 export async function loadReplayDataByLocation(
   database: Database,

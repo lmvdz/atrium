@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { loadRuntimeConfig } from './runtime-config.js';
-import { resolveWsUrl } from './ws-url.js';
+import { loadRuntimeConfig } from './runtime-config';
+import { resolveWsUrl } from './ws-url';
 
 /**
  * The realtime client (#12/#14/#22).
@@ -846,7 +846,12 @@ export interface RoomView {
 export type ConnectionStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed';
 
 export interface RealtimeClientOptions {
-  /** Stub identity until #26 — sent as a query parameter on the socket URL. */
+  /**
+   * The authenticated viewer, used only for optimistic reconciliation and
+   * filtering their own seen cursor. The server derives identity from the
+   * Better Auth cookie on the WebSocket upgrade; this value is not sent as
+   * authentication.
+   */
   userId: string;
   /** Override the resolved URL. Normally omitted; see `ws-url.ts`. */
   url?: string;
@@ -997,19 +1002,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   }
 
   async function resolveUrl(): Promise<string> {
-    if (options.url) return withUser(options.url);
+    if (options.url) return options.url;
     const config = await loadRuntimeConfig();
-    return withUser(resolveWsUrl(config));
-  }
-
-  /**
-   * The stub identity rides on the query string because a browser cannot set a
-   * header on a WebSocket handshake. #26 replaces this with a cookie the
-   * handshake carries on its own, and this function disappears with it.
-   */
-  function withUser(url: string): string {
-    const separator = url.includes('?') ? '&' : '?';
-    return `${url}${separator}user=${encodeURIComponent(options.userId)}`;
+    return resolveWsUrl(config);
   }
 
   function applyEntry(entry: RoomEventEnvelope): void {

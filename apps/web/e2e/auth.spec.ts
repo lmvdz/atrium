@@ -25,7 +25,15 @@ import { countMail, waitForMail } from './support/mail';
 test.describe('auth and workspaces', () => {
   requireBrowser();
 
-  test('signup, verification, workspace, invitation, shared room and presence', async ({
+  /**
+   * Mutation: keep the authenticated route on the retired presence-only frame,
+   * or wire the three-surface frame to a socket that never reaches an
+   * authorized `subscribed` state. The composer stays absent/disabled and a
+   * message written in one authenticated context never reaches the other.
+   * Mutation: derive presence from workspace membership rather than live
+   * per-user frames. Both people appear "here" before their sockets report it.
+   */
+  test('signup, verification, workspace, invitation, shared live room and presence', async ({
     browser,
   }) => {
     const founderEmail = uniqueEmail('ada');
@@ -74,16 +82,23 @@ test.describe('auth and workspaces', () => {
     // A member is not an admin: the invite form is not theirs to see.
     await expect(invitee.getByRole('button', { name: 'Send invitation' })).toHaveCount(0);
 
-    // ── presence: each sees the other ────────────────────────────────────
+    // ── live three-surface room: each sees the other ─────────────────────
     await founder.goto(`/app/${slug}/general`);
     await invitee.goto(`/app/${slug}/general`);
 
     for (const page of [founder, invitee]) {
-      await expect(page.getByTestId('presence')).toHaveAttribute('data-status', 'live');
-      await expect(page.getByTestId('presence-member')).toHaveCount(2);
-      await expect(page.getByTestId('presence')).toContainText('Ada');
-      await expect(page.getByTestId('presence')).toContainText('Grace');
+      await expect(page.locator('[data-frame="live"]')).toBeVisible();
+      await expect(page.getByRole('textbox', { name: 'Message #general' })).toBeEnabled();
+      const people = page.getByRole('navigation', { name: 'Rooms and people' });
+      await expect(people).toContainText('Ada');
+      await expect(people).toContainText('Grace');
+      await expect(people.locator('[data-presence="here"]')).toHaveCount(2);
     }
+
+    const words = `The authenticated live frame carries this message ${Date.now()}.`;
+    await founder.getByRole('textbox', { name: 'Message #general' }).fill(words);
+    await founder.getByRole('button', { name: 'Send' }).click();
+    await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(words);
 
     await founderContext.close();
     await inviteeContext.close();

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { liveRoomView } from '../lib/live-room-view';
 import type { ReplayData } from '../lib/replay-data';
 import { reopenQuestion } from '../lib/replay-transitions';
 import { replayAt, replayReceipt, replayView } from '../lib/replay-view';
@@ -472,5 +473,47 @@ describe('persisted replay view', () => {
     expect(item?.rationale).toContain('named as owner by somebody else');
     expect(item?.actions.map((action) => action.id)).toEqual(['confirm', 'decline']);
     expect(item?.actions.map((action) => action.id)).not.toContain('open');
+  });
+});
+
+describe('live room view', () => {
+  /**
+   * Mutation: compare the membership cursor with `messages.seq` (a global
+   * sequence) or put the divider at the start of the room. The participant who
+   * saw m1 but missed m2 is then told they missed the wrong transcript slice.
+   */
+  it('places the unread divider from persisted room_seq positions', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      messagePositions: [
+        { messageId: 'm1', roomSeq: 1 },
+        { messageId: 'm2', roomSeq: 4 },
+      ],
+    };
+    const view = liveRoomView(snapshot, 'alice', {
+      roomId: 'room',
+      lastSeq: 4,
+      head: 4,
+      seenSeq: 1,
+      events: [],
+      pending: [],
+      presence: { alice: 'online' },
+      typing: [],
+      subscribed: true,
+    });
+
+    expect(view.entries.map((entry) => entry.type)).toEqual([
+      'message',
+      'since-you-left',
+      'message',
+    ]);
+    expect(view.entries[1]).toMatchObject({
+      type: 'since-you-left',
+      label: 'SINCE YOU LEFT',
+      total: 1,
+      counts: { need: 0, change: 0, discussion: 1, routine: 0 },
+    });
+    expect(view.rooms[0]?.unseen).toBe(1);
+    expect(view.humans[0]?.presence).toBe('here');
   });
 });

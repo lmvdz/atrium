@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { checkOrigin, describeUnknown, guardedErrorLog, rawPathname } from '@atrium/auth';
 import { type WebSocket, WebSocketServer } from 'ws';
-import type { CommandService } from './commands.js';
+import type { CommandService, PresenceState } from './commands.js';
 import type { EventBus } from './event-bus.js';
 import { createHeadAcks } from './head-acks.js';
 import { createHub, type Hub } from './hub.js';
@@ -254,6 +254,8 @@ interface Connection {
   headers: Headers;
   /** When the resolved session stops being trusted without a re-check. */
   validUntil: number;
+  /** Ephemeral declarations made by this socket, keyed by room. */
+  presence: Map<string, { state: PresenceState; at: string }>;
 }
 
 export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
@@ -285,6 +287,28 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    * process.
    */
   const byConnectionId = new Map<string, Connection>();
+
+  function aggregatePresence(roomId: string, userId: string): PresenceState {
+    let answer: PresenceState = 'offline';
+    for (const candidate of byConnectionId.values()) {
+      if (candidate.session.userId !== userId) continue;
+      const state = candidate.presence.get(roomId)?.state;
+      if (state === 'online') return 'online';
+      if (state === 'away') answer = 'away';
+    }
+    return answer;
+  }
+
+  function publishPresence(
+    roomId: string,
+    userId: string,
+    state: PresenceState,
+    at = new Date().toISOString(),
+  ): void {
+    const frame: EphemeralFrame = { type: 'presence', roomId, userId, state, at };
+    hub.broadcast(roomId, frame);
+    bus?.relay(roomId, frame);
+  }
   const hub = createHub<ServerFrame>();
   /**
    * What each socket has acknowledged holding, per room. The head frame's only
@@ -407,6 +431,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       session: resolved,
       headers: toHeaders(request),
       validUntil: Date.now() + revalidateTtlMs,
+      presence: new Map(),
     };
     connections.set(socket, connection);
     byConnectionId.set(connection.id, connection);
@@ -434,10 +459,18 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
     });
 
     socket.on('close', (code) => {
+      const declaredRooms = [...connection.presence.keys()];
       hub.drop(connection.id);
       // Or the maps grow one entry per connection for the life of the process.
       headAcks.forget(connection.id);
       byConnectionId.delete(connection.id);
+      for (const roomId of declaredRooms) {
+        publishPresence(
+          roomId,
+          connection.session.userId,
+          aggregatePresence(roomId, connection.session.userId),
+        );
+      }
       logger.info('ws disconnected', { connectionId: connection.id, code });
     });
 
@@ -516,9 +549,15 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         await handleSubscribe(socket, connection, frame.data.roomId);
         return;
       case 'unsubscribe':
+        connection.presence.delete(frame.data.roomId);
         hub.unsubscribe(frame.data.roomId, connection.id);
         headAcks.forgetRoom(connection.id, frame.data.roomId);
         send(socket, { type: 'unsubscribed', roomId: frame.data.roomId });
+        publishPresence(
+          frame.data.roomId,
+          connection.session.userId,
+          aggregatePresence(frame.data.roomId, connection.session.userId),
+        );
         return;
       case 'ack_head':
         // No reply: this is a statement a socket makes about itself, it is only
@@ -575,6 +614,24 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         head: await ledger.head(roomId),
         seenSeq: membership.seenSeq,
       });
+      /* A subscriber must learn who was already here, not only who changes
+         after it arrives. Presence stays ephemeral: this is a snapshot of the
+         in-process socket register and writes no room event. One app server is
+         the Phase-2 deployment topology; the bus still relays later changes. */
+      const users = new Set(
+        [...byConnectionId.values()]
+          .filter((candidate) => candidate.presence.has(roomId))
+          .map((candidate) => candidate.session.userId),
+      );
+      for (const userId of users) {
+        send(socket, {
+          type: 'presence',
+          roomId,
+          userId,
+          state: aggregatePresence(roomId, userId),
+          at: new Date().toISOString(),
+        });
+      }
     } catch (error) {
       send(socket, { type: 'error', message: describe(error) });
     }
@@ -666,18 +723,17 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
           return;
         }
         case 'presence': {
-          const frame: EphemeralFrame = {
-            type: 'presence',
-            roomId: result.roomId,
-            userId: result.userId,
-            state: result.state,
-            at: result.at,
-          };
-          hub.broadcast(result.roomId, frame);
+          if (result.state === 'offline') connection.presence.delete(result.roomId);
+          else connection.presence.set(result.roomId, { state: result.state, at: result.at });
+          publishPresence(
+            result.roomId,
+            result.userId,
+            aggregatePresence(result.roomId, result.userId),
+            result.at,
+          );
           // Relayed, not evented. Presence is still never written to the
           // ledger (#14, asserted by a flood test) — the bus carries the frame
           // itself, because there is nothing durable to read it back from.
-          bus?.relay(result.roomId, frame);
           ackEphemeral(socket, commandId, result.roomId);
           return;
         }

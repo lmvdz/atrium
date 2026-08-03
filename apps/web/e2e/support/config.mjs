@@ -49,7 +49,10 @@ export function serverEnvironment() {
     BETTER_AUTH_SECRET: authSecret,
     APP_URL: appUrl,
     ATRIUM_MAIL_OUTBOX: mailOutbox,
-    NEXT_PUBLIC_WS_URL: `ws://localhost:${serverPort}/ws`,
+    // Runtime configuration, not a value baked into the client bundle. Mutating
+    // this back to NEXT_PUBLIC_WS_URL strands the live frame on same-origin
+    // `/ws`, where the Next process has no WebSocket server.
+    ATRIUM_WS_URL: `ws://localhost:${serverPort}/ws`,
     SERVER_PORT: String(serverPort),
     SERVER_HOST: '127.0.0.1',
     LOG_LEVEL: 'warn',
