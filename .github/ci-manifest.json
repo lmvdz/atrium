@@ -12,19 +12,10 @@
     "file on origin/main.",
     "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
     "target: the point is to catch a suite that shrank, not to go red every time a test is",
-    "renamed away.",
-    "",
-    "ORIGIN OF THIS FILE ON THIS BRANCH (#26 auth, round 6). The gate scripts and the",
-    "workflow live on `fix/ci-r6`, not here and not yet on main; this file is that branch's",
-    "manifest with the two workspaces #26 created enrolled into it. It is here rather than",
-    "left for whoever merges because the branch that adds a workspace is the branch that",
-    "knows what its floor should be, and because `assert-workspace-enrollment.mjs` fails on",
-    "a workspace that is present and undeclared — which, on the merged tree, `packages/auth`",
-    "and the new `apps/web` Vitest project both are. Both branches add this path, so the",
-    "merge is a conflict on one file: take this version, it is the superset.",
-    "",
-    "Counted from a real run of this branch (pnpm test: 637 tests, 30 files):",
-    "core 129, db 23, auth 219, ingest 150, server 104, web 12."
+    "renamed away. Recalibrated when the reviewed fix/ci-r6 lane joined Phase 2:",
+    "the combined tree runs more than 3,000 unit tests, including 676 web tests and",
+    "171 root mutation-ledger tests. Existing package floors remain owned by their",
+    "lanes; the new web, mutants, total and Playwright floors are measured here."
   ],
   "vitest": {
     "workspaces": {
@@ -34,7 +25,11 @@
       },
       "apps/web": {
         "project": "web",
-        "minTests": 10
+        "minTests": 650
+      },
+      "mutants": {
+        "project": "mutants",
+        "minTests": 160
       },
       "packages/auth": {
         "project": "auth",
@@ -54,15 +49,15 @@
       }
     },
     "exempt": {},
-    "minTotalTests": 600
+    "minTotalTests": 2900
   },
   "playwright": {
     "projects": {
       "chromium": {
-        "minTests": 2
+        "minTests": 160
       }
     },
-    "minTotalTests": 2
+    "minTotalTests": 160
   },
   "ratchet": {
     "_comment": [
@@ -87,11 +82,11 @@
       "reason stopped being true, and `assert-vitest-report.mjs` fails a project that runs",
       "while unenrolled, so leaving it exempt would have been red rather than quiet.",
       "",
-      "Other workspaces' floors are left exactly as `fix/ci-r6` calibrated them, even where",
+      "Other package floors are left exactly as `fix/ci-r6` calibrated them, even where",
       "this branch's counts are far above them (db 23 vs 10, server 104 vs 22). Raising",
       "somebody else's floor from a branch they cannot see is how a ratchet ends up encoding",
-      "one branch's tree as everyone's minimum. `minTotalTests` is the one shared number",
-      "that had to move — 300 would be a loss detector that never fires against 637."
+      "one branch's tree as everyone's minimum. Web, mutants, the shared total and Playwright",
+      "did have to move: the old values predated Phase 2 and would no longer detect a lost lane."
     ],
     "justifications": {}
   }
