@@ -35,12 +35,25 @@
   color: var(--tx0);
 }
 
+/* The account bar owns the grid's first row. A full product frame in the
+   second row must fill the remaining track, not ask for a second 100vh below
+   that bar. The replay and pin routes add one semantic wrapper around the
+   frame, so both direct forms are named here. */
+.app > :last-child {
+  min-height: 0;
+}
+
+.app > :global([data-frame]),
+.app > :last-child > :global([data-frame]) {
+  height: 100%;
+}
+
 .topbar {
   display: flex;
   align-items: center;
   gap: var(--sp-4);
   padding: var(--sp-3) var(--sp-5);
-  background: var(--strip);
+  background: var(--bg1);
   border-bottom: 1px solid var(--line);
 }
 
@@ -49,7 +62,7 @@
   font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: var(--stileac);
+  color: var(--tx0);
   text-decoration: none;
 }
 
@@ -70,19 +83,19 @@
 .accountLink {
   font-family: var(--font-mono);
   font-size: var(--fs-row);
-  color: var(--stx);
+  color: var(--tx1);
   text-decoration: none;
 }
 
 .accountLink:hover {
-  color: var(--stileac);
+  color: var(--grn2);
 }
 
 .accountButton {
   padding: 0;
   border: none;
   background: none;
-  color: var(--stx);
+  color: var(--tx1);
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   letter-spacing: var(--ls-label);
@@ -91,5 +104,5 @@
 }
 
 .accountButton:hover {
-  color: var(--stileac);
+  color: var(--grn2);
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ReplayData } from '../lib/replay-data';
-import { replayAt, replayView } from '../lib/replay-view';
+import { reopenQuestion } from '../lib/replay-transitions';
+import { replayAt, replayReceipt, replayView } from '../lib/replay-view';
 
 const at = new Date('2026-08-02T12:00:00.000Z');
 
@@ -85,5 +86,162 @@ describe('persisted replay view', () => {
     if (view.entries[2]?.type !== 'message') throw new Error('third row is not a message');
     expect(view.entries[2].replyTo?.messageId).toBe('m1');
     expect(view.room.members).toEqual(['alice']);
+  });
+
+  /**
+   * Mutation: resolve the first answer edge or the first claim source rather
+   * than the exact relation retained by the reopen transition. The receipt
+   * quotes m2 instead of the answer selected by relation-good.
+   */
+  it('resolves a reopened question through its retained answer relation', () => {
+    const snapshot = data();
+    snapshot.messages.push({
+      id: 'm3',
+      seq: 3,
+      authorId: 'alice',
+      author: 'alice',
+      body: 'The retained answer is the background regeneration claim.',
+      replyToId: 'm1',
+      attachments: [],
+      createdAt: new Date('2026-08-02T12:02:00.000Z'),
+    });
+    snapshot.objects.push(
+      {
+        id: 'question',
+        roomId: 'room',
+        type: 'open_question',
+        payload: { question: 'Should regeneration happen in the background?', status: 'answered' },
+        objectiveId: null,
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: 'alice',
+        createdAt: at,
+        updatedAt: at,
+      },
+      ...(['wrong-answer', 'retained-answer'] as const).map((id, index) => ({
+        id,
+        roomId: 'room',
+        type: 'claim' as const,
+        payload: {
+          statement:
+            index === 0
+              ? 'Yes, while the previous page remains available.'
+              : 'The retained answer is the background regeneration claim.',
+          claimant: 'alice',
+          verification: 'unverified' as const,
+        },
+        objectiveId: null,
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: 'alice',
+        createdAt: at,
+        updatedAt: at,
+      })),
+    );
+    const objectSources = snapshot.objectSources as unknown as Array<{
+      roomId: string;
+      objectId: string;
+      messageId: string;
+    }>;
+    objectSources.push(
+      { roomId: 'room', objectId: 'question', messageId: 'm1' },
+      { roomId: 'room', objectId: 'wrong-answer', messageId: 'm2' },
+      { roomId: 'room', objectId: 'retained-answer', messageId: 'm3' },
+    );
+    snapshot.relations.push(
+      {
+        id: 'relation-wrong',
+        roomId: 'room',
+        kind: 'answers',
+        fromObjectId: 'question',
+        toObjectId: 'wrong-answer',
+        toMessageId: null,
+        toUrl: null,
+        toFileKey: null,
+        note: null,
+        createdBy: 'alice',
+        createdAt: at,
+      },
+      {
+        id: 'relation-good',
+        roomId: 'room',
+        kind: 'answers',
+        fromObjectId: 'question',
+        toObjectId: 'retained-answer',
+        toMessageId: null,
+        toUrl: null,
+        toFileKey: null,
+        note: null,
+        createdBy: 'alice',
+        createdAt: at,
+      },
+    );
+
+    const view = replayView(snapshot, 'alice');
+    const question = view.objects.find((object) => object.id === 'question');
+    if (!question) throw new Error('question view missing');
+    const correction = reopenQuestion(question, '12:03', ['relation-good']);
+    const receipt = replayReceipt(snapshot, view.records, correction.after, { correction });
+
+    expect(receipt.provenance.map((entry) => entry.excerpt.messageId)).toEqual(['m1', 'm3']);
+    expect(receipt.provenance.map((entry) => entry.excerpt.messageId)).not.toContain('m2');
+  });
+
+  /**
+   * Mutation: ignore persisted correction rows, trust arbitrary before/after
+   * text, or narrate the uncited participant note. Only the allowlisted typed
+   * transition appears, and its free-form note remains absent.
+   */
+  it('renders only typed persisted correction history in system voice', () => {
+    const snapshot = data();
+    snapshot.corrections.push(
+      {
+        id: 'valid',
+        roomId: 'room',
+        objectId: 'decision',
+        action: 'retype',
+        before: { type: 'decision' },
+        after: { type: 'claim' },
+        byUserId: 'alice',
+        note: 'Alice supposedly said these uncited words',
+        eventId: 'event-valid',
+        createdAt: at,
+      },
+      {
+        id: 'invalid',
+        roomId: 'room',
+        objectId: 'decision',
+        action: 'retype',
+        before: { type: 'invented' },
+        after: { type: 'claim' },
+        byUserId: 'alice',
+        note: 'Another uncited sentence',
+        eventId: 'event-invalid',
+        createdAt: at,
+      },
+    );
+    const object = {
+      id: 'decision',
+      kind: 'decision' as const,
+      state: {
+        kind: 'decision' as const,
+        verification: 'accepted' as const,
+        owedToViewer: false,
+        irreversible: false,
+      },
+      text: 'Regenerate in the background.',
+      facts: [],
+      objectives: [],
+    };
+
+    const receipt = replayReceipt(snapshot, replayView(snapshot, 'alice').records, object);
+    expect(receipt.corrections).toHaveLength(1);
+    expect(receipt.corrections[0]?.heading.text).toBe('RECORDED · DECISION → CLAIM');
+    expect(JSON.stringify(receipt)).not.toContain('supposedly');
+    expect(JSON.stringify(receipt)).not.toContain('Another uncited');
   });
 });

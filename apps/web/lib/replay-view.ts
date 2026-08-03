@@ -7,10 +7,12 @@ import {
 } from '@atrium/core';
 import type {
   AttentionItem,
+  CorrectionEntry,
   EpistemicState,
   HumanSummary,
   MessageRecord,
   ObjectiveRecord,
+  ProvenanceEntry,
   ReceiptRecord,
   RoomHeadRecord,
   RoomSummary,
@@ -29,6 +31,7 @@ import {
   trailerFor,
 } from '../src/components';
 import type { ReplayData } from './replay-data';
+import type { ReplayCorrectionTransition } from './replay-transitions';
 
 const TALK: EpistemicState = {
   kind: 'event',
@@ -271,6 +274,10 @@ export function replayReceipt(
   data: ReplayData,
   records: readonly MessageRecord[],
   object: StateObject,
+  changes: {
+    readonly answerMessageId?: string;
+    readonly correction?: ReplayCorrectionTransition;
+  } = {},
 ): ReceiptRecord {
   const recordById = new Map(records.map((record) => [record.id, record]));
   const accepted = data.objects.find((candidate) => candidate.id === object.id);
@@ -284,12 +291,100 @@ export function replayReceipt(
       .filter((source) => source.proposalId === proposalId)
       .map((source) => source.messageId),
   ];
-  const provenance = [...new Set(sourceIds)].flatMap((messageId) => {
+  const provenance: ProvenanceEntry[] = [...new Set(sourceIds)].flatMap((messageId) => {
     const record = recordById.get(messageId);
     const excerpt = record ? quotationFrom(record) : null;
     return excerpt ? [{ id: `${object.id}:source:${messageId}`, excerpt, note: null }] : [];
   });
+  const boundAnswer = changes.answerMessageId ? recordById.get(changes.answerMessageId) : undefined;
+  const boundAnswerExcerpt = boundAnswer ? quotationFrom(boundAnswer) : null;
+  if (boundAnswerExcerpt) {
+    provenance.push({
+      id: `${object.id}:bound-answer:${boundAnswerExcerpt.messageId}`,
+      excerpt: boundAnswerExcerpt,
+      note: systemStatement('answer recorded through the bound composer'),
+    });
+  }
   const kind = happenedKindFor(object.state);
+  const sourceRef = provenance[0]?.excerpt.messageId;
+  const correction = changes.correction?.objectId === object.id ? changes.correction : undefined;
+  const answerRelation = data.relations.find(
+    (relation) =>
+      relation.kind === 'answers' &&
+      relation.fromObjectId === object.id &&
+      relation.toObjectId !== null &&
+      (correction?.action !== 'reopen' || correction.priorAnswerRelationIds.includes(relation.id)),
+  );
+  const answerSourceId = answerRelation?.toObjectId
+    ? data.objectSources.find((source) => source.objectId === answerRelation.toObjectId)?.messageId
+    : undefined;
+  const answerRecord = answerSourceId ? recordById.get(answerSourceId) : undefined;
+  const answerExcerpt = answerRecord ? quotationFrom(answerRecord) : null;
+  if (correction?.action === 'reopen' && answerExcerpt) {
+    provenance.push({
+      id: `${object.id}:prior-answer:${answerExcerpt.messageId}`,
+      excerpt: answerExcerpt,
+      note: systemStatement('prior answer kept after reopen'),
+    });
+  }
+  const corrections: CorrectionEntry[] = [];
+  for (const stored of data.corrections.filter((row) => row.objectId === object.id)) {
+    const sides = storedCorrectionSides(stored.action, stored.before, stored.after);
+    if (!sides) continue;
+    corrections.push({
+      id: stored.id,
+      heading: systemStatement(
+        `RECORDED · ${sides.before.toUpperCase()} → ${sides.after.toUpperCase()}`,
+      ),
+      at: clock(stored.createdAt),
+      was: systemStatement(sides.before),
+      now: systemStatement(sides.after),
+      fact: systemStatement('the correction is preserved in the append-only room record'),
+      /* A free correction note has no message citation in this projection. It
+         cannot be rendered as the participant's words without one. */
+      reason: null,
+      link: null,
+    });
+  }
+  if (correction?.action === 'retype') {
+    corrections.push({
+      id: correction.id,
+      heading: systemStatement('CORRECTED · DECISION → CLAIM'),
+      at: correction.at,
+      was: systemStatement(correction.before.kind),
+      now: systemStatement(correction.after.kind),
+      fact: systemStatement('the reading was retyped; its source remains attached'),
+      reason: null,
+      link: sourceRef
+        ? {
+            label: 'the source message remains in the room →',
+            ref: citationFrom(recordById.get(sourceRef) as MessageRecord),
+          }
+        : null,
+    });
+  }
+  if (correction?.action === 'reopen') {
+    corrections.push({
+      id: correction.id,
+      heading: systemStatement('REOPENED · PRIOR ANSWER KEPT'),
+      at: correction.at,
+      was: systemStatement(questionStatus(correction.before)),
+      now: systemStatement(questionStatus(correction.after)),
+      fact: systemStatement('the prior answer remains linked on the record'),
+      reason: null,
+      link: answerRecord
+        ? {
+            label: 'the prior answer remains in the room →',
+            ref: citationFrom(answerRecord),
+          }
+        : null,
+    });
+  }
+  const canReopen =
+    object.state.kind === 'question' &&
+    object.state.verification === 'accepted' &&
+    answerRelation !== undefined &&
+    correction === undefined;
 
   return {
     id: object.id,
@@ -302,13 +397,57 @@ export function replayReceipt(
       statement: systemStatement(fact),
     })),
     provenance,
-    corrections: [],
-    reopenable: false,
+    corrections,
+    retypeable:
+      object.kind === 'decision' &&
+      object.state.verification === 'accepted' &&
+      correction === undefined,
+    reopenable: canReopen,
     reopenNote:
-      provenance.length === 0
-        ? 'no persisted message source is attached to this reading'
-        : 'the excerpts above come from the persisted room record',
+      correction?.action === 'reopen'
+        ? 'pending again · the prior answer remains linked in the correction chain'
+        : canReopen
+          ? 'answered · reopening returns it to pending and keeps the prior answer on the record'
+          : provenance.length === 0
+            ? 'no persisted message source is attached to this reading'
+            : 'the excerpts above come from the persisted room record',
   };
+}
+
+function questionStatus(object: StateObject): string {
+  if (object.kind !== 'question') return object.state.verification.replace('_', ' ');
+  return object.state.verification === 'accepted' ? 'answered' : 'open';
+}
+
+function storedCorrectionSides(
+  action: ReplayData['corrections'][number]['action'],
+  before: unknown,
+  after: unknown,
+): { readonly before: string; readonly after: string } | null {
+  if (!isRecord(before) || !isRecord(after)) return null;
+  if (action === 'retype' && isObjectType(before.type) && isObjectType(after.type)) {
+    return { before: before.type, after: after.type };
+  }
+  if (
+    action === 'reopen' &&
+    isCorrectionStatus(before.status) &&
+    isCorrectionStatus(after.status)
+  ) {
+    return { before: before.status, after: after.status };
+  }
+  return null;
+}
+
+function isObjectType(value: unknown): value is ReplayData['objects'][number]['type'] {
+  return ['decision', 'commitment', 'open_question', 'claim', 'objective'].includes(String(value));
+}
+
+function isCorrectionStatus(value: unknown): value is string {
+  return ['answered', 'open', 'completed', 'cancelled'].includes(String(value));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function clock(value: Date): string {

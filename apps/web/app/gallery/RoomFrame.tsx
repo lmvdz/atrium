@@ -89,6 +89,7 @@ export interface RoomFrameHandlers {
      receipt is an ordinary child with an ordinary prop table. */
   readonly onCloseReceipt?: () => void;
   readonly onReopen?: (receiptId: string) => void;
+  readonly onRetypeToClaim?: (receiptId: string) => void;
   readonly onJumpToMessage?: (messageId: string) => void;
   /* The trace bar's other two seams, found by the counting test above rather
      than by a person reading the file: `CrossRoomJump` declares `onBack` and
@@ -205,6 +206,7 @@ function Frame(props: RoomFrameProps) {
                     onBack={on.onCloseReceipt}
                     onJump={on.onJumpToMessage}
                     onReopen={on.onReopen}
+                    onRetypeToClaim={on.onRetypeToClaim}
                     receipt={props.receipt}
                   />,
                 )

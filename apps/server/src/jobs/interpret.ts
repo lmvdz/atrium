@@ -16,8 +16,8 @@ import {
 import type { Database } from '@atrium/db';
 import { interpretations, messages } from '@atrium/db/schema';
 import { and, asc, eq, gte, inArray, sql } from 'drizzle-orm';
-import { objectFromProposal } from '../commands.js';
 import { reconcileStoredAttention } from '../attention-projection.js';
+import { objectFromProposal } from '../commands.js';
 import { CommandError, type Ledger } from '../ledger.js';
 import type { Logger } from '../logger.js';
 import { projectRoomEvent } from '../projections.js';

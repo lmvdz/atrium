@@ -217,6 +217,7 @@ async function main() {
     ).sort((left, right) => Number(right.type === 'objective') - Number(left.type === 'objective'));
     let humanAccepted = 0;
     let objectiveId: string | null = null;
+    const acceptedByType = new Map<string, string>();
     for (const proposal of staged) {
       // Keep the decision visibly staged for the Needs-you surface. The three
       // other readings are accepted by a recorded human act, never promoted by
@@ -239,7 +240,29 @@ async function main() {
         }
         objectiveId = accepted.event.object.id;
       }
+      if (accepted.kind !== 'appended' || accepted.event.type !== 'object_accepted') {
+        throw new Error(`replay seed: ${proposal.type} acceptance did not reach the fold`);
+      }
+      acceptedByType.set(proposal.type, accepted.event.object.id);
       humanAccepted += 1;
+    }
+    const questionId = acceptedByType.get('open_question');
+    const answerObjectId = acceptedByType.get('claim');
+    if (!questionId || !answerObjectId) {
+      throw new Error('replay seed: the persisted question and answer claim are required');
+    }
+    const bound = await commands.execute(
+      { userId: authorIds.get('timneutkens') as string },
+      Command.parse({
+        name: 'answer_bind',
+        roomId,
+        questionId,
+        answerObjectId,
+        note: null,
+      }),
+    );
+    if (bound.kind !== 'appended' || bound.event.type !== 'relation_added') {
+      throw new Error('replay seed: question answer did not reach the fold');
     }
     const decisionIndex = corpus.findIndex((line) =>
       line.text.includes(readings.find((reading) => reading.type === 'decision')?.match ?? ''),

@@ -936,6 +936,7 @@ export const RECEIPT: ReceiptRecord = {
   ],
   provenance: PROVENANCE,
   corrections: CORRECTIONS,
+  retypeable: false,
   reopenable: false,
   reopenNote:
     'already reopened at 13:14 · the answer of 13:09 is still on the record and still linked below · corrections are events, not erasures',
@@ -997,6 +998,7 @@ export function receiptFromObject(
     })),
     provenance: [],
     corrections: [],
+    retypeable: object.kind === 'decision' && object.state.verification === 'accepted',
     reopenable: !isSettled(object.state),
     reopenNote:
       'this receipt is derived from the object itself — it carries no excerpts, because nothing on this object cites a message',

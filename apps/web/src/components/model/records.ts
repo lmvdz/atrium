@@ -948,6 +948,8 @@ export interface ReceiptRecord {
   readonly happened: readonly HappenedLine[];
   readonly provenance: readonly ProvenanceEntry[];
   readonly corrections: readonly CorrectionEntry[];
+  /** Explicit capability; a decision glyph alone does not grant authority. */
+  readonly retypeable: boolean;
   readonly reopenable: boolean;
   readonly reopenNote: string;
 }

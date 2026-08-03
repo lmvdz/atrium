@@ -2,9 +2,16 @@
 
 import { useMemo, useRef, useState } from 'react';
 import type { ReplayData } from '../../../../lib/replay-data';
+import {
+  applyReplayTransitions,
+  type ReplayCorrectionTransition,
+  reopenQuestion,
+  retypeAsClaim,
+} from '../../../../lib/replay-transitions';
 import { replayAt, replayReceipt, replayView } from '../../../../lib/replay-view';
 import type {
   AttentionClass,
+  AttentionItem,
   ComposerBinding,
   MessageRecord,
   ObjectiveRecord,
@@ -12,13 +19,19 @@ import type {
 } from '../../../../src/components';
 import {
   boundTo,
+  citationFrom,
   messageEntry,
   needsViewer,
+  rationale,
   settledForViewer,
   withFilter,
 } from '../../../../src/components';
 import { RoomFrame } from '../../../gallery/RoomFrame';
 import styles from './replay.module.css';
+
+function clockNow(): string {
+  return new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+}
 
 export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?: string }) {
   const [cursor, setCursor] = useState(data.messages.length);
@@ -28,8 +41,11 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
   const [draft, setDraft] = useState('');
   const [actedOn, setActedOn] = useState<readonly string[]>([]);
   const [acceptedSubjects, setAcceptedSubjects] = useState<readonly string[]>([]);
+  const [answerBySubject, setAnswerBySubject] = useState<Readonly<Record<string, string>>>({});
+  const [corrections, setCorrections] = useState<readonly ReplayCorrectionTransition[]>([]);
   const [localRecords, setLocalRecords] = useState<readonly MessageRecord[]>([]);
   const [receiptId, setReceiptId] = useState<string | null>(null);
+  const [targetMessageId, setTargetMessageId] = useState<string | null>(null);
   const localSequence = useRef(0);
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
@@ -41,11 +57,8 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
   }));
-  const attention = view.attention.map((item) =>
-    actedOn.includes(item.id) ? { ...item, state: settledForViewer(item.state) } : item,
-  );
-  const objects = view.objects.map((object) =>
-    acceptedSubjects.includes(object.id)
+  const baseObjects = view.objects.map((object) => {
+    const accepted = acceptedSubjects.includes(object.id)
       ? {
           ...object,
           state: {
@@ -58,11 +71,51 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
               ? view.objectives.map((objective) => objective.id)
               : object.objectives,
         }
-      : object,
-  );
+      : object;
+    return accepted;
+  });
+  const objects = applyReplayTransitions(baseObjects, corrections);
   const records = [...view.records, ...localRecords];
+  const recordById = new Map(records.map((record) => [record.id, record]));
+  const restoredAttention: AttentionItem[] = corrections.flatMap((correction) => {
+    if (correction.action !== 'reopen') return [];
+    const sourceId = data.objectSources.find(
+      (source) => source.objectId === correction.objectId,
+    )?.messageId;
+    const source = sourceId ? recordById.get(sourceId) : undefined;
+    return [
+      {
+        id: `replay-attention:${correction.id}`,
+        state: correction.after.state,
+        title: correction.after.text,
+        rationale: rationale('this question is open again and needs an answer'),
+        facts: ['reopened with the prior answer preserved'],
+        source: source ? citationFrom(source) : null,
+        actions: [{ id: 'answer', label: 'answer', emphasis: 'primary', statement: null }],
+      },
+    ];
+  });
+  const attention = [...view.attention, ...restoredAttention].map((item) =>
+    actedOn.includes(item.id) ? { ...item, state: settledForViewer(item.state) } : item,
+  );
+  const attentionSubjects = new Map([
+    ...data.attention.map((item) => [item.id, item.subjectId] as const),
+    ...corrections.flatMap((correction) =>
+      correction.action === 'reopen'
+        ? [[`replay-attention:${correction.id}`, correction.objectId] as const]
+        : [],
+    ),
+  ]);
   const receiptObject = objects.find((object) => object.id === receiptId);
-  const receipt = receiptObject ? replayReceipt(data, records, receiptObject) : undefined;
+  const receiptCorrection = corrections.find(
+    (correction) => correction.objectId === receiptObject?.id,
+  );
+  const receipt = receiptObject
+    ? replayReceipt(data, records, receiptObject, {
+        answerMessageId: answerBySubject[receiptObject.id],
+        correction: receiptCorrection,
+      })
+    : undefined;
   const localEntries = localRecords.map((record) =>
     messageEntry(record, {
       state: {
@@ -74,9 +127,23 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
       viewer: view.viewer.name,
     }),
   );
-  const entries = [...view.entries, ...localEntries].map((entry) =>
-    entry.type === 'since-you-left' ? { ...entry, activeFilter: filter } : entry,
-  );
+  const entries = [...view.entries, ...localEntries].map((entry) => {
+    if (entry.type === 'since-you-left') return { ...entry, activeFilter: filter };
+    if (entry.type === 'message') return { ...entry, targeted: entry.id === targetMessageId };
+    return entry;
+  });
+
+  const jumpToMessage = (messageId: string) => {
+    setReceiptId(null);
+    setFocused('conversation');
+    setTargetMessageId(messageId);
+    requestAnimationFrame(() => {
+      const row = [...document.querySelectorAll<HTMLElement>('[data-message-id]')].find(
+        (candidate) => candidate.dataset.messageId === messageId,
+      );
+      row?.scrollIntoView({ block: 'center' });
+    });
+  };
 
   const send = (text: string) => {
     const body = text.trim();
@@ -84,7 +151,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     localSequence.current += 1;
     const record: MessageRecord = {
       id: `replay-answer-${localSequence.current}`,
-      at: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+      at: clockNow(),
       actor: view.viewer.name,
       text: body,
       origin: 'typed',
@@ -92,10 +159,11 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     };
     setLocalRecords((current) => [...current, record]);
     if (binding.mode === 'bound') {
-      const stored = data.attention.find((item) => item.id === binding.itemId);
-      if (stored) {
-        setAcceptedSubjects((current) => [...current, stored.subjectId]);
-        setReceiptId(stored.subjectId);
+      const subjectId = attentionSubjects.get(binding.itemId);
+      if (subjectId) {
+        setAcceptedSubjects((current) => [...current, subjectId]);
+        setAnswerBySubject((current) => ({ ...current, [subjectId]: record.id }));
+        setReceiptId(subjectId);
       }
       setActedOn((current) => [...current, binding.itemId]);
       setOpenAttentionId(
@@ -104,6 +172,21 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     }
     setBinding({ mode: 'free' });
     setDraft('');
+  };
+
+  const seek = (next: number) => {
+    setCursor(Math.max(0, Math.min(data.messages.length, Math.trunc(next))));
+    /* Local replay acts describe the terminal snapshot. Carrying them into an
+       earlier prefix would put an answer before the words it answered. */
+    setBinding({ mode: 'free' });
+    setDraft('');
+    setActedOn([]);
+    setAcceptedSubjects([]);
+    setAnswerBySubject({});
+    setCorrections([]);
+    setLocalRecords([]);
+    setReceiptId(null);
+    setTargetMessageId(null);
   };
 
   return (
@@ -125,12 +208,37 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
           onOpenAttention: setOpenAttentionId,
           onOpenReceipt: setReceiptId,
           onCloseReceipt: () => setReceiptId(null),
+          onJumpToMessage: jumpToMessage,
+          onJumpToSource: (_itemId, messageId) => jumpToMessage(messageId),
+          onRetypeToClaim: (objectId) => {
+            const object = objects.find((candidate) => candidate.id === objectId);
+            if (object)
+              setCorrections((current) => [...current, retypeAsClaim(object, clockNow())]);
+          },
+          onReopen: (objectId) => {
+            const object = objects.find((candidate) => candidate.id === objectId);
+            const relationIds = data.relations
+              .filter(
+                (relation) => relation.kind === 'answers' && relation.fromObjectId === objectId,
+              )
+              .map((relation) => relation.id);
+            if (object) {
+              setCorrections((current) => [
+                ...current,
+                reopenQuestion(object, clockNow(), relationIds),
+              ]);
+            }
+          },
           onAct: (itemId, actionId) => {
             const item = attention.find((candidate) => candidate.id === itemId);
             if (!item) return;
             if (actionId === 'answer') {
               setBinding(boundTo(item, data.room.name));
               setFocused('conversation');
+              return;
+            }
+            if (actionId === 'open' && item.source) {
+              jumpToMessage(item.source.messageId);
               return;
             }
             setActedOn((current) => [...current, itemId]);
@@ -154,14 +262,14 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         trailer={view.trailer}
         updatedAt={view.updatedAt}
         viewer={view.viewer}
-        viewerNote={`replay · ${attention.length} owed to you`}
+        viewerNote={`replay · ${attention.filter((item) => needsViewer(item.state)).length} owed to you`}
       />
       {binding.mode === 'free' ? (
         <nav aria-label="Replay controls" className={styles.controls}>
           <button
             aria-label="Previous message"
             disabled={cursor === 0}
-            onClick={() => setCursor((value) => Math.max(0, value - 1))}
+            onClick={() => seek(cursor - 1)}
             type="button"
           >
             ←
@@ -170,14 +278,14 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
             aria-label="Replay position"
             max={data.messages.length}
             min="0"
-            onChange={(event) => setCursor(Number(event.currentTarget.value))}
+            onChange={(event) => seek(Number(event.currentTarget.value))}
             type="range"
             value={cursor}
           />
           <button
             aria-label="Next message"
             disabled={cursor === data.messages.length}
-            onClick={() => setCursor((value) => Math.min(data.messages.length, value + 1))}
+            onClick={() => seek(cursor + 1)}
             type="button"
           >
             →

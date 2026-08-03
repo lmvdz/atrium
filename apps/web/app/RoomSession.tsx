@@ -233,6 +233,9 @@ export function RoomSession() {
         onReopen: (id: string) => {
           setNote(`reopened ${id} · corrections are events, not erasures`);
         },
+        onRetypeToClaim: (id: string) => {
+          setNote(`retyped ${id} as a claim · the prior decision stays in its correction chain`);
+        },
         onShowRest: () => {
           setFocused('current-state');
           setNote(

@@ -36,10 +36,17 @@ export type ReceiptViewProps = {
   readonly receipt: ReceiptRecord;
   readonly onBack?: () => void;
   readonly onReopen?: (receiptId: string) => void;
+  readonly onRetypeToClaim?: (receiptId: string) => void;
   readonly onJump?: (messageId: string) => void;
 } & NoGlyph;
 
-export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewProps) {
+export function ReceiptView({
+  receipt,
+  onBack,
+  onReopen,
+  onRetypeToClaim,
+  onJump,
+}: ReceiptViewProps) {
   return (
     <section
       aria-label="Receipt"
@@ -160,15 +167,28 @@ export function ReceiptView({ receipt, onBack, onReopen, onJump }: ReceiptViewPr
         <span className={styles.rcFootNote}>
           {systemText(receipt.reopenNote, 'ReceiptView reopenNote')}
         </span>
-        {receipt.reopenable ? (
-          <button
-            className="atr-btn atr-btn-sm"
-            onClick={onReopen === undefined ? undefined : () => onReopen(receipt.id)}
-            type="button"
-          >
-            Reopen
-          </button>
-        ) : null}
+        <span>
+          {receipt.retypeable && onRetypeToClaim !== undefined ? (
+            <button
+              className="atr-btn atr-btn-sm"
+              onClick={
+                onRetypeToClaim === undefined ? undefined : () => onRetypeToClaim(receipt.id)
+              }
+              type="button"
+            >
+              Retype as claim
+            </button>
+          ) : null}
+          {receipt.reopenable ? (
+            <button
+              className="atr-btn atr-btn-sm"
+              onClick={onReopen === undefined ? undefined : () => onReopen(receipt.id)}
+              type="button"
+            >
+              Reopen
+            </button>
+          ) : null}
+        </span>
       </div>
     </section>
   );
