@@ -9,6 +9,8 @@ import {
   replayReceipt,
   replayView,
 } from '../lib/replay-view';
+import { withFilter } from '../src/components';
+import type { RoomView } from '../src/lib/realtime';
 
 const at = new Date('2026-08-02T12:00:00.000Z');
 
@@ -558,9 +560,108 @@ describe('live room view', () => {
       label: 'SINCE YOU LEFT',
       total: 1,
       counts: { need: 0, change: 0, discussion: 1, routine: 0 },
+      entryIds: ['m2'],
     });
     expect(view.rooms[0]?.unseen).toBe(1);
     expect(view.humans[0]?.presence).toBe('here');
+  });
+
+  /**
+   * Mutation: apply a SINCE YOU LEFT chip to every row in the room instead of
+   * the divider's persisted unread membership. An older discussion row then
+   * claims to be one of the single missed rows the chip counted.
+   */
+  it('scopes a live divider filter to the exact unread rows it counted', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      participants: [
+        { id: 'alice', name: 'alice', avatarUrl: null },
+        { id: 'bob', name: 'bob', avatarUrl: null },
+      ],
+      messages: data().messages.map((message) =>
+        message.id === 'm2' ? { ...message, authorId: 'bob', author: 'bob' } : message,
+      ),
+      messagePositions: [
+        { messageId: 'm1', roomSeq: 1 },
+        { messageId: 'm2', roomSeq: 4 },
+      ],
+    };
+    const view = liveRoomView(snapshot, 'alice', {
+      roomId: 'room',
+      lastSeq: 4,
+      head: 4,
+      seenSeq: 1,
+      events: [],
+      pending: [],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    });
+    const divider = view.entries.find((entry) => entry.type === 'since-you-left');
+    expect(divider?.entryIds).toEqual(['m2']);
+
+    const filtered = withFilter(view.entries, 'discussion', divider?.entryIds);
+    const rows = filtered.filter((entry) => entry.type === 'message');
+    expect(rows.map((entry) => [entry.id, entry.filterScoped, entry.matchesFilter])).toEqual([
+      ['m1', false, false],
+      ['m2', true, true],
+    ]);
+  });
+
+  /**
+   * Mutation: recompute the live divider from the newly advanced seen cursor.
+   * Marking its one-row window seen would delete the divider (and turn its
+   * selected chip into a room-wide filter) instead of preserving it muted.
+   */
+  it('keeps a frozen unread window after its durable cursor advances', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      participants: [
+        { id: 'alice', name: 'alice', avatarUrl: null },
+        { id: 'bob', name: 'bob', avatarUrl: null },
+      ],
+      messages: [
+        ...data().messages.map((message) =>
+          message.id === 'm2' ? { ...message, authorId: 'bob', author: 'bob' } : message,
+        ),
+        {
+          id: 'm3',
+          seq: 3,
+          authorId: 'bob',
+          author: 'bob',
+          body: 'This arrived after the frozen missed window.',
+          clientMessageId: null,
+          replyToId: null,
+          attachments: [],
+          createdAt: new Date('2026-08-02T12:02:00.000Z'),
+        },
+      ],
+      messagePositions: [
+        { messageId: 'm1', roomSeq: 1 },
+        { messageId: 'm2', roomSeq: 4 },
+        { messageId: 'm3', roomSeq: 5 },
+      ],
+    };
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 4,
+      head: 4,
+      seenSeq: 4,
+      events: [],
+      pending: [],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+
+    const view = liveRoomView(snapshot, 'alice', live, { afterSeq: 1, throughSeq: 4 });
+    expect(view.entries.find((entry) => entry.type === 'since-you-left')).toMatchObject({
+      seen: true,
+      total: 1,
+      entryIds: ['m2'],
+    });
+    // The preserved group is seen, while later traffic remains independently unread.
+    expect(view.rooms[0]?.unseen).toBe(1);
   });
 
   /**

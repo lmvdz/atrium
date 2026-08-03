@@ -275,6 +275,8 @@ interface MessageEntryCommon {
   readonly targeted: boolean;
   /** matches the active feed filter (rows that do not are quieted, never hidden) */
   readonly matchesFilter: boolean;
+  /** belongs to the rows named by the filter's divider; absent means global */
+  readonly filterScoped?: boolean;
 }
 
 /** A row whose words are the actor's own — typed here or already on the record. */
@@ -340,6 +342,7 @@ export interface MessageEntryInput {
   readonly replyTo?: Maybe<Quotation>;
   readonly targeted?: boolean;
   readonly matchesFilter?: boolean;
+  readonly filterScoped?: boolean;
   /** the person reading the page, so `fromViewer` is derived and not asserted */
   readonly viewer?: string;
 }
@@ -359,6 +362,7 @@ export function messageEntry(record: MessageRecord, input: MessageEntryInput): M
     tag: input.tag ?? null,
     targeted: input.targeted ?? false,
     matchesFilter: input.matchesFilter ?? true,
+    filterScoped: input.filterScoped,
   };
 
   const attribution = quotationFrom(record);
@@ -496,6 +500,8 @@ export interface SystemEntry {
    * filter lifts. Absent reads as "matches", the same default a message row has.
    */
   readonly matchesFilter?: boolean;
+  /** belongs to the rows named by the filter's divider; absent means global */
+  readonly filterScoped?: boolean;
 }
 
 export type AttentionClass = 'need' | 'change' | 'discussion' | 'routine';
@@ -513,6 +519,8 @@ export interface SinceYouLeftEntry {
   readonly seen: boolean;
   readonly seenAt: Maybe<string>;
   readonly activeFilter: Maybe<AttentionClass>;
+  /** exact feed rows counted by this divider and eligible for its filter */
+  readonly entryIds: readonly string[];
 }
 
 export interface RoutineEntry {
@@ -529,6 +537,8 @@ export interface RoutineEntry {
   readonly rows: readonly SystemEntry[];
   /** matches the active class filter; a ROUTINE chip has to be able to lift this */
   readonly matchesFilter?: boolean;
+  /** belongs to the rows named by the filter's divider; absent means global */
+  readonly filterScoped?: boolean;
 }
 
 export type TimelineEntry = MessageEntry | SystemEntry | SinceYouLeftEntry | RoutineEntry;
@@ -632,6 +642,9 @@ export function sinceYouLeft(input: {
     seen: input.seen,
     seenAt: input.seenAt,
     activeFilter: input.activeFilter,
+    entryIds: input.entries
+      .filter((entry) => entry.type !== 'since-you-left')
+      .map((entry) => entry.id),
   };
 }
 
@@ -642,13 +655,19 @@ export function sinceYouLeft(input: {
 export function withFilter(
   entries: readonly TimelineEntry[],
   filter: Maybe<AttentionClass>,
+  scopeIds?: readonly string[],
 ): readonly TimelineEntry[] {
   if (filter === null) return entries;
-  return entries.map((entry) =>
-    entry.type === 'since-you-left'
-      ? entry
-      : { ...entry, matchesFilter: attentionClassOf(entry) === filter },
-  );
+  const scope = scopeIds === undefined ? null : new Set(scopeIds);
+  return entries.map((entry) => {
+    if (entry.type === 'since-you-left') return { ...entry, activeFilter: filter };
+    const filterScoped = scope === null || scope.has(entry.id);
+    return {
+      ...entry,
+      filterScoped,
+      matchesFilter: filterScoped && attentionClassOf(entry) === filter,
+    };
+  });
 }
 
 /* --- attention ----------------------------------------------------------- */

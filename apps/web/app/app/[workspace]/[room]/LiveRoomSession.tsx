@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { liveRoomView } from '@/lib/live-room-view';
+import { type LiveUnreadWindow, liveRoomView } from '@/lib/live-room-view';
 import type { ReplayData } from '@/lib/replay-data';
 import { activeAnswerMatchesClientMessage, replayReceipt } from '@/lib/replay-view';
 import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
@@ -67,6 +67,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   } | null>(null);
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
+  const [unreadWindow, setUnreadWindow] = useState<
+    (LiveUnreadWindow & { readonly roomId: string }) | null
+  >(null);
+  const unreadWindowRef = useRef<(LiveUnreadWindow & { readonly roomId: string }) | null>(null);
   const [openAttentionId, setOpenAttentionId] = useState<string>();
   const [openObjectives, setOpenObjectives] = useState<Readonly<Record<string, boolean>>>({});
   const [receiptId, setReceiptId] = useState<string | null>(null);
@@ -74,6 +78,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const refreshedThrough = useRef(0);
 
   useEffect(() => {
+    unreadWindowRef.current = null;
+    setUnreadWindow(null);
     const client = createRealtimeClient({
       userId: viewerId,
       journal: localStorageJournal(viewerId),
@@ -83,6 +89,14 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     setLive(copyRoom(client.room(roomId)));
     const stopChanges = client.onChange((changedRoomId, room) => {
       if (changedRoomId !== roomId) return;
+      if (room.subscribed && unreadWindowRef.current === null) {
+        // Capture the authorized subscribed frame itself. A passive effect can
+        // run after catch-up or new traffic has already raised `head`, silently
+        // expanding the historical group beyond the join boundary.
+        const window = { roomId, afterSeq: room.seenSeq, throughSeq: room.head };
+        unreadWindowRef.current = window;
+        setUnreadWindow(window);
+      }
       setLive(copyRoom(room));
       if (room.lastSeq <= refreshedThrough.current || refreshTimer.current !== null) return;
       refreshTimer.current = setTimeout(() => {
@@ -110,7 +124,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     };
   }, [roomId, router, viewerId]);
 
-  const view = liveRoomView(data, viewerId, live);
+  const frozenUnreadWindow = unreadWindow?.roomId === roomId ? unreadWindow : undefined;
+  const view = liveRoomView(data, viewerId, live, frozenUnreadWindow);
   const subjectByAttention = new Map(data.attention.map((item) => [item.id, item.subjectId]));
   const objectives = view.objectives.map((objective) => ({
     ...objective,
@@ -124,6 +139,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     : undefined;
   const owed = view.attention.filter((item) => needsViewer(item.state)).length;
   const subscribed = live.subscribed && connection === 'open';
+  const unreadFilterScope = view.entries.find((entry) => entry.type === 'since-you-left')?.entryIds;
 
   useEffect(() => {
     if (!boundSubmission) return;
@@ -183,7 +199,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             ? `${live.typing.length} typing · ordered through ${live.lastSeq}`
             : `${connection} · waiting for an authorized room subscription`)
         }
-        entries={withFilter(view.entries, filter)}
+        entries={withFilter(view.entries, filter, unreadFilterScope ?? [])}
         filter={filter}
         focused={focused}
         handlers={{
@@ -251,7 +267,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           onFocusSurface: setFocused,
           onFilter: (next) => setFilter((current) => (current === next ? null : next)),
           onOpenAttention: setOpenAttentionId,
-          onMarkSeen: () => clientRef.current?.advanceSeen(roomId, live.lastSeq),
+          onMarkSeen: () =>
+            clientRef.current?.advanceSeen(roomId, frozenUnreadWindow?.throughSeq ?? live.head),
           onOpenReceipt: setReceiptId,
           onCloseReceipt: () => setReceiptId(null),
           onJumpToMessage: jumpToMessage,

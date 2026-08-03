@@ -77,7 +77,10 @@ export function Timeline({
      instrument in this repo and to a screen reader. The number is
      `classCounts` — the same derivation the chip's own number comes from, so the
      chip cannot promise 8 and the feed report 3. */
-  const counts = classCounts(entries);
+  const scopedEntries = entries.filter(
+    (entry) => entry.type === 'since-you-left' || entry.filterScoped !== false,
+  );
+  const counts = classCounts(scopedEntries);
   const lifted = filter === null ? 0 : counts[filter];
   const total = counts.need + counts.change + counts.discussion + counts.routine;
   return (

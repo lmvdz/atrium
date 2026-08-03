@@ -26,7 +26,17 @@ function clock(at: string): string {
  * state. Persisted rows remain the authority for history and semantic state;
  * the only optimistic rows are the viewer's own pending messages.
  */
-export function liveRoomView(data: ReplayData, viewerId: string, live: RoomView) {
+export interface LiveUnreadWindow {
+  readonly afterSeq: number;
+  readonly throughSeq: number;
+}
+
+export function liveRoomView(
+  data: ReplayData,
+  viewerId: string,
+  live: RoomView,
+  unreadWindow?: LiveUnreadWindow,
+) {
   const base = replayView(data, viewerId);
   const pendingRecords: MessageRecord[] = live.pending.map((pending) => ({
     id: `pending:${pending.clientMessageId}`,
@@ -49,9 +59,20 @@ export function liveRoomView(data: ReplayData, viewerId: string, live: RoomView)
   const positionByMessage = new Map(
     (data.messagePositions ?? []).map((position) => [position.messageId, position.roomSeq]),
   );
-  const unreadIndices = live.subscribed
+  const afterSeq = unreadWindow?.afterSeq ?? live.seenSeq;
+  const throughSeq = unreadWindow?.throughSeq ?? live.head;
+  const currentUnreadIndices = live.subscribed
     ? data.messages.flatMap((message, index) =>
         (positionByMessage.get(message.id) ?? 0) > live.seenSeq && message.authorId !== viewerId
+          ? [index]
+          : [],
+      )
+    : [];
+  const unreadIndices = live.subscribed
+    ? data.messages.flatMap((message, index) =>
+        (positionByMessage.get(message.id) ?? 0) > afterSeq &&
+        (positionByMessage.get(message.id) ?? 0) <= throughSeq &&
+        message.authorId !== viewerId
           ? [index]
           : [],
       )
@@ -64,16 +85,16 @@ export function liveRoomView(data: ReplayData, viewerId: string, live: RoomView)
       return entry ? [entry] : [];
     });
     const first = data.messages[firstUnread];
-    const last = data.messages.at(-1);
+    const last = data.messages[unreadIndices.at(-1) ?? firstUnread];
     entries.splice(
       firstUnread,
       0,
       sinceYouLeft({
-        id: `live-unread:${live.seenSeq}`,
+        id: `live-unread:${afterSeq}:${throughSeq}`,
         label: 'SINCE YOU LEFT',
         window: `${clock(first?.createdAt.toISOString() ?? '')} → ${clock(last?.createdAt.toISOString() ?? '')}`,
         entries: unread,
-        seen: false,
+        seen: live.seenSeq >= throughSeq,
         seenAt: null,
         activeFilter: null,
       }),
@@ -88,7 +109,7 @@ export function liveRoomView(data: ReplayData, viewerId: string, live: RoomView)
     viewer,
     rooms: base.rooms.map((room) => ({
       ...room,
-      unseen: unreadIndices.length,
+      unseen: currentUnreadIndices.length,
     })),
   };
 }
