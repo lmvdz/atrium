@@ -43,6 +43,17 @@
 	# `email you@example.com` here if you want expiry notices.
 }
 
+# Loopback-only proxy liveness. This proves Caddy loaded its routes; the app's
+# own healthcheck separately proves a real rendered page succeeds.
+http://localhost:2019 {
+	handle /caddy-health {
+		respond "ok" 200
+	}
+	handle {
+		respond 404
+	}
+}
+
 # A hostname, not a port: this is what turns automatic HTTPS on. An IP address
 # or a bare `:80` here would disable it, which is why the value is required
 # rather than defaulted.

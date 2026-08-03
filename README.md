@@ -379,14 +379,15 @@ Everything in containers instead:
 
 ```bash
 ATRIUM_DOMAIN=atrium.example.com    # in .env; required, no default
+ATRIUM_MAIL_TRANSPORT=smtp          # plus ATRIUM_MAIL_FROM and SMTP_* relay settings
 docker compose up --build           # postgres, minio, migrate, server, app, proxy
 ```
 
 `docker-compose.yml` is the **production** stack and it is HTTPS-only. Point a
 hostname at the box, put it in `ATRIUM_DOMAIN`, and Caddy (`deploy/Caddyfile`)
-obtains and renews the certificate itself; `APP_URL` and `NEXT_PUBLIC_WS_URL`
-are derived from that one value as `https://` and `wss://` and are not
-separately settable. Everything arrives through the `proxy` service — `/ws` to
+obtains and renews the certificate itself. `APP_URL` is derived from that one
+value; the browser derives `wss://…/ws` from the page's own origin at runtime,
+so no socket hostname is baked into the image. Everything arrives through the `proxy` service — `/ws` to
 the realtime server, everything else to the app — and it publishes 443 and 80
 (the second answers the ACME challenge and redirects). Neither `app` nor
 `server` publishes a port of its own, and that is load-bearing rather than tidy
@@ -416,7 +417,7 @@ four:
 - Caddy refuses an empty site address, and a hostname is what switches its
   automatic HTTPS on (an IP or a bare `:80` would switch it off);
 - `apps/web` and `apps/server` each refuse to serve production with an
-  `http://` `APP_URL` or a `ws://` `NEXT_PUBLIC_WS_URL`, and so does
+  `http://` `APP_URL` or a `ws://` `ATRIUM_WS_URL`, and so does
   `createAtriumAuth`, which both processes build through — the rule itself is
   one function, `assertSecureTransport` in `packages/auth/src/transport.ts`, so
   the two cannot end up with different ideas of "secure enough to serve";
@@ -449,30 +450,18 @@ cap, and it is not a per-address cap.)
 
 TLS terminates there, automatically, from `ATRIUM_DOMAIN` — see above.
 
-### The compose stack does not serve a page yet
+### The compose stack serves only with a real mail transport
 
-`app` runs `NODE_ENV=production`, and `resolveMailer` refuses to hand out the
-console transport there — it prints verification links, and a verification link
-is a single-use account takeover. There is no production mail transport in this
-repository yet; it lands with the notification work. Until it does, every route
-in `app` answers 500 in this stack. Overriding the variable does not help:
-`next build` inlines `process.env.NODE_ENV` into the standalone bundle.
+`app` runs `NODE_ENV=production`, and `resolveMailer` still refuses the console
+transport there: verification links are single-use account credentials and do
+not belong in logs. `packages/auth/src/smtp.ts` supplies the production SMTP
+transport. An absent, partial, or console configuration fails process boot.
 
-Everything else comes up: postgres, minio, migrate, `server` and `proxy` are
-healthy, and the realtime upgrade routes through the proxy to its origin and
-session checks. `pnpm dev` is unaffected — it is `NODE_ENV=development`, where
-the console transport is exactly right.
-
-[#40](https://github.com/lmvdz/atrium/issues/40) owns the fix: a real transport
-plus a CI job that boots this stack and asserts a *page*, not a health endpoint.
-The gate itself is adjudicated correct and must not be weakened to make the
-stack come up. One consequence worth stating rather than glossing: the HTTPS
-rules above have not been observed serving real traffic either. What has been
-checked is that `caddy validate` accepts the Caddyfile (and reports
-"enabling automatic HTTP->HTTPS redirects"), that `docker compose config`
-refuses an unset `ATRIUM_DOMAIN`, and that both processes refuse an `http://`
-origin under `NODE_ENV=production` — the last by test, the first two by running
-the tools.
+For a local or CI cold boot, add `docker-compose.mailpit.yml`; it runs a real,
+ephemeral SMTP relay on the private compose network and exposes only its UI on
+loopback. The app healthcheck renders `/`, the proxy waits for the app and
+realtime server, and an external check must still fetch the page through the
+public TLS port. Health endpoints are prerequisites, not proof of the product.
 
 ### The credentials in this repo are development-only
 
@@ -659,10 +648,9 @@ those two has the invitation voided.
 Email verification and invitations both go through the mailer
 (`packages/auth/src/mailer.ts`). In development it prints to the console and,
 when `ATRIUM_MAIL_OUTBOX` is set, appends one JSON object per message to a file;
-the e2e suite reads its links from there. **There is no production transport
-yet, and the process refuses to boot with `NODE_ENV=production` until one is
-passed** — those links are one-click account takeovers and belong in an inbox,
-not in a log aggregator.
+the e2e suite reads its links from there. Production selects the SMTP transport
+with `ATRIUM_MAIL_TRANSPORT=smtp`; the process refuses to boot until a complete
+relay configuration is present.
 
 Sign-in, sign-up and resend are throttled per address *and* per IP
 (`packages/auth/src/throttle.ts`). `ATRIUM_TRUSTED_PROXY_HOPS` says what is in

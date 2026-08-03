@@ -20,7 +20,7 @@ const nextConfig: NextConfig = {
   // build is at best pointless and at worst breaks them. Leave them as real
   // Node requires. (The workspace packages are deliberately *not* listed — Next
   // compiles those from source, which is what makes `@/lib` imports work.)
-  serverExternalPackages: ['postgres', 'drizzle-orm', 'better-auth'],
+  serverExternalPackages: ['postgres', 'drizzle-orm', 'better-auth', 'nodemailer'],
   /* In the deployed stack Caddy owns `/attachments/*`. A split-process local
      run has no proxy, so it may state the server origin here; the browser still
      calls the same-origin path and only the small presign JSON is forwarded. */

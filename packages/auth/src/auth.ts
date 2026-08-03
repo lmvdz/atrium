@@ -11,6 +11,7 @@ import {
   type RoomCleanupFailure,
 } from './org.js';
 import { resolveAuthSecret } from './secret.js';
+import { mailerFromEnv } from './smtp.js';
 import { assertSecureTransport, useSecureCookies } from './transport.js';
 import {
   createDefaultRoom,
@@ -177,7 +178,7 @@ export function createAtriumAuth(options: AtriumAuthOptions) {
     })),
   );
 
-  const mailer = resolveMailer(options.mailer);
+  const mailer = resolveMailer(options.mailer ?? mailerFromEnv());
   const secret = options.secret ?? resolveAuthSecret();
   const proxy = options.proxyStrategy ?? trustedProxyStrategy();
 

@@ -133,7 +133,7 @@ export function proxyStrategy(): ProxyStrategy {
  * The realtime server's public origin, if it differs from the app's.
  *
  * Passed to Better Auth as a trusted origin in both processes so the two agree
- * about who "us" is; derived from `NEXT_PUBLIC_WS_URL` because that is the value
+ * about who "us" is; derived from `ATRIUM_WS_URL` because that is the value
  * the browser is actually told to connect to.
  *
  * And judged on the raw value, before the scheme is mapped: `wss://` is the
@@ -143,9 +143,9 @@ export function proxyStrategy(): ProxyStrategy {
  * in production this refuses to start too.
  */
 export function realtimeOrigin(): string | null {
-  const raw = process.env.NEXT_PUBLIC_WS_URL?.trim();
+  const raw = process.env.ATRIUM_WS_URL?.trim();
   if (!raw) return null;
-  assertSecureTransport([{ name: 'NEXT_PUBLIC_WS_URL', value: raw }]);
+  assertSecureTransport([{ name: 'ATRIUM_WS_URL', value: raw }]);
   try {
     const url = new URL(raw);
     const scheme = url.protocol === 'wss:' ? 'https:' : 'http:';

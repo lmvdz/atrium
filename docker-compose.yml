@@ -7,9 +7,8 @@
 # ┌─ THIS FILE IS THE PRODUCTION STACK, AND IT IS HTTPS-ONLY ──────────────────
 # │ `ATRIUM_DOMAIN` is required — a hostname pointed at this box. Caddy takes
 # │ it as its site address and obtains a certificate over ACME on its own;
-# │ APP_URL and NEXT_PUBLIC_WS_URL below are derived from it as `https://` and
-# │ `wss://` and are not separately settable, because two variables that must
-# │ agree are two chances to disagree.
+# │ APP_URL is derived from it as `https://`; the browser derives its socket
+# │ from that same origin and `/ws`, so there is no second hostname to drift.
 # │
 # │ Round 4 shipped this file with the proxy on `:80`, an `http://` APP_URL
 # │ default, and a comment in deploy/Caddyfile telling the operator to change
@@ -77,32 +76,18 @@
 # │ yourself, because APP_URL still has to be https:// or nothing boots.
 # └────────────────────────────────────────────────────────────────────────────
 #
-# ┌─ THIS FILE DOES NOT SERVE A REQUEST YET, AND HERE IS WHY ──────────────────
-# │ `app` runs NODE_ENV=production, and `resolveMailer`
-# │ (packages/auth/src/mailer.ts) refuses to hand out the console transport
-# │ there — deliberately, because it prints verification links and those links
-# │ are single-use account takeovers. There is no production transport in this
-# │ repository yet; wiring one belongs with the notification work.
+# ┌─ THE SERVING CONDITION ────────────────────────────────────────────────────
+# │ Production requires a real mail transport. `ATRIUM_MAIL_TRANSPORT=smtp`
+# │ and the SMTP variables below feed the shared auth composition root; an
+# │ absent, partial, or console configuration still refuses to boot rather than
+# │ putting verification links in logs. For local and CI cold boots, compose
+# │ this file with `docker-compose.mailpit.yml`.
 # │
-# │ The consequence, which round 4 found by actually bringing this stack up:
-# │ every page and every route in `app` answers 500. A runtime override does not
-# │ help, because `next build` inlines `process.env.NODE_ENV` into the
-# │ standalone bundle. `server`, `postgres`, `minio`, `migrate` and `proxy` all
-# │ come up healthy; the realtime upgrade routes through the proxy and reaches
-# │ its origin and session checks.
-# │
-# │ It is stated here rather than filed and forgotten because the fix is a real
-# │ transport at the composition root, not a change to this file — and because
-# │ three previous rounds described this stack as the deployment without anyone
-# │ running it.
-# │
-# │ Issue #40 owns it: a real transport plus a CI job that boots this stack and
-# │ asserts a page, not a health endpoint. The mailer gate is adjudicated
-# │ correct and must not be weakened to make this file come up. The HTTPS rules
-# │ added above are therefore *also* unproven against a fully-serving stack;
-# │ what has been checked is that `caddy validate` accepts this Caddyfile, that
-# │ `docker compose config` refuses an unset ATRIUM_DOMAIN, and that both
-# │ processes refuse an http:// origin under NODE_ENV=production (tested).
+# │ The app healthcheck fetches the real root page after instrumentation has
+# │ exercised every lazy runtime gate. The proxy waits for both application
+# │ processes to become healthy and then reports its own loaded routing state.
+# │ A working-product assertion must still fetch through the public TLS port;
+# │ health is a prerequisite, not a substitute for that external measurement.
 # └────────────────────────────────────────────────────────────────────────────
 
 name: atrium
@@ -291,6 +276,14 @@ services:
       # both of these — the development fallback does not apply here.
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env — there is no default; see the header}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env — there is no default; see the header}
+      ATRIUM_MAIL_TRANSPORT: ${ATRIUM_MAIL_TRANSPORT:?set ATRIUM_MAIL_TRANSPORT in .env — use smtp with the SMTP variables; console is refused in production}
+      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-}
+      SMTP_URL: ${SMTP_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-}
     # No published port, deliberately. `ATRIUM_TRUSTED_PROXY_HOPS=1` is a claim
     # that every request arrived through the proxy; a second, un-proxied way in
     # would make that claim false for anyone who used it — and a caller who
@@ -357,9 +350,23 @@ services:
       ATRIUM_TRUSTED_PROXY_CIDRS: ${ATRIUM_TRUSTED_PROXY_CIDRS:-172.28.0.10/32}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      ATRIUM_MAIL_TRANSPORT: ${ATRIUM_MAIL_TRANSPORT:?set ATRIUM_MAIL_TRANSPORT in .env — use smtp with the SMTP variables; console is refused in production}
+      ATRIUM_MAIL_FROM: ${ATRIUM_MAIL_FROM:-}
+      SMTP_URL: ${SMTP_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-}
     # No published port, for the reason given on `server`. The browser reaches
     # this app through `proxy`, which is what gives a Server Action a caller
     # address it can believe.
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # The single entrypoint, and where TLS terminates. See the two headers at the
   # top of this file.
@@ -368,9 +375,9 @@ services:
     restart: unless-stopped
     depends_on:
       app:
-        condition: service_started
+        condition: service_healthy
       server:
-        condition: service_started
+        condition: service_healthy
     environment:
       # Caddy's site address. Required here as well as in the URLs above, so
       # compose stops before the container starts rather than leaving Caddy to
@@ -389,6 +396,11 @@ services:
       # rather than being re-issued into a rate limit.
       - '${HTTPS_PORT:-443}:443'
       - '${HTTP_PORT:-80}:80'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '-', 'http://localhost:2019/caddy-health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       default:
         # Fixed, so ATRIUM_TRUSTED_PROXY_CIDRS can name this process exactly

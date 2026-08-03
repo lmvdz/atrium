@@ -24,10 +24,12 @@
   "dependencies": {
     "@atrium/db": "workspace:*",
     "better-auth": "^1.6.25",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.2",
+    "nodemailer": "^9.0.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/nodemailer": "^8.0.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
   }
