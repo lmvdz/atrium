@@ -12,8 +12,16 @@ import {
 } from '../lib/replay-view';
 import { withFilter } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
+import { workspacePath } from './support/workspace-path';
 
 const at = new Date('2026-08-02T12:00:00.000Z');
+/**
+ * Mutation: anchor this inspected client boundary to the process cwd. Running
+ * the repository-wide suite from the root then fails before the refresh
+ * mutations are judged, while the package-local suite misleadingly passes.
+ */
+const liveRoomSession = workspacePath('apps/web/app/app/[workspace]/[room]/LiveRoomSession.tsx');
+const replayDataSource = workspacePath('apps/web/lib/replay-data.ts');
 
 function data(): ReplayData {
   return {
@@ -529,7 +537,7 @@ describe('live room view', () => {
     expect(shouldRefreshLiveRoute('state', 9, 8)).toBe(true);
     expect(shouldRefreshLiveRoute('projection', 8, 8)).toBe(true);
 
-    const session = readFileSync('app/app/[workspace]/[room]/LiveRoomSession.tsx', 'utf8');
+    const session = readFileSync(liveRoomSession, 'utf8');
     expect(session).toContain(
       '!shouldRefreshLiveRoute(reason, room.lastSeq, refreshedThrough.current)',
     );
@@ -598,7 +606,7 @@ describe('live room view', () => {
     expect(session).toContain('if (refreshRoom.current !== roomId)');
     expect(session).toContain('refreshTarget.current = persistedThrough');
 
-    const loader = readFileSync('lib/replay-data.ts', 'utf8');
+    const loader = readFileSync(replayDataSource, 'utf8');
     /**
      * Mutation: prove refresh completion with the last message position rather
      * than the room ledger cursor. A semantic tail then keeps the route behind

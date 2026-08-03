@@ -5,6 +5,14 @@ import {
   retainedSupersessionKey,
   supersessionReachedFold,
 } from '../lib/live-supersession';
+import { workspacePath } from './support/workspace-path';
+
+/**
+ * Mutation: resolve the inspected client boundary from the process cwd. The
+ * package-local suite passes, but the repository's root `pnpm test` gate then
+ * cannot find the same file and never runs this mutation check.
+ */
+const liveRoomSession = workspacePath('apps/web/app/app/[workspace]/[room]/LiveRoomSession.tsx');
 
 const pending: PendingSupersession = {
   retiredObjectId: 'old',
@@ -23,7 +31,7 @@ describe('live supersession request state', () => {
     expect(retainedSupersessionKey(pending, 'other-old', 'new')).toBeUndefined();
     expect(retainedSupersessionKey(pending, 'old', 'other-new')).toBeUndefined();
 
-    const session = readFileSync('app/app/[workspace]/[room]/LiveRoomSession.tsx', 'utf8');
+    const session = readFileSync(liveRoomSession, 'utf8');
     expect(session).toContain(
       'const held = retainedSupersessionKey(\n              pendingSupersession,\n              retiredObjectId,\n              replacementObjectId,\n            );',
     );

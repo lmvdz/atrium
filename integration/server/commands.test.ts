@@ -59,7 +59,11 @@ afterAll(async () => {
   await handle?.close();
 });
 
-const send = (roomId: string, body: string, clientMessageId: string | null = null): Command => ({
+const send = (
+  roomId: string,
+  body: string,
+  clientMessageId: string | null = null,
+): Extract<Command, { name: 'send_message' }> => ({
   name: 'send_message',
   roomId,
   body,
@@ -892,7 +896,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
       body: 'Ship on Friday.',
       clientMessageId: 'bound-answer-1',
       attachments: [],
-    } as const;
+    } satisfies Command;
     const ack = await alice.command(answerCommand);
     expect(ack).toMatchObject({ type: 'ack', roomSeq: before + 3 });
     await bob.waitFor((frame) => frame.type === 'event' && frame.entry.roomSeq === before + 3);
@@ -974,7 +978,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
       body: 'Use the Friday window.',
       clientMessageId: 'concurrent-bound-answer',
       attachments: [],
-    } as const;
+    } satisfies Command;
     try {
       const [left, right] = await Promise.all([alice.command(command), peerAlice.command(command)]);
       expect(left).toMatchObject({ type: 'ack' });
@@ -1023,7 +1027,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
           capability: 'fresh-only-grant',
         },
       ],
-    } as const;
+    } satisfies Command;
     try {
       const first = await attachedAlice.command(command);
       expect(first).toMatchObject({ type: 'ack' });
