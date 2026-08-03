@@ -686,7 +686,7 @@ export interface AttentionItem {
 
 /* --- state lens ---------------------------------------------------------- */
 
-export type ObjectiveStatus = 'active' | 'blocked' | 'idle';
+export type ObjectiveStatus = 'active' | 'blocked' | 'idle' | 'proposed';
 
 export interface ObjectiveRecord {
   readonly id: string;
@@ -948,6 +948,10 @@ export interface ReceiptRecord {
   readonly happened: readonly HappenedLine[];
   readonly provenance: readonly ProvenanceEntry[];
   readonly corrections: readonly CorrectionEntry[];
+  /** A staged machine reading becomes accepted only through this human act. */
+  readonly acceptable?: boolean;
+  /** An open question may bind the next words the person types as its answer. */
+  readonly answerable?: boolean;
   /** Explicit capability; a decision glyph alone does not grant authority. */
   readonly retypeable: boolean;
   readonly reopenable: boolean;

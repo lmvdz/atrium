@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { eq, like } from 'drizzle-orm';
 import { reconcileStoredAttention } from '../apps/server/src/attention-projection.js';
-import { Command, createCommandService } from '../apps/server/src/commands.js';
 import type { ExtractedReading } from '../apps/server/src/jobs/extraction.js';
 import { runInterpretation } from '../apps/server/src/jobs/interpret.js';
 import type {
@@ -12,12 +11,10 @@ import type {
 } from '../apps/server/src/jobs/provider.js';
 import { createLedger } from '../apps/server/src/ledger.js';
 import { createLogger } from '../apps/server/src/logger.js';
-import { createMembershipAuthorizer } from '../apps/server/src/session.js';
 import {
   createDatabase,
   memberships,
   messages,
-  proposals,
   rooms,
   users,
   workspaceMembers,
@@ -63,6 +60,7 @@ const readings = [
   },
   {
     match: CURRENT_OPEN_QUESTION,
+    text: CURRENT_OPEN_QUESTION,
     type: 'open_question',
   },
 ] as const;
@@ -100,7 +98,7 @@ const provider: InterpretationProvider = {
         text: 'text' in reading ? reading.text : reading.match,
         subject: reading.type === 'claim' || reading.type === 'commitment' ? source.authorId : null,
         confidence: 0.95,
-        quote: 'wholeMessage' in reading && reading.wholeMessage ? source.body : reading.match,
+        quote: reading.match,
         messageIds: [source.id],
       });
     }
@@ -206,87 +204,7 @@ async function main() {
       workerRejections.push(...run.rejected.map((item) => `${item.reason}: ${item.detail}`));
     }
 
-    const commands = createCommandService({
-      db: database.db,
-      ledger,
-      authorizer: createMembershipAuthorizer(database.db),
-      logger,
-    });
-    const staged = (
-      await database.db
-        .select({ id: proposals.id, type: proposals.type, payload: proposals.payload })
-        .from(proposals)
-        .where(eq(proposals.roomId, roomId))
-    ).sort((left, right) => Number(right.type === 'objective') - Number(left.type === 'objective'));
-    let humanAccepted = 0;
-    let objectiveId: string | null = null;
-    const acceptedByText = new Map<string, string>();
-    for (const proposal of staged) {
-      const semanticText =
-        typeof proposal.payload !== 'object' || proposal.payload === null
-          ? null
-          : proposal.type === 'objective' && 'title' in proposal.payload
-            ? proposal.payload.title
-            : proposal.type === 'open_question' && 'question' in proposal.payload
-              ? proposal.payload.question
-              : 'statement' in proposal.payload
-                ? proposal.payload.statement
-                : null;
-      const accepted = await commands.execute(
-        {
-          userId: authorIds.get(
-            proposal.type === 'commitment' ? 'basickarl' : 'RyanCavanaugh',
-          ) as string,
-        },
-        Command.parse({
-          name: 'accept_proposal',
-          roomId,
-          proposalId: proposal.id,
-          objectiveId: proposal.type === 'objective' ? null : objectiveId,
-        }),
-      );
-      if (proposal.type === 'objective') {
-        if (accepted.kind !== 'appended' || accepted.event.type !== 'object_accepted') {
-          throw new Error('replay seed: objective acceptance did not reach the fold');
-        }
-        objectiveId = accepted.event.object.id;
-      }
-      if (accepted.kind !== 'appended' || accepted.event.type !== 'object_accepted') {
-        throw new Error(`replay seed: ${proposal.type} acceptance did not reach the fold`);
-      }
-      if (typeof semanticText === 'string') {
-        acceptedByText.set(semanticText, accepted.event.object.id);
-      }
-      humanAccepted += 1;
-    }
-    const historicalQuestionId = acceptedByText.get('When a function is invoked, side effects');
-    const currentQuestionId = acceptedByText.get(CURRENT_OPEN_QUESTION);
-    const answerObjectId = acceptedByText.get(
-      'optimistic assumption that type guards are unaffected by intervening function calls is the best compromise',
-    );
-    if (!historicalQuestionId || !currentQuestionId || !answerObjectId || !objectiveId) {
-      throw new Error(
-        `replay seed: the persisted questions, objective and answer claim are required; staged=${staged
-          .map((proposal) => proposal.type)
-          .join(',')}; rejected=${workerRejections.join(' | ') || 'none'}`,
-      );
-    }
-    const bound = await commands.execute(
-      { userId: authorIds.get('RyanCavanaugh') as string },
-      Command.parse({
-        name: 'answer_bind',
-        roomId,
-        questionId: historicalQuestionId,
-        answerObjectId,
-        note: null,
-      }),
-    );
-    if (bound.kind !== 'appended' || bound.event.type !== 'relation_added') {
-      throw new Error('replay seed: question answer did not reach the fold');
-    }
-    const questionIndex = corpus.findIndex((line) => line.text.includes(CURRENT_OPEN_QUESTION));
-    const windowStart = questionIndex;
-    const evidenceWindow = corpus.slice(windowStart, windowStart + 8).map((line) => ({
+    const evidenceWindow = corpus.map((line) => ({
       id: messageIds.get(line.id) as string,
       roomId,
       authorId: authorIds.get(line.author) as string,
@@ -299,7 +217,7 @@ async function main() {
       state: ledger.coreState(),
       roomId,
       messages: evidenceWindow,
-      now: corpus[windowStart + 7]?.ts ?? corpus.at(-1)?.ts ?? new Date().toISOString(),
+      now: corpus.at(-1)?.ts ?? new Date().toISOString(),
     });
 
     console.log(`replay room       /replay/${WORKSPACE_SLUG}/${ROOM_SLUG}`);
@@ -310,7 +228,7 @@ async function main() {
     console.log(`auto-accepted     ${autoAccepted}`);
     console.log(`worker rejected   ${workerRejections.length}`);
     for (const rejection of workerRejections) console.log(`  rejected         ${rejection}`);
-    console.log(`human-accepted    ${humanAccepted}`);
+    console.log('human-accepted    0 (no certification act exists in the corpus)');
     console.log(
       `attention pending ${attention.items.filter((item) => item.status === 'pending').length}`,
     );

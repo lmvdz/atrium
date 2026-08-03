@@ -107,7 +107,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     ),
   ]);
   const receiptObject = objects.find((object) => object.id === receiptId);
-  const receiptCorrection = corrections.find(
+  const receiptCorrection = corrections.findLast(
     (correction) => correction.objectId === receiptObject?.id,
   );
   const receipt = receiptObject
@@ -141,7 +141,11 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
       const row = [...document.querySelectorAll<HTMLElement>('[data-message-id]')].find(
         (candidate) => candidate.dataset.messageId === messageId,
       );
-      row?.scrollIntoView({ block: 'center' });
+      if (row) {
+        row.tabIndex = -1;
+        row.scrollIntoView({ block: 'center' });
+        row.focus({ preventScroll: true });
+      }
     });
   };
 
@@ -160,7 +164,11 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     };
     setLocalRecords((current) => [...current, record]);
     if (binding.mode === 'bound') {
-      const subjectId = attentionSubjects.get(binding.itemId);
+      const subjectId =
+        attentionSubjects.get(binding.itemId) ??
+        (binding.itemId.startsWith('replay-direct:')
+          ? binding.itemId.slice('replay-direct:'.length)
+          : undefined);
       if (subjectId) {
         setAcceptedSubjects((current) => [...current, subjectId]);
         setAnswerBySubject((current) => ({ ...current, [subjectId]: record.id }));
@@ -218,13 +226,33 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
             setTargetMessageId(null);
             setReceiptId(objectId);
           },
+          onAcceptReceipt: (objectId) => {
+            setAcceptedSubjects((current) =>
+              current.includes(objectId) ? current : [...current, objectId],
+            );
+          },
+          onAnswerReceipt: (objectId) => {
+            const object = objects.find((candidate) => candidate.id === objectId);
+            if (!object) return;
+            setBinding({
+              mode: 'bound',
+              itemId: `replay-direct:${object.id}`,
+              itemLabel: object.text,
+              objective: data.room.name,
+              state: object.state,
+            });
+            setFocused('conversation');
+          },
           onCloseReceipt: () => setReceiptId(null),
           onJumpToMessage: jumpToMessage,
           onJumpToSource: (_itemId, messageId) => jumpToMessage(messageId),
           onRetypeToClaim: (objectId) => {
             const object = objects.find((candidate) => candidate.id === objectId);
             if (object)
-              setCorrections((current) => [...current, retypeAsClaim(object, clockNow())]);
+              setCorrections((current) => [
+                ...current.filter((transition) => transition.objectId !== objectId),
+                retypeAsClaim(object, clockNow()),
+              ]);
           },
           onReopen: (objectId) => {
             const object = objects.find((candidate) => candidate.id === objectId);
@@ -233,9 +261,15 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
                 (relation) => relation.kind === 'answers' && relation.fromObjectId === objectId,
               )
               .map((relation) => relation.id);
+            const localAnswer = answerBySubject[objectId];
+            if (localAnswer) relationIds.push(`replay-local-answer:${localAnswer}`);
             if (object) {
+              setActedOn((current) =>
+                current.filter((itemId) => attentionSubjects.get(itemId) !== objectId),
+              );
+              setAcceptedSubjects((current) => current.filter((id) => id !== objectId));
               setCorrections((current) => [
-                ...current,
+                ...current.filter((transition) => transition.objectId !== objectId),
                 reopenQuestion(object, clockNow(), relationIds),
               ]);
             }

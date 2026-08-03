@@ -127,6 +127,75 @@ describe('persisted replay view', () => {
   });
 
   /**
+   * Mutation: omit staged objectives or present a model proposal as accepted.
+   * A corpus with no human certification then either loses its Current-state
+   * grouping or paints a machine reading with settled authority.
+   */
+  it('groups persisted drafts under a proposed objective without certifying them', () => {
+    const snapshot = data();
+    const proposal = (
+      id: string,
+      type: 'objective' | 'decision',
+      payload: ReplayData['proposals'][number]['payload'],
+      quote: string,
+    ): ReplayData['proposals'][number] => ({
+      id,
+      roomId: 'room',
+      interpretationId: null,
+      type,
+      payload,
+      confidence: 0.95,
+      proposerKind: 'model',
+      proposerModel: 'replay/precomputed-v1',
+      proposerUserId: null,
+      stagedByKind: 'model',
+      stagedById: 'replay/precomputed-v1',
+      quote,
+      status: 'proposed',
+      decidedBy: null,
+      decidedAt: null,
+      rejectedReason: null,
+      createdAt: at,
+    });
+    snapshot.proposals.push(
+      proposal(
+        'objective-draft',
+        'objective',
+        {
+          title: 'Choose a regeneration strategy.',
+          status: 'open',
+        } as unknown as ReplayData['proposals'][number]['payload'],
+        'Choose a regeneration strategy.',
+      ),
+      proposal(
+        'decision-draft',
+        'decision',
+        {
+          statement: 'Regenerate in the background.',
+          decidedBy: null,
+          status: 'active',
+        } as ReplayData['proposals'][number]['payload'],
+        'Regenerate in the background.',
+      ),
+    );
+
+    const view = replayView(snapshot, 'alice');
+    expect(view.objectives).toContainEqual({
+      id: 'objective-draft',
+      title: 'Choose a regeneration strategy.',
+      status: 'proposed',
+      open: true,
+    });
+    const decisionDraft = view.objects.find((object) => object.id === 'decision-draft');
+    expect(decisionDraft).toMatchObject({
+      state: { verification: 'proposed' },
+      objectives: ['objective-draft'],
+    });
+    if (!decisionDraft) throw new Error('decision draft missing');
+    expect(replayReceipt(snapshot, view.records, decisionDraft).acceptable).toBe(true);
+  });
+
+  /**
    * Mutation: resolve the first answer edge or the first claim source rather
    * than the exact relation retained by the reopen transition. The receipt
    * quotes m2 instead of the answer selected by relation-good.

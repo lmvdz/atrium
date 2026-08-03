@@ -176,23 +176,15 @@ test.describe('gallery', () => {
       page.locator('[data-gallery-frame="fresh-room"] [data-row="trailer"]'),
     ).not.toContainText('everything outside your list is verified');
 
-    /* ---------------------------------------------------------------------
-     * ROUND 10, D4 — THE TWO CLAUSES, EACH NAMING WHAT IT COUNTS.
-     *
-     * r9's trailer read "… — 2 objectives clear of you · 2 commitments, 0
-     * overdue · 1 failure": three numbers about the pin's objectives, three
-     * about the objects outside it, one room-wide, and the scope stated once.
-     * So "0 overdue" stood 300px from a lens row reading "overdue 16h".
-     * ------------------------------------------------------------------- */
+    /* Mutation: restore the detailed outside/yours count reconciliation after
+       its actionable lead. Those numbers duplicate Current state and make the
+       trailer a run-on audit of itself; the trailer now keeps only the derived
+       lead and the time at which it was checked. */
     const trailer = page.locator('[data-gallery-frame="fresh-room"] [data-row="trailer"]');
-    await expect(trailer.locator('[data-trailer-scope="outside"]')).toContainText(
-      'outside your list, of',
-    );
-    await expect(trailer.locator('[data-trailer-scope="yours"]')).toContainText('your list:');
-    /* AND NEITHER CLAUSE CARRIES THE OTHER'S NUMBERS. A clause is one element's
-       own text, so this is checkable rather than a claim about the sentence. */
-    await expect(trailer.locator('[data-trailer-scope="yours"]')).not.toContainText('commitment');
-    await expect(trailer.locator('[data-trailer-scope="outside"]')).not.toContainText('objectives');
+    await expect(trailer.locator('[data-trailer-lead="true"]')).toHaveCount(1);
+    await expect(trailer.locator('[data-trailer-scope="check"]')).toContainText('last check');
+    await expect(trailer).not.toContainText('commitment');
+    await expect(trailer).not.toContainText('objectives clear');
   });
 
   /* ---------------------------------------------------------------------------

@@ -94,7 +94,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
   const recordById = new Map(records.map((record) => [record.id, record]));
 
   const pendingBySubject = new Map(viewerAttention.map((item) => [item.subjectId, item]));
-  const objectives: ObjectiveRecord[] = data.objects
+  const acceptedObjectives: ObjectiveRecord[] = data.objects
     .filter((object) => object.type === 'objective' && object.retractedAt === null)
     .map((object) => ({
       id: object.id,
@@ -107,6 +107,15 @@ export function replayView(data: ReplayData, viewerId?: string) {
             : 'blocked',
       open: true,
     }));
+  const stagedObjectives: ObjectiveRecord[] = data.proposals
+    .filter((proposal) => proposal.type === 'objective' && proposal.status === 'proposed')
+    .map((proposal) => ({
+      id: proposal.id,
+      title: payloadText(proposal.type, proposal.payload),
+      status: 'proposed',
+      open: true,
+    }));
+  const objectives = [...acceptedObjectives, ...stagedObjectives];
 
   const accepted: StateObject[] = data.objects
     .filter(
@@ -144,7 +153,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
           ? `drafted by ${proposal.proposerModel ?? 'an unrecorded model'}`
           : `drafted by ${participantName.get(proposal.proposerUserId ?? '') ?? 'a participant'}`,
       ],
-      objectives: [],
+      objectives: objectives.map((objective) => objective.id),
     }));
   const objects = [...accepted, ...staged];
 
@@ -390,6 +399,8 @@ export function replayReceipt(
     })),
     provenance,
     corrections,
+    acceptable: object.state.verification === 'proposed',
+    answerable: object.kind === 'question' && object.state.verification === 'open',
     retypeable:
       object.kind === 'decision' &&
       object.state.verification === 'accepted' &&

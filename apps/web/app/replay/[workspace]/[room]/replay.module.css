@@ -7,7 +7,7 @@
   align-items: center;
   background: var(--bg1);
   border: 1px solid var(--line);
-  bottom: 16px;
+  bottom: 96px;
   box-shadow: 0 8px 32px color-mix(in srgb, var(--tx0) 12%, transparent);
   display: grid;
   gap: 8px;

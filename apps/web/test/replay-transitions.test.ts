@@ -61,4 +61,21 @@ describe('replay correction transitions', () => {
       owedToViewer: true,
     });
   });
+
+  /**
+   * Mutation: append the reopen fact every time a locally answered question is
+   * reopened. React then receives duplicate fact keys and the receipt repeats
+   * one event as though it happened twice in the same transition.
+   */
+  it('keeps the reopen fact singular across repeated local answer cycles', () => {
+    const first = reopenQuestion(question, '12:01', ['answers-1']);
+    const answeredAgain: StateObject = {
+      ...first.after,
+      state: { ...first.after.state, verification: 'accepted', owedToViewer: false },
+    };
+    const second = reopenQuestion(answeredAgain, '12:02', ['answers-2']);
+    expect(
+      second.after.facts.filter((fact) => fact === 'reopened with the prior answer preserved'),
+    ).toHaveLength(1);
+  });
 });

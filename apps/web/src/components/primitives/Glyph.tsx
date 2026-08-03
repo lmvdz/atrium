@@ -42,10 +42,9 @@ export function Glyph({ state, decorative = true, className }: GlyphProps) {
     'data-tone': tone,
   };
 
-  // Beside a row that already says who claimed what, the glyph is a visual
-  // restatement and a screen reader should skip it. Standing alone — the pin
-  // head, the trailer — it is the only thing carrying the epistemic state, so
-  // it announces itself.
+  // Beside text that already states the result, the glyph is a visual
+  // restatement and a screen reader should skip it. Where the glyph is the only
+  // carrier — for example the pin head — the caller opts into an announcement.
   if (decorative) {
     return (
       <span {...shared} aria-hidden="true">

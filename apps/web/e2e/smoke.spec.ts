@@ -182,6 +182,20 @@ test.describe('shell', () => {
      */
     const INERT: readonly { readonly name: RegExp; readonly why: string }[] = [
       {
+        name: /^atrium$/,
+        /* Mutation: change this narrowly anchored home-route exemption to a
+           broad link exemption; a genuinely dead navigation control then
+           disappears from the denominator. */
+        why: 'the persistent wordmark links to the current home route while this sweep is already on it',
+      },
+      {
+        name: /^sign in$/,
+        /* Mutation: broaden this to all links. A dead in-product navigation
+           then escapes the sweep; this one route-changing link is driven by
+           the dedicated signed-out-entry test below. */
+        why: 'sign in unmounts this sweep’s denominator and is driven by "offers a way in to someone who is not signed in"',
+      },
+      {
         name: /^Answer .* in your own words$|^Message #/,
         why: 'the composer textarea — focusing a field is not an act, and what it does when it has a draft is asserted in "the controls on / actually do something"',
       },
@@ -247,9 +261,21 @@ test.describe('shell', () => {
        the room switch itself is asserted in "the rail, the objectives and the
        object rows are wired". */
     const REPLACES_THE_PAGE = /^#/;
+    /* Mutation: drive a state-changing control before the inert composer.
+       React replaces the composer node and its temporary enumeration marker,
+       so the sweep skips it and then reports both exemptions as stale. Exercise
+       inert controls first while the denominator's exact nodes still exist. */
+    const isInert = (control: { readonly name: string }) =>
+      INERT.some((entry) => entry.name.test(control.name));
+    const exitsRoute = (control: { readonly name: string }) => /^sign in$/.test(control.name);
     const ordered = [
-      ...visible.filter((control) => !REPLACES_THE_PAGE.test(control.name)),
+      ...visible.filter((control) => isInert(control) && !exitsRoute(control)),
+      ...visible.filter(
+        (control) =>
+          !isInert(control) && !REPLACES_THE_PAGE.test(control.name) && !exitsRoute(control),
+      ),
       ...visible.filter((control) => REPLACES_THE_PAGE.test(control.name)),
+      ...visible.filter((control) => exitsRoute(control)),
     ];
     expect(
       ordered.filter((control) => REPLACES_THE_PAGE.test(control.name)).length,

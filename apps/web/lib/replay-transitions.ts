@@ -64,6 +64,7 @@ export function reopenQuestion(
   if (priorAnswerRelationIds.length === 0) {
     throw new Error('replay reopen: the prior answer relation must stay on the record');
   }
+  const reopenedFact = 'reopened with the prior answer preserved';
   return {
     id: `${object.id}:reopen:${at}`,
     action: 'reopen',
@@ -78,7 +79,7 @@ export function reopenQuestion(
         owedToViewer: true,
         irreversible: false,
       },
-      facts: [...object.facts, 'reopened with the prior answer preserved'],
+      facts: object.facts.includes(reopenedFact) ? object.facts : [...object.facts, reopenedFact],
     },
     priorAnswerRelationIds: [...priorAnswerRelationIds],
   };

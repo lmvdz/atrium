@@ -82,12 +82,12 @@ test.describe('persisted three-surface replay', () => {
     expect(await replayDatabaseFacts()).toEqual({
       messages: 111,
       proposals: 5,
-      objects: 5,
-      stagedDecisions: 0,
-      answers: 1,
+      objects: 0,
+      stagedDecisions: 2,
+      answers: 0,
       blockers: 0,
       proposalSources: 5,
-      objectSources: 5,
+      objectSources: 0,
     });
     await page.goto('/replay/atrium-replay/typescript-9998');
 
@@ -107,6 +107,17 @@ test.describe('persisted three-surface replay', () => {
       page.getByRole('textbox', { name: 'Message #function-call side effects' }),
     ).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
+    expect(
+      await page.getByRole('textbox').evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(
+          bounds.left + bounds.width / 2,
+          bounds.top + bounds.height / 2,
+        );
+        return hit?.closest('[aria-label="Replay controls"]') === null;
+      }),
+      'the replay scrubber must not cover the composer',
+    ).toBe(true);
 
     const slider = page.getByRole('slider', { name: 'Replay position' });
     await slider.press('Home');
@@ -169,6 +180,9 @@ test.describe('persisted three-surface replay', () => {
       .filter({ hasText: decision })
       .click();
     await expect(receipt).toContainText('DECISION');
+    await expect(receipt).toContainText('proposed');
+    await receipt.getByRole('button', { name: 'Accept reading', exact: true }).click();
+    await expect(receipt).toContainText('accepted');
 
     await receipt.getByRole('button', { name: 'Retype as claim', exact: true }).click();
     await expect(receipt).toContainText('CORRECTED · DECISION → CLAIM');
@@ -198,8 +212,7 @@ test.describe('persisted three-surface replay', () => {
   test('reopens an answered question while preserving its prior answer', async ({ page }) => {
     const before = await replayDatabaseFingerprint();
     const question = 'When a function is invoked, side effects';
-    const priorAnswer =
-      'In aggregate, I think our optimistic assumption that type guards are unaffected by intervening function calls is the best compromise.';
+    const firstAnswer = 'Keep the optimistic assumption, but suppress narrowing through a getter.';
     await page.goto('/replay/atrium-replay/typescript-9998');
 
     const questionRow = page
@@ -207,24 +220,35 @@ test.describe('persisted three-surface replay', () => {
       .filter({ hasText: question });
     await questionRow.click();
     const receipt = page.getByRole('region', { name: 'Receipt' });
-    await expect(receipt).toContainText('answered');
-
+    await expect(receipt).toContainText('open');
+    await receipt.getByRole('button', { name: 'Answer', exact: true }).click();
+    await page
+      .getByRole('textbox', { name: `Answer ${question} in your own words` })
+      .fill(firstAnswer);
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(receipt.locator('[data-quoted]').filter({ hasText: firstAnswer })).toHaveCount(1);
+    await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
     await receipt.getByRole('button', { name: 'Reopen', exact: true }).click();
     await expect(receipt).toContainText('REOPENED · PRIOR ANSWER KEPT');
     await expect(receipt).toContainText('pending again');
-    await expect(receipt.locator('[data-quoted]').filter({ hasText: priorAnswer })).toHaveCount(1);
+    await expect(receipt.locator('[data-quoted]').filter({ hasText: firstAnswer })).toHaveCount(1);
     await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toHaveCount(0);
     const restored = page.locator('[data-attention-id]').filter({ hasText: question });
     await expect(restored).toContainText('?');
     await expect(restored.getByRole('button', { name: 'answer', exact: true })).toBeVisible();
 
-    const priorAnswerSource = receipt.getByRole('button').filter({ hasText: priorAnswer });
+    const priorAnswerSource = receipt.getByRole('button').filter({ hasText: firstAnswer });
     const messageId = await priorAnswerSource.getAttribute('data-jumps-to');
     expect(messageId).toBeTruthy();
     await priorAnswerSource.click();
     await expect(page.locator(`[data-message-id="${messageId}"]`)).toBeInViewport();
+    expect(
+      await page.evaluate(() => document.activeElement?.getAttribute('data-message-id')),
+      'a provenance jump must leave keyboard focus on its source row',
+    ).toBe(messageId);
 
-    const secondAnswer = 'Keep the optimistic assumption, but suppress narrowing through a getter.';
+    const secondAnswer =
+      'Retain optimistic narrowing and use an accessor where mutation is expected.';
     await restored.getByRole('button', { name: 'answer', exact: true }).click();
     await page
       .getByRole('textbox', { name: `Answer ${question} in your own words` })
@@ -233,11 +257,16 @@ test.describe('persisted three-surface replay', () => {
     await expect(restored.getByRole('button', { name: 'answer', exact: true })).toHaveCount(0);
     await expect(receipt.locator('[data-quoted]').filter({ hasText: secondAnswer })).toHaveCount(1);
     await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
+    await receipt.getByRole('button', { name: 'Reopen', exact: true }).click();
+    await expect(page.locator('[data-attention-id]').filter({ hasText: question })).toContainText(
+      '?',
+    );
+    await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toHaveCount(0);
     await receipt.getByRole('button', { name: '← BACK TO CURRENT STATE' }).click();
-    const answeredAgain = page
+    const reopenedAgain = page
       .locator('[data-region="current-state"] [data-object-id]')
       .filter({ hasText: question });
-    await expect(answeredAgain).toContainText('✓');
+    await expect(reopenedAgain).toContainText('?');
     expect(await replayDatabaseFingerprint()).toBe(before);
   });
 

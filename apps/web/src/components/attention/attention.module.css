@@ -430,10 +430,6 @@
   font-weight: 500;
 }
 
-.trailerGlyph {
-  flex: none;
-}
-
 /* --- the overflow affordance --------------------------------------------- */
 /* "N more owed" — explicit, counted, and named by derived glyph. The pin folds
    rather than scrolling, so what is behind the fold has to say how hard it is

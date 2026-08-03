@@ -38,6 +38,7 @@ const STATUS_CLASS = {
   active: styles.statusActive,
   blocked: styles.statusBlocked,
   idle: undefined,
+  proposed: undefined,
 } as const;
 
 export function ObjectiveGroup({

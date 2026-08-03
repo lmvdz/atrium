@@ -38,7 +38,7 @@
  * ------------------------------------------------------------------------- */
 
 import frame from '../frame/frame.module.css';
-import { isClaim, needsViewer } from '../model/glyph';
+import { needsViewer } from '../model/glyph';
 import { systemText } from '../model/quotation';
 import type { ObjectiveRecord, StateObject } from '../model/records';
 import type { Slot } from '../model/slot';
@@ -67,10 +67,12 @@ export function StateLens({
   onOpenReceipt,
 }: StateLensProps) {
   const settled = objects.filter((o) => ['verified', 'accepted'].includes(o.state.verification));
-  const claims = objects.filter((o) => isClaim(o.state));
+  const unverified = objects.filter((o) =>
+    ['proposed', 'unverified', 'self_reported'].includes(o.state.verification),
+  );
   const open = objects.filter((o) => o.state.verification === 'open');
   const owed = objects.filter((o) => needsViewer(o.state));
-  const accounted = new Set([...settled, ...claims, ...open].map((o) => o.id));
+  const accounted = new Set([...settled, ...unverified, ...open].map((o) => o.id));
   const unaccounted = objects.filter((o) => !accounted.has(o.id));
 
   return (
@@ -87,7 +89,7 @@ export function StateLens({
         <div className={styles.lensHeadSub}>
           <span aria-hidden="true" className={`${styles.live} atr-pulse`} data-live="true" />
           <span>
-            {plural(objects.length, 'object')} · {settled.length} settled · {claims.length}{' '}
+            {plural(objects.length, 'object')} · {settled.length} settled · {unverified.length}{' '}
             unverified
             {open.length === 0 ? '' : ` · ${open.length} open`}
             {unaccounted.length === 0 ? '' : ` · ${plural(unaccounted.length, 'failure')}`} ·{' '}

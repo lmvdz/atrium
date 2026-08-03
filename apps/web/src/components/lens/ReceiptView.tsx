@@ -37,6 +37,8 @@ export type ReceiptViewProps = {
   readonly onBack?: () => void;
   readonly onReopen?: (receiptId: string) => void;
   readonly onRetypeToClaim?: (receiptId: string) => void;
+  readonly onAccept?: (receiptId: string) => void;
+  readonly onAnswer?: (receiptId: string) => void;
   readonly onJump?: (messageId: string) => void;
 } & NoGlyph;
 
@@ -45,6 +47,8 @@ export function ReceiptView({
   onBack,
   onReopen,
   onRetypeToClaim,
+  onAccept,
+  onAnswer,
   onJump,
 }: ReceiptViewProps) {
   return (
@@ -168,6 +172,24 @@ export function ReceiptView({
           {systemText(receipt.reopenNote, 'ReceiptView reopenNote')}
         </span>
         <span>
+          {receipt.acceptable === true && onAccept !== undefined ? (
+            <button
+              className="atr-btn atr-btn-sm"
+              onClick={() => onAccept(receipt.id)}
+              type="button"
+            >
+              Accept reading
+            </button>
+          ) : null}
+          {receipt.answerable === true && onAnswer !== undefined ? (
+            <button
+              className="atr-btn atr-btn-sm"
+              onClick={() => onAnswer(receipt.id)}
+              type="button"
+            >
+              Answer
+            </button>
+          ) : null}
           {receipt.retypeable && onRetypeToClaim !== undefined ? (
             <button
               className="atr-btn atr-btn-sm"
