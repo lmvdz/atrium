@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
+import { authoredBody } from '@/lib/authored-body';
 import { type LiveUnreadWindow, liveRoomView, shouldRefreshLiveRoute } from '@/lib/live-room-view';
 import {
   type PendingSupersession,
@@ -334,8 +335,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             clientRef.current?.setTyping(roomId, next.trim().length > 0);
           },
           onSend: (text) => {
-            const body = text.trim();
-            if (!body || !subscribed || pendingUploads.current > 0) return;
+            const body = authoredBody(text);
+            if (body === null || !subscribed || pendingUploads.current > 0) return;
             if (binding.mode === 'bound') {
               const questionId =
                 subjectByAttention.get(binding.itemId) ??
@@ -496,6 +497,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             }
             if (actionId === 'decline') {
               clientRef.current?.rejectProposal(roomId, subjectId);
+              return;
+            }
+            if (actionId === 'dismiss') {
+              clientRef.current?.resolveAttention(roomId, attentionId, 'dismissed');
               return;
             }
             if (actionId === 'answer') {

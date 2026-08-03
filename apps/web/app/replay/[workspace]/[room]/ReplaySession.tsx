@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { authoredBody } from '@/lib/authored-body';
 import type { ReplayData } from '../../../../lib/replay-data';
 import {
   applyReplayTransitions,
@@ -176,8 +177,8 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
 
   const send = (text: string) => {
     if (binding.mode !== 'bound') return;
-    const body = text.trim();
-    if (!body) return;
+    const body = authoredBody(text);
+    if (body === null) return;
     localSequence.current += 1;
     const record: MessageRecord = {
       id: `replay-answer-${localSequence.current}`,

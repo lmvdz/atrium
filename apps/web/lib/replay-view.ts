@@ -635,6 +635,14 @@ function actionsFor(
   reason: ReplayData['attention'][number]['reason']['kind'],
   hasSource: boolean,
 ) {
+  if (reason === 'mention') {
+    return [
+      ...(hasSource
+        ? [{ id: 'open', label: 'open source', emphasis: 'secondary' as const, statement: null }]
+        : []),
+      { id: 'dismiss', label: 'dismiss', emphasis: 'secondary' as const, statement: null },
+    ];
+  }
   if (attentionClass === 'needs_decision') {
     return [
       { id: 'answer', label: 'answer', emphasis: 'primary' as const, statement: null },

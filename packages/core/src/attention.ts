@@ -486,7 +486,8 @@ interface AttentionSource {
  */
 export interface MentionSignal {
   roomId: Id;
-  /** The object the mention is attached to. */
+  /** The staged proposal or accepted object the mention is attached to. */
+  subjectKind?: AttentionSubjectKind;
   objectId: Id;
   userId: Id;
   /** What is being asked of them, verbatim enough to quote. */
@@ -1194,7 +1195,8 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
   const out: ComputedAttentionItem[] = [];
   const seen = new Set<string>();
   for (const signal of signals) {
-    const id = attentionItemId(signal.userId, 'object', signal.objectId, 'mention');
+    const subjectKind = signal.subjectKind ?? 'object';
+    const id = attentionItemId(signal.userId, subjectKind, signal.objectId, 'mention');
     if (seen.has(id)) continue;
     seen.add(id);
     out.push(
@@ -1203,7 +1205,7 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
         roomId: signal.roomId,
         userId: signal.userId,
         objectId: signal.objectId,
-        subjectKind: 'object',
+        subjectKind,
         class: 'mention',
         priority: ATTENTION_PRIORITY.mention,
         createdAt: ctx.now,

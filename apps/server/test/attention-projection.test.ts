@@ -76,12 +76,14 @@ describe('live mention projection', () => {
     expect(mentionSignals(state, roomId, messages, [mentionedUser])).toEqual([
       {
         roomId,
+        subjectKind: 'proposal',
         objectId: proposalId,
         userId: mentionedUser,
         request: 'Open question: Which trace?',
       },
       {
         roomId,
+        subjectKind: 'object',
         objectId,
         userId: mentionedUser,
         request: 'Open question: Which trace?',

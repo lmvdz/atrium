@@ -79,7 +79,8 @@ Final combined-tree gates:
 - `pnpm lint`: exit 0; 15 warnings and 51 infos are the repository's known
   design-harness diagnostics, not new errors.
 - `pnpm typecheck`: pass.
-- `pnpm test --maxWorkers=2`: 3,027/3,027.
+- `pnpm test --maxWorkers=2`: 3,027/3,027 before the final blind remedy; the
+  added authored-body mutation test brings the current total to 3,028.
 - `pnpm test:integration`: 170/170 against compose-managed real Postgres; the
   harness removed its container and network.
 - Playwright at `--workers=2`: 167/167 in 3.8 minutes, including replay
@@ -146,8 +147,12 @@ objective filing and mentions plus stale receipt claims. A later fresh review
 found two further blockers: public replay access and a mention protocol that
 serialized routing metadata into a person's words. Replay is now user-scoped,
 and mentions are persisted as structured UUID metadata while the authored body
-remains byte-for-byte unchanged. Those remedies are awaiting the final fresh
-verdict. No Grok runtime or
+remains byte-for-byte unchanged. A final fresh review then found that mention
+attention lost its proposal discriminator and lacked dismissal, and that both
+live and replay consumers trimmed authored whitespace. Mention subjects now
+retain `proposal`/`object` identity through core and Postgres, one-click dismiss
+lands as `dismissed`, and nonblank authored bodies cross unchanged. Those last
+remedies are awaiting a fresh verdict. No Grok runtime or
 credential is available in this environment, and spending or external account
 use was not authorized. Therefore this branch must not be described as ready to
 merge or ticket #27 as closed until an actual Grok review is attached (and any

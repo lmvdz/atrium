@@ -1008,3 +1008,22 @@ workspace and room lookup to that user; browser cases pin anonymous redirect and
 a verified workspace member without room membership receiving 404. Lesson kept:
 **authorization belongs on every read surface, not on the route that happens to
 link to it.**
+
+**Polymorphic provenance loses its safety when an adapter erases the
+discriminator.** Structured mentions could originate on a staged proposal or a
+direct accepted object, but the first adapter called both `objectId`. Core then
+minted `subject_kind = object`, contradicting the database's room-scoped
+proposal/object foreign keys and leaving proposal sources unresolved in the UI.
+The signal now carries its kind, accepted readings retain the stable proposal
+subject, and direct objects retain object subjects. The same pass wired the
+required one-click dismissal through the live client and pinned its persisted
+`dismissed` status in the multiplayer test. Lesson kept: **when an id can name
+two tables, its discriminator must survive every layer that transports it.**
+
+**Checking trimmed emptiness does not authorize storing trimmed speech.** Both
+live and replay composers correctly rejected whitespace-only drafts, then reused
+the trimmed value as the person's recorded words. Leading indentation can be
+meaningful code or Markdown. A shared boundary now returns the original string
+for every nonblank draft, with a mutation test that fails if persistence ever
+receives `trim()` again. Lesson kept: **validate a person's text without
+normalizing the value attributed to them.**

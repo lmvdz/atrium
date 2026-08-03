@@ -98,17 +98,28 @@ export function mentionSignals(
 
   const subjects = [
     ...Object.values(state.proposals)
-      .filter((record) => record.status === 'proposed' && record.proposal.roomId === roomId)
-      .map((record) => ({ id: record.proposal.id, messageIds: record.proposal.provenance })),
+      .filter((record) => record.proposal.roomId === roomId)
+      .map((record) => ({
+        kind: 'proposal' as const,
+        id: record.proposal.id,
+        messageIds: record.proposal.provenance,
+      })),
     ...Object.values(state.objects)
-      .filter((record) => record.object.roomId === roomId)
-      .map((record) => ({ id: record.object.id, messageIds: record.object.provenance.messageIds })),
+      .filter(
+        (record) => record.object.roomId === roomId && record.object.provenance.proposalId === null,
+      )
+      .map((record) => ({
+        kind: 'object' as const,
+        id: record.object.id,
+        messageIds: record.object.provenance.messageIds,
+      })),
   ];
 
   return subjects.flatMap((subject) => {
     return subject.messageIds.flatMap((messageId) => {
       return (mentioned.get(messageId) ?? []).map((signal) => ({
         roomId,
+        subjectKind: subject.kind,
         objectId: subject.id,
         userId: signal.userId,
         request: signal.request,

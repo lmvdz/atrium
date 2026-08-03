@@ -116,7 +116,13 @@ async function actOnAttention(page: Page, attentionId: string, action: string): 
   for (;;) {
     const item = pin.locator(`[data-attention-id="${attentionId}"]`);
     if ((await item.count()) > 0) {
-      const control = item.getByRole('button', { name: action, exact: true });
+      let control = item.getByRole('button', { name: action, exact: true });
+      if ((await control.count()) === 0) {
+        await item.locator('button[data-truncates="control"]').first().click();
+        control = pin
+          .locator(`[data-attention-id="${attentionId}"]`)
+          .getByRole('button', { name: action, exact: true });
+      }
       await expect(control).toBeVisible();
       if ((await control.getAttribute('data-hold')) !== null) {
         await control.hover();
@@ -417,6 +423,24 @@ test.describe
         expect(renderedCommitment).toBe(true);
         expect([...renderedAttentionIds].sort()).toEqual(
           pendingAttention.map((item) => item.id).sort(),
+        );
+        const mentionAttention = pendingAttention.find((item) => item.reasonKind === 'mention');
+        expect(mentionAttention).toMatchObject({
+          subjectKind: 'proposal',
+          proposalStatus: 'accepted',
+          reasonKind: 'mention',
+        });
+        if (!mentionAttention?.id) throw new Error('the structured mention has no attention row');
+        await actOnAttention(absentee, mentionAttention.id, 'dismiss');
+        await eventually(
+          async () =>
+            String(
+              (
+                await sql`SELECT status::text FROM attention_items WHERE id=${mentionAttention.id}::uuid`
+              )[0]?.status ?? '',
+            ),
+          (status) => status === 'dismissed',
+          'one-click mention dismissal to reach the persisted attention fold',
         );
         await openScenarioSocket(absentee, roomId);
 
