@@ -310,23 +310,24 @@ export function replayReceipt(
   const kind = happenedKindFor(object.state);
   const sourceRef = provenance[0]?.excerpt.messageId;
   const correction = changes.correction?.objectId === object.id ? changes.correction : undefined;
-  const answerRelation = data.relations.find(
-    (relation) =>
-      relation.kind === 'answers' &&
-      relation.fromObjectId === object.id &&
-      relation.toObjectId !== null &&
-      (correction?.action !== 'reopen' || correction.priorAnswerRelationIds.includes(relation.id)),
-  );
+  const answerRelation = answerRelationFor(data, object.id, correction);
   const answerSourceId = answerRelation?.toObjectId
     ? data.objectSources.find((source) => source.objectId === answerRelation.toObjectId)?.messageId
     : undefined;
   const answerRecord = answerSourceId ? recordById.get(answerSourceId) : undefined;
   const answerExcerpt = answerRecord ? quotationFrom(answerRecord) : null;
-  if (correction?.action === 'reopen' && answerExcerpt) {
+  if (
+    answerExcerpt &&
+    !provenance.some((entry) => entry.excerpt.messageId === answerExcerpt.messageId)
+  ) {
     provenance.push({
-      id: `${object.id}:prior-answer:${answerExcerpt.messageId}`,
+      id: `${object.id}:${correction?.action === 'reopen' ? 'prior-answer' : 'answer'}:${answerExcerpt.messageId}`,
       excerpt: answerExcerpt,
-      note: systemStatement('prior answer kept after reopen'),
+      note: systemStatement(
+        correction?.action === 'reopen'
+          ? 'prior answer kept after reopen'
+          : 'accepted answer linked to this question',
+      ),
     });
   }
   const corrections: CorrectionEntry[] = [];
@@ -416,6 +417,55 @@ export function replayReceipt(
             ? 'no persisted message source is attached to this reading'
             : 'the excerpts above come from the persisted room record',
   };
+}
+
+function historicalAnswerRelationIds(data: ReplayData, questionId: string): Set<string> {
+  const historical = new Set<string>();
+  for (const correction of data.corrections) {
+    if (correction.objectId !== questionId || correction.action !== 'reopen') continue;
+    if (!isRecord(correction.after) || !Array.isArray(correction.after.priorAnswers)) continue;
+    for (const relationId of correction.after.priorAnswers) {
+      if (typeof relationId === 'string') historical.add(relationId);
+    }
+  }
+  return historical;
+}
+
+function answerRelationFor(
+  data: ReplayData,
+  questionId: string,
+  correction?: ReplayCorrectionTransition,
+): ReplayData['relations'][number] | undefined {
+  const eligible = data.relations.filter(
+    (relation) =>
+      relation.kind === 'answers' &&
+      relation.fromObjectId === questionId &&
+      relation.toObjectId !== null,
+  );
+  if (correction?.action === 'reopen') {
+    return eligible.find((relation) => correction.priorAnswerRelationIds.includes(relation.id));
+  }
+  const historical = historicalAnswerRelationIds(data, questionId);
+  return eligible.findLast((relation) => !historical.has(relation.id));
+}
+
+/** The exact persisted message supporting the currently active answer edge. */
+export function activeAnswerMessageId(data: ReplayData, questionId: string): string | undefined {
+  const answerObjectId = answerRelationFor(data, questionId)?.toObjectId;
+  if (!answerObjectId) return undefined;
+  return data.objectSources.find((source) => source.objectId === answerObjectId)?.messageId;
+}
+
+/** True only when this exact optimistic submission became the active answer. */
+export function activeAnswerMatchesClientMessage(
+  data: ReplayData,
+  questionId: string,
+  clientMessageId: string,
+): boolean {
+  const messageId = activeAnswerMessageId(data, questionId);
+  return (
+    data.messages.find((message) => message.id === messageId)?.clientMessageId === clientMessageId
+  );
 }
 
 function questionStatus(object: StateObject): string {

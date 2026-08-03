@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { advanceSeenSeq } from '@atrium/auth';
 import {
   type AcceptedObject,
@@ -71,6 +71,36 @@ const AttachmentList = z
   .max(20)
   .default([]);
 
+function answerMessageFingerprint(input: {
+  roomId: string;
+  questionId: string;
+  body: string;
+  attachments: readonly {
+    key: string;
+    name: string;
+    contentType: string;
+    size: number;
+  }[];
+}): string {
+  // Arrays make the encoding unambiguous and preserve attachment order. The
+  // version is part of the hash so a future semantic change cannot silently
+  // reinterpret an old retry key. Upload capabilities are intentionally absent:
+  // they authorize a fresh write, but are not part of the durable meaning.
+  const canonical = JSON.stringify([
+    'answer_message/v1',
+    input.roomId,
+    input.questionId,
+    input.body,
+    input.attachments.map((attachment) => [
+      attachment.key,
+      attachment.name,
+      attachment.contentType,
+      attachment.size,
+    ]),
+  ]);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
 /**
  * A proposal as a caller submits it: the reading, without a position or an id.
  *
@@ -128,6 +158,14 @@ export const Command = z.discriminatedUnion('name', [
     attachments: AttachmentList,
   }),
   z.object({ name: z.literal('record_proposal'), roomId: Id, proposal: ProposalDraft }),
+  z.object({
+    name: z.literal('answer_message'),
+    roomId: Id,
+    questionId: Id,
+    body: z.string().min(1).max(20_000),
+    clientMessageId: z.string().min(1).max(128),
+    attachments: AttachmentList,
+  }),
   z.object({
     name: z.literal('accept_proposal'),
     roomId: Id,
@@ -208,6 +246,12 @@ export type CommandResult =
       event: RoomEvent;
       /** Business problems the reducer recorded. The event still happened. */
       issues: string[];
+    }
+  | {
+      kind: 'appended_many';
+      roomId: string;
+      entries: readonly import('./ledger.js').AppendResult[];
+      replayed: boolean;
     }
   | { kind: 'presence'; roomId: string; userId: string; state: PresenceState; at: string }
   | { kind: 'typing'; roomId: string; userId: string; typing: boolean; at: string }
@@ -340,6 +384,116 @@ export function createCommandService({
             MessageAttachment.parse(attachment),
           ),
         }));
+
+      case 'answer_message': {
+        const messageId = randomUUID();
+        const answerObjectId = randomUUID();
+        const relationId = randomUUID();
+        const persistedAttachments = command.attachments.map(
+          ({ capability: _capability, ...attachment }) => MessageAttachment.parse(attachment),
+        );
+        const batch = await ledger.appendBatch({
+          roomId: command.roomId,
+          actor: actorOf(session),
+          requireClean: true,
+          authorize: async (tx) => {
+            await requireMembership(session, command.roomId, tx);
+          },
+          prepare: async () => {
+            if (command.attachments.length > 0 && !attachmentCapabilities) {
+              throw new CommandError('invalid', 'attachments are not configured');
+            }
+            if (
+              command.attachments.some(
+                (attachment) =>
+                  attachmentCapabilities?.verify({ ...attachment, roomId: command.roomId }) !==
+                  true,
+              )
+            ) {
+              throw new CommandError('invalid', 'an attachment capability is invalid or expired');
+            }
+          },
+          idempotency: {
+            commandName: 'answer_message',
+            key: command.clientMessageId,
+            fingerprint: answerMessageFingerprint({
+              roomId: command.roomId,
+              questionId: command.questionId,
+              body: command.body,
+              attachments: persistedAttachments,
+            }),
+            expectedEventTypes: ['message_posted', 'object_accepted', 'relation_added'],
+          },
+          builds: [
+            ({ id, at }) => ({
+              id,
+              at,
+              type: 'message_posted',
+              roomId: command.roomId,
+              messageId,
+              body: command.body,
+              replyToId: null,
+              clientMessageId: command.clientMessageId,
+              attachments: persistedAttachments,
+            }),
+            ({ id, at }) => {
+              const question = ledger.coreState().objects[command.questionId];
+              if (question?.object.type !== 'open_question') {
+                throw new CommandError('invalid', 'the bound subject is not an open question');
+              }
+              if (
+                question.object.roomId !== command.roomId ||
+                question.retractedAt !== null ||
+                question.object.payload.status !== 'open'
+              ) {
+                throw new CommandError('invalid', 'the bound question is not open in this room');
+              }
+              return {
+                id,
+                at,
+                type: 'object_accepted',
+                object: {
+                  id: answerObjectId,
+                  roomId: command.roomId,
+                  objectiveId: question.object.objectiveId,
+                  type: 'decision',
+                  payload: { statement: command.body, decidedBy: session.userId, status: 'active' },
+                  provenance: {
+                    messageIds: [messageId],
+                    proposalId: null,
+                    interpretationId: null,
+                  },
+                  createdAt: at,
+                  updatedAt: at,
+                },
+              };
+            },
+            ({ id, at }) => ({
+              id,
+              at,
+              type: 'relation_added',
+              relation: {
+                id: relationId,
+                roomId: command.roomId,
+                kind: 'answers',
+                fromObjectId: command.questionId,
+                to: { kind: 'object', objectId: answerObjectId },
+                note: null,
+                createdAt: at,
+              },
+            }),
+          ],
+          // Explicit answer-binding is a person's command, not an inference.
+          // Project the message but do not enqueue it for interpretation.
+          project: (context) => projectRoomEvent(context, {}),
+        });
+        return {
+          kind: 'appended_many',
+          roomId: command.roomId,
+          entries: batch.entries,
+          replayed: batch.replayed,
+        };
+      }
 
       case 'record_proposal':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({

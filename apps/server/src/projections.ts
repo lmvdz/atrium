@@ -350,6 +350,19 @@ async function projectRelationAdded(
   if (relation.to.kind === 'object') {
     await syncObjectRow(tx, roomId, after, relation.to.objectId);
   }
+  if (relation.kind === 'answers') {
+    await tx
+      .update(attentionItems)
+      .set({ status: 'resolved', resolvedAt: new Date(event.at) })
+      .where(
+        and(
+          eq(attentionItems.roomId, roomId),
+          eq(attentionItems.subjectKind, 'object'),
+          eq(attentionItems.subjectId, relation.fromObjectId),
+          eq(attentionItems.status, 'pending'),
+        ),
+      );
+  }
 }
 
 function targetColumns(relation: Relation): {

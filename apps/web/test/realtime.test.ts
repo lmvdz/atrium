@@ -1801,6 +1801,7 @@ describe('optimism is limited to your own message row', () => {
     client.rejectProposal(ROOM, 'proposal-2');
     client.correctObject(ROOM, 'object-1', 'reopen');
     client.answerBind(ROOM, 'question-1', 'answer-1');
+    client.answerMessage(ROOM, 'question-2', 'the answer in my own words');
     client.resolveAttention(ROOM, 'attention-1');
     expect(client.room(ROOM).events).toHaveLength(0);
     expect(client.room(ROOM).presence).toEqual({});
@@ -1815,6 +1816,7 @@ describe('optimism is limited to your own message row', () => {
       'reject_proposal',
       'correct',
       'answer_bind',
+      'answer_message',
       'resolve_attention',
     ]);
   });

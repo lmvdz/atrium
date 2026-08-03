@@ -801,6 +801,74 @@ export const coreEvents = pgTable(
 
 /* ── conversation substrate (append-only) ───────────────────────────────── */
 
+/**
+ * The durable answer to “did this command already commit?”.
+ *
+ * A receipt names a contiguous room-sequence interval rather than copying the
+ * events into a second json document. `core_events` remains the one history;
+ * retries read the exact rows the first attempt committed. The ledger's global
+ * append lock makes a batch contiguous, and the two composite foreign keys
+ * prove both ends belong to this room. The endpoint equation then proves the
+ * claimed count without trusting a caller-supplied list of event ids.
+ *
+ * `actor_id` is deliberately non-null. Idempotent participant commands may be
+ * issued by humans and named models; the system actor has no stable id and may
+ * not claim a retry key. This keeps the same `(actor_kind, actor_id)` spelling
+ * as `core_events` while making the unique key an ordinary PostgreSQL key with
+ * no NULL corner case.
+ */
+export const commandReceipts = pgTable(
+  'command_receipts',
+  {
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    actorKind: actorKind('actor_kind').notNull(),
+    actorId: text('actor_id').notNull(),
+    commandName: text('command_name').notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    /** Lowercase SHA-256 over a server-canonical, versioned command payload. */
+    payloadFingerprint: text('payload_fingerprint').notNull(),
+    firstRoomSeq: bigint('first_room_seq', { mode: 'number' }).notNull(),
+    lastRoomSeq: bigint('last_room_seq', { mode: 'number' }).notNull(),
+    eventCount: integer('event_count').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({
+      name: 'command_receipts_key',
+      columns: [t.roomId, t.actorKind, t.actorId, t.commandName, t.idempotencyKey],
+    }),
+    foreignKey({
+      name: 'command_receipts_first_event_same_room_fk',
+      columns: [t.roomId, t.firstRoomSeq],
+      foreignColumns: [coreEvents.roomId, coreEvents.roomSeq],
+    }),
+    foreignKey({
+      name: 'command_receipts_last_event_same_room_fk',
+      columns: [t.roomId, t.lastRoomSeq],
+      foreignColumns: [coreEvents.roomId, coreEvents.roomSeq],
+    }),
+    check('command_receipts_actor_has_identity', sql`${t.actorKind} <> 'system'`),
+    check('command_receipts_actor_id_not_blank', sql`length(${t.actorId}) > 0`),
+    check('command_receipts_command_name_not_blank', sql`length(${t.commandName}) > 0`),
+    check(
+      'command_receipts_idempotency_key_bounded',
+      sql`length(${t.idempotencyKey}) BETWEEN 1 AND 128`,
+    ),
+    check(
+      'command_receipts_fingerprint_is_sha256',
+      sql`${t.payloadFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check('command_receipts_event_count_positive', sql`${t.eventCount} > 0`),
+    check('command_receipts_first_seq_positive', sql`${t.firstRoomSeq} > 0`),
+    check(
+      'command_receipts_interval_matches_count',
+      sql`${t.lastRoomSeq} = ${t.firstRoomSeq} + ${t.eventCount} - 1`,
+    ),
+  ],
+);
+
 export const messages = pgTable(
   'messages',
   {

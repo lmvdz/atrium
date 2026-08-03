@@ -829,6 +829,29 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
           hub.broadcast(result.roomId, { type: 'event', entry });
           return;
         }
+        case 'appended_many': {
+          const last = result.entries.at(-1);
+          if (!last) throw new Error('an appended batch returned no entries');
+          send(socket, {
+            type: 'ack',
+            commandId,
+            roomId: result.roomId,
+            seq: last.seq,
+            roomSeq: last.roomSeq,
+            eventId: last.event.id,
+            issues: result.entries.flatMap((entry) => entry.issues),
+          });
+          // The transaction has committed before execute() returns. Only now
+          // can peers observe the three-event meaning, in room order. A retry
+          // receives the original ack position but does not replay old live
+          // frames into every participant's socket.
+          if (!result.replayed) {
+            for (const committed of result.entries) {
+              hub.broadcast(result.roomId, { type: 'event', entry: toWire(committed) });
+            }
+          }
+          return;
+        }
         case 'presence': {
           if (result.state === 'offline') connection.presence.delete(result.roomId);
           else connection.presence.set(result.roomId, { state: result.state, at: result.at });

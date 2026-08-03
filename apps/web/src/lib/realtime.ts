@@ -914,6 +914,18 @@ export interface RealtimeClient {
       }>;
     },
   ) => string;
+  answerMessage: (
+    roomId: string,
+    questionId: string,
+    body: string,
+    attachments?: Array<{
+      key: string;
+      name: string;
+      contentType: string;
+      size: number;
+      capability: string;
+    }>,
+  ) => string;
   acceptProposal: (roomId: string, proposalId: string, objectiveId?: string | null) => string;
   rejectProposal: (roomId: string, proposalId: string, reason?: string | null) => string;
   correctObject: (
@@ -1471,6 +1483,28 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         clientMessageId,
         replyToId: messageOptions.replyToId ?? null,
         attachments: messageOptions.attachments ?? [],
+      });
+      inFlight.set(commandId, { roomId, clientMessageId });
+      changed(roomId);
+      return clientMessageId;
+    },
+    answerMessage: (roomId, questionId, body, attachments = []) => {
+      const room = view(roomId);
+      const clientMessageId = `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
+      room.pending.push({
+        clientMessageId,
+        body,
+        at: new Date(now()).toISOString(),
+        status: 'pending',
+        attachments,
+      });
+      const commandId = command({
+        name: 'answer_message',
+        roomId,
+        questionId,
+        body,
+        clientMessageId,
+        attachments,
       });
       inFlight.set(commandId, { roomId, clientMessageId });
       changed(roomId);

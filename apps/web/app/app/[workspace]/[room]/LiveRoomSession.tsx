@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { liveRoomView } from '@/lib/live-room-view';
 import type { ReplayData } from '@/lib/replay-data';
-import { replayReceipt } from '@/lib/replay-view';
+import { activeAnswerMatchesClientMessage, replayReceipt } from '@/lib/replay-view';
 import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
 import { boundTo, needsViewer, withFilter } from '@/src/components';
 import { quotationFrom } from '@/src/components/model/quotation';
@@ -61,6 +61,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const pendingUploads = useRef(0);
   const [uploading, setUploading] = useState(false);
   const [binding, setBinding] = useState<ComposerBinding>({ mode: 'free' });
+  const [boundSubmission, setBoundSubmission] = useState<{
+    clientMessageId: string;
+    questionId: string;
+  } | null>(null);
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
   const [openAttentionId, setOpenAttentionId] = useState<string>();
@@ -121,6 +125,37 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const owed = view.attention.filter((item) => needsViewer(item.state)).length;
   const subscribed = live.subscribed && connection === 'open';
 
+  useEffect(() => {
+    if (!boundSubmission) return;
+    const pending = live.pending.find(
+      (candidate) => candidate.clientMessageId === boundSubmission.clientMessageId,
+    );
+    if (pending?.status === 'failed') {
+      // CATCHES: erasing a person's bound draft and provenance after the server
+      // refused it. The failed optimistic row remains visible and the composer
+      // is re-enabled with the exact words, attachment and binding intact.
+      setBoundSubmission(null);
+      return;
+    }
+    if (
+      !activeAnswerMatchesClientMessage(
+        data,
+        boundSubmission.questionId,
+        boundSubmission.clientMessageId,
+      )
+    ) {
+      return;
+    }
+    // A bound answer is complete only once the canonical semantic projection,
+    // not its command ack, says the question was answered.
+    setDraft('');
+    setAttachments([]);
+    setAttachmentNote(undefined);
+    setBinding({ mode: 'free' });
+    setBoundSubmission(null);
+    setError(null);
+  }, [boundSubmission, data, live.pending]);
+
   const jumpToMessage = (messageId: string) => {
     setReceiptId(null);
     setFocused('conversation');
@@ -141,7 +176,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         attention={view.attention}
         binding={binding}
         boxed={false}
-        composerEnabled={subscribed && !uploading}
+        composerEnabled={subscribed && !uploading && boundSubmission === null}
         composerNote={
           error ??
           (subscribed
@@ -160,15 +195,36 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           onSend: (text) => {
             const body = text.trim();
             if (!body || !subscribed || pendingUploads.current > 0) return;
-            clientRef.current?.sendMessage(roomId, body, {
-              attachments,
-              replyToId: binding.mode === 'replying' ? binding.to.messageId : null,
-            });
+            if (binding.mode === 'bound') {
+              const questionId =
+                subjectByAttention.get(binding.itemId) ??
+                (binding.itemId.startsWith('live-direct:')
+                  ? binding.itemId.slice('live-direct:'.length)
+                  : null);
+              if (!questionId) {
+                setError('the question behind this answer is no longer on the record');
+                return;
+              }
+              const clientMessageId = clientRef.current?.answerMessage(
+                roomId,
+                questionId,
+                body,
+                attachments,
+              );
+              if (!clientMessageId) return;
+              setError(null);
+              setBoundSubmission({ clientMessageId, questionId });
+            } else {
+              clientRef.current?.sendMessage(roomId, body, {
+                attachments,
+                replyToId: binding.mode === 'replying' ? binding.to.messageId : null,
+              });
+              setDraft('');
+              setAttachments([]);
+              setAttachmentNote(undefined);
+              setBinding({ mode: 'free' });
+            }
             clientRef.current?.setTyping(roomId, false);
-            setDraft('');
-            setAttachments([]);
-            setAttachmentNote(undefined);
-            setBinding({ mode: 'free' });
           },
           onAttach: (file) => {
             pendingUploads.current += 1;
@@ -189,7 +245,9 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               });
           },
           attachmentNote,
-          onCancelBinding: () => setBinding({ mode: 'free' }),
+          onCancelBinding: () => {
+            if (boundSubmission === null) setBinding({ mode: 'free' });
+          },
           onFocusSurface: setFocused,
           onFilter: (next) => setFilter((current) => (current === next ? null : next)),
           onOpenAttention: setOpenAttentionId,

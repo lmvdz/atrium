@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
+import { serverPort } from './support/config.mjs';
 import {
   createWorkspace,
   invite,
@@ -11,6 +12,51 @@ import {
   uniqueEmail,
 } from './support/flows';
 import { countMail, waitForMail } from './support/mail';
+
+async function commandEvent(
+  page: import('@playwright/test').Page,
+  roomId: string,
+  command: Record<string, unknown>,
+  eventType: string,
+): Promise<Record<string, unknown>> {
+  return page.evaluate(
+    ({ command, eventType, roomId, url }) =>
+      new Promise<Record<string, unknown>>((resolve, reject) => {
+        const socket = new WebSocket(url);
+        const commandId = `e2e-${Date.now()}-${Math.random()}`;
+        const timer = setTimeout(() => {
+          socket.close();
+          reject(new Error(`timed out waiting for ${eventType}`));
+        }, 10_000);
+        const done = (event: Record<string, unknown>) => {
+          clearTimeout(timer);
+          socket.close();
+          resolve(event);
+        };
+        socket.addEventListener('open', () => {
+          socket.send(JSON.stringify({ type: 'subscribe', roomId }));
+        });
+        socket.addEventListener('message', (raw: MessageEvent<string>) => {
+          const frame = JSON.parse(raw.data) as Record<string, unknown>;
+          if (frame.type === 'subscribed') {
+            socket.send(JSON.stringify({ type: 'command', commandId, command }));
+            return;
+          }
+          if (frame.type === 'nack' && frame.commandId === commandId) {
+            clearTimeout(timer);
+            socket.close();
+            reject(new Error(String(frame.message)));
+            return;
+          }
+          if (frame.type !== 'event') return;
+          const entry = frame.entry as { event?: Record<string, unknown> } | undefined;
+          if (entry?.event?.type === eventType) done(entry.event);
+        });
+        socket.addEventListener('error', () => reject(new Error('command socket failed')));
+      }),
+    { command, eventType, roomId, url: `ws://localhost:${serverPort}/ws` },
+  );
+}
 
 /**
  * The acceptance test for issue #26, end to end and for real: a browser signs
@@ -112,6 +158,130 @@ test.describe('auth and workspaces', () => {
     await invitee.getByRole('button', { name: 'Send' }).click();
     const replyRow = founder.locator('[data-message-id]').filter({ hasText: replyWords });
     await expect(replyRow).toContainText(words);
+
+    const roomId = await founder.locator('main[data-room-id]').getAttribute('data-room-id');
+    const sourceMessageId = await founder
+      .locator('[data-row-body]')
+      .filter({ hasText: words })
+      .getAttribute('data-row-body');
+    if (!roomId || !sourceMessageId) throw new Error('the live room did not expose its records');
+    const objectiveProposal = await commandEvent(
+      founder,
+      roomId,
+      {
+        name: 'record_proposal',
+        roomId,
+        proposal: {
+          type: 'objective',
+          payload: { title: 'Choose the release plan', status: 'open' },
+          confidence: 1,
+          provenance: [sourceMessageId],
+          quote: words,
+          interpretationId: null,
+        },
+      },
+      'proposal_recorded',
+    );
+    const objectiveProposalId = (objectiveProposal.proposal as { id?: string } | undefined)?.id;
+    if (!objectiveProposalId) throw new Error('the objective proposal did not carry its id');
+    const acceptedObjective = await commandEvent(
+      founder,
+      roomId,
+      {
+        name: 'accept_proposal',
+        roomId,
+        proposalId: objectiveProposalId,
+        objectiveId: null,
+      },
+      'object_accepted',
+    );
+    const objectiveId = (acceptedObjective.object as { id?: string } | undefined)?.id;
+    if (!objectiveId) throw new Error('the accepted objective did not carry its id');
+    const questionText = `Which release date is approved ${Date.now()}?`;
+    const proposalEvent = await commandEvent(
+      founder,
+      roomId,
+      {
+        name: 'record_proposal',
+        roomId,
+        proposal: {
+          type: 'open_question',
+          payload: { question: questionText, status: 'open' },
+          confidence: 1,
+          provenance: [sourceMessageId],
+          quote: words,
+          interpretationId: null,
+        },
+      },
+      'proposal_recorded',
+    );
+    const proposalId = (proposalEvent.proposal as { id?: string } | undefined)?.id;
+    if (!proposalId) throw new Error('the proposal event did not carry its id');
+    const acceptedQuestion = await commandEvent(
+      founder,
+      roomId,
+      { name: 'accept_proposal', roomId, proposalId, objectiveId },
+      'object_accepted',
+    );
+    const questionId = (acceptedQuestion.object as { id?: string } | undefined)?.id;
+    if (!questionId) throw new Error('the accepted question did not carry its id');
+
+    await Promise.all([founder.reload(), invitee.reload()]);
+    for (const page of [founder, invitee]) {
+      await page
+        .locator('[data-region="current-state"] [data-object-id]')
+        .filter({ hasText: questionText })
+        .click();
+      await page
+        .getByRole('region', { name: 'Receipt' })
+        .getByRole('button', { name: 'Answer', exact: true })
+        .click();
+    }
+    const founderAnswer = `Ship on Friday ${Date.now()}.`;
+    const inviteeAnswer = `Ship after the Friday review ${Date.now()}.`;
+    const answerName = `Answer ${questionText} in your own words`;
+    const founderBound = founder.getByRole('textbox', { name: answerName });
+    const inviteeBound = invitee.getByRole('textbox', { name: answerName });
+    await founderBound.fill(founderAnswer);
+    await inviteeBound.fill(inviteeAnswer);
+    await Promise.all([
+      founder.getByRole('button', { name: 'Send' }).click(),
+      invitee.getByRole('button', { name: 'Send' }).click(),
+    ]);
+
+    // CATCHES: clearing the losing participant's exact words merely because a
+    // different participant's answer changed the shared question to answered.
+    await expect
+      .poll(async () => (await founderBound.count()) + (await inviteeBound.count()))
+      .toBe(1);
+    const founderLost = (await founderBound.count()) === 1;
+    const loser = founderLost ? founder : invitee;
+    const loserBound = founderLost ? founderBound : inviteeBound;
+    const loserWords = founderLost ? founderAnswer : inviteeAnswer;
+    const winner = founderLost ? invitee : founder;
+    const winnerWords = founderLost ? inviteeAnswer : founderAnswer;
+    await expect(loserBound).toHaveValue(loserWords);
+    await expect(loserBound).toBeEnabled();
+    await expect(loser.locator('[data-binding="bound"]')).toBeVisible();
+    const winnerReceipt = winner.getByRole('region', { name: 'Receipt' });
+    await expect(winnerReceipt).toContainText(winnerWords);
+    await expect(winnerReceipt).toContainText('answered');
+    const answerQuote = winnerReceipt.locator('[data-quoted]').filter({ hasText: winnerWords });
+    await expect(answerQuote).toHaveCount(1);
+    const quotedId = /^msg:([^@]+)/.exec((await answerQuote.getAttribute('data-quoted')) ?? '');
+    const answerMessageId = quotedId?.[1];
+    if (!answerMessageId)
+      throw new Error('the accepted answer receipt has no canonical message id');
+    await expect(winner.locator(`[data-message-id="${answerMessageId}"]`)).toContainText(
+      winnerWords,
+    );
+    await expect(founder.getByRole('region', { name: 'Conversation' })).toContainText(winnerWords);
+    await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(winnerWords);
+
+    // Leave the long-running attachment half of this scenario in free-compose
+    // mode whichever participant lost the race.
+    await loserBound.fill('');
+    await loser.getByRole('button', { name: 'Cancel answering' }).click();
 
     const bytes = Buffer.from('persisted object bytes\n', 'utf8');
     let uploadTarget = '';

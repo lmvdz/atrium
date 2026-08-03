@@ -12,8 +12,8 @@ import {
   type TrustedContext,
   trustedContext,
 } from '@atrium/core';
-import { coreEvents, type Database } from '@atrium/db';
-import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { commandReceipts, coreEvents, type Database } from '@atrium/db';
+import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import type { Logger } from './logger.js';
 import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
 
@@ -305,6 +305,12 @@ export interface AppendResult extends LedgerEntry {
   outcome: EventOutcome | null;
 }
 
+export interface AppendBatchResult {
+  entries: AppendResult[];
+  /** True when a durable command receipt recovered these existing rows. */
+  replayed: boolean;
+}
+
 /** What `append` needs from a command handler. */
 export interface AppendRequest<T extends RoomEvent = RoomEvent> {
   /** The room the caller was authorized for. Checked against the event's own. */
@@ -339,6 +345,26 @@ export interface AppendRequest<T extends RoomEvent = RoomEvent> {
    * a state the next reader disagrees with.
    */
   project?: (context: ProjectionContext<T>) => Promise<void>;
+}
+
+/** Several causally inseparable rows committed and projected under one lock. */
+export interface AppendBatchRequest {
+  roomId: string;
+  actor: Actor;
+  authorize?: (tx: Tx) => Promise<void>;
+  /** Fresh-attempt authority checks, deliberately skipped for a durable replay. */
+  prepare?: (tx: Tx) => Promise<void>;
+  idempotency?: {
+    commandName: string;
+    key: string;
+    /** Lowercase SHA-256 computed by the server from the semantic command. */
+    fingerprint: string;
+    expectedEventTypes: readonly RoomEvent['type'][];
+  };
+  /** Refuse the whole causal unit if any reducer step reports a business issue. */
+  requireClean?: boolean;
+  builds: readonly ((assigned: { id: string; at: string }) => RoomEvent)[];
+  project?: (context: ProjectionContext<RoomEvent>) => Promise<void>;
 }
 
 export interface ProjectionContext<T extends RoomEvent = RoomEvent> {
@@ -398,6 +424,7 @@ export interface Ledger {
   /** Global position of the last row this process has folded. */
   lastSeq: () => number;
   append: <T extends RoomEvent>(request: AppendRequest<T>) => Promise<AppendResult>;
+  appendBatch: (request: AppendBatchRequest) => Promise<AppendBatchResult>;
   /**
    * Fold everything another instance committed since this one last looked, and
    * hand back what was newly folded so the caller can fan it out locally.
@@ -802,12 +829,6 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     return folded;
   }
 
-  function nextTimestamp(): string {
-    const ms = Math.max(Date.now(), lastAtMs + 1);
-    lastAtMs = ms;
-    return new Date(ms).toISOString();
-  }
-
   /**
    * The room an event belongs to, checked against the room the caller was
    * authorized for.
@@ -879,7 +900,11 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    * file: `commands.ts` mints every subject id with `randomUUID()`, so a client
    * cannot name an existing subject into a second room.
    */
-  function resolveRoomId(event: RoomEvent, authorizedRoomId: string): string {
+  function resolveRoomId(
+    event: RoomEvent,
+    authorizedRoomId: string,
+    sourceState: CoreState = state,
+  ): string {
     const declared = declaredRoomId(event);
     if (declared !== null && declared !== authorizedRoomId) {
       throw new CommandError(
@@ -895,10 +920,10 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     let fromState: string | undefined;
     let subject: string;
     if (event.type === 'proposal_rejected' || event.type === 'proposal_superseded') {
-      fromState = state.proposals[event.proposalId]?.proposal.roomId;
+      fromState = sourceState.proposals[event.proposalId]?.proposal.roomId;
       subject = `proposal "${event.proposalId}"`;
     } else if (event.type === 'object_corrected') {
-      fromState = state.objects[event.objectId]?.object.roomId;
+      fromState = sourceState.objects[event.objectId]?.object.roomId;
       subject = `object "${event.objectId}"`;
     } else {
       throw new CommandError('invalid', `event type "${event.type}" declares no room`);
@@ -915,7 +940,10 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     return fromState;
   }
 
-  async function append<T extends RoomEvent>(request: AppendRequest<T>): Promise<AppendResult> {
+  async function appendBatch(request: AppendBatchRequest): Promise<AppendBatchResult> {
+    if (request.builds.length === 0) {
+      throw new CommandError('invalid', 'an atomic append batch must contain at least one event');
+    }
     return runExclusive(async () => {
       // A busy database is not a bad command. Reclassified here, where the
       // driver error still exists: by the time it reaches the socket layer it
@@ -941,77 +969,154 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           await request.authorize?.(tx);
 
           await catchUp(tx);
-
-          const at = nextTimestamp();
-          const id = randomUUID();
-          const event = request.build({ id, at });
-          if (event.id !== id || event.at !== at) {
-            throw new CommandError(
-              'invalid',
-              'a command may not choose its own ledger position — build() must use the assigned id and at',
-            );
+          const actorColumns = actorToColumns(request.actor);
+          if (request.idempotency) {
+            if (actorColumns.id === null) {
+              throw new CommandError('invalid', 'a system command cannot claim a retry key');
+            }
+            const [receipt] = await tx
+              .select()
+              .from(commandReceipts)
+              .where(
+                and(
+                  eq(commandReceipts.roomId, request.roomId),
+                  eq(commandReceipts.actorKind, actorColumns.kind),
+                  eq(commandReceipts.actorId, actorColumns.id),
+                  eq(commandReceipts.commandName, request.idempotency.commandName),
+                  eq(commandReceipts.idempotencyKey, request.idempotency.key),
+                ),
+              )
+              .limit(1);
+            if (receipt) {
+              if (receipt.payloadFingerprint !== request.idempotency.fingerprint) {
+                throw new CommandError(
+                  'conflict',
+                  'that retry key already names a different command payload',
+                );
+              }
+              const rows = await tx
+                .select(ROW)
+                .from(coreEvents)
+                .where(
+                  and(
+                    eq(coreEvents.roomId, request.roomId),
+                    gte(coreEvents.roomSeq, receipt.firstRoomSeq),
+                    lte(coreEvents.roomSeq, receipt.lastRoomSeq),
+                  ),
+                )
+                .orderBy(asc(coreEvents.roomSeq));
+              const recovered = rows.map((row) => parseEntry(row));
+              const actualTypes = recovered.map((entry) => entry.event.type);
+              if (
+                recovered.length !== receipt.eventCount ||
+                actualTypes.length !== request.idempotency.expectedEventTypes.length ||
+                actualTypes.some(
+                  (type, index) => type !== request.idempotency?.expectedEventTypes[index],
+                )
+              ) {
+                throw new CommandError(
+                  'conflict',
+                  'the durable command receipt does not resolve to its exact ledger batch',
+                );
+              }
+              return {
+                results: recovered.map((entry) => ({
+                  ...withIssues(entry),
+                  // The durable entry and its fold issues are exact. The
+                  // transient reducer object was never stored and no batch
+                  // caller consumes it.
+                  outcome: null,
+                })),
+                staged: { state, seq: lastSeq, at: lastAtMs },
+                replayed: true,
+              };
+            }
           }
-          const roomId = resolveRoomId(event, request.roomId);
-          const actor = request.actor;
 
-          const before = state;
-          let after = state;
-          let outcome: EventOutcome | null = null;
-          /**
-           * The window this event folded under.
-           *
-           * Not on its way anywhere: the `core_events_invariants` trigger derives
-           * its own from the same `atrium_receipt_window` and assigns it onto the
-           * row on the way in. This is kept only so the
-           * two can be compared once the append returns what it stored, which is
-           * what makes "one derivation" a checked fact rather than a claim about
-           * the code. `undefined` for a ledger-only kind that was never folded.
-           */
-          let foldedWindow: readonly ProvenanceMessage[] | undefined;
-          let folded = false;
-          if (isCoreEvent(event)) {
-            // Derived by the database, from the row this transaction is about to
-            // insert. Nothing here reads `messages`, and nothing here chooses the
-            // window — see the note on `trustToRecord` and r4-delta blocking.
-            const trusted = await trustToRecord(tx, event, actor, roomId);
-            foldedWindow = trusted.messages;
-            folded = true;
-            const applied = appendEvent(state, event, trusted);
-            if (applied.outcome === 'rejected' || applied.outcome === 'malformed') {
-              // The whole point. Throwing here aborts the transaction, so the
-              // INSERT below never happens and the refused event leaves nothing.
+          await request.prepare?.(tx);
+          let stagedState = state;
+          let stagedAtMs = lastAtMs;
+          let stagedSeq = lastSeq;
+          const results: AppendResult[] = [];
+
+          for (const build of request.builds) {
+            const atMs = Math.max(Date.now(), stagedAtMs + 1);
+            const at = new Date(atMs).toISOString();
+            const id = randomUUID();
+            const event = build({ id, at });
+            if (event.id !== id || event.at !== at) {
               throw new CommandError(
-                applied.outcome === 'rejected' ? 'rejected' : 'invalid',
-                applied.outcome === 'rejected'
-                  ? `${applied.reason}: ${applied.detail} — re-mint the command at the current position and retry`
-                  : applied.detail,
+                'invalid',
+                'a command may not choose its own ledger position — build() must use the assigned id and at',
               );
             }
-            outcome = applied;
-            after = applied.state;
-          }
+            const roomId = resolveRoomId(event, request.roomId, stagedState);
+            const actor = request.actor;
 
-          // Through the procedure, like every other writer — there is no
-          // privileged path and no direct INSERT anywhere in this codebase. The
-          // procedure authorizes the actor, refuses anything out of canonical
-          // order, mints `room_seq` under the lock it re-takes, inserts, and
-          // rings the doorbell; the trigger behind it refuses anything that did
-          // not come this way. See `drizzle/0004_trusted_actor_and_append_boundary.sql`.
-          //
-          // The whole event goes into `payload`, envelope included: replay is a
-          // parse of that column, not a re-assembly from the lifted ones. The
-          // actor is NOT in the payload — a constraint refuses one that is — and
-          // rides in its own two columns instead.
-          //
-          // There is **no receipt-window argument**. Round 4's signature had one
-          // and the r4-delta gauntlet's blocking finding is what it cost: the
-          // boundary validated its shape and stored it verbatim, so a direct
-          // caller supplied a well-formed lie and every later fold believed it.
-          // The window is derived inside, from `p_payload` and `p_room_id` — the
-          // same values this statement inserts — and returned so the fold above
-          // can be checked against it.
-          const columns = actorToColumns(actor);
-          const appended = (await tx.execute(sql`
+            const before = stagedState;
+            let after = stagedState;
+            let outcome: EventOutcome | null = null;
+            /**
+             * The window this event folded under.
+             *
+             * Not on its way anywhere: the `core_events_invariants` trigger derives
+             * its own from the same `atrium_receipt_window` and assigns it onto the
+             * row on the way in. This is kept only so the
+             * two can be compared once the append returns what it stored, which is
+             * what makes "one derivation" a checked fact rather than a claim about
+             * the code. `undefined` for a ledger-only kind that was never folded.
+             */
+            let foldedWindow: readonly ProvenanceMessage[] | undefined;
+            let folded = false;
+            if (isCoreEvent(event)) {
+              // Derived by the database, from the row this transaction is about to
+              // insert. Nothing here reads `messages`, and nothing here chooses the
+              // window — see the note on `trustToRecord` and r4-delta blocking.
+              const trusted = await trustToRecord(tx, event, actor, roomId);
+              foldedWindow = trusted.messages;
+              folded = true;
+              const applied = appendEvent(before, event, trusted);
+              if (applied.outcome === 'rejected' || applied.outcome === 'malformed') {
+                // The whole point. Throwing here aborts the transaction, so the
+                // INSERT below never happens and the refused event leaves nothing.
+                throw new CommandError(
+                  applied.outcome === 'rejected' ? 'rejected' : 'invalid',
+                  applied.outcome === 'rejected'
+                    ? `${applied.reason}: ${applied.detail} — re-mint the command at the current position and retry`
+                    : applied.detail,
+                );
+              }
+              outcome = applied;
+              after = applied.state;
+              if (request.requireClean && applied.outcome === 'applied_with_issue') {
+                throw new CommandError(
+                  'invalid',
+                  `atomic command refused: ${applied.issues.map((issue) => issue.reason).join('; ')}`,
+                );
+              }
+            }
+
+            // Through the procedure, like every other writer — there is no
+            // privileged path and no direct INSERT anywhere in this codebase. The
+            // procedure authorizes the actor, refuses anything out of canonical
+            // order, mints `room_seq` under the lock it re-takes, inserts, and
+            // rings the doorbell; the trigger behind it refuses anything that did
+            // not come this way. See `drizzle/0004_trusted_actor_and_append_boundary.sql`.
+            //
+            // The whole event goes into `payload`, envelope included: replay is a
+            // parse of that column, not a re-assembly from the lifted ones. The
+            // actor is NOT in the payload — a constraint refuses one that is — and
+            // rides in its own two columns instead.
+            //
+            // There is **no receipt-window argument**. Round 4's signature had one
+            // and the r4-delta gauntlet's blocking finding is what it cost: the
+            // boundary validated its shape and stored it verbatim, so a direct
+            // caller supplied a well-formed lie and every later fold believed it.
+            // The window is derived inside, from `p_payload` and `p_room_id` — the
+            // same values this statement inserts — and returned so the fold above
+            // can be checked against it.
+            const columns = actorToColumns(actor);
+            const appended = (await tx.execute(sql`
           SELECT "seq", "room_seq", "trusted_messages" FROM atrium_append_core_event(
             ${roomId}::uuid,
             ${event.id}::text,
@@ -1023,82 +1128,84 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             ${instanceId ?? null}::text
           )
         `)) as unknown as Array<{
-            seq: string | number;
-            room_seq: string | number;
-            trusted_messages: ProvenanceMessage[] | null;
-          }>;
-          const minted = appended[0];
-          const seq = Number(minted?.seq);
-          const roomSeq = Number(minted?.room_seq);
-          if (!Number.isFinite(seq) || !Number.isFinite(roomSeq)) {
-            throw new CommandError('conflict', 'the ledger append procedure returned no position');
-          }
-          /**
-           * The row folded under exactly the window the row now holds.
-           *
-           * ## What this proves, exactly — and what it does not (r5 delta, major 1)
-           *
-           * Round 5's receipt called this "what makes one derivation a checked
-           * fact", which reads as though it validated the window. It does not, and
-           * the finding is right about why:
-           *
-           * > it is identity between two calls to the same SQL under one
-           * > transaction, so both can agree while both are wrong, and a direct
-           * > SQL caller never runs it at all.
-           *
-           * Granted in full. `atrium_receipt_window` is the only derivation there
-           * is; if the derivation is wrong, both calls are wrong together and this
-           * comparison is silent. It is not a check on the *content* of the
-           * window. What the content is checked by is a different instrument
-           * entirely — the integration tests that assert room-scoping, `messages.seq`
-           * ordering, and NULL-vs-`[]` against a real database.
-           *
-           * Two things it does prove, both worth the round trip:
-           *
-           *  1. **Live ≡ replay for this row.** The right-hand side is now a
-           *     `RETURNING` of the stored column (0007), not the value the function
-           *     meant to store. A replay reads that same column. So this compares
-           *     the window the live fold ran against with the bytes every future
-           *     replay will run against — which is the property this whole column
-           *     exists for, and the only one of the three the reducer's own
-           *     determinism does not already give.
-           *  2. **The `SECURITY INVOKER` / `SECURITY DEFINER` split costs nothing
-           *     here.** The two calls run as two roles by design (see
-           *     `trustToRecord`). If that divergence ever produced two answers —
-           *     row-level security, a search-path difference, a revoked `SELECT` on
-           *     `messages` — this is what notices, rather than a room whose
-           *     acceptances quietly stop folding.
-           *
-           * It aborts rather than logs, because either failure means the durable
-           * row would replay into a different state than it applied: the
-           * transaction rolls back and the event leaves nothing behind.
-           *
-           * It runs on the server's path only. A direct SQL caller holding
-           * `EXECUTE` never executes this line — which is exactly why every
-           * guarantee that has to hold against such a caller lives in the SQL
-           * boundary and not here.
-           */
-          if (folded && !sameWindow(foldedWindow, minted?.trusted_messages ?? null)) {
-            throw new CommandError(
-              'conflict',
-              'the receipt window this event folded under is not the one the ledger recorded — refusing the append rather than storing a row that replays differently than it applied',
-            );
-          }
+              seq: string | number;
+              room_seq: string | number;
+              trusted_messages: ProvenanceMessage[] | null;
+            }>;
+            const minted = appended[0];
+            const seq = Number(minted?.seq);
+            const roomSeq = Number(minted?.room_seq);
+            if (!Number.isFinite(seq) || !Number.isFinite(roomSeq)) {
+              throw new CommandError(
+                'conflict',
+                'the ledger append procedure returned no position',
+              );
+            }
+            /**
+             * The row folded under exactly the window the row now holds.
+             *
+             * ## What this proves, exactly — and what it does not (r5 delta, major 1)
+             *
+             * Round 5's receipt called this "what makes one derivation a checked
+             * fact", which reads as though it validated the window. It does not, and
+             * the finding is right about why:
+             *
+             * > it is identity between two calls to the same SQL under one
+             * > transaction, so both can agree while both are wrong, and a direct
+             * > SQL caller never runs it at all.
+             *
+             * Granted in full. `atrium_receipt_window` is the only derivation there
+             * is; if the derivation is wrong, both calls are wrong together and this
+             * comparison is silent. It is not a check on the *content* of the
+             * window. What the content is checked by is a different instrument
+             * entirely — the integration tests that assert room-scoping, `messages.seq`
+             * ordering, and NULL-vs-`[]` against a real database.
+             *
+             * Two things it does prove, both worth the round trip:
+             *
+             *  1. **Live ≡ replay for this row.** The right-hand side is now a
+             *     `RETURNING` of the stored column (0007), not the value the function
+             *     meant to store. A replay reads that same column. So this compares
+             *     the window the live fold ran against with the bytes every future
+             *     replay will run against — which is the property this whole column
+             *     exists for, and the only one of the three the reducer's own
+             *     determinism does not already give.
+             *  2. **The `SECURITY INVOKER` / `SECURITY DEFINER` split costs nothing
+             *     here.** The two calls run as two roles by design (see
+             *     `trustToRecord`). If that divergence ever produced two answers —
+             *     row-level security, a search-path difference, a revoked `SELECT` on
+             *     `messages` — this is what notices, rather than a room whose
+             *     acceptances quietly stop folding.
+             *
+             * It aborts rather than logs, because either failure means the durable
+             * row would replay into a different state than it applied: the
+             * transaction rolls back and the event leaves nothing behind.
+             *
+             * It runs on the server's path only. A direct SQL caller holding
+             * `EXECUTE` never executes this line — which is exactly why every
+             * guarantee that has to hold against such a caller lives in the SQL
+             * boundary and not here.
+             */
+            if (folded && !sameWindow(foldedWindow, minted?.trusted_messages ?? null)) {
+              throw new CommandError(
+                'conflict',
+                'the receipt window this event folded under is not the one the ledger recorded — refusing the append rather than storing a row that replays differently than it applied',
+              );
+            }
 
-          await request.project?.({
-            tx,
-            event,
-            actor,
-            roomId,
-            seq,
-            roomSeq,
-            before,
-            after,
-            outcome,
-          });
+            await request.project?.({
+              tx,
+              event,
+              actor,
+              roomId,
+              seq,
+              roomSeq,
+              before,
+              after,
+              outcome,
+            });
 
-          return {
-            result: {
+            results.push({
               seq,
               roomSeq,
               roomId,
@@ -1106,15 +1213,52 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
               actor,
               outcome,
               issues: EMPTY_ISSUES,
-            },
-            staged: { state: after, seq, at: Date.parse(event.at) },
+            });
+            stagedState = after;
+            stagedSeq = seq;
+            stagedAtMs = atMs;
+          }
+          if (request.idempotency) {
+            const first = results[0];
+            const last = results.at(-1);
+            if (!first || !last || actorColumns.id === null) {
+              throw new CommandError('conflict', 'the atomic command produced no receipt interval');
+            }
+            const actualTypes = results.map((result) => result.event.type);
+            if (
+              actualTypes.length !== request.idempotency.expectedEventTypes.length ||
+              actualTypes.some(
+                (type, index) => type !== request.idempotency?.expectedEventTypes[index],
+              )
+            ) {
+              throw new CommandError(
+                'conflict',
+                'the atomic command built an unexpected event batch',
+              );
+            }
+            await tx.insert(commandReceipts).values({
+              roomId: request.roomId,
+              actorKind: actorColumns.kind,
+              actorId: actorColumns.id,
+              commandName: request.idempotency.commandName,
+              idempotencyKey: request.idempotency.key,
+              payloadFingerprint: request.idempotency.fingerprint,
+              firstRoomSeq: first.roomSeq,
+              lastRoomSeq: last.roomSeq,
+              eventCount: results.length,
+            });
+          }
+          return {
+            results,
+            staged: { state: stagedState, seq: stagedSeq, at: stagedAtMs },
+            replayed: false,
           };
         })
         .catch((error: unknown) => {
           throw asCommandError(error);
         });
 
-      const { result, staged } = committed;
+      const { results, staged, replayed } = committed;
       // Adopted only now: an in-memory state that ran ahead of a rolled-back
       // transaction would reject the retry of the very command that failed.
       state = staged.state;
@@ -1124,8 +1268,24 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       // been adopted. Reading `outcome.issues` here instead would be a second
       // derivation of the same fact — the one that lets a live frame and a
       // `since` page disagree about whether a row applied.
-      return { ...result, issues: issuesFor(result.event.id) };
+      return {
+        entries: results.map((result) => ({ ...result, issues: issuesFor(result.event.id) })),
+        replayed,
+      };
     });
+  }
+
+  async function append<T extends RoomEvent>(request: AppendRequest<T>): Promise<AppendResult> {
+    const { entries } = await appendBatch({
+      roomId: request.roomId,
+      actor: request.actor,
+      authorize: request.authorize,
+      builds: [request.build],
+      project: request.project as AppendBatchRequest['project'],
+    });
+    const [result] = entries;
+    if (!result) throw new CommandError('conflict', 'the ledger append returned no event');
+    return result;
   }
 
   return {
@@ -1137,6 +1297,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     serialize: () => serializeState(state),
     lastSeq: () => lastSeq,
     append,
+    appendBatch,
     /**
      * Fold whatever a peer instance committed, and report it.
      *

@@ -17,6 +17,7 @@ import {
   acceptedObjectType,
   attentionClass,
   attentionItems,
+  commandReceipts,
   coreEvents,
   coreEventTypes,
   corrections,
@@ -242,6 +243,56 @@ describe('the durable ledger (issue #22)', () => {
     expect(seenSeq?.notNull).toBe(true);
     // The int4 column it replaced is gone, not shadowed.
     expect(getTableConfig(memberships).columns.map((c) => c.name)).not.toContain('last_read_seq');
+  });
+});
+
+describe('durable command receipts', () => {
+  const config = getTableConfig(commandReceipts);
+
+  it('keys a retry by room, authenticated actor, command and caller key', () => {
+    // Catches: `command_receipt_key_drops_actor` — one participant can occupy
+    // another participant's client-generated key and either retrieve their
+    // result or prevent their command from landing.
+    expect(config.primaryKeys).toHaveLength(1);
+    expect(config.primaryKeys[0]?.columns.map((column) => column.name)).toEqual([
+      'room_id',
+      'actor_kind',
+      'actor_id',
+      'command_name',
+      'idempotency_key',
+    ]);
+  });
+
+  it('binds both ends of the receipt interval to ledger rows in the same room', () => {
+    // Catches: `command_receipt_event_fk_loses_room` — a forged or corrupted
+    // receipt can name an equally numbered event from another room and return
+    // somebody else's payload as the retry result.
+    const foreignKeys = config.foreignKeys.map((fk) => fk.reference());
+    expect(foreignKeys.map((fk) => fk.columns.map((column) => column.name))).toEqual(
+      expect.arrayContaining([
+        ['room_id', 'first_room_seq'],
+        ['room_id', 'last_room_seq'],
+      ]),
+    );
+    for (const endpoint of foreignKeys.filter((fk) => fk.columns.length === 2)) {
+      expect(endpoint.foreignColumns.map((column) => column.name)).toEqual(['room_id', 'room_seq']);
+    }
+  });
+
+  it('constrains the claimed interval, fingerprint and caller-sized key', () => {
+    const checks = config.checks.map((constraint) => constraint.name);
+    // Catches: `command_receipt_interval_accepts_a_partial_batch` — the stored
+    // count can disagree with its endpoints, so a retry returns fewer or more
+    // events than the command originally committed.
+    expect(checks).toContain('command_receipts_interval_matches_count');
+    expect(checks).toContain('command_receipts_event_count_positive');
+    // Catches: `command_receipt_accepts_unversioned_payload_text` — arbitrary
+    // caller text occupies the fingerprint column and defeats exact mismatch
+    // detection; the boundary stores one lowercase SHA-256 representation.
+    expect(checks).toContain('command_receipts_fingerprint_is_sha256');
+    expect(checks).toContain('command_receipts_idempotency_key_bounded');
+    // A system actor has no actor_id and therefore no stable retry namespace.
+    expect(checks).toContain('command_receipts_actor_has_identity');
   });
 });
 

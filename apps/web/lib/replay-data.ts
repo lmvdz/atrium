@@ -48,6 +48,7 @@ export async function loadReplayData(database: Database, roomId: string) {
       authorId: messages.authorId,
       author: users.displayName,
       body: messages.body,
+      clientMessageId: messages.clientMessageId,
       replyToId: messages.replyToId,
       attachments: messages.attachments,
       createdAt: messages.createdAt,
@@ -162,7 +163,12 @@ export async function loadReplayData(database: Database, roomId: string) {
 }
 
 type LoadedReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
-export type ReplayData = Omit<LoadedReplayData, 'messagePositions'> & {
+type LoadedReplayMessage = LoadedReplayData['messages'][number];
+export type ReplayData = Omit<LoadedReplayData, 'messagePositions' | 'messages'> & {
+  /** Optional only for hand-built fixtures created before live client ids existed. */
+  messages: (Omit<LoadedReplayMessage, 'clientMessageId'> & {
+    readonly clientMessageId?: string | null;
+  })[];
   /** Optional only so hand-built unit fixtures can describe pre-ledger imports. */
   readonly messagePositions?: LoadedReplayData['messagePositions'];
 };

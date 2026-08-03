@@ -241,6 +241,40 @@ describe('send_message', () => {
     const ack = await alice.command(send(room.roomId, 'a legal one'));
     expect(ack).toMatchObject({ type: 'ack', roomSeq: 1 });
   });
+
+  /** CATCHES: committing the first rows of appendBatch before a later projection fails. */
+  it('rolls back every row and the live fold when the third event in a batch fails', async () => {
+    const beforeCount = await ledgerCount();
+    const beforeState = server.ledger.serialize();
+    let projected = 0;
+    await expect(
+      server.ledger.appendBatch({
+        roomId: room.roomId,
+        actor: { kind: 'human', userId: room.people.alice as string },
+        builds: [0, 1, 2].map((index) => ({ id, at }: { id: string; at: string }) => ({
+          id,
+          at,
+          type: 'message_posted' as const,
+          roomId: room.roomId,
+          messageId: randomUUID(),
+          body: `batch row ${index}`,
+          replyToId: null,
+          clientMessageId: `batch-${index}`,
+          attachments: [],
+        })),
+        project: async (context) => {
+          projected += 1;
+          await projectRoomEvent(context);
+          if (projected === 3) throw new Error('third projection failed');
+        },
+      }),
+    ).rejects.toThrow(/third projection failed/);
+    expect(await ledgerCount()).toBe(beforeCount);
+    expect(server.ledger.serialize()).toBe(beforeState);
+    expect(await handle.db.select().from(messages).where(eq(messages.roomId, room.roomId))).toEqual(
+      [],
+    );
+  });
 });
 
 describe('the proposal → acceptance boundary, over the wire', () => {
@@ -259,6 +293,30 @@ describe('the proposal → acceptance boundary, over the wire', () => {
     expect(ack.type).toBe('ack');
     const posted = await lastEvent<{ messageId: string }>(room.roomId);
     return posted.messageId;
+  }
+
+  async function acceptedQuestion(client: TestClient, question: string): Promise<string> {
+    const asked = await citedMessage(client, question);
+    await client.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'open_question',
+        payload: { question, status: 'open' },
+        confidence: 0.9,
+        provenance: [asked],
+        quote: question,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    await client.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    return (await lastEvent<{ object: { id: string } }>(room.roomId)).object.id;
   }
 
   async function acceptedDecision(client: TestClient, statement: string) {
@@ -497,6 +555,172 @@ describe('the proposal → acceptance boundary, over the wire', () => {
       .from(acceptedObjects)
       .where(eq(acceptedObjects.id, questionId));
     expect((question2?.payload as { status: string } | undefined)?.status).toBe('answered');
+  });
+
+  /** CATCHES: posting a bound answer as chat while leaving its question open. */
+  it('commits the typed answer, accepted decision and answers relation as one ordered meaning', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    const questionId = await acceptedQuestion(alice, 'which release date?');
+    await alice.subscribe(room.roomId);
+    await bob.subscribe(room.roomId);
+    const before = await server.ledger.head(room.roomId);
+
+    const answerCommand = {
+      name: 'answer_message',
+      roomId: room.roomId,
+      questionId,
+      body: 'Ship on Friday.',
+      clientMessageId: 'bound-answer-1',
+      attachments: [],
+    } as const;
+    const ack = await alice.command(answerCommand);
+    expect(ack).toMatchObject({ type: 'ack', roomSeq: before + 3 });
+    await bob.waitFor((frame) => frame.type === 'event' && frame.entry.roomSeq === before + 3);
+    const batch = (await server.ledger.since(room.roomId, before)).slice(0, 3);
+    expect(batch.map((entry) => entry.event.type)).toEqual([
+      'message_posted',
+      'object_accepted',
+      'relation_added',
+    ]);
+    expect(batch.map((entry) => entry.roomSeq)).toEqual([before + 1, before + 2, before + 3]);
+    const posted = batch[0]?.event as { messageId: string };
+    const accepted = batch[1]?.event as {
+      object: { id: string; provenance: { messageIds: string[] } };
+    };
+    expect(accepted.object.provenance.messageIds).toEqual([posted.messageId]);
+
+    const [question] = await handle.db
+      .select()
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.id, questionId));
+    if (!question) throw new Error('the question projection is missing');
+    expect((question.payload as { status: string }).status).toBe('answered');
+    const [answer] = await handle.db
+      .select()
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.id, accepted.object.id));
+    if (!answer) throw new Error('the answer projection is missing');
+    expect(answer.acceptedBy).toBe(room.people.alice);
+    expect((answer.payload as { statement: string }).statement).toBe('Ship on Friday.');
+    expect(serializeState(reduce(await server.ledger.replayCoreEvents()))).toBe(
+      server.ledger.serialize(),
+    );
+
+    const count = await ledgerCount();
+    /** CATCHES: a fresh process re-executing or refusing an answer whose ack was lost. */
+    const restarted = await startTestServer(handle);
+    const retryingAlice = await TestClient.connect(restarted.url, room.people.alice as string);
+    try {
+      const retry = await retryingAlice.command(answerCommand);
+      expect(retry).toMatchObject({
+        type: 'ack',
+        roomSeq: before + 3,
+        eventId: batch[2]?.event.id,
+      });
+      expect(await ledgerCount()).toBe(count);
+    } finally {
+      await retryingAlice.close();
+      await restarted.close();
+    }
+
+    /** CATCHES: treating a retry key as authority for a different answer payload. */
+    const mismatch = await alice.command({
+      ...answerCommand,
+      body: 'Ship on Monday.',
+    });
+    expect(mismatch).toMatchObject({ type: 'nack', code: 'conflict' });
+    expect(await ledgerCount()).toBe(count);
+
+    const second = await alice.command({
+      ...answerCommand,
+      body: 'Ship on Monday.',
+      clientMessageId: 'bound-answer-2',
+    });
+    expect(second).toMatchObject({ type: 'nack', code: 'invalid' });
+    expect(await ledgerCount()).toBe(count);
+  });
+
+  /** CATCHES: two processes committing the same retry key before either sees the other's receipt. */
+  it('serializes concurrent identical bound answers to one durable batch', async () => {
+    const alice = await connect(room.people.alice as string);
+    const questionId = await acceptedQuestion(alice, 'which deployment window?');
+    const peer = await startTestServer(handle);
+    const peerAlice = await TestClient.connect(peer.url, room.people.alice as string);
+    const before = await ledgerCount();
+    const command = {
+      name: 'answer_message',
+      roomId: room.roomId,
+      questionId,
+      body: 'Use the Friday window.',
+      clientMessageId: 'concurrent-bound-answer',
+      attachments: [],
+    } as const;
+    try {
+      const [left, right] = await Promise.all([alice.command(command), peerAlice.command(command)]);
+      expect(left).toMatchObject({ type: 'ack' });
+      expect(right).toMatchObject({
+        type: 'ack',
+        roomSeq: left.type === 'ack' ? left.roomSeq : undefined,
+        eventId: left.type === 'ack' ? left.eventId : undefined,
+      });
+      expect(await ledgerCount()).toBe(before + 3);
+      const rows = await server.ledger.since(room.roomId, 0);
+      expect(rows.slice(-3).map((entry) => entry.event.type)).toEqual([
+        'message_posted',
+        'object_accepted',
+        'relation_added',
+      ]);
+    } finally {
+      await peerAlice.close();
+      await peer.close();
+    }
+  });
+
+  /** CATCHES: rechecking an expired upload grant before consulting a committed command receipt. */
+  it('recovers an attached answer after its fresh-write capability expires', async () => {
+    const alice = await connect(room.people.alice as string);
+    const questionId = await acceptedQuestion(alice, 'which artifact is final?');
+    let capabilityValid = true;
+    const withAttachments = await startTestServer(handle, {
+      attachmentCapabilities: { verify: () => capabilityValid },
+    });
+    const attachedAlice = await TestClient.connect(
+      withAttachments.url,
+      room.people.alice as string,
+    );
+    const command = {
+      name: 'answer_message',
+      roomId: room.roomId,
+      questionId,
+      body: 'The signed release archive is final.',
+      clientMessageId: 'attached-bound-answer',
+      attachments: [
+        {
+          key: `${room.roomId}/release.tar.zst`,
+          name: 'release.tar.zst',
+          contentType: 'application/zstd',
+          size: 17,
+          capability: 'fresh-only-grant',
+        },
+      ],
+    } as const;
+    try {
+      const first = await attachedAlice.command(command);
+      expect(first).toMatchObject({ type: 'ack' });
+      const countAfterFirst = await ledgerCount();
+      capabilityValid = false;
+      const retry = await attachedAlice.command(command);
+      expect(retry).toMatchObject({
+        type: 'ack',
+        roomSeq: first.type === 'ack' ? first.roomSeq : undefined,
+        eventId: first.type === 'ack' ? first.eventId : undefined,
+      });
+      expect(await ledgerCount()).toBe(countAfterFirst);
+    } finally {
+      await attachedAlice.close();
+      await withAttachments.close();
+    }
   });
 
   /**

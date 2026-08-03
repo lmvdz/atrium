@@ -85,6 +85,13 @@
       "when": 1786099200000,
       "tag": "0011_the_window_reaches_past_the_citations",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786185600000,
+      "tag": "0012_command_receipts",
+      "breakpoints": true
     }
   ]
 }

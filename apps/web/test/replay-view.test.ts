@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { liveRoomView } from '../lib/live-room-view';
 import type { ReplayData } from '../lib/replay-data';
 import { reopenQuestion } from '../lib/replay-transitions';
-import { replayAt, replayReceipt, replayView } from '../lib/replay-view';
+import {
+  activeAnswerMatchesClientMessage,
+  activeAnswerMessageId,
+  replayAt,
+  replayReceipt,
+  replayView,
+} from '../lib/replay-view';
 
 const at = new Date('2026-08-02T12:00:00.000Z');
 
@@ -34,6 +40,7 @@ function data(): ReplayData {
         authorId: 'alice',
         author: 'alice',
         body: 'Yes, while the previous page remains available.',
+        clientMessageId: 'client-answer-a',
         replyToId: 'm1',
         attachments: [],
         createdAt: new Date('2026-08-02T12:01:00.000Z'),
@@ -209,6 +216,7 @@ describe('persisted replay view', () => {
       authorId: 'alice',
       author: 'alice',
       body: 'The retained answer is the background regeneration claim.',
+      clientMessageId: 'client-answer-b',
       replyToId: 'm1',
       attachments: [],
       createdAt: new Date('2026-08-02T12:02:00.000Z'),
@@ -292,6 +300,37 @@ describe('persisted replay view', () => {
     const view = replayView(snapshot, 'alice');
     const question = view.objects.find((object) => object.id === 'question');
     if (!question) throw new Error('question view missing');
+    /** CATCHES: marking a question answered while omitting the accepted answer's exact source. */
+    const answeredReceipt = replayReceipt(snapshot, view.records, question);
+    expect(answeredReceipt.provenance.map((entry) => entry.excerpt.messageId)).toEqual([
+      'm1',
+      'm3',
+    ]);
+    expect(answeredReceipt.provenance[1]?.note?.text).toBe(
+      'accepted answer linked to this question',
+    );
+    snapshot.corrections.push({
+      id: 'persisted-reopen',
+      roomId: 'room',
+      objectId: 'question',
+      action: 'reopen',
+      before: { status: 'answered', answeredBy: ['relation-wrong'] },
+      after: { status: 'open', priorAnswers: ['relation-wrong'] },
+      byUserId: 'alice',
+      note: null,
+      eventId: 'event-reopen',
+      createdAt: at,
+    });
+    /** CATCHES: showing the oldest historical answer after reopen then re-answer. */
+    const reansweredReceipt = replayReceipt(snapshot, view.records, question);
+    expect(reansweredReceipt.provenance.map((entry) => entry.excerpt.messageId)).toEqual([
+      'm1',
+      'm3',
+    ]);
+    expect(activeAnswerMessageId(snapshot, 'question')).toBe('m3');
+    /** CATCHES: clearing a losing concurrent answer because somebody else answered first. */
+    expect(activeAnswerMatchesClientMessage(snapshot, 'question', 'client-answer-a')).toBe(false);
+    expect(activeAnswerMatchesClientMessage(snapshot, 'question', 'client-answer-b')).toBe(true);
     const correction = reopenQuestion(question, '12:03', ['relation-good']);
     const receipt = replayReceipt(snapshot, view.records, correction.after, { correction });
 

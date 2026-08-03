@@ -140,6 +140,7 @@ describe('ClientFrame', () => {
   it('accepts the six #12 commands plus the two this ticket adds', () => {
     const names = [
       'send_message',
+      'answer_message',
       'accept_proposal',
       'correct',
       'answer_bind',

@@ -3389,6 +3389,8 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       // `core_events.actor_kind`/`actor_id` still have no FK to `users` at all.
       'auth_accounts_user_id_users_id_fk',
       'auth_sessions_user_id_users_id_fk',
+      // A command receipt has no meaning after its room history is deleted.
+      'command_receipts_room_id_rooms_id_fk',
       'core_events_room_id_rooms_id_fk',
       'corrections_object_same_room_fk',
       'corrections_room_id_rooms_id_fk',
