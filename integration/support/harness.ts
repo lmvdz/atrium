@@ -60,6 +60,34 @@ export async function resetDatabase(handle: DatabaseHandle): Promise<void> {
   await handle.db.execute(
     sql.raw(`TRUNCATE ${APP_TABLES.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`),
   );
+  await resetQueue(handle);
+}
+
+/**
+ * Empty pg-boss's job table, if pg-boss has ever run against this database.
+ *
+ * `pgboss` is a schema drizzle does not own and `APP_TABLES` therefore does not
+ * name, which meant a test that enqueued an interpretation left its jobs behind
+ * — and with `fileParallelism: false` the very next file inherits them. A
+ * worker suite is the first thing here to enqueue anything, so this is the
+ * first time it mattered; it lives in the shared reset rather than in that
+ * suite because the leak is not that suite's property, it is the reset's gap.
+ *
+ * Guarded on the schema existing: most files never start a queue, and a reset
+ * that fails because pg-boss has not been installed yet would take every one of
+ * them down.
+ */
+export async function resetQueue(handle: DatabaseHandle): Promise<void> {
+  await handle.db.execute(sql`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.tables
+                  WHERE table_schema = 'pgboss' AND table_name = 'job') THEN
+        TRUNCATE pgboss.job CASCADE;
+      END IF;
+    END
+    $$;
+  `);
 }
 
 export interface SeededRoom {
