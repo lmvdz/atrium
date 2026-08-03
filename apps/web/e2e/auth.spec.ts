@@ -103,6 +103,16 @@ test.describe('auth and workspaces', () => {
     await founder.getByRole('button', { name: 'Send' }).click();
     await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(words);
 
+    const sourceRow = invitee.locator('[data-message-id]').filter({ hasText: words });
+    await sourceRow.getByRole('button', { name: 'reply' }).focus();
+    await sourceRow.getByRole('button', { name: 'reply' }).press('Enter');
+    await expect(invitee.getByText('REPLYING TO')).toBeVisible();
+    const replyWords = `A persisted reply to the exact source ${Date.now()}.`;
+    await invitee.getByRole('textbox', { name: 'Message #general' }).fill(replyWords);
+    await invitee.getByRole('button', { name: 'Send' }).click();
+    const replyRow = founder.locator('[data-message-id]').filter({ hasText: replyWords });
+    await expect(replyRow).toContainText(words);
+
     const bytes = Buffer.from('persisted object bytes\n', 'utf8');
     let uploadTarget = '';
     let releaseUpload: (() => void) | undefined;

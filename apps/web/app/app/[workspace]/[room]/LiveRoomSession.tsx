@@ -7,6 +7,7 @@ import type { ReplayData } from '@/lib/replay-data';
 import { replayReceipt } from '@/lib/replay-view';
 import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
 import { boundTo, needsViewer, withFilter } from '@/src/components';
+import { quotationFrom } from '@/src/components/model/quotation';
 import {
   attachmentDownloadUrl,
   type UploadedAttachment,
@@ -159,7 +160,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           onSend: (text) => {
             const body = text.trim();
             if (!body || !subscribed || pendingUploads.current > 0) return;
-            clientRef.current?.sendMessage(roomId, body, { attachments });
+            clientRef.current?.sendMessage(roomId, body, {
+              attachments,
+              replyToId: binding.mode === 'replying' ? binding.to.messageId : null,
+            });
             clientRef.current?.setTyping(roomId, false);
             setDraft('');
             setAttachments([]);
@@ -200,6 +204,32 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               .catch((failure: unknown) =>
                 setError(failure instanceof Error ? failure.message : String(failure)),
               );
+          },
+          onRowAction: (messageId, actionId) => {
+            const record = view.records.find((candidate) => candidate.id === messageId);
+            if (!record || record.id.startsWith('pending:')) return;
+            if (actionId === 'reply') {
+              const quotation = quotationFrom(record);
+              if (!quotation) return;
+              setBinding({ mode: 'replying', to: quotation });
+              return;
+            }
+            if (actionId === 'quote') {
+              void navigator.clipboard.writeText(record.text).then(() => {
+                setAttachmentNote(
+                  'exact message text copied · attribution remains on its source row',
+                );
+              });
+              return;
+            }
+            if (actionId === 'link') {
+              const hash = `#message=${encodeURIComponent(record.id)}`;
+              window.history.replaceState(null, '', hash);
+              void navigator.clipboard.writeText(window.location.href).then(() => {
+                setAttachmentNote('message link copied');
+              });
+              jumpToMessage(record.id);
+            }
           },
           onAcceptReceipt: (proposalId) => clientRef.current?.acceptProposal(roomId, proposalId),
           onRetypeToClaim: (objectId) =>
