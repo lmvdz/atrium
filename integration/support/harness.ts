@@ -284,30 +284,33 @@ export async function startSecondInstance(
  * `onopen`/`onmessage`/`onclose` handles. Nothing about the client's behaviour
  * is mocked, stubbed or reimplemented here.
  */
-export function nodeSocketFactory(
-  options: {
-    onSocket?: (socket: WebSocket) => void;
-    /**
-     * Lose a frame on the way in, as a wire does.
-     *
-     * The socket stays open, the server believes it sent, and the client never
-     * hears — which is the failure the `head` frame exists for and the one
-     * #22's r3 delta found unpinned:
-     *
-     * > The pin is theatre (`reconcile.test.ts:280–308` waits for a head after
-     * > subscribe and never drops an event frame); r4's test must drop an event
-     * > frame after a successful fan-out and assert convergence.
-     *
-     * Dropped at the client's edge rather than by instrumenting the server,
-     * because the server must be the one that shipped: a test that stopped the
-     * broadcast would be testing a delivery that never happened, and the whole
-     * point is that it did.
-     */
-    dropFrame?: (frame: ServerFrame) => boolean;
-  } = {},
-) {
+export function nodeSocketFactory(options: {
+  /** Authenticated identity consumed only by the integration stub upgrader. */
+  userId: string;
+  onSocket?: (socket: WebSocket) => void;
+  /**
+   * Lose a frame on the way in, as a wire does.
+   *
+   * The socket stays open, the server believes it sent, and the client never
+   * hears — which is the failure the `head` frame exists for and the one
+   * #22's r3 delta found unpinned:
+   *
+   * > The pin is theatre (`reconcile.test.ts:280–308` waits for a head after
+   * > subscribe and never drops an event frame); r4's test must drop an event
+   * > frame after a successful fan-out and assert convergence.
+   *
+   * Dropped at the client's edge rather than by instrumenting the server,
+   * because the server must be the one that shipped: a test that stopped the
+   * broadcast would be testing a delivery that never happened, and the whole
+   * point is that it did.
+   */
+  dropFrame?: (frame: ServerFrame) => boolean;
+}) {
   return (url: string): SocketLike => {
-    const socket = new WebSocket(url);
+    // CATCHES: removing the authenticated test upgrade credential after the
+    // production client stopped putting identity in its URL. Query identity is
+    // not restored; this header belongs solely to createStubSessionAuthenticator.
+    const socket = new WebSocket(url, { headers: { 'x-atrium-user': options.userId } });
     const adapter: SocketLike = {
       get readyState() {
         return socket.readyState;

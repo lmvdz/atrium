@@ -113,6 +113,7 @@ function productionClient(
     reconnect: { initialDelayMs: 10, maxDelayMs: 40, factor: 1 },
     catchUpPageSize: PAGE,
     socketFactory: nodeSocketFactory({
+      userId,
       onSocket: (socket) => {
         if (!options.onFrame) return;
         socket.on('message', (raw) => {

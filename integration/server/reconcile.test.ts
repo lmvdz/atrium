@@ -85,7 +85,7 @@ function productionClient(
     url,
     reconnect: { initialDelayMs: 10, maxDelayMs: 40, factor: 1 },
     catchUpPageSize: 5,
-    socketFactory: nodeSocketFactory({ dropFrame: options.dropFrame }),
+    socketFactory: nodeSocketFactory({ userId, dropFrame: options.dropFrame }),
   });
   clients.push(client);
   return client;

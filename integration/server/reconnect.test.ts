@@ -112,7 +112,10 @@ describe('kill mid-burst, reconnect through the production client', () => {
       // the acceptance test never once exercised the catch-up loop it exists to
       // prove (#22 gauntlet r2 delta, major 2).
       catchUpPageSize: CATCH_UP_PAGE,
-      socketFactory: nodeSocketFactory({ onSocket: (socket) => sockets.push(socket) }),
+      socketFactory: nodeSocketFactory({
+        userId: room.people.bob as string,
+        onSocket: (socket) => sockets.push(socket),
+      }),
       onError: (message) => errors.push(message),
     });
     clients.push(bob);
