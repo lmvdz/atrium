@@ -6,6 +6,7 @@ export interface ScenarioMessage {
   body: string;
   clientMessageId: string;
   semantic: 'objective' | 'decision' | 'commitment' | 'open_question' | 'claim' | null;
+  objective: 0 | 1 | null;
   attachment: boolean;
 }
 
@@ -36,6 +37,7 @@ export function multiplayerManifest(
     const author = authorFor(seq);
     let body = `Run ${runId} message ${seq}: ordinary project discussion.`;
     let semantic: ScenarioMessage['semantic'] = null;
+    let objective: ScenarioMessage['objective'] = null;
     if (seq === 5) {
       body = `Objective: Run ${runId} ship reconnect correctness.`;
       semantic = 'objective';
@@ -45,9 +47,11 @@ export function multiplayerManifest(
     } else if (seq === 41) {
       body = `Commitment for ${userIds[4]}: Run ${runId} review the reconnect trace.`;
       semantic = 'commitment';
+      objective = 0;
     } else if (seq === 60) {
       body = `Decision: Run ${runId} reconnect from the durable cursor.`;
       semantic = 'decision';
+      objective = 0;
     } else if (seq === 75) {
       body = `Open question: Run ${runId} which trace proves ordered catch-up?`;
       semantic = 'open_question';
@@ -57,6 +61,7 @@ export function multiplayerManifest(
     } else if (seq === 110) {
       body = `Decision: Run ${runId} keep the missed window frozen at return.`;
       semantic = 'decision';
+      objective = 1;
     } else if (seq === 130) {
       body = `Claim: Run ${runId} the second trace preserves message order.`;
       semantic = 'claim';
@@ -69,6 +74,7 @@ export function multiplayerManifest(
       body,
       clientMessageId: `${runId}-message-${seq}`,
       semantic,
+      objective,
       attachment: seq === 145,
     });
   }

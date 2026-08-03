@@ -55,6 +55,17 @@ describe('the #27 multiplayer manifest', () => {
     expect(
       manifest.messages.filter((message) => message.attachment).map((message) => message.seq),
     ).toEqual([145]);
+    /**
+     * Mutation: leave the human-gated children unassociated, or pretend a
+     * machine-accepted claim/question can be retroactively filed. The former
+     * stops exercising both objectives; the latter asserts authority the
+     * immutable accepted-object record deliberately does not grant.
+     */
+    expect(
+      manifest.messages
+        .filter((message) => message.semantic !== null && message.semantic !== 'objective')
+        .map((message) => message.objective),
+    ).toEqual([0, 0, null, null, 1, null]);
     expect(manifest.disconnect).toEqual({ after: 170, through: 180 });
     expect(
       manifest.messages

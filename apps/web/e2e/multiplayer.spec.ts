@@ -285,36 +285,94 @@ test.describe
           ).toContainText(`${count}`);
         }
         const absenteeAttention = absentee.getByRole('region', { name: 'Needs you' });
-        const [commitmentAttention] = await sql<
+        const pendingAttention = await sql<
           {
             id: string;
             subjectKind: string;
             proposalId: string | null;
             proposalStatus: string | null;
+            reasonKind: string;
+            statement: string | null;
           }[]
         >`
           SELECT a.id::text, a.subject_kind AS "subjectKind", p.id::text AS "proposalId",
-                 p.status::text AS "proposalStatus"
+                 p.status::text AS "proposalStatus", a.reason->>'kind' AS "reasonKind",
+                 COALESCE(p.payload->>'statement', p.payload->>'question', p.payload->>'title')
+                   AS statement
           FROM attention_items a
           LEFT JOIN proposals p ON p.room_id=a.room_id AND p.id=a.subject_id
           WHERE a.room_id=${roomId}::uuid AND a.user_id=${users[4]}::uuid
-            AND a.reason->>'kind'='commitment_confirm' AND a.status='pending'
+            AND a.status='pending'
+          ORDER BY a.id
         `;
+        /**
+         * Mutation: project one expected commitment card but retain an extra
+         * pending card for the returning member. A positive lookup still passes;
+         * equality against the complete persisted and rendered set does not.
+         */
+        const expectedAttention = manifest.messages
+          .filter(
+            (message) =>
+              message.semantic === 'commitment' ||
+              message.semantic === 'decision' ||
+              message.semantic === 'objective',
+          )
+          .map((message) => ({
+            reasonKind:
+              message.semantic === 'commitment'
+                ? 'commitment_confirm'
+                : message.semantic === 'decision'
+                  ? 'decision_pending'
+                  : 'reading_pending',
+            statement: message.body,
+          }))
+          .sort((left, right) => left.statement.localeCompare(right.statement));
+        expect(
+          pendingAttention
+            .map(({ reasonKind, statement }) => ({ reasonKind, statement }))
+            .sort((left, right) => (left.statement ?? '').localeCompare(right.statement ?? '')),
+        ).toEqual(expectedAttention);
+        const commitmentAttention = pendingAttention.find(
+          (item) => item.reasonKind === 'commitment_confirm',
+        );
         expect(commitmentAttention).toMatchObject({
           subjectKind: 'proposal',
           proposalStatus: 'proposed',
+          reasonKind: 'commitment_confirm',
         });
         if (!commitmentAttention?.id || !commitmentAttention.proposalId) {
           throw new Error('the owner commitment attention has no proposal subject');
         }
-        const commitmentCard = absentee.locator(`[data-attention-id="${commitmentAttention.id}"]`);
-        for (let page = 0; page < 3 && (await commitmentCard.count()) === 0; page += 1) {
+        const renderedAttentionIds = new Set<string>();
+        let renderedCommitment = false;
+        const visitedPages = new Set<string>();
+        for (;;) {
+          const visibleCards = absenteeAttention.locator('[data-attention-id]');
+          for (const id of await visibleCards.evaluateAll((cards) =>
+            cards.map((card) => card.getAttribute('data-attention-id')),
+          )) {
+            if (id !== null) renderedAttentionIds.add(id);
+          }
+          const commitmentCard = absentee.locator(
+            `[data-attention-id="${commitmentAttention.id}"]`,
+          );
+          if ((await commitmentCard.count()) > 0) {
+            await expect(commitmentCard).toContainText(
+              `Commitment for ${users[4]}: Run ${runId} review the reconnect trace.`,
+            );
+            renderedCommitment = true;
+          }
+
           const next = absenteeAttention.locator('[data-pin-overflow]');
           if ((await next.count()) === 0) break;
+          const page = await next.getAttribute('data-pin-page');
+          if (page === null || visitedPages.has(page)) break;
+          visitedPages.add(page);
           await next.click();
         }
-        await expect(commitmentCard).toContainText(
-          `Commitment for ${users[4]}: Run ${runId} review the reconnect trace.`,
+        expect(renderedCommitment).toBe(true);
+        expect([...renderedAttentionIds].sort()).toEqual(
+          pendingAttention.map((item) => item.id).sort(),
         );
         await openScenarioSocket(absentee, roomId);
 
@@ -323,14 +381,68 @@ test.describe
           COALESCE(payload->>'statement', payload->>'question', payload->>'title') AS statement
         FROM proposals WHERE room_id=${roomId}::uuid AND status='proposed' ORDER BY created_at
       `;
-        for (const proposal of pending) {
-          const actor = proposal.type === 'commitment' ? absentee : (pages[0] as Page);
-          await scenarioCommand(actor, {
+        const objectiveProposals = pending.filter((proposal) => proposal.type === 'objective');
+        expect(objectiveProposals).toHaveLength(2);
+        for (const proposal of objectiveProposals) {
+          await scenarioCommand(pages[0] as Page, {
             name: 'accept_proposal',
             roomId,
             proposalId: proposal.id,
             objectiveId: null,
           });
+        }
+        await eventually(
+          async () =>
+            Number(
+              (
+                await sql`SELECT count(*)::int AS n FROM accepted_objects WHERE room_id=${roomId}::uuid AND type='objective'`
+              )[0]?.n ?? 0,
+            ),
+          (count) => count === 2,
+          'both objectives to reach the accepted fold before their children',
+        );
+        const acceptedObjectives = await sql<{ id: string; statement: string }[]>`
+          SELECT id::text,
+            COALESCE(payload->>'statement', payload->>'question', payload->>'title') AS statement
+          FROM accepted_objects
+          WHERE room_id=${roomId}::uuid AND type='objective'
+        `;
+        const objectiveMessages = manifest.messages.filter(
+          (message) => message.semantic === 'objective',
+        );
+        const objectiveIds = objectiveMessages.map(
+          (message) => acceptedObjectives.find((object) => object.statement === message.body)?.id,
+        );
+        if (objectiveIds.some((id) => !id)) {
+          throw new Error('both authored objectives did not reach the accepted fold');
+        }
+        for (const proposal of pending.filter((candidate) => candidate.type !== 'objective')) {
+          const fixture = manifest.messages.find((message) => message.body === proposal.statement);
+          if (!fixture || fixture.objective === null) {
+            throw new Error(
+              `semantic fixture has no objective ground truth: ${proposal.statement}`,
+            );
+          }
+          const actor = proposal.type === 'commitment' ? absentee : (pages[0] as Page);
+          await scenarioCommand(actor, {
+            name: 'accept_proposal',
+            roomId,
+            proposalId: proposal.id,
+            objectiveId: objectiveIds[fixture.objective] as string,
+          });
+          const expectedObjectiveId = objectiveIds[fixture.objective] as string;
+          await eventually(
+            async () =>
+              (
+                await sql<{ objectiveId: string | null }[]>`
+                  SELECT objective_id::text AS "objectiveId"
+                  FROM accepted_objects
+                  WHERE room_id=${roomId}::uuid AND proposal_id=${proposal.id}::uuid
+                `
+              )[0]?.objectiveId,
+            (objectiveId) => objectiveId === expectedObjectiveId,
+            `${proposal.type} acceptance to retain objective ${expectedObjectiveId}`,
+          );
         }
         await eventually(
           async () =>
@@ -343,11 +455,43 @@ test.describe
           'all semantic fixtures to reach the accepted fold',
         );
 
-        const objects = await sql<{ id: string; type: string; statement: string }[]>`
+        const objects = await sql<
+          { id: string; type: string; statement: string; objectiveId: string | null }[]
+        >`
         SELECT id::text, type::text,
-          COALESCE(payload->>'statement', payload->>'question', payload->>'title') AS statement
+          COALESCE(payload->>'statement', payload->>'question', payload->>'title') AS statement,
+          objective_id::text AS "objectiveId"
         FROM accepted_objects WHERE room_id=${roomId}::uuid ORDER BY created_at
       `;
+        /**
+         * Mutation: accept every child with objectiveId null or attach every
+         * child to the first objective. The fold can still contain eight valid
+         * objects, but it no longer exercises state across two objectives.
+         */
+        for (const object of objects.filter((candidate) => candidate.type !== 'objective')) {
+          const fixture = manifest.messages.find((message) => message.body === object.statement);
+          if (!fixture) {
+            throw new Error(`accepted object has no objective ground truth: ${object.statement}`);
+          }
+          if (fixture.objective === null) {
+            expect(
+              object.objectiveId,
+              `${object.type} ${JSON.stringify(object.statement)} was machine-accepted before a person could file it`,
+            ).toBeNull();
+            continue;
+          }
+          expect(
+            object.objectiveId,
+            `${object.type} ${JSON.stringify(object.statement)} must retain its selected objective`,
+          ).toBe(objectiveIds[fixture.objective]);
+        }
+        expect(
+          new Set(
+            objects
+              .filter((object) => object.objectiveId !== null)
+              .map((object) => object.objectiveId),
+          ),
+        ).toEqual(new Set(objectiveIds));
         const firstDecision = objects.find((object) => object.statement.includes('durable cursor'));
         const claims = objects.filter((object) => object.type === 'claim');
         if (!firstDecision || claims.length !== 2)
