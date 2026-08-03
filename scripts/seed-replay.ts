@@ -33,7 +33,7 @@ const WORKSPACE_SLUG = 'atrium-replay';
 const ROOM_SLUG = 'typescript-9998';
 const MODEL = 'replay/precomputed-v1';
 const MEMBER_NAMES = new Set(['RyanCavanaugh', 'ahejlsberg', 'basickarl', 'ExE-Boss', 'pimterry']);
-const CURRENT_OPEN_QUESTION = 'any plan to improve the developer experience on this subject';
+const CURRENT_OPEN_QUESTION = 'any plan to improve the developer experience on this subject?';
 
 const readings = [
   {
@@ -41,11 +41,6 @@ const readings = [
       'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
     text: 'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
     type: 'objective',
-  },
-  {
-    match: 'When a function is invoked, what should we assume its side effects are?',
-    text: 'When a function is invoked, side effects',
-    type: 'open_question',
   },
   {
     match:

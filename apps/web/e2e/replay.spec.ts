@@ -81,12 +81,12 @@ test.describe('persisted three-surface replay', () => {
   test('loads the full corpus and steps through its honest worker boundary', async ({ page }) => {
     expect(await replayDatabaseFacts()).toEqual({
       messages: 111,
-      proposals: 5,
+      proposals: 4,
       objects: 0,
       stagedDecisions: 2,
       answers: 0,
       blockers: 0,
-      proposalSources: 5,
+      proposalSources: 4,
       objectSources: 0,
     });
     await page.goto('/replay/atrium-replay/typescript-9998');
@@ -211,7 +211,7 @@ test.describe('persisted three-surface replay', () => {
    */
   test('reopens an answered question while preserving its prior answer', async ({ page }) => {
     const before = await replayDatabaseFingerprint();
-    const question = 'When a function is invoked, side effects';
+    const question = 'any plan to improve the developer experience on this subject?';
     const firstAnswer = 'Keep the optimistic assumption, but suppress narrowing through a getter.';
     await page.goto('/replay/atrium-replay/typescript-9998');
 
