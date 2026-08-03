@@ -48,6 +48,7 @@ import {
   offeredText,
   quotationRef,
   statementText,
+  systemStatement,
   systemText,
 } from '../model/quotation';
 import type {
@@ -56,7 +57,7 @@ import type {
   MessageEntry,
   RowTag,
 } from '../model/records';
-import { bodyDivergence, isAuthored } from '../model/records';
+import { bodyDivergence, bodyText, isAuthored } from '../model/records';
 import { slot } from '../model/slot';
 import type { Maybe } from '../model/text';
 import { ClaimText } from '../primitives/ClaimText';
@@ -223,6 +224,12 @@ function AuthoredRow({
   });
   if (diverged !== null) throw new Error(diverged);
   refuseElsewhere(attribution.room, here, attribution.messageId);
+  const authoredLength = bodyText(entry.body).length;
+  const authoredBody = (
+    <span data-row-body={attribution.messageId}>
+      <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
+    </span>
+  );
 
   /* THE ROW AND THE LEDGER ARE THE SAME REGISTER, OR THIS DOES NOT RENDER — and
      that check now lives on the CITATION rather than on this row, so it holds at
@@ -264,9 +271,21 @@ function AuthoredRow({
             against the record rather than against the model that built it.
             `messageEntry` proves `bodyText(body) === record.text`; this is what
             proves the renderer did not then print something else. */}
-        <span data-row-body={attribution.messageId}>
-          <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
-        </span>
+        {authoredLength >= 1200 ? (
+          <details className={styles.longMessage} data-long-message={attribution.messageId}>
+            <summary>
+              <SystemVoice
+                inline
+                statement={systemStatement(
+                  `long message · ${authoredLength} characters · show exact text`,
+                )}
+              />
+            </summary>
+            {authoredBody}
+          </details>
+        ) : (
+          authoredBody
+        )}
         <RowTagButton entry={entry} messageId={attribution.messageId} onOpenTag={onOpenTag} />
         {entry.note === null ? null : (
           <SystemVoice className={styles.note} statement={entry.note} />

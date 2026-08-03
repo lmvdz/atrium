@@ -122,6 +122,21 @@
   min-width: 0;
 }
 
+.longMessage {
+  border-left: 2px solid var(--line3);
+  padding-left: 7px;
+}
+
+.longMessage summary {
+  cursor: pointer;
+  list-style-position: outside;
+  padding: 2px 0;
+}
+
+.longMessage[open] summary {
+  margin-bottom: 6px;
+}
+
 /* a page-authored answer: system voice in the body column, no actor beside it */
 .chosen {
   display: inline;

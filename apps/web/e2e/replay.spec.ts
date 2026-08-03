@@ -132,6 +132,21 @@ test.describe('persisted three-surface replay', () => {
       .toBeGreaterThan(0);
     await expect(divider).toBeInViewport();
     /**
+     * Mutation: render an oversized authored record expanded by default. The
+     * first corpus message then occupies nearly the entire return viewport.
+     * Native disclosure keeps every exact authored byte one action away.
+     */
+    const longMessage = page.locator('[data-long-message]').first();
+    await expect(longMessage).toBeVisible();
+    await expect(longMessage).not.toHaveAttribute('open', '');
+    await expect(
+      longMessage.getByText(/long message · \d+ characters · show exact text/),
+    ).toBeVisible();
+    await longMessage.locator('summary').click();
+    await expect(longMessage).toHaveAttribute('open', '');
+    await expect(longMessage).toContainText('Some rough notes from a conversation');
+    await longMessage.locator('summary').click();
+    /**
      * Mutation: return the transport to fixed positioning. It then covers the
      * feed/composer while the earlier hit-test samples only the textbox centre.
      */
