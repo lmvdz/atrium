@@ -166,10 +166,10 @@ export async function signIn(page: Page, email: string): Promise<void> {
  */
 export async function sendCommand(
   page: Page,
-  frame: { command: string; roomId: string },
+  frame: Record<string, unknown>,
 ): Promise<{ opened: boolean; reply: Record<string, unknown> | null }> {
   return page.evaluate(
-    ({ command, roomId, url }) =>
+    ({ frame, url }) =>
       new Promise<{ opened: boolean; reply: Record<string, unknown> | null }>((resolve) => {
         const socket = new WebSocket(url);
         let opened = false;
@@ -182,7 +182,7 @@ export async function sendCommand(
 
         socket.addEventListener('open', () => {
           opened = true;
-          socket.send(JSON.stringify({ type: 'command', command, roomId, requestId: 'probe' }));
+          socket.send(JSON.stringify(frame));
         });
         socket.addEventListener('message', (event: MessageEvent<string>) => {
           const message = JSON.parse(event.data) as Record<string, unknown>;
@@ -196,7 +196,7 @@ export async function sendCommand(
           if (!opened) done(null);
         });
       }),
-    { ...frame, url: wsUrl },
+    { frame, url: wsUrl },
   );
 }
 
@@ -223,7 +223,7 @@ export async function openLiveSocket(page: Page): Promise<boolean> {
           __atriumLive?: {
             socket: WebSocket;
             replies: Record<string, unknown>[];
-            broadcasts: number;
+            frames: Record<string, unknown>[];
             closeCode: number | null;
           };
         };
@@ -231,21 +231,15 @@ export async function openLiveSocket(page: Page): Promise<boolean> {
         const live = {
           socket,
           replies: [] as Record<string, unknown>[],
-          broadcasts: 0,
+          frames: [] as Record<string, unknown>[],
           closeCode: null as number | null,
         };
         holder.__atriumLive = live;
 
         socket.addEventListener('message', (event: MessageEvent<string>) => {
           const message = JSON.parse(event.data) as Record<string, unknown>;
-          // Roster broadcasts arrive unprompted; they are not answers. They are
-          // exactly what a revoked subscription must stop receiving, so they
-          // are counted rather than dropped.
-          if (message.type === 'presence') {
-            live.broadcasts += 1;
-            return;
-          }
           if (message.type === 'welcome') return;
+          live.frames.push(message);
           live.replies.push(message);
         });
         socket.addEventListener('close', (event: CloseEvent) => {
@@ -262,17 +256,21 @@ export async function openLiveSocket(page: Page): Promise<boolean> {
 /** What the socket `openLiveSocket` left open is still being told, and whether it lives. */
 export async function liveSocketStatus(
   page: Page,
-): Promise<{ open: boolean; closeCode: number | null; broadcasts: number }> {
+): Promise<{ open: boolean; closeCode: number | null; frames: Record<string, unknown>[] }> {
   return page.evaluate(() => {
     const holder = window as unknown as {
-      __atriumLive?: { socket: WebSocket; broadcasts: number; closeCode: number | null };
+      __atriumLive?: {
+        socket: WebSocket;
+        frames: Record<string, unknown>[];
+        closeCode: number | null;
+      };
     };
     const live = holder.__atriumLive;
-    if (!live) return { open: false, closeCode: null, broadcasts: 0 };
+    if (!live) return { open: false, closeCode: null, frames: [] };
     return {
       open: live.socket.readyState === WebSocket.OPEN,
       closeCode: live.closeCode,
-      broadcasts: live.broadcasts,
+      frames: live.frames,
     };
   });
 }
@@ -280,10 +278,10 @@ export async function liveSocketStatus(
 /** Sends one command over the socket `openLiveSocket` left open. */
 export async function sendOnLiveSocket(
   page: Page,
-  frame: { command: string; roomId: string },
+  frame: Record<string, unknown>,
 ): Promise<{ closed: boolean; reply: Record<string, unknown> | null }> {
   return page.evaluate(
-    ({ command, roomId }) =>
+    (frame) =>
       new Promise<{ closed: boolean; reply: Record<string, unknown> | null }>((resolve) => {
         const holder = window as unknown as {
           __atriumLive?: { socket: WebSocket; replies: Record<string, unknown>[] };
@@ -295,7 +293,7 @@ export async function sendOnLiveSocket(
         }
 
         live.replies.length = 0;
-        live.socket.send(JSON.stringify({ type: 'command', command, roomId, requestId: 'live' }));
+        live.socket.send(JSON.stringify(frame));
 
         const startedAt = Date.now();
         const tick = setInterval(() => {

@@ -135,7 +135,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   };
 
   return (
-    <main className={styles.live}>
+    <main className={styles.live} data-room-id={roomId}>
       <RoomFrame
         attention={view.attention}
         binding={binding}
