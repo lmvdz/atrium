@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ReplayData } from '../lib/replay-data';
-import { replayView } from '../lib/replay-view';
+import { replayAt, replayView } from '../lib/replay-view';
 
 const at = new Date('2026-08-02T12:00:00.000Z');
 
@@ -49,6 +49,17 @@ function data(): ReplayData {
 }
 
 describe('persisted replay view', () => {
+  /**
+   * Mutation: retain final worker rows while scrubbing an earlier message
+   * prefix. The replay then presents a conclusion before its source was read.
+   */
+  it('withholds the worker result until the complete imported corpus is visible', () => {
+    const snapshot = data();
+    expect(replayAt(snapshot, 0).messages).toEqual([]);
+    expect(replayAt(snapshot, 0).objects).toEqual([]);
+    expect(replayAt(snapshot, snapshot.messages.length)).toBe(snapshot);
+  });
+
   /**
    * Mutation: source the feed from gallery fixtures or truncate the persisted
    * messages. The two database records no longer produce exactly two rows.

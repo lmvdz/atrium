@@ -26,11 +26,34 @@ async function main() {
 
   await migrate();
   if (RESET) await truncate();
+  seedReplay();
 
   // A stale outbox would let a test read a link from a previous run.
   rmSync(mailOutbox, { force: true });
 
   console.info(`[e2e] database ready at ${redact(databaseUrl)}`);
+}
+
+/**
+ * #25's browser proof reads the same deterministic 454-message room a person
+ * can seed locally. The provider is precomputed and reports zero API spend,
+ * but every interpretation and proposal still traverses the production worker.
+ */
+function seedReplay() {
+  try {
+    execFileSync(
+      'pnpm',
+      ['--filter', '@atrium/server', 'exec', 'tsx', '../../scripts/seed-replay.ts'],
+      {
+        cwd: new URL('../../../../', import.meta.url),
+        encoding: 'utf8',
+        env: { ...process.env, ATRIUM_REPLAY_DATABASE_URL: databaseUrl },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+  } catch (error) {
+    fail(`could not seed the persisted replay: ${error.stderr || error.message}`);
+  }
 }
 
 async function reachable(url) {

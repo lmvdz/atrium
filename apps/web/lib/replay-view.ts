@@ -1,3 +1,10 @@
+import {
+  ClaimPayload,
+  CommitmentPayload,
+  DecisionPayload,
+  ObjectivePayload,
+  OpenQuestionPayload,
+} from '@atrium/core';
 import type {
   AttentionItem,
   EpistemicState,
@@ -9,13 +16,6 @@ import type {
   StateObject,
   TimelineEntry,
 } from '../src/components';
-import {
-  ClaimPayload,
-  CommitmentPayload,
-  DecisionPayload,
-  ObjectivePayload,
-  OpenQuestionPayload,
-} from '@atrium/core';
 import {
   citationFrom,
   messageEntry,
@@ -32,6 +32,30 @@ const TALK: EpistemicState = {
   owedToViewer: false,
   irreversible: false,
 };
+
+/**
+ * Replay the import honestly: corpus messages arrived in order, then the
+ * precomputed worker pass produced its durable semantic rows. A partial cursor
+ * therefore contains only the message prefix; showing final objects beside an
+ * earlier prefix would claim the worker knew words it had not read yet.
+ */
+export function replayAt(data: ReplayData, messageCount: number): ReplayData {
+  const count = Math.max(0, Math.min(Math.trunc(messageCount), data.messages.length));
+  if (count === data.messages.length) return data;
+  const visibleMessages = data.messages.slice(0, count);
+  return {
+    ...data,
+    messages: visibleMessages,
+    interpretations: [],
+    proposals: [],
+    proposalSources: [],
+    objects: [],
+    objectSources: [],
+    relations: [],
+    attention: [],
+    corrections: [],
+  };
+}
 
 /**
  * Adapt a persisted room to the verified component vocabulary.
@@ -119,11 +143,12 @@ export function replayView(data: ReplayData, viewerId?: string) {
     const sourceId =
       subjectKind === 'proposal'
         ? data.proposalSources.find((source) => source.proposalId === subjectId)?.messageId
-        : data.objectSources.find((source) => source.objectId === subjectId)?.messageId ??
+        : (data.objectSources.find((source) => source.objectId === subjectId)?.messageId ??
           (() => {
             const proposalId = data.objects.find((object) => object.id === subjectId)?.proposalId;
-            return data.proposalSources.find((source) => source.proposalId === proposalId)?.messageId;
-          })();
+            return data.proposalSources.find((source) => source.proposalId === proposalId)
+              ?.messageId;
+          })());
     const source = sourceId ? recordById.get(sourceId) : undefined;
     return source ? citationFrom(source) : null;
   };
@@ -155,14 +180,13 @@ export function replayView(data: ReplayData, viewerId?: string) {
     note: null,
     isViewer: person.id === viewer?.id,
   }));
-  const viewerRecord: HumanSummary =
-    humans.find((person) => person.isViewer) ?? {
-      id: 'replay-viewer',
-      name: viewerName,
-      presence: 'away',
-      note: null,
-      isViewer: true,
-    };
+  const viewerRecord: HumanSummary = humans.find((person) => person.isViewer) ?? {
+    id: 'replay-viewer',
+    name: viewerName,
+    presence: 'away',
+    note: null,
+    isViewer: true,
+  };
   const room: RoomHeadRecord = {
     name: data.room.name,
     topic: data.room.workspaceName,

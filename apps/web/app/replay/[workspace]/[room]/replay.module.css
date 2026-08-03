@@ -1,0 +1,55 @@
+.replay {
+  min-height: 100vh;
+}
+
+.controls {
+  align-items: center;
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  bottom: 16px;
+  box-shadow: 0 8px 32px color-mix(in srgb, var(--tx0) 12%, transparent);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(180px, 36vw) auto auto;
+  left: 50%;
+  padding: 8px;
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 20;
+}
+
+.controls button {
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  color: var(--tx0);
+  cursor: pointer;
+  font: inherit;
+  min-height: 28px;
+  min-width: 28px;
+}
+
+.controls button:disabled {
+  background: var(--bg1);
+  border-style: dashed;
+  color: var(--tx2);
+  cursor: default;
+}
+
+.controls input {
+  accent-color: var(--amb1);
+}
+
+.position {
+  color: var(--tx1);
+  font-size: 11px;
+  min-width: 150px;
+  text-align: right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .controls,
+  .controls * {
+    scroll-behavior: auto;
+    transition: none;
+  }
+}

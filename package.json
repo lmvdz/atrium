@@ -11,6 +11,7 @@
     "dev": "pnpm --filter \"./packages/*\" build && pnpm --parallel --filter \"./apps/*\" dev",
     "build": "pnpm --filter \"./packages/*\" build && pnpm --filter \"./apps/*\" build",
     "ingest": "pnpm --filter @atrium/ingest... build && node packages/ingest/dist/cli.js",
+    "seed:replay": "pnpm --filter \"./packages/*\" build && pnpm --filter @atrium/server exec tsx ../../scripts/seed-replay.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "bash scripts/integration-test.sh",
