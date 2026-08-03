@@ -309,7 +309,12 @@ function fallbackPriority(attentionClass: AttentionClass): number {
  * content can imitate the structure; and `subjectKind` is part of the id, so the
  * proposal namespace and the object namespace cannot meet.
  */
-function itemId(userId: Id, subjectKind: AttentionSubjectKind, subjectId: Id, cls: string): string {
+export function attentionItemId(
+  userId: Id,
+  subjectKind: AttentionSubjectKind,
+  subjectId: Id,
+  cls: string,
+): string {
   return `attn:${escapeIdPart(userId)}:${subjectKind}:${escapeIdPart(subjectId)}:${cls}`;
 }
 
@@ -817,7 +822,7 @@ function needsYouOutcome(
     return raiseOrRefuse(
       audience.map((userId) =>
         item({
-          id: itemId(userId, 'proposal', proposal.id, 'needs_decision'),
+          id: attentionItemId(userId, 'proposal', proposal.id, 'needs_decision'),
           roomId: proposal.roomId,
           userId,
           objectId: proposal.id,
@@ -863,7 +868,7 @@ function needsYouOutcome(
       hasContent(owner)
         ? [
             item({
-              id: itemId(owner, 'proposal', proposal.id, 'owned_commitment'),
+              id: attentionItemId(owner, 'proposal', proposal.id, 'owned_commitment'),
               roomId: proposal.roomId,
               userId: owner,
               objectId: proposal.id,
@@ -916,7 +921,7 @@ function needsYouOutcome(
   return raiseOrRefuse(
     room.map((userId) =>
       item({
-        id: itemId(userId, 'proposal', proposal.id, 'needs_decision'),
+        id: attentionItemId(userId, 'proposal', proposal.id, 'needs_decision'),
         roomId: proposal.roomId,
         userId,
         objectId: proposal.id,
@@ -966,7 +971,7 @@ function commitmentItems(state: CoreState, ctx: AttentionContext): AttentionSour
     const overdue = due !== null && due < ctx.now;
     out.push(
       item({
-        id: itemId(owner, 'object', object.id, 'owned_commitment'),
+        id: attentionItemId(owner, 'object', object.id, 'owned_commitment'),
         roomId: object.roomId,
         userId: owner,
         objectId: object.id,
@@ -1045,7 +1050,7 @@ function blockingQuestionItems(state: CoreState, ctx: AttentionContext): Attenti
   }
 
   const push = (userId: Id, question: ObjectRecord, reason: RationaleReason): void => {
-    const id = itemId(userId, 'object', question.object.id, 'blocking_question');
+    const id = attentionItemId(userId, 'object', question.object.id, 'blocking_question');
     if (seen.has(id)) return;
     seen.add(id);
     out.push(
@@ -1151,7 +1156,7 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
   //
   // r10 wrote that sentence and then declared an examination *per subject it
   // was handed*, which closed the empty case and left the partial one wide
-  // open. `itemId(signal.userId, 'object', signal.objectId, 'mention')` carries
+  // open. `attentionItemId(signal.userId, 'object', signal.objectId, 'mention')` carries
   // the user; the `ExaminedSubject` pushed beside it carried `class`,
   // `subjectKind`, `subjectId` and `producer` and **no user at all**. So one
   // signal about an object concluded about that object for everybody:
@@ -1189,7 +1194,7 @@ function mentionItems(ctx: AttentionContext): AttentionSource {
   const out: ComputedAttentionItem[] = [];
   const seen = new Set<string>();
   for (const signal of signals) {
-    const id = itemId(signal.userId, 'object', signal.objectId, 'mention');
+    const id = attentionItemId(signal.userId, 'object', signal.objectId, 'mention');
     if (seen.has(id)) continue;
     seen.add(id);
     out.push(

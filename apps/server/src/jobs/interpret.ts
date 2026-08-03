@@ -17,6 +17,7 @@ import type { Database } from '@atrium/db';
 import { interpretations, messages } from '@atrium/db/schema';
 import { and, asc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { objectFromProposal } from '../commands.js';
+import { reconcileStoredAttention } from '../attention-projection.js';
 import { CommandError, type Ledger } from '../ledger.js';
 import type { Logger } from '../logger.js';
 import { projectRoomEvent } from '../projections.js';
@@ -532,6 +533,20 @@ export async function runInterpretation(
   }
 
   await markSucceeded(deps.db, claimed, result.raw);
+
+  const attention = await reconcileStoredAttention({
+    db: deps.db,
+    state: deps.ledger.coreState(),
+    roomId,
+    messages: context,
+    now: startedAt,
+  });
+  if (attention.refusals.length > 0) {
+    deps.logger.warn('attention projection refused evidence in this worker window', {
+      roomId,
+      refusals: attention.refusals,
+    });
+  }
 
   run.leftover = await countUninterpreted(deps.db, roomId);
   if (run.leftover > 0) {

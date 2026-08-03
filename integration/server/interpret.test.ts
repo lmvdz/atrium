@@ -1,5 +1,5 @@
 import type { DatabaseHandle } from '@atrium/db';
-import { interpretations, messages, proposals } from '@atrium/db/schema';
+import { attentionItems, interpretations, messages, proposals } from '@atrium/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Command, createCommandService } from '../../apps/server/src/commands.js';
@@ -739,6 +739,58 @@ describe('per-job settlement', () => {
 /* ── acceptance, and what #86 does to it ────────────────────────────────── */
 
 describe('in-job acceptance', () => {
+  /**
+   * Mutation: delete `reconcileStoredAttention` from the worker. The proposal
+   * and interpretation still report success, but the durable Needs-you panel
+   * remains empty.
+   *
+   * Mutation: reconcile stored rows by their database UUID instead of deriving
+   * core's semantic identity. A second cycle sees every row as a different
+   * item and cannot preserve its settled status.
+   */
+  it('persists pending attention for a decision the worker stages', async () => {
+    const body = 'We will use Postgres for the queue.';
+    const first = await insertMessage(room.people.alice as string, body);
+    await insertMessage(room.people.bob as string, 'Understood.');
+
+    provider.respond = () => [
+      {
+        type: 'decision',
+        text: body,
+        subject: null,
+        confidence: 0.95,
+        quote: body,
+        messageIds: [first],
+      },
+    ];
+
+    const run = await runInterpretation(
+      {
+        db: handle.db,
+        ledger,
+        provider,
+        routing: { default: MODEL_DEFAULT, escalation: MODEL_ESCALATION },
+        logger,
+      },
+      { roomId: room.roomId },
+    );
+
+    expect(run.proposalsRecorded).toHaveLength(1);
+    expect(run.objectsAccepted).toHaveLength(0);
+    const rows = await handle.db
+      .select()
+      .from(attentionItems)
+      .where(eq(attentionItems.roomId, room.roomId));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.userId).sort()).toEqual(
+      [room.people.alice as string, room.people.bob as string].sort(),
+    );
+    expect(rows.every((row) => /^[0-9a-f-]{36}$/.test(row.id))).toBe(true);
+    expect(rows.every((row) => row.status === 'pending')).toBe(true);
+    expect(rows.every((row) => row.subjectKind === 'proposal')).toBe(true);
+    expect(rows.every((row) => row.reason.kind === 'decision_pending')).toBe(true);
+  });
+
   /**
    * **The #86 receipt: the worker's acceptance reaches the fold.**
    *
