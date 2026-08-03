@@ -1,10 +1,10 @@
+import { roomMemberIds } from '@atrium/auth';
 import type { Database } from '@atrium/db';
 import {
   acceptedObjects,
   attentionItems,
   corrections,
   interpretations,
-  memberships,
   messages,
   objectRelations,
   objectSources,
@@ -58,14 +58,16 @@ export async function loadReplayData(database: Database, roomId: string) {
 
   const messageIds = roomMessages.map((message) => message.id);
 
+  const participantIds = await roomMemberIds(database, roomId);
   const [participants, roomInterpretations, roomProposals, objects, relations, attention, fixes] =
     await Promise.all([
-      database
-        .select({ id: users.id, name: users.displayName, avatarUrl: users.avatarUrl })
-        .from(memberships)
-        .innerJoin(users, eq(users.id, memberships.userId))
-        .where(eq(memberships.roomId, roomId))
-        .orderBy(asc(users.displayName), asc(users.id)),
+      participantIds.length === 0
+        ? Promise.resolve([])
+        : database
+            .select({ id: users.id, name: users.displayName, avatarUrl: users.avatarUrl })
+            .from(users)
+            .where(inArray(users.id, participantIds))
+            .orderBy(asc(users.displayName), asc(users.id)),
       messageIds.length === 0
         ? Promise.resolve([])
         : database
@@ -120,9 +122,7 @@ export async function loadReplayData(database: Database, roomId: string) {
       : database
           .select()
           .from(objectSources)
-          .where(
-            and(eq(objectSources.roomId, roomId), inArray(objectSources.objectId, objectIds)),
-          )
+          .where(and(eq(objectSources.roomId, roomId), inArray(objectSources.objectId, objectIds)))
           .orderBy(asc(objectSources.objectId), asc(objectSources.messageId)),
   ]);
 

@@ -1,3 +1,4 @@
+import { roomMemberIds } from '@atrium/auth';
 import {
   AttentionItem,
   attentionItemId,
@@ -7,7 +8,7 @@ import {
   reconcileAttention,
 } from '@atrium/core';
 import type { Database } from '@atrium/db';
-import { attentionItems, memberships } from '@atrium/db/schema';
+import { attentionItems } from '@atrium/db/schema';
 import { eq } from 'drizzle-orm';
 
 /** Persist the evidence-bounded attention projection for one worker cycle. */
@@ -19,10 +20,7 @@ export async function reconcileStoredAttention(input: {
   now: string;
 }) {
   const [memberRows, storedRows] = await Promise.all([
-    input.db
-      .select({ userId: memberships.userId })
-      .from(memberships)
-      .where(eq(memberships.roomId, input.roomId)),
+    roomMemberIds(input.db, input.roomId),
     input.db.select().from(attentionItems).where(eq(attentionItems.roomId, input.roomId)),
   ]);
 
@@ -41,7 +39,7 @@ export async function reconcileStoredAttention(input: {
   );
   const projection = projectAttention(input.state, {
     now: input.now,
-    members: { [input.roomId]: memberRows.map((row) => row.userId) },
+    members: { [input.roomId]: memberRows },
     messages: input.messages,
   });
   const reconciled = reconcileAttention(stored, projection);

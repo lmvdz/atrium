@@ -358,6 +358,28 @@ export async function roomMembershipsHeld(
 }
 
 /**
+ * Every effective member of one live room, for room-wide derived projections.
+ *
+ * This deliberately applies the same workspace join and role clamp as command
+ * authorization. Reading `memberships` alone would resurrect a user whose
+ * workspace membership was revoked but whose derived room row survived.
+ */
+export async function roomMemberIds(
+  db: Database,
+  roomId: string,
+  logger: ReconcileLogger = silent,
+): Promise<string[]> {
+  const rows = await db
+    .select({ userId: memberships.userId, ...roomAuthorizationRoles })
+    .from(memberships)
+    .innerJoin(rooms, eq(memberships.roomId, rooms.id))
+    .innerJoin(workspaceMembers, roomWorkspaceMemberJoin)
+    .where(and(eq(memberships.roomId, roomId), isNull(rooms.archivedAt)));
+
+  return rows.filter((row) => effectiveRoomRole(row, logger) !== null).map((row) => row.userId);
+}
+
+/**
  * Move a member's read cursor forward, never backward.
  *
  * `apps/server`'s `room.ack` command owned this `UPDATE memberships` directly,

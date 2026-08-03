@@ -1,15 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import {
   acceptedObjects,
   interpretations,
   messages,
-  objectSources,
-  proposalSources,
-  proposals,
   type NewAcceptedObjectRow,
   type NewInterpretation,
   type NewProposalRow,
+  objectSources,
+  proposalSources,
+  proposals,
+  workspaceMembers,
 } from '@atrium/db';
-import { randomUUID } from 'node:crypto';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadReplayData } from '../../apps/web/lib/replay-data.js';
 import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
@@ -163,6 +165,18 @@ describe('persisted replay data', () => {
       { roomId: own.roomId, objectId: ownObjectId, messageId: secondMessageId },
     ]);
     expect(replay?.participants.map((person) => person.name)).toEqual(['alice']);
+
+    // Mutation: derive replay participants from `memberships` alone. The stale
+    // room row then keeps rendering Alice after workspace revocation.
+    await handle.db
+      .delete(workspaceMembers)
+      .where(
+        and(
+          eq(workspaceMembers.organizationId, own.workspaceId),
+          eq(workspaceMembers.userId, own.people.alice as string),
+        ),
+      );
+    expect((await loadReplayData(handle.db, own.roomId))?.participants).toEqual([]);
   });
 
   /** Mutation: turn a missing room into an empty replay and let `/` claim it loaded. */
