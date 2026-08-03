@@ -72,6 +72,15 @@ export function serverEnvironment() {
     SERVER_PORT: String(serverPort),
     SERVER_HOST: '127.0.0.1',
     LOG_LEVEL: 'warn',
+    // The Phase 2 simulation exercises the real worker without a network or a
+    // paid model. This provider is double-opted-in and refuses to boot if a
+    // gateway key is present; ordinary E2E prose produces an empty reading.
+    INTERPRET_PROVIDER: 'acceptance-deterministic',
+    ATRIUM_ACCEPTANCE_MODE: 'enabled',
+    INTERPRET_MODEL_DEFAULT: 'acceptance/deterministic-v1',
+    INTERPRET_MODEL_ESCALATION: 'acceptance/deterministic-v1',
+    INTERPRET_COALESCE_SECONDS: '1',
+    INTERPRET_WORKER_CONCURRENCY: '4',
     /**
      * One hop, so the throttle's IP dimension is genuinely live during the
      * suite rather than silently inert — a rate limiter nobody has ever seen

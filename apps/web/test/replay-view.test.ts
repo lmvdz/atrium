@@ -533,6 +533,80 @@ describe('live room view', () => {
     expect(session).toContain(
       '!shouldRefreshLiveRoute(reason, room.lastSeq, refreshedThrough.current)',
     );
+    /**
+     * Mutation: advance the guard to the client's cursor before the refreshed
+     * Server Component props commit. A concurrent refresh can then absorb a
+     * reconnect request, leaving ten durable catch-up rows absent forever while
+     * the guard says the route already holds them.
+     */
+    expect(session).toContain('refreshedThrough.current = persistedThrough');
+    expect(session).not.toContain('refreshedThrough.current = client.lastSeq(roomId)');
+    /**
+     * Mutation: make the reconnect refresh fire only once. Next may coalesce
+     * that request with an in-flight projection refresh, after which no socket
+     * frame remains to trigger another attempt and the transcript stays stale.
+     */
+    expect(session).toContain('refreshTarget.current > refreshedThrough.current');
+    expect(session).toContain('scheduleRefreshRef.current(75)');
+    expect(session).toContain('}, [data.loadReceipt])');
+    expect(session).toContain('refreshInFlight.current = true');
+    expect(session).toContain('refreshInFlight.current = false');
+    expect(session).toContain('refreshTimer.current !== null ||\n        refreshInFlight.current');
+    /**
+     * Mutation: keep the in-flight latch forever when Next cancels a refresh
+     * without committing a load receipt. Every later reconnect target is then
+     * recorded but no route read may start.
+     */
+    expect(session).toContain('refreshLeaseTimer.current = setTimeout');
+    expect(session).toContain('}, 5_000)');
+    /**
+     * Mutation: check the watchdog limit only after issuing refresh 12. Its
+     * receipt then schedules refresh 13 and a stuck cursor loops forever.
+     */
+    expect(session.indexOf('if (refreshAttempts.current >= 12)')).toBeLessThan(
+      session.indexOf('refreshInFlight.current = true'),
+    );
+    /**
+     * Mutation: count productive partial commits against the no-progress
+     * watchdog. A moving worker tail can then exhaust twelve refreshes while
+     * every one advanced, stranding reconnect catch-up behind the target.
+     */
+    expect(session).toContain(
+      'if (advanced || persistedThrough >= refreshTarget.current) refreshAttempts.current = 0',
+    );
+    /**
+     * Mutation: leave a projection-only exhausted watchdog latched when a new
+     * authenticated ledger target arrives. Reconnect then records its cursor
+     * but refuses every refresh needed to render the new messages.
+     */
+    expect(session).toContain('if (room.lastSeq > previousTarget) refreshAttempts.current = 0');
+    /**
+     * Mutation: clear a projection invalidation when any older refresh returns
+     * arrays with new identities. That stale response can then swallow the one
+     * reread that should reveal a new proposal or attention item.
+     */
+    expect(session).toContain(
+      "if (reason === 'projection' && projectionRefreshRemaining.current === 0)",
+    );
+    expect(session).toContain('projectionRefreshRemaining.current = 2');
+    expect(session).not.toContain('projectionRefreshPending.current = false');
+    /**
+     * Mutation: carry a high refresh watermark across client-side navigation
+     * into a low-cursor room. That room's first events then compare below the
+     * previous room's cursor and never refresh its persisted transcript.
+     */
+    expect(session).toContain('if (refreshRoom.current !== roomId)');
+    expect(session).toContain('refreshTarget.current = persistedThrough');
+
+    const loader = readFileSync('lib/replay-data.ts', 'utf8');
+    /**
+     * Mutation: prove refresh completion with the last message position rather
+     * than the room ledger cursor. A semantic tail then keeps the route behind
+     * forever even when every message is present.
+     */
+    expect(loader).toContain('loadedThrough: roomCursor[0]?.loadedThrough ?? 0');
+    expect(loader).toContain('loadReceipt: randomUUID()');
+    expect(loader).toContain('.where(eq(coreEvents.roomId, roomId))');
   });
 
   /**

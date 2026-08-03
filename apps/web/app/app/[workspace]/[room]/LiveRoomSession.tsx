@@ -81,7 +81,48 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const [receiptId, setReceiptId] = useState<string | null>(null);
   const [pendingSupersession, setPendingSupersession] = useState<PendingSupersession | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const refreshedThrough = useRef(0);
+  const refreshLeaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshInFlight = useRef(false);
+  const scheduleRefreshRef = useRef<(delayMs?: number) => void>(() => {});
+  const messageThrough = Math.max(
+    0,
+    ...(data.messagePositions ?? []).map((position) => position.roomSeq),
+  );
+  const persistedThrough = data.loadedThrough ?? messageThrough;
+  const refreshedThrough = useRef(persistedThrough);
+  const refreshTarget = useRef(persistedThrough);
+  const refreshAttempts = useRef(0);
+  const projectionRefreshRemaining = useRef(0);
+  const refreshRoom = useRef(roomId);
+
+  useEffect(() => {
+    if (refreshRoom.current !== roomId) {
+      refreshRoom.current = roomId;
+      refreshTarget.current = persistedThrough;
+      refreshAttempts.current = 0;
+      projectionRefreshRemaining.current = 0;
+      refreshInFlight.current = false;
+      if (refreshLeaseTimer.current !== null) clearTimeout(refreshLeaseTimer.current);
+      refreshLeaseTimer.current = null;
+    }
+    // This cursor describes what the Server Component props actually contain,
+    // not what a refresh request hoped they would contain. Advancing it before
+    // `router.refresh()` commits lets an overlapping refresh swallow a later
+    // reconnect catch-up while the rendered projection remains behind.
+    const advanced = persistedThrough > refreshedThrough.current;
+    refreshedThrough.current = persistedThrough;
+    if (advanced || persistedThrough >= refreshTarget.current) refreshAttempts.current = 0;
+  }, [persistedThrough, roomId]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the opaque receipt is intentionally the completed-load signal, not data read by the callback.
+  useEffect(() => {
+    // A new load receipt is minted only by a completed Server Component read.
+    // It is the serialization edge for the next bounded refresh attempt.
+    refreshInFlight.current = false;
+    if (refreshLeaseTimer.current !== null) clearTimeout(refreshLeaseTimer.current);
+    refreshLeaseTimer.current = null;
+    scheduleRefreshRef.current(75);
+  }, [data.loadReceipt]);
 
   useEffect(() => {
     unreadWindowRef.current = null;
@@ -93,6 +134,37 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     });
     clientRef.current = client;
     setLive(copyRoom(client.room(roomId)));
+    const scheduleRefresh = (delayMs = 75) => {
+      if (refreshTimer.current !== null) return;
+      refreshTimer.current = setTimeout(() => {
+        refreshTimer.current = null;
+        if (refreshInFlight.current) return;
+        const cursorBehind = refreshTarget.current > refreshedThrough.current;
+        if (!cursorBehind && projectionRefreshRemaining.current === 0) {
+          refreshAttempts.current = 0;
+          return;
+        }
+        if (refreshAttempts.current >= 12) {
+          setError(
+            `the live route did not reach room position ${refreshTarget.current} after 12 refreshes`,
+          );
+          return;
+        }
+        refreshInFlight.current = true;
+        router.refresh();
+        refreshLeaseTimer.current = setTimeout(() => {
+          // Next can cancel/coalesce a refresh without committing a receipt.
+          // Release only that vanished request; ordinary responses clear this
+          // lease in the load-receipt effect before another refresh can start.
+          refreshLeaseTimer.current = null;
+          refreshInFlight.current = false;
+          scheduleRefreshRef.current(75);
+        }, 5_000);
+        projectionRefreshRemaining.current = Math.max(0, projectionRefreshRemaining.current - 1);
+        refreshAttempts.current += 1;
+      }, delayMs);
+    };
+    scheduleRefreshRef.current = scheduleRefresh;
     const stopChanges = client.onChange((changedRoomId, room, reason) => {
       if (changedRoomId !== roomId) return;
       if (room.subscribed && unreadWindowRef.current === null) {
@@ -104,17 +176,25 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         setUnreadWindow(window);
       }
       setLive(copyRoom(room));
+      const previousTarget = refreshTarget.current;
+      refreshTarget.current = Math.max(refreshTarget.current, room.lastSeq);
+      if (room.lastSeq > previousTarget) refreshAttempts.current = 0;
+      // Unlike ledger entries, projection invalidations have no durable
+      // revision/ack loop (protocol.ts documents that boundary). Two completed,
+      // serialized rereads survive an older in-flight refresh without treating
+      // changed array identity as proof of freshness. Invalidations arriving
+      // inside the same batch do not reset its budget into a refresh storm.
+      if (reason === 'projection' && projectionRefreshRemaining.current === 0) {
+        projectionRefreshRemaining.current = 2;
+      }
       if (
         !shouldRefreshLiveRoute(reason, room.lastSeq, refreshedThrough.current) ||
-        refreshTimer.current !== null
+        refreshTimer.current !== null ||
+        refreshInFlight.current
       ) {
         return;
       }
-      refreshTimer.current = setTimeout(() => {
-        refreshTimer.current = null;
-        refreshedThrough.current = client.lastSeq(roomId);
-        router.refresh();
-      }, 75);
+      scheduleRefresh();
     });
     const stopStatus = client.onStatus((status) => {
       setConnection(status);
@@ -128,6 +208,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
       stopChanges();
       stopStatus();
       if (refreshTimer.current !== null) clearTimeout(refreshTimer.current);
+      if (refreshLeaseTimer.current !== null) clearTimeout(refreshLeaseTimer.current);
+      scheduleRefreshRef.current = () => {};
       client.setPresence(roomId, 'offline');
       client.leave(roomId);
       client.close();
@@ -214,7 +296,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   };
 
   return (
-    <main className={styles.live} data-room-id={roomId}>
+    <main
+      className={styles.live}
+      data-live-through={live.lastSeq}
+      data-persisted-through={persistedThrough}
+      data-room-id={roomId}
+    >
       <RoomFrame
         attention={view.attention}
         binding={binding}

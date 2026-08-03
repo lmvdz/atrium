@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { roomMemberIds } from '@atrium/auth';
 import type { Database } from '@atrium/db';
 import {
@@ -15,7 +16,7 @@ import {
   users,
   workspaces,
 } from '@atrium/db';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 
 /**
  * The persisted input to replay.
@@ -70,6 +71,7 @@ export async function loadReplayData(database: Database, roomId: string) {
     attention,
     fixes,
     messageEvents,
+    roomCursor,
   ] = await Promise.all([
     participantIds.length === 0
       ? Promise.resolve([])
@@ -115,6 +117,12 @@ export async function loadReplayData(database: Database, roomId: string) {
       .from(coreEvents)
       .where(and(eq(coreEvents.roomId, roomId), eq(coreEvents.type, 'message_posted')))
       .orderBy(asc(coreEvents.roomSeq)),
+    database
+      .select({ loadedThrough: coreEvents.roomSeq })
+      .from(coreEvents)
+      .where(eq(coreEvents.roomId, roomId))
+      .orderBy(desc(coreEvents.roomSeq))
+      .limit(1),
   ]);
 
   const messagePositions = messageEvents.flatMap((event) => {
@@ -147,6 +155,7 @@ export async function loadReplayData(database: Database, roomId: string) {
   ]);
 
   return {
+    loadReceipt: randomUUID(),
     room,
     participants,
     messages: roomMessages,
@@ -159,18 +168,26 @@ export async function loadReplayData(database: Database, roomId: string) {
     attention,
     corrections: fixes,
     messagePositions,
+    loadedThrough: roomCursor[0]?.loadedThrough ?? 0,
   };
 }
 
 type LoadedReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
 type LoadedReplayMessage = LoadedReplayData['messages'][number];
-export type ReplayData = Omit<LoadedReplayData, 'messagePositions' | 'messages'> & {
+export type ReplayData = Omit<
+  LoadedReplayData,
+  'loadReceipt' | 'loadedThrough' | 'messagePositions' | 'messages'
+> & {
+  /** Optional only for hand-built fixtures; every server load mints a fresh commit receipt. */
+  readonly loadReceipt?: string;
   /** Optional only for hand-built fixtures created before live client ids existed. */
   messages: (Omit<LoadedReplayMessage, 'clientMessageId'> & {
     readonly clientMessageId?: string | null;
   })[];
   /** Optional only so hand-built unit fixtures can describe pre-ledger imports. */
   readonly messagePositions?: LoadedReplayData['messagePositions'];
+  /** Optional only for hand-built fixtures created before live route coordination. */
+  readonly loadedThrough?: number;
 };
 
 export async function loadReplayDataByLocation(

@@ -1,0 +1,509 @@
+import { randomUUID } from 'node:crypto';
+import { expect, type Page, test } from '@playwright/test';
+import postgres from 'postgres';
+import { databaseUrl, serverPort } from './support/config.mjs';
+import {
+  createWorkspace,
+  invite,
+  newCallerContext,
+  requireBrowser,
+  signUpAndVerify,
+  uniqueEmail,
+} from './support/flows';
+import { multiplayerManifest, type ScenarioMessage } from './support/multiplayer-manifest';
+
+const socketUrl = `ws://localhost:${serverPort}/ws`;
+
+async function openScenarioSocket(page: Page, roomId: string): Promise<void> {
+  await page.evaluate(
+    ({ roomId, socketUrl }) =>
+      new Promise<void>((resolve, reject) => {
+        const holder = window as unknown as {
+          __atriumScenario?: { socket: WebSocket; roomId: string; serial: number };
+        };
+        const socket = new WebSocket(socketUrl);
+        holder.__atriumScenario = { socket, roomId, serial: 0 };
+        const timer = setTimeout(
+          () => reject(new Error('scenario socket did not subscribe')),
+          10_000,
+        );
+        socket.addEventListener('open', () =>
+          socket.send(JSON.stringify({ type: 'subscribe', roomId })),
+        );
+        socket.addEventListener('message', (event: MessageEvent<string>) => {
+          const frame = JSON.parse(event.data) as { type: string; roomId?: string; head?: number };
+          if (frame.type === 'head' && frame.roomId === roomId) {
+            socket.send(JSON.stringify({ type: 'ack_head', roomId, roomSeq: frame.head }));
+          }
+          if (frame.type === 'subscribed' && frame.roomId === roomId) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        socket.addEventListener('error', () => reject(new Error('scenario socket failed')));
+      }),
+    { roomId, socketUrl },
+  );
+}
+
+async function scenarioCommand(
+  page: Page,
+  command: Record<string, unknown>,
+): Promise<number | null> {
+  return page.evaluate(
+    (command) =>
+      new Promise<number | null>((resolve, reject) => {
+        const holder = window as unknown as {
+          __atriumScenario?: { socket: WebSocket; roomId: string; serial: number };
+        };
+        const live = holder.__atriumScenario;
+        if (!live || live.socket.readyState !== WebSocket.OPEN) {
+          reject(new Error('scenario command socket is not open'));
+          return;
+        }
+        live.serial += 1;
+        const commandId = `scenario-${live.serial}`;
+        const timer = setTimeout(() => {
+          live.socket.removeEventListener('message', onMessage);
+          reject(new Error(`timed out waiting for ${commandId}`));
+        }, 10_000);
+        const onMessage = (event: MessageEvent<string>) => {
+          const frame = JSON.parse(event.data) as {
+            type: string;
+            commandId?: string;
+            roomSeq?: number | null;
+            message?: string;
+            issues?: string[];
+          };
+          if (frame.commandId !== commandId) return;
+          clearTimeout(timer);
+          live.socket.removeEventListener('message', onMessage);
+          if (frame.type === 'nack') reject(new Error(frame.message ?? `${commandId} was refused`));
+          else if (frame.type !== 'ack')
+            reject(new Error(`unexpected ${frame.type} for ${commandId}`));
+          else if ((frame.issues?.length ?? 0) > 0) reject(new Error(frame.issues?.join(' | ')));
+          else resolve(frame.roomSeq ?? null);
+        };
+        live.socket.addEventListener('message', onMessage);
+        live.socket.send(JSON.stringify({ type: 'command', commandId, command }));
+      }),
+    command,
+  );
+}
+
+async function sendManifestMessage(page: Page, roomId: string, message: ScenarioMessage) {
+  return scenarioCommand(page, {
+    name: 'send_message',
+    roomId,
+    body: message.body,
+    clientMessageId: message.clientMessageId,
+  });
+}
+
+async function eventually<T>(
+  read: () => Promise<T>,
+  accepts: (value: T) => boolean,
+  label: string,
+) {
+  await expect
+    .poll(async () => accepts(await read()), { timeout: 30_000, message: label })
+    .toBe(true);
+}
+
+test.describe
+  .serial('Phase 2 multiplayer acceptance', () => {
+    requireBrowser();
+
+    /**
+     * Mutation: replace five independent cookie jars with pages in one context;
+     * let the absence cursor float to the new head; count acknowledgements rather
+     * than persisted messages; reconnect through the test socket instead of the
+     * production client; or omit any required semantic action. The manifest/DB,
+     * frozen-divider and rendered catch-up assertions below fail independently.
+     */
+    test('five participants preserve a 200-message room through absence and reconnect', async ({
+      browser,
+    }) => {
+      test.setTimeout(240_000);
+      const sql = postgres(databaseUrl, { max: 2, onnotice: () => {} });
+      const contexts = await Promise.all(
+        Array.from({ length: 5 }, () => newCallerContext(browser)),
+      );
+      const pages = await Promise.all(contexts.map((context) => context.newPage()));
+      const emails = Array.from({ length: 5 }, (_, index) => uniqueEmail(`multi-${index}`));
+      const names = ['Aster', 'Birch', 'Cedar', 'Dahlia', 'Elm'];
+      const runId = randomUUID().slice(0, 8);
+
+      try {
+        await signUpAndVerify(pages[0] as Page, {
+          email: emails[0] as string,
+          name: names[0] as string,
+        });
+        const workspace = await createWorkspace(pages[0] as Page, `Multiplayer ${runId}`);
+        const invitations: string[] = [];
+        for (let index = 1; index < 5; index += 1) {
+          invitations.push(
+            await invite(pages[0] as Page, {
+              slug: workspace,
+              email: emails[index] as string,
+              role: 'member',
+            }),
+          );
+        }
+        for (let index = 1; index < 5; index += 1) {
+          const page = pages[index] as Page;
+          await signUpAndVerify(page, {
+            email: emails[index] as string,
+            name: names[index] as string,
+          });
+          await page.goto(invitations[index - 1] as string);
+          await page.getByTestId('accept-invitation').click();
+          await page.waitForURL('**/app');
+        }
+
+        // Install before the designated participant enters the room. It tracks
+        // that context's real sockets and can hold reconnect attempts closed for
+        // one deterministic interval; no production client method is replaced.
+        await contexts[3]?.addInitScript(() => {
+          const holder = window as unknown as {
+            __atriumDisconnect?: { blocked: boolean; sockets: WebSocket[] };
+          };
+          const NativeWebSocket = window.WebSocket;
+          const control = { blocked: false, sockets: [] as WebSocket[] };
+          holder.__atriumDisconnect = control;
+          window.WebSocket = class TrackedWebSocket extends NativeWebSocket {
+            constructor(url: string | URL, protocols?: string | string[]) {
+              super(url, protocols ?? []);
+              control.sockets.push(this);
+              this.addEventListener('open', () => {
+                if (control.blocked) this.close(4001, 'scripted reconnect interval');
+              });
+            }
+          };
+        });
+
+        await Promise.all(pages.map((page) => page.goto(`/app/${workspace}/general`)));
+        for (const page of pages) {
+          await expect(page.locator('[data-frame="live"]')).toBeVisible();
+          await expect(page.locator('[data-presence="here"]')).toHaveCount(5);
+        }
+        const roomId = await (pages[0] as Page)
+          .locator('main[data-room-id]')
+          .getAttribute('data-room-id');
+        if (!roomId) throw new Error('live route did not expose its room id');
+        const userRows = await sql<{ id: string; email: string }[]>`
+        SELECT id::text, email FROM users WHERE email IN ${sql(emails)}
+      `;
+        const byEmail = new Map(userRows.map((row) => [row.email, row.id]));
+        const userIds = emails.map((email) => byEmail.get(email));
+        if (userIds.some((id) => !id)) throw new Error('not every scenario account reached users');
+        const users = userIds as [string, string, string, string, string];
+        const manifest = multiplayerManifest(runId, users);
+
+        await Promise.all(pages.map((page) => openScenarioSocket(page, roomId)));
+        for (const message of manifest.messages.slice(0, 40)) {
+          await sendManifestMessage(pages[message.author] as Page, roomId, message);
+        }
+        await eventually(
+          async () =>
+            Number(
+              (
+                await sql`SELECT count(*)::int AS n FROM interpretations i JOIN messages m ON m.id=i.message_id WHERE m.room_id=${roomId}::uuid AND i.status='succeeded'`
+              )[0]?.n ?? 0,
+            ),
+          (count) => count === 40,
+          'the first forty messages to traverse the worker',
+        );
+
+        const absentee = pages[manifest.absentee] as Page;
+        await absentee.reload();
+        const firstDivider = absentee.locator('[data-row="since-you-left"]');
+        // Eight of the first forty are Elm's own rows. The divider never tells
+        // somebody their own activity is unseen, so the truthful count is 32.
+        await expect(firstDivider).toContainText('32 messages');
+        await firstDivider.getByRole('button', { name: 'mark this group seen' }).click();
+        await eventually(
+          async () =>
+            Number(
+              (
+                await sql<{ seen: number }[]>`
+                  SELECT seen_seq::int AS seen FROM memberships
+                  WHERE room_id=${roomId}::uuid AND user_id=${users[manifest.absentee]}::uuid
+                `
+              )[0]?.seen ?? 0,
+            ),
+          (seen) => seen > 0,
+          'mark-seen to reach the durable membership cursor',
+        );
+        await absentee.goto('/app');
+
+        for (const message of manifest.messages.slice(40, 160)) {
+          if (message.attachment) {
+            const sender = pages[message.author] as Page;
+            await sender.getByLabel('Choose an attachment').setInputFiles({
+              name: `trace-${runId}.txt`,
+              mimeType: 'text/plain',
+              buffer: Buffer.from(`trace ${runId}\n`, 'utf8'),
+            });
+            await expect(sender.locator('[data-attachment-note="true"]')).toContainText('attached');
+            await sender.getByRole('textbox', { name: 'Message #general' }).fill(message.body);
+            await sender.getByRole('button', { name: 'Send' }).click();
+          } else {
+            await sendManifestMessage(pages[message.author] as Page, roomId, message);
+          }
+        }
+        await eventually(
+          async () =>
+            Number(
+              (
+                await sql`SELECT count(*)::int AS n FROM interpretations i JOIN messages m ON m.id=i.message_id WHERE m.room_id=${roomId}::uuid AND i.status='succeeded'`
+              )[0]?.n ?? 0,
+            ),
+          (count) => count === 160,
+          'all absent-window messages to traverse the worker',
+        );
+        await eventually(
+          async () =>
+            Number(
+              (await sql`SELECT count(*)::int AS n FROM proposals WHERE room_id=${roomId}::uuid`)[0]
+                ?.n ?? 0,
+            ),
+          (count) => count === 8,
+          'all eight semantic fixtures to become proposals',
+        );
+
+        await absentee.goto(`/app/${workspace}/general`);
+        await expect(absentee.locator('[data-row="since-you-left"]')).toContainText('120 messages');
+        for (const [kind, count] of [
+          ['need', 0],
+          ['change', 0],
+          ['discussion', 120],
+          ['routine', 0],
+        ] as const) {
+          await expect(
+            absentee.locator(`[data-row="since-you-left"] [data-count-class="${kind}"]`),
+          ).toContainText(`${count}`);
+        }
+        const absenteeAttention = absentee.getByRole('region', { name: 'Needs you' });
+        const [commitmentAttention] = await sql<
+          {
+            id: string;
+            subjectKind: string;
+            proposalId: string | null;
+            proposalStatus: string | null;
+          }[]
+        >`
+          SELECT a.id::text, a.subject_kind AS "subjectKind", p.id::text AS "proposalId",
+                 p.status::text AS "proposalStatus"
+          FROM attention_items a
+          LEFT JOIN proposals p ON p.room_id=a.room_id AND p.id=a.subject_id
+          WHERE a.room_id=${roomId}::uuid AND a.user_id=${users[4]}::uuid
+            AND a.reason->>'kind'='commitment_confirm' AND a.status='pending'
+        `;
+        expect(commitmentAttention).toMatchObject({
+          subjectKind: 'proposal',
+          proposalStatus: 'proposed',
+        });
+        if (!commitmentAttention?.id || !commitmentAttention.proposalId) {
+          throw new Error('the owner commitment attention has no proposal subject');
+        }
+        const commitmentCard = absentee.locator(`[data-attention-id="${commitmentAttention.id}"]`);
+        for (let page = 0; page < 3 && (await commitmentCard.count()) === 0; page += 1) {
+          const next = absenteeAttention.locator('[data-pin-overflow]');
+          if ((await next.count()) === 0) break;
+          await next.click();
+        }
+        await expect(commitmentCard).toContainText(
+          `Commitment for ${users[4]}: Run ${runId} review the reconnect trace.`,
+        );
+        await openScenarioSocket(absentee, roomId);
+
+        const pending = await sql<{ id: string; type: string; statement: string }[]>`
+        SELECT id::text, type::text,
+          COALESCE(payload->>'statement', payload->>'question', payload->>'title') AS statement
+        FROM proposals WHERE room_id=${roomId}::uuid AND status='proposed' ORDER BY created_at
+      `;
+        for (const proposal of pending) {
+          const actor = proposal.type === 'commitment' ? absentee : (pages[0] as Page);
+          await scenarioCommand(actor, {
+            name: 'accept_proposal',
+            roomId,
+            proposalId: proposal.id,
+            objectiveId: null,
+          });
+        }
+        await eventually(
+          async () =>
+            Number(
+              (
+                await sql`SELECT count(*)::int AS n FROM accepted_objects WHERE room_id=${roomId}::uuid`
+              )[0]?.n ?? 0,
+            ),
+          (count) => count === 8,
+          'all semantic fixtures to reach the accepted fold',
+        );
+
+        const objects = await sql<{ id: string; type: string; statement: string }[]>`
+        SELECT id::text, type::text,
+          COALESCE(payload->>'statement', payload->>'question', payload->>'title') AS statement
+        FROM accepted_objects WHERE room_id=${roomId}::uuid ORDER BY created_at
+      `;
+        const firstDecision = objects.find((object) => object.statement.includes('durable cursor'));
+        const claims = objects.filter((object) => object.type === 'claim');
+        if (!firstDecision || claims.length !== 2)
+          throw new Error('correction/supersession fixtures did not fold');
+        await scenarioCommand(pages[0] as Page, {
+          name: 'correct',
+          roomId,
+          objectId: firstDecision.id,
+          action: 'retype',
+          patch: { claimant: users[0] },
+          toType: 'claim',
+          provenance: { messageIds: [] },
+          note: `Run ${runId} measured this as a claim, not a decision.`,
+        });
+        await scenarioCommand(pages[0] as Page, {
+          name: 'supersede_object',
+          roomId,
+          replacementObjectId: (claims[1] as { id: string }).id,
+          retiredObjectId: (claims[0] as { id: string }).id,
+          clientSupersessionId: `${runId}-supersession`,
+          note: `Run ${runId} second trace replaces the first.`,
+        });
+
+        for (const message of manifest.messages.slice(160, 170)) {
+          await sendManifestMessage(pages[message.author] as Page, roomId, message);
+        }
+        const disconnectedPage = pages[manifest.disconnected] as Page;
+        const disconnectedComposer = disconnectedPage.getByRole('textbox', {
+          name: 'Message #general',
+        });
+        await disconnectedPage.evaluate(() => {
+          const control = (
+            window as unknown as {
+              __atriumDisconnect?: { blocked: boolean; sockets: WebSocket[] };
+            }
+          ).__atriumDisconnect;
+          if (!control) throw new Error('disconnect control was not installed');
+          control.blocked = true;
+          for (const socket of control.sockets) {
+            if (socket.readyState === WebSocket.OPEN)
+              socket.close(4001, 'scripted reconnect interval');
+          }
+        });
+        await expect(disconnectedComposer).toBeDisabled({ timeout: 20_000 });
+        let reconnectThrough = 0;
+        for (const message of manifest.messages.slice(170, 180)) {
+          reconnectThrough =
+            (await sendManifestMessage(pages[message.author] as Page, roomId, message)) ??
+            reconnectThrough;
+        }
+        await disconnectedPage.evaluate(() => {
+          const control = (
+            window as unknown as {
+              __atriumDisconnect?: { blocked: boolean; sockets: WebSocket[] };
+            }
+          ).__atriumDisconnect;
+          if (!control) throw new Error('disconnect control was not installed');
+          control.blocked = false;
+        });
+        await expect(disconnectedComposer).toBeEnabled({ timeout: 20_000 });
+        await openScenarioSocket(disconnectedPage, roomId);
+        /**
+         * Mutation: stop after the client's catch-up cursor advances, without
+         * proving the authenticated Server Component projection committed the
+         * reconnect interval's ledger prefix. The socket then looks healthy while its visible
+         * transcript can remain ten messages behind.
+         */
+        await expect
+          .poll(
+            async () => {
+              const surface = disconnectedPage.locator('main[data-room-id]');
+              return {
+                live: await surface.getAttribute('data-live-through'),
+                persisted: await surface.getAttribute('data-persisted-through'),
+              };
+            },
+            {
+              message: 'server-rendered room cursor to catch the reconnected client cursor',
+              timeout: 20_000,
+            },
+          )
+          .toMatchObject({ live: expect.any(String), persisted: expect.any(String) });
+        await expect
+          .poll(
+            async () => {
+              const surface = disconnectedPage.locator('main[data-room-id]');
+              return Number(await surface.getAttribute('data-persisted-through'));
+            },
+            {
+              message: 'committed route cursor to include the reconnect interval',
+              timeout: 20_000,
+            },
+          )
+          .toBeGreaterThanOrEqual(reconnectThrough);
+        const conversation = disconnectedPage.getByRole('region', { name: 'Conversation' });
+        for (const message of manifest.messages.slice(170, 180)) {
+          await expect(conversation.getByText(message.body, { exact: true })).toHaveCount(1);
+        }
+        let finalMessageThrough = reconnectThrough;
+        for (const message of manifest.messages.slice(180)) {
+          finalMessageThrough =
+            (await sendManifestMessage(pages[message.author] as Page, roomId, message)) ??
+            finalMessageThrough;
+        }
+
+        /**
+         * Mutation: persist commands but stop or misorder production-client
+         * event/catch-up application. The database can still hold the exact
+         * transcript, but the always-connected client's cursor cannot cross the
+         * final message event and its rendered 200-line receipt stays incomplete.
+         */
+        const connectedSurface = (pages[0] as Page).locator('main[data-room-id]');
+        await expect
+          .poll(() => connectedSurface.getAttribute('data-live-through').then(Number), {
+            message: 'the always-connected production client to apply the final message event',
+            timeout: 30_000,
+          })
+          .toBeGreaterThanOrEqual(finalMessageThrough);
+        await expect
+          .poll(() => connectedSurface.getAttribute('data-persisted-through').then(Number), {
+            message: 'the always-connected route to render through the final message event',
+            timeout: 30_000,
+          })
+          .toBeGreaterThanOrEqual(finalMessageThrough);
+        const connectedConversation = (pages[0] as Page).getByRole('region', {
+          name: 'Conversation',
+        });
+        for (const message of manifest.messages) {
+          await expect(connectedConversation.getByText(message.body, { exact: true })).toHaveCount(
+            1,
+          );
+        }
+
+        const persisted = await sql<
+          { id: string; body: string; authorId: string; attachments: unknown[] }[]
+        >`
+        SELECT id::text, body, author_id::text AS "authorId", attachments
+        FROM messages WHERE room_id=${roomId}::uuid ORDER BY seq
+      `;
+        expect(persisted).toHaveLength(200);
+        expect(persisted.map(({ body, authorId }) => ({ body, authorId }))).toEqual(
+          manifest.messages.map((message) => ({
+            body: message.body,
+            authorId: users[message.author],
+          })),
+        );
+        expect(persisted[144]?.attachments).toHaveLength(1);
+        const foldReceipt = await sql<{ corrections: number; relations: number }[]>`
+        SELECT
+          (SELECT count(*)::int FROM corrections WHERE room_id=${roomId}::uuid) AS corrections,
+          (SELECT count(*)::int FROM relations WHERE room_id=${roomId}::uuid AND kind='supersedes') AS relations
+      `;
+        expect(foldReceipt[0]).toEqual({ corrections: 1, relations: 1 });
+      } finally {
+        await Promise.all(contexts.map((context) => context.close().catch(() => {})));
+        await sql.end({ timeout: 5 });
+      }
+    });
+  });
