@@ -1792,7 +1792,7 @@ describe('optimism is limited to your own message row', () => {
   });
 
   it('never renders anything semantic optimistically', () => {
-    // There is no local-first path for acceptance, correction or binding: the
+    // There is no local-first path for acceptance, correction, supersession or binding: the
     // client can only ask, and the room's understanding changes when the
     // server says it did.
     client.setPresence(ROOM, 'online');
@@ -1801,6 +1801,9 @@ describe('optimism is limited to your own message row', () => {
     client.rejectProposal(ROOM, 'proposal-2');
     client.correctObject(ROOM, 'object-1', 'reopen');
     client.answerBind(ROOM, 'question-1', 'answer-1');
+    const supersession = client.supersedeObject(ROOM, 'object-new', 'object-old', {
+      note: 'replaced by the newer decision',
+    });
     client.answerMessage(ROOM, 'question-2', 'the answer in my own words');
     client.resolveAttention(ROOM, 'attention-1');
     expect(client.room(ROOM).events).toHaveLength(0);
@@ -1816,9 +1819,45 @@ describe('optimism is limited to your own message row', () => {
       'reject_proposal',
       'correct',
       'answer_bind',
+      'supersede_object',
       'answer_message',
       'resolve_attention',
     ]);
+    const supersessionCommand = latest()
+      .commands()
+      .find((candidate) => candidate.name === 'supersede_object');
+    expect(supersessionCommand).toMatchObject({
+      replacementObjectId: 'object-new',
+      retiredObjectId: 'object-old',
+      note: 'replaced by the newer decision',
+      clientSupersessionId: expect.any(String),
+    });
+    expect(
+      supersessionCommand?.name === 'supersede_object'
+        ? supersessionCommand.clientSupersessionId
+        : null,
+    ).toBe(supersession.clientSupersessionId);
+  });
+
+  /**
+   * Mutation: hide the durable supersession key inside the client method. A
+   * caller recovering from a lost ack then remints the key and cannot recover
+   * the already-committed relation from its server receipt.
+   */
+  it('lets a caller retain and reuse the exact supersession retry key', () => {
+    const first = client.supersedeObject(ROOM, 'new', 'old');
+    const retry = client.supersedeObject(ROOM, 'new', 'old', {
+      clientSupersessionId: first.clientSupersessionId,
+    });
+    const commands = latest()
+      .commands()
+      .filter((candidate) => candidate.name === 'supersede_object');
+    expect(commands).toHaveLength(2);
+    expect(commands.map((command) => command.clientSupersessionId)).toEqual([
+      first.clientSupersessionId,
+      first.clientSupersessionId,
+    ]);
+    expect(retry.clientSupersessionId).toBe(first.clientSupersessionId);
   });
 
   /**

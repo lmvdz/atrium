@@ -472,3 +472,22 @@
   flex: 1;
   line-height: 1.4;
 }
+
+.rcSupersede {
+  margin: 8px 14px 14px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+}
+
+.rcSupersedeChoices {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.rcSupersedeChoices button {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px;
+  text-align: left;
+}

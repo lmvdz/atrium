@@ -181,6 +181,33 @@ describe('a handler is told what it acted on, by the register', () => {
   });
 });
 
+describe('receipt supersession', () => {
+  /**
+   * Mutation: invoke supersession from a single ambiguous click or reverse the
+   * selected replacement and the open receipt. The destructive relation then
+   * retires the object the person meant to keep.
+   */
+  it('requires candidate selection and confirmation and preserves endpoint direction', () => {
+    const candidate = f.OBJECTS.find((object) => object.id !== f.RECEIPT.id);
+    if (!candidate) throw new Error('the receipt fixture has no replacement candidate');
+    const calls: Array<[string, string]> = [];
+    render(
+      <ReceiptView
+        onSupersede={(retired, replacement) => calls.push([retired, replacement])}
+        receipt={f.RECEIPT}
+        supersessionCandidates={[candidate]}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: 'Confirm supersession' })).toBeNull();
+    fireEvent.click(
+      document.querySelector(`[data-supersession-replacement="${candidate.id}"]`) as Element,
+    );
+    expect(calls).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm supersession' }));
+    expect(calls).toEqual([[f.RECEIPT.id, candidate.id]]);
+  });
+});
+
 /* ---------------------------------------------------------------------------
  * WHAT THE RECEIPT SAYS WHEN IT HAS NOTHING TO SAY — r8 D7/D8.
  *

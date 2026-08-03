@@ -137,13 +137,14 @@ describe('the ledger event union', () => {
 });
 
 describe('ClientFrame', () => {
-  it('accepts the six #12 commands plus the two this ticket adds', () => {
+  it('accepts the complete authenticated command vocabulary', () => {
     const names = [
       'send_message',
       'answer_message',
       'accept_proposal',
       'correct',
       'answer_bind',
+      'supersede_object',
       'resolve_attention',
       'set_presence',
       'record_proposal',

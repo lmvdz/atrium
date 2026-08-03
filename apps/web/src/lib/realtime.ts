@@ -939,6 +939,12 @@ export interface RealtimeClient {
     },
   ) => string;
   answerBind: (roomId: string, questionId: string, answerObjectId: string) => string;
+  supersedeObject: (
+    roomId: string,
+    replacementObjectId: string,
+    retiredObjectId: string,
+    options?: { clientSupersessionId?: string; note?: string | null },
+  ) => { commandId: string; clientSupersessionId: string };
   resolveAttention: (
     roomId: string,
     attentionId: string,
@@ -1527,6 +1533,20 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       }),
     answerBind: (roomId, questionId, answerObjectId) =>
       command({ name: 'answer_bind', roomId, questionId, answerObjectId, note: null }),
+    supersedeObject: (roomId, replacementObjectId, retiredObjectId, supersession = {}) => {
+      const clientSupersessionId =
+        supersession.clientSupersessionId ??
+        `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
+      const commandId = command({
+        name: 'supersede_object',
+        roomId,
+        replacementObjectId,
+        retiredObjectId,
+        clientSupersessionId,
+        note: supersession.note ?? null,
+      });
+      return { commandId, clientSupersessionId };
+    },
     resolveAttention: (roomId, attentionId, status = 'resolved') =>
       command({ name: 'resolve_attention', roomId, attentionId, status }),
     advanceSeen: (roomId, roomSeq) => {

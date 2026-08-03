@@ -101,6 +101,26 @@ function answerMessageFingerprint(input: {
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
+function supersessionFingerprint(input: {
+  roomId: string;
+  replacementObjectId: string;
+  retiredObjectId: string;
+  note: string | null;
+}): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        'supersede_object/v1',
+        input.roomId,
+        input.replacementObjectId,
+        input.retiredObjectId,
+        input.note,
+      ]),
+      'utf8',
+    )
+    .digest('hex');
+}
+
 /**
  * A proposal as a caller submits it: the reading, without a position or an id.
  *
@@ -209,6 +229,17 @@ export const Command = z.discriminatedUnion('name', [
     questionId: Id,
     /** The decision or claim that answers it. */
     answerObjectId: Id,
+    note: z.string().max(2000).nullable().default(null),
+  }),
+  z.object({
+    name: z.literal('supersede_object'),
+    roomId: Id,
+    /** The newer accepted object that remains active. */
+    replacementObjectId: Id,
+    /** The older accepted object retired by the newer one. */
+    retiredObjectId: Id,
+    /** Stable across a lost-ack retry and scoped to this actor and room. */
+    clientSupersessionId: z.string().min(1).max(128),
     note: z.string().max(2000).nullable().default(null),
   }),
   z.object({
@@ -558,6 +589,65 @@ export function createCommandService({
           };
           return { id, at, type: 'relation_added', relation };
         });
+
+      case 'supersede_object': {
+        const relationId = randomUUID();
+        const batch = await ledger.appendBatch({
+          roomId: command.roomId,
+          actor: actorOf(session),
+          requireClean: true,
+          authorize: async (tx) => {
+            await requireMembership(session, command.roomId, tx);
+          },
+          prepare: async () => {
+            const state = ledger.coreState();
+            const replacement = state.objects[command.replacementObjectId];
+            const retired = state.objects[command.retiredObjectId];
+            if (!replacement || replacement.object.roomId !== command.roomId) {
+              throw new CommandError('invalid', 'the replacement is not an object in this room');
+            }
+            if (!retired || retired.object.roomId !== command.roomId) {
+              throw new CommandError(
+                'invalid',
+                'the retired subject is not an object in this room',
+              );
+            }
+            if (replacement.retractedAt !== null || replacement.supersededById !== null) {
+              throw new CommandError('invalid', 'the replacement object is not active');
+            }
+            if (retired.retractedAt !== null || retired.supersededById !== null) {
+              throw new CommandError('invalid', 'the object being retired is not active');
+            }
+          },
+          idempotency: {
+            commandName: 'supersede_object',
+            key: command.clientSupersessionId,
+            fingerprint: supersessionFingerprint(command),
+            expectedEventTypes: ['relation_added'],
+          },
+          builds: [
+            ({ id, at }) => {
+              const relation: Relation = {
+                id: relationId,
+                roomId: command.roomId,
+                kind: 'supersedes',
+                fromObjectId: command.replacementObjectId,
+                to: { kind: 'object', objectId: command.retiredObjectId },
+                note: command.note,
+                createdAt: at,
+              };
+              return { id, at, type: 'relation_added', relation };
+            },
+          ],
+          project: (context) => projectRoomEvent(context, projectionHooks),
+        });
+        return {
+          kind: 'appended_many',
+          roomId: command.roomId,
+          entries: batch.entries,
+          replayed: batch.replayed,
+        };
+      }
 
       case 'resolve_attention':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({

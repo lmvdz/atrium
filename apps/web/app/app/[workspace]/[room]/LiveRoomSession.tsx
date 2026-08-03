@@ -3,6 +3,11 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { type LiveUnreadWindow, liveRoomView } from '@/lib/live-room-view';
+import {
+  type PendingSupersession,
+  retainedSupersessionKey,
+  supersessionReachedFold,
+} from '@/lib/live-supersession';
 import type { ReplayData } from '@/lib/replay-data';
 import { activeAnswerMatchesClientMessage, replayReceipt } from '@/lib/replay-view';
 import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
@@ -74,6 +79,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const [openAttentionId, setOpenAttentionId] = useState<string>();
   const [openObjectives, setOpenObjectives] = useState<Readonly<Record<string, boolean>>>({});
   const [receiptId, setReceiptId] = useState<string | null>(null);
+  const [pendingSupersession, setPendingSupersession] = useState<PendingSupersession | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshedThrough = useRef(0);
 
@@ -137,6 +143,16 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
       // No semantic command is rendered optimistically.
       replayReceipt(data, view.records, receiptObject)
     : undefined;
+  const acceptedActiveIds = new Set(
+    data.objects
+      .filter((object) => object.retractedAt === null && object.supersededById === null)
+      .map((object) => object.id),
+  );
+  const supersessionCandidates = receiptObject
+    ? view.objects.filter(
+        (object) => object.id !== receiptObject.id && acceptedActiveIds.has(object.id),
+      )
+    : [];
   const owed = view.attention.filter((item) => needsViewer(item.state)).length;
   const subscribed = live.subscribed && connection === 'open';
   const unreadFilterScope = view.entries.find((entry) => entry.type === 'since-you-left')?.entryIds;
@@ -171,6 +187,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     setBoundSubmission(null);
     setError(null);
   }, [boundSubmission, data, live.pending]);
+
+  useEffect(() => {
+    if (!supersessionReachedFold(data.objects, pendingSupersession)) return;
+    setPendingSupersession(null);
+    setReceiptId(null);
+  }, [data.objects, pendingSupersession]);
 
   const jumpToMessage = (messageId: string) => {
     setReceiptId(null);
@@ -322,6 +344,25 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             });
             setFocused('conversation');
           },
+          onSupersedeReceipt: (retiredObjectId, replacementObjectId) => {
+            const held = retainedSupersessionKey(
+              pendingSupersession,
+              retiredObjectId,
+              replacementObjectId,
+            );
+            const request = clientRef.current?.supersedeObject(
+              roomId,
+              replacementObjectId,
+              retiredObjectId,
+              { clientSupersessionId: held },
+            );
+            if (!request) return;
+            setPendingSupersession({
+              retiredObjectId,
+              replacementObjectId,
+              clientSupersessionId: request.clientSupersessionId,
+            });
+          },
           onAct: (attentionId, actionId) => {
             const item = view.attention.find((candidate) => candidate.id === attentionId);
             const subjectId = subjectByAttention.get(attentionId);
@@ -361,6 +402,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         objects={view.objects}
         openAttentionId={openAttentionId}
         receipt={receipt}
+        supersessionCandidates={supersessionCandidates}
+        pendingReplacementId={
+          pendingSupersession?.retiredObjectId === receiptId
+            ? pendingSupersession.replacementObjectId
+            : undefined
+        }
         room={view.room}
         rooms={view.rooms}
         trailer={view.trailer}

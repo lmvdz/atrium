@@ -20,7 +20,8 @@
  *     bottom of the pane, which is a dead end by scroll position.
  * ------------------------------------------------------------------------- */
 
-import type { NoGlyph } from '../model/glyph';
+import { useState } from 'react';
+import type { EpistemicState, NoGlyph, ObjectKind } from '../model/glyph';
 import { GLYPHS, glyphMeaning } from '../model/glyph';
 import { useAttribution, useCitedLocation, useHere } from '../model/ledger';
 import { quotationRef, sourceLocation, systemText } from '../model/quotation';
@@ -40,6 +41,14 @@ export type ReceiptViewProps = {
   readonly onAccept?: (receiptId: string) => void;
   readonly onAnswer?: (receiptId: string) => void;
   readonly onJump?: (messageId: string) => void;
+  readonly supersessionCandidates?: readonly {
+    readonly id: string;
+    readonly kind: ObjectKind;
+    readonly state: EpistemicState;
+    readonly text: string;
+  }[];
+  readonly pendingReplacementId?: string;
+  readonly onSupersede?: (retiredObjectId: string, replacementObjectId: string) => void;
 } & NoGlyph;
 
 export function ReceiptView({
@@ -50,7 +59,12 @@ export function ReceiptView({
   onAccept,
   onAnswer,
   onJump,
+  supersessionCandidates = [],
+  pendingReplacementId,
+  onSupersede,
 }: ReceiptViewProps) {
+  const [replacementId, setReplacementId] = useState<string | null>(pendingReplacementId ?? null);
+  const replacement = supersessionCandidates.find((candidate) => candidate.id === replacementId);
   return (
     <section
       aria-label="Receipt"
@@ -213,6 +227,38 @@ export function ReceiptView({
           ) : null}
         </span>
       </div>
+      {onSupersede === undefined || supersessionCandidates.length === 0 ? null : (
+        <fieldset className={styles.rcSupersede}>
+          <legend className="atr-lbl">REPLACE THIS OBJECT WITH AN EXISTING OBJECT</legend>
+          <div className={styles.rcSupersedeChoices}>
+            {supersessionCandidates.map((candidate) => (
+              <button
+                aria-pressed={candidate.id === replacementId}
+                className="atr-btn atr-btn-sm"
+                data-supersession-replacement={candidate.id}
+                key={candidate.id}
+                onClick={() => setReplacementId(candidate.id)}
+                type="button"
+              >
+                <span>{systemText(candidate.kind, 'ReceiptView supersession kind')}</span>
+                <ClaimText content={slot(candidate.text)} state={candidate.state} />
+              </button>
+            ))}
+          </div>
+          {replacement === undefined ? null : (
+            <button
+              className="atr-btn atr-btn-sm"
+              data-confirm-supersession={replacement.id}
+              onClick={() => onSupersede(receipt.id, replacement.id)}
+              type="button"
+            >
+              {pendingReplacementId === replacement.id
+                ? 'Retry supersession with the same durable request'
+                : 'Confirm supersession'}
+            </button>
+          )}
+        </fieldset>
+      )}
     </section>
   );
 }

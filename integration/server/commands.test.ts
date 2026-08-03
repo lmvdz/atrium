@@ -364,6 +364,276 @@ describe('the proposal → acceptance boundary, over the wire', () => {
     expect(object?.roomId).toBe(room.roomId);
   });
 
+  /**
+   * Mutation: expose no production supersession command, reverse its relation,
+   * or acknowledge it without projecting the fold. The older decision then
+   * remains active (or the newer one is retired) despite the durable command.
+   */
+  it('supersedes an accepted object through the authenticated production command', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    await alice.subscribe(room.roomId);
+    await bob.subscribe(room.roomId);
+    const older = await acceptedDecision(alice, 'ship on friday');
+    const newer = await acceptedDecision(alice, 'ship on monday');
+    const aliceMark = alice.frames.length;
+    const bobMark = bob.frames.length;
+
+    const ack = await alice.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: newer.objectId,
+      retiredObjectId: older.objectId,
+      clientSupersessionId: 'replace-friday-with-monday',
+      note: 'monday replaces friday',
+    });
+    expect(ack.type).toBe('ack');
+    expect(ack.type === 'ack' && ack.issues).toEqual([]);
+    const [aliceEvent, bobEvent] = await Promise.all([
+      alice.waitFor(
+        (frame) => frame.type === 'event' && frame.entry.event.type === 'relation_added',
+        15_000,
+        aliceMark,
+      ),
+      bob.waitFor(
+        (frame) => frame.type === 'event' && frame.entry.event.type === 'relation_added',
+        15_000,
+        bobMark,
+      ),
+    ]);
+    expect(aliceEvent).toEqual(bobEvent);
+
+    const rows = await handle.db
+      .select()
+      .from(acceptedObjects)
+      .where(sql`${acceptedObjects.id} in (${older.objectId}, ${newer.objectId})`);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const olderRow = byId.get(older.objectId);
+    expect(olderRow?.supersededById).toBe(newer.objectId);
+    expect((olderRow?.payload as { status?: string } | undefined)?.status).toBe('superseded');
+    expect(byId.get(newer.objectId)?.supersededById).toBeNull();
+
+    const [relation] = await handle.db
+      .select()
+      .from(objectRelations)
+      .where(eq(objectRelations.kind, 'supersedes'));
+    expect(relation).toMatchObject({
+      roomId: room.roomId,
+      fromObjectId: newer.objectId,
+      toObjectId: older.objectId,
+      note: 'monday replaces friday',
+      createdBy: room.people.alice,
+    });
+    expect(server.ledger.coreState().objects[older.objectId]?.supersededById).toBe(newer.objectId);
+
+    const retry = await alice.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: newer.objectId,
+      retiredObjectId: older.objectId,
+      clientSupersessionId: 'replace-friday-with-monday',
+      note: 'monday replaces friday',
+    });
+    expect(retry).toMatchObject({
+      type: 'ack',
+      roomSeq: ack.type === 'ack' ? ack.roomSeq : null,
+      eventId: ack.type === 'ack' ? ack.eventId : null,
+    });
+    const durableRelations = await handle.db
+      .select({ count: count() })
+      .from(coreEvents)
+      .where(eq(coreEvents.type, 'relation_added'));
+    expect(Number(durableRelations[0]?.count)).toBe(1);
+
+    const restarted = await startTestServer(handle);
+    const retryingAlice = await TestClient.connect(restarted.url, room.people.alice as string);
+    try {
+      const afterRestart = await retryingAlice.command({
+        name: 'supersede_object',
+        roomId: room.roomId,
+        replacementObjectId: newer.objectId,
+        retiredObjectId: older.objectId,
+        clientSupersessionId: 'replace-friday-with-monday',
+        note: 'monday replaces friday',
+      });
+      expect(afterRestart).toMatchObject({
+        type: 'ack',
+        roomSeq: ack.type === 'ack' ? ack.roomSeq : null,
+        eventId: ack.type === 'ack' ? ack.eventId : null,
+      });
+    } finally {
+      await retryingAlice.close();
+      await restarted.close();
+    }
+
+    const mismatchedRetry = await alice.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: newer.objectId,
+      retiredObjectId: older.objectId,
+      clientSupersessionId: 'replace-friday-with-monday',
+      note: 'different durable meaning',
+    });
+    expect(mismatchedRetry).toMatchObject({ type: 'nack', code: 'conflict' });
+
+    expect(serializeState(reduce(await server.ledger.replayCoreEvents()))).toBe(
+      server.ledger.serialize(),
+    );
+  });
+
+  /**
+   * Mutation: remove the active-object allowlist before building the relation.
+   * A withdrawn decision can then become the room's current replacement even
+   * though it is absent from every live-state surface.
+   */
+  it('refuses a withdrawn replacement without consuming a ledger position', async () => {
+    const alice = await connect(room.people.alice as string);
+    const retired = await acceptedDecision(alice, 'ship on friday');
+    const withdrawn = await acceptedDecision(alice, 'ship on monday');
+    await alice.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId: withdrawn.objectId,
+      action: 'retract',
+      patch: {},
+      toType: null,
+      provenance: { messageIds: [], proposalId: null, interpretationId: null },
+      note: 'withdrawn',
+    });
+    const before = await ledgerCount();
+
+    const result = await alice.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: withdrawn.objectId,
+      retiredObjectId: retired.objectId,
+      clientSupersessionId: 'withdrawn-cannot-replace',
+      note: null,
+    });
+    expect(result).toMatchObject({ type: 'nack', code: 'invalid' });
+    expect(await ledgerCount()).toBe(before);
+    expect(server.ledger.coreState().objects[retired.objectId]?.supersededById).toBeNull();
+  });
+
+  /**
+   * Mutation: remove the `replacement.supersededById` active-source check. An
+   * object already retired by a newer decision can then retire a third object,
+   * creating two contradictory current-state chains from a non-live source.
+   */
+  it('refuses an already-superseded replacement without consuming a position', async () => {
+    const alice = await connect(room.people.alice as string);
+    const target = await acceptedDecision(alice, 'ship on friday');
+    const staleReplacement = await acceptedDecision(alice, 'ship on monday');
+    const currentReplacement = await acceptedDecision(alice, 'ship on tuesday');
+    await alice.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: currentReplacement.objectId,
+      retiredObjectId: staleReplacement.objectId,
+      clientSupersessionId: 'make-tuesday-current',
+      note: null,
+    });
+    const before = await ledgerCount();
+
+    const result = await alice.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: staleReplacement.objectId,
+      retiredObjectId: target.objectId,
+      clientSupersessionId: 'stale-cannot-replace',
+      note: null,
+    });
+    expect(result).toMatchObject({ type: 'nack', code: 'invalid' });
+    expect(await ledgerCount()).toBe(before);
+    expect(server.ledger.coreState().objects[target.objectId]?.supersededById).toBeNull();
+  });
+
+  /**
+   * Mutation: remove the `retired.retractedAt` active-target check. A command
+   * can then attach live supersession state to an object the room withdrew.
+   */
+  it('refuses a retracted target without consuming a ledger position', async () => {
+    const alice = await connect(room.people.alice as string);
+    const withdrawnTarget = await acceptedDecision(alice, 'ship on friday');
+    const replacement = await acceptedDecision(alice, 'ship on monday');
+    await alice.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId: withdrawnTarget.objectId,
+      action: 'retract',
+      patch: {},
+      toType: null,
+      provenance: { messageIds: [], proposalId: null, interpretationId: null },
+      note: null,
+    });
+    const before = await ledgerCount();
+
+    const result = await alice.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: replacement.objectId,
+      retiredObjectId: withdrawnTarget.objectId,
+      clientSupersessionId: 'withdrawn-target',
+      note: null,
+    });
+    expect(result).toMatchObject({ type: 'nack', code: 'invalid' });
+    expect(await ledgerCount()).toBe(before);
+    expect(server.ledger.coreState().objects[withdrawnTarget.objectId]?.supersededById).toBeNull();
+  });
+
+  /**
+   * Mutation: authorize competing replacements outside the append lock or let
+   * a refused relation persist with issues. Two servers then both acknowledge,
+   * or the loser consumes a durable event despite changing no state.
+   */
+  it('serializes competing replacements to one clean durable winner', async () => {
+    const alice = await connect(room.people.alice as string);
+    const retired = await acceptedDecision(alice, 'ship on friday');
+    const monday = await acceptedDecision(alice, 'ship on monday');
+    const tuesday = await acceptedDecision(alice, 'ship on tuesday');
+    const second = await startTestServer(handle);
+    const bob = await TestClient.connect(second.url, room.people.bob as string);
+    try {
+      const results = await Promise.all([
+        alice.fire({
+          name: 'supersede_object',
+          roomId: room.roomId,
+          replacementObjectId: monday.objectId,
+          retiredObjectId: retired.objectId,
+          clientSupersessionId: 'race-monday',
+          note: null,
+        }),
+        bob.fire({
+          name: 'supersede_object',
+          roomId: room.roomId,
+          replacementObjectId: tuesday.objectId,
+          retiredObjectId: retired.objectId,
+          clientSupersessionId: 'race-tuesday',
+          note: null,
+        }),
+      ]);
+      expect(results.map((result) => result.type).sort()).toEqual(['ack', 'nack']);
+
+      await server.ledger.sync();
+      await second.ledger.sync();
+      const relations = await handle.db
+        .select()
+        .from(objectRelations)
+        .where(eq(objectRelations.kind, 'supersedes'));
+      expect(relations).toHaveLength(1);
+      const winner = relations[0]?.fromObjectId;
+      expect([monday.objectId, tuesday.objectId]).toContain(winner);
+      expect(server.ledger.coreState().objects[retired.objectId]?.supersededById).toBe(winner);
+      expect(second.ledger.serialize()).toBe(server.ledger.serialize());
+      expect(serializeState(reduce(await server.ledger.replayCoreEvents()))).toBe(
+        server.ledger.serialize(),
+      );
+    } finally {
+      await bob.close();
+      await second.close();
+    }
+  });
+
   it('refuses a second acceptance of the same proposal, and stores the refusal as an issue', async () => {
     const alice = await connect(room.people.alice as string);
     const { proposalId } = await acceptedDecision(alice, 'ship on friday');
