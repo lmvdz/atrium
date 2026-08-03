@@ -99,10 +99,7 @@ export function SinceYouLeftDivider({
       <div className={styles.sylWhen}>
         {window === null ? null : <span>{window}</span>}
         <span aria-hidden="true">·</span>
-        <span>
-          {plural(entry.total, 'message')} · chips count rows, NEEDS YOU counts the items behind
-          them
-        </span>
+        <span>{plural(entry.total, 'message')}</span>
         {entry.ownRows > 0 ? (
           <>
             <span aria-hidden="true">·</span>

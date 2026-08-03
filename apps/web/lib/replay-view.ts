@@ -375,8 +375,8 @@ export function replayReceipt(
   const canReopen =
     object.state.kind === 'question' &&
     object.state.verification === 'accepted' &&
-    answerRelation !== undefined &&
-    correction === undefined;
+    (answerRelation !== undefined || boundAnswer !== undefined) &&
+    (correction === undefined || boundAnswer !== undefined);
 
   return {
     id: object.id,

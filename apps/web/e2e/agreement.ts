@@ -292,13 +292,11 @@ export const AGREEMENT = String.raw`((options) => {
     /nothing on the needs you surface/,
     /* the load route says what it is carrying, in its own words */
     /Carry (\d+) owed items/,
-    /* the since-you-left divider counts ROWS, and says so in its own tooltip:
-       "chips count rows, NEEDS YOU counts the items behind them". Two counts of
-       two different things that happen to be near each other is not a
-       contradiction, and calling it one would make this check noise. */
+    /* the since-you-left divider's chips count rows. The NEED chip's tooltip
+       identifies those rows without adding permanent count-reconciliation
+       prose to every replay. */
     /^\d+ NEED YOU$/,
     /messages in this group are linked to something that needs you/,
-    /chips count rows/,
   ];
 
   /* A NUMBER STANDING NEXT TO THE OWED VOCABULARY IS AN ANSWER TO THE OWED

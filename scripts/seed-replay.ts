@@ -12,7 +12,6 @@ import type {
 } from '../apps/server/src/jobs/provider.js';
 import { createLedger } from '../apps/server/src/ledger.js';
 import { createLogger } from '../apps/server/src/logger.js';
-import { projectRoomEvent } from '../apps/server/src/projections.js';
 import { createMembershipAuthorizer } from '../apps/server/src/session.js';
 import {
   createDatabase,
@@ -55,7 +54,7 @@ const readings = [
     match:
       'In aggregate, I think our optimistic assumption that type guards are unaffected by intervening function calls is the best compromise.',
     text: 'optimistic assumption that type guards are unaffected by intervening function calls is the best compromise',
-    type: 'claim',
+    type: 'decision',
   },
   {
     match: 'We will instead be using a function to obtain the current token:',
@@ -65,11 +64,6 @@ const readings = [
   {
     match: CURRENT_OPEN_QUESTION,
     type: 'open_question',
-  },
-  {
-    match: 'I will update with this code of yous, hopefully it will help future people!',
-    text: 'will update with this code',
-    type: 'commitment',
   },
 ] as const;
 
@@ -289,27 +283,6 @@ async function main() {
     );
     if (bound.kind !== 'appended' || bound.event.type !== 'relation_added') {
       throw new Error('replay seed: question answer did not reach the fold');
-    }
-    const blocked = await ledger.append({
-      roomId,
-      actor: { kind: 'human', userId: authorIds.get('RyanCavanaugh') as string },
-      build: ({ id, at }) => ({
-        id,
-        at,
-        type: 'relation_added',
-        relation: {
-          id: stableUuid('relation:roadmap-question-blocks-objective'),
-          roomId,
-          kind: 'blocks',
-          fromObjectId: currentQuestionId,
-          to: { kind: 'object', objectId: objectiveId },
-          createdAt: at,
-        },
-      }),
-      project: (context) => projectRoomEvent(context),
-    });
-    if (blocked.outcome?.outcome !== 'applied') {
-      throw new Error('replay seed: roadmap question blocker did not reach the fold');
     }
     const questionIndex = corpus.findIndex((line) => line.text.includes(CURRENT_OPEN_QUESTION));
     const windowStart = questionIndex;

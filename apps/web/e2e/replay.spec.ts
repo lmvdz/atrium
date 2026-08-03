@@ -81,16 +81,17 @@ test.describe('persisted three-surface replay', () => {
   test('loads the full corpus and steps through its honest worker boundary', async ({ page }) => {
     expect(await replayDatabaseFacts()).toEqual({
       messages: 111,
-      proposals: 6,
-      objects: 6,
+      proposals: 5,
+      objects: 5,
       stagedDecisions: 0,
       answers: 1,
-      blockers: 1,
-      proposalSources: 6,
-      objectSources: 6,
+      blockers: 0,
+      proposalSources: 5,
+      objectSources: 5,
     });
     await page.goto('/replay/atrium-replay/typescript-9998');
 
+    await expect(page.getByText('1 room · 5 humans', { exact: true })).toBeVisible();
     const controls = page.getByRole('navigation', { name: 'Replay controls' });
     await expect(controls).toContainText('interpreted · 111 / 111');
     await expect(
@@ -155,30 +156,14 @@ test.describe('persisted three-surface replay', () => {
    * source. The typed answer, accepted object, and quoted source can no longer
    * be observed together through the product surfaces.
    */
-  test('answers the current question and corrects a sourced decision reading', async ({ page }) => {
+  test('corrects a sourced decision reading without mutating the persisted replay', async ({
+    page,
+  }) => {
     const before = await replayDatabaseFingerprint();
-    const question = 'any plan to improve the developer experience on this subject';
-    const answer = 'A maintainer still needs to decide whether this belongs after TypeScript 7.';
     const decision = 'will instead be using a function to obtain the current token';
     await page.goto('/replay/atrium-replay/typescript-9998');
 
-    await page.getByRole('button', { name: 'answer', exact: true }).click();
-    const composer = page.getByRole('textbox', {
-      name: `Answer ${question} in your own words`,
-    });
-    await composer.fill(answer);
-    await page.getByRole('button', { name: 'Send', exact: true }).click();
-
-    await expect(page.getByText(answer, { exact: true })).toBeVisible();
     const receipt = page.getByRole('region', { name: 'Receipt' });
-    await expect(receipt).toBeVisible();
-    await expect(receipt).toContainText('✓');
-    await expect(receipt).toContainText('QUESTION');
-    await expect(receipt).toContainText('accepted');
-    await expect(receipt.locator('[data-quoted]').filter({ hasText: question })).toHaveCount(1);
-    await expect(receipt.locator('[data-quoted]').filter({ hasText: answer })).toHaveCount(1);
-
-    await receipt.getByRole('button', { name: '← BACK TO CURRENT STATE' }).click();
     await page
       .locator('[data-region="current-state"] [data-object-id]')
       .filter({ hasText: decision })
@@ -199,12 +184,8 @@ test.describe('persisted three-surface replay', () => {
 
     const slider = page.getByRole('slider', { name: 'Replay position' });
     await slider.press('Home');
-    await expect(page.getByText(answer, { exact: true })).toHaveCount(0);
     await slider.press('End');
-    await expect(
-      page.locator('[data-region="current-state"] [data-object-id]').filter({ hasText: question }),
-    ).toContainText('?');
-    await expect(page.getByRole('button', { name: 'answer', exact: true })).toBeVisible();
+    await expect(page.getByText(decision, { exact: true })).toContainText(decision);
     expect(await replayDatabaseFingerprint()).toBe(before);
   });
 
@@ -251,6 +232,7 @@ test.describe('persisted three-surface replay', () => {
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(restored.getByRole('button', { name: 'answer', exact: true })).toHaveCount(0);
     await expect(receipt.locator('[data-quoted]').filter({ hasText: secondAnswer })).toHaveCount(1);
+    await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
     await receipt.getByRole('button', { name: '← BACK TO CURRENT STATE' }).click();
     const answeredAgain = page
       .locator('[data-region="current-state"] [data-object-id]')

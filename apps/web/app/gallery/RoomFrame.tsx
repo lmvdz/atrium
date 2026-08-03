@@ -225,7 +225,7 @@ function Frame(props: RoomFrameProps) {
           viewer={props.viewer}
           viewerNote={props.viewerNote}
           workspaceName="atrium"
-          workspaceSub="4 rooms · 5 humans"
+          workspaceSub={`${props.rooms.length} ${props.rooms.length === 1 ? 'room' : 'rooms'} · ${props.humans.length} ${props.humans.length === 1 ? 'human' : 'humans'}`}
         />,
       )}
       /* Every element handed across a slot boundary carries a key. React's dev
