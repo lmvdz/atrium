@@ -52,6 +52,34 @@ Each build ticket carries `## Question`, `## Context`, `## Touches`, `## Accepta
 
 **Ticket bodies can be stale against later decisions.** One specified a prompt structure that a measurement had already removed, and listed triggers that a spike measured firing 0 of 6. Check the decision ticket a build ticket cites before treating its body as spec.
 
+## Setting up from a fresh clone
+
+Node **>= 22.12**, pnpm **10.13.1** (the repo pins `packageManager`, so `corepack enable` is the least surprising route).
+
+```
+pnpm install
+pnpm -r build          # packages must build before apps typecheck
+pnpm typecheck && pnpm lint && pnpm test
+```
+
+`pnpm test` needs no services. **Integration tests and both mutation ledgers need a real Postgres** reachable at `ATRIUM_TEST_DATABASE_URL`:
+
+```
+docker compose up -d postgres        # or bring your own
+pnpm --filter @atrium/db migrate     # apply the 11 migrations
+ATRIUM_TEST_DATABASE_URL=postgres://... pnpm test:integration
+```
+
+`docker-compose.yml` also defines `minio`, `migrate`, `server`, `app` and `proxy` — you do not need them to run the suites. Two known issues live in the tracker: compose publishes Postgres and MinIO on every interface, and `.env.example` is inaccurate about what enables a credential fallback. Read `.env.example` rather than trusting either.
+
+**`gh` needs its own auth on a new machine.** If it is not authenticated, or the shell is sandboxed, GitHub is unreachable and `docs/TRACKER.md` is your fallback — see below.
+
+## Methodology
+
+`docs/skills/campaign.md` is the working method this repository was built with: a decision graph on the tracker, work decomposed to the smallest independently-judgeable artifact, and **blind critics with fresh context** judging each one against a real-world reference. It is not required reading to fix a bug; it is required reading before starting a new lane, and every rule in it was bought by a defect recorded in `RETRO.md`.
+
+The parts that matter even for a one-off change are in **How work is verified here**, below.
+
 ## Before you spend money
 
 `INTERPRET_MODEL_DEFAULT` and `INTERPRET_MODEL_ESCALATION` have no defaults; unset, the server logs an error and installs neither the worker nor its enqueue hook, so nothing accumulates. That is deliberate.
@@ -84,7 +112,7 @@ The bar is higher than green tests, and it is the point of the project.
 - **There are two mutation ledgers**: `packages/core/mutants/` and root `mutants/`. They never share a path.
 - **Ledger anchors go stale as code moves**, and a stale anchor reads as `ESCAPED`. Five needed repointing in one week. Three had a restore step pointing at a superseded migration, which would have re-deployed the old behaviour mid-run while every later verdict still read `CAUGHT`.
 - **The refusal convention is `ack` with a non-empty `issues` array, not `nack`.** `nack` is for malformed or rejected appends. An `ack` whose `issues` are non-empty and whose write did not land is a refusal.
-- **This is a 4-core box.** Do not run heavy things concurrently. Browser suites need `--workers=2` or fewer; under load they emit `Protocol error (Runtime.evaluate)`, which is browsers dying, not a product defect. A full state walk has starved and timed out mid-run — suspect the machine before the page, and say which you concluded.
+- **Check your core count and cap concurrency at half of it.** These suites are heavy. Browser suites want `--workers=2` or fewer on a small machine; under load they emit `Protocol error (Runtime.evaluate)`, which is browsers dying rather than a product defect — re-run the affected tests in isolation before believing them, and say which you concluded. A full state walk has starved and timed out mid-run on a four-core machine, costing ninety minutes. Suspect the machine before the page.
 - **`biome check design/` has never passed** — 63 errors in harness `.mjs` files. Not a gate this repo holds. Do not reformat to fix it; biome's own `--unsafe` fix for `noConsole` **deletes the console call**, which would turn four reporters into programs that compute an answer and throw it away.
 - **`pnpm` monorepo.** `pnpm install`, `pnpm -r build`, `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm test:integration` (needs a real Postgres via `ATRIUM_TEST_DATABASE_URL`).
 
