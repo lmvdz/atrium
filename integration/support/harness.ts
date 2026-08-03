@@ -6,6 +6,7 @@ import { createDatabase, type DatabaseHandle, workspaceMembers } from '@atrium/d
 import { memberships, rooms, users, workspaces } from '@atrium/db/schema';
 import { sql } from 'drizzle-orm';
 import { WebSocket } from 'ws';
+import type { AttachmentSigner } from '../../apps/server/src/attachments.js';
 import { type CommandInput, createCommandService } from '../../apps/server/src/commands.js';
 import { createEventBus, type EventBus } from '../../apps/server/src/event-bus.js';
 import { createLedger, type Ledger } from '../../apps/server/src/ledger.js';
@@ -187,6 +188,7 @@ export interface TestServerOptions {
    * unrelated assertion and make the suite depend on wall clock.
    */
   membershipRevalidateIntervalMs?: number;
+  attachmentCapabilities?: Pick<AttachmentSigner, 'verify'>;
 }
 
 /** A realtime server on an ephemeral port, wired exactly as `index.ts` wires it. */
@@ -206,6 +208,7 @@ export async function startTestServer(
     db: handle.db,
     ledger,
     authorizer: createMembershipAuthorizer(handle.db),
+    attachmentCapabilities: options.attachmentCapabilities,
   });
   const realtime = createRealtimeServer({
     host: '127.0.0.1',

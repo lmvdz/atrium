@@ -174,6 +174,46 @@ describe('send_message', () => {
     expect(alice.events(room.roomId)[0]?.event).toEqual(bob.events(room.roomId)[0]?.event);
   });
 
+  /** CATCHES: accepting same-room attachment metadata without verifying the upload grant. */
+  it('persists only metadata bound by a server-minted capability, never the capability', async () => {
+    await server.close();
+    server = await startTestServer(handle, {
+      attachmentCapabilities: {
+        verify: (attachment) =>
+          attachment.capability === 'real-grant' &&
+          attachment.roomId === room.roomId &&
+          attachment.name === 'proof.txt' &&
+          attachment.size === 5,
+      },
+    });
+    const alice = await connect(room.people.alice as string);
+    const attachment = {
+      key: `${room.roomId}/object`,
+      name: 'proof.txt',
+      contentType: 'text/plain',
+      size: 5,
+      capability: 'real-grant',
+    };
+
+    const refused = await alice.command({
+      ...send(room.roomId, 'forged metadata'),
+      attachments: [{ ...attachment, name: 'invoice.exe' }],
+    });
+    expect(refused).toMatchObject({ type: 'nack', code: 'invalid' });
+    expect(await ledgerCount()).toBe(0);
+
+    const accepted = await alice.command({
+      ...send(room.roomId, 'bound metadata'),
+      attachments: [attachment],
+    });
+    expect(accepted.type).toBe('ack');
+    const event = await lastEvent<{ attachments: unknown[] }>(room.roomId);
+    expect(event.attachments).toEqual([
+      { key: attachment.key, name: 'proof.txt', contentType: 'text/plain', size: 5 },
+    ]);
+    expect(JSON.stringify(event)).not.toContain('real-grant');
+  });
+
   it('rolls the whole append back when a projection violates a constraint', async () => {
     // A reply to a message in another room: the composite FK refuses it, and
     // the ledger row must go with it. This is #22's "rejection = no write",

@@ -34,6 +34,39 @@ describe('direct attachment capabilities', () => {
     expect(url.searchParams.get('X-Amz-SignedHeaders')).toContain('content-length');
     expect(url.searchParams.get('X-Amz-SignedHeaders')).toContain('content-type');
     expect(signed.headers).toEqual({ 'content-type': 'text/plain' });
+    expect(
+      signer().verify({
+        roomId: ROOM,
+        key: signed.key,
+        name: 'proof.txt',
+        contentType: 'text/plain',
+        size: 5,
+        capability: signed.capability,
+      }),
+    ).toBe(true);
+  });
+
+  /** Mutation: verify only the key prefix and trust rewritten message metadata. */
+  it('rejects any metadata tuple other than the one the upload grant signed', async () => {
+    const authority = signer();
+    const signed = await authority.upload({
+      roomId: ROOM,
+      name: 'proof.txt',
+      contentType: 'text/plain',
+      size: 5,
+    });
+    const granted = {
+      roomId: ROOM,
+      key: signed.key,
+      name: 'proof.txt',
+      contentType: 'text/plain',
+      size: 5,
+      capability: signed.capability,
+    };
+    expect(authority.verify({ ...granted, name: 'invoice.exe' })).toBe(false);
+    expect(authority.verify({ ...granted, contentType: 'application/octet-stream' })).toBe(false);
+    expect(authority.verify({ ...granted, size: 6 })).toBe(false);
+    expect(authority.verify({ ...granted, key: `${ROOM}/another-object` })).toBe(false);
   });
 
   /** Mutation: remove the 25 MB bound from either presigning or the command. */

@@ -21,10 +21,12 @@ async function start(options: { authenticated?: boolean; member?: boolean } = {}
     key: `${ROOM}/object`,
     headers: { 'content-type': 'text/plain' },
     expiresIn: 900,
+    capability: 'signed-capability',
   }));
   const attachments: AttachmentSigner = {
     upload,
     download: vi.fn(async () => ({ url: 'http://object.test/download', expiresIn: 900 })),
+    verify: vi.fn(() => true),
   };
   const commands = {
     execute: vi.fn(),

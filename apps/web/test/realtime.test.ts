@@ -1827,12 +1827,28 @@ describe('optimism is limited to your own message row', () => {
   it('carries reply and attachment metadata on the durable message command', () => {
     client.sendMessage(ROOM, 'with context', {
       replyToId: 'message-before',
-        attachments: [{ key: 'room-1/file', name: 'proof.txt', contentType: 'text/plain', size: 5 }],
+      attachments: [
+        {
+          key: 'room-1/file',
+          name: 'proof.txt',
+          contentType: 'text/plain',
+          size: 5,
+          capability: 'signed-capability',
+        },
+      ],
     });
     expect(latest().commands().at(-1)).toMatchObject({
       name: 'send_message',
       replyToId: 'message-before',
-        attachments: [{ key: 'room-1/file', name: 'proof.txt', contentType: 'text/plain', size: 5 }],
+      attachments: [
+        {
+          key: 'room-1/file',
+          name: 'proof.txt',
+          contentType: 'text/plain',
+          size: 5,
+          capability: 'signed-capability',
+        },
+      ],
     });
   });
 });

@@ -142,10 +142,20 @@ async function main(): Promise<void> {
       : undefined,
   });
 
+  const attachments = createAttachmentSigner({
+    endpoint: env.S3_PUBLIC_ENDPOINT,
+    region: env.S3_REGION,
+    bucket: env.S3_BUCKET,
+    forcePathStyle: env.S3_FORCE_PATH_STYLE,
+    accessKeyId: env.S3_ACCESS_KEY_ID,
+    secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+  });
+
   const commands = createCommandService({
     db: database.db,
     ledger,
     authorizer: createMembershipAuthorizer(database.db),
+    attachmentCapabilities: attachments,
     projectionHooks: routing
       ? {
           onMessagePosted: ({ tx, roomId }) => queue.enqueueInterpretation(tx, roomId),
@@ -166,14 +176,7 @@ async function main(): Promise<void> {
     commands,
     ledger,
     bus,
-    attachments: createAttachmentSigner({
-      endpoint: env.S3_PUBLIC_ENDPOINT,
-      region: env.S3_REGION,
-      bucket: env.S3_BUCKET,
-      forcePathStyle: env.S3_FORCE_PATH_STYLE,
-      accessKeyId: env.S3_ACCESS_KEY_ID,
-      secretAccessKey: env.S3_SECRET_ACCESS_KEY,
-    }),
+    attachments,
     // #26, arrived. The stub is gone; this is Better Auth reading the same
     // cookie the web app mints, over the same tables.
     session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }) },

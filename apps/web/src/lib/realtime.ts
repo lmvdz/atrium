@@ -905,7 +905,13 @@ export interface RealtimeClient {
     body: string,
     options?: {
       replyToId?: string | null;
-      attachments?: Array<{ key: string; name: string; contentType: string; size: number }>;
+      attachments?: Array<{
+        key: string;
+        name: string;
+        contentType: string;
+        size: number;
+        capability: string;
+      }>;
     },
   ) => string;
   acceptProposal: (roomId: string, proposalId: string, objectiveId?: string | null) => string;

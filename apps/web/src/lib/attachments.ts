@@ -5,6 +5,7 @@ export interface UploadedAttachment {
   name: string;
   contentType: string;
   size: number;
+  capability: string;
 }
 
 /** Upload bytes directly to the signed object-store URL; Atrium sees metadata only. */
@@ -24,10 +25,17 @@ export async function uploadAttachment(roomId: string, file: File): Promise<Uplo
     url: string;
     key: string;
     headers: Record<string, string>;
+    capability: string;
   };
   const uploaded = await fetch(signed.url, { method: 'PUT', headers: signed.headers, body: file });
   if (!uploaded.ok) throw new Error(`the object store refused the upload (${uploaded.status})`);
-  return { key: signed.key, name: file.name, contentType, size: file.size };
+  return {
+    key: signed.key,
+    name: file.name,
+    contentType,
+    size: file.size,
+    capability: signed.capability,
+  };
 }
 
 export async function attachmentDownloadUrl(

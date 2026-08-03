@@ -66,7 +66,10 @@ import type { Authorizer, MembershipPair, Session } from './session.js';
  * its own, and whatever it is, `stagedBy` will record which one was used.
  */
 
-const AttachmentList = z.array(MessageAttachment).max(20).default([]);
+const AttachmentList = z
+  .array(MessageAttachment.extend({ capability: z.string().min(1) }))
+  .max(20)
+  .default([]);
 
 /**
  * A proposal as a caller submits it: the reading, without a position or an id.
@@ -225,6 +228,8 @@ export interface CommandServiceOptions {
    * rather than an omission nobody can see.
    */
   projectionHooks?: ProjectionHooks;
+  /** Verifies that each persisted metadata tuple came from this server's upload grant. */
+  attachmentCapabilities?: Pick<import('./attachments.js').AttachmentSigner, 'verify'>;
 }
 
 export interface CommandService {
@@ -246,6 +251,7 @@ export function createCommandService({
   ledger,
   authorizer,
   projectionHooks = {},
+  attachmentCapabilities,
 }: CommandServiceOptions): CommandService {
   async function requireMembership(session: Session, roomId: string, runner?: Tx) {
     const membership = await authorizer.authorize(session, roomId, runner);
@@ -310,10 +316,16 @@ export function createCommandService({
 
     switch (command.name) {
       case 'send_message':
+        if (command.attachments.length > 0 && !attachmentCapabilities) {
+          throw new CommandError('invalid', 'attachments are not configured');
+        }
         if (
-          command.attachments.some((attachment) => !attachment.key.startsWith(`${command.roomId}/`))
+          command.attachments.some(
+            (attachment) =>
+              attachmentCapabilities?.verify({ ...attachment, roomId: command.roomId }) !== true,
+          )
         ) {
-          throw new CommandError('invalid', 'an attachment key belongs to another room');
+          throw new CommandError('invalid', 'an attachment capability is invalid or expired');
         }
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
@@ -324,7 +336,9 @@ export function createCommandService({
           body: command.body,
           replyToId: command.replyToId,
           clientMessageId: command.clientMessageId,
-          attachments: command.attachments,
+          attachments: command.attachments.map(({ capability: _capability, ...attachment }) =>
+            MessageAttachment.parse(attachment),
+          ),
         }));
 
       case 'record_proposal':

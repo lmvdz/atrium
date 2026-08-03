@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { z } from 'zod';
@@ -28,8 +28,10 @@ export interface AttachmentSigner {
     key: string;
     headers: Readonly<Record<string, string>>;
     expiresIn: number;
+    capability: string;
   }>;
   download(request: DownloadRequest): Promise<{ url: string; expiresIn: number }>;
+  verify(attachment: UploadRequest & { key: string; capability: string }): boolean;
 }
 
 export interface AttachmentSignerOptions {
@@ -56,11 +58,30 @@ export function createAttachmentSigner(options: AttachmentSignerOptions): Attach
       secretAccessKey: options.secretAccessKey,
     },
   });
+  const capabilityPayload = (input: {
+    roomId: string;
+    key: string;
+    name: string;
+    contentType: string;
+    size: number;
+    expiresAt: number;
+  }) =>
+    JSON.stringify([
+      input.roomId,
+      input.key,
+      input.name,
+      input.contentType,
+      input.size,
+      input.expiresAt,
+    ]);
+  const signature = (payload: string) =>
+    createHmac('sha256', options.secretAccessKey).update(payload).digest('base64url');
 
   return {
     upload: async (request) => {
       const input = UploadRequest.parse(request);
       const key = `${input.roomId}/${randomUUID()}`;
+      const expiresAt = Math.floor(Date.now() / 1000) + ATTACHMENT_URL_TTL_SECONDS;
       const command = new PutObjectCommand({
         Bucket: options.bucket,
         Key: key,
@@ -78,6 +99,7 @@ export function createAttachmentSigner(options: AttachmentSignerOptions): Attach
           'content-type': input.contentType,
         },
         expiresIn: ATTACHMENT_URL_TTL_SECONDS,
+        capability: `${expiresAt}.${signature(capabilityPayload({ ...input, key, expiresAt }))}`,
       };
     },
     download: async (request) => {
@@ -95,6 +117,20 @@ export function createAttachmentSigner(options: AttachmentSignerOptions): Attach
         url: await getSignedUrl(client, command, { expiresIn: ATTACHMENT_URL_TTL_SECONDS }),
         expiresIn: ATTACHMENT_URL_TTL_SECONDS,
       };
+    },
+    verify: (attachment) => {
+      const dot = attachment.capability.indexOf('.');
+      if (dot <= 0) return false;
+      const expiresAt = Number(attachment.capability.slice(0, dot));
+      if (!Number.isSafeInteger(expiresAt) || expiresAt < Math.floor(Date.now() / 1000)) {
+        return false;
+      }
+      const actual = Buffer.from(attachment.capability.slice(dot + 1), 'base64url');
+      const expected = Buffer.from(
+        signature(capabilityPayload({ ...attachment, expiresAt })),
+        'base64url',
+      );
+      return actual.length === expected.length && timingSafeEqual(actual, expected);
     },
   };
 }
