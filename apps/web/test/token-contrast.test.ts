@@ -188,13 +188,12 @@ function block(selector: string): Readonly<Record<string, string>> {
 const LIGHT = block(':root');
 const DARK = block('html.atr-dark');
 
-/* CATCHES the bug above coming back in any form: the two themes must actually
-   be two themes. A `describe`-level guard rather than a test, so no assertion
-   in this file can run against a pair that turned out to be the same block. */
-if (LIGHT.bg1 === DARK.bg1) {
-  throw new Error(
-    'token-contrast: the light and dark blocks parsed to the same values — every "dark" assertion in this file would be measuring the light theme',
-  );
+/* Mutation: restore v6's warm-paper `:root` while leaving the compatibility
+   class on WIRE. A persisted preference would look current while a fresh visit
+   rendered the superseded product. Both entry points must begin at the WIRE
+   canvas; their inset ramps may still differ slightly during migration. */
+if (LIGHT.bg0 !== '#0a0b0c' || DARK.bg0 !== '#0a0b0c') {
+  throw new Error('token-contrast: both root entry points must begin on the WIRE #0a0b0c canvas');
 }
 
 function channel(c: number): number {
@@ -666,26 +665,15 @@ describe('the filter cannot fade a row under AA', () => {
     expect(ratio).toBeGreaterThanOrEqual(4.5);
   });
 
-  /* The old assertion caught a fade doctrine being softened by requiring the
-     light token to have *no* headroom. The rendered replay then proved that
-     premise unsafe: other legitimate amber surfaces crossed the audit's safety
-     floor. Opacity is already forbidden exhaustively above; this test now
-     catches regressing the light ramp below the measured safety margin while
-     retaining the old upper bound that keeps amber subordinate to body text.
-
-     The dark number was invisible until this round: `block()` was matching the
-     selector names in tokens.css's own provenance comment, so this test's
-     "dark" case had been re-measuring the light theme since it was written, and
-     asserted `< 5.6` on a value that is really 9.65. */
-  it('the binding light-theme token retains rendered-audit headroom', () => {
-    const light = contrast(LIGHT.amb2 as string, LIGHT.ambbg as string);
-    const dark = contrast(DARK.amb2 as string, DARK.ambbg as string);
-    console.info(
-      `weakest row token: light ${light.toFixed(2)}:1 · dark ${dark.toFixed(2)}:1 — the binding one is ${Math.min(light, dark).toFixed(2)}`,
-    );
-    expect(Math.min(light, dark)).toBe(light);
-    expect(light).toBeGreaterThanOrEqual(4.9);
-    expect(light).toBeLessThan(5.6);
+  /* Mutation: lift the WIRE amber until a needs-you sentence visually outranks
+     primary text, or lower it beneath the rendered audit margin. The retired
+     warm-paper ramp needed a narrow numerical ceiling; on one near-black
+     surface the honest hierarchy is relational. */
+  it.each(THEMES)('WIRE amber stays legible and subordinate to primary text — %s', (_, theme) => {
+    const amber = contrast(theme.amb2 as string, theme.ambbg as string);
+    const primary = contrast(theme.tx0 as string, theme.bg0 as string);
+    expect(amber).toBeGreaterThanOrEqual(4.9);
+    expect(amber).toBeLessThan(primary);
   });
 });
 

@@ -3,13 +3,22 @@
 
 .app {
   display: grid;
-  grid-template-columns: 52px 234px minmax(560px, 1fr) 376px;
+  grid-template-columns: 44px 190px minmax(560px, 1fr) 300px;
   height: 100vh;
   /* the narrowest supported width is 1124 CSS px; a classic scrollbar eats ~15
      of those, so the floor is set below the viewport target rather than at it.
      The ≤1279 track set needs 998px, so 1024 is a real floor, not a guess. */
   min-width: 1024px;
   overflow: hidden;
+}
+
+/* WIRE controls are flat terminal instruments. Human avatars retain their
+   circles; actionable chrome and text fields do not inherit the rounded v6
+   card language. */
+.app button,
+.app textarea,
+.app input {
+  border-radius: 0;
 }
 
 /* grid and flex items default to min-width:auto, which lets a long mono line
@@ -74,27 +83,34 @@
 /* --- workspace strip ----------------------------------------------------- */
 
 .ws {
-  background: var(--bg5);
-  border-right: 1px solid var(--line2);
+  background: var(--strip);
+  border-right: 1px solid var(--grnbd);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 10px 0 12px;
+  padding: 10px 0;
   gap: 8px;
 }
 
 .wsTile {
-  width: 30px;
-  height: 30px;
-  border-radius: 7px;
-  border: 1px solid var(--tx1);
-  background: var(--tx1);
-  color: var(--bg1);
+  width: 28px;
+  height: 28px;
+  border-radius: 0;
+  border: 1px solid var(--grnbd);
+  background: var(--grnav);
+  color: var(--grn2);
   display: grid;
   place-items: center;
   font-family: 'IBM Plex Mono', ui-monospace, monospace;
   font-size: 11px;
   font-weight: 600;
+}
+
+.wsMark {
+  width: 20px;
+  height: 20px;
+  color: var(--tx0);
+  flex: none;
 }
 
 .wsSpacer {
@@ -105,14 +121,14 @@
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: var(--replybg);
-  border: 1px solid var(--filebd);
+  background: var(--stile);
+  border: 1px solid var(--stbd);
   display: grid;
   place-items: center;
   font-family: 'IBM Plex Mono', ui-monospace, monospace;
   font-size: 10px;
   font-weight: 600;
-  color: var(--blu2);
+  color: var(--stx);
 }
 
 .iconbtn {
@@ -152,13 +168,13 @@
 }
 
 .railHead {
-  padding: 12px 12px 10px;
+  padding: 12px 14px 10px;
   border-bottom: 1px solid var(--line);
 }
 
 .railHead h1 {
   margin: 0;
-  font-size: 13px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--tx0);
 }
@@ -169,12 +185,12 @@
 
 .railBody {
   overflow-y: auto;
-  padding: 4px 0 10px;
+  padding: 2px 0 10px;
   min-height: 0;
 }
 
 .railSec {
-  padding: 12px 12px 5px;
+  padding: 12px 14px 5px;
 }
 
 .railSecLabel {
@@ -187,7 +203,7 @@
   gap: 7px;
   width: 100%;
   text-align: left;
-  padding: 4px 12px 4px 11px;
+  padding: 3px 14px 3px 12px;
   border-left: 2px solid transparent;
   color: var(--tx2);
   transition:
@@ -201,8 +217,8 @@
 }
 
 .rrowOn {
-  background: var(--bg4);
-  border-left-color: var(--tx1);
+  background: var(--bg5);
+  border-left-color: var(--grn);
   color: var(--tx0);
 }
 
@@ -214,7 +230,7 @@
 }
 
 .rrowName {
-  font-size: 12px;
+  font-size: 10.5px;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -253,7 +269,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 3.5px 12px 3.5px 13px;
+  padding: 3px 14px;
 }
 
 /* presence uses BLUE (= human), never green: green is reserved for "verified"
@@ -301,11 +317,18 @@
    the element the feed's actor column routes TO, and a route to a clip is a
    route to nothing. */
 .hrowName {
-  font-size: 11.5px;
+  font-size: 10px;
   color: var(--tx2);
+  flex: none;
+  white-space: nowrap;
+}
+
+.hrow :global(.atr-meta) {
   flex: 1;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hrowMe .hrowName {
@@ -315,7 +338,7 @@
 
 .railFoot {
   border-top: 1px solid var(--line);
-  padding: 8px 12px;
+  padding: 7px 14px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -336,7 +359,7 @@
 }
 
 .railFootName {
-  font-size: 11.5px;
+  font-size: 10px;
   color: var(--tx1);
   line-height: 1.25;
 }
@@ -344,7 +367,7 @@
 /* --- centre column ------------------------------------------------------- */
 
 .center {
-  background: var(--bg1);
+  background: var(--bg0);
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   min-width: 0;
@@ -353,8 +376,8 @@
 
 .roomhead {
   border-bottom: 1px solid var(--line);
-  padding: 8px 16px 0;
-  background: var(--bg1);
+  padding: 9px 20px 0;
+  background: var(--bg0);
 }
 
 .roomheadTop {
@@ -366,7 +389,7 @@
 
 .roomheadTop h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--tx0);
   flex: none;
@@ -385,7 +408,7 @@
 /* The topic wraps rather than clipping, for the same reason as `.hrowName`: its
    only route was the `title` attribute. */
 .topic {
-  font-size: 11.5px;
+  font-size: 10px;
   color: var(--tx2);
   flex: 1;
   min-width: 0;
@@ -538,8 +561,8 @@
 
 .composer {
   border-top: 1px solid var(--line);
-  background: var(--bg1);
-  padding: 9px 16px 8px;
+  background: var(--bg0);
+  padding: 7px 20px 9px;
 }
 
 /* BRIEF concept 4: the binding banner. Your next message resolves the named
@@ -609,7 +632,7 @@
 
 .cbox {
   border: 1px solid var(--line2);
-  border-radius: 5px;
+  border-radius: 0;
   background: var(--bg3);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -657,8 +680,8 @@
   border: 0;
   background: transparent;
   resize: none;
-  font-family: Inter, sans-serif;
-  font-size: 12.5px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 11px;
   color: var(--tx1);
   padding: 8px 10px 8px 11px;
   min-height: 36px;
@@ -731,7 +754,7 @@
 /* --- lens ---------------------------------------------------------------- */
 
 .lens {
-  background: var(--bg3);
+  background: var(--bg2);
   border-left: 1px solid var(--line);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -742,13 +765,13 @@
 
 @media (max-width: 1439px) {
   .app {
-    grid-template-columns: 48px 216px minmax(500px, 1fr) 344px;
+    grid-template-columns: 44px 184px minmax(500px, 1fr) 300px;
   }
 }
 
 @media (max-width: 1279px) {
   .app {
-    grid-template-columns: 44px 198px minmax(440px, 1fr) 316px;
+    grid-template-columns: 44px 174px minmax(440px, 1fr) 286px;
   }
 
   .faces {

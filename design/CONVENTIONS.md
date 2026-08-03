@@ -1,21 +1,22 @@
 # Atrium design conventions
 
-How to use `design/tokens.css`. Both the tokens and these rules come from the
-prior Atrium design lineage (Prototype → v6), extracted from `Atrium v6.dc.html`
-on 2026-07-31. The full rationale is in
-`plans/research-live-call-design-system/BRIEF.md` (concept 9); this file is the
-operating manual.
+How to use `design/tokens.css`. The semantic rules below survived the prior
+Prototype → v6 lineage; the frame, palette and typography were superseded by
+the WIRE handoff (`Design system for live call interface/CLAUDE.md` with
+`Atrium v8.dc.html` as its full-frame witness) on 2026-08-03. This file is the
+operating manual for that combined authority.
 
 The system is stable across six versions of iteration. Treat it as settled: use
 the tokens, do not add hexes. If something needs a color that is not here, that
 is a signal the thing needs a semantic class, not a new swatch.
 
-## Themes
+## WIRE surface
 
-Light (`:root`) is the default — warm paper. Dark is opt-in by putting the class
-`atr-dark` on `<html>`. Both themes define exactly the same 51 token names, so no
-component ever branches on theme; it just reads `var(--tx1)` and gets the right
-answer. Adding a token means adding it to both blocks.
+The product is near-black WIRE. The earlier warm-paper default is retired.
+`:root` is authoritative; `atr-dark` temporarily defines the same 51-name token
+contract so a persisted preference from the earlier product cannot bring the
+old language back. Components never branch on theme. Adding or removing a token
+still changes both blocks until that compatibility class is deleted.
 
 ## Semantic ramps
 
@@ -48,8 +49,7 @@ visual ones.
 - **Surfaces** `--bg0` … `--bg7`. `--bg0` is the page. `--bg1` is the primary
   raised surface (panels, cards). The rest are the well-trodden variations the
   prototypes settled into — insets, hovers, headers, sunken rows. Pick by role,
-  not by lightness: in dark theme the ramp is not monotonic, so "one step lighter"
-  is not a thing you can rely on.
+  not by apparent lightness; the ramp is intentionally shallow.
 - **Rules** `--line` (hairline, the default divider), `--line2` (a divider you are
   meant to notice), `--line3` (emphatic — section boundaries, focused borders).
   Note the first one is `--line`, not `--line1`.
@@ -60,30 +60,19 @@ visual ones.
 
 ## Typography
 
-Two families, split by *who is speaking*.
-
-- **IBM Plex Mono** for machine chrome: timeline rows, log lines, receipts,
-  status chips, counts, timestamps, identifiers, section labels. Anything the
-  system emitted or that is scannable-as-data.
-- **Inter** for human chrome: prose, message bodies, composer, buttons, headings,
-  anything a person wrote or reads as sentences.
-
-That split is the point — it is how a reader tells derived state from someone's
-words without reading either. `body` is Inter; mono is applied where the machine
-speaks.
-
-**Do not import Sora.** The v6 source still preloads it in the font stylesheet
-link but never applies it anywhere — vestigial across four versions. Drop it.
-
-Font loading: import only `IBM Plex Mono` (400, 500, 600, 400 italic) and `Inter`
-(400, 500, 600, 700). Those are the weights the source actually uses.
+WIRE uses **JetBrains Mono everywhere**: authored conversation, system voice,
+receipts, controls and chrome. Human/system distinction remains semantic and
+structural — attribution, the explicit `SystemVoice` boundary, glyph state and
+quotation provenance — and may never depend on a font swap alone. Bundle the
+variable font; do not make the product depend on a workstation font or a
+runtime font CDN.
 
 ## Density
 
 The system is deliberately dense — an operator surface, not a marketing page.
 
-- **12.5px** base body size on the app shell. This is the baseline everything else
-  is relative to; it is smaller than a typical web default on purpose.
+- **10.5px** base body size on the app shell. This is the baseline everything else
+  is relative to; it is an operator surface, not a document default.
 - **10–11.5px** for timeline and list rows (10, 10.5, 11, 11.5 are the sizes in
   use — 10 and 11 dominate). Rows are information, not reading material.
 - **10px uppercase with `letter-spacing: .14em`** for section labels. This is the

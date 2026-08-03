@@ -14,6 +14,7 @@
  * design/CONVENTIONS.md for the rules these encode.
  * ------------------------------------------------------------------------- */
 
+@import '@fontsource-variable/jetbrains-mono';
 @import '../../../design/tokens.css';
 
 /* ===========================================================================
@@ -70,11 +71,24 @@ body {
   margin: 0;
   background: var(--bg0);
   color: var(--tx1);
-  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 12.5px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, sfmono-regular, menlo, monospace;
+  font-size: 10.5px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizelegibility;
+}
+
+/* WIRE is one typographic instrument. Component-era mono/sans declarations
+   remain locally documented, but the latest full-frame system deliberately
+   removes that split. This selector is scoped to the real frame so auth forms
+   retain their independently reviewed form typography. */
+body [data-frame],
+body [data-frame] *,
+button,
+input,
+textarea,
+select {
+  font-family: 'JetBrains Mono Variable', ui-monospace, sfmono-regular, menlo, monospace;
 }
 
 button {

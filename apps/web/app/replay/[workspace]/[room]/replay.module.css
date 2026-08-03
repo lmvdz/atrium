@@ -7,12 +7,12 @@
 
 .controls {
   align-items: center;
-  background: var(--bg1);
+  background: var(--bg0);
   border-top: 1px solid var(--line);
   display: grid;
   gap: 8px;
   grid-template-columns: auto auto minmax(180px, 1fr) auto auto;
-  padding: 8px 14px;
+  padding: 7px 20px 9px;
   position: relative;
   z-index: 20;
 }
@@ -30,7 +30,7 @@
   color: var(--tx0);
   cursor: pointer;
   font: inherit;
-  min-height: 28px;
+  min-height: 24px;
   min-width: 82px;
 }
 

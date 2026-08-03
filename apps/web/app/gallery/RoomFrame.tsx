@@ -34,6 +34,7 @@ import {
   systemText,
   Timeline,
   WorkspaceSpacer,
+  WorkspaceMark,
   WorkspaceTile,
   WorkspaceYou,
 } from '../../src/components';
@@ -247,6 +248,7 @@ function Frame(props: RoomFrameProps) {
          created in one component and rendered inside another trips the "unique
          key" warning even when the slot only ever holds one thing. */
       strip={slot([
+        <WorkspaceMark key="mark" />,
         <WorkspaceTile code="AT" key="tile" title="Atrium — this workspace" />,
         <WorkspaceSpacer key="spacer" />,
         <ThemeToggle key="theme" />,

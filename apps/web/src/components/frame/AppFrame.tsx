@@ -75,6 +75,23 @@ export interface WorkspaceTileProps {
   readonly title: string;
 }
 
+export function WorkspaceMark() {
+  return (
+    <svg
+      aria-label="Atrium"
+      className={styles.wsMark}
+      fill="none"
+      role="img"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 3 3 9v12h18V9l-9-6Z" />
+      <path d="M12 3v18M3 9h18" />
+    </svg>
+  );
+}
+
 export function WorkspaceTile({ code, title }: WorkspaceTileProps) {
   return (
     <div className={styles.wsTile} title={systemText(title, 'WorkspaceTile title')}>

@@ -17,15 +17,15 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#e6e2da' },
+    { media: '(prefers-color-scheme: light)', color: '#0a0b0c' },
     { media: '(prefers-color-scheme: dark)', color: '#0a0b0c' },
   ],
 };
 
 /**
- * Applied before first paint so a dark-mode user never sees a flash of warm
- * paper. Light is the default; `html.atr-dark` is the only dark switch.
- * `?theme=` pins a theme for screenshots and e2e without touching storage.
+ * Compatibility with persisted v6 preferences. Both token blocks now resolve
+ * to WIRE, so this class can change without reviving the retired warm-paper
+ * product while old screenshot routes continue to be addressable.
  */
 const themeBootstrap = `(function(){try{var q=new URLSearchParams(location.search).get('theme');var s=q||localStorage.getItem('atrium-theme');var dark=s?s==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.classList.toggle('atr-dark',dark);}catch(e){}})();`;
 

@@ -11,7 +11,13 @@ export { AttentionCompact } from './attention/AttentionCompact';
 export { CrossRoomJump } from './attention/CrossRoomJump';
 export { nextPageLabel, Pin } from './attention/Pin';
 export { Trailer } from './attention/Trailer';
-export { AppFrame, WorkspaceSpacer, WorkspaceTile, WorkspaceYou } from './frame/AppFrame';
+export {
+  AppFrame,
+  WorkspaceMark,
+  WorkspaceSpacer,
+  WorkspaceTile,
+  WorkspaceYou,
+} from './frame/AppFrame';
 export { Composer } from './frame/Composer';
 export { Rail } from './frame/Rail';
 export { RoomHead } from './frame/RoomHead';
