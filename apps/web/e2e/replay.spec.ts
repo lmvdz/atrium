@@ -165,7 +165,9 @@ test.describe('persisted three-surface replay', () => {
    * Mutation: treat an answer-bound message as ordinary chat, remove only the
    * pin row, or build the receipt from proposal text rather than its persisted
    * source. The typed answer, accepted object, and quoted source can no longer
-   * be observed together through the product surfaces.
+   * be observed together through the product surfaces. Mutation: omit the
+   * focus handoff when Accept or Retype removes its own button; keyboard focus
+   * then falls back to the document body.
    */
   test('corrects a sourced decision reading without mutating the persisted replay', async ({
     page,
@@ -183,9 +185,11 @@ test.describe('persisted three-surface replay', () => {
     await expect(receipt).toContainText('proposed');
     await receipt.getByRole('button', { name: 'Accept reading', exact: true }).click();
     await expect(receipt).toContainText('accepted');
+    await expect(receipt).toBeFocused();
 
     await receipt.getByRole('button', { name: 'Retype as claim', exact: true }).click();
     await expect(receipt).toContainText('CORRECTED · DECISION → CLAIM');
+    await expect(receipt).toBeFocused();
     await expect(receipt).toContainText('the reading was retyped; its source remains attached');
     await expect(receipt.getByRole('button', { name: 'Retype as claim' })).toHaveCount(0);
 
@@ -207,7 +211,8 @@ test.describe('persisted three-surface replay', () => {
    * Mutation: reopen a decision even though core refuses that operation, erase
    * the question's answer relation, or reset the status without retaining the
    * answer's cited message. The only legal Reopen control or its prior-answer
-   * quotation disappears from this flow.
+   * quotation disappears from this flow. Mutation: remove the composer/receipt
+   * focus handoff after Answer or Reopen and strand the keyboard on the body.
    */
   test('reopens an answered question while preserving its prior answer', async ({ page }) => {
     const before = await replayDatabaseFingerprint();
@@ -222,6 +227,9 @@ test.describe('persisted three-surface replay', () => {
     const receipt = page.getByRole('region', { name: 'Receipt' });
     await expect(receipt).toContainText('open');
     await receipt.getByRole('button', { name: 'Answer', exact: true }).click();
+    await expect(
+      page.getByRole('textbox', { name: `Answer ${question} in your own words` }),
+    ).toBeFocused();
     await page
       .getByRole('textbox', { name: `Answer ${question} in your own words` })
       .fill(firstAnswer);
@@ -229,6 +237,7 @@ test.describe('persisted three-surface replay', () => {
     await expect(receipt.locator('[data-quoted]').filter({ hasText: firstAnswer })).toHaveCount(1);
     await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
     await receipt.getByRole('button', { name: 'Reopen', exact: true }).click();
+    await expect(receipt).toBeFocused();
     await expect(receipt).toContainText('REOPENED · PRIOR ANSWER KEPT');
     await expect(receipt).toContainText('pending again');
     await expect(receipt.locator('[data-quoted]').filter({ hasText: firstAnswer })).toHaveCount(1);

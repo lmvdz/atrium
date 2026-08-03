@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReplayData } from '../../../../lib/replay-data';
 import {
   applyReplayTransitions,
@@ -46,12 +46,20 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
   const [receiptId, setReceiptId] = useState<string | null>(null);
   const [targetMessageId, setTargetMessageId] = useState<string | null>(null);
   const localSequence = useRef(0);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
   const [openAttentionId, setOpenAttentionId] = useState(
     view.attention.find((item) => needsViewer(item.state))?.id,
   );
   const [openObjectives, setOpenObjectives] = useState<Readonly<Record<string, boolean>>>({});
+  useEffect(() => {
+    if (binding.mode !== 'bound') return;
+    const frame = requestAnimationFrame(() => {
+      composerRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [binding]);
   const objectives: readonly ObjectiveRecord[] = view.objectives.map((objective) => ({
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
@@ -149,6 +157,12 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     });
   };
 
+  const focusReceipt = () => {
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('[data-receipt-id]')?.focus();
+    });
+  };
+
   const send = (text: string) => {
     if (binding.mode !== 'bound') return;
     const body = text.trim();
@@ -216,6 +230,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         focused={focused}
         handlers={{
           composerValue: draft,
+          composerRef,
           onComposerChange: setDraft,
           onSend: send,
           onCancelBinding: () => setBinding({ mode: 'free' }),
@@ -230,6 +245,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
             setAcceptedSubjects((current) =>
               current.includes(objectId) ? current : [...current, objectId],
             );
+            focusReceipt();
           },
           onAnswerReceipt: (objectId) => {
             const object = objects.find((candidate) => candidate.id === objectId);
@@ -253,6 +269,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
                 ...current.filter((transition) => transition.objectId !== objectId),
                 retypeAsClaim(object, clockNow()),
               ]);
+            focusReceipt();
           },
           onReopen: (objectId) => {
             const object = objects.find((candidate) => candidate.id === objectId);
@@ -272,6 +289,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
                 ...current.filter((transition) => transition.objectId !== objectId),
                 reopenQuestion(object, clockNow(), relationIds),
               ]);
+              focusReceipt();
             }
           },
           onAct: (itemId, actionId) => {

@@ -56,6 +56,7 @@ export function ReceiptView({
       aria-label="Receipt"
       className={`${styles.receipt} atr-rise`}
       data-receipt-id={receipt.id}
+      tabIndex={-1}
     >
       <div className={styles.rcTop}>
         <button className={`${styles.rcBack} atr-lbl`} onClick={onBack} type="button">
