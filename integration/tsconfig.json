@@ -22,5 +22,5 @@
       "@atrium/db/schema": ["./packages/db/src/schema.ts"]
     }
   },
-  "include": ["**/*.ts", "../vitest.integration.config.ts"]
+  "include": ["**/*.ts", "../apps/web/lib/replay-data.ts", "../vitest.integration.config.ts"]
 }
