@@ -132,7 +132,7 @@ export interface RoomFrameHandlers {
   readonly composerRef?: Ref<HTMLTextAreaElement>;
   readonly onSend?: (draft: string) => void;
   readonly onAttach?: (file: File) => void;
-  readonly onMention?: (userId: string) => void;
+  readonly onMention?: (userId: string | null) => void;
   readonly attachmentNote?: string;
   readonly onCancelBinding?: () => void;
 }
@@ -176,6 +176,7 @@ export interface RoomFrameProps {
   readonly pendingReplacementId?: string;
   readonly acceptObjectives?: readonly { readonly id: string; readonly label: string }[];
   readonly mentionTargets?: readonly { readonly id: string; readonly label: string }[];
+  readonly mentionTargetId?: string | null;
   readonly boxed?: boolean;
   readonly label?: string;
   readonly handlers?: RoomFrameHandlers;
@@ -336,6 +337,7 @@ function Frame(props: RoomFrameProps) {
             onAttach={on.onAttach}
             onMention={on.onMention}
             mentionTargets={props.mentionTargets}
+            mentionTargetId={props.mentionTargetId}
             attachmentNote={on.attachmentNote}
             roomName={props.room.name}
             textareaRef={on.composerRef}

@@ -64,9 +64,10 @@ export interface ComposerProps {
   readonly onSend?: (draft: string) => void;
   readonly onAttach?: (file: File) => void;
   readonly attachmentNote?: string;
-  /** Explicit request targeting; choosing one inserts the visible authored marker. */
+  /** Explicit structured request targeting, kept separate from the authored body. */
   readonly mentionTargets?: readonly { readonly id: string; readonly label: string }[];
-  readonly onMention?: (userId: string) => void;
+  readonly mentionTargetId?: string | null;
+  readonly onMention?: (userId: string | null) => void;
   /** A replay may permit only a bound answer, never free historical chat. */
   readonly disabled?: boolean;
 }
@@ -84,6 +85,7 @@ export function Composer({
   onAttach,
   attachmentNote,
   mentionTargets = [],
+  mentionTargetId = null,
   onMention,
   disabled = false,
 }: ComposerProps) {
@@ -235,11 +237,8 @@ export function Composer({
           <select
             aria-label="Mention a person"
             disabled={disabled}
-            onChange={(event) => {
-              if (event.target.value) onMention(event.target.value);
-              event.target.value = '';
-            }}
-            defaultValue=""
+            onChange={(event) => onMention(event.target.value || null)}
+            value={mentionTargetId ?? ''}
           >
             <option value="">Choose a person…</option>
             {mentionTargets.map((target) => (
@@ -248,7 +247,9 @@ export function Composer({
               </option>
             ))}
           </select>
-          <span data-voice="system">inserts a visible request marker; remove it to cancel</span>
+          <span data-voice="system">
+            routes this message as a request; its words stay unchanged
+          </span>
         </label>
       )}
 

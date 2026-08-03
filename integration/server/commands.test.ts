@@ -70,6 +70,7 @@ const send = (
   clientMessageId,
   replyToId: null,
   attachments: [],
+  mentionUserIds: [],
 });
 
 /**

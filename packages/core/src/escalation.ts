@@ -681,6 +681,8 @@ export interface ProvenanceMessage {
   id: string;
   authorId: string;
   body: string;
+  /** Structured request targets selected by the author; never serialized into `body`. */
+  mentionUserIds?: readonly string[];
 }
 
 /**

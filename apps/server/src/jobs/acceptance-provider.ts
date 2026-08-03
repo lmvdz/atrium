@@ -42,12 +42,7 @@ export function createAcceptanceProvider(): InterpretationProvider {
 type SourceMessage = NonNullable<InterpretationRequest['sourceMessages']>[number];
 
 function readingFor(message: SourceMessage): ExtractedReading[] {
-  const mention =
-    /^Mention for [0-9a-f-]{36}: ((?:Decision|Objective|Open question|Claim): \S[^\r\n]*)$/.exec(
-      message.body,
-    );
-  const semanticText = mention?.[1] ?? message.body;
-  const own = /^(Decision|Objective|Open question|Claim): (\S[^\r\n]*)$/.exec(semanticText);
+  const own = /^(Decision|Objective|Open question|Claim): (\S[^\r\n]*)$/.exec(message.body);
   if (own) {
     const type = {
       Decision: 'decision',

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { advanceSeenSeq } from '@atrium/auth';
+import { advanceSeenSeq, roomMemberIds } from '@atrium/auth';
 import {
   type AcceptedObject,
   AcceptedObjectType,
@@ -176,6 +176,7 @@ export const Command = z.discriminatedUnion('name', [
     clientMessageId: z.string().min(1).max(128).nullable().default(null),
     replyToId: Id.nullable().default(null),
     attachments: AttachmentList,
+    mentionUserIds: z.array(Id).max(20).default([]),
   }),
   z.object({ name: z.literal('record_proposal'), roomId: Id, proposal: ProposalDraft }),
   z.object({
@@ -402,6 +403,16 @@ export function createCommandService({
         ) {
           throw new CommandError('invalid', 'an attachment capability is invalid or expired');
         }
+        if (command.mentionUserIds.length > 0) {
+          const uniqueTargets = [...new Set(command.mentionUserIds)];
+          if (uniqueTargets.length !== command.mentionUserIds.length) {
+            throw new CommandError('invalid', 'mention targets must be unique');
+          }
+          const members = new Set(await roomMemberIds(db, command.roomId));
+          if (uniqueTargets.some((userId) => !members.has(userId))) {
+            throw new CommandError('invalid', 'every mention target must be a current room member');
+          }
+        }
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
@@ -414,6 +425,7 @@ export function createCommandService({
           attachments: command.attachments.map(({ capability: _capability, ...attachment }) =>
             MessageAttachment.parse(attachment),
           ),
+          mentionUserIds: command.mentionUserIds,
         }));
 
       case 'answer_message': {

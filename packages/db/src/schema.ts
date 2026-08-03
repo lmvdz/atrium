@@ -885,6 +885,8 @@ export const messages = pgTable(
     clientMessageId: text('client_message_id'),
     /** `[{ key, name, contentType, size }]` — objects live in S3/MinIO. */
     attachments: jsonb('attachments').$type<MessageAttachment[]>().notNull().default([]),
+    /** Explicit request targets selected by the author, separate from authored speech. */
+    mentionUserIds: uuid('mention_user_ids').array().notNull().default(sql`'{}'::uuid[]`),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

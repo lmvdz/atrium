@@ -254,6 +254,7 @@ export interface PendingMessage {
   status: 'pending' | 'failed';
   error?: string;
   attachments: Array<{ key: string; name: string; contentType: string; size: number }>;
+  mentionUserIds?: string[];
   /**
    * Whether sending the identical frame again is a sensible thing to offer.
    *
@@ -917,6 +918,7 @@ export interface RealtimeClient {
         size: number;
         capability: string;
       }>;
+      mentionUserIds?: string[];
     },
   ) => string;
   answerMessage: (
@@ -1495,6 +1497,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         at: new Date(now()).toISOString(),
         status: 'pending',
         attachments: messageOptions.attachments ?? [],
+        mentionUserIds: messageOptions.mentionUserIds ?? [],
       });
       const commandId = command({
         name: 'send_message',
@@ -1503,6 +1506,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         clientMessageId,
         replyToId: messageOptions.replyToId ?? null,
         attachments: messageOptions.attachments ?? [],
+        mentionUserIds: messageOptions.mentionUserIds ?? [],
       });
       inFlight.set(commandId, { roomId, clientMessageId });
       changed(roomId);

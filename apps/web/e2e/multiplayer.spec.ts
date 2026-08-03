@@ -269,13 +269,11 @@ test.describe
           if (message.mention !== null) {
             const sender = pages[message.author] as Page;
             const targetId = users[message.mention];
-            const prefix = `Mention for ${targetId}: `;
             await sender.getByLabel('Mention a person').selectOption(targetId);
             const composer = sender.getByRole('textbox', { name: 'Message #general' });
-            await expect(composer).toHaveValue(prefix);
-            await composer.click();
-            await composer.press('End');
-            await composer.type(message.body.slice(prefix.length));
+            await expect(sender.getByLabel('Mention a person')).toHaveValue(targetId);
+            await expect(composer).toHaveValue('');
+            await composer.fill(message.body);
             await sender.getByRole('button', { name: 'Send' }).click();
           } else if (message.attachment) {
             const sender = pages[message.author] as Page;
@@ -476,13 +474,13 @@ test.describe
         }
         for (const proposal of pending.filter((candidate) => candidate.type !== 'objective')) {
           const fixture = manifest.messages.find((message) => message.body === proposal.statement);
-          if (!fixture || fixture.objective === null) {
+          if (!fixture)
             throw new Error(
               `semantic fixture has no objective ground truth: ${proposal.statement}`,
             );
-          }
           const actor = proposal.type === 'commitment' ? absentee : (pages[0] as Page);
-          const expectedObjectiveId = objectiveIds[fixture.objective] as string;
+          const expectedObjectiveId =
+            fixture.objective === null ? null : (objectiveIds[fixture.objective] as string);
           const actorId = proposal.type === 'commitment' ? users[manifest.absentee] : users[0];
           const [attention] = await sql<{ id: string }[]>`
             SELECT id::text FROM attention_items
@@ -498,9 +496,11 @@ test.describe
           );
           const receipt = actor.locator(`[data-receipt-id="${proposal.id}"]`);
           await expect(receipt).toBeVisible();
-          await receipt
-            .getByRole('combobox', { name: 'File accepted reading under' })
-            .selectOption(expectedObjectiveId);
+          if (expectedObjectiveId !== null) {
+            await receipt
+              .getByRole('combobox', { name: 'File accepted reading under' })
+              .selectOption(expectedObjectiveId);
+          }
           await receipt.getByRole('button', { name: 'Accept reading' }).click();
           await eventually(
             async () =>
@@ -512,7 +512,7 @@ test.describe
                 `
               )[0]?.objectiveId,
             (objectiveId) => objectiveId === expectedObjectiveId,
-            `${proposal.type} acceptance to retain objective ${expectedObjectiveId}`,
+            `${proposal.type} acceptance to retain objective ${expectedObjectiveId ?? 'null'}`,
           );
         }
         await eventually(
@@ -525,6 +525,18 @@ test.describe
           (count) => count === 8,
           'all semantic fixtures to reach the accepted fold',
         );
+
+        const mentionedFixture = manifest.messages[74];
+        if (!mentionedFixture) throw new Error('structured mention fixture is missing');
+        const [mentionedMessage] = await sql<{ body: string; mentionUserIds: string[] }[]>`
+          SELECT body, mention_user_ids::text[] AS "mentionUserIds"
+          FROM messages
+          WHERE room_id=${roomId}::uuid AND body=${mentionedFixture.body}
+        `;
+        expect(mentionedMessage).toEqual({
+          body: mentionedFixture.body,
+          mentionUserIds: [users[manifest.absentee]],
+        });
 
         const objects = await sql<
           { id: string; type: string; statement: string; objectiveId: string | null }[]

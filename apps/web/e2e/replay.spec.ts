@@ -3,6 +3,41 @@ import postgres from 'postgres';
 import type { AuditResult } from './audit';
 import { AUDIT } from './audit';
 import { databaseUrl } from './support/config.mjs';
+import { signUpAndVerify, uniqueEmail } from './support/flows';
+
+async function authorizeReplay(page: Parameters<typeof signUpAndVerify>[0], prefix = 'replay') {
+  const email = uniqueEmail(prefix);
+  await signUpAndVerify(page, { email, name: 'Replay reader' });
+
+  const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  try {
+    await sql.begin(async (tx) => {
+      const [identity] = await tx<Array<{ callerId: string; replayMemberId: string }>>`
+        SELECT caller.id AS "callerId", r.created_by AS "replayMemberId"
+        FROM users caller
+        CROSS JOIN workspaces w
+        JOIN rooms r ON r.workspace_id = w.id
+        WHERE caller.email = ${email}
+          AND w.slug = 'atrium-replay'
+          AND r.slug = 'typescript-9998'
+      `;
+      if (!identity) throw new Error('the seeded replay identity was not found');
+
+      // The corpus already has five real participants. Point this test browser's
+      // verified session at its seeded creator instead of inventing a sixth
+      // human whose membership would change the product state under test.
+      await tx`UPDATE users SET email_verified = true WHERE id = ${identity.replayMemberId}`;
+      await tx`
+        UPDATE auth_sessions
+        SET user_id = ${identity.replayMemberId}
+        WHERE user_id = ${identity.callerId}
+      `;
+      await tx`DELETE FROM users WHERE id = ${identity.callerId}`;
+    });
+  } finally {
+    await sql.end();
+  }
+}
 
 async function replayDatabaseFingerprint(): Promise<string> {
   const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
@@ -70,6 +105,59 @@ async function replayDatabaseFacts() {
 }
 
 test.describe('persisted three-surface replay', () => {
+  test.beforeEach(async ({ page }) => {
+    await authorizeReplay(page);
+  });
+
+  /**
+   * Mutation: remove `requireSession` from the replay route. A caller with no
+   * session can read the complete persisted room rather than being returned to
+   * the sign-in boundary.
+   */
+  test('requires a verified session before revealing replay data', async ({ browser }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto('/replay/atrium-replay/typescript-9998');
+    await expect(page).toHaveURL(/\/sign-in\?next=/);
+    expect(new URL(page.url()).searchParams.get('next')).toBe(
+      '/replay/atrium-replay/typescript-9998',
+    );
+    await expect(page.getByText('Some rough notes from a conversation')).toHaveCount(0);
+    await context.close();
+  });
+
+  /**
+   * Mutation: load replay data by public slugs after authentication, or check
+   * workspace membership without checking the room membership. A verified
+   * account outside the room can then read its transcript.
+   */
+  test('returns not found when the verified caller is not a room member', async ({ browser }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const email = uniqueEmail('replay-outsider');
+    await signUpAndVerify(page, {
+      email,
+      name: 'Replay outsider',
+    });
+    const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+    try {
+      await sql`
+        INSERT INTO workspace_members (organization_id, user_id, role)
+        SELECT w.id, u.id, 'member'
+        FROM workspaces w
+        CROSS JOIN users u
+        WHERE w.slug = 'atrium-replay' AND u.email = ${email}
+        ON CONFLICT (organization_id, user_id) DO NOTHING
+      `;
+    } finally {
+      await sql.end();
+    }
+    const response = await page.goto('/replay/atrium-replay/typescript-9998');
+    expect(response?.status()).toBe(404);
+    await expect(page.getByText('Some rough notes from a conversation')).toHaveCount(0);
+    await context.close();
+  });
+
   /**
    * Mutation: route the replay through gallery fixtures, truncate the corpus,
    * or leave the range input disconnected. The database-backed title/count and
@@ -340,6 +428,7 @@ test.describe('persisted three-surface replay', () => {
   test('honours reduced motion on the persisted replay route', async ({ browser }) => {
     const context = await browser.newContext({ reducedMotion: 'reduce' });
     const page = await context.newPage();
+    await authorizeReplay(page, 'replay-reduced-motion');
     await page.goto('/replay/atrium-replay/typescript-9998?theme=light');
     const motion = await page.evaluate(() => {
       const animations: string[] = [];
@@ -361,6 +450,7 @@ test.describe('persisted three-surface replay', () => {
 
     const ordinary = await browser.newContext({ reducedMotion: 'no-preference' });
     const ordinaryPage = await ordinary.newPage();
+    await authorizeReplay(ordinaryPage, 'replay-ordinary-motion');
     await ordinaryPage.goto('/replay/atrium-replay/typescript-9998?theme=light');
     const liveTransitions = await ordinaryPage.evaluate(
       () =>

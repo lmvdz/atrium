@@ -749,12 +749,22 @@ async function readContext(
   const first = Math.min(...claimed.map((candidate) => candidate.seq));
   const from = Math.max(0, first - config.contextMessagesBefore);
   const rows = await db
-    .select({ id: messages.id, authorId: messages.authorId, body: messages.body })
+    .select({
+      id: messages.id,
+      authorId: messages.authorId,
+      body: messages.body,
+      mentionUserIds: messages.mentionUserIds,
+    })
     .from(messages)
     .where(and(eq(messages.roomId, roomId), gte(messages.seq, from)))
     .orderBy(asc(messages.seq))
     .limit(config.contextMessagesBefore + config.maxWindowMessages * 2);
-  return rows.map((row) => ({ id: row.id, authorId: row.authorId ?? '', body: row.body }));
+  return rows.map((row) => ({
+    id: row.id,
+    authorId: row.authorId ?? '',
+    body: row.body,
+    mentionUserIds: row.mentionUserIds,
+  }));
 }
 
 async function markStarted(

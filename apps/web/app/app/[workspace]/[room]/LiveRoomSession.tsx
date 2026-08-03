@@ -61,6 +61,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   >('idle');
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [mentionTargetId, setMentionTargetId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [attachmentNote, setAttachmentNote] = useState<string>();
   const pendingUploads = useRef(0);
@@ -246,6 +247,9 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const mentionTargets = view.humans
     .filter((human) => human.id !== viewerId)
     .map((human) => ({ id: human.id, label: human.name }));
+  const activeMentionTargetId = mentionTargets.some((target) => target.id === mentionTargetId)
+    ? mentionTargetId
+    : null;
   const owed = view.attention.filter((item) => needsViewer(item.state)).length;
   const subscribed = live.subscribed && connection === 'open';
   const unreadFilterScope = view.entries.find((entry) => entry.type === 'since-you-left')?.entryIds;
@@ -355,8 +359,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               clientRef.current?.sendMessage(roomId, body, {
                 attachments,
                 replyToId: binding.mode === 'replying' ? binding.to.messageId : null,
+                mentionUserIds: activeMentionTargetId ? [activeMentionTargetId] : [],
               });
               setDraft('');
+              setMentionTargetId(null);
               setAttachments([]);
               setAttachmentNote(undefined);
               setBinding({ mode: 'free' });
@@ -381,12 +387,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
                 setUploading(pendingUploads.current > 0);
               });
           },
-          onMention: (userId) => {
-            setDraft((current) => {
-              const withoutPrior = current.replace(/^Mention for [0-9a-f-]{36}:\s*/, '');
-              return `Mention for ${userId}: ${withoutPrior}`;
-            });
-          },
+          onMention: setMentionTargetId,
           attachmentNote,
           onCancelBinding: () => {
             if (boundSubmission === null) setBinding({ mode: 'free' });
@@ -526,6 +527,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         lastCheck={view.updatedAt}
         messages={view.records}
         mentionTargets={mentionTargets}
+        mentionTargetId={activeMentionTargetId}
         objectives={objectives}
         objects={view.objects}
         openAttentionId={openAttentionId}

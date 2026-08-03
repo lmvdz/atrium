@@ -67,6 +67,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
       clientMessageId: messages.clientMessageId,
       replyToId: messages.replyToId,
       attachments: messages.attachments,
+      mentionUserIds: messages.mentionUserIds,
       createdAt: messages.createdAt,
     })
     .from(messages)
@@ -196,8 +197,10 @@ export type ReplayData = Omit<
   /** Optional only for hand-built fixtures; every server load mints a fresh commit receipt. */
   readonly loadReceipt?: string;
   /** Optional only for hand-built fixtures created before live client ids existed. */
-  messages: (Omit<LoadedReplayMessage, 'clientMessageId'> & {
+  messages: (Omit<LoadedReplayMessage, 'clientMessageId' | 'mentionUserIds'> & {
     readonly clientMessageId?: string | null;
+    /** Optional only for hand-built fixtures created before structured mentions existed. */
+    readonly mentionUserIds?: readonly string[];
   })[];
   /** Optional only so hand-built unit fixtures can describe pre-ledger imports. */
   readonly messagePositions?: LoadedReplayData['messagePositions'];

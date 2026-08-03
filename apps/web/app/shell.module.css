@@ -98,7 +98,7 @@
   background: none;
   color: var(--tx1);
   font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
   cursor: pointer;
 }

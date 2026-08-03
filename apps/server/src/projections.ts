@@ -119,6 +119,7 @@ async function projectMessagePosted(
     replyToId: event.replyToId,
     clientMessageId: event.clientMessageId,
     attachments: event.attachments,
+    mentionUserIds: event.mentionUserIds ?? [],
   });
   // Same transaction, same statement batch, no gap. `pg-boss`'s `fromDrizzle`
   // adapter writes the job row through `tx`, so there is no instant at which

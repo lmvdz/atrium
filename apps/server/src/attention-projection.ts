@@ -80,11 +80,7 @@ export async function reconcileStoredAttention(input: {
   return { ...projection, items: reconciled };
 }
 
-/**
- * Explicit composer mentions, attached to accepted objects borne by the same
- * authored message. `Mention for <user-id>:` is an opt-in request marker, not
- * a scan for bare names; the request remains the author's verbatim suffix.
- */
+/** Explicit structured request targets attached to staged or accepted readings borne by the message. */
 export function mentionSignals(
   state: CoreState,
   roomId: string,
@@ -92,21 +88,31 @@ export function mentionSignals(
   memberIds: readonly string[],
 ): MentionSignal[] {
   const members = new Set(memberIds);
-  const mentioned = new Map<string, { userId: string; request: string }>();
+  const mentioned = new Map<string, { userId: string; request: string }[]>();
   for (const message of messages) {
-    const match = /^Mention for ([0-9a-f-]{36}): (\S[^\r\n]*)$/.exec(message.body);
-    if (match?.[1] && match[2] && members.has(match[1])) {
-      mentioned.set(message.id, { userId: match[1], request: match[2] });
-    }
+    const targets = [...new Set(message.mentionUserIds ?? [])]
+      .filter((userId) => members.has(userId))
+      .map((userId) => ({ userId, request: message.body }));
+    if (targets.length > 0) mentioned.set(message.id, targets);
   }
 
-  return Object.values(state.objects).flatMap((record) => {
-    if (record.object.roomId !== roomId) return [];
-    return record.object.provenance.messageIds.flatMap((messageId) => {
-      const signal = mentioned.get(messageId);
-      return signal
-        ? [{ roomId, objectId: record.object.id, userId: signal.userId, request: signal.request }]
-        : [];
+  const subjects = [
+    ...Object.values(state.proposals)
+      .filter((record) => record.status === 'proposed' && record.proposal.roomId === roomId)
+      .map((record) => ({ id: record.proposal.id, messageIds: record.proposal.provenance })),
+    ...Object.values(state.objects)
+      .filter((record) => record.object.roomId === roomId)
+      .map((record) => ({ id: record.object.id, messageIds: record.object.provenance.messageIds })),
+  ];
+
+  return subjects.flatMap((subject) => {
+    return subject.messageIds.flatMap((messageId) => {
+      return (mentioned.get(messageId) ?? []).map((signal) => ({
+        roomId,
+        objectId: subject.id,
+        userId: signal.userId,
+        request: signal.request,
+      }));
     });
   });
 }

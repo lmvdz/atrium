@@ -21,11 +21,12 @@ nothing has checked it. `✓` is the same sentence after a person accepted it. T
 arrow is the provenance link back to the messages it was read from. [The actor
 floor](#the-actor-floor) is where that difference is enforced.
 
-**None of that runs yet.** The rules are enforced and tested in `packages/core`,
-and nowhere else: the machine reading that would feed them does not exist, and
-no running process is wired to the core at all. [What is actually
-built](#what-is-actually-built) spells that out, and it is the section to read
-before believing anything above it.
+**That loop now runs on the Phase 2 branch.** The server records messages,
+stages machine readings through the optional interpretation worker, and applies
+human actions through the semantic ledger. Persisted replay and authenticated
+live rooms render the same three product surfaces. [What is actually
+built](#what-is-actually-built) distinguishes those real routes from the
+fixture-backed design gallery.
 
 **And a machine drafted it.** This codebase was written by AI — an orchestrated
 campaign of Claude models building against a decision graph kept on [this repo's
@@ -65,10 +66,10 @@ autonomous.
 
 ## What the three surfaces look like
 
-**The panel below is the design, not a screenshot.** Nothing renders it today.
-`apps/web` lays out the three regions over hardcoded fixtures, and this sketch is
-drawn from [`design/CONVENTIONS.md`](design/CONVENTIONS.md). Nothing here was
-captured from a running app.
+**The panel below is a conceptual sketch, not a screenshot.** The authenticated
+live room and persisted replay routes render these three surfaces over database
+state. `/` and `/gallery` remain fixture-backed design harnesses. The binding
+rendering rules live in [`design/CONVENTIONS.md`](design/CONVENTIONS.md).
 
 Conversation is the messages, with each machine reading attached to the message
 it was drawn from. Current state is a flat list, one glyph per line. Needs you is
@@ -151,17 +152,12 @@ narrower than `✓` implies:
 | a claim moving to `verification: 'verified'` | **no** — refused | [the actor floor](#the-actor-floor) |
 | a claim accepted `unverified` or `disputed` | yes | deliberate: an accepted claim keeps its truth status in a separate `verification` field, and that field is what the glyph renders |
 | `open_question` | yes | deliberate: #4's auto-accept path |
-| `commitment` | **yes — and it should not** | attribution is deferred to #21 |
-| `objective` | **yes — and it should not** | no gate exists |
+| `commitment` | **no** — refused | accepting it would write an obligation onto a named person on a machine's word |
+| `objective` | **no** — refused | objectives organize the room and require a person to accept them |
 
-`{statement: 'Bob will deploy production Friday', owner: 'user_bob'}` — a
-third-party commitment naming a human — is accepted on a model actor's word with
-no issue raised. `authority.ts`'s own header concedes why: deciding whether a
-commitment is self-stated or third-party needs the message it was drawn from,
-which the reducer does not have, so the commitment row is routed to
-[#21](https://github.com/lmvdz/atrium/issues/21) and the gap is scheduled. Until
-#21 lands, "`✓` means a human checked it" is true of decisions and of verified
-claims, and false of commitments and objectives.
+The reducer therefore refuses a model-authored accepted commitment or objective
+even when the proposal and provenance are otherwise valid. Models may stage
+them; a person must perform the acceptance that produces `✓`.
 
 **Corrections are events, not erasures.** Saying *"that was only a suggestion,
 not a decision"* does not delete the decision. It writes a correction that
@@ -192,61 +188,28 @@ the fixture gallery remains only a design harness. The combined unit suite is
 3,026 tests across seven projects, and the real-Postgres and Playwright suites
 remain separate fail-closed gates.
 
-**On `main`.** `packages/core` is the semantic core: pure TypeScript with no I/O
+`packages/core` is the semantic core: pure TypeScript with no I/O
 and no clock, holding five accepted object types (decision, commitment, open
 question, claim, objective), typed relations, proposal staging,
 corrections-as-events, and a deterministic reducer whose live-and-replay
 equivalence is checked property-style: the test generates logs and asserts the
 equivalence across all of them.
-`packages/db` has the Drizzle schema and its first migration. `packages/ingest`
+`packages/db` holds the guarded append-only schema and migrations. `packages/ingest`
 turns a real conversation into canonical JSONL, byte-identically on a rerun;
 three corpora are committed, of 454, 111 and 480 messages. `design/` holds the
-token system (51 variables per theme, extracted from the `:root` and
-`html.atr-dark` blocks of `Atrium v6.dc.html`, the last of the prior prototype
-lineage) and the rules for using it. `apps/web` is a Next.js shell that lays
-out the three regions over hardcoded fixtures; it declares `@atrium/core`
-directly and does not declare `@atrium/db` at all, so the arrow under
-[Layout](#layout) is the shape the code is held to; it is not what the manifests
-currently say. `apps/server` is one Node process whose WebSocket
-server is a heartbeat-and-echo placeholder and whose job queue is real but
-registers `interpret-message` as a no-op.
+WIRE-derived token system and its binding rendering conventions. `apps/server`
+provides authenticated commands, realtime catch-up, projections, attachments
+and the optional interpretation worker. `apps/web` has two distinct uses: `/`
+is the fixture-backed design gallery, while authenticated live rooms and replay
+routes load real persisted state through the server. The compose stack is a
+local production-shape deployment; it does not imply a public host exists.
 
-The token file's header still says its values are byte-identical to that
-prototype. On `main` they are not: a routine `pnpm lint` reformatted the file,
-lower-casing every hex, renotating two `rgba()` values (`rgba(244,241,234,.10)`
-→ `rgba(244, 241, 234, 0.1)`), and changing 83 lines. The checker that proved
-the property was never committed, so nothing caught it. Measured today, the
-`:root` block matches on 0 of 51 declarations and `html.atr-dark` on 19 of 51;
-every colour is still the same colour. The byte-identity claim broke; the
-palette did not.
-[#48](https://github.com/lmvdz/atrium/issues/48) owns restoring the file and
-committing the checker; the same stale sentence is still in `CONVENTIONS.md`
-and in `design/tokens.css`'s own header, which is how this class survives being
-fixed in one place.
-
-**On branches, under review, not merged.** The realtime ledger
-([#22](https://github.com/lmvdz/atrium/issues/22)), auth and workspaces
-([#26](https://github.com/lmvdz/atrium/issues/26)), CI
-([#28](https://github.com/lmvdz/atrium/issues/28)), a deployment that actually
-serves a page ([#40](https://github.com/lmvdz/atrium/issues/40)), the UI
-component library and app frame
-([#39](https://github.com/lmvdz/atrium/issues/39)), the three-surface
-interaction prototype ([#10](https://github.com/lmvdz/atrium/issues/10)), and the
-next round of the core engine
-([#21](https://github.com/lmvdz/atrium/issues/21)). Each is a branch with an open
-ticket and an unfinished review round. None of it is shipped, and there is no
-continuous integration on `main` yet; the workflow that would provide it is
-itself on a branch. There is also no host. #40 is open precisely because the
-deployment does not yet serve a page, so the compose stack under "Boot it" is a
-local stack today, whatever the file says about production.
-
-**Not built at all.** No product code here calls a language model — not on
-`main`, not on any branch under review. There is no interpretation job that does
-anything, no eval run, no live multiplayer, and no attention computation over
-real data. The only model work that has happened is a throwaway spike on a
-`research/` branch, which measured how the reading would behave and settled the
-pipeline decision; nothing from it ships. [What would settle
-this](#what-would-settle-this) is the last section.
+The interpretation worker is installed only when both model routes are
+configured. With them unset, it fails closed and accumulates no paid work. Test
+acceptance uses a deterministic, no-network provider. Live multiplayer,
+attention computation, persisted replay, and CI are present on this branch;
+their exact verification evidence belongs in `docs/PHASE2-RECEIPT.md` rather
+than in a branch-state narrative here.
 
 ## Why it is built this way
 
@@ -1240,35 +1203,22 @@ about; a boundary that nobody wrote down is one somebody walks over.
 
 ## Notes for the next change
 
-- `design/tokens.css` is a placeholder transcribed from the settled Atrium token
-  system recorded in `plans/research-live-call-design-system/`. When the
-  `design/tokens` branch lands, replace the file wholesale. `shell.module.css`
-  reads only the variables, so replacing the file is enough for everything the
-  page paints; the one exception is `apps/web/app/layout.tsx`, whose viewport
-  `themeColor` hardcodes `#e6e2da` and `#0a0b0c` for the browser chrome. Those
-  are emitted as `<meta name="theme-color">`, which is HTML metadata and so
-  cannot reference a custom property; they have to be updated by hand and kept
-  in step with `--bg0`.
-- `interpret-message` is registered as a no-op worker. Its idempotency contract
-  is already in place: dedup key `${messageId}:${interpretationVersion}` with an
-  explicit singleton window, backed by the `(message_id, interpretation_version)`
-  unique constraint on `interpretations` (issue #16).
-- The WebSocket protocol is heartbeat, echo, and an authorized command path with
-  a presence roster. The real command and event contract slots into
-  `handleCommand` without the authentication or authorization around it moving.
-  Commands in `commandPolicy` with no handler answer `not_implemented` rather
-  than pretending to have worked.
-- `rooms.workspace_id` is `NOT NULL` with no backfill, so migration `0001` will
-  fail on a database that already has rooms in it. Nothing has shipped; drop the
-  dev database rather than writing a backfill for rows that do not exist.
+- `design/tokens.css` and the shared frame now follow WIRE v8. Treat
+  `design/CONVENTIONS.md` and the current component tree as the rendering
+  authority; `/` and `/gallery` are the fixture harnesses for that system.
+- `interpret-message` is a real worker with deduplicated windows and guarded
+  model routing. It is installed only when both model route variables are set.
+  Acceptance tests use the deterministic no-network provider; do not add a
+  gateway key casually because the escalation trigger remains expensive.
+- The WebSocket protocol is the production room contract: authenticated
+  subscribe/catch-up and commands in, ordered `(room, room_seq)` events out.
+  Membership is checked at upgrade, per command, and for passive listeners.
+- The authenticated live route and persisted replay route use the shared frame
+  over real server/database state. Do not infer that `/` is a real-data route;
+  it intentionally remains the design harness.
 - No MFA, SSO or SCIM (out of scope for #26). Better Auth's `twoFactor` and
   `passkey` plugins are the documented path when MFA is wanted; both add tables,
   so they land with a migration and an update to the parity test.
-- The WebSocket protocol is real (#22): `subscribe` / `since` / `command`
-  in, `(room, room_seq)`-tagged events out. Identity at the upgrade is the #26
-  stub in `apps/server/src/session.ts` — the *seam* is real and membership is
-  checked against the database per command; only the "who is this socket"
-  half is placeholder.
 - The client's WebSocket URL is resolved at runtime, never baked. Same-origin
   `/ws` by default; `ATRIUM_WS_URL` is read per request by the `force-dynamic`
   route at `apps/web/app/api/runtime-config/route.ts`. A unit test asserts that

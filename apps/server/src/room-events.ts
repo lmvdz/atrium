@@ -78,6 +78,7 @@ export const MessagePosted = z.object({
   /** The sender's idempotency key — also what its own optimistic echo matches on. */
   clientMessageId: z.string().min(1).nullable().default(null),
   attachments: z.array(MessageAttachment).default([]),
+  mentionUserIds: z.array(Id).max(20).optional(),
 });
 export type MessagePosted = z.infer<typeof MessagePosted>;
 

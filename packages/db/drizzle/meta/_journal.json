@@ -92,6 +92,13 @@
       "when": 1786185600000,
       "tag": "0012_command_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786185600001,
+      "tag": "0013_structured_mentions",
+      "breakpoints": true
     }
   ]
 }

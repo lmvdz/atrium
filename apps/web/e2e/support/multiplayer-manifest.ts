@@ -55,7 +55,7 @@ export function multiplayerManifest(
       semantic = 'decision';
       objective = 0;
     } else if (seq === 75) {
-      body = `Mention for ${userIds[4]}: Open question: Run ${runId} which trace proves ordered catch-up?`;
+      body = `Open question: Run ${runId} which trace proves ordered catch-up?`;
       semantic = 'open_question';
       mention = 4;
     } else if (seq === 90) {
