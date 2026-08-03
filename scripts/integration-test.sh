@@ -51,4 +51,10 @@ fi
 #
 # Not `exec`: the EXIT trap above is what stops the container, and exec would
 # replace this shell before it could fire.
-pnpm exec vitest run --config vitest.integration.config.ts "${VITEST_ARGS[@]}"
+if [ "${#VITEST_ARGS[@]}" -eq 0 ]; then
+  # Bash 3.2 treats an empty-array expansion as an unset variable under `set
+  # -u`. Keep the no-argument gate runnable on the macOS system Bash.
+  pnpm exec vitest run --config vitest.integration.config.ts
+else
+  pnpm exec vitest run --config vitest.integration.config.ts "${VITEST_ARGS[@]}"
+fi
