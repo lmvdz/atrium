@@ -30,6 +30,7 @@ import {
   StateLens,
   SurfaceIndicators,
   slot,
+  surfaceIndicators,
   systemText,
   Timeline,
   WorkspaceSpacer,
@@ -55,7 +56,6 @@ import type {
 } from '../../src/components/model';
 import { needsViewer } from '../../src/components/model';
 import { ThemeToggle } from '../theme-toggle';
-import { surfaces } from './fixtures';
 
 /**
  * Every seam the library offers, in one place. Optional throughout: the
@@ -260,7 +260,7 @@ function Frame(props: RoomFrameProps) {
                    the same predicate `foldPin`, the rail and the lens count. A
                    length is the one reading of that array that stopped being
                    true the moment an act became a state change. */
-                surfaces={surfaces(
+                surfaces={surfaceIndicators(
                   props.attention.filter((item) => needsViewer(item.state)).length,
                   props.objects.length,
                 )}

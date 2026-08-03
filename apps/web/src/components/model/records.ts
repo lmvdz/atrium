@@ -112,6 +112,15 @@ export interface SurfaceIndicator {
   readonly warn: boolean;
 }
 
+/** All three surfaces are present at once; only derived sets carry counts. */
+export function surfaceIndicators(owed: number, objects: number): readonly SurfaceIndicator[] {
+  return [
+    { id: 'conversation', label: 'CONVERSATION', count: null, warn: false },
+    { id: 'needs-you', label: 'NEEDS YOU', count: owed, warn: true },
+    { id: 'current-state', label: 'CURRENT STATE', count: objects, warn: false },
+  ];
+}
+
 /* --- timeline ------------------------------------------------------------ */
 
 /** An inline run inside a message body. Code and mentions are the only two. */

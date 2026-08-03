@@ -142,3 +142,17 @@ export async function loadReplayData(database: Database, roomId: string) {
 }
 
 export type ReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
+
+export async function loadReplayDataByLocation(
+  database: Database,
+  workspaceSlug: string,
+  roomSlug: string,
+) {
+  const [match] = await database
+    .select({ roomId: rooms.id })
+    .from(rooms)
+    .innerJoin(workspaces, eq(workspaces.id, rooms.workspaceId))
+    .where(and(eq(workspaces.slug, workspaceSlug), eq(rooms.slug, roomSlug)))
+    .limit(1);
+  return match ? loadReplayData(database, match.roomId) : null;
+}

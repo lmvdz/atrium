@@ -30,7 +30,6 @@ import type {
   RoutineEntry,
   SinceYouLeftEntry,
   StateObject,
-  SurfaceIndicator,
   SystemEntry,
   SystemStatement,
   TimelineEntry,
@@ -49,6 +48,7 @@ import {
   rationale,
   settledForViewer,
   sinceYouLeft,
+  surfaceIndicators,
   systemStatement,
   trailerFor,
   withFilter,
@@ -299,13 +299,7 @@ export const ROOM: RoomHeadRecord = {
 };
 
 /** All three surfaces are on screen at once; only two of them carry a count. */
-export function surfaces(owed: number, objects: number): readonly SurfaceIndicator[] {
-  return [
-    { id: 'conversation', label: 'CONVERSATION', count: null, warn: false },
-    { id: 'needs-you', label: 'NEEDS YOU', count: owed, warn: true },
-    { id: 'current-state', label: 'CURRENT STATE', count: objects, warn: false },
-  ];
-}
+export const surfaces = surfaceIndicators;
 
 /* --- state lens ---------------------------------------------------------- */
 
