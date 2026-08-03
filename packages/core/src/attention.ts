@@ -142,6 +142,12 @@ export const RationaleReason = z.discriminatedUnion('kind', [
     statement: z.string().min(1),
     proposedType: AcceptedObjectType,
   }),
+  /** A staged reading whose cited receipt explicitly declined certification. */
+  z.object({
+    kind: z.literal('receipt_review'),
+    statement: z.string().min(1),
+    proposedType: AcceptedObjectType,
+  }),
 ]);
 export type RationaleReason = z.infer<typeof RationaleReason>;
 
@@ -195,6 +201,8 @@ export function rationaleFor(userId: Id, reason: RationaleReason): Rationale {
       return `${you} — you were named in a message that asks you something: "${clip(reason.request)}".` as Rationale;
     case 'reading_pending':
       return `${you} — a machine read this as a ${reason.proposedType} and nothing in the words settles that it was one, so it is staged rather than accepted and any member of the room can file it or decline it: "${clip(reason.statement)}".` as Rationale;
+    case 'receipt_review':
+      return `${you} — a machine staged this as a ${reason.proposedType}, but its cited receipt did not certify that reading. Review the source and file it or decline it: "${clip(reason.statement)}".` as Rationale;
     default: {
       const exhaustive: never = reason;
       return `${you} — ${JSON.stringify(exhaustive)}` as Rationale;
@@ -393,6 +401,7 @@ const PRODUCER_OF: Readonly<Record<RationaleReason['kind'], AttentionProducer>> 
   commitment_confirm: 'staged_proposal',
   commitment_self_stated: 'staged_proposal',
   reading_pending: 'staged_proposal',
+  receipt_review: 'staged_proposal',
   commitment_overdue: 'open_commitment',
   commitment_open: 'open_commitment',
   question_blocks_commitment: 'blocking_relation',
@@ -698,6 +707,23 @@ function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource
       producer: 'staged_proposal',
     });
   };
+  const concludeReview = (proposal: StoredProposal): void => {
+    if (classOf(proposal.type) === 'needs_decision') return;
+    examined.push({
+      class: 'needs_decision',
+      subjectKind: 'proposal',
+      subjectId: proposal.id,
+      producer: 'staged_proposal',
+    });
+  };
+  const concludeSettled = (proposal: StoredProposal): void => {
+    conclude(proposal);
+    // A receipt that could not certify the machine's reading is reviewed as a
+    // generic needs-decision item, even when its proposed type is commitment.
+    // Settlement or a complete reading-level projection that replaces the
+    // generic review may conclude it; a blind bounded window must not.
+    concludeReview(proposal);
+  };
 
   for (const proposalId of Object.keys(state.proposals).sort()) {
     const record = state.proposals[proposalId];
@@ -706,7 +732,7 @@ function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource
       // Accepted, rejected or superseded: the cycle looked at this proposal and
       // it is settled. That is a conclusion, and it is the ordinary way a
       // `needs_decision` item stops being owed.
-      conclude(record.proposal);
+      concludeSettled(record.proposal);
       continue;
     }
     const { proposal } = record;
@@ -723,13 +749,40 @@ function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource
       });
       continue;
     }
-    // A receipt the engine declines to rule on silences the panel too, and the
-    // silence gets a receipt of its own. Round 3's gauntlet is the case: the
-    // quote carries the whole statement and says more, so the extra words may be
-    // "not" — asking somebody to confirm a commitment that may be the negation of
-    // what they wrote is worse than asking them nothing.
+    // A verdict about a bounded window is not a judgement about the reading.
+    // Missing cited source remains refusal-only and cannot mint a review item.
+    if (verdict.about === 'the_window') {
+      refusals.push({
+        proposalId: proposal.id,
+        reason: `the bounded window did not establish a conclusion about this proposal, so the verdict that came back (${verdict.rule}) is a fact about the window rather than about the reading and nothing here judged the proposal: ${verdict.reason}`,
+      });
+      continue;
+    }
+    // A receipt the engine declines to rule on must never become a type-specific
+    // confirmation: the extra words may be "not", so asking an alleged owner to
+    // confirm would repeat the machine's attribution error. It is nevertheless
+    // a staged machine reading, and #6 requires staged readings to reach a
+    // person. Route the *reading* to the room, visibly proposed and with its
+    // source, while retaining the refusal that explains why no machine verdict
+    // was possible. This reading-level cycle does know its review audience and
+    // marks it examined; the window-level branch above remains unexamined.
     if (verdict.rule === 'receipt_not_certifiable') {
-      refusals.push({ proposalId: proposal.id, reason: verdict.reason });
+      const review = readingReviewOutcome(proposal, ctx);
+      if (review.kind === 'raise') {
+        refusals.push({ proposalId: proposal.id, reason: verdict.reason });
+        // This complete reading-level cycle knows the current review audience.
+        // It may replace a prior type-specific item, and roster members no
+        // longer present must not remain owed forever. Window-level blindness
+        // returned above and declares no examination.
+        conclude(proposal);
+        concludeReview(proposal);
+        out.push(...review.items);
+      } else {
+        refusals.push({
+          proposalId: proposal.id,
+          reason: `${verdict.reason}; ${review.reason}`,
+        });
+      }
       continue;
     }
     // ── A verdict about the window is not a judgement about the reading — r11 ─
@@ -766,13 +819,6 @@ function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource
     // A refusal rather than a silence, for `AttentionRefusal`'s stated reason: a
     // required input was missing, and the honest answer to that is silence *plus
     // a receipt for the silence*.
-    if (verdict.about === 'the_window') {
-      refusals.push({
-        proposalId: proposal.id,
-        reason: `this window does not hold every message the proposal cites, so the verdict that came back (${verdict.rule}) is a fact about the window rather than about the reading and nothing here judged this proposal: ${verdict.reason}`,
-      });
-      continue;
-    }
     // The one `continue` that owes nothing *in items*: `accepted`, `quiet` and
     // `none` are the engine saying this proposal is not anybody's turn. It owes
     // an examination, though — this is the branch that carries "the commitment
@@ -789,10 +835,46 @@ function proposalItems(state: CoreState, ctx: AttentionContext): AttentionSource
       continue;
     }
     conclude(proposal);
+    concludeReview(proposal);
     out.push(...outcome.items);
   }
 
   return { items: out, refusals, examined };
+}
+
+/**
+ * A machine reading whose receipt was referred is not a decision or commitment
+ * yet. It therefore fans out as a generic review, never as owner confirmation.
+ */
+function readingReviewOutcome(proposal: StoredProposal, ctx: AttentionContext): NeedsYouOutcome {
+  const reviewStatement = payloadText(proposal.type, proposal.payload as Record<string, unknown>);
+  if (reviewStatement.length === 0) {
+    return {
+      kind: 'refuse',
+      reason: `a ${proposal.type} reading needs human review, but its payload carries no text — there is nothing honest to put in front of a person`,
+    };
+  }
+  const room = [...(ctx.members?.[proposal.roomId] ?? [])].sort();
+  return raiseOrRefuse(
+    room.map((userId) =>
+      item({
+        id: attentionItemId(userId, 'proposal', proposal.id, 'needs_decision'),
+        roomId: proposal.roomId,
+        userId,
+        objectId: proposal.id,
+        subjectKind: 'proposal',
+        class: 'needs_decision',
+        priority: ATTENTION_PRIORITY.needs_decision,
+        createdAt: ctx.now,
+        reason: {
+          kind: 'receipt_review',
+          statement: reviewStatement,
+          proposedType: proposal.type,
+        },
+      }),
+    ),
+    `a machine staged this ${proposal.type} reading for human review, but no member list was supplied for room "${proposal.roomId}" — nobody can be asked to inspect it: "${clip(reviewStatement)}"`,
+  );
 }
 
 /**

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, type Locator, type Page, test } from '@playwright/test';
 import postgres from 'postgres';
 import type { AuditResult } from './audit';
 import { AUDIT } from './audit';
@@ -36,6 +36,21 @@ async function authorizeReplay(page: Parameters<typeof signUpAndVerify>[0], pref
     });
   } finally {
     await sql.end();
+  }
+}
+
+async function findAttentionCard(page: Page, text: string): Promise<Locator> {
+  const pin = page.getByRole('region', { name: 'Needs you' });
+  const visited = new Set<string>();
+  for (;;) {
+    const item = pin.locator('[data-attention-id]').filter({ hasText: text });
+    if ((await item.count()) > 0) return item;
+    const next = pin.locator('[data-pin-overflow]');
+    if ((await next.count()) === 0) return item;
+    const pageNumber = await next.getAttribute('data-pin-page');
+    if (pageNumber === null || visited.has(pageNumber)) return item;
+    visited.add(pageNumber);
+    await next.click();
   }
 }
 
@@ -80,6 +95,7 @@ async function replayDatabaseFacts() {
         blockers: number;
         proposalSources: number;
         objectSources: number;
+        pendingAttention: number;
       }>
     >`
       WITH target AS (
@@ -96,7 +112,8 @@ async function replayDatabaseFacts() {
         (SELECT count(*)::int FROM relations WHERE room_id = (SELECT id FROM target) AND kind = 'answers') AS answers,
         (SELECT count(*)::int FROM relations WHERE room_id = (SELECT id FROM target) AND kind = 'blocks') AS blockers,
         (SELECT count(*)::int FROM proposal_sources WHERE room_id = (SELECT id FROM target)) AS "proposalSources",
-        (SELECT count(*)::int FROM object_sources WHERE room_id = (SELECT id FROM target)) AS "objectSources"
+        (SELECT count(*)::int FROM object_sources WHERE room_id = (SELECT id FROM target)) AS "objectSources",
+        (SELECT count(*)::int FROM attention_items WHERE room_id = (SELECT id FROM target) AND status = 'pending') AS "pendingAttention"
     `;
     return row;
   } finally {
@@ -176,6 +193,7 @@ test.describe('persisted three-surface replay', () => {
       blockers: 0,
       proposalSources: 4,
       objectSources: 0,
+      pendingAttention: 20,
     });
     await page.goto('/replay/atrium-replay/typescript-9998');
 
@@ -186,10 +204,12 @@ test.describe('persisted three-surface replay', () => {
       page.getByRole('heading', { name: 'function-call side effects', exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText(
-        'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
-        { exact: true },
-      ),
+      page
+        .locator('[data-region="current-state"]')
+        .getByText(
+          'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
+          { exact: true },
+        ),
     ).toBeVisible();
     await expect(
       page.getByRole('textbox', { name: 'Message #function-call side effects' }),
@@ -285,6 +305,47 @@ test.describe('persisted three-surface replay', () => {
   });
 
   /**
+   * Mutation: restore the receipt-not-certifiable branch that records only a
+   * refusal, drop the pin's answer binding, or accept without retaining the
+   * typed answer. The staged decision then reaches nobody, or its ✓ receipt no
+   * longer carries both the authored answer and cited source.
+   */
+  test('answers a referred decision from Needs you into an answer-bound receipt', async ({
+    page,
+  }) => {
+    const before = await replayDatabaseFingerprint();
+    const decision = 'will instead be using a function to obtain the current token';
+    const answer = 'Use the getter so the current token is read at the point of use.';
+    await page.goto('/replay/atrium-replay/typescript-9998');
+
+    const pin = page.getByRole('region', { name: 'Needs you' });
+    const pinned = await findAttentionCard(page, decision);
+    await expect(pinned).toContainText('◆');
+    await expect(pinned).toContainText('cited receipt did not certify');
+    await pinned.getByRole('button', { name: 'answer', exact: true }).click();
+    const composer = page.getByRole('textbox', {
+      name: `Answer ${decision} in your own words`,
+    });
+    await expect(composer).toBeFocused();
+    await composer.fill(answer);
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+
+    const receipt = page.getByRole('region', { name: 'Receipt' });
+    await expect(receipt).toContainText('DECISION');
+    await expect(receipt).toContainText('accepted');
+    await expect(receipt).toContainText('answer recorded through the bound composer');
+    await expect(receipt.locator('[data-quoted]').filter({ hasText: answer })).toHaveCount(1);
+    await expect(receipt.locator('[data-jumps-to]')).not.toHaveCount(0);
+    await receipt.getByRole('button', { name: '← BACK TO CURRENT STATE' }).click();
+    const accepted = page
+      .locator('[data-region="current-state"] [data-object-id]')
+      .filter({ hasText: decision });
+    await expect(accepted).toContainText('✓');
+    await expect(pin.locator('[data-attention-id]').filter({ hasText: decision })).toHaveCount(0);
+    expect(await replayDatabaseFingerprint()).toBe(before);
+  });
+
+  /**
    * Mutation: treat an answer-bound message as ordinary chat, remove only the
    * pin row, or build the receipt from proposal text rather than its persisted
    * source. The typed answer, accepted object, and quoted source can no longer
@@ -326,7 +387,9 @@ test.describe('persisted three-surface replay', () => {
     const slider = page.getByRole('slider', { name: 'Replay position' });
     await slider.press('Home');
     await slider.press('End');
-    await expect(page.getByText(decision, { exact: true })).toContainText(decision);
+    await expect(
+      page.locator('[data-region="current-state"] [data-object-id]').filter({ hasText: decision }),
+    ).toContainText(decision);
     expect(await replayDatabaseFingerprint()).toBe(before);
   });
 
@@ -336,6 +399,9 @@ test.describe('persisted three-surface replay', () => {
    * answer's cited message. The only legal Reopen control or its prior-answer
    * quotation disappears from this flow. Mutation: remove the composer/receipt
    * focus handoff after Answer or Reopen and strand the keyboard on the body.
+   * Mutation: clear no prior attention subjects on a direct receipt answer, or
+   * restore every historical subject item on reopen. The referred reading and
+   * reopened question then appear as two cards for the same question.
    */
   test('reopens an answered question while preserving its prior answer', async ({ page }) => {
     const before = await replayDatabaseFingerprint();
@@ -365,7 +431,7 @@ test.describe('persisted three-surface replay', () => {
     await expect(receipt).toContainText('pending again');
     await expect(receipt.locator('[data-quoted]').filter({ hasText: firstAnswer })).toHaveCount(1);
     await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toHaveCount(0);
-    const restored = page.locator('[data-attention-id]').filter({ hasText: question });
+    const restored = await findAttentionCard(page, question);
     await expect(restored).toContainText('?');
     await expect(restored.getByRole('button', { name: 'answer', exact: true })).toBeVisible();
 
@@ -390,9 +456,7 @@ test.describe('persisted three-surface replay', () => {
     await expect(receipt.locator('[data-quoted]').filter({ hasText: secondAnswer })).toHaveCount(1);
     await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
     await receipt.getByRole('button', { name: 'Reopen', exact: true }).click();
-    await expect(page.locator('[data-attention-id]').filter({ hasText: question })).toContainText(
-      '?',
-    );
+    await expect(await findAttentionCard(page, question)).toContainText('?');
     await expect(receipt.getByRole('button', { name: 'Reopen', exact: true })).toHaveCount(0);
     await receipt.getByRole('button', { name: '← BACK TO CURRENT STATE' }).click();
     const reopenedAgain = page

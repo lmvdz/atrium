@@ -660,6 +660,8 @@ function reasonFor(reason: ReplayData['attention'][number]['reason'], viewer: st
       return `${viewer} has a direct request routed here for action`;
     case 'reading_pending':
       return `a machine staged this as a ${reason.proposedType}; a person must file or decline it`;
+    case 'receipt_review':
+      return `a machine staged this as a ${reason.proposedType}, but its cited receipt did not certify it; review the source and file or decline it`;
   }
 }
 

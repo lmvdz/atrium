@@ -199,8 +199,17 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         setAcceptedSubjects((current) => [...current, subjectId]);
         setAnswerBySubject((current) => ({ ...current, [subjectId]: record.id }));
         setReceiptId(subjectId);
+        setActedOn((current) => [
+          ...new Set([
+            ...current,
+            binding.itemId,
+            ...[...attentionSubjects.entries()]
+              .filter(([, candidateSubjectId]) => candidateSubjectId === subjectId)
+              .map(([itemId]) => itemId),
+          ]),
+        ]);
       }
-      setActedOn((current) => [...current, binding.itemId]);
+      if (!subjectId) setActedOn((current) => [...current, binding.itemId]);
       setOpenAttentionId(
         view.attention.find((item) => item.id !== binding.itemId && !actedOn.includes(item.id))?.id,
       );
@@ -294,7 +303,11 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
             if (localAnswer) relationIds.push(`replay-local-answer:${localAnswer}`);
             if (object) {
               setActedOn((current) =>
-                current.filter((itemId) => attentionSubjects.get(itemId) !== objectId),
+                current.filter(
+                  (itemId) =>
+                    !itemId.startsWith('replay-attention:') ||
+                    attentionSubjects.get(itemId) !== objectId,
+                ),
               );
               setAcceptedSubjects((current) => current.filter((id) => id !== objectId));
               setCorrections((current) => [

@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { eq, like } from 'drizzle-orm';
-import { reconcileStoredAttention } from '../apps/server/src/attention-projection.js';
 import type { ExtractedReading } from '../apps/server/src/jobs/extraction.js';
 import { runInterpretation } from '../apps/server/src/jobs/interpret.js';
 import type {
@@ -12,6 +11,7 @@ import type {
 import { createLedger } from '../apps/server/src/ledger.js';
 import { createLogger } from '../apps/server/src/logger.js';
 import {
+  attentionItems,
   createDatabase,
   memberships,
   messages,
@@ -188,7 +188,11 @@ async function main() {
           provider,
           routing: { default: MODEL, escalation: MODEL },
           logger,
-          config: { maxWindowMessages: 8, contextMessagesBefore: 0 },
+          // One claimed row plus the worker's one-row forward receipt tail.
+          // The corpus contains oversized later messages that deliberately make
+          // a wider correction scan decline. This is the actual worker window,
+          // not a post-hoc projection built after interpretation.
+          config: { maxWindowMessages: 1, contextMessagesBefore: 0 },
         },
         { roomId },
       );
@@ -199,21 +203,10 @@ async function main() {
       workerRejections.push(...run.rejected.map((item) => `${item.reason}: ${item.detail}`));
     }
 
-    const evidenceWindow = corpus.map((line) => ({
-      id: messageIds.get(line.id) as string,
-      roomId,
-      authorId: authorIds.get(line.author) as string,
-      body: line.text,
-      replyToId: line.reply_to ? (messageIds.get(line.reply_to) ?? null) : null,
-      createdAt: line.ts,
-    }));
-    const attention = await reconcileStoredAttention({
-      db: database.db,
-      state: ledger.coreState(),
-      roomId,
-      messages: evidenceWindow,
-      now: corpus.at(-1)?.ts ?? new Date().toISOString(),
-    });
+    const attention = await database.db
+      .select()
+      .from(attentionItems)
+      .where(eq(attentionItems.roomId, roomId));
 
     console.log(`replay room       /replay/${WORKSPACE_SLUG}/${ROOM_SLUG}`);
     console.log(`messages          ${corpus.length}`);
@@ -225,10 +218,8 @@ async function main() {
     for (const rejection of workerRejections) console.log(`  rejected         ${rejection}`);
     console.log('human-accepted    0 (no certification act exists in the corpus)');
     console.log(
-      `attention pending ${attention.items.filter((item) => item.status === 'pending').length}`,
+      `attention pending ${attention.filter((item) => item.status === 'pending').length}`,
     );
-    console.log(`attention refused ${attention.refusals.length}`);
-    for (const refusal of attention.refusals) console.log(`  refused          ${refusal.reason}`);
   } finally {
     await database.close();
   }

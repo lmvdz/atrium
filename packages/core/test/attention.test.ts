@@ -209,6 +209,102 @@ describe('class 1 — needs_decision', () => {
     expect(renderRationale(first)).toContain('nobody is named on this decision');
   });
 
+  it('routes an uncertified machine reading for review without attributing its proposed type', () => {
+    const statement = 'Use the getter for the current token.';
+    const quote = 'Use the getter for the current token unless the compatibility suite fails.';
+    const proposal = event({
+      id: 'ev_prop_referred',
+      at: at(9),
+      actor: model(),
+      type: 'proposal_recorded',
+      proposal: {
+        id: 'prop_referred',
+        roomId: ROOM,
+        type: 'decision',
+        payload: { statement, decidedBy: null },
+        confidence: 0.95,
+        proposer: { kind: 'model', model: 'test-model' },
+        provenance: ['msg_referred'],
+        quote,
+        createdAt: at(9),
+      },
+    });
+    const messages: ProvenanceMessage[] = [
+      { id: 'msg_referred', authorId: ALICE, body: quote },
+      UNCITED_TAIL,
+    ];
+    const staged = reduce([...sampleLog(), proposal]);
+    const cycle = projectAttention(staged, { now: at(20), messages, members: MEMBERS });
+
+    // Mutation: restore the receipt_not_certifiable `continue`. The proposal
+    // remains staged but reaches nobody, recreating the canonical replay's
+    // empty Needs-you panel.
+    const reviewItems = cycle.items.filter((item) => item.objectId === 'prop_referred');
+    expect(reviewItems.map((item) => item.userId)).toEqual([ALICE, BOB, CAROL]);
+    expect(reviewItems.every((item) => item.reason.kind === 'receipt_review')).toBe(true);
+    expect(reviewItems.every((item) => item.class === 'needs_decision')).toBe(true);
+    expect(cycle.refusals).toHaveLength(1);
+    expect(cycle.refusals[0]?.reason).toContain('unless');
+    expect(cycle.examined.filter((item) => item.subjectId === 'prop_referred')).toEqual([
+      {
+        class: 'needs_decision',
+        subjectKind: 'proposal',
+        subjectId: 'prop_referred',
+        producer: 'staged_proposal',
+      },
+    ]);
+
+    let pending = reconcileAttention([], cycle).filter((item) => item.objectId === 'prop_referred');
+    const blind = projectAttention(staged, {
+      now: at(21),
+      messages: [UNCITED_TAIL],
+      members: MEMBERS,
+    });
+    expect(blind.items.filter((item) => item.objectId === 'prop_referred')).toEqual([]);
+    expect(blind.examined.filter((item) => item.subjectId === 'prop_referred')).toEqual([]);
+    pending = reconcileAttention(pending, blind).filter(
+      (item) => item.objectId === 'prop_referred',
+    );
+    expect(pending.every((item) => item.status === 'pending')).toBe(true);
+
+    pending = reconcileAttention(
+      pending,
+      projectAttention(staged, {
+        now: at(22),
+        messages,
+        members: { [ROOM]: [ALICE, BOB] },
+      }),
+    ).filter((item) => item.objectId === 'prop_referred');
+    expect(
+      pending
+        .map((item) => [item.userId, item.status] as const)
+        .sort(([left], [right]) => left.localeCompare(right)),
+    ).toEqual([
+      [ALICE, 'pending'],
+      [BOB, 'pending'],
+      [CAROL, 'resolved'],
+    ]);
+    const rejected = reduce([
+      ...sampleLog(),
+      proposal,
+      event({
+        id: 'ev_reject_referred',
+        at: at(23),
+        actor: human(ALICE),
+        type: 'proposal_rejected',
+        proposalId: 'prop_referred',
+        reason: 'the cited qualification changes the reading',
+      }),
+    ]);
+    const settled = reconcileAttention(
+      pending,
+      projectAttention(rejected, { now: at(24), messages, members: MEMBERS }),
+    );
+    expect(
+      settled.filter((item) => item.objectId === 'prop_referred').map((item) => item.status),
+    ).toEqual(['resolved', 'resolved', 'resolved']);
+  });
+
   it('names nobody when membership is unknown, and says so instead of guessing', () => {
     // r9: the title used to be *"produces nothing when membership is unknown"*,
     // and producing nothing is the half that was wrong. Guessing an audience is
