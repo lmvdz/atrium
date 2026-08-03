@@ -79,8 +79,7 @@ Final combined-tree gates:
 - `pnpm lint`: exit 0; 15 warnings and 51 infos are the repository's known
   design-harness diagnostics, not new errors.
 - `pnpm typecheck`: pass.
-- `pnpm test --maxWorkers=2`: 3,027/3,027 before the final blind remedy; the
-  added authored-body mutation test brings the current total to 3,028.
+- `pnpm test --maxWorkers=2`: 3,029/3,029 after the final blind remedies.
 - `pnpm test:integration`: 170/170 against compose-managed real Postgres; the
   harness removed its container and network.
 - Playwright at `--workers=2`: 167/167 in 3.8 minutes, including replay
@@ -151,8 +150,11 @@ remains byte-for-byte unchanged. A final fresh review then found that mention
 attention lost its proposal discriminator and lacked dismissal, and that both
 live and replay consumers trimmed authored whitespace. Mention subjects now
 retain `proposal`/`object` identity through core and Postgres, one-click dismiss
-lands as `dismissed`, and nonblank authored bodies cross unchanged. Those last
-remedies are awaiting a fresh verdict. No Grok runtime or
+lands as `dismissed`, nonblank authored bodies cross unchanged, and an accepted
+proposal mention remains owed and actionable until the recipient dismisses it.
+The final independent Codex review passed commit `978fbee` with no concrete code
+merge blockers after 52/52 focused tests, web typecheck, and the five-participant
+multiplayer acceptance. No Grok runtime or
 credential is available in this environment, and spending or external account
 use was not authorized. Therefore this branch must not be described as ready to
 merge or ticket #27 as closed until an actual Grok review is attached (and any
@@ -161,7 +163,7 @@ gate.
 
 ## Cleanup receipt
 
-Generate this last, from an actual final container and process scan. Intermediate
-E2E Postgres/MinIO containers and their Next/server/browser processes have been
-removed after each diagnostic run; no final-cleanup claim is made while the
-remaining gates are still running.
+Final cleanup was performed after every gate and critic completed. The two
+Atrium E2E service containers were removed, and a final process scan found no
+Atrium Next, server, Playwright or Vitest process. No unrelated container or
+process was touched.

@@ -1027,3 +1027,11 @@ meaningful code or Markdown. A shared boundary now returns the original string
 for every nonblank draft, with a mutation test that fails if persistence ever
 receives `trim()` again. Lesson kept: **validate a person's text without
 normalizing the value attributed to them.**
+
+**A semantic record can settle while the attention it caused remains owed.**
+The first accepted-proposal projection reused the accepted object's settled
+state, which made a recipient's mention disappear before they had seen or
+dismissed it. The replay adapter now resolves the accepted object's current
+title and source while retaining an owed, actionable mention state until the
+recipient acts. Lesson kept: **derive attention lifecycle from the recipient's
+disposition, not from the lifecycle of the record that caused it.**
