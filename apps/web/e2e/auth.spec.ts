@@ -447,6 +447,11 @@ test.describe('auth and workspaces', () => {
     await page.getByLabel('Password').fill(password);
     await page.getByRole('button', { name: 'Sign in' }).click();
     await page.waitForURL(`**/app/${slug}/general`);
-    await expect(page.getByTestId('room-name')).toHaveText('#general');
+    /**
+     * Mutation: redirect to the right URL while rendering no room. The live
+     * three-surface route names the room with its real heading, not the retired
+     * scaffold's `room-name` test hook, so judge what the participant sees.
+     */
+    await expect(page.getByRole('heading', { name: 'general', exact: true })).toBeVisible();
   });
 });
