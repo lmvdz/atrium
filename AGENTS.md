@@ -22,7 +22,15 @@ Work is **not on `main`.** `main` carries only `RETRO.md` and this file.
 | `fix/receipt-window` | the merge blocker closed, based on foundation | 2,927 unit · **139/139** integration · ledgers 172/172 and 96/96 |
 | `build/interpret-worker` | the interpretation worker, based on foundation | 2,944 unit · 148/149 integration |
 
-**`fix/receipt-window` and `build/interpret-worker` have never met.** Merging them and running the worker's integration suite is the next action, and it is one merge and one command. A single assertion flips — `objectsAccepted` becomes 1 and `rejected` empties — and that flip is the cheapest available proof the engine works end to end.
+**`fix/receipt-window` and `build/interpret-worker` have never met.** That merge is the next action, and it is one merge and one command:
+
+```
+git checkout -b join/worker-on-fixed-window fix/receipt-window
+git merge build/interpret-worker
+pnpm install && pnpm -r build && pnpm test:integration
+```
+
+`fix/receipt-window` is the base and `build/interpret-worker` merges **into** it — that direction because the receipt-window fix is what makes the worker's acceptances land at all. Both branch from `merge/foundation`, so the shared history is identical and only their own files should conflict. A single assertion flips — `objectsAccepted` becomes 1 and `rejected` empties — and that flip is the cheapest available proof the engine works end to end.
 
 ### What is built and adversarially verified
 
@@ -36,11 +44,27 @@ Joining them is the remaining work: the replay app and live multiplayer. Those a
 
 ## Where the decisions live
 
-`github.com/lmvdz/atrium/issues/1` is the map — destination, methodology, model routing, every resolved decision indexed. **Read it before starting.** It is private; `gh issue view 1` works if authenticated.
+`github.com/lmvdz/atrium/issues/1` is the map — destination, methodology, model routing, every resolved decision indexed. **Read it before starting.**
+
+The repo is private and **`gh` cannot reach GitHub from a sandboxed shell** — it returns `error connecting to api.github.com`. If that happens to you, read **`docs/TRACKER.md`**, a point-in-time snapshot of the open tickets, the map, and the four load-bearing build tickets. It is a copy and it will drift; the live tracker wins whenever you can reach it.
 
 Each build ticket carries `## Question`, `## Context`, `## Touches`, `## Acceptance test`, `## Verification gate`, `## Scope boundary` and `## Gauntlet`. A ticket you cannot pick up cold is a defect — say so rather than guessing.
 
 **Ticket bodies can be stale against later decisions.** One specified a prompt structure that a measurement had already removed, and listed triggers that a spike measured firing 0 of 6. Check the decision ticket a build ticket cites before treating its body as spec.
+
+## Before you spend money
+
+`INTERPRET_MODEL_DEFAULT` and `INTERPRET_MODEL_ESCALATION` have no defaults; unset, the server logs an error and installs neither the worker nor its enqueue hook, so nothing accumulates. That is deliberate.
+
+**The escalation tier is miscalibrated and it is expensive.** Measured against the real corpus, the routing trigger fires on 35% of individual messages, 91% of five-message windows and **100% of ten- and twenty-message windows** — and it is evaluated per window at a window size of 10–20. So the cheap tier never runs and every burst pays the escalation model's price. Nothing is broken; it just costs several times what the pipeline's cost model assumed. Know that before adding an `AI_GATEWAY_API_KEY` and running the smoke script. The rate is pinned as a test carrying the numbers, and each pass logs `tier`, `triggers` and `costUsd`.
+
+## Do not re-do this work
+
+Six subsystems have already been through repeated blind adversarial review — core, realtime, auth, the UI component library, the prototype, and deployment. **They are done being verified.** Facing 58 open tickets and a 900-line retrospective, the tempting move is to start hardening `packages/core` again. That is exactly the drift that cost this campaign a day: twelve consecutive rounds, every one finding a real defect, while the two tickets that constitute the actual goal sat untouched.
+
+The deployment lane is **deliberately stopped**, not abandoned — its remaining findings all required editing the gate's own source, and hardening a gate against its own author has no terminal state.
+
+The work is the join: connecting the verified component library to the verified server, plus replay. Everything else is a distraction with a good excuse.
 
 ## How work is verified here
 
