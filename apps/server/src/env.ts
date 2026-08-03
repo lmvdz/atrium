@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
 import { hasProxyStrategy, isSecureUrl } from '@atrium/auth';
 import { z } from 'zod';
+import { ACCEPTANCE_MODEL } from './jobs/acceptance-provider.js';
 
 /**
  * `NODE_ENV` exactly as this process was started with, captured at import time
@@ -177,6 +178,13 @@ const RawEnvSchema = BaseEnvSchema.extend({
    */
   INTERPRET_MODEL_DEFAULT: z.string().min(1).optional(),
   INTERPRET_MODEL_ESCALATION: z.string().min(1).optional(),
+  /**
+   * The production worker normally calls the gateway. The deterministic form
+   * exists only for the no-network Phase 2 acceptance run and requires a
+   * second, conspicuous opt-in below; choosing it by accident must fail boot.
+   */
+  INTERPRET_PROVIDER: z.enum(['gateway', 'acceptance-deterministic']).default('gateway'),
+  ATRIUM_ACCEPTANCE_MODE: z.enum(['enabled']).optional(),
   /**
    * #8's coalescing window, in seconds. One number, three uses — the singleton
    * slot width, the debounce delay, and the offset a follow-up pass is pushed
@@ -393,8 +401,34 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const env = parseOrThrow(EnvSchema, source);
   // `parseOrThrow` may have populated `process.env` from a `.env` file; re-read
   // it so a value that arrived that way counts as "configured" below.
-  assertProductionSafe(source === process.env ? process.env : source, env);
+  const effectiveSource = source === process.env ? process.env : source;
+  assertProductionSafe(effectiveSource, env);
+  assertInterpretationProviderSafe(effectiveSource, env);
   return env;
+}
+
+function assertInterpretationProviderSafe(source: NodeJS.ProcessEnv, env: Env): void {
+  if (env.INTERPRET_PROVIDER !== 'acceptance-deterministic') return;
+  const problems: string[] = [];
+  if (env.ATRIUM_ACCEPTANCE_MODE !== 'enabled') {
+    problems.push(
+      '  ATRIUM_ACCEPTANCE_MODE: must be exactly "enabled" when INTERPRET_PROVIDER=acceptance-deterministic',
+    );
+  }
+  if (
+    env.INTERPRET_MODEL_DEFAULT !== ACCEPTANCE_MODEL ||
+    env.INTERPRET_MODEL_ESCALATION !== ACCEPTANCE_MODEL
+  ) {
+    problems.push(
+      `  INTERPRET_MODEL_DEFAULT/INTERPRET_MODEL_ESCALATION: both must be ${ACCEPTANCE_MODEL} for the deterministic acceptance provider`,
+    );
+  }
+  if (source.AI_GATEWAY_API_KEY?.trim()) {
+    problems.push(
+      '  AI_GATEWAY_API_KEY: must be unset when the deterministic acceptance provider is enabled',
+    );
+  }
+  if (problems.length > 0) throw new Error(`invalid environment:\n${problems.join('\n')}`);
 }
 
 /**

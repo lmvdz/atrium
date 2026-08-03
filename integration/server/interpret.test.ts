@@ -9,6 +9,10 @@ import {
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Command, createCommandService } from '../../apps/server/src/commands.js';
+import {
+  ACCEPTANCE_MODEL,
+  createAcceptanceProvider,
+} from '../../apps/server/src/jobs/acceptance-provider.js';
 import type { ExtractedReading } from '../../apps/server/src/jobs/extraction.js';
 import { runInterpretation } from '../../apps/server/src/jobs/interpret.js';
 import type {
@@ -745,6 +749,136 @@ describe('per-job settlement', () => {
 /* ── acceptance, and what #86 does to it ────────────────────────────────── */
 
 describe('in-job acceptance', () => {
+  /**
+   * Mutation: replace the model call for acceptance by seeding projections or
+   * accepted rows directly. This proof would then find no interpretation,
+   * proposal, ledger event, or folded object produced by the real worker.
+   *
+   * Mutation: let the deterministic seam cite its stripped semantic text
+   * rather than the exact source line. Core refuses the proposal because the
+   * quote is no longer verbatim, and the folded accepted count remains zero.
+   */
+  it('drives an exact acceptance fixture through the production worker into the fold', async () => {
+    const source = await insertMessage(
+      room.people.alice as string,
+      'Claim: The reconnect trace contains every committed message.',
+    );
+    await insertMessage(room.people.bob as string, 'Receipt recorded.');
+
+    const run = await runInterpretation(
+      {
+        db: handle.db,
+        ledger,
+        provider: createAcceptanceProvider(),
+        routing: { default: ACCEPTANCE_MODEL, escalation: ACCEPTANCE_MODEL },
+        logger,
+      },
+      { roomId: room.roomId },
+    );
+
+    expect(run.messageIds).toEqual([source, expect.any(String)]);
+    expect(run.proposalsRecorded).toHaveLength(1);
+    expect(run.rejected).toEqual([]);
+    expect(run.objectsAccepted).toHaveLength(1);
+    expect(run.costUsd).toBe(0);
+    const rows = (await handle.db.execute(
+      sql`SELECT payload FROM accepted_objects WHERE room_id = ${room.roomId}::uuid`,
+    )) as unknown as Array<{ payload: { statement?: string } }>;
+    expect(rows).toEqual([
+      {
+        payload: {
+          statement: 'Claim: The reconnect trace contains every committed message.',
+          claimant: room.people.alice,
+          verification: 'unverified',
+        },
+      },
+    ]);
+    expect((await proposalRows())[0]?.model).toBe(ACCEPTANCE_MODEL);
+  });
+
+  /**
+   * Mutation: omit the configured history before the unread window, or resolve
+   * a commitment owner from membership instead of authored evidence. The
+   * absent owner's UUID cannot be grounded and the reading is rejected rather
+   * than staged for their confirmation.
+   *
+   * Mutation: auto-accept a third-party commitment. An accepted object appears
+   * before the named owner acts and their confirmation item never exists.
+   */
+  it('grounds a third-party commitment in recent owner speech and waits for that owner', async () => {
+    const owner = room.people.bob as string;
+    await insertMessage(owner, 'I am present before this burst.');
+    await runInterpretation(
+      {
+        db: handle.db,
+        ledger,
+        provider: createAcceptanceProvider(),
+        routing: { default: ACCEPTANCE_MODEL, escalation: ACCEPTANCE_MODEL },
+        logger,
+      },
+      { roomId: room.roomId },
+    );
+    const source = await insertMessage(
+      room.people.alice as string,
+      `Commitment for ${owner}: Upload the reconnect trace.`,
+    );
+    await insertMessage(room.people.alice as string, 'The burst continues.');
+
+    const run = await runInterpretation(
+      {
+        db: handle.db,
+        ledger,
+        provider: createAcceptanceProvider(),
+        routing: { default: ACCEPTANCE_MODEL, escalation: ACCEPTANCE_MODEL },
+        logger,
+        config: { maxWindowMessages: 50, contextMessagesBefore: 25 },
+      },
+      { roomId: room.roomId },
+    );
+
+    expect(run.messageIds).toContain(source);
+    expect(run.proposalsRecorded).toHaveLength(1);
+    expect(run.objectsAccepted).toHaveLength(0);
+    expect(run.rejected).toEqual([]);
+    const pending = await handle.db
+      .select({ userId: attentionItems.userId, reason: attentionItems.reason })
+      .from(attentionItems)
+      .where(eq(attentionItems.roomId, room.roomId));
+    expect(pending).toEqual([
+      {
+        userId: owner,
+        reason: {
+          kind: 'commitment_confirm',
+          statement: `Commitment for ${owner}: Upload the reconnect trace.`,
+        },
+      },
+    ]);
+
+    const accepted = await commands.execute(
+      { userId: owner },
+      Command.parse({
+        name: 'accept_proposal',
+        roomId: room.roomId,
+        proposalId: run.proposalsRecorded[0],
+      }),
+    );
+    expect(accepted.kind).toBe('appended');
+    const folded = (await handle.db.execute(
+      sql`SELECT payload, accepted_by AS "acceptedBy" FROM accepted_objects WHERE room_id = ${room.roomId}::uuid`,
+    )) as unknown as Array<{ payload: { statement?: string; owner?: string }; acceptedBy: string }>;
+    expect(folded).toEqual([
+      {
+        payload: {
+          statement: `Commitment for ${owner}: Upload the reconnect trace.`,
+          owner,
+          status: 'open',
+          due: null,
+        },
+        acceptedBy: owner,
+      },
+    ]);
+  });
+
   /**
    * Mutation: delete `reconcileStoredAttention` from the worker. The proposal
    * and interpretation still report success, but the durable Needs-you panel

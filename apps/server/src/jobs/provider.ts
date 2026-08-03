@@ -1,3 +1,4 @@
+import type { ProvenanceMessage } from '@atrium/core';
 import { generateObject, NoObjectGeneratedError } from 'ai';
 import { ExtractionOutput, ExtractionWireSchema } from './extraction.js';
 
@@ -21,6 +22,8 @@ export interface InterpretationRequest {
   model: string;
   system: string;
   prompt: string;
+  /** Database-derived records represented by the prompt; never sent to the gateway. */
+  sourceMessages?: readonly ProvenanceMessage[];
   /** Aborts a call that has stopped being worth waiting for. */
   signal?: AbortSignal;
 }

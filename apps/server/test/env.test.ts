@@ -242,6 +242,35 @@ describe('loadEnv — the interpretation worker', () => {
   });
 
   /**
+   * Mutation: select the deterministic provider with only one environment
+   * switch. A typo in deployment would then replace semantic interpretation
+   * with a fixture parser while the process still reported healthy.
+   */
+  it('requires an explicit acceptance opt-in and the exact receipt model', () => {
+    const selected = {
+      ...BASE,
+      NODE_ENV: 'development',
+      INTERPRET_PROVIDER: 'acceptance-deterministic',
+      INTERPRET_MODEL_DEFAULT: 'acceptance/deterministic-v1',
+      INTERPRET_MODEL_ESCALATION: 'acceptance/deterministic-v1',
+    } as const;
+    expect(() => loadEnv(selected)).toThrow(/ATRIUM_ACCEPTANCE_MODE/);
+    expect(() =>
+      loadEnv({ ...selected, ATRIUM_ACCEPTANCE_MODE: 'enabled', INTERPRET_MODEL_DEFAULT: 'other' }),
+    ).toThrow(/both must be acceptance\/deterministic-v1/);
+    expect(() =>
+      loadEnv({
+        ...selected,
+        ATRIUM_ACCEPTANCE_MODE: 'enabled',
+        AI_GATEWAY_API_KEY: 'configured-but-must-not-be-usable-here',
+      }),
+    ).toThrow(/AI_GATEWAY_API_KEY.*must be unset/);
+    expect(loadEnv({ ...selected, ATRIUM_ACCEPTANCE_MODE: 'enabled' }).INTERPRET_PROVIDER).toBe(
+      'acceptance-deterministic',
+    );
+  });
+
+  /**
    * Mutation: let `INTERPRET_CONTEXT_MESSAGES` be 0. Zero history is not "less
    * context" — it is the `reply_blockquote` trigger unable to name which
    * earlier message a quote-reply points at, and a receipt window that starts

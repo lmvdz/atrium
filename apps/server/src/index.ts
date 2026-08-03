@@ -10,6 +10,7 @@ import { createAttachmentSigner } from './attachments.js';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
+import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
 import { createLedger } from './ledger.js';
 import { createLogger } from './logger.js';
@@ -143,7 +144,10 @@ async function main(): Promise<void> {
       ? {
           db: database.db,
           ledger,
-          provider: createGatewayProvider(),
+          provider:
+            env.INTERPRET_PROVIDER === 'acceptance-deterministic'
+              ? createAcceptanceProvider()
+              : createGatewayProvider(),
           routing,
           onProjectionChanged: (roomId) => signalProjectionChanged(roomId),
           config: {

@@ -227,6 +227,7 @@ export async function runInterpretation(
       model,
       system: prompt.system,
       prompt: prompt.prompt,
+      sourceMessages: window,
     });
   } catch (error) {
     // The rows stay `pending`, deliberately: pg-boss will retry this job, the
