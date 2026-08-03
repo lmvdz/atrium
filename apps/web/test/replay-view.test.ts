@@ -10,7 +10,7 @@ import {
   replayReceipt,
   replayView,
 } from '../lib/replay-view';
-import { withFilter } from '../src/components';
+import { needsViewer, withFilter } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
 import { workspacePath } from './support/workspace-path';
 
@@ -523,6 +523,81 @@ describe('persisted replay view', () => {
     expect(item?.rationale).toContain('named as owner by somebody else');
     expect(item?.actions.map((action) => action.id)).toEqual(['confirm', 'decline']);
     expect(item?.actions.map((action) => action.id)).not.toContain('open');
+  });
+
+  /**
+   * Mutation: reuse an accepted decision's settled state for its still-pending
+   * mention, or resolve the proposal id only among staged records. The mention
+   * then vanishes from Needs-you or loses its authored title/source.
+   */
+  it('keeps an accepted proposal mention owed, sourced, and dismissible', () => {
+    const snapshot = data();
+    snapshot.proposals.push({
+      id: 'decision-proposal',
+      roomId: 'room',
+      interpretationId: null,
+      type: 'decision',
+      payload: { statement: 'Regenerate in the background.', decidedBy: null, status: 'active' },
+      confidence: 0.95,
+      proposerKind: 'model',
+      proposerModel: 'test',
+      proposerUserId: null,
+      stagedByKind: 'model',
+      stagedById: 'test',
+      quote: 'Regenerate in the background.',
+      status: 'accepted',
+      decidedBy: 'alice',
+      decidedAt: at,
+      rejectedReason: null,
+      createdAt: at,
+    });
+    snapshot.objects.push({
+      id: 'decision-object',
+      roomId: 'room',
+      type: 'decision',
+      payload: { statement: 'Regenerate in the background.', decidedBy: 'alice', status: 'active' },
+      objectiveId: null,
+      proposalId: 'decision-proposal',
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: 'alice',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const proposalSources = snapshot.proposalSources as unknown as Array<{
+      roomId: string;
+      proposalId: string;
+      messageId: string;
+    }>;
+    proposalSources.push({
+      roomId: 'room',
+      proposalId: 'decision-proposal',
+      messageId: 'm2',
+    });
+    snapshot.attention.push({
+      id: 'mention',
+      roomId: 'room',
+      userId: 'alice',
+      subjectKind: 'proposal',
+      subjectId: 'decision-proposal',
+      subjectObjectId: null,
+      subjectProposalId: 'decision-proposal',
+      class: 'mention',
+      reason: { kind: 'mention', request: 'Please check this.' },
+      status: 'pending',
+      createdAt: at,
+      resolvedAt: null,
+    });
+
+    const [item] = replayView(snapshot, 'alice').attention;
+    expect(item).toMatchObject({
+      title: 'Regenerate in the background.',
+      state: { verification: 'proposed', owedToViewer: true },
+      source: { messageId: 'm2' },
+    });
+    expect(item && needsViewer(item.state)).toBe(true);
+    expect(item?.actions.map((action) => action.id)).toEqual(['open', 'dismiss']);
   });
 });
 

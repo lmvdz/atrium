@@ -123,6 +123,10 @@ async function actOnAttention(page: Page, attentionId: string, action: string): 
           .locator(`[data-attention-id="${attentionId}"]`)
           .getByRole('button', { name: action, exact: true });
       }
+      if (action === 'dismiss') {
+        await expect(item).not.toContainText('semantic record is unavailable');
+        await expect(item.getByRole('button', { name: 'open source', exact: true })).toBeVisible();
+      }
       await expect(control).toBeVisible();
       if ((await control.getAttribute('data-hold')) !== null) {
         await control.hover();

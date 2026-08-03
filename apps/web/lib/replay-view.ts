@@ -201,19 +201,52 @@ export function replayView(data: ReplayData, viewerId?: string) {
   };
 
   const attention: AttentionItem[] = viewerAttention.map((item) => {
+    const proposalSubject =
+      item.subjectKind === 'proposal'
+        ? data.proposals.find((proposal) => proposal.id === item.subjectId)
+        : undefined;
+    const acceptedFromProposal = proposalSubject
+      ? data.objects.find((object) => object.proposalId === proposalSubject.id)
+      : undefined;
     const subject = objects.find((object) => object.id === item.subjectId);
     const source = sourceFor(item.subjectKind, item.subjectId);
+    const subjectState =
+      (acceptedFromProposal
+        ? stateForObject(acceptedFromProposal.type, acceptedFromProposal.payload, true, true)
+        : subject
+          ? { ...subject.state, owedToViewer: true }
+          : proposalSubject
+            ? stateForObject(
+                proposalSubject.type,
+                proposalSubject.payload,
+                true,
+                proposalSubject.status === 'accepted',
+              )
+            : undefined) ??
+      ({
+        kind: item.class === 'blocking_question' ? 'question' : 'decision',
+        verification: item.class === 'blocking_question' ? 'open' : 'proposed',
+        owedToViewer: true,
+        irreversible: false,
+      } satisfies EpistemicState);
     return {
       id: item.id,
       state:
-        subject?.state ??
-        ({
-          kind: item.class === 'blocking_question' ? 'question' : 'decision',
-          verification: item.class === 'blocking_question' ? 'open' : 'proposed',
-          owedToViewer: true,
-          irreversible: false,
-        } satisfies EpistemicState),
-      title: subject?.text ?? 'an item whose semantic record is unavailable',
+        item.reason.kind === 'mention'
+          ? {
+              ...subjectState,
+              verification: subjectState.verification === 'open' ? 'open' : 'proposed',
+              owedToViewer: true,
+              irreversible: false,
+            }
+          : subjectState,
+      title:
+        (acceptedFromProposal
+          ? payloadText(acceptedFromProposal.type, acceptedFromProposal.payload)
+          : subject?.text) ??
+        (proposalSubject
+          ? payloadText(proposalSubject.type, proposalSubject.payload)
+          : 'an item whose semantic record is unavailable'),
       rationale: rationale(reasonFor(item.reason, viewerName)),
       facts: [`raised ${clock(item.createdAt)}`],
       source,
