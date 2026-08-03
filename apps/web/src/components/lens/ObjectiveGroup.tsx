@@ -29,7 +29,7 @@ const KIND_ORDER: readonly ObjectKind[] = ['decision', 'commitment', 'question',
 const KIND_LABEL: Readonly<Record<ObjectKind, string>> = {
   decision: 'DECISIONS',
   commitment: 'COMMITMENTS',
-  question: 'OPEN QUESTIONS',
+  question: 'QUESTIONS',
   claim: 'CLAIMS',
   event: 'EVENTS',
 };

@@ -89,6 +89,44 @@ describe('persisted replay view', () => {
   });
 
   /**
+   * Mutation: copy an accepted object's epistemic state onto its entire source
+   * message. A mixed or long human post then appears wholly certified even
+   * though the persisted edge proves only the extracted semantic sentence.
+   */
+  it('keeps a semantic source message as ordinary conversation', () => {
+    const snapshot = data();
+    snapshot.objects.push({
+      id: 'decision',
+      roomId: 'room',
+      type: 'decision',
+      payload: { statement: 'Regenerate in the background.', decidedBy: 'alice', status: 'active' },
+      objectiveId: null,
+      proposalId: null,
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: 'alice',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const objectSources = snapshot.objectSources as unknown as Array<{
+      roomId: string;
+      objectId: string;
+      messageId: string;
+    }>;
+    objectSources.push({ roomId: 'room', objectId: 'decision', messageId: 'm1' });
+
+    const sourceRow = replayView(snapshot, 'alice').entries[1];
+    if (sourceRow?.type !== 'message') throw new Error('source row is not a message');
+    expect(sourceRow.state).toEqual({
+      kind: 'event',
+      verification: 'routine',
+      owedToViewer: false,
+      irreversible: false,
+    });
+  });
+
+  /**
    * Mutation: resolve the first answer edge or the first claim source rather
    * than the exact relation retained by the reopen transition. The receipt
    * quotes m2 instead of the answer selected by relation-good.

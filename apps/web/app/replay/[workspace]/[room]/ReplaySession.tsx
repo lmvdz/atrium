@@ -23,7 +23,6 @@ import {
   messageEntry,
   needsViewer,
   rationale,
-  settledForViewer,
   withFilter,
 } from '../../../../src/components';
 import { RoomFrame } from '../../../gallery/RoomFrame';
@@ -96,8 +95,8 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
       },
     ];
   });
-  const attention = [...view.attention, ...restoredAttention].map((item) =>
-    actedOn.includes(item.id) ? { ...item, state: settledForViewer(item.state) } : item,
+  const attention = [...view.attention, ...restoredAttention].filter(
+    (item) => !actedOn.includes(item.id),
   );
   const attentionSubjects = new Map([
     ...data.attention.map((item) => [item.id, item.subjectId] as const),
@@ -174,6 +173,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     }
     setBinding({ mode: 'free' });
     setDraft('');
+    setTargetMessageId(null);
   };
 
   const seek = (next: number) => {
@@ -214,7 +214,10 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
           onFocusSurface: setFocused,
           onFilter: (next) => setFilter((current) => (current === next ? null : next)),
           onOpenAttention: setOpenAttentionId,
-          onOpenReceipt: setReceiptId,
+          onOpenReceipt: (objectId) => {
+            setTargetMessageId(null);
+            setReceiptId(objectId);
+          },
           onCloseReceipt: () => setReceiptId(null),
           onJumpToMessage: jumpToMessage,
           onJumpToSource: (_itemId, messageId) => jumpToMessage(messageId),

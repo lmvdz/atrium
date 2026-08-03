@@ -12,6 +12,7 @@ import type {
 } from '../apps/server/src/jobs/provider.js';
 import { createLedger } from '../apps/server/src/ledger.js';
 import { createLogger } from '../apps/server/src/logger.js';
+import { projectRoomEvent } from '../apps/server/src/projections.js';
 import { createMembershipAuthorizer } from '../apps/server/src/session.js';
 import {
   createDatabase,
@@ -36,7 +37,7 @@ const WORKSPACE_SLUG = 'atrium-replay';
 const ROOM_SLUG = 'typescript-9998';
 const MODEL = 'replay/precomputed-v1';
 const MEMBER_NAMES = new Set(['RyanCavanaugh', 'ahejlsberg', 'basickarl', 'ExE-Boss', 'pimterry']);
-const STAGED_DECISION = '@Strate That function will return `undefined`, not `null`.';
+const CURRENT_OPEN_QUESTION = 'any plan to improve the developer experience on this subject';
 
 const readings = [
   {
@@ -62,10 +63,8 @@ const readings = [
     type: 'decision',
   },
   {
-    match: STAGED_DECISION,
-    type: 'decision',
-    wholeMessage: true,
-    keepStaged: true,
+    match: CURRENT_OPEN_QUESTION,
+    type: 'open_question',
   },
   {
     match: 'I will update with this code of yous, hopefully it will help future people!',
@@ -227,18 +226,18 @@ async function main() {
     ).sort((left, right) => Number(right.type === 'objective') - Number(left.type === 'objective'));
     let humanAccepted = 0;
     let objectiveId: string | null = null;
-    const acceptedByType = new Map<string, string>();
+    const acceptedByText = new Map<string, string>();
     for (const proposal of staged) {
-      // Keep the deliberately misread decision visibly staged for Needs-you. The
-      // other readings are accepted by a recorded human act, never promoted by
-      // the fixture or presented as certified model output.
-      const statement =
-        typeof proposal.payload === 'object' &&
-        proposal.payload !== null &&
-        'statement' in proposal.payload
-          ? proposal.payload.statement
-          : null;
-      if (statement === STAGED_DECISION) continue;
+      const semanticText =
+        typeof proposal.payload !== 'object' || proposal.payload === null
+          ? null
+          : proposal.type === 'objective' && 'title' in proposal.payload
+            ? proposal.payload.title
+            : proposal.type === 'open_question' && 'question' in proposal.payload
+              ? proposal.payload.question
+              : 'statement' in proposal.payload
+                ? proposal.payload.statement
+                : null;
       const accepted = await commands.execute(
         {
           userId: authorIds.get(
@@ -261,14 +260,19 @@ async function main() {
       if (accepted.kind !== 'appended' || accepted.event.type !== 'object_accepted') {
         throw new Error(`replay seed: ${proposal.type} acceptance did not reach the fold`);
       }
-      acceptedByType.set(proposal.type, accepted.event.object.id);
+      if (typeof semanticText === 'string') {
+        acceptedByText.set(semanticText, accepted.event.object.id);
+      }
       humanAccepted += 1;
     }
-    const questionId = acceptedByType.get('open_question');
-    const answerObjectId = acceptedByType.get('claim');
-    if (!questionId || !answerObjectId) {
+    const historicalQuestionId = acceptedByText.get('When a function is invoked, side effects');
+    const currentQuestionId = acceptedByText.get(CURRENT_OPEN_QUESTION);
+    const answerObjectId = acceptedByText.get(
+      'optimistic assumption that type guards are unaffected by intervening function calls is the best compromise',
+    );
+    if (!historicalQuestionId || !currentQuestionId || !answerObjectId || !objectiveId) {
       throw new Error(
-        `replay seed: the persisted question and answer claim are required; staged=${staged
+        `replay seed: the persisted questions, objective and answer claim are required; staged=${staged
           .map((proposal) => proposal.type)
           .join(',')}; rejected=${workerRejections.join(' | ') || 'none'}`,
       );
@@ -278,7 +282,7 @@ async function main() {
       Command.parse({
         name: 'answer_bind',
         roomId,
-        questionId,
+        questionId: historicalQuestionId,
         answerObjectId,
         note: null,
       }),
@@ -286,14 +290,29 @@ async function main() {
     if (bound.kind !== 'appended' || bound.event.type !== 'relation_added') {
       throw new Error('replay seed: question answer did not reach the fold');
     }
-    const decisionIndex = corpus.findIndex((line) =>
-      line.text.includes(
-        readings.find(
-          (reading) => reading.type === 'decision' && 'keepStaged' in reading && reading.keepStaged,
-        )?.match ?? '',
-      ),
-    );
-    const windowStart = decisionIndex;
+    const blocked = await ledger.append({
+      roomId,
+      actor: { kind: 'human', userId: authorIds.get('RyanCavanaugh') as string },
+      build: ({ id, at }) => ({
+        id,
+        at,
+        type: 'relation_added',
+        relation: {
+          id: stableUuid('relation:roadmap-question-blocks-objective'),
+          roomId,
+          kind: 'blocks',
+          fromObjectId: currentQuestionId,
+          to: { kind: 'object', objectId: objectiveId },
+          createdAt: at,
+        },
+      }),
+      project: (context) => projectRoomEvent(context),
+    });
+    if (blocked.outcome?.outcome !== 'applied') {
+      throw new Error('replay seed: roadmap question blocker did not reach the fold');
+    }
+    const questionIndex = corpus.findIndex((line) => line.text.includes(CURRENT_OPEN_QUESTION));
+    const windowStart = questionIndex;
     const evidenceWindow = corpus.slice(windowStart, windowStart + 8).map((line) => ({
       id: messageIds.get(line.id) as string,
       roomId,

@@ -148,33 +148,14 @@ export function replayView(data: ReplayData, viewerId?: string) {
     }));
   const objects = [...accepted, ...staged];
 
-  /* A source message inherits only the semantic state its persisted edges
-     prove. Pending attention wins over accepted/change because the divider's
-     NEED class answers the stronger question: which rows lead to something the
-     viewer still owes. Every other human-authored row remains discussion. */
-  const stateByMessage = new Map<string, EpistemicState>();
-  for (const source of data.objectSources) {
-    const object = accepted.find((candidate) => candidate.id === source.objectId);
-    if (object) stateByMessage.set(source.messageId, object.state);
-  }
-  for (const source of data.proposalSources) {
-    const object = objects.find((candidate) => candidate.id === source.proposalId);
-    if (object) stateByMessage.set(source.messageId, object.state);
-  }
-  for (const item of viewerAttention) {
-    const sourceId =
-      item.subjectKind === 'proposal'
-        ? data.proposalSources.find((source) => source.proposalId === item.subjectId)?.messageId
-        : data.objectSources.find((source) => source.objectId === item.subjectId)?.messageId;
-    const object = objects.find((candidate) => candidate.id === item.subjectId);
-    if (sourceId && object) stateByMessage.set(sourceId, { ...object.state, owedToViewer: true });
-  }
-
   const messageEntries: TimelineEntry[] = data.messages.map((message, index) => {
     const record = records[index] as MessageRecord;
     const reply = message.replyToId ? recordById.get(message.replyToId) : undefined;
     return messageEntry(record, {
-      state: stateByMessage.get(message.id) ?? TALK,
+      /* The semantic edge certifies the extracted object, never every sentence
+         in its source message. Human speech stays discussion; the Current-state
+         object and its receipt carry the derived epistemic status. */
+      state: TALK,
       replyTo: reply ? quotationFrom(reply) : null,
       viewer: viewerName,
     });

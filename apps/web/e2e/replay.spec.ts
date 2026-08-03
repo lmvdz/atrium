@@ -42,6 +42,7 @@ async function replayDatabaseFacts() {
         objects: number;
         stagedDecisions: number;
         answers: number;
+        blockers: number;
         proposalSources: number;
         objectSources: number;
       }>
@@ -58,6 +59,7 @@ async function replayDatabaseFacts() {
         (SELECT count(*)::int FROM accepted_objects WHERE room_id = (SELECT id FROM target)) AS objects,
         (SELECT count(*)::int FROM proposals WHERE room_id = (SELECT id FROM target) AND type = 'decision' AND status = 'proposed') AS "stagedDecisions",
         (SELECT count(*)::int FROM relations WHERE room_id = (SELECT id FROM target) AND kind = 'answers') AS answers,
+        (SELECT count(*)::int FROM relations WHERE room_id = (SELECT id FROM target) AND kind = 'blocks') AS blockers,
         (SELECT count(*)::int FROM proposal_sources WHERE room_id = (SELECT id FROM target)) AS "proposalSources",
         (SELECT count(*)::int FROM object_sources WHERE room_id = (SELECT id FROM target)) AS "objectSources"
     `;
@@ -80,11 +82,12 @@ test.describe('persisted three-surface replay', () => {
     expect(await replayDatabaseFacts()).toEqual({
       messages: 111,
       proposals: 6,
-      objects: 5,
-      stagedDecisions: 1,
+      objects: 6,
+      stagedDecisions: 0,
       answers: 1,
+      blockers: 1,
       proposalSources: 6,
-      objectSources: 5,
+      objectSources: 6,
     });
     await page.goto('/replay/atrium-replay/typescript-9998');
 
@@ -152,17 +155,16 @@ test.describe('persisted three-surface replay', () => {
    * source. The typed answer, accepted object, and quoted source can no longer
    * be observed together through the product surfaces.
    */
-  test('binds a typed answer to the pending decision and opens its sourced receipt', async ({
-    page,
-  }) => {
+  test('answers the current question and corrects a sourced decision reading', async ({ page }) => {
     const before = await replayDatabaseFingerprint();
-    const decision = '@Strate That function will return `undefined`, not `null`.';
-    const answer = 'Treat this as a decision.';
+    const question = 'any plan to improve the developer experience on this subject';
+    const answer = 'A maintainer still needs to decide whether this belongs after TypeScript 7.';
+    const decision = 'will instead be using a function to obtain the current token';
     await page.goto('/replay/atrium-replay/typescript-9998');
 
     await page.getByRole('button', { name: 'answer', exact: true }).click();
     const composer = page.getByRole('textbox', {
-      name: `Answer ${decision} in your own words`,
+      name: `Answer ${question} in your own words`,
     });
     await composer.fill(answer);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
@@ -171,10 +173,17 @@ test.describe('persisted three-surface replay', () => {
     const receipt = page.getByRole('region', { name: 'Receipt' });
     await expect(receipt).toBeVisible();
     await expect(receipt).toContainText('✓');
-    await expect(receipt).toContainText('DECISION');
+    await expect(receipt).toContainText('QUESTION');
     await expect(receipt).toContainText('accepted');
-    await expect(receipt.locator('[data-quoted]').filter({ hasText: decision })).toHaveCount(1);
+    await expect(receipt.locator('[data-quoted]').filter({ hasText: question })).toHaveCount(1);
     await expect(receipt.locator('[data-quoted]').filter({ hasText: answer })).toHaveCount(1);
+
+    await receipt.getByRole('button', { name: '← BACK TO CURRENT STATE' }).click();
+    await page
+      .locator('[data-region="current-state"] [data-object-id]')
+      .filter({ hasText: decision })
+      .click();
+    await expect(receipt).toContainText('DECISION');
 
     await receipt.getByRole('button', { name: 'Retype as claim', exact: true }).click();
     await expect(receipt).toContainText('CORRECTED · DECISION → CLAIM');
@@ -193,8 +202,8 @@ test.describe('persisted three-surface replay', () => {
     await expect(page.getByText(answer, { exact: true })).toHaveCount(0);
     await slider.press('End');
     await expect(
-      page.locator('[data-region="current-state"] [data-object-id]').filter({ hasText: decision }),
-    ).toHaveCount(0);
+      page.locator('[data-region="current-state"] [data-object-id]').filter({ hasText: question }),
+    ).toContainText('?');
     await expect(page.getByRole('button', { name: 'answer', exact: true })).toBeVisible();
     expect(await replayDatabaseFingerprint()).toBe(before);
   });
