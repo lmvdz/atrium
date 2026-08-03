@@ -44,6 +44,7 @@ const readings = [
   },
   {
     match: 'Will it work for `getStaticPaths`? (i.e. adding or deleting a blogpost from a CMS)',
+    text: 'Will it work for `getStaticPaths`?',
     type: 'open_question',
   },
   {
@@ -51,8 +52,17 @@ const readings = [
     type: 'claim',
   },
   {
-    match: 'This RFC exclusively discusses API additions.',
+    match:
+      "This will cause a server-side render of the full page for a missing path (that wasn't prerendered via `paths: [...]`), instead of doing the static fallback and then load client-side.",
+    text: "Correct. This will cause a server-side render of the full page for a missing path (that wasn't prerendered via `paths: [...]`), instead of doing the static fallback and then load client-side. All other benefits and functionality remains the same.",
     type: 'decision',
+    wholeMessage: true,
+  },
+  {
+    match:
+      "We'll be exploring on-demand (triggered via API route) revalidation instead of interval-based in the future.",
+    text: 'on-demand (triggered via API route) revalidation instead of interval-based in the future.',
+    type: 'commitment',
   },
 ] as const;
 
@@ -86,10 +96,10 @@ const provider: InterpretationProvider = {
       if (!source) continue;
       extracted.push({
         type: reading.type,
-        text: reading.match,
-        subject: reading.type === 'claim' ? source.authorId : null,
+        text: 'text' in reading ? reading.text : reading.match,
+        subject: reading.type === 'claim' || reading.type === 'commitment' ? source.authorId : null,
         confidence: 0.95,
-        quote: reading.match,
+        quote: 'wholeMessage' in reading && reading.wholeMessage ? source.body : reading.match,
         messageIds: [source.id],
       });
     }
@@ -183,7 +193,7 @@ async function main() {
           provider,
           routing: { default: MODEL, escalation: MODEL },
           logger,
-          config: { maxWindowMessages: 50, contextMessagesBefore: 0 },
+          config: { maxWindowMessages: 8, contextMessagesBefore: 0 },
         },
         { roomId },
       );
@@ -199,23 +209,43 @@ async function main() {
       authorizer: createMembershipAuthorizer(database.db),
       logger,
     });
-    const staged = await database.db
-      .select({ id: proposals.id, type: proposals.type })
-      .from(proposals)
-      .where(eq(proposals.roomId, roomId));
+    const staged = (
+      await database.db
+        .select({ id: proposals.id, type: proposals.type })
+        .from(proposals)
+        .where(eq(proposals.roomId, roomId))
+    ).sort((left, right) => Number(right.type === 'objective') - Number(left.type === 'objective'));
     let humanAccepted = 0;
+    let objectiveId: string | null = null;
     for (const proposal of staged) {
       // Keep the decision visibly staged for the Needs-you surface. The three
       // other readings are accepted by a recorded human act, never promoted by
       // the fixture or presented as certified model output.
       if (proposal.type === 'decision') continue;
-      await commands.execute(
-        { userId: authorIds.get('timneutkens') as string },
-        Command.parse({ name: 'accept_proposal', roomId, proposalId: proposal.id }),
+      const accepted = await commands.execute(
+        {
+          userId: authorIds.get(proposal.type === 'commitment' ? 'Timer' : 'timneutkens') as string,
+        },
+        Command.parse({
+          name: 'accept_proposal',
+          roomId,
+          proposalId: proposal.id,
+          objectiveId: proposal.type === 'objective' ? null : objectiveId,
+        }),
       );
+      if (proposal.type === 'objective') {
+        if (accepted.kind !== 'appended' || accepted.event.type !== 'object_accepted') {
+          throw new Error('replay seed: objective acceptance did not reach the fold');
+        }
+        objectiveId = accepted.event.object.id;
+      }
       humanAccepted += 1;
     }
-    const firstWindow = corpus.slice(0, 50).map((line) => ({
+    const decisionIndex = corpus.findIndex((line) =>
+      line.text.includes(readings.find((reading) => reading.type === 'decision')?.match ?? ''),
+    );
+    const windowStart = Math.floor(decisionIndex / 8) * 8;
+    const evidenceWindow = corpus.slice(windowStart, windowStart + 8).map((line) => ({
       id: messageIds.get(line.id) as string,
       roomId,
       authorId: authorIds.get(line.author) as string,
@@ -223,12 +253,12 @@ async function main() {
       replyToId: line.reply_to ? (messageIds.get(line.reply_to) ?? null) : null,
       createdAt: line.ts,
     }));
-    await reconcileStoredAttention({
+    const attention = await reconcileStoredAttention({
       db: database.db,
       state: ledger.coreState(),
       roomId,
-      messages: firstWindow,
-      now: corpus[49]?.ts ?? new Date().toISOString(),
+      messages: evidenceWindow,
+      now: corpus[windowStart + 7]?.ts ?? corpus.at(-1)?.ts ?? new Date().toISOString(),
     });
 
     console.log(`replay room       /replay/${WORKSPACE_SLUG}/${ROOM_SLUG}`);
@@ -238,6 +268,11 @@ async function main() {
     console.log(`proposals         ${proposalCount}`);
     console.log(`auto-accepted     ${autoAccepted}`);
     console.log(`human-accepted    ${humanAccepted}`);
+    console.log(
+      `attention pending ${attention.items.filter((item) => item.status === 'pending').length}`,
+    );
+    console.log(`attention refused ${attention.refusals.length}`);
+    for (const refusal of attention.refusals) console.log(`  refused          ${refusal.reason}`);
   } finally {
     await database.close();
   }

@@ -1,5 +1,11 @@
 import type { DatabaseHandle } from '@atrium/db';
-import { attentionItems, interpretations, messages, proposals } from '@atrium/db/schema';
+import {
+  attentionItems,
+  interpretations,
+  messages,
+  proposalSources,
+  proposals,
+} from '@atrium/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Command, createCommandService } from '../../apps/server/src/commands.js';
@@ -747,6 +753,10 @@ describe('in-job acceptance', () => {
    * Mutation: reconcile stored rows by their database UUID instead of deriving
    * core's semantic identity. A second cycle sees every row as a different
    * item and cannot preserve its settled status.
+   *
+   * Mutation: project proposal provenance only when somebody accepts it. The
+   * pending decision still appears in Needs you but its receipt has no source
+   * message—the item that most needs inspection is the only unsourced one.
    */
   it('persists pending attention for a decision the worker stages', async () => {
     const body = 'We will use Postgres for the queue.';
@@ -789,6 +799,17 @@ describe('in-job acceptance', () => {
     expect(rows.every((row) => row.status === 'pending')).toBe(true);
     expect(rows.every((row) => row.subjectKind === 'proposal')).toBe(true);
     expect(rows.every((row) => row.reason.kind === 'decision_pending')).toBe(true);
+    const sources = await handle.db
+      .select()
+      .from(proposalSources)
+      .where(eq(proposalSources.proposalId, run.proposalsRecorded[0] as string));
+    expect(sources).toEqual([
+      {
+        roomId: room.roomId,
+        proposalId: run.proposalsRecorded[0],
+        messageId: first,
+      },
+    ]);
   });
 
   /**

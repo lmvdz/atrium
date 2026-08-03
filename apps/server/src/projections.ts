@@ -6,6 +6,7 @@ import {
   messages,
   objectRelations,
   objectSources,
+  proposalSources,
   proposals,
 } from '@atrium/db/schema';
 import { and, eq } from 'drizzle-orm';
@@ -173,6 +174,13 @@ async function projectProposalRecorded(
     status: record.status,
     createdAt: new Date(proposal.createdAt),
   });
+
+  // A staged reading needs the same inspectable source chain as an accepted
+  // object. Waiting until acceptance to project provenance leaves the exact
+  // proposal that still needs human judgment with no receipt to inspect.
+  for (const messageId of proposal.provenance) {
+    await tx.insert(proposalSources).values({ roomId, proposalId: id, messageId });
+  }
 }
 
 async function projectProposalRejected(

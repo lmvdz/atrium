@@ -11,6 +11,7 @@ import type {
   HumanSummary,
   MessageRecord,
   ObjectiveRecord,
+  ReceiptRecord,
   RoomHeadRecord,
   RoomSummary,
   StateObject,
@@ -18,10 +19,13 @@ import type {
 } from '../src/components';
 import {
   citationFrom,
+  happenedKindFor,
   messageEntry,
   owedSummary,
   quotationFrom,
   rationale,
+  sinceYouLeft,
+  systemStatement,
   trailerFor,
 } from '../src/components';
 import type { ReplayData } from './replay-data';
@@ -82,16 +86,6 @@ export function replayView(data: ReplayData, viewerId?: string) {
   }));
   const recordById = new Map(records.map((record) => [record.id, record]));
 
-  const entries: TimelineEntry[] = data.messages.map((message, index) => {
-    const record = records[index] as MessageRecord;
-    const reply = message.replyToId ? recordById.get(message.replyToId) : undefined;
-    return messageEntry(record, {
-      state: TALK,
-      replyTo: reply ? quotationFrom(reply) : null,
-      viewer: viewerName,
-    });
-  });
-
   const pendingBySubject = new Map(viewerAttention.map((item) => [item.subjectId, item]));
   const objectives: ObjectiveRecord[] = data.objects
     .filter((object) => object.type === 'objective' && object.retractedAt === null)
@@ -138,6 +132,53 @@ export function replayView(data: ReplayData, viewerId?: string) {
       objectives: [],
     }));
   const objects = [...accepted, ...staged];
+
+  /* A source message inherits only the semantic state its persisted edges
+     prove. Pending attention wins over accepted/change because the divider's
+     NEED class answers the stronger question: which rows lead to something the
+     viewer still owes. Every other human-authored row remains discussion. */
+  const stateByMessage = new Map<string, EpistemicState>();
+  for (const source of data.objectSources) {
+    const object = accepted.find((candidate) => candidate.id === source.objectId);
+    if (object) stateByMessage.set(source.messageId, object.state);
+  }
+  for (const source of data.proposalSources) {
+    const object = objects.find((candidate) => candidate.id === source.proposalId);
+    if (object) stateByMessage.set(source.messageId, object.state);
+  }
+  for (const item of viewerAttention) {
+    const sourceId =
+      item.subjectKind === 'proposal'
+        ? data.proposalSources.find((source) => source.proposalId === item.subjectId)?.messageId
+        : data.objectSources.find((source) => source.objectId === item.subjectId)?.messageId;
+    const object = objects.find((candidate) => candidate.id === item.subjectId);
+    if (sourceId && object) stateByMessage.set(sourceId, { ...object.state, owedToViewer: true });
+  }
+
+  const messageEntries: TimelineEntry[] = data.messages.map((message, index) => {
+    const record = records[index] as MessageRecord;
+    const reply = message.replyToId ? recordById.get(message.replyToId) : undefined;
+    return messageEntry(record, {
+      state: stateByMessage.get(message.id) ?? TALK,
+      replyTo: reply ? quotationFrom(reply) : null,
+      viewer: viewerName,
+    });
+  });
+  const entries: TimelineEntry[] =
+    messageEntries.length === 0
+      ? []
+      : [
+          sinceYouLeft({
+            id: 'replay-history',
+            label: 'REPLAYED HISTORY',
+            window: `${clock(data.messages[0]?.createdAt ?? new Date(0))} → ${clock(data.messages.at(-1)?.createdAt ?? new Date(0))}`,
+            entries: messageEntries,
+            seen: false,
+            seenAt: null,
+            activeFilter: null,
+          }),
+          ...messageEntries,
+        ];
 
   const sourceFor = (subjectKind: 'object' | 'proposal', subjectId: string) => {
     const sourceId =
@@ -216,6 +257,57 @@ export function replayView(data: ReplayData, viewerId?: string) {
     updatedAt: clock(
       data.messages.at(-1)?.createdAt ?? data.objects.at(-1)?.updatedAt ?? new Date(0),
     ),
+  };
+}
+
+/**
+ * Build the inspectable record for one persisted semantic row.
+ *
+ * The excerpt is minted from the message register, never copied out of a
+ * proposal payload. That keeps the receipt's author, clock, words, room and
+ * jump target anchored to the same persisted message.
+ */
+export function replayReceipt(
+  data: ReplayData,
+  records: readonly MessageRecord[],
+  object: StateObject,
+): ReceiptRecord {
+  const recordById = new Map(records.map((record) => [record.id, record]));
+  const accepted = data.objects.find((candidate) => candidate.id === object.id);
+  const proposal = data.proposals.find((candidate) => candidate.id === object.id);
+  const proposalId = accepted?.proposalId ?? proposal?.id;
+  const sourceIds = [
+    ...data.objectSources
+      .filter((source) => source.objectId === object.id)
+      .map((source) => source.messageId),
+    ...data.proposalSources
+      .filter((source) => source.proposalId === proposalId)
+      .map((source) => source.messageId),
+  ];
+  const provenance = [...new Set(sourceIds)].flatMap((messageId) => {
+    const record = recordById.get(messageId);
+    const excerpt = record ? quotationFrom(record) : null;
+    return excerpt ? [{ id: `${object.id}:source:${messageId}`, excerpt, note: null }] : [];
+  });
+  const kind = happenedKindFor(object.state);
+
+  return {
+    id: object.id,
+    state: object.state,
+    title: object.text,
+    status: [object.kind.toUpperCase(), object.state.verification.replace('_', ' ')],
+    happened: object.facts.map((fact, index) => ({
+      id: `${object.id}:fact:${index}`,
+      kind,
+      statement: systemStatement(fact),
+    })),
+    provenance,
+    corrections: [],
+    reopenable: false,
+    reopenNote:
+      provenance.length === 0
+        ? 'no persisted message source is attached to this reading'
+        : 'the excerpts above come from the persisted room record',
   };
 }
 

@@ -62,9 +62,12 @@ describe('persisted replay view', () => {
 
   /**
    * Mutation: source the feed from gallery fixtures or truncate the persisted
-   * messages. The two database records no longer produce exactly two rows.
+   * messages. The two database records no longer produce exactly two message
+   * rows beneath the derived replay divider.
    * Mutation: carry reply text separately instead of deriving it from m1. The
    * reply citation no longer names the record whose words it displays.
+   * Mutation: hand-write the divider's class totals. Its discussion count no
+   * longer follows the two persisted human-authored rows.
    */
   it('derives every conversation row and reply citation from persisted messages', () => {
     const view = replayView(data(), 'alice');
@@ -72,10 +75,15 @@ describe('persisted replay view', () => {
       'Should regeneration happen in the background?',
       'Yes, while the previous page remains available.',
     ]);
-    expect(view.entries).toHaveLength(2);
-    expect(view.entries[1]?.type).toBe('message');
-    if (view.entries[1]?.type !== 'message') throw new Error('second row is not a message');
-    expect(view.entries[1].replyTo?.messageId).toBe('m1');
+    expect(view.entries).toHaveLength(3);
+    expect(view.entries[0]).toMatchObject({
+      type: 'since-you-left',
+      counts: { need: 0, change: 0, discussion: 2, routine: 0 },
+      total: 2,
+    });
+    expect(view.entries[2]?.type).toBe('message');
+    if (view.entries[2]?.type !== 'message') throw new Error('third row is not a message');
+    expect(view.entries[2].replyTo?.messageId).toBe('m1');
     expect(view.room.members).toEqual(['alice']);
   });
 });
