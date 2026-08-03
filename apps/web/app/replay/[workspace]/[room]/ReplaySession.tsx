@@ -60,6 +60,17 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     });
     return () => cancelAnimationFrame(frame);
   }, [binding]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const feed = document.querySelector<HTMLElement>('[data-region="conversation"]');
+      const visibleMessages = feed?.querySelectorAll<HTMLElement>('[data-message-id]');
+      const anchor =
+        feed?.querySelector<HTMLElement>('[data-row="since-you-left"]') ??
+        visibleMessages?.[Math.min(cursor, visibleMessages.length) - 1];
+      anchor?.scrollIntoView({ block: 'start' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [cursor]);
   const objectives: readonly ObjectiveRecord[] = view.objectives.map((objective) => ({
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
@@ -329,13 +340,14 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
       />
       {binding.mode === 'free' ? (
         <nav aria-label="Replay controls" className={styles.controls}>
+          <span className={styles.controlLabel}>REPLAY POSITION</span>
           <button
             aria-label="Previous message"
             disabled={cursor === 0}
             onClick={() => seek(cursor - 1)}
             type="button"
           >
-            ←
+            ← previous
           </button>
           <input
             aria-label="Replay position"
@@ -351,12 +363,12 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
             onClick={() => seek(cursor + 1)}
             type="button"
           >
-            →
+            next →
           </button>
           <output aria-live="polite" className={styles.position}>
             {cursor === data.messages.length
-              ? `interpreted · ${cursor} / ${data.messages.length}`
-              : `message ${cursor} / ${data.messages.length}`}
+              ? `all ${cursor} messages shown · machine read through ${cursor}`
+              : `first ${cursor} of ${data.messages.length} shown`}
           </output>
         </nav>
       ) : null}

@@ -93,7 +93,7 @@ test.describe('persisted three-surface replay', () => {
 
     await expect(page.getByText('1 room · 5 humans', { exact: true })).toBeVisible();
     const controls = page.getByRole('navigation', { name: 'Replay controls' });
-    await expect(controls).toContainText('interpreted · 111 / 111');
+    await expect(controls).toContainText('all 111 messages shown · machine read through 111');
     await expect(
       page.getByRole('heading', { name: 'function-call side effects', exact: true }),
     ).toBeVisible();
@@ -118,13 +118,33 @@ test.describe('persisted three-surface replay', () => {
       }),
       'the replay scrubber must not cover the composer',
     ).toBe(true);
+    /**
+     * Mutation: leave replay at scrollTop zero. The corpus's first, book-length
+     * message then consumes the returning participant's entire reading surface
+     * and buries the since-you-left boundary the replay exists to expose.
+     */
+    const feed = page.locator('[data-region="conversation"]');
+    const divider = page.locator('[data-row="since-you-left"]');
+    await expect
+      .poll(() => feed.evaluate((element) => element.scrollTop), {
+        message: 'the replay to orient at its return boundary',
+      })
+      .toBeGreaterThan(0);
+    await expect(divider).toBeInViewport();
+    /**
+     * Mutation: return the transport to fixed positioning. It then covers the
+     * feed/composer while the earlier hit-test samples only the textbox centre.
+     */
+    expect(await controls.evaluate((element) => getComputedStyle(element).position)).toBe(
+      'relative',
+    );
 
     const slider = page.getByRole('slider', { name: 'Replay position' });
     await slider.press('Home');
     await slider.press('ArrowRight');
     await slider.press('ArrowRight');
     await slider.press('ArrowRight');
-    await expect(controls).toContainText('message 3 / 111');
+    await expect(controls).toContainText('first 3 of 111 shown');
     await expect(page.locator('[data-region="conversation"] [data-message-id]')).toHaveCount(3);
     await expect(
       page.getByText(

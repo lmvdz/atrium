@@ -1,4 +1,6 @@
 .replay {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   height: 100%;
   min-height: 0;
 }
@@ -6,17 +8,20 @@
 .controls {
   align-items: center;
   background: var(--bg1);
-  border: 1px solid var(--line);
-  bottom: 96px;
-  box-shadow: 0 8px 32px color-mix(in srgb, var(--tx0) 12%, transparent);
+  border-top: 1px solid var(--line);
   display: grid;
   gap: 8px;
-  grid-template-columns: auto minmax(180px, 36vw) auto auto;
-  left: 50%;
-  padding: 8px;
-  position: fixed;
-  transform: translateX(-50%);
+  grid-template-columns: auto auto minmax(180px, 1fr) auto auto;
+  padding: 8px 14px;
+  position: relative;
   z-index: 20;
+}
+
+.controlLabel {
+  align-self: center;
+  color: var(--tx1);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10.5px;
 }
 
 .controls button {
@@ -26,7 +31,7 @@
   cursor: pointer;
   font: inherit;
   min-height: 28px;
-  min-width: 28px;
+  min-width: 82px;
 }
 
 .controls button:disabled {
@@ -43,7 +48,7 @@
 .position {
   color: var(--tx1);
   font-size: 11px;
-  min-width: 150px;
+  min-width: 250px;
   text-align: right;
 }
 
