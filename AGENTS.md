@@ -62,15 +62,19 @@ pnpm -r build          # packages must build before apps typecheck
 pnpm typecheck && pnpm lint && pnpm test
 ```
 
-`pnpm test` needs no services. **Integration tests and both mutation ledgers need a real Postgres** reachable at `ATRIUM_TEST_DATABASE_URL`:
+`pnpm test` needs no services. **Integration tests need a real Postgres, and the script brings its own** — `pnpm test:integration` runs up → migrate → vitest → down against `docker-compose.test.yml`, so Docker is the only prerequisite:
 
 ```
-docker compose up -d postgres        # or bring your own
-pnpm --filter @atrium/db migrate     # apply the 11 migrations
-ATRIUM_TEST_DATABASE_URL=postgres://... pnpm test:integration
+pnpm test:integration            # brings the database up and tears it down
+pnpm test:integration --keep     # leave it running afterwards
+ATRIUM_TEST_DATABASE_URL=... pnpm test:integration   # use your own; touches compose not at all
 ```
 
-`docker-compose.yml` also defines `minio`, `migrate`, `server`, `app` and `proxy` — you do not need them to run the suites. Two known issues live in the tracker: compose publishes Postgres and MinIO on every interface, and `.env.example` is inaccurate about what enables a credential fallback. Read `.env.example` rather than trusting either.
+There is deliberately **no in-suite skip**: if the database cannot be reached the run exits non-zero, because a test that quietly passes without its database keeps reporting green on the gate it guards.
+
+**Both mutation ledgers** — `packages/core/mutants/run.mjs` and root `mutants/` — need `ATRIUM_TEST_DATABASE_URL` pointing at an already-migrated database; they do not manage one for you.
+
+`docker-compose.yml` (the full stack, distinct from the test one) also defines `minio`, `server`, `app` and `proxy`; you do not need them for the suites. Two known issues are in the tracker: compose publishes Postgres and MinIO on every interface, and `.env.example` is inaccurate about what enables a credential fallback.
 
 **`gh` needs its own auth on a new machine.** If it is not authenticated, or the shell is sandboxed, GitHub is unreachable and `docs/TRACKER.md` is your fallback — see below.
 
