@@ -10,10 +10,10 @@
   font-variant-ligatures: none;
 }
 
-/* --grn2 is the darkest green in the set and on --bg1 it measures 4.48:1 —
-   under AA at this size. Every other verified glyph in the shell sits on --bg3
-   (the pin, the lens, the receipt), where the same colour clears it. So the
-   feed's ✓ gets the same surface the rest of them stand on. */
+/* --grn2 is the darkest green in the set. The light-theme step was darkened
+   after the persisted replay measured the former value below the rendered
+   audit's AA safety floor on --bg3. The feed's ✓ keeps that same surface so
+   every verified glyph is measured against one of the audited backgrounds. */
 .verified {
   color: var(--grn2);
   background: var(--bg3);

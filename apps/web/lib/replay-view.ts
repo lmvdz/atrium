@@ -72,8 +72,12 @@ export function replayAt(data: ReplayData, messageCount: number): ReplayData {
  */
 export function replayView(data: ReplayData, viewerId?: string) {
   const participantName = new Map(data.participants.map((person) => [person.id, person.name]));
+  const defaultViewerId = data.attention.find((item) => item.status === 'pending')?.userId;
   const viewer =
-    data.participants.find((person) => person.id === viewerId) ?? data.participants[0] ?? null;
+    data.participants.find((person) => person.id === viewerId) ??
+    data.participants.find((person) => person.id === defaultViewerId) ??
+    data.participants[0] ??
+    null;
   const viewerName = viewer?.name ?? 'replay viewer';
   const viewerAttention = data.attention.filter(
     (item) => item.userId === viewer?.id && item.status === 'pending',
@@ -82,7 +86,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
   const records: MessageRecord[] = data.messages.map((message) => ({
     id: message.id,
     at: clock(message.createdAt),
-    actor: message.author ?? 'deleted participant',
+    actor: message.author ?? 'author unavailable',
     text: message.body,
     origin: 'seeded',
     room: data.room.name,
@@ -105,13 +109,21 @@ export function replayView(data: ReplayData, viewerId?: string) {
     }));
 
   const accepted: StateObject[] = data.objects
-    .filter((object) => object.type !== 'objective' && object.retractedAt === null)
+    .filter(
+      (object) =>
+        object.type !== 'objective' &&
+        object.retractedAt === null &&
+        object.supersededById === null,
+    )
     .map((object) => ({
       id: object.id,
       kind: objectKind(object.type),
       state: stateForObject(object.type, object.payload, pendingBySubject.has(object.id), true),
       text: payloadText(object.type, object.payload),
-      facts: objectFacts(object.type, object.payload, participantName, object.createdAt),
+      facts: [
+        ...objectFacts(object.type, object.payload, participantName, object.createdAt),
+        ...relationFacts(data, object.id),
+      ],
       objectives: object.objectiveId ? [object.objectiveId] : [],
     }));
 
@@ -199,6 +211,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
 
   const attention: AttentionItem[] = viewerAttention.map((item) => {
     const subject = objects.find((object) => object.id === item.subjectId);
+    const source = sourceFor(item.subjectKind, item.subjectId);
     return {
       id: item.id,
       state:
@@ -210,10 +223,10 @@ export function replayView(data: ReplayData, viewerId?: string) {
           irreversible: false,
         } satisfies EpistemicState),
       title: subject?.text ?? 'an item whose semantic record is unavailable',
-      rationale: rationale(reasonFor(item.class, viewerName)),
+      rationale: rationale(reasonFor(item.reason, viewerName)),
       facts: [`raised ${clock(item.createdAt)}`],
-      source: sourceFor(item.subjectKind, item.subjectId),
-      actions: actionsFor(item.class),
+      source,
+      actions: actionsFor(item.class, item.reason.kind, source !== null),
     };
   });
 
@@ -257,9 +270,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
     room,
     rooms,
     trailer: trailerFor({ objects, objectives, overdue: [] }),
-    updatedAt: clock(
-      data.messages.at(-1)?.createdAt ?? data.objects.at(-1)?.updatedAt ?? new Date(0),
-    ),
+    updatedAt: clock(latestReplayChange(data)),
   };
 }
 
@@ -528,28 +539,97 @@ function objectFacts(
   return facts;
 }
 
-function reasonFor(
-  attentionClass: ReplayData['attention'][number]['class'],
-  viewer: string,
-): string {
-  switch (attentionClass) {
-    case 'needs_decision':
-      return `${viewer} can settle this decision, and inference cannot certify it`;
-    case 'owned_commitment':
-      return `${viewer} owns this commitment and it remains open`;
-    case 'blocking_question':
-      return `${viewer} can answer the question that blocks current work`;
+function relationFacts(data: ReplayData, objectId: string): string[] {
+  const objects = new Map(
+    data.objects.map((object) => [object.id, payloadText(object.type, object.payload)]),
+  );
+  return data.relations.flatMap((relation) => {
+    if (relation.kind === 'answers' || relation.kind === 'evidence') return [];
+    if (relation.fromObjectId === objectId && relation.toObjectId) {
+      const target = objects.get(relation.toObjectId) ?? relation.toObjectId;
+      if (relation.kind === 'blocks') return [`blocks: ${target}`];
+      if (relation.kind === 'depends_on') return [`depends on: ${target}`];
+      if (relation.kind === 'supersedes') return [`supersedes: ${target}`];
+    }
+    if (relation.toObjectId === objectId) {
+      const source = objects.get(relation.fromObjectId) ?? relation.fromObjectId;
+      if (relation.kind === 'blocks') return [`blocked by: ${source}`];
+      if (relation.kind === 'depends_on') return [`required by: ${source}`];
+    }
+    return [];
+  });
+}
+
+function reasonFor(reason: ReplayData['attention'][number]['reason'], viewer: string): string {
+  switch (reason.kind) {
+    case 'decision_pending':
+      return reason.assigned
+        ? `${viewer} is named to settle this decision; inference cannot certify it`
+        : 'no owner is named; any room member can settle this decision';
+    case 'commitment_overdue':
+      return `${viewer} owns this commitment and its recorded due time has passed`;
+    case 'commitment_open':
+      return `${viewer} owns this open commitment`;
+    case 'commitment_confirm':
+      return `${viewer} was named as owner by somebody else and must confirm or decline`;
+    case 'commitment_self_stated':
+      return `${viewer} authored words staged as a commitment and must confirm or decline`;
+    case 'question_blocks_commitment':
+      return `${viewer} owns the commitment blocked by this open question`;
+    case 'question_blocks_objective':
+      return 'this open question blocks an unowned objective; any room member can answer';
+    case 'question_names_you':
+      return `${viewer} is named on this open question`;
     case 'mention':
-      return `${viewer} was named in a message that asks for attention`;
+      return `${viewer} was named in a message asking for attention`;
+    case 'reading_pending':
+      return `a machine staged this as a ${reason.proposedType}; a person must file or decline it`;
   }
 }
 
-function actionsFor(attentionClass: ReplayData['attention'][number]['class']) {
+function actionsFor(
+  attentionClass: ReplayData['attention'][number]['class'],
+  reason: ReplayData['attention'][number]['reason']['kind'],
+  hasSource: boolean,
+) {
   if (attentionClass === 'needs_decision') {
     return [
       { id: 'answer', label: 'answer', emphasis: 'primary' as const, statement: null },
       { id: 'decline', label: 'decline', emphasis: 'secondary' as const, statement: null },
     ];
   }
-  return [{ id: 'open', label: 'open source', emphasis: 'secondary' as const, statement: null }];
+  if (attentionClass === 'blocking_question') {
+    return [
+      { id: 'answer', label: 'answer', emphasis: 'primary' as const, statement: null },
+      ...(hasSource
+        ? [{ id: 'open', label: 'open source', emphasis: 'secondary' as const, statement: null }]
+        : []),
+    ];
+  }
+  if (reason === 'commitment_confirm' || reason === 'commitment_self_stated') {
+    return [
+      { id: 'confirm', label: 'confirm', emphasis: 'primary' as const, statement: null },
+      { id: 'decline', label: 'decline', emphasis: 'secondary' as const, statement: null },
+    ];
+  }
+  return hasSource
+    ? [{ id: 'open', label: 'open source', emphasis: 'secondary' as const, statement: null }]
+    : [];
+}
+
+function latestReplayChange(data: ReplayData): Date {
+  const times: Date[] = [
+    ...data.messages.map((row) => row.createdAt),
+    ...data.interpretations.flatMap((row) => [row.createdAt, row.completedAt].filter(isDate)),
+    ...data.proposals.flatMap((row) => [row.createdAt, row.decidedAt].filter(isDate)),
+    ...data.objects.map((row) => row.updatedAt),
+    ...data.relations.map((row) => row.createdAt),
+    ...data.attention.flatMap((row) => [row.createdAt, row.resolvedAt].filter(isDate)),
+    ...data.corrections.map((row) => row.createdAt),
+  ];
+  return times.reduce((latest, value) => (value > latest ? value : latest), new Date(0));
+}
+
+function isDate(value: Date | null): value is Date {
+  return value instanceof Date;
 }

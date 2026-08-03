@@ -57,24 +57,25 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
   }));
-  const baseObjects = view.objects.map((object) => {
-    const accepted = acceptedSubjects.includes(object.id)
-      ? {
-          ...object,
-          state: {
-            ...object.state,
-            verification: 'accepted' as const,
-            owedToViewer: false,
-          },
-          objectives:
-            object.objectives.length === 0
-              ? view.objectives.map((objective) => objective.id)
-              : object.objectives,
-        }
-      : object;
+  const correctedObjects = applyReplayTransitions(view.objects, corrections);
+  const objects = correctedObjects.map((object) => {
+    const accepted =
+      acceptedSubjects.includes(object.id) && object.kind !== 'claim'
+        ? {
+            ...object,
+            state: {
+              ...object.state,
+              verification: 'accepted' as const,
+              owedToViewer: false,
+            },
+            objectives:
+              object.objectives.length === 0
+                ? view.objectives.map((objective) => objective.id)
+                : object.objectives,
+          }
+        : object;
     return accepted;
   });
-  const objects = applyReplayTransitions(baseObjects, corrections);
   const records = [...view.records, ...localRecords];
   const recordById = new Map(records.map((record) => [record.id, record]));
   const restoredAttention: AttentionItem[] = corrections.flatMap((correction) => {
@@ -146,6 +147,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
   };
 
   const send = (text: string) => {
+    if (binding.mode !== 'bound') return;
     const body = text.trim();
     if (!body) return;
     localSequence.current += 1;
@@ -195,6 +197,12 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         attention={attention}
         binding={binding}
         boxed={false}
+        composerEnabled={binding.mode === 'bound'}
+        composerNote={
+          binding.mode === 'bound'
+            ? 'this answer is recorded verbatim in the local replay'
+            : 'replay is read-only · choose an answer action to exercise answer binding'
+        }
         entries={withFilter(entries, filter)}
         filter={filter}
         focused={focused}

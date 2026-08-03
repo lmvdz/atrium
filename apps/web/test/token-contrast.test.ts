@@ -666,27 +666,26 @@ describe('the filter cannot fade a row under AA', () => {
     expect(ratio).toBeGreaterThanOrEqual(4.5);
   });
 
-  /* CATCHES: the "no fade clears AA" doctrine being softened on the strength of
-     a dark-theme number. ONE stylesheet serves both themes, so a fade has to
-     clear AA in the WORSE of them, and light is the worse: --amb2 on --ambbg is
-     4.53:1 there against 9.65:1 dark. At 4.53 there is no headroom at all —
-     that is what settled the filter on lifting matches instead of dimming the
-     rest, and what CONVENTIONS records.
+  /* The old assertion caught a fade doctrine being softened by requiring the
+     light token to have *no* headroom. The rendered replay then proved that
+     premise unsafe: other legitimate amber surfaces crossed the audit's safety
+     floor. Opacity is already forbidden exhaustively above; this test now
+     catches regressing the light ramp below the measured safety margin while
+     retaining the old upper bound that keeps amber subordinate to body text.
 
      The dark number was invisible until this round: `block()` was matching the
      selector names in tokens.css's own provenance comment, so this test's
      "dark" case had been re-measuring the light theme since it was written, and
      asserted `< 5.6` on a value that is really 9.65. */
-  it('the binding measurement is the light theme, and it has no headroom', () => {
+  it('the binding light-theme token retains rendered-audit headroom', () => {
     const light = contrast(LIGHT.amb2 as string, LIGHT.ambbg as string);
     const dark = contrast(DARK.amb2 as string, DARK.ambbg as string);
     console.info(
       `weakest row token: light ${light.toFixed(2)}:1 · dark ${dark.toFixed(2)}:1 — the binding one is ${Math.min(light, dark).toFixed(2)}`,
     );
     expect(Math.min(light, dark)).toBe(light);
+    expect(light).toBeGreaterThanOrEqual(4.9);
     expect(light).toBeLessThan(5.6);
-    // and no fade survives it: 95% of the floor is already under AA
-    expect(light * 0.95).toBeLessThan(4.5);
   });
 });
 

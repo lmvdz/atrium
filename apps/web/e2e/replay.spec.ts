@@ -12,7 +12,7 @@ async function replayDatabaseFingerprint(): Promise<string> {
         SELECT r.id
         FROM rooms r
         JOIN workspaces w ON w.id = r.workspace_id
-        WHERE w.slug = 'atrium-replay' AND r.slug = 'nextjs-isr'
+        WHERE w.slug = 'atrium-replay' AND r.slug = 'typescript-9998'
       )
       SELECT md5(concat_ws('|',
         (SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.id)::text, '[]') FROM core_events x WHERE x.room_id = (SELECT id FROM target)),
@@ -32,6 +32,41 @@ async function replayDatabaseFingerprint(): Promise<string> {
   }
 }
 
+async function replayDatabaseFacts() {
+  const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  try {
+    const [row] = await sql<
+      Array<{
+        messages: number;
+        proposals: number;
+        objects: number;
+        stagedDecisions: number;
+        answers: number;
+        proposalSources: number;
+        objectSources: number;
+      }>
+    >`
+      WITH target AS (
+        SELECT r.id
+        FROM rooms r
+        JOIN workspaces w ON w.id = r.workspace_id
+        WHERE w.slug = 'atrium-replay' AND r.slug = 'typescript-9998'
+      )
+      SELECT
+        (SELECT count(*)::int FROM messages WHERE room_id = (SELECT id FROM target)) AS messages,
+        (SELECT count(*)::int FROM proposals WHERE room_id = (SELECT id FROM target)) AS proposals,
+        (SELECT count(*)::int FROM accepted_objects WHERE room_id = (SELECT id FROM target)) AS objects,
+        (SELECT count(*)::int FROM proposals WHERE room_id = (SELECT id FROM target) AND type = 'decision' AND status = 'proposed') AS "stagedDecisions",
+        (SELECT count(*)::int FROM relations WHERE room_id = (SELECT id FROM target) AND kind = 'answers') AS answers,
+        (SELECT count(*)::int FROM proposal_sources WHERE room_id = (SELECT id FROM target)) AS "proposalSources",
+        (SELECT count(*)::int FROM object_sources WHERE room_id = (SELECT id FROM target)) AS "objectSources"
+    `;
+    return row;
+  } finally {
+    await sql.end();
+  }
+}
+
 test.describe('persisted three-surface replay', () => {
   /**
    * Mutation: route the replay through gallery fixtures, truncate the corpus,
@@ -42,35 +77,43 @@ test.describe('persisted three-surface replay', () => {
    * The objective appears before the worker has read the complete import.
    */
   test('loads the full corpus and steps through its honest worker boundary', async ({ page }) => {
-    await page.goto('/replay/atrium-replay/nextjs-isr');
+    expect(await replayDatabaseFacts()).toEqual({
+      messages: 111,
+      proposals: 6,
+      objects: 5,
+      stagedDecisions: 1,
+      answers: 1,
+      proposalSources: 6,
+      objectSources: 5,
+    });
+    await page.goto('/replay/atrium-replay/typescript-9998');
 
     const controls = page.getByRole('navigation', { name: 'Replay controls' });
-    await expect(controls).toContainText('interpreted · 454 / 454');
+    await expect(controls).toContainText('interpreted · 111 / 111');
     await expect(
-      page.getByRole('heading', { name: 'incremental static regeneration', exact: true }),
+      page.getByRole('heading', { name: 'function-call side effects', exact: true }),
     ).toBeVisible();
     await expect(
       page.getByText(
-        'Fully automatic re-rendering of statically exported pages without a full rebuild.',
+        'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
         { exact: true },
       ),
     ).toBeVisible();
+    await expect(
+      page.getByRole('textbox', { name: 'Message #function-call side effects' }),
+    ).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
 
     const slider = page.getByRole('slider', { name: 'Replay position' });
     await slider.press('Home');
     await slider.press('ArrowRight');
     await slider.press('ArrowRight');
     await slider.press('ArrowRight');
-    await expect(controls).toContainText('message 3 / 454');
+    await expect(controls).toContainText('message 3 / 111');
+    await expect(page.locator('[data-region="conversation"] [data-message-id]')).toHaveCount(3);
     await expect(
       page.getByText(
-        'You would still need a full rebuild if you change something shared with all pages eg header, correct?',
-        { exact: true },
-      ),
-    ).toBeVisible();
-    await expect(
-      page.getByText(
-        'Fully automatic re-rendering of statically exported pages without a full rebuild.',
+        'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
         { exact: true },
       ),
     ).toHaveCount(0);
@@ -82,7 +125,7 @@ test.describe('persisted three-surface replay', () => {
    * the number reported as lifted diverge.
    */
   test('derives every replay-divider count from the rows its filter lifts', async ({ page }) => {
-    await page.goto('/replay/atrium-replay/nextjs-isr');
+    await page.goto('/replay/atrium-replay/typescript-9998');
 
     const divider = page.locator('[data-row="since-you-left"]');
     for (const attentionClass of ['need', 'change', 'discussion', 'routine'] as const) {
@@ -113,10 +156,9 @@ test.describe('persisted three-surface replay', () => {
     page,
   }) => {
     const before = await replayDatabaseFingerprint();
-    const decision =
-      "Correct. This will cause a server-side render of the full page for a missing path (that wasn't prerendered via `paths: [...]`), instead of doing the static fallback and then load client-side. All other benefits and functionality remains the same.";
-    const answer = 'Use the server-rendered fallback for paths that were not prerendered.';
-    await page.goto('/replay/atrium-replay/nextjs-isr');
+    const decision = '@Strate That function will return `undefined`, not `null`.';
+    const answer = 'Treat this as a decision.';
+    await page.goto('/replay/atrium-replay/typescript-9998');
 
     await page.getByRole('button', { name: 'answer', exact: true }).click();
     const composer = page.getByRole('textbox', {
@@ -143,7 +185,7 @@ test.describe('persisted three-surface replay', () => {
     const accepted = page
       .locator('[data-region="current-state"] [data-object-id]')
       .filter({ hasText: decision });
-    await expect(accepted).toContainText('✓');
+    await expect(accepted).toContainText('~');
     await expect(accepted).toContainText('claim truth remains unverified');
 
     const slider = page.getByRole('slider', { name: 'Replay position' });
@@ -165,9 +207,10 @@ test.describe('persisted three-surface replay', () => {
    */
   test('reopens an answered question while preserving its prior answer', async ({ page }) => {
     const before = await replayDatabaseFingerprint();
-    const question = 'Will it work for `getStaticPaths`?';
-    const priorAnswer = 'Only if your code changes. In cases of data it can just be re-rendered.';
-    await page.goto('/replay/atrium-replay/nextjs-isr');
+    const question = 'When a function is invoked, side effects';
+    const priorAnswer =
+      'In aggregate, I think our optimistic assumption that type guards are unaffected by intervening function calls is the best compromise.';
+    await page.goto('/replay/atrium-replay/typescript-9998');
 
     const questionRow = page
       .locator('[data-region="current-state"] [data-object-id]')
@@ -190,6 +233,20 @@ test.describe('persisted three-surface replay', () => {
     expect(messageId).toBeTruthy();
     await priorAnswerSource.click();
     await expect(page.locator(`[data-message-id="${messageId}"]`)).toBeInViewport();
+
+    const secondAnswer = 'Keep the optimistic assumption, but suppress narrowing through a getter.';
+    await restored.getByRole('button', { name: 'answer', exact: true }).click();
+    await page
+      .getByRole('textbox', { name: `Answer ${question} in your own words` })
+      .fill(secondAnswer);
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(restored.getByRole('button', { name: 'answer', exact: true })).toHaveCount(0);
+    await expect(receipt.locator('[data-quoted]').filter({ hasText: secondAnswer })).toHaveCount(1);
+    await receipt.getByRole('button', { name: '← BACK TO CURRENT STATE' }).click();
+    const answeredAgain = page
+      .locator('[data-region="current-state"] [data-object-id]')
+      .filter({ hasText: question });
+    await expect(answeredAgain).toContainText('✓');
     expect(await replayDatabaseFingerprint()).toBe(before);
   });
 
@@ -201,7 +258,7 @@ test.describe('persisted three-surface replay', () => {
      */
     test(`passes the rendered contrast spot-check in ${theme} theme`, async ({ page }) => {
       await page.setViewportSize({ width: 1440, height: 900 });
-      await page.goto(`/replay/atrium-replay/nextjs-isr?theme=${theme}`);
+      await page.goto(`/replay/atrium-replay/typescript-9998?theme=${theme}`);
       await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
       const audit = (await page.evaluate(AUDIT)) as AuditResult;
       expect(audit.elementsChecked).toBeGreaterThan(120);
@@ -219,7 +276,7 @@ test.describe('persisted three-surface replay', () => {
   test('honours reduced motion on the persisted replay route', async ({ browser }) => {
     const context = await browser.newContext({ reducedMotion: 'reduce' });
     const page = await context.newPage();
-    await page.goto('/replay/atrium-replay/nextjs-isr?theme=light');
+    await page.goto('/replay/atrium-replay/typescript-9998?theme=light');
     const motion = await page.evaluate(() => {
       const animations: string[] = [];
       const transitions: string[] = [];
@@ -240,7 +297,7 @@ test.describe('persisted three-surface replay', () => {
 
     const ordinary = await browser.newContext({ reducedMotion: 'no-preference' });
     const ordinaryPage = await ordinary.newPage();
-    await ordinaryPage.goto('/replay/atrium-replay/nextjs-isr?theme=light');
+    await ordinaryPage.goto('/replay/atrium-replay/typescript-9998?theme=light');
     const liveTransitions = await ordinaryPage.evaluate(
       () =>
         [...document.querySelectorAll('body *')].filter((element) =>

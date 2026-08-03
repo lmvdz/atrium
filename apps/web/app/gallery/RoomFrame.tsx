@@ -155,6 +155,7 @@ export interface RoomFrameProps {
   readonly updatedAt: string;
   readonly binding: ComposerBinding;
   readonly composerNote?: string;
+  readonly composerEnabled?: boolean;
   readonly jump?: CrossRoomJumpRecord;
   /**
    * The receipt to show in the lens, as a RECORD rather than as pre-built
@@ -305,6 +306,7 @@ function Frame(props: RoomFrameProps) {
           />
           <Composer
             binding={props.binding}
+            disabled={props.composerEnabled === false}
             footNote={props.composerNote}
             onCancelBinding={on.onCancelBinding}
             onChange={on.onComposerChange}

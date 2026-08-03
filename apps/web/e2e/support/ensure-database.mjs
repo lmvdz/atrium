@@ -35,7 +35,7 @@ async function main() {
 }
 
 /**
- * #25's browser proof reads the same deterministic 454-message room a person
+ * #25's browser proof reads the same deterministic 111-message room a person
  * can seed locally. The provider is precomputed and reports zero API spend,
  * but every interpretation and proposal still traverses the production worker.
  */

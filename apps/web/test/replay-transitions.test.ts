@@ -42,7 +42,7 @@ describe('replay correction transitions', () => {
       action: 'retype',
       objectId: decision.id,
       before: { id: decision.id, kind: 'decision' },
-      after: { id: decision.id, kind: 'claim', state: { verification: 'accepted' } },
+      after: { id: decision.id, kind: 'claim', state: { verification: 'unverified' } },
     });
     expect(applyReplayTransitions([decision], [transition])[0]).toBe(transition.after);
   });

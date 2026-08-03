@@ -62,6 +62,8 @@ export interface ComposerProps {
   readonly textareaRef?: Ref<HTMLTextAreaElement>;
   /** receives the draft the footer promises Enter will send */
   readonly onSend?: (draft: string) => void;
+  /** A replay may permit only a bound answer, never free historical chat. */
+  readonly disabled?: boolean;
 }
 
 export function Composer({
@@ -74,6 +76,7 @@ export function Composer({
   onKeyDown,
   textareaRef,
   onSend,
+  disabled = false,
 }: ComposerProps) {
   const own = useRef<HTMLTextAreaElement | null>(null);
   /* WHETHER AN IME IS MID-COMPOSITION, tracked on the element rather than read
@@ -235,6 +238,7 @@ export function Composer({
             binding.mode === 'bound' ? `Answer ${boundLabel} in your own words` : `Message #${room}`
           }
           data-composing={composingNow ? 'true' : 'false'}
+          disabled={disabled}
           onBlur={() => setComposing(false)}
           onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
             /* A change whose native event says it is not part of a composition
@@ -271,6 +275,7 @@ export function Composer({
         <div className={styles.cboxRight}>
           <button
             className="atr-btn"
+            disabled={disabled}
             onClick={send}
             /* KEEP THE COMPOSITION ALIVE ACROSS THE CLICK. Pressing a button
                blurs the textarea, which ends the composition, which clears the

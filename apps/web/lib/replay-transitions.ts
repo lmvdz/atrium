@@ -43,7 +43,7 @@ export function retypeAsClaim(
       state: {
         kind: 'claim',
         /* Human correction confirms the reading, not the truth of the claim. */
-        verification: 'accepted',
+        verification: 'unverified',
         owedToViewer: false,
         irreversible: false,
       },

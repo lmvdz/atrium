@@ -33,35 +33,43 @@ interface CorpusLine {
 }
 
 const WORKSPACE_SLUG = 'atrium-replay';
-const ROOM_SLUG = 'nextjs-isr';
+const ROOM_SLUG = 'typescript-9998';
 const MODEL = 'replay/precomputed-v1';
-const MEMBER_NAMES = new Set(['timneutkens', 'Timer', 'jpsc', 'garnerp', 'rauchg']);
+const MEMBER_NAMES = new Set(['RyanCavanaugh', 'ahejlsberg', 'basickarl', 'ExE-Boss', 'pimterry']);
+const STAGED_DECISION = '@Strate That function will return `undefined`, not `null`.';
 
 const readings = [
   {
-    match: 'Fully automatic re-rendering of statically exported pages without a full rebuild.',
+    match:
+      'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
+    text: 'trade-offs in the control flow analysis work based on running the real-world code (RWC) tests',
     type: 'objective',
   },
   {
-    match: 'Will it work for `getStaticPaths`? (i.e. adding or deleting a blogpost from a CMS)',
-    text: 'Will it work for `getStaticPaths`?',
+    match: 'When a function is invoked, what should we assume its side effects are?',
+    text: 'When a function is invoked, side effects',
     type: 'open_question',
   },
   {
-    match: 'In cases of data it can just be re-rendered.',
+    match:
+      'In aggregate, I think our optimistic assumption that type guards are unaffected by intervening function calls is the best compromise.',
+    text: 'optimistic assumption that type guards are unaffected by intervening function calls is the best compromise',
     type: 'claim',
   },
   {
-    match:
-      "This will cause a server-side render of the full page for a missing path (that wasn't prerendered via `paths: [...]`), instead of doing the static fallback and then load client-side.",
-    text: "Correct. This will cause a server-side render of the full page for a missing path (that wasn't prerendered via `paths: [...]`), instead of doing the static fallback and then load client-side. All other benefits and functionality remains the same.",
+    match: 'We will instead be using a function to obtain the current token:',
+    text: 'will instead be using a function to obtain the current token',
     type: 'decision',
-    wholeMessage: true,
   },
   {
-    match:
-      "We'll be exploring on-demand (triggered via API route) revalidation instead of interval-based in the future.",
-    text: 'on-demand (triggered via API route) revalidation instead of interval-based in the future.',
+    match: STAGED_DECISION,
+    type: 'decision',
+    wholeMessage: true,
+    keepStaged: true,
+  },
+  {
+    match: 'I will update with this code of yous, hopefully it will help future people!',
+    text: 'will update with this code',
     type: 'commitment',
   },
 ] as const;
@@ -115,13 +123,13 @@ const provider: InterpretationProvider = {
 async function main() {
   const databaseUrl = process.env.ATRIUM_REPLAY_DATABASE_URL ?? process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error('set ATRIUM_REPLAY_DATABASE_URL (or DATABASE_URL)');
-  const corpusPath = resolve(process.argv[2] ?? '../../corpora/nextjs-isr.jsonl');
+  const corpusPath = resolve(process.argv[2] ?? '../../corpora/ts9998.jsonl');
   const corpus = readFileSync(corpusPath, 'utf8')
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line) as CorpusLine);
-  if (corpus.length !== 454)
-    throw new Error(`expected the 454-message demo corpus, found ${corpus.length}`);
+  if (corpus.length !== 111)
+    throw new Error(`expected the 111-message demo corpus, found ${corpus.length}`);
 
   const database = createDatabase({ url: databaseUrl });
   const logger = createLogger('error');
@@ -148,15 +156,15 @@ async function main() {
     );
     await database.db.insert(workspaces).values({
       id: workspaceId,
-      name: 'Next.js ISR discussion',
+      name: 'TypeScript control-flow analysis',
       slug: WORKSPACE_SLUG,
     });
     await database.db.insert(rooms).values({
       id: roomId,
       workspaceId,
       slug: ROOM_SLUG,
-      name: 'incremental static regeneration',
-      createdBy: authorIds.get('timneutkens'),
+      name: 'function-call side effects',
+      createdBy: authorIds.get('RyanCavanaugh'),
     });
 
     const memberIds = authors
@@ -185,6 +193,7 @@ async function main() {
     let calls = 0;
     let proposalCount = 0;
     let autoAccepted = 0;
+    const workerRejections: string[] = [];
     while (true) {
       const run = await runInterpretation(
         {
@@ -201,6 +210,7 @@ async function main() {
       calls += run.providerCalls;
       proposalCount += run.proposalsRecorded.length;
       autoAccepted += run.objectsAccepted.length;
+      workerRejections.push(...run.rejected.map((item) => `${item.reason}: ${item.detail}`));
     }
 
     const commands = createCommandService({
@@ -211,7 +221,7 @@ async function main() {
     });
     const staged = (
       await database.db
-        .select({ id: proposals.id, type: proposals.type })
+        .select({ id: proposals.id, type: proposals.type, payload: proposals.payload })
         .from(proposals)
         .where(eq(proposals.roomId, roomId))
     ).sort((left, right) => Number(right.type === 'objective') - Number(left.type === 'objective'));
@@ -219,13 +229,21 @@ async function main() {
     let objectiveId: string | null = null;
     const acceptedByType = new Map<string, string>();
     for (const proposal of staged) {
-      // Keep the decision visibly staged for the Needs-you surface. The three
+      // Keep the deliberately misread decision visibly staged for Needs-you. The
       // other readings are accepted by a recorded human act, never promoted by
       // the fixture or presented as certified model output.
-      if (proposal.type === 'decision') continue;
+      const statement =
+        typeof proposal.payload === 'object' &&
+        proposal.payload !== null &&
+        'statement' in proposal.payload
+          ? proposal.payload.statement
+          : null;
+      if (statement === STAGED_DECISION) continue;
       const accepted = await commands.execute(
         {
-          userId: authorIds.get(proposal.type === 'commitment' ? 'Timer' : 'timneutkens') as string,
+          userId: authorIds.get(
+            proposal.type === 'commitment' ? 'basickarl' : 'RyanCavanaugh',
+          ) as string,
         },
         Command.parse({
           name: 'accept_proposal',
@@ -249,10 +267,14 @@ async function main() {
     const questionId = acceptedByType.get('open_question');
     const answerObjectId = acceptedByType.get('claim');
     if (!questionId || !answerObjectId) {
-      throw new Error('replay seed: the persisted question and answer claim are required');
+      throw new Error(
+        `replay seed: the persisted question and answer claim are required; staged=${staged
+          .map((proposal) => proposal.type)
+          .join(',')}; rejected=${workerRejections.join(' | ') || 'none'}`,
+      );
     }
     const bound = await commands.execute(
-      { userId: authorIds.get('timneutkens') as string },
+      { userId: authorIds.get('RyanCavanaugh') as string },
       Command.parse({
         name: 'answer_bind',
         roomId,
@@ -265,9 +287,13 @@ async function main() {
       throw new Error('replay seed: question answer did not reach the fold');
     }
     const decisionIndex = corpus.findIndex((line) =>
-      line.text.includes(readings.find((reading) => reading.type === 'decision')?.match ?? ''),
+      line.text.includes(
+        readings.find(
+          (reading) => reading.type === 'decision' && 'keepStaged' in reading && reading.keepStaged,
+        )?.match ?? '',
+      ),
     );
-    const windowStart = Math.floor(decisionIndex / 8) * 8;
+    const windowStart = decisionIndex;
     const evidenceWindow = corpus.slice(windowStart, windowStart + 8).map((line) => ({
       id: messageIds.get(line.id) as string,
       roomId,
@@ -290,6 +316,8 @@ async function main() {
     console.log(`worker calls      ${calls} (${MODEL}; precomputed, no API spend)`);
     console.log(`proposals         ${proposalCount}`);
     console.log(`auto-accepted     ${autoAccepted}`);
+    console.log(`worker rejected   ${workerRejections.length}`);
+    for (const rejection of workerRejections) console.log(`  rejected         ${rejection}`);
     console.log(`human-accepted    ${humanAccepted}`);
     console.log(
       `attention pending ${attention.items.filter((item) => item.status === 'pending').length}`,

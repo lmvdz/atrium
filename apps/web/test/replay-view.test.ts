@@ -244,4 +244,126 @@ describe('persisted replay view', () => {
     expect(JSON.stringify(receipt)).not.toContain('supposedly');
     expect(JSON.stringify(receipt)).not.toContain('Another uncited');
   });
+
+  /**
+   * Mutation: turn a nullable author join into a named human. The adapter then
+   * invents an identity that is absent from the persisted message record.
+   */
+  it('labels a missing attribution as unavailable instead of inventing a participant', () => {
+    const snapshot = data();
+    const first = snapshot.messages[0];
+    if (!first) throw new Error('fixture message missing');
+    snapshot.messages[0] = { ...first, author: null };
+
+    const view = replayView(snapshot, 'alice');
+    expect(view.records[0]?.actor).toBe('author unavailable');
+    expect(view.room.members).toEqual(['alice']);
+  });
+
+  /**
+   * Mutation: render a superseded row, drop either direction of a persisted
+   * blocker edge, or derive the room timestamp from only the last message.
+   */
+  it('projects supersession, relation direction, and the latest semantic timestamp', () => {
+    const snapshot = data();
+    const changedAt = new Date('2026-08-02T13:05:00.000Z');
+    snapshot.objects.push(
+      {
+        id: 'old-decision',
+        roomId: 'room',
+        type: 'decision',
+        payload: { statement: 'Use the old path.', decidedBy: 'alice', status: 'superseded' },
+        objectiveId: null,
+        proposalId: null,
+        revision: 1,
+        retractedAt: null,
+        supersededById: 'decision',
+        acceptedBy: 'alice',
+        createdAt: at,
+        updatedAt: at,
+      },
+      {
+        id: 'decision',
+        roomId: 'room',
+        type: 'decision',
+        payload: { statement: 'Use the current path.', decidedBy: 'alice', status: 'active' },
+        objectiveId: null,
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: 'alice',
+        createdAt: at,
+        updatedAt: changedAt,
+      },
+      {
+        id: 'claim',
+        roomId: 'room',
+        type: 'claim',
+        payload: {
+          statement: 'The migration is safe.',
+          claimant: 'alice',
+          verification: 'unverified',
+        },
+        objectiveId: null,
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: 'alice',
+        createdAt: at,
+        updatedAt: at,
+      },
+    );
+    snapshot.relations.push({
+      id: 'blocker',
+      roomId: 'room',
+      kind: 'blocks',
+      fromObjectId: 'decision',
+      toObjectId: 'claim',
+      toMessageId: null,
+      toUrl: null,
+      toFileKey: null,
+      note: null,
+      createdBy: 'alice',
+      createdAt: at,
+    });
+
+    const view = replayView(snapshot, 'alice');
+    expect(view.objects.find((object) => object.id === 'old-decision')).toBeUndefined();
+    expect(view.objects.find((object) => object.id === 'decision')?.facts).toContain(
+      'blocks: The migration is safe.',
+    );
+    expect(view.objects.find((object) => object.id === 'claim')?.facts).toContain(
+      'blocked by: Use the current path.',
+    );
+    expect(view.updatedAt).toBe('13:05');
+  });
+
+  /**
+   * Mutation: replace the structured reason with a class-level generic, or
+   * offer an open-source action when no persisted provenance edge exists.
+   */
+  it('derives attention rationale and actions from the stored reason and source', () => {
+    const snapshot = data();
+    snapshot.attention.push({
+      id: 'confirm',
+      roomId: 'room',
+      userId: 'alice',
+      subjectKind: 'object',
+      subjectId: 'missing-commitment',
+      subjectObjectId: 'missing-commitment',
+      subjectProposalId: null,
+      class: 'owned_commitment',
+      reason: { kind: 'commitment_confirm', statement: 'Ship the migration.' },
+      status: 'pending',
+      createdAt: at,
+      resolvedAt: null,
+    });
+
+    const [item] = replayView(snapshot).attention;
+    expect(item?.rationale).toContain('named as owner by somebody else');
+    expect(item?.actions.map((action) => action.id)).toEqual(['confirm', 'decline']);
+    expect(item?.actions.map((action) => action.id)).not.toContain('open');
+  });
 });
