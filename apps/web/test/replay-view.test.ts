@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { liveRoomView } from '../lib/live-room-view';
+import { liveRoomView, shouldRefreshLiveRoute } from '../lib/live-room-view';
 import type { ReplayData } from '../lib/replay-data';
 import { reopenQuestion } from '../lib/replay-transitions';
 import {
@@ -518,6 +519,22 @@ describe('persisted replay view', () => {
 });
 
 describe('live room view', () => {
+  /**
+   * Mutation: apply the durable-sequence guard to projection invalidations, or
+   * ignore the onChange reason in LiveRoomSession. With an unchanged cursor the
+   * authenticated route then never rereads post-worker attention.
+   */
+  it('refreshes the live route for projection changes at an unchanged cursor', () => {
+    expect(shouldRefreshLiveRoute('state', 8, 8)).toBe(false);
+    expect(shouldRefreshLiveRoute('state', 9, 8)).toBe(true);
+    expect(shouldRefreshLiveRoute('projection', 8, 8)).toBe(true);
+
+    const session = readFileSync('app/app/[workspace]/[room]/LiveRoomSession.tsx', 'utf8');
+    expect(session).toContain(
+      '!shouldRefreshLiveRoute(reason, room.lastSeq, refreshedThrough.current)',
+    );
+  });
+
   /**
    * Mutation: compare the membership cursor with `messages.seq` (a global
    * sequence) or put the divider at the start of the room. The participant who

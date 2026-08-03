@@ -31,6 +31,15 @@ export interface LiveUnreadWindow {
   readonly throughSeq: number;
 }
 
+/** A projection invalidation bypasses the durable event-sequence guard. */
+export function shouldRefreshLiveRoute(
+  reason: 'state' | 'projection',
+  lastSeq: number,
+  refreshedThrough: number,
+): boolean {
+  return reason === 'projection' || lastSeq > refreshedThrough;
+}
+
 export function liveRoomView(
   data: ReplayData,
   viewerId: string,

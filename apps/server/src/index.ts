@@ -122,6 +122,17 @@ async function main(): Promise<void> {
     );
   }
 
+  // Before the socket server exists there can be no local subscribers. Still
+  // relay to already-running instances; once realtime is constructed this is
+  // replaced with the local+broadcast implementation below.
+  let signalProjectionChanged = (roomId: string) => {
+    bus.relay(roomId, {
+      type: 'projection_changed',
+      roomId,
+      at: new Date().toISOString(),
+    });
+  };
+
   const queue = await startQueue({
     databaseUrl: env.DATABASE_URL,
     concurrency: env.INTERPRET_WORKER_CONCURRENCY,
@@ -134,6 +145,7 @@ async function main(): Promise<void> {
           ledger,
           provider: createGatewayProvider(),
           routing,
+          onProjectionChanged: (roomId) => signalProjectionChanged(roomId),
           config: {
             maxWindowMessages: env.INTERPRET_MAX_WINDOW_MESSAGES,
             contextMessagesBefore: env.INTERPRET_CONTEXT_MESSAGES,
@@ -191,6 +203,7 @@ async function main(): Promise<void> {
     revalidateSession: createSessionResolver({ auth, logger }),
     revalidateTtlMs: env.WS_REVALIDATE_TTL_MS,
   });
+  signalProjectionChanged = (roomId) => realtime.projectionChanged(roomId);
 
   await realtime.listen();
 

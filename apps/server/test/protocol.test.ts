@@ -201,20 +201,24 @@ describe('ClientFrame', () => {
  * schemas on their own, because the alphabet is the design decision and a
  * schema is where a design decision can be read.
  */
-describe('the bus carries presence and typing, and nothing durable', () => {
+describe('the bus carries volatile state and invalidation, never history', () => {
   const room = '11111111-1111-4111-8111-111111111111';
   const user = '22222222-2222-4222-8222-222222222222';
   const presence = { type: 'presence', roomId: room, userId: user, state: 'online', at };
 
-  it('accepts exactly the two ephemeral frames', () => {
+  it('accepts exactly the three non-history frames', () => {
     expect(EphemeralFrame.parse(presence)).toMatchObject({ type: 'presence' });
     expect(
       EphemeralFrame.parse({ type: 'typing', roomId: room, userId: user, typing: true, at }),
     ).toMatchObject({ type: 'typing' });
+    expect(EphemeralFrame.parse({ type: 'projection_changed', roomId: room, at })).toMatchObject({
+      type: 'projection_changed',
+    });
     // The whole union, so a frame added to `EphemeralFrame` without a decision
     // shows up here rather than in production.
     expect(EphemeralFrame.options.map((option) => option.shape.type.value).sort()).toEqual([
       'presence',
+      'projection_changed',
       'typing',
     ]);
   });

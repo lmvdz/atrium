@@ -147,6 +147,8 @@ export type ServerFrame =
   | { type: 'nack'; commandId: string; code: CommandErrorCode | 'malformed'; message: string }
   | { type: 'presence'; roomId: string; userId: string; state: PresenceState; at: string }
   | { type: 'typing'; roomId: string; userId: string; typing: boolean; at: string }
+  /** A derived database projection changed after the last durable room event. */
+  | { type: 'projection_changed'; roomId: string; at: string }
   | { type: 'seen'; roomId: string; userId: string; seenSeq: number }
   | { type: 'error'; message: string };
 
@@ -173,9 +175,9 @@ export type ServerFrame =
  * then typed the payload `unknown`.
  *
  * So the rule is now written down where it can be enforced: the bus carries
- * `presence` and `typing`, the two frames that are statements about *now* and
- * have no ledger to be read back from. Nothing else. A frame naming any other
- * type does not parse, and `event` in particular cannot be spelled here at all.
+ * presence, typing, and a payload-free request to reread a persisted projection.
+ * None is history. A frame naming any other type does not parse, and `event` in
+ * particular cannot be spelled here at all.
  *
  * ## What this does not close, said plainly
  *
@@ -183,11 +185,14 @@ export type ServerFrame =
  * **typing** frame, well-formed and naming a room consistently, is still relayed
  * to that room's subscribers by anything that can reach the database. That is a
  * real residual and it is the deliberate shape of the fix rather than an
- * oversight: the two frames left on this channel are the two whose worst case is
- * a wrong dot beside a name for a few seconds, both are re-established by the
- * next real update, and neither is written down anywhere. What is closed is the
- * *durable* case — the one where a forgery becomes history a client still
- * believes after a reload.
+ * oversight. Forged presence or typing costs a transient wrong indicator. A
+ * forged `projection_changed` can force an authorized subscriber to reread its
+ * own route, but supplies none of the state that route returns. A lost projection
+ * signal can delay cross-instance freshness indefinitely; unlike ledger heads,
+ * this channel has no durable revision/ack loop. The Phase-2 single-instance
+ * path and ordinary relay are covered; listener-loss recovery for derived
+ * projections remains explicitly unclaimed. What is closed is the *durable*
+ * forgery case — a notification becoming history a client believes after reload.
  *
  * Making even that impossible means authenticating the channel (a shared secret
  * in the payload, or a `SECURITY DEFINER` relay function with `EXECUTE` revoked
@@ -226,6 +231,11 @@ export const EphemeralFrame = z.discriminatedUnion('type', [
     roomId: Id,
     userId: Id,
     typing: z.boolean(),
+    at: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('projection_changed'),
+    roomId: Id,
     at: z.string().min(1),
   }),
 ]);

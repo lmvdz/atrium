@@ -123,6 +123,8 @@ export interface InterpretDeps {
    * anybody up.
    */
   enqueueFollowUp?: (roomId: string) => Promise<void>;
+  /** Notify live readers after attention reconciliation has committed. */
+  onProjectionChanged?: (roomId: string) => void | Promise<void>;
 }
 
 /* ── result ─────────────────────────────────────────────────────────────── */
@@ -547,6 +549,7 @@ export async function runInterpretation(
       refusals: attention.refusals,
     });
   }
+  await deps.onProjectionChanged?.(roomId);
 
   run.leftover = await countUninterpreted(deps.db, roomId);
   if (run.leftover > 0) {

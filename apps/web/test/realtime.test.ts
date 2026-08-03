@@ -1930,6 +1930,24 @@ describe('ephemeral channels', () => {
     expect(client.room(ROOM).typing).toEqual([]);
   });
 
+  /**
+   * Mutation: parse projection_changed and then drop it, or treat it as a room
+   * event. The live route never rereads attention after worker reconciliation,
+   * or advances a durable cursor for a fact that is not history.
+   */
+  it('reports a projection invalidation without changing history or cursors', () => {
+    const reasons: string[] = [];
+    client.onChange((_roomId, _view, reason) => reasons.push(reason));
+    latest().deliver({
+      type: 'projection_changed',
+      roomId: ROOM,
+      at: '2026-07-31T00:00:03.000Z',
+    });
+    expect(reasons.at(-1)).toBe('projection');
+    expect(client.room(ROOM).events).toHaveLength(0);
+    expect(client.lastSeq(ROOM)).toBe(0);
+  });
+
   it('advances the read cursor only for this user', () => {
     latest().deliver({ type: 'seen', roomId: ROOM, userId: 'user-other', seenSeq: 9 });
     expect(client.room(ROOM).seenSeq).toBe(0);

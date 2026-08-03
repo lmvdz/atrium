@@ -91,8 +91,8 @@ import {
  *     and dropped exactly like unparseable JSON, because a notification is not
  *     a request and there is nobody to answer.
  *  2. **The ephemeral channel has a closed alphabet.** `EphemeralFrame` is
- *     `presence | typing` and nothing else, with a compile-time assertion that no
- *     durable frame can ever join it. There is no longer a spelling of "event"
+ *     presence, typing, or a projection invalidation, with a compile-time
+ *     assertion that no durable frame can ever join it. There is no spelling of "event"
  *     that this channel accepts, so the exploit above is not a validation failure
  *     to be caught — it is a sentence that cannot be said.
  *
@@ -104,7 +104,7 @@ import {
 
 /** The channel a committed ledger position is announced on. */
 export const LEDGER_CHANNEL = 'atrium_ledger';
-/** The channel presence and typing — never durable — are relayed on. */
+/** The channel non-history state and projection invalidations are relayed on. */
 export const EPHEMERAL_CHANNEL = 'atrium_ephemeral';
 
 /** @see LedgerNote in `protocol.ts` — the schema this channel is parsed with. */
@@ -207,8 +207,9 @@ export function createEventBus({ sql: client, logger, instanceId }: EventBusOpti
 
     relay: (roomId, frame) => {
       const payload = JSON.stringify({ origin: id, roomId, frame });
-      // Not awaited: an ephemeral frame that arrives late is worthless, and a
-      // presence update must never hold up the socket that produced it.
+      // Not awaited: relaying cannot hold up the operation that produced the
+      // signal. A late projection invalidation is still useful; a failed one is
+      // logged, and (unlike ledger delivery) currently has no durable retry.
       void client.notify(EPHEMERAL_CHANNEL, payload).catch((error: unknown) => {
         logger.warn('ephemeral relay failed', {
           error: error instanceof Error ? error.message : String(error),

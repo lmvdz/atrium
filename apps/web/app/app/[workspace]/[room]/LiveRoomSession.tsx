@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { type LiveUnreadWindow, liveRoomView } from '@/lib/live-room-view';
+import { type LiveUnreadWindow, liveRoomView, shouldRefreshLiveRoute } from '@/lib/live-room-view';
 import {
   type PendingSupersession,
   retainedSupersessionKey,
@@ -93,7 +93,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     });
     clientRef.current = client;
     setLive(copyRoom(client.room(roomId)));
-    const stopChanges = client.onChange((changedRoomId, room) => {
+    const stopChanges = client.onChange((changedRoomId, room, reason) => {
       if (changedRoomId !== roomId) return;
       if (room.subscribed && unreadWindowRef.current === null) {
         // Capture the authorized subscribed frame itself. A passive effect can
@@ -104,7 +104,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         setUnreadWindow(window);
       }
       setLive(copyRoom(room));
-      if (room.lastSeq <= refreshedThrough.current || refreshTimer.current !== null) return;
+      if (
+        !shouldRefreshLiveRoute(reason, room.lastSeq, refreshedThrough.current) ||
+        refreshTimer.current !== null
+      ) {
+        return;
+      }
       refreshTimer.current = setTimeout(() => {
         refreshTimer.current = null;
         refreshedThrough.current = client.lastSeq(roomId);

@@ -132,9 +132,9 @@ export const MEMBERSHIP_REVALIDATE_INTERVAL_MS = 1_000;
  * `hub` only knows about sockets attached to *this* process. What makes a
  * second instance's commits reach this one's subscribers is `event-bus.ts`: a
  * commit is announced on a Postgres channel, every instance folds the rows it
- * has not seen, and each fans them out to its own subscribers. Presence and
- * typing — which are not history and have no ledger to be read back from — are
- * relayed as frames on a second channel.
+ * has not seen, and each fans them out to its own subscribers. Presence,
+ * typing, and the payload-free signal to reread a persisted projection are not
+ * history; they are relayed as frames on a second channel.
  */
 
 export interface RealtimeOptions {
@@ -240,6 +240,8 @@ export interface RealtimeServer {
    * measuring the timer rather than the rule.
    */
   revalidateSubscriptions: () => Promise<void>;
+  /** Tell authorized subscribers to re-read non-ledger projections. */
+  projectionChanged: (roomId: string, at?: string) => void;
   listen: () => Promise<void>;
   close: () => Promise<void>;
 }
@@ -1130,6 +1132,11 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       await reconciler?.reconcile();
     },
     revalidateSubscriptions,
+    projectionChanged: (roomId, at = new Date().toISOString()) => {
+      const frame: EphemeralFrame = { type: 'projection_changed', roomId, at };
+      hub.broadcast(roomId, frame);
+      bus?.relay(roomId, frame);
+    },
     listen: async () => {
       // Before the port opens, so no client can connect into a window where
       // this instance is serving but deaf to its peers.
@@ -1137,13 +1144,14 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         onLedger: () => {
           void reconciler?.reconcile();
         },
-        // `note.frame` is an `EphemeralFrame` — `presence` or `typing`, parsed
+        // `note.frame` is an `EphemeralFrame` — presence, typing, or a
+        // projection-refresh signal, parsed
         // against a schema in `event-bus.ts` and structurally unable to be a
         // durable frame (#22 gauntlet r6, major 1). It used to be
         // `note.frame as ServerFrame`, which is how a forged `event` frame
         // published on an unprivileged `NOTIFY` reached a client's journal.
         // Nothing here has to decide anything: what arrives is already one of
-        // exactly two shapes, and its room already matches the envelope's.
+        // exactly three shapes, and its room already matches the envelope's.
         onEphemeral: (note) => {
           hub.broadcast(note.roomId, note.frame);
         },

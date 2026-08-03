@@ -218,6 +218,11 @@ export const ServerFrame = z.discriminatedUnion('type', [
     at: z.string(),
   }),
   z.object({
+    type: z.literal('projection_changed'),
+    roomId: z.string().min(1),
+    at: z.string(),
+  }),
+  z.object({
     type: z.literal('seen'),
     roomId: z.string().min(1),
     userId: z.string(),
@@ -954,7 +959,9 @@ export interface RealtimeClient {
   setPresence: (roomId: string, state: 'online' | 'away' | 'offline') => void;
   setTyping: (roomId: string, typing: boolean) => void;
   /** Subscribe to any change. Returns an unsubscribe function. */
-  onChange: (listener: (roomId: string, view: RoomView) => void) => () => void;
+  onChange: (
+    listener: (roomId: string, view: RoomView, reason: 'state' | 'projection') => void,
+  ) => () => void;
   onStatus: (listener: (status: ConnectionStatus) => void) => () => void;
 }
 
@@ -975,7 +982,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   const maxStalledCatchups = options.maxStalledCatchups ?? DEFAULT_MAX_STALLED_CATCHUPS;
 
   const rooms = new Map<string, RoomView>();
-  const changeListeners = new Set<(roomId: string, view: RoomView) => void>();
+  const changeListeners = new Set<
+    (roomId: string, view: RoomView, reason: 'state' | 'projection') => void
+  >();
   const statusListeners = new Set<(status: ConnectionStatus) => void>();
   /** commandId → the pending own-message it optimistically rendered. */
   const inFlight = new Map<string, { roomId: string; clientMessageId: string }>();
@@ -1017,9 +1026,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     return existing;
   }
 
-  function changed(roomId: string): void {
+  function changed(roomId: string, reason: 'state' | 'projection' = 'state'): void {
     const current = view(roomId);
-    for (const listener of changeListeners) listener(roomId, current);
+    for (const listener of changeListeners) listener(roomId, current, reason);
   }
 
   function setStatus(next: ConnectionStatus): void {
@@ -1314,6 +1323,11 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         changed(frame.roomId);
         return;
       }
+      case 'projection_changed':
+        // No semantic state is accepted from the frame. It is only a prompt to
+        // re-read the authenticated route's persisted projection.
+        changed(frame.roomId, 'projection');
+        return;
       case 'seen': {
         if (frame.userId !== options.userId) return;
         const room = view(frame.roomId);

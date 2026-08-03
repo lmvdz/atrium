@@ -20,6 +20,7 @@ import {
   resetDatabase,
   type SeededRoom,
   seedRoom,
+  startSecondInstance,
   startTestServer,
   TestClient,
   type TestServer,
@@ -139,6 +140,54 @@ describe('membership', () => {
     const alice = await connect(room.people.alice as string);
     const nack = await alice.command(send(other.roomId, 'not mine'));
     expect(nack).toMatchObject({ type: 'nack', code: 'not_a_member' });
+  });
+});
+
+describe('projection invalidation', () => {
+  /**
+   * Mutation: broadcast projection_changed globally instead of through the
+   * room subscription set. A member of another room is then prompted to reread
+   * state they were never authorized to observe.
+   */
+  it('reaches only subscribers of the invalidated room', async () => {
+    const other = await seedRoom(handle, ['mallory'], { slug: 'projection-elsewhere' });
+    const alice = await connect(room.people.alice as string);
+    const mallory = await connect(other.people.mallory as string);
+    await alice.subscribe(room.roomId);
+    await mallory.subscribe(other.roomId);
+    const mark = alice.frames.length;
+
+    server.realtime.projectionChanged(room.roomId, '2026-08-03T12:00:00.000Z');
+    await alice.waitFor(
+      (frame) => frame.type === 'projection_changed' && frame.roomId === room.roomId,
+      15_000,
+      mark,
+    );
+    expect(mallory.frames.some((frame) => frame.type === 'projection_changed')).toBe(false);
+  });
+
+  /**
+   * Mutation: notify only this process's hub and omit the event-bus relay. A
+   * subscriber on another ordinary server instance never refreshes.
+   */
+  it('relays an ordinary projection invalidation across server instances', async () => {
+    const first = await startSecondInstance();
+    const second = await startSecondInstance();
+    const alice = await TestClient.connect(second.server.url, room.people.alice as string);
+    try {
+      await alice.subscribe(room.roomId);
+      const mark = alice.frames.length;
+      first.server.realtime.projectionChanged(room.roomId, '2026-08-03T12:00:00.000Z');
+      await alice.waitFor(
+        (frame) => frame.type === 'projection_changed' && frame.roomId === room.roomId,
+        15_000,
+        mark,
+      );
+    } finally {
+      await alice.close();
+      await first.close();
+      await second.close();
+    }
   });
 });
 

@@ -757,6 +757,10 @@ describe('in-job acceptance', () => {
    * Mutation: project proposal provenance only when somebody accepts it. The
    * pending decision still appears in Needs you but its receipt has no source
    * message—the item that most needs inspection is the only unsourced one.
+   *
+   * Mutation: signal `onProjectionChanged` before `reconcileStoredAttention`.
+   * A live client is told to reread while the durable attention table still has
+   * zero rows, recreating the worker's last-event/late-projection race.
    */
   it('persists pending attention for a decision the worker stages', async () => {
     const body = 'We will use Postgres for the queue.';
@@ -774,6 +778,7 @@ describe('in-job acceptance', () => {
       },
     ];
 
+    let attentionRowsAtSignal = 0;
     const run = await runInterpretation(
       {
         db: handle.db,
@@ -781,12 +786,20 @@ describe('in-job acceptance', () => {
         provider,
         routing: { default: MODEL_DEFAULT, escalation: MODEL_ESCALATION },
         logger,
+        onProjectionChanged: async () => {
+          const rows = await handle.db
+            .select()
+            .from(attentionItems)
+            .where(eq(attentionItems.roomId, room.roomId));
+          attentionRowsAtSignal = rows.length;
+        },
       },
       { roomId: room.roomId },
     );
 
     expect(run.proposalsRecorded).toHaveLength(1);
     expect(run.objectsAccepted).toHaveLength(0);
+    expect(attentionRowsAtSignal).toBe(2);
     const rows = await handle.db
       .select()
       .from(attentionItems)
