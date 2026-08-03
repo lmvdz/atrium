@@ -5,8 +5,13 @@ import { useEffect, useRef, useState } from 'react';
 import { liveRoomView } from '@/lib/live-room-view';
 import type { ReplayData } from '@/lib/replay-data';
 import { replayReceipt } from '@/lib/replay-view';
-import type { AttentionClass, SurfaceId } from '@/src/components';
-import { needsViewer, withFilter } from '@/src/components';
+import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
+import { boundTo, needsViewer, withFilter } from '@/src/components';
+import {
+  attachmentDownloadUrl,
+  type UploadedAttachment,
+  uploadAttachment,
+} from '@/src/lib/attachments';
 import {
   createRealtimeClient,
   localStorageJournal,
@@ -50,6 +55,11 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   >('idle');
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const [attachmentNote, setAttachmentNote] = useState<string>();
+  const pendingUploads = useRef(0);
+  const [uploading, setUploading] = useState(false);
+  const [binding, setBinding] = useState<ComposerBinding>({ mode: 'free' });
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
   const [openAttentionId, setOpenAttentionId] = useState<string>();
@@ -96,6 +106,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   }, [roomId, router, viewerId]);
 
   const view = liveRoomView(data, viewerId, live);
+  const subjectByAttention = new Map(data.attention.map((item) => [item.id, item.subjectId]));
   const objectives = view.objectives.map((objective) => ({
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
@@ -109,13 +120,27 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const owed = view.attention.filter((item) => needsViewer(item.state)).length;
   const subscribed = live.subscribed && connection === 'open';
 
+  const jumpToMessage = (messageId: string) => {
+    setReceiptId(null);
+    setFocused('conversation');
+    requestAnimationFrame(() => {
+      const row = [...document.querySelectorAll<HTMLElement>('[data-message-id]')].find(
+        (candidate) => candidate.dataset.messageId === messageId,
+      );
+      if (!row) return;
+      row.tabIndex = -1;
+      row.scrollIntoView({ block: 'center' });
+      row.focus({ preventScroll: true });
+    });
+  };
+
   return (
     <main className={styles.live}>
       <RoomFrame
         attention={view.attention}
-        binding={{ mode: 'free' }}
+        binding={binding}
         boxed={false}
-        composerEnabled={subscribed}
+        composerEnabled={subscribed && !uploading}
         composerNote={
           error ??
           (subscribed
@@ -133,17 +158,90 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           },
           onSend: (text) => {
             const body = text.trim();
-            if (!body || !subscribed) return;
-            clientRef.current?.sendMessage(roomId, body);
+            if (!body || !subscribed || pendingUploads.current > 0) return;
+            clientRef.current?.sendMessage(roomId, body, { attachments });
             clientRef.current?.setTyping(roomId, false);
             setDraft('');
+            setAttachments([]);
+            setAttachmentNote(undefined);
+            setBinding({ mode: 'free' });
           },
+          onAttach: (file) => {
+            pendingUploads.current += 1;
+            setUploading(true);
+            setAttachmentNote(`uploading ${file.name} directly to object storage`);
+            void uploadAttachment(roomId, file)
+              .then((uploaded) => {
+                setAttachments((current) => [...current, uploaded]);
+                setAttachmentNote(`${uploaded.name} attached · ${uploaded.size} bytes`);
+              })
+              .catch((failure: unknown) => {
+                setAttachmentNote(undefined);
+                setError(failure instanceof Error ? failure.message : String(failure));
+              })
+              .finally(() => {
+                pendingUploads.current -= 1;
+                setUploading(pendingUploads.current > 0);
+              });
+          },
+          attachmentNote,
+          onCancelBinding: () => setBinding({ mode: 'free' }),
           onFocusSurface: setFocused,
           onFilter: (next) => setFilter((current) => (current === next ? null : next)),
           onOpenAttention: setOpenAttentionId,
           onMarkSeen: () => clientRef.current?.advanceSeen(roomId, live.lastSeq),
           onOpenReceipt: setReceiptId,
           onCloseReceipt: () => setReceiptId(null),
+          onJumpToMessage: jumpToMessage,
+          onJumpToSource: (_itemId, messageId) => jumpToMessage(messageId),
+          onOpenAttachment: (_messageId, attachment) => {
+            void attachmentDownloadUrl(roomId, attachment)
+              .then((url) => window.open(url, '_blank', 'noopener'))
+              .catch((failure: unknown) =>
+                setError(failure instanceof Error ? failure.message : String(failure)),
+              );
+          },
+          onAcceptReceipt: (proposalId) => clientRef.current?.acceptProposal(roomId, proposalId),
+          onRetypeToClaim: (objectId) =>
+            clientRef.current?.correctObject(roomId, objectId, 'retype', { toType: 'claim' }),
+          onReopen: (objectId) => clientRef.current?.correctObject(roomId, objectId, 'reopen'),
+          onAnswerReceipt: (objectId) => {
+            const object = view.objects.find((candidate) => candidate.id === objectId);
+            if (!object) return;
+            setBinding({
+              mode: 'bound',
+              itemId: `live-direct:${object.id}`,
+              itemLabel: object.text,
+              objective: data.room.name,
+              state: object.state,
+            });
+            setFocused('conversation');
+          },
+          onAct: (attentionId, actionId) => {
+            const item = view.attention.find((candidate) => candidate.id === attentionId);
+            const subjectId = subjectByAttention.get(attentionId);
+            if (!item || !subjectId) return;
+            if (actionId === 'confirm') {
+              clientRef.current?.acceptProposal(roomId, subjectId);
+              return;
+            }
+            if (actionId === 'decline') {
+              clientRef.current?.rejectProposal(roomId, subjectId);
+              return;
+            }
+            if (actionId === 'answer') {
+              const subject = view.objects.find((candidate) => candidate.id === subjectId);
+              if (subject?.kind !== 'question') {
+                setReceiptId(subjectId);
+                setFocused('current-state');
+                return;
+              }
+              setBinding(boundTo(item, data.room.name));
+              setFocused('conversation');
+              return;
+            }
+            if (actionId === 'open' && item.source) jumpToMessage(item.source.messageId);
+          },
           onToggleObjective: (objectiveId) =>
             setOpenObjectives((current) => ({
               ...current,

@@ -248,6 +248,7 @@ export interface PendingMessage {
   at: string;
   status: 'pending' | 'failed';
   error?: string;
+  attachments: Array<{ key: string; name: string; contentType: string; size: number }>;
   /**
    * Whether sending the identical frame again is a sensible thing to offer.
    *
@@ -899,7 +900,32 @@ export interface RealtimeClient {
   rooms: () => string[];
   lastSeq: (roomId: string) => number;
   /** Post a message. Returns the `clientMessageId` its optimistic row is keyed on. */
-  sendMessage: (roomId: string, body: string) => string;
+  sendMessage: (
+    roomId: string,
+    body: string,
+    options?: {
+      replyToId?: string | null;
+      attachments?: Array<{ key: string; name: string; contentType: string; size: number }>;
+    },
+  ) => string;
+  acceptProposal: (roomId: string, proposalId: string, objectiveId?: string | null) => string;
+  rejectProposal: (roomId: string, proposalId: string, reason?: string | null) => string;
+  correctObject: (
+    roomId: string,
+    objectId: string,
+    action: 'retype' | 'amend' | 'reattribute' | 'reject' | 'reopen',
+    options?: {
+      patch?: Record<string, unknown>;
+      toType?: 'decision' | 'commitment' | 'open_question' | 'claim' | 'objective' | null;
+      note?: string | null;
+    },
+  ) => string;
+  answerBind: (roomId: string, questionId: string, answerObjectId: string) => string;
+  resolveAttention: (
+    roomId: string,
+    attentionId: string,
+    status?: 'resolved' | 'dismissed',
+  ) => string;
   advanceSeen: (roomId: string, roomSeq?: number) => void;
   setPresence: (roomId: string, state: 'online' | 'away' | 'offline') => void;
   setTyping: (roomId: string, typing: boolean) => void;
@@ -1422,7 +1448,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     room: (roomId) => view(roomId),
     rooms: () => [...rooms.keys()],
     lastSeq: (roomId) => view(roomId).lastSeq,
-    sendMessage: (roomId, body) => {
+    sendMessage: (roomId, body, messageOptions = {}) => {
       const room = view(roomId);
       const clientMessageId = `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
       room.pending.push({
@@ -1430,19 +1456,39 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         body,
         at: new Date(now()).toISOString(),
         status: 'pending',
+        attachments: messageOptions.attachments ?? [],
       });
       const commandId = command({
         name: 'send_message',
         roomId,
         body,
         clientMessageId,
-        replyToId: null,
-        attachments: [],
+        replyToId: messageOptions.replyToId ?? null,
+        attachments: messageOptions.attachments ?? [],
       });
       inFlight.set(commandId, { roomId, clientMessageId });
       changed(roomId);
       return clientMessageId;
     },
+    acceptProposal: (roomId, proposalId, objectiveId = null) =>
+      command({ name: 'accept_proposal', roomId, proposalId, objectiveId }),
+    rejectProposal: (roomId, proposalId, reason = null) =>
+      command({ name: 'reject_proposal', roomId, proposalId, reason }),
+    correctObject: (roomId, objectId, action, correction = {}) =>
+      command({
+        name: 'correct',
+        roomId,
+        objectId,
+        action,
+        patch: correction.patch ?? {},
+        toType: correction.toType ?? null,
+        provenance: { messageIds: [], proposalId: null, interpretationId: null },
+        note: correction.note ?? null,
+      }),
+    answerBind: (roomId, questionId, answerObjectId) =>
+      command({ name: 'answer_bind', roomId, questionId, answerObjectId, note: null }),
+    resolveAttention: (roomId, attentionId, status = 'resolved') =>
+      command({ name: 'resolve_attention', roomId, attentionId, status }),
     advanceSeen: (roomId, roomSeq) => {
       const target = roomSeq ?? view(roomId).lastSeq;
       // Explicit, per room, never a global mark-all-read (#12/#14).

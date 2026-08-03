@@ -67,6 +67,14 @@
 	handle /health {
 		reverse_proxy server:4000
 	}
+	handle /attachments/* {
+		reverse_proxy server:4000
+	}
+	# Path-style S3 URLs preserve /bucket/key. Keeping the path and Host intact
+	# is part of the signature, so this is deliberately not `handle_path`.
+	handle /{$S3_BUCKET}/* {
+		reverse_proxy minio:9000
+	}
 
 	# Everything else is the Next.js app: pages, Server Actions, the auth
 	# catch-all route.

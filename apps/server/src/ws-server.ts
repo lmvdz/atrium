@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { checkOrigin, describeUnknown, guardedErrorLog, rawPathname } from '@atrium/auth';
 import { type WebSocket, WebSocketServer } from 'ws';
+import { type AttachmentSigner, DownloadRequest, UploadRequest } from './attachments.js';
 import type { CommandService, PresenceState } from './commands.js';
 import type { EventBus } from './event-bus.js';
 import { createHeadAcks } from './head-acks.js';
@@ -157,6 +158,8 @@ export interface RealtimeOptions {
    * the README both say plainly which mode is which.
    */
   bus?: EventBus;
+  /** Short-lived direct S3/MinIO capabilities; absent disables attachment routes. */
+  attachments?: AttachmentSigner;
   /**
    * How often to reconcile against the ledger regardless of notifications.
    *
@@ -330,9 +333,113 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       res.end(JSON.stringify({ status: ready ? 'ok' : 'starting', connections: wss.clients.size }));
       return;
     }
-    res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: 'not found' }));
+    void handleHttp(req, res).catch((error: unknown) => {
+      logSafely('http request failed unexpectedly', () => ({ error: describeUnknown(error) }));
+      if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'request failed' }));
+    });
   });
+
+  async function handleHttp(req: IncomingMessage, res: import('node:http').ServerResponse) {
+    const path = rawPathname(req.url ?? '/');
+    if (path !== '/attachments/presign-upload' && path !== '/attachments/presign-download') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+      return;
+    }
+
+    const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+    if (checkOrigin(origin, originPolicy) !== 'allowed') {
+      res.writeHead(403, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'forbidden' }));
+      return;
+    }
+    const cors = {
+      'access-control-allow-credentials': 'true',
+      'access-control-allow-headers': 'content-type',
+      'access-control-allow-methods': 'POST, OPTIONS',
+      'access-control-allow-origin': origin as string,
+      'cache-control': 'no-store',
+      vary: 'Origin',
+    };
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors);
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { ...cors, 'content-type': 'application/json', allow: 'POST, OPTIONS' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+      return;
+    }
+    if (!options.attachments || !commands) {
+      res.writeHead(503, { ...cors, 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'attachments are not configured' }));
+      return;
+    }
+
+    let identified: Session | null = null;
+    try {
+      identified = await session.authenticateUpgrade(req);
+    } catch (error) {
+      logSafely('attachment auth failed', () => ({ error: describeUnknown(error) }));
+    }
+    if (!identified) {
+      res.writeHead(401, { ...cors, 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
+    let json: unknown;
+    try {
+      json = JSON.parse(await readRequestBody(req));
+    } catch {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'malformed request' }));
+      return;
+    }
+    const parsed = path.endsWith('presign-upload')
+      ? UploadRequest.safeParse(json)
+      : DownloadRequest.safeParse(json);
+    if (!parsed.success) {
+      res.writeHead(400, { ...cors, 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid attachment request' }));
+      return;
+    }
+    try {
+      await commands.requireMembership(identified, parsed.data.roomId);
+      const answer = path.endsWith('presign-upload')
+        ? await options.attachments.upload(parsed.data as import('./attachments.js').UploadRequest)
+        : await options.attachments.download(
+            parsed.data as import('./attachments.js').DownloadRequest,
+          );
+      res.writeHead(200, { ...cors, 'content-type': 'application/json' });
+      res.end(JSON.stringify(answer));
+    } catch {
+      /* Same answer for a missing room, another room, and a key outside it: the
+         endpoint must not become a room/key existence oracle. */
+      res.writeHead(403, { ...cors, 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'attachment request refused' }));
+    }
+  }
+
+  function readRequestBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let length = 0;
+      req.on('data', (chunk: Buffer) => {
+        length += chunk.length;
+        if (length > 16 * 1024) {
+          reject(new Error('request body too large'));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', reject);
+    });
+  }
 
   // `noServer` rather than `{ server }`: the upgrade has to be refused *before*
   // the handshake completes when there is no session, and that is only possible

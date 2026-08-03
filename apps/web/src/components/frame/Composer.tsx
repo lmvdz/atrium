@@ -62,6 +62,8 @@ export interface ComposerProps {
   readonly textareaRef?: Ref<HTMLTextAreaElement>;
   /** receives the draft the footer promises Enter will send */
   readonly onSend?: (draft: string) => void;
+  readonly onAttach?: (file: File) => void;
+  readonly attachmentNote?: string;
   /** A replay may permit only a bound answer, never free historical chat. */
   readonly disabled?: boolean;
 }
@@ -76,9 +78,12 @@ export function Composer({
   onKeyDown,
   textareaRef,
   onSend,
+  onAttach,
+  attachmentNote,
   disabled = false,
 }: ComposerProps) {
   const own = useRef<HTMLTextAreaElement | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
   /* WHETHER AN IME IS MID-COMPOSITION, tracked on the element rather than read
      off a key event — because the SEND BUTTON has no key event to read.
      Found by the round-5 blind review: the Enter guard covered the keyboard and
@@ -172,6 +177,8 @@ export function Composer({
      `/` writes every handler's outcome into — and it printed raw. */
   const room = systemText(roomName, 'Composer roomName');
   const foot = footNote === undefined ? null : systemText(footNote, 'Composer footNote');
+  const attachmentStatus =
+    attachmentNote === undefined ? null : systemText(attachmentNote, 'Composer attachmentNote');
   const boundLabel =
     binding.mode === 'bound' ? systemText(binding.itemLabel, 'Composer binding') : '';
   const boundObjective =
@@ -273,6 +280,31 @@ export function Composer({
               { value, readOnly: onChange === undefined })}
         />
         <div className={styles.cboxRight}>
+          {onAttach === undefined ? null : (
+            <>
+              <input
+                accept="*/*"
+                aria-label="Choose an attachment"
+                className={styles.fileInput}
+                disabled={disabled}
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  if (file) onAttach(file);
+                  event.currentTarget.value = '';
+                }}
+                ref={fileInput}
+                type="file"
+              />
+              <button
+                className="atr-btn"
+                disabled={disabled}
+                onClick={() => fileInput.current?.click()}
+                type="button"
+              >
+                Attach
+              </button>
+            </>
+          )}
           <button
             className="atr-btn"
             disabled={disabled}
@@ -313,6 +345,9 @@ export function Composer({
         </span>
         <span className={styles.cfootSpacer} />
         {foot === null ? null : <span data-composer-note="true">{foot}</span>}
+        {attachmentStatus === null ? null : (
+          <span data-attachment-note="true">{attachmentStatus}</span>
+        )}
       </div>
     </div>
   );

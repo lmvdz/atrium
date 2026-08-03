@@ -1797,13 +1797,43 @@ describe('optimism is limited to your own message row', () => {
     // server says it did.
     client.setPresence(ROOM, 'online');
     client.advanceSeen(ROOM, 0);
+    client.acceptProposal(ROOM, 'proposal-1');
+    client.rejectProposal(ROOM, 'proposal-2');
+    client.correctObject(ROOM, 'object-1', 'reopen');
+    client.answerBind(ROOM, 'question-1', 'answer-1');
+    client.resolveAttention(ROOM, 'attention-1');
     expect(client.room(ROOM).events).toHaveLength(0);
     expect(client.room(ROOM).presence).toEqual({});
     expect(
       latest()
         .commands()
         .map((c) => c.name),
-    ).toEqual(['set_presence', 'advance_seen']);
+    ).toEqual([
+      'set_presence',
+      'advance_seen',
+      'accept_proposal',
+      'reject_proposal',
+      'correct',
+      'answer_bind',
+      'resolve_attention',
+    ]);
+  });
+
+  /**
+   * Mutation: keep the old fixed `replyToId: null, attachments: []` frame after
+   * exposing composer reply/upload controls. The UI appears to send richer
+   * messages while the durable command silently strips both relationships.
+   */
+  it('carries reply and attachment metadata on the durable message command', () => {
+    client.sendMessage(ROOM, 'with context', {
+      replyToId: 'message-before',
+        attachments: [{ key: 'room-1/file', name: 'proof.txt', contentType: 'text/plain', size: 5 }],
+    });
+    expect(latest().commands().at(-1)).toMatchObject({
+      name: 'send_message',
+      replyToId: 'message-before',
+        attachments: [{ key: 'room-1/file', name: 'proof.txt', contentType: 'text/plain', size: 5 }],
+    });
   });
 });
 

@@ -58,11 +58,13 @@ const eventBase = {
   at: Timestamp,
 };
 
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
 export const MessageAttachment = z.object({
   key: z.string().min(1),
   name: z.string().min(1),
   contentType: z.string().min(1),
-  size: z.number().int().nonnegative(),
+  size: z.number().int().positive().max(MAX_ATTACHMENT_BYTES),
 });
 export type MessageAttachment = z.infer<typeof MessageAttachment>;
 

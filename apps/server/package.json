@@ -18,6 +18,8 @@
     "@atrium/auth": "workspace:*",
     "@atrium/core": "workspace:*",
     "@atrium/db": "workspace:*",
+    "@aws-sdk/client-s3": "^3.1101.0",
+    "@aws-sdk/s3-request-presigner": "^3.1101.0",
     "ai": "^7.0.48",
     "drizzle-orm": "^0.45.2",
     "pg-boss": "^12.26.3",

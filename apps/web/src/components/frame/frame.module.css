@@ -691,6 +691,14 @@
   color: var(--tx2);
 }
 
+.fileInput {
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  position: absolute;
+  width: 1px;
+}
+
 .cboxRight {
   display: flex;
   align-items: center;

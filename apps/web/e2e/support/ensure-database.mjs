@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import postgres from 'postgres';
-import { container, databaseUrl, mailOutbox } from './config.mjs';
+import { baseURL, container, databaseUrl, mailOutbox, objectStore } from './config.mjs';
 
 /**
  * Gets a Postgres ready for `pnpm test:e2e`, then migrates and empties it.
@@ -23,6 +23,7 @@ async function main() {
   if (!(await reachable(databaseUrl))) {
     await startContainer();
   }
+  await ensureObjectStore();
 
   await migrate();
   if (RESET) await truncate();
@@ -32,6 +33,69 @@ async function main() {
   rmSync(mailOutbox, { force: true });
 
   console.info(`[e2e] database ready at ${redact(databaseUrl)}`);
+  console.info(`[e2e] object store ready at http://127.0.0.1:${objectStore.port}`);
+}
+
+async function ensureObjectStore() {
+  const health = `http://127.0.0.1:${objectStore.port}/minio/health/live`;
+  if (!(await httpReachable(health))) {
+    if (!hasDocker()) fail('the E2E object store is unavailable and docker is not available');
+    const existing = docker(['ps', '-aq', '-f', `name=^${objectStore.name}$`]).trim();
+    if (existing) {
+      docker(['start', objectStore.name]);
+    } else {
+      docker([
+        'run',
+        '-d',
+        '--name',
+        objectStore.name,
+        '-e',
+        `MINIO_ROOT_USER=${objectStore.accessKeyId}`,
+        '-e',
+        `MINIO_ROOT_PASSWORD=${objectStore.secretAccessKey}`,
+        '-e',
+        `MINIO_API_CORS_ALLOW_ORIGIN=${baseURL}`,
+        '-p',
+        `${objectStore.port}:9000`,
+        objectStore.image,
+        'server',
+        '/data',
+      ]);
+    }
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline && !(await httpReachable(health))) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    if (!(await httpReachable(health))) fail('the E2E object store never became healthy');
+  }
+  docker([
+    'exec',
+    objectStore.name,
+    'mc',
+    'alias',
+    'set',
+    'local',
+    'http://127.0.0.1:9000',
+    objectStore.accessKeyId,
+    objectStore.secretAccessKey,
+  ]);
+  docker([
+    'exec',
+    objectStore.name,
+    'mc',
+    'mb',
+    '--ignore-existing',
+    `local/${objectStore.bucket}`,
+  ]);
+}
+
+async function httpReachable(url) {
+  try {
+    const response = await fetch(url);
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**

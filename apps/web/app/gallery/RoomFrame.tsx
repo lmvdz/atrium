@@ -55,6 +55,7 @@ import type {
   TrailerSummary,
 } from '../../src/components/model';
 import { needsViewer } from '../../src/components/model';
+import type { MessageAttachmentRecord } from '../../src/components/model/quotation';
 import { ThemeToggle } from '../theme-toggle';
 
 /**
@@ -107,6 +108,7 @@ export interface RoomFrameHandlers {
   readonly onTogglePeek?: (entryId: string) => void;
   readonly onRowAction?: (entryId: string, actionId: string) => void;
   readonly onOpenTag?: (entryId: string) => void;
+  readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
   readonly onMarkSeen?: (entryId: string) => void;
   readonly onUnmarkSeen?: (entryId: string) => void;
   readonly onOpenAttention?: (itemId: string) => void;
@@ -127,6 +129,8 @@ export interface RoomFrameHandlers {
   readonly onComposerKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   readonly composerRef?: Ref<HTMLTextAreaElement>;
   readonly onSend?: (draft: string) => void;
+  readonly onAttach?: (file: File) => void;
+  readonly attachmentNote?: string;
   readonly onCancelBinding?: () => void;
 }
 
@@ -303,6 +307,7 @@ function Frame(props: RoomFrameProps) {
             filter={props.filter}
             onFilter={on.onFilter}
             onMarkSeen={on.onMarkSeen}
+            onOpenAttachment={on.onOpenAttachment}
             onOpenTag={on.onOpenTag}
             onRowAction={on.onRowAction}
             onTogglePeek={on.onTogglePeek}
@@ -316,6 +321,8 @@ function Frame(props: RoomFrameProps) {
             onChange={on.onComposerChange}
             onKeyDown={on.onComposerKeyDown}
             onSend={on.onSend}
+            onAttach={on.onAttach}
+            attachmentNote={on.attachmentNote}
             roomName={props.room.name}
             textareaRef={on.composerRef}
             value={on.composerValue}

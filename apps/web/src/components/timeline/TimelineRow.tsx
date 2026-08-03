@@ -42,7 +42,7 @@
 
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution, useCitedRecord, useHere } from '../model/ledger';
-import type { MessageId, Quotation } from '../model/quotation';
+import type { MessageAttachmentRecord, MessageId, Quotation } from '../model/quotation';
 import {
   chosenAct,
   offeredText,
@@ -88,6 +88,7 @@ export type TimelineRowProps = {
   readonly entry: MessageEntry;
   readonly actions?: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
+  readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
 } & NoGlyph;
 
 const TAG_CLASS: Readonly<Record<RowTag['tone'], string | undefined>> = {
@@ -109,9 +110,19 @@ const TAG_CLASS: Readonly<Record<RowTag['tone'], string | undefined>> = {
  * hook cannot be conditional. Duplicating six lines of wrapper is the cost of
  * having no unresolved value on the row at all.
  */
-export function TimelineRow({ entry, actions = [], onOpenTag }: TimelineRowProps) {
+export function TimelineRow({
+  entry,
+  actions = [],
+  onOpenTag,
+  onOpenAttachment,
+}: TimelineRowProps) {
   return isAuthored(entry) ? (
-    <AuthoredRow actions={actions} entry={entry} onOpenTag={onOpenTag} />
+    <AuthoredRow
+      actions={actions}
+      entry={entry}
+      onOpenAttachment={onOpenAttachment}
+      onOpenTag={onOpenTag}
+    />
   ) : (
     <ChosenRow entry={entry} onOpenTag={onOpenTag} />
   );
@@ -189,10 +200,12 @@ function AuthoredRow({
   entry,
   actions,
   onOpenTag,
+  onOpenAttachment,
 }: {
   readonly entry: AuthoredMessageEntry;
   readonly actions: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
+  readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
 }) {
   /* THE LOOKUP A CALL SITE CANNOT SKIP. The name is not read off the entry; it
      is read out of the record register by the id the entry cites, so it holds
@@ -258,6 +271,21 @@ function AuthoredRow({
         {entry.note === null ? null : (
           <SystemVoice className={styles.note} statement={entry.note} />
         )}
+        {attribution.attachments.length === 0 ? null : (
+          <div className={styles.attachments} data-attachments={attribution.messageId}>
+            {attribution.attachments.map((attachment) => (
+              <button
+                data-attachment-key={attachment.key}
+                key={attachment.key}
+                onClick={() => onOpenAttachment?.(attribution.messageId, attachment)}
+                type="button"
+              >
+                <span data-attachment-name={attachment.name}>{attachment.name}</span>
+                <span aria-hidden="true"> · {formatBytes(attachment.size)}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {actions.length === 0 ? null : (
           <div className={styles.acts}>
             {actions.map((action) => (
@@ -280,6 +308,12 @@ function AuthoredRow({
       </div>
     </div>
   );
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**

@@ -53,6 +53,12 @@ localhost:80, 127.0.0.1:80, [::1]:80 {
 	handle /health {
 		reverse_proxy server:4000
 	}
+	handle /attachments/* {
+		reverse_proxy server:4000
+	}
+	handle /{$S3_BUCKET}/* {
+		reverse_proxy minio:9000
+	}
 	handle {
 		reverse_proxy app:3000
 	}

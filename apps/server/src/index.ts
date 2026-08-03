@@ -6,6 +6,7 @@ import {
   trustedProxyStrategy,
 } from '@atrium/auth';
 import { createDatabase } from '@atrium/db';
+import { createAttachmentSigner } from './attachments.js';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
@@ -165,6 +166,14 @@ async function main(): Promise<void> {
     commands,
     ledger,
     bus,
+    attachments: createAttachmentSigner({
+      endpoint: env.S3_PUBLIC_ENDPOINT,
+      region: env.S3_REGION,
+      bucket: env.S3_BUCKET,
+      forcePathStyle: env.S3_FORCE_PATH_STYLE,
+      accessKeyId: env.S3_ACCESS_KEY_ID,
+      secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+    }),
     // #26, arrived. The stub is gone; this is Better Auth reading the same
     // cookie the web app mints, over the same tables.
     session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }) },

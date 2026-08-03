@@ -286,7 +286,13 @@ const LEDGER = [
   {
     name: 'onOpenTag is dropped on the way to the row',
     file: 'src/components/timeline/Timeline.tsx',
-    find: '<TimelineRow actions={actions} entry={entry} key={entry.id} onOpenTag={onOpenTag} />',
+    find: `            <TimelineRow
+              actions={actions}
+              entry={entry}
+              key={entry.id}
+              onOpenAttachment={onOpenAttachment}
+              onOpenTag={onOpenTag}
+            />`,
     replace: '<TimelineRow actions={actions} entry={entry} key={entry.id} />',
     test: 'test/timeline-handlers.test.tsx',
   },

@@ -29,6 +29,15 @@ export const container = {
   database: 'atrium_e2e',
 };
 
+export const objectStore = {
+  name: process.env.E2E_S3_CONTAINER ?? 'atrium-e2e-minio',
+  port: Number(process.env.E2E_S3_PORT ?? 59000),
+  image: 'minio/minio:latest',
+  accessKeyId: 'atrium-e2e',
+  secretAccessKey: 'atrium-e2e-secret',
+  bucket: 'atrium-e2e-attachments',
+};
+
 export const baseURL = `http://localhost:${webPort}`;
 export const appUrl = baseURL;
 
@@ -53,6 +62,13 @@ export function serverEnvironment() {
     // this back to NEXT_PUBLIC_WS_URL strands the live frame on same-origin
     // `/ws`, where the Next process has no WebSocket server.
     ATRIUM_WS_URL: `ws://localhost:${serverPort}/ws`,
+    ATRIUM_SERVER_HTTP_URL: `http://localhost:${serverPort}`,
+    S3_ENDPOINT: `http://localhost:${objectStore.port}`,
+    S3_PUBLIC_ENDPOINT: `http://localhost:${objectStore.port}`,
+    S3_BUCKET: objectStore.bucket,
+    S3_ACCESS_KEY_ID: objectStore.accessKeyId,
+    S3_SECRET_ACCESS_KEY: objectStore.secretAccessKey,
+    S3_FORCE_PATH_STYLE: 'true',
     SERVER_PORT: String(serverPort),
     SERVER_HOST: '127.0.0.1',
     LOG_LEVEL: 'warn',

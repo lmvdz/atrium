@@ -13,6 +13,7 @@
  * Every handler a child accepts is now reachable from here.
  * ------------------------------------------------------------------------- */
 
+import type { MessageAttachmentRecord } from '../model/quotation';
 import { systemText } from '../model/quotation';
 import type { AttentionClass, TimelineEntry } from '../model/records';
 import { classCounts } from '../model/records';
@@ -43,6 +44,7 @@ export interface TimelineProps {
   /** one handler for every row action; the row and the action both arrive */
   readonly onRowAction?: (entryId: string, actionId: string) => void;
   readonly onOpenTag?: (entryId: string) => void;
+  readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
   readonly onMarkSeen?: (entryId: string) => void;
   readonly onUnmarkSeen?: (entryId: string) => void;
   /** replace the default reply/quote/link set without forking this component */
@@ -63,6 +65,7 @@ export function Timeline({
   onTogglePeek,
   onRowAction,
   onOpenTag,
+  onOpenAttachment,
   onMarkSeen,
   onUnmarkSeen,
   rowActions = ROW_ACTIONS,
@@ -107,7 +110,13 @@ export function Timeline({
                   (messageId: string) => onRowAction(messageId, action.id),
           }));
           return (
-            <TimelineRow actions={actions} entry={entry} key={entry.id} onOpenTag={onOpenTag} />
+            <TimelineRow
+              actions={actions}
+              entry={entry}
+              key={entry.id}
+              onOpenAttachment={onOpenAttachment}
+              onOpenTag={onOpenTag}
+            />
           );
         }
         if (entry.type === 'system') {

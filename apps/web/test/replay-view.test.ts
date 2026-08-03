@@ -485,6 +485,13 @@ describe('live room view', () => {
   it('places the unread divider from persisted room_seq positions', () => {
     const snapshot: ReplayData = {
       ...data(),
+      participants: [
+        { id: 'alice', name: 'alice', avatarUrl: null },
+        { id: 'bob', name: 'bob', avatarUrl: null },
+      ],
+      messages: data().messages.map((message) =>
+        message.id === 'm2' ? { ...message, authorId: 'bob', author: 'bob' } : message,
+      ),
       messagePositions: [
         { messageId: 'm1', roomSeq: 1 },
         { messageId: 'm2', roomSeq: 4 },
@@ -515,5 +522,33 @@ describe('live room view', () => {
     });
     expect(view.rooms[0]?.unseen).toBe(1);
     expect(view.humans[0]?.presence).toBe('here');
+  });
+
+  /**
+   * Mutation: count every room row after seen_seq without removing messages
+   * authored by the viewer. The divider then contradicts its own promise that
+   * a person’s activity is never counted back to them as unseen.
+   */
+  it('does not count the viewer’s own later messages as unseen', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      messagePositions: [
+        { messageId: 'm1', roomSeq: 1 },
+        { messageId: 'm2', roomSeq: 4 },
+      ],
+    };
+    const view = liveRoomView(snapshot, 'alice', {
+      roomId: 'room',
+      lastSeq: 4,
+      head: 4,
+      seenSeq: 1,
+      events: [],
+      pending: [],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    });
+    expect(view.entries.some((entry) => entry.type === 'since-you-left')).toBe(false);
+    expect(view.rooms[0]?.unseen).toBe(0);
   });
 });

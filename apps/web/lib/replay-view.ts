@@ -90,6 +90,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
     text: message.body,
     origin: 'seeded',
     room: data.room.name,
+    attachments: message.attachments,
   }));
   const recordById = new Map(records.map((record) => [record.id, record]));
 

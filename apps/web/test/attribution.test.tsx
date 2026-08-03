@@ -1078,6 +1078,9 @@ describe('the row and the register it renders against are the same register', ()
     at: { at: '09:04' },
     origin: { origin: 'seeded' },
     room: { room: 'identity-service' },
+    attachments: {
+      attachments: [{ key: 'room/file', name: 'proof.txt', contentType: 'text/plain', size: 5 }],
+    },
   };
 
   it('every field of the record has a stated way to disagree', () => {

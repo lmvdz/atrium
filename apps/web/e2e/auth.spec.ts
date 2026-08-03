@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 import {
   createWorkspace,
@@ -32,6 +33,8 @@ test.describe('auth and workspaces', () => {
    * message written in one authenticated context never reaches the other.
    * Mutation: derive presence from workspace membership rather than live
    * per-user frames. Both people appear "here" before their sockets report it.
+   * Mutation: send attachment bytes through Atrium, omit their metadata from
+   * the room event, or render a download that does not recover the same bytes.
    */
   test('signup, verification, workspace, invitation, shared live room and presence', async ({
     browser,
@@ -99,6 +102,62 @@ test.describe('auth and workspaces', () => {
     await founder.getByRole('textbox', { name: 'Message #general' }).fill(words);
     await founder.getByRole('button', { name: 'Send' }).click();
     await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(words);
+
+    const bytes = Buffer.from('persisted object bytes\n', 'utf8');
+    let uploadTarget = '';
+    let releaseUpload: (() => void) | undefined;
+    const uploadGate = new Promise<void>((resolve) => {
+      releaseUpload = resolve;
+    });
+    await founder.route(/:59000\//, async (route) => {
+      if (route.request().method() === 'PUT') await uploadGate;
+      await route.continue();
+    });
+    const failedUploads: string[] = [];
+    founder.on('request', (request) => {
+      if (request.method() === 'PUT') uploadTarget = request.url();
+      if (request.url().includes(':4100') || request.url().includes(':59000')) {
+        failedUploads.push(`request ${request.method()} ${request.url()}`);
+      }
+    });
+    founder.on('response', (response) => {
+      if (response.url().includes(':4100') || response.url().includes(':59000')) {
+        failedUploads.push(`response ${response.status()} ${response.url()}`);
+      }
+    });
+    founder.on('requestfailed', (request) => {
+      if (request.url().includes('attachment') || request.method() === 'PUT') {
+        failedUploads.push(`${request.method()} ${request.url()} ${request.failure()?.errorText}`);
+      }
+    });
+    await founder.getByLabel('Choose an attachment').setInputFiles({
+      name: 'evidence.txt',
+      mimeType: 'text/plain',
+      buffer: bytes,
+    });
+    // CATCHES: Send remaining live during a PUT, which sent this draft without
+    // the file and attached the eventual result to the following message.
+    await expect(founder.getByRole('button', { name: 'Send' })).toBeDisabled();
+    await expect(founder.getByRole('textbox', { name: 'Message #general' })).toBeDisabled();
+    releaseUpload?.();
+    await expect(
+      founder.locator('[data-attachment-note="true"]'),
+      `attachment failures: ${failedUploads.join(' | ')}`,
+    ).toContainText('evidence.txt attached');
+    await founder.unroute(/:59000\//);
+    expect(new URL(uploadTarget).port).toBe('59000');
+    await founder.getByRole('textbox', { name: 'Message #general' }).fill('Attached evidence.');
+    await founder.getByRole('button', { name: 'Send' }).click();
+
+    const attachment = invitee.getByRole('button', { name: /evidence\.txt/ });
+    await expect(attachment).toBeVisible();
+    const downloadPromise = invitee.waitForEvent('download');
+    await attachment.click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe('evidence.txt');
+    const downloadedPath = await download.path();
+    if (!downloadedPath) throw new Error('the browser did not persist the downloaded attachment');
+    expect(await readFile(downloadedPath)).toEqual(bytes);
 
     await founderContext.close();
     await inviteeContext.close();

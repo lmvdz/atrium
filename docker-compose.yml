@@ -280,6 +280,10 @@ services:
       INTERPRET_CONTEXT_MESSAGES: ${INTERPRET_CONTEXT_MESSAGES:-25}
       INTERPRET_RETRY_LIMIT: ${INTERPRET_RETRY_LIMIT:-5}
       S3_ENDPOINT: http://minio:9000
+      # Presigned URLs are used by the browser, so they name the public proxy,
+      # not Docker's private `minio` hostname. The bucket-prefixed path is
+      # routed unchanged by Caddy below, preserving the SigV4 request target.
+      S3_PUBLIC_ENDPOINT: https://${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-atrium-attachments}
       S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
@@ -373,6 +377,7 @@ services:
       # fail on an empty address — and so `docker compose config` names the
       # missing variable.
       ATRIUM_DOMAIN: ${ATRIUM_DOMAIN:?set ATRIUM_DOMAIN in .env — the hostname pointed at this box; Caddy gets its certificate for it and both apps refuse to serve production over http://}
+      S3_BUCKET: ${S3_BUCKET:-atrium-attachments}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

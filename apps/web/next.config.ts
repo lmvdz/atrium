@@ -21,6 +21,20 @@ const nextConfig: NextConfig = {
   // Node requires. (The workspace packages are deliberately *not* listed — Next
   // compiles those from source, which is what makes `@/lib` imports work.)
   serverExternalPackages: ['postgres', 'drizzle-orm', 'better-auth'],
+  /* In the deployed stack Caddy owns `/attachments/*`. A split-process local
+     run has no proxy, so it may state the server origin here; the browser still
+     calls the same-origin path and only the small presign JSON is forwarded. */
+  async rewrites() {
+    const server = process.env.ATRIUM_SERVER_HTTP_URL?.replace(/\/$/, '');
+    return server
+      ? [
+          {
+            source: '/attachments/:path*',
+            destination: `${server}/attachments/:path*`,
+          },
+        ]
+      : [];
+  },
 
   // There is deliberately no `env:` block, and no `NEXT_PUBLIC_WS_URL`.
   //

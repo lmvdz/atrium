@@ -310,6 +310,11 @@ export function createCommandService({
 
     switch (command.name) {
       case 'send_message':
+        if (
+          command.attachments.some((attachment) => !attachment.key.startsWith(`${command.roomId}/`))
+        ) {
+          throw new CommandError('invalid', 'an attachment key belongs to another room');
+        }
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,

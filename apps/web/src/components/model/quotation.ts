@@ -81,6 +81,7 @@ export interface MessageRecord {
   readonly actor: string;
   readonly text: string;
   readonly origin: MessageOrigin;
+  readonly attachments?: readonly MessageAttachmentRecord[];
   /**
    * THE ROOM THIS MESSAGE LIVES IN. Absolute, and about the record only.
    *
@@ -106,6 +107,13 @@ export interface MessageRecord {
    * makes its own.
    */
   readonly room?: string;
+}
+
+export interface MessageAttachmentRecord {
+  readonly key: string;
+  readonly name: string;
+  readonly contentType: string;
+  readonly size: number;
 }
 
 /** Where a cited message is, RELATIVE TO THE ROOM ON SCREEN — the only relative thing. */
@@ -191,6 +199,7 @@ export interface Attribution {
   readonly at: string;
   readonly origin: QuotableOrigin;
   readonly room: string | null;
+  readonly attachments: readonly MessageAttachmentRecord[];
 }
 
 export function isQuotableOrigin(origin: MessageOrigin): origin is QuotableOrigin {
@@ -326,7 +335,15 @@ export function recordFingerprint(record: MessageRecord): string {
      `room` is optional, so it is encoded as a distinguishable absence rather
      than as the empty string: `room: ''` is refused by `parseMessageRecord`, but
      a cast is not, and `∅` is not a room name a record can hold. */
-  return [record.id, record.origin, record.at, record.actor, record.text, record.room ?? '∅']
+  return [
+    record.id,
+    record.origin,
+    record.at,
+    record.actor,
+    record.text,
+    record.room ?? '∅',
+    JSON.stringify(record.attachments ?? []),
+  ]
     .map((part) => `${part.length}:${part}`)
     .join('|');
 }
@@ -396,6 +413,7 @@ export function resolveQuotation(
     at: record.at,
     origin: record.origin,
     room: record.room ?? null,
+    attachments: record.attachments ?? [],
   };
 }
 
@@ -526,7 +544,7 @@ export function parseQuotation(value: unknown, ledger: MessageLedger): Quotation
 /** Same boundary, one step earlier: a message record from untrusted data. */
 export function parseMessageRecord(value: unknown): MessageRecord {
   if (!isRecord(value)) throw new Error('parseMessageRecord: not an object');
-  const { id, at, actor, text, origin, room } = value;
+  const { id, at, actor, text, origin, room, attachments } = value;
   if (!nonEmptyString(id)) throw new Error('parseMessageRecord: a message needs an id');
   if (typeof at !== 'string') throw new Error('parseMessageRecord: a message needs a timestamp');
   if (!nonEmptyString(actor)) throw new Error('parseMessageRecord: a message needs an actor');
@@ -539,6 +557,22 @@ export function parseMessageRecord(value: unknown): MessageRecord {
   if (room !== undefined && !nonEmptyString(room)) {
     throw new Error('parseMessageRecord: room, when present, names a room');
   }
+  if (
+    attachments !== undefined &&
+    (!Array.isArray(attachments) ||
+      attachments.some(
+        (attachment) =>
+          !isRecord(attachment) ||
+          !nonEmptyString(attachment.key) ||
+          !nonEmptyString(attachment.name) ||
+          !nonEmptyString(attachment.contentType) ||
+          typeof attachment.size !== 'number' ||
+          !Number.isSafeInteger(attachment.size) ||
+          attachment.size <= 0,
+      ))
+  ) {
+    throw new Error('parseMessageRecord: attachments must carry key, name, type and size');
+  }
   return {
     id,
     at,
@@ -546,6 +580,9 @@ export function parseMessageRecord(value: unknown): MessageRecord {
     text,
     origin: origin as MessageOrigin,
     ...(room === undefined ? {} : { room }),
+    ...(attachments === undefined
+      ? {}
+      : { attachments: attachments as unknown as MessageAttachmentRecord[] }),
   };
 }
 

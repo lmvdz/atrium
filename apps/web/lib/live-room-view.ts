@@ -35,6 +35,7 @@ export function liveRoomView(data: ReplayData, viewerId: string, live: RoomView)
     text: pending.body,
     origin: 'typed',
     room: base.room.name,
+    attachments: pending.attachments,
   }));
   const pendingEntries = pendingRecords.map((record) =>
     messageEntry(record, { state: TALK, viewer: base.viewer.name }),
@@ -48,12 +49,20 @@ export function liveRoomView(data: ReplayData, viewerId: string, live: RoomView)
   const positionByMessage = new Map(
     (data.messagePositions ?? []).map((position) => [position.messageId, position.roomSeq]),
   );
-  const firstUnread = live.subscribed
-    ? data.messages.findIndex((message) => (positionByMessage.get(message.id) ?? 0) > live.seenSeq)
-    : -1;
+  const unreadIndices = live.subscribed
+    ? data.messages.flatMap((message, index) =>
+        (positionByMessage.get(message.id) ?? 0) > live.seenSeq && message.authorId !== viewerId
+          ? [index]
+          : [],
+      )
+    : [];
+  const firstUnread = unreadIndices[0] ?? -1;
   const entries: TimelineEntry[] = [...messageEntries];
   if (firstUnread >= 0) {
-    const unread = messageEntries.slice(firstUnread);
+    const unread = unreadIndices.flatMap((index) => {
+      const entry = messageEntries[index];
+      return entry ? [entry] : [];
+    });
     const first = data.messages[firstUnread];
     const last = data.messages.at(-1);
     entries.splice(
@@ -79,7 +88,7 @@ export function liveRoomView(data: ReplayData, viewerId: string, live: RoomView)
     viewer,
     rooms: base.rooms.map((room) => ({
       ...room,
-      unseen: firstUnread < 0 ? 0 : data.messages.length - firstUnread,
+      unseen: unreadIndices.length,
     })),
   };
 }

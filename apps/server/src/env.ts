@@ -202,6 +202,8 @@ const RawEnvSchema = BaseEnvSchema.extend({
   INTERPRET_RETRY_LIMIT: z.coerce.number().int().min(1).max(20).default(5),
 
   S3_ENDPOINT: z.string().min(1).default('http://localhost:9000'),
+  /** Browser-reachable signing origin; defaults to the endpoint in local dev. */
+  S3_PUBLIC_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().min(1).default('us-east-1'),
   S3_BUCKET: z.string().min(1).default('atrium-attachments'),
   S3_FORCE_PATH_STYLE: z
@@ -237,6 +239,7 @@ const EnvSchema = RawEnvSchema.transform((raw, ctx) => {
 
   return {
     ...raw,
+    S3_PUBLIC_ENDPOINT: raw.S3_PUBLIC_ENDPOINT ?? raw.S3_ENDPOINT,
     S3_ACCESS_KEY_ID: required('S3_ACCESS_KEY_ID', raw.S3_ACCESS_KEY_ID, DEV_S3_ACCESS_KEY_ID),
     S3_SECRET_ACCESS_KEY: required(
       'S3_SECRET_ACCESS_KEY',
