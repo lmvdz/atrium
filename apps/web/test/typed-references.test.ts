@@ -109,6 +109,17 @@ describe('typed reference spans', () => {
     ).toEqual([]);
   });
 
+  /* CATCHES: assigning ordinals before invalid surfaces are removed, leaving
+     the first valid reference numbered 1 and making the server refuse it. */
+  it('numbers the valid references only after invalid metadata is removed', () => {
+    expect(
+      normalizeMessageReferences('@bad then @sam', [
+        { kind: 'object', targetId: 'o1', start: 0, end: 4, surface: '@nope' },
+        { kind: 'human', targetId: 'u2', start: 10, end: 14, surface: '@sam' },
+      ]),
+    ).toEqual([{ ordinal: 0, kind: 'human', targetId: 'u2', start: 10, end: 14, surface: '@sam' }]);
+  });
+
   /* CATCHES: using a renamed target's current label as message text. Resolution
      may change; the authored token under the author's name may not. */
   it('renders authored text while exposing current resolution separately', () => {

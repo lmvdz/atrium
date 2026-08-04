@@ -61,6 +61,6 @@ export function normalizeMessageReferences(
 ): readonly MessageReference[] {
   return [...references]
     .sort((left, right) => left.start - right.start || left.end - right.end)
-    .map((reference, ordinal) => ({ ...reference, ordinal }))
-    .filter((reference) => body.slice(reference.start, reference.end) === reference.surface);
+    .filter((reference) => body.slice(reference.start, reference.end) === reference.surface)
+    .map((reference, ordinal) => ({ ...reference, ordinal }));
 }
