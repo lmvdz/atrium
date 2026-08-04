@@ -119,7 +119,7 @@ test.describe('durable typed room references', () => {
         objectStatement,
       );
 
-      const composer = owner.getByRole('textbox', { name: /Message #/ });
+      const composer = owner.getByRole('combobox', { name: /Message #/ });
       await composer.fill('@Read');
       const humanChoice = owner.locator(
         `[data-reference-kind="human"][data-reference-target="${readerIdentity.id}"]`,
@@ -283,7 +283,7 @@ test.describe('durable typed room references', () => {
       );
       await expect(reader.locator(`[data-attention-id="${attention?.id}"]`)).toBeVisible();
 
-      const semanticComposer = owner.getByRole('textbox', { name: /Message #/ });
+      const semanticComposer = owner.getByRole('combobox', { name: /Message #/ });
       await semanticComposer.fill('@');
       const proposalChoice = owner.locator(
         `[data-reference-kind="proposal"][data-reference-target="${proposalId}"]`,

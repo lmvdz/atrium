@@ -22,7 +22,7 @@ import {
 async function joinedRoomId(page: import('@playwright/test').Page): Promise<string> {
   const live = page.locator('main[data-room-id]');
   await expect(live.locator('[data-frame="live"]')).toBeVisible();
-  await expect(page.getByRole('textbox', { name: 'Message #general' })).toBeEnabled();
+  await expect(page.getByRole('combobox', { name: 'Message #general' })).toBeEnabled();
   const roomId = await live.getAttribute('data-room-id');
   expect(roomId, 'the authenticated live route must name its authorized room').toBeTruthy();
   return roomId ?? '';
@@ -159,7 +159,7 @@ test.describe('websocket authorization', () => {
 
     await owner.goto(`/app/${slug}/general`);
     const words = `Only the remaining member receives this ${Date.now()}`;
-    await owner.getByRole('textbox', { name: 'Message #general' }).fill(words);
+    await owner.getByRole('combobox', { name: 'Message #general' }).fill(words);
     await owner.getByRole('button', { name: 'Send' }).click();
     await expect(owner.getByRole('region', { name: 'Conversation' })).toContainText(words);
     await member.waitForTimeout(500);

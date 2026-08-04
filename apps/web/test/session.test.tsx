@@ -83,7 +83,7 @@ describe('two records under one id', () => {
 describe('the session under a driver faster than a render', () => {
   function open() {
     render(<RoomSession />);
-    return screen.getByRole('textbox');
+    return screen.getByRole('combobox');
   }
 
   /* CATCHES: the id going back to `sent.length + 1`. Both sends happen inside

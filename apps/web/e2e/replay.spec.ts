@@ -224,11 +224,11 @@ test.describe('persisted three-surface replay', () => {
         ),
     ).toBeVisible();
     await expect(
-      page.getByRole('textbox', { name: 'Message #function-call side effects' }),
+      page.getByRole('combobox', { name: 'Message #function-call side effects' }),
     ).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
     expect(
-      await page.getByRole('textbox').evaluate((element) => {
+      await page.getByRole('combobox').evaluate((element) => {
         const bounds = element.getBoundingClientRect();
         const hit = document.elementFromPoint(
           bounds.left + bounds.width / 2,
@@ -335,7 +335,7 @@ test.describe('persisted three-surface replay', () => {
     await expect(pinned).toContainText('◆');
     await expect(pinned).toContainText('cited receipt did not certify');
     await pinned.getByRole('button', { name: 'answer', exact: true }).click();
-    const composer = page.getByRole('textbox', {
+    const composer = page.getByRole('combobox', {
       name: `Answer ${decision} in your own words`,
     });
     await expect(composer).toBeFocused();
@@ -429,10 +429,10 @@ test.describe('persisted three-surface replay', () => {
     await expect(receipt).toContainText('open');
     await receipt.getByRole('button', { name: 'Answer', exact: true }).click();
     await expect(
-      page.getByRole('textbox', { name: `Answer ${question} in your own words` }),
+      page.getByRole('combobox', { name: `Answer ${question} in your own words` }),
     ).toBeFocused();
     await page
-      .getByRole('textbox', { name: `Answer ${question} in your own words` })
+      .getByRole('combobox', { name: `Answer ${question} in your own words` })
       .fill(firstAnswer);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(receipt.locator('[data-quoted]').filter({ hasText: firstAnswer })).toHaveCount(1);
@@ -461,7 +461,7 @@ test.describe('persisted three-surface replay', () => {
       'Retain optimistic narrowing and use an accessor where mutation is expected.';
     await restored.getByRole('button', { name: 'answer', exact: true }).click();
     await page
-      .getByRole('textbox', { name: `Answer ${question} in your own words` })
+      .getByRole('combobox', { name: `Answer ${question} in your own words` })
       .fill(secondAnswer);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(restored.getByRole('button', { name: 'answer', exact: true })).toHaveCount(0);

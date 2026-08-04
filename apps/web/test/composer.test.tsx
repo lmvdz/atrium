@@ -50,7 +50,7 @@ const FRAME: RoomFrameProps = {
 };
 
 function box(): HTMLTextAreaElement {
-  return screen.getByRole('textbox') as HTMLTextAreaElement;
+  return screen.getByRole('combobox') as HTMLTextAreaElement;
 }
 
 describe('the composer keeps its send contract', () => {
@@ -301,7 +301,7 @@ describe('draft-driven command and mention completion', () => {
       />,
     );
     fireEvent.change(box(), { target: { value: 'ask @pr' } });
-    fireEvent.click(screen.getByRole('button', { name: '@priya' }));
+    fireEvent.click(screen.getByRole('option', { name: '@priya' }));
     expect(drafts.at(-1)).toBe('ask @priya ');
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(sentReferences).toEqual([
@@ -334,7 +334,7 @@ describe('draft-driven command and mention completion', () => {
       />,
     );
     fireEvent.change(box(), { target: { value: '@sa' } });
-    fireEvent.click(screen.getByRole('button', { name: /@sam · second/ }));
+    fireEvent.click(screen.getByRole('option', { name: /@sam · second/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(sent[0]?.targetId).toBe('user-two');
   });
@@ -354,10 +354,111 @@ describe('draft-driven command and mention completion', () => {
       />,
     );
     fireEvent.change(box(), { target: { value: '@map' } });
-    fireEvent.click(screen.getByRole('button', { name: /@map\.png/ }));
+    fireEvent.click(screen.getByRole('option', { name: /@map\.png/ }));
     fireEvent.change(box(), { target: { value: '@map-old.png ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(sent).toEqual([]);
+  });
+
+  /* CATCHES: rendering a visually vertical menu while leaving selection pointer-only;
+     without an active option ArrowDown and Tab cannot complete a stable target. */
+  it('exposes a listbox and autocompletes the arrow-selected option with Tab', () => {
+    const drafts: string[] = [];
+    let sent: readonly import('../src/lib/typed-references').MessageReference[] = [];
+    render(
+      <Composer
+        binding={FREE}
+        referenceTargets={[
+          { kind: 'human', id: 'user-one', label: 'sam', detail: 'first' },
+          { kind: 'human', id: 'user-two', label: 'sam', detail: 'second' },
+          { kind: 'attachment', id: 'file-one', label: 'sample.png', detail: 'image' },
+        ]}
+        onChange={(draft) => drafts.push(draft)}
+        onSend={(_draft, references) => {
+          sent = references;
+        }}
+        roomName="r"
+      />,
+    );
+
+    fireEvent.change(box(), { target: { value: 'ask @sa' } });
+    expect(box().getAttribute('role')).toBe('combobox');
+    expect(box().getAttribute('aria-expanded')).toBe('true');
+    const listbox = screen.getByRole('listbox', { name: 'Reference targets' });
+    expect(listbox).toBeDefined();
+    const options = screen.getAllByRole('option');
+    expect(options).toHaveLength(3);
+    expect(options[0]?.getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.keyDown(box(), { key: 'ArrowDown' });
+    expect(options[1]?.getAttribute('aria-selected')).toBe('true');
+    expect(box().getAttribute('aria-activedescendant')).toBe(options[1]?.id);
+    fireEvent.keyDown(box(), { key: 'Tab' });
+
+    expect(drafts.at(-1)).toBe('ask @sam ');
+    expect(document.activeElement).toBe(box());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent[0]?.targetId).toBe('user-two');
+  });
+
+  /* CATCHES: allowing ordinary Enter-to-send to run before reference completion,
+     which would post the partial `@` query instead of selecting the active row. */
+  it('Enter selects while open, then resumes normal send behavior', () => {
+    const sent: string[] = [];
+    render(
+      <Composer
+        binding={FREE}
+        referenceTargets={[{ kind: 'proposal', id: 'proposal-one', label: 'ship preview' }]}
+        onSend={(draft) => sent.push(draft)}
+        roomName="r"
+      />,
+    );
+    fireEvent.change(box(), { target: { value: '@sh' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(sent).toEqual([]);
+    expect(box().value).toBe('@ship preview ');
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(sent).toEqual(['@ship preview ']);
+  });
+
+  /* CATCHES: Escape mutating the authored draft, or leaving the popup's active
+     descendant attached after the popup has closed. */
+  it('Escape closes completion without changing the draft', () => {
+    render(
+      <Composer
+        binding={FREE}
+        referenceTargets={[{ kind: 'human', id: 'u-priya', label: 'priya' }]}
+        roomName="r"
+      />,
+    );
+    fireEvent.change(box(), { target: { value: 'ask @pr' } });
+    fireEvent.keyDown(box(), { key: 'Escape' });
+    expect(box().value).toBe('ask @pr');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(box().getAttribute('aria-activedescendant')).toBeNull();
+  });
+
+  /* CATCHES: maintaining a keyboard index independent of pointer hover, so Tab
+     completes a stale row after the user has visibly moved to another option. */
+  it('pointer hover moves the active option used by autocomplete', () => {
+    const changes: string[] = [];
+    render(
+      <Composer
+        binding={FREE}
+        referenceTargets={[
+          { kind: 'human', id: 'u-priya', label: 'priya' },
+          { kind: 'object', id: 'object-one', label: 'priority' },
+        ]}
+        onChange={(draft) => changes.push(draft)}
+        roomName="r"
+      />,
+    );
+    fireEvent.change(box(), { target: { value: '@pr' } });
+    const object = screen.getByRole('option', { name: /@priority/ });
+    fireEvent.mouseEnter(object);
+    expect(object.getAttribute('aria-selected')).toBe('true');
+    fireEvent.keyDown(box(), { key: 'Tab' });
+    expect(changes.at(-1)).toBe('@priority ');
   });
 });
 
@@ -387,7 +488,7 @@ describe('the gallery frame forwards every composer seam', () => {
         }}
       />,
     );
-    const textarea = screen.getAllByRole('textbox')[0] as HTMLTextAreaElement;
+    const textarea = screen.getAllByRole('combobox')[0] as HTMLTextAreaElement;
     fireEvent.keyDown(textarea, { key: 'Escape' });
     expect(keys, 'RoomFrame drops onKeyDown on the way to the composer').toEqual(['Escape']);
     expect(ref.current, 'RoomFrame drops textareaRef on the way to the composer').toBe(textarea);
@@ -460,7 +561,7 @@ describe('a composition that ends any way at all releases the send', () => {
     const view = render(
       <Composer binding={FREE} footNote="" onSend={onSend} roomName="users-migration" />,
     );
-    return { view, field: screen.getByRole('textbox') };
+    return { view, field: screen.getByRole('combobox') };
   }
 
   /* CATCHES: `onBlur` being dropped. Blurring mid-candidate is the commonest way

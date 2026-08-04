@@ -137,7 +137,7 @@ test.describe('auth and workspaces', () => {
 
     for (const page of [founder, invitee]) {
       await expect(page.locator('[data-frame="live"]')).toBeVisible();
-      await expect(page.getByRole('textbox', { name: 'Message #general' })).toBeEnabled();
+      await expect(page.getByRole('combobox', { name: 'Message #general' })).toBeEnabled();
       const call = page.getByRole('region', { name: 'Call pane' });
       await expect(call.getByLabel('Ada · here')).toBeVisible();
       await expect(call.getByLabel('Grace · here')).toBeVisible();
@@ -145,7 +145,7 @@ test.describe('auth and workspaces', () => {
     }
 
     const words = `The authenticated live frame carries this message ${Date.now()}.`;
-    await founder.getByRole('textbox', { name: 'Message #general' }).fill(words);
+    await founder.getByRole('combobox', { name: 'Message #general' }).fill(words);
     await founder.getByRole('button', { name: 'Send' }).click();
     await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(words);
 
@@ -154,7 +154,7 @@ test.describe('auth and workspaces', () => {
     // exact canonical source, or failing to reconstruct it after reload.
     const semanticTitle = `Ship deterministic commands ${Date.now()}`;
     const semanticMessage = `/goal ${semanticTitle}`;
-    await founder.getByRole('textbox', { name: 'Message #general' }).fill(semanticMessage);
+    await founder.getByRole('combobox', { name: 'Message #general' }).fill(semanticMessage);
     await founder.getByRole('button', { name: 'Send' }).click();
     for (const page of [founder, invitee]) {
       await expect(page.getByRole('region', { name: 'Conversation' })).toContainText(
@@ -195,15 +195,15 @@ test.describe('auth and workspaces', () => {
         .filter({ hasText: semanticTitle }),
     ).toContainText('active');
     await invitee.goto(`/app/${slug}/general`);
-    await expect(invitee.getByRole('textbox', { name: 'Message #general' })).toBeEnabled();
+    await expect(invitee.getByRole('combobox', { name: 'Message #general' })).toBeEnabled();
 
     // CATCHES: a structured mention forcing the whole authored message back to
     // plain text, flattening Markdown/newlines, or retaining only the visible
     // @label while dropping the certified user id sent beside it.
     const richLead = `**Deployment note ${Date.now()}**`;
-    const founderComposer = founder.getByRole('textbox', { name: 'Message #general' });
+    const founderComposer = founder.getByRole('combobox', { name: 'Message #general' });
     await founderComposer.fill(`${richLead}\n\n@Gra`);
-    await founder.getByRole('button', { name: '@Grace', exact: true }).click();
+    await founder.getByRole('option', { name: '@Grace', exact: true }).click();
     const mentionedDraft = await founderComposer.inputValue();
     await founderComposer.fill(`${mentionedDraft}\n\n\`\`\`ts\nconst ready = true;\n\`\`\``);
     await founder.getByRole('button', { name: 'Send' }).click();
@@ -223,7 +223,7 @@ test.describe('auth and workspaces', () => {
     await sourceRow.getByRole('button', { name: 'reply' }).press('Enter');
     await expect(invitee.getByText('REPLYING TO')).toBeVisible();
     const replyWords = `A persisted reply to the exact source ${Date.now()}.`;
-    await invitee.getByRole('textbox', { name: 'Message #general' }).fill(replyWords);
+    await invitee.getByRole('combobox', { name: 'Message #general' }).fill(replyWords);
     await invitee.getByRole('button', { name: 'Send' }).click();
     const replyRow = founder.locator('[data-message-id]').filter({ hasText: replyWords });
     await expect(replyRow).toContainText(words);
@@ -309,8 +309,8 @@ test.describe('auth and workspaces', () => {
     const founderAnswer = `Ship on Friday ${Date.now()}.`;
     const inviteeAnswer = `Ship after the Friday review ${Date.now()}.`;
     const answerName = `Answer ${questionText} in your own words`;
-    const founderBound = founder.getByRole('textbox', { name: answerName });
-    const inviteeBound = invitee.getByRole('textbox', { name: answerName });
+    const founderBound = founder.getByRole('combobox', { name: answerName });
+    const inviteeBound = invitee.getByRole('combobox', { name: answerName });
     await founderBound.fill(founderAnswer);
     await inviteeBound.fill(inviteeAnswer);
     await Promise.all([
@@ -390,7 +390,7 @@ test.describe('auth and workspaces', () => {
     // CATCHES: Send remaining live during a PUT, which sent this draft without
     // the file and attached the eventual result to the following message.
     await expect(founder.getByRole('button', { name: 'Send' })).toBeDisabled();
-    await expect(founder.getByRole('textbox', { name: 'Message #general' })).toBeDisabled();
+    await expect(founder.getByRole('combobox', { name: 'Message #general' })).toBeDisabled();
     releaseUpload?.();
     await expect(
       founder.locator('[data-attachment-note="true"]'),
@@ -398,7 +398,7 @@ test.describe('auth and workspaces', () => {
     ).toContainText('evidence.png attached');
     await founder.unroute(/:59000\//);
     expect(new URL(uploadTarget).port).toBe('59000');
-    await founder.getByRole('textbox', { name: 'Message #general' }).fill('Attached evidence.');
+    await founder.getByRole('combobox', { name: 'Message #general' }).fill('Attached evidence.');
     await founder.getByRole('button', { name: 'Send' }).click();
 
     const attachment = invitee.getByRole('button', { name: /evidence\.png/ });

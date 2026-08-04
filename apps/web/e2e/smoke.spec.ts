@@ -46,7 +46,7 @@ test.describe('shell', () => {
        record, so it is quotable, attributed, and its body reads as its
        record. */
     const rowsBefore = await page.locator('[data-row="message"]').count();
-    const composer = page.getByRole('textbox');
+    const composer = page.getByRole('combobox');
     await composer.click();
     await composer.type('the composer seam is real');
     await composer.press('Enter');

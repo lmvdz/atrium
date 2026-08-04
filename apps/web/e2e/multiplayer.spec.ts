@@ -278,7 +278,7 @@ test.describe
         for (const message of manifest.messages.slice(40, 160)) {
           if (message.mention !== null) {
             const sender = pages[message.author] as Page;
-            const composer = sender.getByRole('textbox', { name: 'Message #general' });
+            const composer = sender.getByRole('combobox', { name: 'Message #general' });
             await sender.getByLabel('Mention a person or agent').click();
             await sender
               .getByRole('button', { name: `@${names[message.mention]}`, exact: true })
@@ -294,7 +294,7 @@ test.describe
               buffer: Buffer.from(`trace ${runId}\n`, 'utf8'),
             });
             await expect(sender.locator('[data-attachment-note="true"]')).toContainText('attached');
-            await sender.getByRole('textbox', { name: 'Message #general' }).fill(message.body);
+            await sender.getByRole('combobox', { name: 'Message #general' }).fill(message.body);
             await sender.getByRole('button', { name: 'Send' }).click();
           } else {
             await sendManifestMessage(pages[message.author] as Page, roomId, message);
@@ -654,7 +654,7 @@ test.describe
           await sendManifestMessage(pages[message.author] as Page, roomId, message);
         }
         const disconnectedPage = pages[manifest.disconnected] as Page;
-        const disconnectedComposer = disconnectedPage.getByRole('textbox', {
+        const disconnectedComposer = disconnectedPage.getByRole('combobox', {
           name: 'Message #general',
         });
         await disconnectedPage.evaluate(() => {

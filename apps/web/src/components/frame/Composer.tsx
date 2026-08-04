@@ -34,7 +34,7 @@
 
 import Image from 'next/image';
 import type { ChangeEvent, KeyboardEvent, Ref } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { MessageReference, ReferenceTarget } from '../../lib/typed-references';
 import { normalizeMessageReferences, reconcileMessageReferences } from '../../lib/typed-references';
 import { useAttribution } from '../model/ledger';
@@ -121,8 +121,11 @@ export function Composer({
      refusing to send has to say it is refusing. */
   const [composingNow, setComposingNow] = useState(false);
   const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionActive, setMentionActive] = useState(0);
+  const [mentionDismissedDraft, setMentionDismissedDraft] = useState<string | null>(null);
   const [slashOpen, setSlashOpen] = useState(false);
   const [draftMirror, setDraftMirror] = useState(value ?? '');
+  const mentionListId = useId();
   const references = useRef<readonly MessageReference[]>([]);
   const setComposing = useCallback((value: boolean) => {
     composing.current = value;
@@ -173,6 +176,57 @@ export function Composer({
   const visibleMentions = referenceTargets.filter((target) =>
     target.label.toLocaleLowerCase().startsWith(mentionQuery),
   );
+  const mentionMenuOpen =
+    binding.mode === 'free' &&
+    (mentionOpen || mentionMatch !== null) &&
+    mentionDismissedDraft !== visibleDraft &&
+    referenceTargets.length > 0;
+  const selectedMention = visibleMentions[mentionActive];
+
+  useEffect(() => {
+    void mentionQuery;
+    setMentionActive(0);
+  }, [mentionQuery]);
+
+  useEffect(() => {
+    if (visibleMentions.length === 0) setMentionActive(0);
+    else if (mentionActive >= visibleMentions.length) setMentionActive(visibleMentions.length - 1);
+  }, [mentionActive, visibleMentions.length]);
+
+  useEffect(() => {
+    if (!mentionMenuOpen || selectedMention === undefined) return;
+    document
+      .getElementById(`${mentionListId}-option-${mentionActive}`)
+      ?.scrollIntoView?.({ block: 'nearest' });
+  }, [mentionActive, mentionListId, mentionMenuOpen, selectedMention]);
+
+  const selectMention = useCallback(
+    (target: ReferenceTarget) => {
+      const prefix =
+        mentionMatch === null
+          ? visibleDraft
+          : visibleDraft.slice(0, mentionMatch.index) + (mentionMatch[1] ?? '');
+      const suffix = ' ';
+      const surface = `@${target.label}`;
+      const next = `${prefix}${surface}${suffix}`;
+      const retained = reconcileMessageReferences(visibleDraft, next, references.current);
+      references.current = normalizeMessageReferences(next, [
+        ...retained,
+        {
+          kind: target.kind,
+          targetId: target.id,
+          start: prefix.length,
+          end: prefix.length + surface.length,
+          surface,
+        },
+      ]);
+      replaceDraft(next);
+      setMentionOpen(false);
+      setMentionDismissedDraft(null);
+      setMentionActive(0);
+    },
+    [mentionMatch, replaceDraft, visibleDraft],
+  );
 
   const send = useCallback(() => {
     /* Refused from EVERY control, not just the one that had the key event. A
@@ -208,11 +262,45 @@ export function Composer({
          one is a check that passes on the platforms most likely to fail. */
       const native = event.nativeEvent;
       if (native.isComposing || native.keyCode === 229 || composing.current) return;
+      if (mentionMenuOpen) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setMentionOpen(false);
+          /* A typed trigger would otherwise immediately reopen from the regex.
+             Moving focus nowhere and leaving the authored bytes untouched is
+             the conventional Escape contract; this flag is the explicit veto. */
+          setMentionDismissedDraft(visibleDraft);
+          return;
+        }
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          if (visibleMentions.length > 0) {
+            const delta = event.key === 'ArrowDown' ? 1 : -1;
+            setMentionActive(
+              (current) => (current + delta + visibleMentions.length) % visibleMentions.length,
+            );
+          }
+          return;
+        }
+        if ((event.key === 'Tab' || event.key === 'Enter') && selectedMention !== undefined) {
+          event.preventDefault();
+          selectMention(selectedMention);
+          return;
+        }
+      }
       if (event.key !== 'Enter' || event.shiftKey) return;
       event.preventDefault();
       send();
     },
-    [onKeyDown, send],
+    [
+      mentionMenuOpen,
+      onKeyDown,
+      selectMention,
+      selectedMention,
+      send,
+      visibleDraft,
+      visibleMentions.length,
+    ],
   );
 
   const attach = useCallback(
@@ -313,37 +401,24 @@ export function Composer({
         </div>
       )}
 
-      {binding.mode !== 'free' ||
-      (!mentionOpen && mentionMatch === null) ||
-      referenceTargets.length === 0 ? null : (
-        <div className={styles.mentionMenu}>
-          {visibleMentions.map((target) => (
+      {!mentionMenuOpen ? null : (
+        <div
+          aria-label="Reference targets"
+          className={styles.mentionMenu}
+          id={mentionListId}
+          role="listbox"
+        >
+          {visibleMentions.map((target, index) => (
             <button
+              aria-selected={index === mentionActive}
               data-reference-kind={target.kind}
               data-reference-target={target.id}
+              id={`${mentionListId}-option-${index}`}
               key={`${target.kind}:${target.id}`}
-              onClick={() => {
-                const prefix =
-                  mentionMatch === null
-                    ? visibleDraft
-                    : visibleDraft.slice(0, mentionMatch.index) + (mentionMatch[1] ?? '');
-                const suffix = ' ';
-                const surface = `@${target.label}`;
-                const next = `${prefix}${surface}${suffix}`;
-                const retained = reconcileMessageReferences(visibleDraft, next, references.current);
-                references.current = normalizeMessageReferences(next, [
-                  ...retained,
-                  {
-                    kind: target.kind,
-                    targetId: target.id,
-                    start: prefix.length,
-                    end: prefix.length + surface.length,
-                    surface,
-                  },
-                ]);
-                replaceDraft(next);
-                setMentionOpen(false);
-              }}
+              onClick={() => selectMention(target)}
+              onMouseEnter={() => setMentionActive(index)}
+              role="option"
+              tabIndex={-1}
               type="button"
             >
               {target.kind === 'human' ? null : <span aria-hidden="true">▤ </span>}@
@@ -395,6 +470,14 @@ export function Composer({
         data-composer-box={binding.mode}
       >
         <textarea
+          aria-activedescendant={
+            mentionMenuOpen && selectedMention !== undefined
+              ? `${mentionListId}-option-${mentionActive}`
+              : undefined
+          }
+          aria-autocomplete="list"
+          aria-controls={mentionMenuOpen ? mentionListId : undefined}
+          aria-expanded={mentionMenuOpen}
           aria-label={
             binding.mode === 'bound' ? `Answer ${boundLabel} in your own words` : `Message #${room}`
           }
@@ -432,6 +515,7 @@ export function Composer({
               : `message #${room}…`
           }
           ref={attach}
+          role="combobox"
           rows={1}
           {...(value === undefined
             ? { defaultValue: '' }
@@ -478,15 +562,16 @@ export function Composer({
           )}
           <button
             aria-expanded={mentionOpen}
-            aria-label="Mention a person or agent"
+            aria-label="Reference a person or room item"
             className={styles.composerTool}
             disabled={disabled}
             onClick={() => {
               if (mentionMatch === null) insert('@');
               setMentionOpen(true);
+              setMentionDismissedDraft(null);
               setSlashOpen(false);
             }}
-            title="mention a person or agent"
+            title="reference a person or room item"
             type="button"
           >
             <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 24 24" width="14">

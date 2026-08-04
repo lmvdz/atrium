@@ -79,7 +79,7 @@ test.describe('outbound reconnect recovery', () => {
       });
       const workspace = await createWorkspace(page, `Uncertain ${Date.now()}`);
       await page.goto(`/app/${workspace}/general`);
-      const composer = page.getByRole('textbox', { name: 'Message #general' });
+      const composer = page.getByRole('combobox', { name: 'Message #general' });
       await expect(composer).toBeEnabled();
       const roomId = await page.locator('main[data-room-id]').getAttribute('data-room-id');
       if (!roomId) throw new Error('the live route did not expose its room id');
