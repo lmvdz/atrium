@@ -14,9 +14,11 @@ import {
   OpenQuestionPayload,
   type Proposal,
   Provenance,
+  parseSemanticCommand,
   type Relation,
 } from '@atrium/core';
-import type { Database } from '@atrium/db';
+import { type Database, messages } from '@atrium/db';
+import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
 import { type ProjectionHooks, projectRoomEvent } from './projections.js';
@@ -129,6 +131,12 @@ function sendMessageFingerprint(input: {
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
+function semanticCommandFingerprint(roomId: string, messageId: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify(['stage_semantic_command/v1', roomId, messageId]), 'utf8')
+    .digest('hex');
+}
+
 function supersessionFingerprint(input: {
   roomId: string;
   replacementObjectId: string;
@@ -207,6 +215,12 @@ export const Command = z.discriminatedUnion('name', [
     mentionUserIds: z.array(Id).max(20).default([]),
   }),
   z.object({ name: z.literal('record_proposal'), roomId: Id, proposal: ProposalDraft }),
+  z.object({
+    name: z.literal('stage_semantic_command'),
+    roomId: Id,
+    messageId: Id,
+    idempotencyKey: z.string().min(1).max(128),
+  }),
   z.object({
     name: z.literal('answer_message'),
     roomId: Id,
@@ -613,6 +627,75 @@ export function createCommandService({
           type: 'proposal_recorded',
           proposal: draftToProposal(command.proposal, command.roomId, at, session),
         }));
+
+      case 'stage_semantic_command': {
+        let source: { body: string } | undefined;
+        const batch = await ledger.appendBatch({
+          roomId: command.roomId,
+          actor: actorOf(session),
+          requireClean: true,
+          authorize: async (tx) => {
+            await requireMembership(session, command.roomId, tx);
+          },
+          prepare: async (tx) => {
+            [source] = await tx
+              .select({ body: messages.body })
+              .from(messages)
+              .where(
+                and(
+                  eq(messages.id, command.messageId),
+                  eq(messages.roomId, command.roomId),
+                  eq(messages.authorId, session.userId),
+                ),
+              )
+              .limit(1);
+            if (!source || !parseSemanticCommand(source.body, session.userId)) {
+              throw new CommandError(
+                'invalid',
+                'that message is not your semantic command in this room',
+              );
+            }
+          },
+          idempotency: {
+            commandName: 'stage_semantic_command',
+            key: command.idempotencyKey,
+            fingerprint: semanticCommandFingerprint(command.roomId, command.messageId),
+            expectedEventTypes: ['proposal_recorded'],
+          },
+          builds: [
+            ({ id, at }) => {
+              const parsed = source && parseSemanticCommand(source.body, session.userId);
+              if (!source || !parsed)
+                throw new CommandError('invalid', 'semantic source was not prepared');
+              return {
+                id,
+                at,
+                type: 'proposal_recorded',
+                proposal: draftToProposal(
+                  {
+                    type: parsed.type,
+                    payload: parsed.payload,
+                    confidence: 1,
+                    provenance: [command.messageId],
+                    quote: source.body,
+                    interpretationId: null,
+                  } as ProposalDraft,
+                  command.roomId,
+                  at,
+                  session,
+                ),
+              };
+            },
+          ],
+          project: (context) => projectRoomEvent(context, projectionHooks),
+        });
+        return {
+          kind: 'appended_many',
+          roomId: command.roomId,
+          entries: batch.entries,
+          replayed: batch.replayed,
+        };
+      }
 
       case 'reject_proposal':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({

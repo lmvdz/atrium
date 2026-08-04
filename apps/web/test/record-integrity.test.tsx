@@ -9,6 +9,7 @@ import * as f from '../app/gallery/fixtures';
 import { ReceiptView, Timeline, TimelineRow } from '../src/components';
 import { list, text } from '../src/components/model';
 import { renderWith } from './harness';
+import { workspacePath } from './support/workspace-path';
 
 afterEach(cleanup);
 
@@ -87,7 +88,7 @@ describe('no optional field reaches a rendered string unguarded', () => {
      authored paragraph breaks even though the ledger preserved them. */
   it('the rendered authored body preserves whitespace and line breaks', () => {
     const css = readFileSync(
-      resolve(process.cwd(), 'src/components/timeline/timeline.module.css'),
+      workspacePath('apps/web/src/components/timeline/timeline.module.css'),
       'utf8',
     );
     expect(css).toMatch(/\.body \[data-row-body\]\s*\{[^}]*white-space:\s*pre-wrap/s);

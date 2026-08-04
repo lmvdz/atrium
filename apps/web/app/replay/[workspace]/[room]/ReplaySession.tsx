@@ -9,7 +9,12 @@ import {
   reopenQuestion,
   retypeAsClaim,
 } from '../../../../lib/replay-transitions';
-import { replayAt, replayReceipt, replayView } from '../../../../lib/replay-view';
+import {
+  replayAt,
+  replayReceipt,
+  replayReceiptSubject,
+  replayView,
+} from '../../../../lib/replay-view';
 import type {
   AttentionClass,
   AttentionItem,
@@ -126,7 +131,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         : [],
     ),
   ]);
-  const receiptObject = objects.find((object) => object.id === receiptId);
+  const receiptObject = replayReceiptSubject(data, objects, receiptId);
   const receiptCorrection = corrections.findLast(
     (correction) => correction.objectId === receiptObject?.id,
   );

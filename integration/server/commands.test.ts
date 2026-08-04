@@ -9,6 +9,7 @@ import {
   memberships,
   messages,
   objectRelations,
+  proposalSources,
   proposals,
 } from '@atrium/db/schema';
 import { and, count, eq, sql } from 'drizzle-orm';
@@ -229,10 +230,7 @@ describe('send_message', () => {
     expect((await alice.command(send(room.roomId, 'alice words', sharedKey))).type).toBe('ack');
     expect((await bob.command(send(room.roomId, 'bob words', sharedKey))).type).toBe('ack');
 
-    const rows = await handle.db
-      .select()
-      .from(messages)
-      .where(eq(messages.roomId, room.roomId));
+    const rows = await handle.db.select().from(messages).where(eq(messages.roomId, room.roomId));
     expect(
       rows
         .map(({ authorId, body, clientMessageId }) => ({ authorId, body, clientMessageId }))
@@ -423,6 +421,88 @@ describe('send_message', () => {
     expect(await handle.db.select().from(messages).where(eq(messages.roomId, room.roomId))).toEqual(
       [],
     );
+  });
+});
+
+describe('stage_semantic_command', () => {
+  /**
+   * CATCHES: staging from client-supplied prose, accepting implicitly, losing
+   * canonical provenance, or mapping only a subset of the five commands.
+   */
+  it.each([
+    ['/goal Ship Atrium', 'objective'],
+    ['/decision Keep Postgres', 'decision'],
+    ['/question Who reviews?', 'open_question'],
+    ['/commitment I will test it', 'commitment'],
+    ['/claim The build is green', 'claim'],
+  ] as const)('persists %s first and stages one human-review proposal', async (body, type) => {
+    const alice = await connect(room.people.alice as string);
+    expect((await alice.command(send(room.roomId, body, `semantic-${type}`))).type).toBe('ack');
+    const [message] = await handle.db.select().from(messages).where(eq(messages.body, body));
+    if (!message) throw new Error('canonical message missing');
+
+    const ack = await alice.command({
+      name: 'stage_semantic_command',
+      roomId: room.roomId,
+      messageId: message.id,
+      idempotencyKey: `semantic:${message.id}`,
+    });
+    expect(ack.type).toBe('ack');
+
+    const [proposal] = await handle.db
+      .select()
+      .from(proposals)
+      .where(eq(proposals.roomId, room.roomId));
+    expect(proposal).toMatchObject({
+      type,
+      status: 'proposed',
+      proposerKind: 'human',
+      proposerUserId: room.people.alice,
+    });
+    const sources = await handle.db
+      .select()
+      .from(proposalSources)
+      .where(eq(proposalSources.proposalId, proposal?.id as string));
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.messageId).toBe(message.id);
+    expect(proposal?.quote).toBe(body);
+    expect(await handle.db.select().from(acceptedObjects)).toHaveLength(0);
+  });
+
+  /** CATCHES: retrying an interrupted staging command by minting a second proposal. */
+  it('replays the durable result for the same source and retry key exactly once', async () => {
+    const alice = await connect(room.people.alice as string);
+    await alice.command(send(room.roomId, '/goal Retry safely', 'semantic-retry'));
+    const [message] = await handle.db.select().from(messages);
+    if (!message) throw new Error('canonical message missing');
+    const command = {
+      name: 'stage_semantic_command' as const,
+      roomId: room.roomId,
+      messageId: message.id,
+      idempotencyKey: `semantic:${message.id}`,
+    };
+    expect((await alice.command(command)).type).toBe('ack');
+    expect((await alice.command(command)).type).toBe('ack');
+    expect(await handle.db.select().from(proposals)).toHaveLength(1);
+    expect(await handle.db.select().from(proposalSources)).toHaveLength(1);
+  });
+
+  /** CATCHES: allowing a member to stage another participant's authored words. */
+  it('refuses a different participant while preserving the source message', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    await alice.command(send(room.roomId, '/claim Alice wrote this', 'semantic-owned'));
+    const [message] = await handle.db.select().from(messages);
+    if (!message) throw new Error('canonical message missing');
+    const result = await bob.command({
+      name: 'stage_semantic_command',
+      roomId: room.roomId,
+      messageId: message.id,
+      idempotencyKey: `semantic:${message.id}`,
+    });
+    expect(result).toMatchObject({ type: 'nack', code: 'invalid' });
+    expect(await handle.db.select().from(messages)).toHaveLength(1);
+    expect(await handle.db.select().from(proposals)).toHaveLength(0);
   });
 });
 

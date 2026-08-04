@@ -55,11 +55,21 @@ export function ObjectiveGroup({
       <button
         aria-expanded={objective.open}
         className={styles.objHead}
-        onClick={onToggle === undefined ? undefined : () => onToggle(objective.id)}
+        onClick={
+          objective.status === 'proposed'
+            ? onOpenReceipt === undefined
+              ? undefined
+              : () => onOpenReceipt(objective.id)
+            : onToggle === undefined
+              ? undefined
+              : () => onToggle(objective.id)
+        }
         title={
-          owedHere > 0
-            ? `${plural(mine.length, 'object')} sit under this objective, ${owedHere} of which need you. An object can sit under more than one objective, so these counts overlap the other objectives and the pin.`
-            : `${plural(mine.length, 'object')} sit under this objective. Nothing here is waiting on you.`
+          objective.status === 'proposed'
+            ? 'open the receipt — inspect the source and accept or decline this reading'
+            : owedHere > 0
+              ? `${plural(mine.length, 'object')} sit under this objective, ${owedHere} of which need you. An object can sit under more than one objective, so these counts overlap the other objectives and the pin.`
+              : `${plural(mine.length, 'object')} sit under this objective. Nothing here is waiting on you.`
         }
         type="button"
       >

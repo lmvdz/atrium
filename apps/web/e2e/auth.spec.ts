@@ -149,6 +149,54 @@ test.describe('auth and workspaces', () => {
     await founder.getByRole('button', { name: 'Send' }).click();
     await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(words);
 
+    // CATCHES: treating a semantic slash command as client-authored state,
+    // hiding it from another participant, accepting it implicitly, losing the
+    // exact canonical source, or failing to reconstruct it after reload.
+    const semanticTitle = `Ship deterministic commands ${Date.now()}`;
+    const semanticMessage = `/goal ${semanticTitle}`;
+    await founder.getByRole('textbox', { name: 'Message #general' }).fill(semanticMessage);
+    await founder.getByRole('button', { name: 'Send' }).click();
+    for (const page of [founder, invitee]) {
+      await expect(page.getByRole('region', { name: 'Conversation' })).toContainText(
+        semanticMessage,
+      );
+      await expect(
+        page
+          .locator('[data-region="current-state"] [data-objective-id]')
+          .filter({ hasText: semanticTitle }),
+      ).toContainText('proposed');
+    }
+    const founderSemantic = founder
+      .locator('[data-region="current-state"] [data-objective-id]')
+      .filter({ hasText: semanticTitle });
+    await founderSemantic.getByRole('button').click();
+    const semanticReceipt = founder.getByRole('region', { name: 'Receipt' });
+    await expect(semanticReceipt).toContainText('proposed');
+    await expect(semanticReceipt.locator('[data-quoted]')).toContainText(semanticMessage);
+    await semanticReceipt.getByRole('button', { name: 'Accept reading', exact: true }).click();
+    await expect(semanticReceipt).toContainText('accepted');
+    await Promise.all([founder.reload(), invitee.reload()]);
+    for (const page of [founder, invitee]) {
+      const acceptedSemantic = page
+        .locator('[data-region="current-state"] [data-objective-id]')
+        .filter({ hasText: semanticTitle });
+      await expect(acceptedSemantic).toContainText('active');
+      await expect(page.getByRole('region', { name: 'Conversation' })).toContainText(
+        semanticMessage,
+      );
+    }
+    await invitee.goto(`/replay/${slug}/general`);
+    await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(
+      semanticMessage,
+    );
+    await expect(
+      invitee
+        .locator('[data-region="current-state"] [data-objective-id]')
+        .filter({ hasText: semanticTitle }),
+    ).toContainText('active');
+    await invitee.goto(`/app/${slug}/general`);
+    await expect(invitee.getByRole('textbox', { name: 'Message #general' })).toBeEnabled();
+
     // CATCHES: a structured mention forcing the whole authored message back to
     // plain text, flattening Markdown/newlines, or retaining only the visible
     // @label while dropping the certified user id sent beside it.

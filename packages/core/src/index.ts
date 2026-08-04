@@ -22,4 +22,5 @@ export * from './ports.js';
 export * from './proposal.js';
 export * from './reduce.js';
 export * from './relations.js';
+export * from './semantic-command.js';
 export * from './state.js';

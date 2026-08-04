@@ -1738,6 +1738,31 @@ describe('optimism is limited to your own message row', () => {
     expect(client.lastSeq(ROOM)).toBe(0);
   });
 
+  /** CATCHES: losing explicit semantic intent at the persisted-message boundary. */
+  it('marks semantic sends durably without changing the exact authored body', () => {
+    const clientMessageId = client.sendMessage(ROOM, '/goal First line\nSecond line', {
+      semantic: true,
+    });
+    expect(clientMessageId).toMatch(/^semantic:/);
+    expect(latest().commands().at(-1)).toMatchObject({
+      name: 'send_message',
+      body: '/goal First line\nSecond line',
+      clientMessageId,
+    });
+  });
+
+  /** CATCHES: retrying semantic staging with a new key or client-authored proposal payload. */
+  it('stages only a canonical message id with a deterministic retry key', () => {
+    const messageId = '00000000-0000-4000-8000-000000000099';
+    client.stageSemanticCommand(ROOM, messageId);
+    expect(latest().commands().at(-1)).toEqual({
+      name: 'stage_semantic_command',
+      roomId: ROOM,
+      messageId,
+      idempotencyKey: `semantic:${messageId}`,
+    });
+  });
+
   it('retires the optimistic row when the server’s event confirms it', () => {
     const clientMessageId = client.sendMessage(ROOM, 'typed just now');
     latest().deliver({

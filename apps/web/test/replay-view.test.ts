@@ -85,6 +85,57 @@ function data(): ReplayData {
 }
 
 describe('persisted replay view', () => {
+  /** CATCHES: hiding a persisted semantic message after staging failed, leaving no retry. */
+  it('marks an unstaged authored semantic message for idempotent retry', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      messages: data().messages.map((message) =>
+        message.id === 'm1'
+          ? { ...message, body: '/goal Preserve this message', clientMessageId: 'semantic:alice:1' }
+          : message,
+      ),
+    };
+    const view = liveRoomView(snapshot, 'alice', {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 1,
+      seenSeq: 1,
+      events: [],
+      pending: [],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    });
+    expect(view.entries.find((entry) => entry.id === 'm1')).toMatchObject({
+      tag: { label: 'retry semantic staging' },
+      note: { text: 'the message is saved; its semantic proposal has not been staged' },
+    });
+  });
+
+  /** CATCHES: continuing to claim staging failed after provenance was projected. */
+  it('removes semantic retry once any proposal cites the message', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      messages: data().messages.map((message) =>
+        message.id === 'm1'
+          ? { ...message, body: '/goal Done', clientMessageId: 'semantic:alice:1' }
+          : message,
+      ),
+      proposalSources: [{ roomId: 'room', proposalId: 'p1', messageId: 'm1' }],
+    };
+    const view = liveRoomView(snapshot, 'alice', {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 1,
+      seenSeq: 1,
+      events: [],
+      pending: [],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    });
+    expect(view.entries.find((entry) => entry.id === 'm1')).toMatchObject({ tag: null });
+  });
   /**
    * Mutation: retain final worker rows while scrubbing an earlier message
    * prefix. The replay then presents a conclusion before its source was read.
@@ -539,6 +590,32 @@ describe('persisted replay view', () => {
     expect(item?.rationale).toContain('named as owner by somebody else');
     expect(item?.actions.map((action) => action.id)).toEqual(['confirm', 'decline']);
     expect(item?.actions.map((action) => action.id)).not.toContain('open');
+  });
+
+  /** CATCHES: attributing every staged reading to a machine after human slash commands exist. */
+  it('does not invent an actor for a proposal-review rationale', () => {
+    const snapshot = data();
+    snapshot.attention.push({
+      id: 'review',
+      roomId: 'room',
+      userId: 'alice',
+      subjectKind: 'proposal',
+      subjectId: 'missing-proposal',
+      subjectObjectId: null,
+      subjectProposalId: 'missing-proposal',
+      class: 'needs_decision',
+      reason: {
+        kind: 'reading_pending',
+        proposedType: 'objective',
+        statement: 'Ship it.',
+      },
+      status: 'pending',
+      createdAt: at,
+      resolvedAt: null,
+    });
+    const rationale = replayView(snapshot).attention[0]?.rationale ?? '';
+    expect(rationale).toContain('this was staged as objective');
+    expect(rationale).not.toContain('machine');
   });
 
   /**

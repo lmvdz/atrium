@@ -940,10 +940,14 @@ export interface RealtimeClient {
         capability: string;
       }>;
       mentionUserIds?: string[];
+      /** Marks explicit semantic intent so a reload can finish proposal staging. */
+      semantic?: boolean;
     },
   ) => string;
   /** Retry one failed optimistic row with its original idempotency key and exact metadata. */
   retryMessage: (roomId: string, clientMessageId: string) => boolean;
+  /** Stage a persisted authored slash command as a reviewable proposal. */
+  stageSemanticCommand: (roomId: string, messageId: string) => string;
   answerMessage: (
     roomId: string,
     questionId: string,
@@ -1513,7 +1517,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     lastSeq: (roomId) => view(roomId).lastSeq,
     sendMessage: (roomId, body, messageOptions = {}) => {
       const room = view(roomId);
-      const clientMessageId = `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
+      const clientMessageId = `${messageOptions.semantic === true ? 'semantic:' : ''}${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
       const attachments = (messageOptions.attachments ?? []).map((attachment) => ({
         ...attachment,
       }));
@@ -1578,6 +1582,13 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       changed(roomId);
       return true;
     },
+    stageSemanticCommand: (roomId, messageId) =>
+      command({
+        name: 'stage_semantic_command',
+        roomId,
+        messageId,
+        idempotencyKey: `semantic:${messageId}`,
+      }),
     answerMessage: (roomId, questionId, body, attachments = []) => {
       const room = view(roomId);
       const clientMessageId = `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;

@@ -148,6 +148,7 @@ describe('ClientFrame', () => {
       'resolve_attention',
       'set_presence',
       'record_proposal',
+      'stage_semantic_command',
       'reject_proposal',
       'set_typing',
       'advance_seen',

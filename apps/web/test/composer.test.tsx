@@ -267,9 +267,18 @@ describe('draft-driven command and mention completion', () => {
      into the primary input inert even though V8 promises keyboard completion. */
   it('typing slash opens and filters commands', () => {
     render(<Composer binding={FREE} roomName="r" />);
-    fireEvent.change(box(), { target: { value: '/in' } });
-    expect(screen.getByRole('button', { name: /invite/i })).toBeDefined();
-    expect(screen.queryByRole('button', { name: /plan/i })).toBeNull();
+    fireEvent.change(box(), { target: { value: '/cl' } });
+    expect(screen.getByRole('button', { name: /claim/i })).toBeDefined();
+    expect(screen.queryByRole('button', { name: /goal/i })).toBeNull();
+  });
+
+  /* CATCHES: exposing only a subset of the deterministic semantic command lane. */
+  it('offers all five reviewable semantic commands', () => {
+    render(<Composer binding={FREE} roomName="r" />);
+    fireEvent.change(box(), { target: { value: '/' } });
+    for (const command of ['goal', 'decision', 'question', 'commitment', 'claim']) {
+      expect(screen.getByRole('button', { name: new RegExp(command, 'i') })).toBeDefined();
+    }
   });
 
   /* CATCHES: painting @name without preserving the structured user id used by

@@ -88,7 +88,29 @@ export function liveRoomView(
     presence: presenceFor(live.presence[human.id]),
   }));
   const viewer = humans.find((human) => human.id === viewerId) ?? base.viewer;
-  const messageEntries = base.entries.filter((entry) => entry.type === 'message');
+  const sourcedMessageIds = new Set(data.proposalSources.map((source) => source.messageId));
+  const semanticRetryIds = new Set(
+    data.messages.flatMap((message) =>
+      message.authorId === viewerId &&
+      message.clientMessageId?.startsWith('semantic:') &&
+      !sourcedMessageIds.has(message.id)
+        ? [message.id]
+        : [],
+    ),
+  );
+  const messageEntries = base.entries
+    .filter((entry) => entry.type === 'message')
+    .map((entry) =>
+      semanticRetryIds.has(entry.id)
+        ? {
+            ...entry,
+            tag: { label: 'retry semantic staging', tone: 'neutral' as const },
+            note: systemStatement(
+              'the message is saved; its semantic proposal has not been staged',
+            ),
+          }
+        : entry,
+    );
   const positionByMessage = new Map(
     (data.messagePositions ?? []).map((position) => [position.messageId, position.roomSeq]),
   );

@@ -1,5 +1,6 @@
 'use client';
 
+import { parseSemanticCommand } from '@atrium/core';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { authoredBody } from '@/lib/authored-body';
@@ -10,7 +11,11 @@ import {
   supersessionReachedFold,
 } from '@/lib/live-supersession';
 import type { ReplayData } from '@/lib/replay-data';
-import { activeAnswerMatchesClientMessage, replayReceipt } from '@/lib/replay-view';
+import {
+  activeAnswerMatchesClientMessage,
+  replayReceipt,
+  replayReceiptSubject,
+} from '@/lib/replay-view';
 import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
 import { boundTo, withFilter } from '@/src/components';
 import { quotationFrom } from '@/src/components/model/quotation';
@@ -134,6 +139,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const refreshTarget = useRef(persistedThrough);
   const refreshAttempts = useRef(0);
   const projectionRefreshRemaining = useRef(0);
+  const semanticStageAttempts = useRef(new Set<string>());
   const refreshRoom = useRef(roomId);
 
   useEffect(() => {
@@ -265,7 +271,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
   }));
-  const receiptObject = view.objects.find((object) => object.id === receiptId);
+  const receiptObject = replayReceiptSubject(data, view.objects, receiptId);
   const receipt = receiptObject
     ? // Live receipts are derived only from the refreshed persisted projection.
       // No semantic command is rendered optimistically.
@@ -276,11 +282,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
       .filter((object) => object.retractedAt === null && object.supersededById === null)
       .map((object) => object.id),
   );
-  const supersessionCandidates = receiptObject
-    ? view.objects.filter(
-        (object) => object.id !== receiptObject.id && acceptedActiveIds.has(object.id),
-      )
-    : [];
+  const supersessionCandidates =
+    receiptObject && receiptObject.kind !== 'objective'
+      ? view.objects.filter(
+          (object) => object.id !== receiptObject.id && acceptedActiveIds.has(object.id),
+        )
+      : [];
   const acceptObjectives = objectives
     .filter((objective) => objective.status !== 'proposed')
     .map((objective) => ({ id: objective.id, label: objective.title }));
@@ -292,6 +299,24 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     : null;
   const subscribed = live.subscribed && connection === 'open';
   const unreadFilterScope = view.entries.find((entry) => entry.type === 'since-you-left')?.entryIds;
+
+  useEffect(() => {
+    if (!subscribed) return;
+    const sourcedMessageIds = new Set(data.proposalSources.map((source) => source.messageId));
+    for (const message of data.messages) {
+      if (
+        message.authorId !== viewerId ||
+        !message.clientMessageId?.startsWith('semantic:') ||
+        sourcedMessageIds.has(message.id) ||
+        semanticStageAttempts.current.has(message.id) ||
+        !parseSemanticCommand(message.body, viewerId)
+      ) {
+        continue;
+      }
+      semanticStageAttempts.current.add(message.id);
+      clientRef.current?.stageSemanticCommand(roomId, message.id);
+    }
+  }, [data.messages, data.proposalSources, roomId, subscribed, viewerId]);
 
   useEffect(() => {
     if (!boundSubmission) return;
@@ -405,10 +430,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               setError(null);
               setBoundSubmission({ clientMessageId, questionId });
             } else {
+              const semantic = parseSemanticCommand(body, viewerId) !== null;
               clientRef.current?.sendMessage(roomId, body, {
                 attachments,
                 replyToId: binding.mode === 'replying' ? binding.to.messageId : null,
                 mentionUserIds: activeMentionTargetId ? [activeMentionTargetId] : [],
+                semantic,
               });
               setDraft('');
               setMentionTargetId(null);
@@ -473,12 +500,24 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               );
           },
           onOpenTag: (messageId) => {
-            if (!messageId.startsWith('pending:')) return;
-            const retried = clientRef.current?.retryMessage(
-              roomId,
-              messageId.slice('pending:'.length),
-            );
-            if (retried) setError(null);
+            if (messageId.startsWith('pending:')) {
+              const retried = clientRef.current?.retryMessage(
+                roomId,
+                messageId.slice('pending:'.length),
+              );
+              if (retried) setError(null);
+              return;
+            }
+            const message = data.messages.find((candidate) => candidate.id === messageId);
+            if (
+              message?.authorId === viewerId &&
+              message.clientMessageId?.startsWith('semantic:') &&
+              parseSemanticCommand(message.body, viewerId)
+            ) {
+              semanticStageAttempts.current.add(messageId);
+              clientRef.current?.stageSemanticCommand(roomId, messageId);
+              setError(null);
+            }
           },
           onRowAction: (messageId, actionId) => {
             const record = view.records.find((candidate) => candidate.id === messageId);

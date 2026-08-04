@@ -336,7 +336,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
 export function replayReceipt(
   data: ReplayData,
   records: readonly MessageRecord[],
-  object: StateObject,
+  object: StateObject | (Omit<StateObject, 'kind'> & { readonly kind: 'objective' }),
   changes: {
     readonly answerMessageId?: string;
     readonly correction?: ReplayCorrectionTransition;
@@ -477,6 +477,70 @@ export function replayReceipt(
           : provenance.length === 0
             ? 'no persisted message source is attached to this reading'
             : 'the excerpts above come from the persisted room record',
+  };
+}
+
+/** Resolve receipt subjects that are represented as objective group headers. */
+export function replayReceiptSubject(
+  data: ReplayData,
+  objects: readonly StateObject[],
+  subjectId: string | null,
+): StateObject | (Omit<StateObject, 'kind'> & { readonly kind: 'objective' }) | undefined {
+  if (subjectId === null) return undefined;
+  const ordinary = objects.find((object) => object.id === subjectId);
+  if (ordinary) return ordinary;
+  const participantName = new Map(data.participants.map((person) => [person.id, person.name]));
+  const acceptedFromProposal = data.objects.find((candidate) => candidate.proposalId === subjectId);
+  if (acceptedFromProposal) {
+    const acceptedObject = objects.find((object) => object.id === acceptedFromProposal.id);
+    if (acceptedObject) return acceptedObject;
+    if (acceptedFromProposal.type === 'objective') {
+      return {
+        id: acceptedFromProposal.id,
+        kind: 'objective',
+        state: stateForObject('objective', acceptedFromProposal.payload, false, true),
+        text: payloadText('objective', acceptedFromProposal.payload),
+        facts: objectFacts(
+          'objective',
+          acceptedFromProposal.payload,
+          participantName,
+          acceptedFromProposal.createdAt,
+        ),
+        objectives: [],
+      };
+    }
+  }
+  const proposal = data.proposals.find(
+    (candidate) =>
+      candidate.id === subjectId &&
+      candidate.type === 'objective' &&
+      candidate.status === 'proposed',
+  );
+  if (proposal) {
+    return {
+      id: proposal.id,
+      kind: 'objective',
+      state: stateForObject('objective', proposal.payload, false, false),
+      text: payloadText('objective', proposal.payload),
+      facts: [
+        proposal.proposerKind === 'model'
+          ? `drafted by ${proposal.proposerModel ?? 'an unrecorded model'}`
+          : `drafted by ${participantName.get(proposal.proposerUserId ?? '') ?? 'a participant'}`,
+      ],
+      objectives: [],
+    };
+  }
+  const accepted = data.objects.find(
+    (candidate) => candidate.id === subjectId && candidate.type === 'objective',
+  );
+  if (!accepted) return undefined;
+  return {
+    id: accepted.id,
+    kind: 'objective',
+    state: stateForObject('objective', accepted.payload, false, true),
+    text: payloadText('objective', accepted.payload),
+    facts: objectFacts('objective', accepted.payload, participantName, accepted.createdAt),
+    objectives: [],
   };
 }
 
@@ -687,9 +751,9 @@ function reasonFor(reason: ReplayData['attention'][number]['reason'], viewer: st
     case 'mention':
       return `${viewer} has a direct request routed here for action`;
     case 'reading_pending':
-      return `a machine staged this as a ${reason.proposedType}; a person must file or decline it`;
+      return `this was staged as ${reason.proposedType}; a person must file or decline it`;
     case 'receipt_review':
-      return `a machine staged this as a ${reason.proposedType}, but its cited receipt did not certify it; review the source and file or decline it`;
+      return `this was staged as ${reason.proposedType}, but its cited receipt did not certify it; review the source and file or decline it`;
   }
 }
 

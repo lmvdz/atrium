@@ -13,7 +13,7 @@ import { cleanup, fireEvent, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
-import { CrossRoomJump, ReceiptView, Timeline } from '../src/components';
+import { CrossRoomJump, ObjectiveGroup, ReceiptView, Timeline } from '../src/components';
 import { renderWith } from './harness';
 
 afterEach(cleanup);
@@ -99,6 +99,38 @@ describe('the feed forwards what its children accept', () => {
     );
     expect(screen.getAllByRole('button', { name: 'pin it' }).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'reply' })).toBeNull();
+  });
+});
+
+describe('objective header actions', () => {
+  /** CATCHES: proposed objectives remaining expandable but having no path to their receipt. */
+  it('opens a proposed objective receipt instead of toggling an empty group', () => {
+    const calls: string[] = [];
+    render(
+      <ObjectiveGroup
+        objective={{ id: 'proposal-goal', title: 'Ship it', status: 'proposed', open: true }}
+        objects={[]}
+        onOpenReceipt={(id) => calls.push(`receipt:${id}`)}
+        onToggle={(id) => calls.push(`toggle:${id}`)}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Ship it/ }));
+    expect(calls).toEqual(['receipt:proposal-goal']);
+  });
+
+  /** CATCHES: routing accepted objective navigation into the retired proposal receipt path. */
+  it('keeps accepted objectives expandable', () => {
+    const calls: string[] = [];
+    render(
+      <ObjectiveGroup
+        objective={{ id: 'accepted-goal', title: 'Ship it', status: 'active', open: true }}
+        objects={[]}
+        onOpenReceipt={(id) => calls.push(`receipt:${id}`)}
+        onToggle={(id) => calls.push(`toggle:${id}`)}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Ship it/ }));
+    expect(calls).toEqual(['toggle:accepted-goal']);
   });
 });
 

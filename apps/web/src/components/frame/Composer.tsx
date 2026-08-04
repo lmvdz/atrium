@@ -160,11 +160,11 @@ export function Composer({
   const slashMatch = /^\/(\S*)$/.exec(visibleDraft);
   const slashQuery = slashMatch?.[1]?.toLowerCase() ?? '';
   const commands = [
-    ['/plan ', 'open or describe a plan'],
-    ['/call', 'start or address the room call'],
-    ['/invite ', 'invite a person'],
-    ['/mux', 'focus active work'],
-    ['/share', 'share an artifact or screen'],
+    ['/goal ', 'stage an objective for review'],
+    ['/decision ', 'stage a decision for review'],
+    ['/question ', 'stage an open question for review'],
+    ['/commitment ', 'stage your commitment for review'],
+    ['/claim ', 'stage your claim for review'],
   ] as const;
   const visibleCommands = commands.filter(([command]) =>
     command.slice(1).trim().startsWith(slashQuery),
