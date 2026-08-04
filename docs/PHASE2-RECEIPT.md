@@ -39,6 +39,11 @@ below only as the repository copy of the requirements.
   projection refresh after interpreted bursts are wired through the production
   realtime protocol. Authorization is rechecked for commands and listeners;
   membership revocation evicts the passive listener.
+- An outbound send whose acknowledgement is lost remains visibly retryable.
+  The retry reuses the original authenticated author-scoped key and a cloned
+  snapshot of its reply, mention and attachment metadata; a durable command
+  receipt recovers a committed send without duplicating or revalidating an
+  expired upload grant.
 - Attention reconciliation retains one complete provider window behind the
   claimed slice. This lets a reading minted at a slice boundary reach people on
   the next pass without exposing the model to extra prompt context or letting
@@ -83,15 +88,15 @@ Final combined-tree gates:
 - `pnpm lint`: exit 0; 15 warnings and 51 infos are the repository's known
   design-harness diagnostics, not new errors.
 - `pnpm typecheck`: pass.
-- `pnpm test --maxWorkers=2`: 3,030/3,030 after the final boundary regression.
+- `pnpm test --maxWorkers=2`: 3,031/3,031 after the final boundary regression.
   An uncapped run made two repository source scanners exceed their fixed
   five-second timeout; the controlled run proves the same assertions without
   weakening or changing them.
-- `pnpm test:integration`: 171/171 against compose-managed real Postgres; the
+- `pnpm test:integration`: 173/173 against compose-managed real Postgres; the
   harness removed its container and network.
-- Playwright at `--workers=2`: 168/168 in 3.3 minutes, including replay
-  authorization, exact structured-mention persistence and the five-participant
-  multiplayer run.
+- Playwright at `--workers=2`: 169/169 in 4.1 minutes, including replay
+  authorization, both uncertain-send outcomes, exact structured-mention
+  persistence and the five-participant multiplayer run.
 - `pnpm -r build`: pass, including the optimized Next production build.
 
 ## Blind reorientation validation
@@ -155,7 +160,7 @@ Conversation surface at 359–379 pixels with readable message lines.
   deliberately excluded from this Phase 2 remedy rather than inferred from log
   volume alone.
 
-## Unresolved external verification
+## Independent full-diff verification
 
 Ticket #27 requires both a Codex and a Grok full-diff review before merge. An
 initial fresh Codex full-diff review found the missing real UI paths for
@@ -171,12 +176,24 @@ lands as `dismissed`, nonblank authored bodies cross unchanged, and an accepted
 proposal mention remains owed and actionable until the recipient dismisses it.
 The final independent Codex review passed commit `978fbee` with no concrete code
 merge blockers after 52/52 focused tests, web typecheck, and the five-participant
-multiplayer acceptance. No Grok runtime or
-credential is available in this environment, and spending or external account
-use was not authorized. Therefore this branch must not be described as ready to
-merge or ticket #27 as closed until an actual Grok review is attached (and any
-material finding is resolved). This is missing external evidence, not a waived
-gate.
+multiplayer acceptance. After the remaining replay-attention, WIRE and worker
+boundary commits landed, Grok Build 0.2.118 independently inspected the complete
+`78d0b8b..e3b9888` range in read-only mode. It returned **PASS** with no material
+merge blocker. Its three non-blocking observations concern test-driving shape
+and a stale comment rather than product behavior; the complete verdict and
+caveats are preserved in `docs/PHASE2-GROK-REVIEW.md`.
+
+A later fresh Codex review found that socket loss after commit still had no
+exact outbound retry, then found two defects in the first remedy: caller-mutable
+attachment metadata and a room-global projection key disagreeing with
+actor-scoped receipts. After those closed, another fresh pass caught migration
+0014's generated timestamp being older than 0013, which would make upgraded
+databases silently skip it. The final head `c372f8d` snapshots retry metadata,
+aligns uniqueness with the authenticated author, and pins the newest migration
+timestamp above every predecessor. Codex returned **PASS** on that head. Grok
+then reviewed the complete later increment `e3b9888..c372f8d` in read-only mode,
+combined it with its prior full-range pass, and returned **PASS**. The dual-review
+gate therefore covers the exact delivered tree rather than the pre-remedy range.
 
 ## Cleanup receipt
 

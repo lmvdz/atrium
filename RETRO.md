@@ -1044,3 +1044,19 @@ future conversation reclassify the canonical replay. Attention reconciliation
 now retains exactly one provider window behind the claimed slice and keeps the
 same bounded forward tail. Lesson kept: **widen evidence only as far as the
 measured boundary requires; an unbounded remedy changes the question.**
+
+**A retry is exact only if its input is snapshotted and its namespace matches
+the fold.** The first outbound recovery kept a caller-owned attachment array,
+so later UI mutation could rewrite the retry, and it keyed durable receipts per
+actor while the message projection reserved client ids across the whole room.
+Attachment records are now cloned before the first frame, and both receipts and
+message uniqueness use the authenticated author boundary. Lesson kept: **copy
+retry payloads at the seam, and make every uniqueness constraint name the same
+principal as the receipt.**
+
+**A migration number is not its application order.** Drizzle generated `0014`
+with a timestamp older than the already-applied `0013`; a fresh database ran it,
+while an upgraded database would silently skip it. The journal timestamp is now
+strictly newer and a schema test pins that property for the newest migration.
+Lesson kept: **test migrations from the previous head as well as from empty;
+upgrade visibility lives in the journal timestamp, not the filename.**
