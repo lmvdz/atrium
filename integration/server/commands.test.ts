@@ -7,6 +7,7 @@ import {
   coreEvents,
   corrections,
   memberships,
+  messageReferences,
   messages,
   objectRelations,
   proposalSources,
@@ -304,7 +305,9 @@ describe('send_message', () => {
 
     const rows = await handle.db.select().from(messages).where(eq(messages.roomId, room.roomId));
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
+    const persisted = rows[0];
+    if (!persisted) throw new Error('uncertain send did not persist its message');
+    expect(persisted).toMatchObject({
       body: command.body,
       clientMessageId: command.clientMessageId,
       attachments: [
@@ -317,6 +320,36 @@ describe('send_message', () => {
         },
       ],
     });
+
+    /**
+     * CATCHES: leaving human-reference attention behind the optional
+     * interpretation hook, or replaying the uncertain send into duplicate
+     * reference/attention rows. This server has no worker installed.
+     */
+    expect(
+      await handle.db
+        .select({ kind: messageReferences.kind, targetId: messageReferences.targetId })
+        .from(messageReferences)
+        .where(eq(messageReferences.messageId, persisted.id)),
+    ).toEqual([{ kind: 'human', targetId: room.people.bob }]);
+    expect(
+      await handle.db
+        .select({
+          userId: attentionItems.userId,
+          subjectKind: attentionItems.subjectKind,
+          subjectId: attentionItems.subjectId,
+          status: attentionItems.status,
+        })
+        .from(attentionItems)
+        .where(eq(attentionItems.subjectId, persisted.id)),
+    ).toEqual([
+      {
+        userId: room.people.bob,
+        subjectKind: 'message',
+        subjectId: persisted.id,
+        status: 'pending',
+      },
+    ]);
 
     const changedPayload = await retryingAlice.command({ ...command, body: 'different words' });
     expect(changedPayload).toMatchObject({ type: 'nack', code: 'conflict' });
