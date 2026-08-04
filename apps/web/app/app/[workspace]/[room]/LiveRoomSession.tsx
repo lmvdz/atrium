@@ -1,6 +1,6 @@
 'use client';
 
-import { parseSemanticCommand } from '@atrium/core';
+import { parseSemanticCommand, payloadText } from '@atrium/core';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { authoredBody } from '@/lib/authored-body';
@@ -302,13 +302,13 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     ...data.proposals.map((proposal) => ({
       kind: 'proposal' as const,
       id: proposal.id,
-      label: view.objects.find((object) => object.id === proposal.id)?.text ?? proposal.type,
+      label: payloadText(proposal.type, proposal.payload),
       detail: proposal.status,
     })),
     ...data.objects.map((object) => ({
       kind: 'object' as const,
       id: object.id,
-      label: view.objects.find((candidate) => candidate.id === object.id)?.text ?? object.type,
+      label: payloadText(object.type, object.payload),
       detail:
         object.retractedAt !== null
           ? 'retracted'

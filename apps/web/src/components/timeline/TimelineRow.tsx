@@ -238,7 +238,13 @@ function AuthoredRow({
   if (diverged !== null) throw new Error(diverged);
   refuseElsewhere(attribution.room, here, attribution.messageId);
   const authoredLength = bodyText(entry.body).length;
-  const rich = hasRichMessageSyntax(attribution.text);
+  /* A typed reference is structure even when its authored surface is ordinary
+     prose. Looking only for Markdown syntax routes `hello @Ada` through
+     ClaimText and discards the durable target id/span that RichMessageBody is
+     responsible for rendering. */
+  const rich =
+    hasRichMessageSyntax(attribution.text) ||
+    entry.body.some((segment) => segment.kind === 'mention');
   const authoredBody = (
     <div data-row-body={attribution.messageId}>
       {rich ? (
