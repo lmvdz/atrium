@@ -247,14 +247,22 @@ export type SocketFactory = (url: string) => SocketLike;
 
 /* ── client state ───────────────────────────────────────────────────────── */
 
-export interface PendingMessage {
+interface PendingAttachment {
+  key: string;
+  name: string;
+  contentType: string;
+  size: number;
+  /** Retained only so an uncommitted send can replay the exact authorized frame. */
+  capability: string;
+}
+
+interface PendingMessageBase {
   clientMessageId: string;
   body: string;
   at: string;
   status: 'pending' | 'failed';
   error?: string;
-  attachments: Array<{ key: string; name: string; contentType: string; size: number }>;
-  mentionUserIds?: string[];
+  attachments: PendingAttachment[];
   /**
    * Whether sending the identical frame again is a sensible thing to offer.
    *
@@ -265,6 +273,19 @@ export interface PendingMessage {
    */
   retryable?: boolean;
 }
+
+export type PendingMessage = PendingMessageBase &
+  (
+    | {
+        commandName: 'send_message';
+        replyToId: string | null;
+        mentionUserIds: string[];
+      }
+    | {
+        commandName: 'answer_message';
+        questionId: string;
+      }
+  );
 
 /**
  * The room's applied history and its cursor, stored as **one thing**.
@@ -921,6 +942,8 @@ export interface RealtimeClient {
       mentionUserIds?: string[];
     },
   ) => string;
+  /** Retry one failed optimistic row with its original idempotency key and exact metadata. */
+  retryMessage: (roomId: string, clientMessageId: string) => boolean;
   answerMessage: (
     roomId: string,
     questionId: string,
@@ -1496,8 +1519,10 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         body,
         at: new Date(now()).toISOString(),
         status: 'pending',
+        commandName: 'send_message',
+        replyToId: messageOptions.replyToId ?? null,
         attachments: messageOptions.attachments ?? [],
-        mentionUserIds: messageOptions.mentionUserIds ?? [],
+        mentionUserIds: [...(messageOptions.mentionUserIds ?? [])],
       });
       const commandId = command({
         name: 'send_message',
@@ -1512,6 +1537,44 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       changed(roomId);
       return clientMessageId;
     },
+    retryMessage: (roomId, clientMessageId) => {
+      const room = view(roomId);
+      const pending = room.pending.find((item) => item.clientMessageId === clientMessageId);
+      if (
+        pending === undefined ||
+        pending.status !== 'failed' ||
+        pending.retryable !== true ||
+        status !== 'open' ||
+        room.subscribed !== true
+      ) {
+        return false;
+      }
+      const commandId =
+        pending.commandName === 'send_message'
+          ? command({
+              name: 'send_message',
+              roomId,
+              body: pending.body,
+              clientMessageId: pending.clientMessageId,
+              replyToId: pending.replyToId,
+              attachments: pending.attachments,
+              mentionUserIds: pending.mentionUserIds,
+            })
+          : command({
+              name: 'answer_message',
+              roomId,
+              questionId: pending.questionId,
+              body: pending.body,
+              clientMessageId: pending.clientMessageId,
+              attachments: pending.attachments,
+            });
+      pending.status = 'pending';
+      delete pending.error;
+      delete pending.retryable;
+      inFlight.set(commandId, { roomId, clientMessageId });
+      changed(roomId);
+      return true;
+    },
     answerMessage: (roomId, questionId, body, attachments = []) => {
       const room = view(roomId);
       const clientMessageId = `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
@@ -1520,6 +1583,8 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         body,
         at: new Date(now()).toISOString(),
         status: 'pending',
+        commandName: 'answer_message',
+        questionId,
         attachments,
       });
       const commandId = command({

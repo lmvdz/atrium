@@ -298,6 +298,29 @@ test.describe
           } else {
             await sendManifestMessage(pages[message.author] as Page, roomId, message);
           }
+          if (message.seq === 60) {
+            /**
+             * Mutation: let receipt-write latency choose whether the mentioned
+             * question is the last line in its worker window. Its correction
+             * scan then alternates between staged and accepted without any room
+             * fact changing. Drain through the preceding decision first; the
+             * next coalesced pass receives the question with its authored tail.
+             */
+            await eventually(
+              async () =>
+                Number(
+                  (
+                    await sql`
+                      SELECT count(*)::int AS n
+                      FROM interpretations i JOIN messages m ON m.id=i.message_id
+                      WHERE m.room_id=${roomId}::uuid AND i.status='succeeded'
+                    `
+                  )[0]?.n ?? 0,
+                ),
+              (count) => count === 60,
+              'the preceding semantic window to finish before the mentioned question burst',
+            );
+          }
         }
         await eventually(
           async () =>

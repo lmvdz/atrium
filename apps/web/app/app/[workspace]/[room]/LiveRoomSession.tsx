@@ -408,6 +408,14 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
                 setError(failure instanceof Error ? failure.message : String(failure)),
               );
           },
+          onOpenTag: (messageId) => {
+            if (!messageId.startsWith('pending:')) return;
+            const retried = clientRef.current?.retryMessage(
+              roomId,
+              messageId.slice('pending:'.length),
+            );
+            if (retried) setError(null);
+          },
           onRowAction: (messageId, actionId) => {
             const record = view.records.find((candidate) => candidate.id === messageId);
             if (!record || record.id.startsWith('pending:')) return;

@@ -1,5 +1,5 @@
 import type { HumanSummary, MessageRecord, TimelineEntry } from '../src/components';
-import { messageEntry, sinceYouLeft } from '../src/components';
+import { messageEntry, sinceYouLeft, systemStatement } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
 import type { ReplayData } from './replay-data';
 import { replayView } from './replay-view';
@@ -54,11 +54,30 @@ export function liveRoomView(
     text: pending.body,
     origin: 'typed',
     room: base.room.name,
-    attachments: pending.attachments,
+    // Upload capabilities authorize a retry but are not product metadata and
+    // must never enter the rendered attribution register.
+    attachments: pending.attachments.map(({ key, name, contentType, size }) => ({
+      key,
+      name,
+      contentType,
+      size,
+    })),
   }));
-  const pendingEntries = pendingRecords.map((record) =>
-    messageEntry(record, { state: TALK, viewer: base.viewer.name }),
-  );
+  const pendingEntries = pendingRecords.map((record, index) => {
+    const pending = live.pending[index];
+    return messageEntry(record, {
+      state: TALK,
+      viewer: base.viewer.name,
+      tag:
+        pending?.status === 'failed' && pending.retryable === true
+          ? { label: 'retry exact send', tone: 'neutral' }
+          : null,
+      note:
+        pending?.status === 'failed'
+          ? systemStatement(pending.error ?? 'the send did not complete')
+          : null,
+    });
+  });
   const humans = base.humans.map((human) => ({
     ...human,
     presence: presenceFor(live.presence[human.id]),

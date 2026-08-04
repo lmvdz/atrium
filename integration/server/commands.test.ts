@@ -215,6 +215,72 @@ describe('send_message', () => {
     expect(rows[0]?.authorId).toBe(room.people.alice);
   });
 
+  /**
+   * CATCHES: treating clientMessageId as optimistic-display metadata rather
+   * than durable whole-command idempotency. A socket can disappear after the
+   * commit and before its ack; replaying the exact frame must recover the one
+   * committed event, even after restart, without rechecking an expired upload
+   * capability or duplicating the mention.
+   */
+  it('recovers an uncertain committed send as one exact durable message', async () => {
+    await server.close();
+    let capabilityValid = true;
+    server = await startTestServer(handle, {
+      attachmentCapabilities: { verify: () => capabilityValid },
+    });
+    const alice = await connect(room.people.alice as string);
+    await alice.subscribe(room.roomId);
+    const command = {
+      ...send(room.roomId, 'The exact authored message survives reconnect.', 'uncertain-send-1'),
+      mentionUserIds: [room.people.bob as string],
+      attachments: [
+        {
+          key: `${room.roomId}/reconnect-proof.txt`,
+          name: 'reconnect-proof.txt',
+          contentType: 'text/plain',
+          size: 23,
+          capability: 'fresh-upload-grant',
+        },
+      ],
+    } satisfies Command;
+
+    const first = await alice.command(command);
+    expect(first).toMatchObject({ type: 'ack', roomSeq: 1 });
+    await alice.close();
+    await server.close();
+    capabilityValid = false;
+    server = await startTestServer(handle, {
+      attachmentCapabilities: { verify: () => capabilityValid },
+    });
+    const retryingAlice = await connect(room.people.alice as string);
+    const retry = await retryingAlice.command(command);
+    expect(retry).toMatchObject({
+      type: 'ack',
+      roomSeq: first.type === 'ack' ? first.roomSeq : undefined,
+      eventId: first.type === 'ack' ? first.eventId : undefined,
+    });
+
+    const rows = await handle.db.select().from(messages).where(eq(messages.roomId, room.roomId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      body: command.body,
+      clientMessageId: command.clientMessageId,
+      mentionUserIds: command.mentionUserIds,
+      attachments: [
+        {
+          key: `${room.roomId}/reconnect-proof.txt`,
+          name: 'reconnect-proof.txt',
+          contentType: 'text/plain',
+          size: 23,
+        },
+      ],
+    });
+
+    const changedPayload = await retryingAlice.command({ ...command, body: 'different words' });
+    expect(changedPayload).toMatchObject({ type: 'nack', code: 'conflict' });
+    expect(await ledgerCount()).toBe(1);
+  });
+
   it('broadcasts the event to every subscriber, sender included', async () => {
     const alice = await connect(room.people.alice as string);
     const bob = await connect(room.people.bob as string);

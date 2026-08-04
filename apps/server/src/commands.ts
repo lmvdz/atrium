@@ -101,6 +101,34 @@ function answerMessageFingerprint(input: {
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
+function sendMessageFingerprint(input: {
+  roomId: string;
+  body: string;
+  replyToId: string | null;
+  attachments: readonly {
+    key: string;
+    name: string;
+    contentType: string;
+    size: number;
+  }[];
+  mentionUserIds: readonly string[];
+}): string {
+  const canonical = JSON.stringify([
+    'send_message/v1',
+    input.roomId,
+    input.body,
+    input.replyToId,
+    input.attachments.map((attachment) => [
+      attachment.key,
+      attachment.name,
+      attachment.contentType,
+      attachment.size,
+    ]),
+    input.mentionUserIds,
+  ]);
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
 function supersessionFingerprint(input: {
   roomId: string;
   replacementObjectId: string;
@@ -391,29 +419,37 @@ export function createCommandService({
     await requireMembership(session, command.roomId);
 
     switch (command.name) {
-      case 'send_message':
-        if (command.attachments.length > 0 && !attachmentCapabilities) {
-          throw new CommandError('invalid', 'attachments are not configured');
-        }
-        if (
-          command.attachments.some(
-            (attachment) =>
-              attachmentCapabilities?.verify({ ...attachment, roomId: command.roomId }) !== true,
-          )
-        ) {
-          throw new CommandError('invalid', 'an attachment capability is invalid or expired');
-        }
-        if (command.mentionUserIds.length > 0) {
-          const uniqueTargets = [...new Set(command.mentionUserIds)];
-          if (uniqueTargets.length !== command.mentionUserIds.length) {
-            throw new CommandError('invalid', 'mention targets must be unique');
+      case 'send_message': {
+        const persistedAttachments = command.attachments.map(
+          ({ capability: _capability, ...attachment }) => MessageAttachment.parse(attachment),
+        );
+        const prepare = async () => {
+          if (command.attachments.length > 0 && !attachmentCapabilities) {
+            throw new CommandError('invalid', 'attachments are not configured');
           }
-          const members = new Set(await roomMemberIds(db, command.roomId));
-          if (uniqueTargets.some((userId) => !members.has(userId))) {
-            throw new CommandError('invalid', 'every mention target must be a current room member');
+          if (
+            command.attachments.some(
+              (attachment) =>
+                attachmentCapabilities?.verify({ ...attachment, roomId: command.roomId }) !== true,
+            )
+          ) {
+            throw new CommandError('invalid', 'an attachment capability is invalid or expired');
           }
-        }
-        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          if (command.mentionUserIds.length > 0) {
+            const uniqueTargets = [...new Set(command.mentionUserIds)];
+            if (uniqueTargets.length !== command.mentionUserIds.length) {
+              throw new CommandError('invalid', 'mention targets must be unique');
+            }
+            const members = new Set(await roomMemberIds(db, command.roomId));
+            if (uniqueTargets.some((userId) => !members.has(userId))) {
+              throw new CommandError(
+                'invalid',
+                'every mention target must be a current room member',
+              );
+            }
+          }
+        };
+        const build = ({ id, at }: { id: string; at: string }): RoomEvent => ({
           id,
           at,
           type: 'message_posted',
@@ -422,11 +458,43 @@ export function createCommandService({
           body: command.body,
           replyToId: command.replyToId,
           clientMessageId: command.clientMessageId,
-          attachments: command.attachments.map(({ capability: _capability, ...attachment }) =>
-            MessageAttachment.parse(attachment),
-          ),
+          attachments: persistedAttachments,
           mentionUserIds: command.mentionUserIds,
-        }));
+        });
+        if (command.clientMessageId === null) {
+          await prepare();
+          return appendAndProject(session, command.roomId, build);
+        }
+        const batch = await ledger.appendBatch({
+          roomId: command.roomId,
+          actor: actorOf(session),
+          requireClean: true,
+          authorize: async (tx) => {
+            await requireMembership(session, command.roomId, tx);
+          },
+          prepare,
+          idempotency: {
+            commandName: 'send_message',
+            key: command.clientMessageId,
+            fingerprint: sendMessageFingerprint({
+              roomId: command.roomId,
+              body: command.body,
+              replyToId: command.replyToId,
+              attachments: persistedAttachments,
+              mentionUserIds: command.mentionUserIds,
+            }),
+            expectedEventTypes: ['message_posted'],
+          },
+          builds: [build],
+          project: (context) => projectRoomEvent(context, projectionHooks),
+        });
+        return {
+          kind: 'appended_many',
+          roomId: command.roomId,
+          entries: batch.entries,
+          replayed: batch.replayed,
+        };
+      }
 
       case 'answer_message': {
         const messageId = randomUUID();
