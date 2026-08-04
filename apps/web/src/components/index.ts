@@ -25,6 +25,7 @@ export { SurfaceIndicators } from './frame/SurfaceIndicators';
 export { ObjectiveGroup } from './lens/ObjectiveGroup';
 export { ObjectRow } from './lens/ObjectRow';
 export { ReceiptView } from './lens/ReceiptView';
+export { ReferenceMarkers } from './lens/ReferenceMarkers';
 export { StateLens } from './lens/StateLens';
 export * from './model';
 export { ClaimText } from './primitives/ClaimText';

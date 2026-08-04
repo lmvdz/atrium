@@ -472,6 +472,15 @@ describe('draft-driven command and mention completion', () => {
  * as round 2's dead demo at a smaller scale.
  * ------------------------------------------------------------------------- */
 describe('the gallery frame forwards every composer seam', () => {
+  /* CATCHES: keeping the empty Needs-you header/body mounted on product frames,
+     consuming the space recovered when contextual references left the pin. */
+  it('can remove the entire empty attention region without hiding real obligations', () => {
+    const view = render(<RoomFrame {...FRAME} attention={[]} hideEmptyAttention />);
+    expect(screen.queryByRole('region', { name: 'Needs you' })).toBeNull();
+    view.rerender(<RoomFrame {...FRAME} hideEmptyAttention />);
+    expect(screen.getByRole('region', { name: 'Needs you' })).toBeDefined();
+  });
+
   /* CATCHES: dropping `onKeyDown` or `textareaRef` from RoomFrameHandlers or
      from the <Composer> call. Asserted BEHAVIOURALLY through a rendered frame
      rather than by reading the props table, because a prop that is declared and

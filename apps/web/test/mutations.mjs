@@ -289,17 +289,21 @@ const LEDGER = [
     find: `            <TimelineRow
               actions={actions}
               attachmentPreviewUrl={attachmentPreviewUrl}
+              loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
               entry={entry}
               key={entry.id}
               onOpenAttachment={onOpenAttachment}
+              onDownloadAttachment={onDownloadAttachment}
               onOpenTag={onOpenTag}
             />`,
     replace: `            <TimelineRow
               actions={actions}
               attachmentPreviewUrl={attachmentPreviewUrl}
+              loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
               entry={entry}
               key={entry.id}
               onOpenAttachment={onOpenAttachment}
+              onDownloadAttachment={onDownloadAttachment}
             />`,
     test: 'test/timeline-handlers.test.tsx',
   },
@@ -1089,8 +1093,8 @@ const LEDGER = [
   {
     name: 'the frame drops the lens’s objective and receipt handlers again',
     file: 'app/gallery/RoomFrame.tsx',
-    find: '            onOpenReceipt={on.onOpenReceipt}\n            onToggleObjective={on.onToggleObjective}\n',
-    replace: '',
+    find: '            onOpenReceipt={on.onOpenReceipt}\n            onOpenReferences={on.onOpenReferences}\n            onToggleObjective={on.onToggleObjective}\n',
+    replace: '            onOpenReferences={on.onOpenReferences}\n',
     test: 'test/frame-handlers.test.tsx',
   },
   {

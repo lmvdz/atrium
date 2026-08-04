@@ -261,7 +261,8 @@ function AuthoredRow({
      responsible for rendering. */
   const rich =
     hasRichMessageSyntax(attribution.text) ||
-    entry.body.some((segment) => segment.kind === 'mention');
+    (entry.body.some((segment) => segment.kind === 'mention') &&
+      !entry.body.some((segment) => segment.kind === 'code'));
   const authoredBody = (
     <div data-row-body={attribution.messageId}>
       {rich ? (

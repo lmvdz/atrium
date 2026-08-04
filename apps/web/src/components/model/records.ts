@@ -710,6 +710,17 @@ export interface AttentionItem {
   readonly actions: readonly AttentionAction[];
 }
 
+export type ReferenceAttentionLocation =
+  | { readonly kind: 'conversation'; readonly id: null }
+  | { readonly kind: 'objective' | 'object'; readonly id: string };
+
+/** A durable direct reference projected beside, never into, semantic state. */
+export interface ContextualReferenceAttention {
+  readonly attentionId: string;
+  readonly messageId: string;
+  readonly location: ReferenceAttentionLocation;
+}
+
 /* --- state lens ---------------------------------------------------------- */
 
 export type ObjectiveStatus = 'active' | 'blocked' | 'idle' | 'proposed';

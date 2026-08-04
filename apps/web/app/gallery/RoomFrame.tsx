@@ -45,6 +45,7 @@ import type {
   AttentionClass,
   AttentionItem,
   ComposerBinding,
+  ContextualReferenceAttention,
   CrossRoomJumpRecord,
   HumanSummary,
   Maybe,
@@ -133,6 +134,7 @@ export interface RoomFrameHandlers {
   readonly onMarkSeen?: (entryId: string) => void;
   readonly onUnmarkSeen?: (entryId: string) => void;
   readonly onOpenAttention?: (itemId: string) => void;
+  readonly onOpenReferences?: (attentionIds: readonly string[], messageId: string) => void;
   readonly onAct?: (itemId: string, actionId: string) => void;
   readonly onArm?: (itemId: string, arming: Arming) => void;
   readonly onJumpToSource?: (itemId: string, messageId: string) => void;
@@ -171,6 +173,7 @@ export interface RoomFrameProps {
   readonly viewer: HumanSummary;
   readonly focused: SurfaceId;
   readonly attention: readonly AttentionItem[];
+  readonly referenceAttention?: readonly ContextualReferenceAttention[];
   readonly openAttentionId?: string;
   readonly trailer: TrailerSummary;
   readonly lastCheck: string;
@@ -194,6 +197,8 @@ export interface RoomFrameProps {
   readonly pendingReplacementId?: string;
   readonly acceptObjectives?: readonly { readonly id: string; readonly label: string }[];
   readonly referenceTargets?: readonly ReferenceTarget[];
+  /** Product routes recover this space; historical gallery frames may still exhibit the old state. */
+  readonly hideEmptyAttention?: boolean;
   readonly boxed?: boolean;
   readonly label?: string;
   readonly handlers?: RoomFrameHandlers;
@@ -304,25 +309,30 @@ function Frame(props: RoomFrameProps) {
             <span>SPEND</span>
             <span>AGE</span>
           </div>
-          <Pin
-            items={props.attention}
-            lastCheck={props.lastCheck}
-            onAct={on.onAct}
-            onArm={on.onArm}
-            onFold={on.onFoldPin}
-            onJumpToSource={on.onJumpToSource}
-            onOpen={on.onOpenAttention}
-            onPage={on.onPagePin}
-            onShowRest={on.onShowRest}
-            openId={props.openAttentionId}
-            trailer={props.trailer}
-            viewer={props.viewer.name}
-          />
+          {props.hideEmptyAttention &&
+          !props.attention.some((item) => needsViewer(item.state)) ? null : (
+            <Pin
+              items={props.attention}
+              lastCheck={props.lastCheck}
+              onAct={on.onAct}
+              onArm={on.onArm}
+              onFold={on.onFoldPin}
+              onJumpToSource={on.onJumpToSource}
+              onOpen={on.onOpenAttention}
+              onPage={on.onPagePin}
+              onShowRest={on.onShowRest}
+              openId={props.openAttentionId}
+              trailer={props.trailer}
+              viewer={props.viewer.name}
+            />
+          )}
           <StateLens
             objectives={props.objectives}
             objects={props.objects}
             onOpenReceipt={on.onOpenReceipt}
+            onOpenReferences={on.onOpenReferences}
             onToggleObjective={on.onToggleObjective}
+            referenceAttention={props.referenceAttention}
             receipt={
               props.receipt === undefined
                 ? undefined

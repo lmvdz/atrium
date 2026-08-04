@@ -127,6 +127,13 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
   const attention = [...view.attention, ...restoredAttention].filter(
     (item) => !actedOn.includes(item.id),
   );
+  const contextualAttentionIds = new Set(
+    view.referenceAttention.map((reference) => reference.attentionId),
+  );
+  const actionableAttention = attention.filter((item) => !contextualAttentionIds.has(item.id));
+  const referenceAttention = view.referenceAttention.filter(
+    (reference) => !actedOn.includes(reference.attentionId),
+  );
   const attentionSubjects = new Map([
     ...data.attention.map((item) => [item.id, item.subjectId] as const),
     ...corrections.flatMap((correction) =>
@@ -246,7 +253,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
   return (
     <main className={styles.replay}>
       <RoomFrame
-        attention={attention}
+        attention={actionableAttention}
         binding={binding}
         boxed={false}
         composerEnabled={binding.mode === 'bound'}
@@ -267,6 +274,10 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
           onFocusSurface: setFocused,
           onFilter: (next) => setFilter((current) => (current === next ? null : next)),
           onOpenAttention: setOpenAttentionId,
+          onOpenReferences: (attentionIds, messageId) => {
+            setActedOn((current) => [...new Set([...current, ...attentionIds])]);
+            jumpToMessage(messageId);
+          },
           onOpenReceipt: (objectId) => {
             setTargetMessageId(null);
             setReceiptId(objectId);
@@ -353,6 +364,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
             })),
         }}
         humans={view.humans}
+        hideEmptyAttention
         label="replay"
         lastCheck={view.updatedAt}
         messages={records}
@@ -360,6 +372,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         objects={objects}
         openAttentionId={openAttentionId}
         receipt={receipt}
+        referenceAttention={referenceAttention}
         room={view.room}
         rooms={view.rooms}
         trailer={view.trailer}

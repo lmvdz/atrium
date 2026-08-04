@@ -12,16 +12,19 @@
 import type { ObjectKind } from '../model/glyph';
 import { needsViewer } from '../model/glyph';
 import { systemText } from '../model/quotation';
-import type { ObjectiveRecord, StateObject } from '../model/records';
+import type { ContextualReferenceAttention, ObjectiveRecord, StateObject } from '../model/records';
 import { plural } from '../model/text';
 import styles from './lens.module.css';
 import { ObjectRow } from './ObjectRow';
+import { ReferenceMarkers } from './ReferenceMarkers';
 
 export interface ObjectiveGroupProps {
   readonly objective: ObjectiveRecord;
   readonly objects: readonly StateObject[];
   readonly onToggle?: (objectiveId: string) => void;
   readonly onOpenReceipt?: (objectId: string) => void;
+  readonly referenceAttention?: readonly ContextualReferenceAttention[];
+  readonly onOpenReferences?: (attentionIds: readonly string[], messageId: string) => void;
 }
 
 const KIND_ORDER: readonly ObjectKind[] = ['decision', 'commitment', 'question', 'claim', 'event'];
@@ -46,9 +49,15 @@ export function ObjectiveGroup({
   objects,
   onToggle,
   onOpenReceipt,
+  referenceAttention = [],
+  onOpenReferences,
 }: ObjectiveGroupProps) {
   const mine = objects.filter((object) => object.objectives.includes(objective.id));
   const owedHere = mine.filter((object) => needsViewer(object.state)).length;
+  const objectiveReferences = referenceAttention.filter(
+    (reference) =>
+      reference.location.kind === 'objective' && reference.location.id === objective.id,
+  );
 
   return (
     <section className={styles.obj} data-objective-id={objective.id}>
@@ -101,6 +110,7 @@ export function ObjectiveGroup({
           —
         </span>
       </button>
+      <ReferenceMarkers onOpen={onOpenReferences} references={objectiveReferences} />
 
       {objective.open
         ? KIND_ORDER.map((kind) => {
@@ -114,7 +124,13 @@ export function ObjectiveGroup({
                   <span className={styles.groupRule} />
                 </div>
                 {items.map((object) => (
-                  <ObjectRow key={object.id} object={object} onOpenReceipt={onOpenReceipt} />
+                  <ObjectRow
+                    key={object.id}
+                    object={object}
+                    onOpenReceipt={onOpenReceipt}
+                    onOpenReferences={onOpenReferences}
+                    referenceAttention={referenceAttention}
+                  />
                 ))}
               </div>
             );

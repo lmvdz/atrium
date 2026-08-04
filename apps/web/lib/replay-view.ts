@@ -32,6 +32,7 @@ import {
   trailerFor,
 } from '../src/components';
 import type { MessageReference, MessageReferenceKind } from '../src/lib/typed-references';
+import { contextualReferenceAttention } from './contextual-reference-attention';
 import type { ReplayData } from './replay-data';
 import type { ReplayCorrectionTransition } from './replay-transitions';
 
@@ -393,6 +394,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
       actions: actionsFor(item.class, item.reason.kind, source !== null),
     };
   });
+  const referenceAttention = contextualReferenceAttention(data, viewer?.id);
 
   const humans: HumanSummary[] = data.participants.map((person) => ({
     id: person.id,
@@ -429,6 +431,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
     objectives,
     objects,
     attention,
+    referenceAttention,
     humans,
     viewer: viewerRecord,
     room,

@@ -125,7 +125,8 @@ test.describe('durable typed room references', () => {
         `[data-reference-kind="human"][data-reference-target="${readerIdentity.id}"]`,
       );
       await expect(humanChoice).toBeVisible();
-      await humanChoice.click();
+      await expect(humanChoice).toHaveAttribute('aria-selected', 'true');
+      await composer.press('Tab');
       await expect(composer).toHaveValue(`@${originalName} `);
 
       const imageName = `diagram-${run}.svg`;
@@ -231,6 +232,7 @@ test.describe('durable typed room references', () => {
           AND subject_id = ${message.id}::uuid
       `;
       expect(attention).toMatchObject({ userId: readerIdentity.id, subjectId: message.id });
+      if (!attention) throw new Error('durable direct-reference attention disappeared');
 
       const readerRow = reader.locator(`[data-message-id="${message.id}"]`);
       await expect(readerRow).toBeVisible();
@@ -245,7 +247,25 @@ test.describe('durable typed room references', () => {
           `[data-reference-kind="attachment"][data-reference-target="${attachmentId}"]`,
         ),
       ).toHaveText(`@${imageName}`);
-      await expect(reader.locator(`[data-attention-id="${attention?.id}"]`)).toBeVisible();
+      const contextualMarker = reader.locator(
+        `[data-reference-location="conversation"] [data-reference-message="${message.id}"]`,
+      );
+      await expect(contextualMarker).toBeVisible();
+      await expect(reader.locator(`[data-attention-id="${attention?.id}"]`)).toHaveCount(0);
+
+      // CATCHES: retaining the old download-on-card behavior or presenting the
+      // preview without a separate original-file action.
+      const attachmentPreview = reader.getByRole('button', { name: `Preview ${imageName}` });
+      await attachmentPreview.click();
+      const previewDialog = reader.getByRole('dialog', { name: `Preview ${imageName}` });
+      await expect(previewDialog).toBeVisible();
+      await expect(previewDialog).toContainText('image/svg+xml');
+      await expect(
+        previewDialog.getByRole('button', { name: `Download ${imageName}` }),
+      ).toBeVisible();
+      await reader.keyboard.press('Escape');
+      await expect(previewDialog).toHaveCount(0);
+      await expect(attachmentPreview).toBeFocused();
 
       await sql`
         UPDATE users SET display_name = ${renamedName} WHERE id = ${readerIdentity.id}::uuid
@@ -281,7 +301,21 @@ test.describe('durable typed room references', () => {
       await expect(reader.locator(`[data-message-id="${message.id}"] [data-row-body]`)).toHaveText(
         authored,
       );
-      await expect(reader.locator(`[data-attention-id="${attention?.id}"]`)).toBeVisible();
+      await expect(contextualMarker).toBeVisible();
+
+      // CATCHES: making the contextual marker cosmetic. Its click must jump to
+      // the exact durable message and resolve the underlying attention row.
+      await contextualMarker.click();
+      await expect(readerRow).toHaveClass(/targeted/);
+      await expect
+        .poll(async () => {
+          const [row] = await sql<Array<{ status: string }>>`
+            SELECT status::text FROM attention_items WHERE id = ${attention.id}::uuid
+          `;
+          return row?.status;
+        })
+        .toBe('resolved');
+      await expect(contextualMarker).toHaveCount(0);
 
       const semanticComposer = owner.getByRole('combobox', { name: /Message #/ });
       await semanticComposer.fill('@');

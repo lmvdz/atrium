@@ -242,6 +242,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
 
   const frozenUnreadWindow = unreadWindow?.roomId === roomId ? unreadWindow : undefined;
   const view = liveRoomView(data, viewerId, live, frozenUnreadWindow);
+  const contextualAttentionIds = new Set(
+    view.referenceAttention.map((reference) => reference.attentionId),
+  );
+  const actionableAttention = view.attention.filter((item) => !contextualAttentionIds.has(item.id));
   const subjectByAttention = new Map(data.attention.map((item) => [item.id, item.subjectId]));
   const objectives = view.objectives.map((objective) => ({
     ...objective,
@@ -376,7 +380,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     >
       <RoomFrame
         acceptObjectives={acceptObjectives}
-        attention={view.attention}
+        attention={actionableAttention}
         binding={binding}
         boxed={false}
         composerEnabled={subscribed && !uploading && boundSubmission === null}
@@ -480,6 +484,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           onFocusSurface: setFocused,
           onFilter: (next) => setFilter((current) => (current === next ? null : next)),
           onOpenAttention: setOpenAttentionId,
+          onOpenReferences: (attentionIds, messageId) => {
+            for (const attentionId of attentionIds) {
+              clientRef.current?.resolveAttention(roomId, attentionId, 'resolved');
+            }
+            jumpToMessage(messageId);
+          },
           onMarkSeen: () =>
             clientRef.current?.advanceSeen(roomId, frozenUnreadWindow?.throughSeq ?? live.head),
           onOpenReceipt: setReceiptId,
@@ -631,9 +641,11 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             })),
         }}
         humans={view.humans}
+        hideEmptyAttention
         label="live"
         lastCheck={view.updatedAt}
         messages={view.records}
+        referenceAttention={view.referenceAttention}
         referenceTargets={referenceTargets}
         objectives={objectives}
         objects={view.objects}

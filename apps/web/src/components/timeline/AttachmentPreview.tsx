@@ -3,6 +3,7 @@
 import Image from 'next/image';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MessageAttachmentRecord } from '../model/quotation';
+import { systemText } from '../model/quotation';
 import styles from './attachment-preview.module.css';
 
 export interface AttachmentPreviewProps {
@@ -78,6 +79,8 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
   }, [attachment, loadUrl]);
 
   const isImage = attachment.contentType.startsWith('image/');
+  const name = systemText(attachment.name, 'AttachmentPreview name');
+  const contentType = systemText(attachment.contentType, 'AttachmentPreview contentType');
   return (
     <div className={styles.backdrop} data-attachment-preview="true">
       <button
@@ -88,15 +91,15 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
         type="button"
       />
       <section
-        aria-label={`Preview ${attachment.name}`}
+        aria-label={`Preview ${name}`}
         aria-modal="true"
         className={styles.dialog}
         role="dialog"
       >
         <header className={styles.header}>
-          <span className={styles.name}>{attachment.name}</span>
+          <span className={styles.name}>{name}</span>
           <span className={styles.meta}>
-            {attachment.contentType} · {formatBytes(attachment.size)}
+            {contentType} · {formatBytes(attachment.size)}
           </span>
           {isImage ? (
             <button
@@ -109,7 +112,7 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
             </button>
           ) : null}
           <button
-            aria-label={`Download ${attachment.name}`}
+            aria-label={`Download ${name}`}
             className={styles.icon}
             onClick={download}
             title="download original"
@@ -155,7 +158,7 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
             </span>
           ) : isImage ? (
             <Image
-              alt={attachment.name}
+              alt={name}
               className={actualSize ? styles.actual : styles.fit}
               height={1200}
               onError={() => {

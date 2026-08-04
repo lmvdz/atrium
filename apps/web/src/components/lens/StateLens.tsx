@@ -40,11 +40,13 @@
 import frame from '../frame/frame.module.css';
 import { needsViewer } from '../model/glyph';
 import { systemText } from '../model/quotation';
-import type { ObjectiveRecord, StateObject } from '../model/records';
+import type { ContextualReferenceAttention, ObjectiveRecord, StateObject } from '../model/records';
 import type { Slot } from '../model/slot';
 import { plural } from '../model/text';
 import styles from './lens.module.css';
 import { ObjectiveGroup } from './ObjectiveGroup';
+import { ObjectRow } from './ObjectRow';
+import { ReferenceMarkers } from './ReferenceMarkers';
 
 export interface StateLensProps {
   readonly roomName: string;
@@ -55,6 +57,8 @@ export interface StateLensProps {
   readonly receipt?: Slot;
   readonly onToggleObjective?: (objectiveId: string) => void;
   readonly onOpenReceipt?: (objectId: string) => void;
+  readonly referenceAttention?: readonly ContextualReferenceAttention[];
+  readonly onOpenReferences?: (attentionIds: readonly string[], messageId: string) => void;
 }
 
 export function StateLens({
@@ -65,6 +69,8 @@ export function StateLens({
   receipt,
   onToggleObjective,
   onOpenReceipt,
+  referenceAttention = [],
+  onOpenReferences,
 }: StateLensProps) {
   const settled = objects.filter((o) => ['verified', 'accepted'].includes(o.state.verification));
   const unverified = objects.filter((o) =>
@@ -74,6 +80,19 @@ export function StateLens({
   const owed = objects.filter((o) => needsViewer(o.state));
   const accounted = new Set([...settled, ...unverified, ...open].map((o) => o.id));
   const unaccounted = objects.filter((o) => !accounted.has(o.id));
+  const conversationReferences = referenceAttention.filter(
+    (reference) => reference.location.kind === 'conversation',
+  );
+  const objectiveIds = new Set(objectives.map((objective) => objective.id));
+  const unfiledObjects = objects.filter(
+    (object) => !object.objectives.some((objectiveId) => objectiveIds.has(objectiveId)),
+  );
+  const objectReferenceHome = new Map(
+    objects.flatMap((object) => {
+      const home = object.objectives.find((objectiveId) => objectiveIds.has(objectiveId));
+      return home === undefined ? [] : [[object.id, home] as const];
+    }),
+  );
 
   return (
     <aside aria-label="Current state" className={frame.lens} data-region="current-state">
@@ -100,17 +119,50 @@ export function StateLens({
       </div>
 
       <div className={`${styles.lensBody} atr-scroll`}>
-        {receipt !== undefined
-          ? receipt.node
-          : objectives.map((objective) => (
+        {receipt !== undefined ? (
+          receipt.node
+        ) : (
+          <>
+            {conversationReferences.length === 0 ? null : (
+              <div className={styles.conversationReferences} data-reference-location="conversation">
+                <span>CONVERSATION</span>
+                <span className={styles.conversationReferenceLabel}>unfiled direct references</span>
+                <ReferenceMarkers onOpen={onOpenReferences} references={conversationReferences} />
+              </div>
+            )}
+            {unfiledObjects.length === 0 ? null : (
+              <section className={styles.unfiledObjects} data-reference-location="unfiled-state">
+                <div className={styles.unfiledHead}>UNFILED STATE</div>
+                {unfiledObjects.map((object) => (
+                  <ObjectRow
+                    key={object.id}
+                    object={object}
+                    onOpenReceipt={onOpenReceipt}
+                    onOpenReferences={onOpenReferences}
+                    referenceAttention={referenceAttention}
+                  />
+                ))}
+              </section>
+            )}
+            {objectives.map((objective) => (
               <ObjectiveGroup
                 key={objective.id}
                 objective={objective}
                 objects={objects}
                 onOpenReceipt={onOpenReceipt}
+                onOpenReferences={onOpenReferences}
                 onToggle={onToggleObjective}
+                referenceAttention={referenceAttention.filter(
+                  (reference) =>
+                    (reference.location.kind === 'objective' &&
+                      reference.location.id === objective.id) ||
+                    (reference.location.kind === 'object' &&
+                      objectReferenceHome.get(reference.location.id) === objective.id),
+                )}
               />
             ))}
+          </>
+        )}
       </div>
     </aside>
   );

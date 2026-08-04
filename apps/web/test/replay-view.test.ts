@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { contextualReferenceAttention } from '../lib/contextual-reference-attention';
 import { liveRoomView, shouldRefreshLiveRoute } from '../lib/live-room-view';
 import type { ReplayData } from '../lib/replay-data';
 import { reopenQuestion } from '../lib/replay-transitions';
@@ -32,6 +33,116 @@ describe('structured mention rendering', () => {
     expect(
       mentionBody('ask @Priya, not @unknown', ['u-priya'], new Map([['u-priya', 'priya']])),
     ).toBeUndefined();
+  });
+});
+
+describe('contextual direct-reference placement', () => {
+  const mention = (id: string, messageId: string, userId = 'alice') => ({
+    id,
+    roomId: 'room',
+    userId,
+    subjectKind: 'message' as const,
+    subjectId: messageId,
+    subjectObjectId: null,
+    subjectProposalId: null,
+    subjectMessageId: messageId,
+    class: 'mention' as const,
+    reason: { kind: 'mention' as const, request: 'direct reference' },
+    status: 'pending' as const,
+    createdAt: at,
+    resolvedAt: null,
+  });
+
+  /* CATCHES: filing a reference under the currently open or first objective
+     instead of following the persisted object-source edge from its message. */
+  it('uses durable objective/object provenance and leaves unsourced chat in conversation', () => {
+    const snapshot = data();
+    const firstMessage = snapshot.messages[0];
+    if (!firstMessage) throw new Error('reference placement fixture has no source message');
+    snapshot.messages.push({
+      ...firstMessage,
+      id: 'm3',
+      seq: 3,
+      body: 'an unfiled direct reference',
+    });
+    snapshot.objects.push(
+      {
+        id: 'objective',
+        roomId: 'room',
+        type: 'objective',
+        payload: { title: 'Ship it', status: 'open' },
+        objectiveId: null,
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: 'alice',
+        createdAt: at,
+        updatedAt: at,
+      },
+      {
+        id: 'decision',
+        roomId: 'room',
+        type: 'decision',
+        payload: { statement: 'Use the durable edge.', decidedBy: 'alice', status: 'active' },
+        objectiveId: 'objective',
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: 'alice',
+        createdAt: at,
+        updatedAt: at,
+      },
+    );
+    const sources = snapshot.objectSources as unknown as Array<{
+      roomId: string;
+      objectId: string;
+      messageId: string;
+    }>;
+    sources.push(
+      { roomId: 'room', objectId: 'objective', messageId: 'm1' },
+      { roomId: 'room', objectId: 'decision', messageId: 'm2' },
+    );
+    snapshot.attention.push(mention('mention-objective', 'm1'));
+    snapshot.attention.push(mention('mention-object', 'm2'));
+    snapshot.attention.push(mention('mention-unfiled', 'm3'));
+
+    expect(contextualReferenceAttention(snapshot, 'alice')).toEqual([
+      {
+        attentionId: 'mention-objective',
+        messageId: 'm1',
+        location: { kind: 'objective', id: 'objective' },
+      },
+      {
+        attentionId: 'mention-object',
+        messageId: 'm2',
+        location: { kind: 'object', id: 'decision' },
+      },
+      {
+        attentionId: 'mention-unfiled',
+        messageId: 'm3',
+        location: { kind: 'conversation', id: null },
+      },
+    ]);
+  });
+
+  /* CATCHES: projecting every pending room mention to every participant, which
+     leaks another user's attention and inflates the viewer's row markers. */
+  it('projects only the current viewer and only pending direct message references', () => {
+    const snapshot = data();
+    const participants = snapshot.participants as unknown as Array<{
+      id: string;
+      name: string;
+      avatarUrl: string | null;
+    }>;
+    participants.push({ id: 'bob', name: 'bob', avatarUrl: null });
+    snapshot.attention.push(mention('mine', 'm1'));
+    snapshot.attention.push(mention('theirs', 'm1', 'bob'));
+    snapshot.attention.push({ ...mention('resolved', 'm2'), status: 'resolved', resolvedAt: at });
+    expect(contextualReferenceAttention(snapshot, 'alice').map((item) => item.attentionId)).toEqual(
+      ['mine'],
+    );
   });
 });
 
