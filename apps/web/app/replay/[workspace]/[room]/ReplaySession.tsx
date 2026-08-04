@@ -350,7 +350,6 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         trailer={view.trailer}
         updatedAt={view.updatedAt}
         viewer={view.viewer}
-        viewerNote={`replay · ${attention.filter((item) => needsViewer(item.state)).length} owed to you`}
       />
       {binding.mode === 'free' ? (
         <nav aria-label="Replay controls" className={styles.controls}>

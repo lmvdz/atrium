@@ -20,7 +20,7 @@
 .controlLabel {
   align-self: center;
   color: var(--tx1);
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10.5px;
 }
 

@@ -200,8 +200,8 @@ describe('an act moves every surface that counts it', () => {
   });
 
   /* CATCHES: `/gallery/pin/[n]` going back to the static fixtures beside a
-     synthetic pin — D2 with zero clicks, where the rail said 4, the lens said 4
-     and the footer said 60. */
+     synthetic pin — D2 with zero clicks, where the rail said 4 and the lens
+     said 4 beside a pin holding 60. */
   it('the pin-load route derives every surface from the one number', () => {
     for (const n of [4, 60]) {
       const load = loadRoom(n);
@@ -213,7 +213,6 @@ describe('an act moves every surface that counts it', () => {
          every load `manyOwed` includes a failure, so `✗` is what the chip must
          wear; the r9 rail wrote `◆` beside this number by hand. */
       expect(chip?.kind === 'some' ? glyphFor(chip.state) : null).toBe('✗');
-      expect(load.viewerNote).toContain(`${n} owed to you`);
     }
   });
 });

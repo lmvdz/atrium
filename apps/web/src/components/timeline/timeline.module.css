@@ -85,7 +85,7 @@
 }
 
 .time {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
   text-align: right;
@@ -97,7 +97,7 @@
 }
 
 .actor {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10.5px;
   color: var(--tx2);
   text-align: right;
@@ -144,7 +144,7 @@
 
 /* a system row recedes: mono everywhere, one shade of muted, no actor accent */
 .systemBody {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 11px;
   color: var(--tx2);
   min-width: 0;
@@ -153,7 +153,7 @@
 .reply {
   display: block;
   margin-bottom: 1px;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--blu2);
   border-left: 2px solid var(--filebd);
@@ -247,7 +247,7 @@
 }
 
 .acts button {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
   padding: 2px 6px 3px;
@@ -313,7 +313,7 @@
 }
 
 .cnt {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   border: 1px solid var(--line2);
   background: var(--bg3);
@@ -374,7 +374,7 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
 }
@@ -410,7 +410,7 @@
   border-top: 1px dashed var(--line);
   border-bottom: 1px dashed var(--line);
   padding: 5px 4px 5px 46px;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10.5px;
   color: var(--tx2);
   transition:
@@ -476,7 +476,7 @@
   padding: 5px 16px 6px;
   border-bottom: 1px solid var(--line);
   background: var(--replybg);
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--blu2);
 }
@@ -517,4 +517,38 @@
   .acts {
     right: 16px;
   }
+}
+
+/* WIRE's right dock is deliberately narrow. Reusing the wide-workspace IRC
+   columns there left 70–90px for authored prose and turned long messages into
+   vertical word stacks. The epistemic columns remain aligned and visible, but
+   surrender enough width for the words they qualify. Kept after the laptop
+   override because compact is a surface mode, not a viewport fallback. */
+.feedCompact .mrow {
+  box-sizing: border-box;
+  column-gap: 5px;
+  grid-template-columns: 34px 10px minmax(42px, 58px) minmax(0, 1fr);
+  min-width: 0;
+  padding-left: 8px;
+  padding-right: 8px;
+  width: 100%;
+}
+
+.feedCompact .body,
+.feedCompact .systemBody {
+  overflow-wrap: anywhere;
+}
+
+.feedCompact .sylCounts {
+  min-width: 0;
+  width: 100%;
+}
+
+.feedCompact .cnt {
+  white-space: normal;
+}
+
+.feedCompact .filterNote {
+  padding-left: 8px;
+  padding-right: 8px;
 }

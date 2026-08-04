@@ -574,7 +574,6 @@ export interface LoadRoom {
   readonly objectives: readonly ObjectiveRecord[];
   readonly trailer: TrailerSummary;
   readonly rooms: readonly RoomSummary[];
-  readonly viewerNote: string;
 }
 
 export function loadRoom(n: number): LoadRoom {
@@ -601,6 +600,5 @@ export function loadRoom(n: number): LoadRoom {
     objectives,
     trailer: trailerFor({ objects, objectives, overdue: [] }),
     rooms: railFor(f.ROOM.name, attention),
-    viewerNote: `here · ${n} owed to you`,
   };
 }

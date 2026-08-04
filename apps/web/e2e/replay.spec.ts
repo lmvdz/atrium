@@ -197,6 +197,18 @@ test.describe('persisted three-surface replay', () => {
     });
     await page.goto('/replay/atrium-replay/typescript-9998');
 
+    /* Mutation: drop Timeline's compact dock mode or restore the 300px dock.
+       The fixed IRC metadata columns then leave 70–90px for authored prose,
+       turning the corpus into one-to-three-word vertical fragments. */
+    const messageBodies = page.locator(
+      '[data-region="conversation"] [data-row="message"] > div:nth-child(4)',
+    );
+    const bodyWidths = await messageBodies.evaluateAll((nodes) =>
+      nodes.map((node) => node.getBoundingClientRect().width),
+    );
+    expect(bodyWidths.length).toBeGreaterThan(0);
+    expect(Math.min(...bodyWidths)).toBeGreaterThanOrEqual(160);
+
     await expect(page.getByText('1 room · 5 humans', { exact: true })).toBeVisible();
     const controls = page.getByRole('navigation', { name: 'Replay controls' });
     await expect(controls).toContainText('all 111 messages shown · machine read through 111');

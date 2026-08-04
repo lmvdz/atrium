@@ -38,6 +38,7 @@ import {
   WorkspaceTile,
   WorkspaceYou,
 } from '../../src/components';
+import frame from '../../src/components/frame/frame.module.css';
 import type {
   AttentionClass,
   AttentionItem,
@@ -150,7 +151,6 @@ export interface RoomFrameProps {
   readonly rooms: readonly RoomSummary[];
   readonly humans: readonly HumanSummary[];
   readonly viewer: HumanSummary;
-  readonly viewerNote: string;
   readonly focused: SurfaceId;
   readonly attention: readonly AttentionItem[];
   readonly openAttentionId?: string;
@@ -206,35 +206,41 @@ function Frame(props: RoomFrameProps) {
       boxed={props.boxed ?? true}
       label={props.label ?? 'atrium'}
       lens={slot(
-        <StateLens
-          key="lens"
-          objectives={props.objectives}
-          objects={props.objects}
-          onOpenReceipt={on.onOpenReceipt}
-          onToggleObjective={on.onToggleObjective}
-          receipt={
-            props.receipt === undefined
-              ? undefined
-              : slot(
-                  <ReceiptView
-                    key={props.receipt.id}
-                    onBack={on.onCloseReceipt}
-                    onJump={on.onJumpToMessage}
-                    onAccept={on.onAcceptReceipt}
-                    acceptObjectives={props.acceptObjectives}
-                    onAnswer={on.onAnswerReceipt}
-                    onReopen={on.onReopen}
-                    onRetypeToClaim={on.onRetypeToClaim}
-                    onSupersede={on.onSupersedeReceipt}
-                    pendingReplacementId={props.pendingReplacementId}
-                    receipt={props.receipt}
-                    supersessionCandidates={props.supersessionCandidates}
-                  />,
-                )
-          }
-          roomName={props.room.name}
-          updatedAt={props.updatedAt}
-        />,
+        <section aria-label="Room activity dock" className={frame.conversationDock} key="dock">
+          <div className={frame.dockHead}>
+            <span className="atr-lbl">CONVERSATION</span>
+            <span className="atr-meta">#{systemText(props.room.name, 'RoomFrame dock room')}</span>
+          </div>
+          <Timeline
+            compact
+            entries={props.entries}
+            filter={props.filter}
+            onFilter={on.onFilter}
+            onMarkSeen={on.onMarkSeen}
+            onOpenAttachment={on.onOpenAttachment}
+            onOpenTag={on.onOpenTag}
+            onRowAction={on.onRowAction}
+            onTogglePeek={on.onTogglePeek}
+            onUnmarkSeen={on.onUnmarkSeen}
+          />
+          <Composer
+            attachmentNote={on.attachmentNote}
+            binding={props.binding}
+            disabled={props.composerEnabled === false}
+            footNote={props.composerNote}
+            mentionTargetId={props.mentionTargetId}
+            mentionTargets={props.mentionTargets}
+            onAttach={on.onAttach}
+            onCancelBinding={on.onCancelBinding}
+            onChange={on.onComposerChange}
+            onKeyDown={on.onComposerKeyDown}
+            onMention={on.onMention}
+            onSend={on.onSend}
+            roomName={props.room.name}
+            textareaRef={on.composerRef}
+            value={on.composerValue}
+          />
+        </section>,
       )}
       rail={slot(
         <Rail
@@ -242,8 +248,6 @@ function Frame(props: RoomFrameProps) {
           humans={props.humans}
           onSelectRoom={on.onSelectRoom}
           rooms={props.rooms}
-          viewer={props.viewer}
-          viewerNote={props.viewerNote}
           workspaceName="atrium"
           workspaceSub={`${props.rooms.length} ${props.rooms.length === 1 ? 'room' : 'rooms'} · ${props.humans.length} ${props.humans.length === 1 ? 'human' : 'humans'}`}
         />,
@@ -315,33 +319,33 @@ function Frame(props: RoomFrameProps) {
             trailer={props.trailer}
             viewer={props.viewer.name}
           />
-          <Timeline
-            entries={props.entries}
-            filter={props.filter}
-            onFilter={on.onFilter}
-            onMarkSeen={on.onMarkSeen}
-            onOpenAttachment={on.onOpenAttachment}
-            onOpenTag={on.onOpenTag}
-            onRowAction={on.onRowAction}
-            onTogglePeek={on.onTogglePeek}
-            onUnmarkSeen={on.onUnmarkSeen}
-          />
-          <Composer
-            binding={props.binding}
-            disabled={props.composerEnabled === false}
-            footNote={props.composerNote}
-            onCancelBinding={on.onCancelBinding}
-            onChange={on.onComposerChange}
-            onKeyDown={on.onComposerKeyDown}
-            onSend={on.onSend}
-            onAttach={on.onAttach}
-            onMention={on.onMention}
-            mentionTargets={props.mentionTargets}
-            mentionTargetId={props.mentionTargetId}
-            attachmentNote={on.attachmentNote}
+          <StateLens
+            objectives={props.objectives}
+            objects={props.objects}
+            onOpenReceipt={on.onOpenReceipt}
+            onToggleObjective={on.onToggleObjective}
+            receipt={
+              props.receipt === undefined
+                ? undefined
+                : slot(
+                    <ReceiptView
+                      acceptObjectives={props.acceptObjectives}
+                      key={props.receipt.id}
+                      onAccept={on.onAcceptReceipt}
+                      onAnswer={on.onAnswerReceipt}
+                      onBack={on.onCloseReceipt}
+                      onJump={on.onJumpToMessage}
+                      onReopen={on.onReopen}
+                      onRetypeToClaim={on.onRetypeToClaim}
+                      onSupersede={on.onSupersedeReceipt}
+                      pendingReplacementId={props.pendingReplacementId}
+                      receipt={props.receipt}
+                      supersessionCandidates={props.supersessionCandidates}
+                    />,
+                  )
+            }
             roomName={props.room.name}
-            textareaRef={on.composerRef}
-            value={on.composerValue}
+            updatedAt={props.updatedAt}
           />
         </Fragment>,
       ])}

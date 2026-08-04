@@ -13,7 +13,7 @@
 
 import { systemText } from '../model/quotation';
 import type { HumanSummary, RoomSummary } from '../model/records';
-import { initials, text } from '../model/text';
+import { text } from '../model/text';
 import { Glyph } from '../primitives/Glyph';
 import styles from './frame.module.css';
 
@@ -22,8 +22,6 @@ export interface RailProps {
   readonly workspaceSub: string;
   readonly rooms: readonly RoomSummary[];
   readonly humans: readonly HumanSummary[];
-  readonly viewer: HumanSummary;
-  readonly viewerNote: string;
   readonly onSelectRoom?: (roomId: string) => void;
 }
 
@@ -45,15 +43,7 @@ const PRESENCE_LABEL = {
   away: 'away',
 } as const;
 
-export function Rail({
-  workspaceName,
-  workspaceSub,
-  rooms,
-  humans,
-  viewer,
-  viewerNote,
-  onSelectRoom,
-}: RailProps) {
+export function Rail({ workspaceName, workspaceSub, rooms, humans, onSelectRoom }: RailProps) {
   return (
     <nav className={styles.rail} aria-label="Rooms and people">
       <div className={styles.railHead}>
@@ -77,16 +67,6 @@ export function Rail({
         {humans.map((human) => (
           <HumanRow human={human} key={human.id} />
         ))}
-      </div>
-
-      <div className={styles.railFoot}>
-        <div className={styles.railFootAvatar} aria-hidden="true">
-          {initials(systemText(viewer.name, 'Rail viewer'))}
-        </div>
-        <div>
-          <div className={styles.railFootName}>{systemText(viewer.name, 'Rail viewer')}</div>
-          <div className="atr-meta">{systemText(viewerNote, 'Rail viewerNote')}</div>
-        </div>
       </div>
     </nav>
   );

@@ -28,6 +28,8 @@ import styles from './timeline.module.css';
 
 export interface TimelineProps {
   readonly entries: readonly TimelineEntry[];
+  /** Compact metadata columns for the docked WIRE conversation pane. */
+  readonly compact?: boolean;
   /**
    * WHICH CLASS IS LIFTED, not merely THAT something is — round 10, D3.
    *
@@ -59,6 +61,7 @@ const ROW_ACTIONS: readonly Omit<RowAction, 'onSelect'>[] = [
 
 export function Timeline({
   entries,
+  compact = false,
   filter,
   label = 'Conversation',
   onFilter,
@@ -86,9 +89,15 @@ export function Timeline({
   return (
     <section
       aria-label={systemText(label, 'Timeline label')}
-      className={[styles.feed, 'atr-scroll', filter === null ? null : styles.feedFiltered]
+      className={[
+        styles.feed,
+        'atr-scroll',
+        compact ? styles.feedCompact : null,
+        filter === null ? null : styles.feedFiltered,
+      ]
         .filter(Boolean)
         .join(' ')}
+      data-compact={compact ? 'true' : undefined}
       data-region="conversation"
     >
       {filter === null ? null : (

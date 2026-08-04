@@ -3,7 +3,7 @@
 
 .app {
   display: grid;
-  grid-template-columns: 44px 190px minmax(560px, 1fr) 300px;
+  grid-template-columns: 44px 190px minmax(560px, 1fr) 380px;
   height: 100vh;
   /* the narrowest supported width is 1124 CSS px; a classic scrollbar eats ~15
      of those, so the floor is set below the viewport target rather than at it.
@@ -73,7 +73,7 @@
     padding: 7px 12px;
     background: var(--bg1);
     border-bottom: 1px solid var(--line);
-    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
     font-size: 11px;
     line-height: 1.45;
     color: var(--tx1);
@@ -101,7 +101,7 @@
   color: var(--grn2);
   display: grid;
   place-items: center;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 11px;
   font-weight: 600;
 }
@@ -125,7 +125,7 @@
   border: 1px solid var(--stbd);
   display: grid;
   place-items: center;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   font-weight: 600;
   color: var(--stx);
@@ -223,7 +223,7 @@
 }
 
 .hash {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 11px;
   color: var(--tx2);
   width: 9px;
@@ -243,14 +243,14 @@
 }
 
 .count {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
 }
 
 /* owed never hides: the badge is amber and it is not a hover affordance */
 .owedPill {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   font-weight: 600;
   color: var(--amb2);
@@ -335,42 +335,43 @@
   font-weight: 500;
 }
 
-.railFoot {
-  border-top: 1px solid var(--line);
-  padding: 7px 14px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.railFootAvatar {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--replybg);
-  border: 1px solid var(--filebd);
-  display: grid;
-  place-items: center;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--blu2);
-}
-
-.railFootName {
-  font-size: 10px;
-  color: var(--tx1);
-  line-height: 1.25;
-}
-
 /* --- centre column ------------------------------------------------------- */
 
 .center {
   background: var(--bg0);
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+}
+
+/* WIRE v8 makes the evolving state the wide operator workspace and docks the
+   room conversation at the right. The three Phase-2 surfaces remain
+   simultaneous: Needs you is pinned above Current state, while Conversation
+   owns the right dock and its bottom-bound composer. */
+.conversationDock {
+  background: var(--bg0);
+  border-left: 1px solid var(--line);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.conversationDock > * {
+  min-width: 0;
+  width: 100%;
+}
+
+.dockHead {
+  align-items: center;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+  color: var(--tx2);
+  display: flex;
+  justify-content: space-between;
+  min-height: 32px;
+  padding: 0 12px;
 }
 
 .roomhead {
@@ -397,7 +398,7 @@
 
 .roomheadHash {
   color: var(--tx2);
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 13px;
   font-weight: 400;
 }
@@ -431,7 +432,7 @@
   display: grid;
   place-items: center;
   margin-left: -5px;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   font-weight: 600;
   color: var(--tx2);
@@ -522,7 +523,7 @@
 }
 
 .surfCount {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
   background: var(--bg7);
@@ -750,7 +751,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
 }
@@ -767,6 +768,16 @@
   flex: 1;
 }
 
+.conversationDock .composer {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.conversationDock .cfoot {
+  column-gap: 5px;
+  flex-wrap: wrap;
+}
+
 /* --- lens ---------------------------------------------------------------- */
 
 .lens {
@@ -777,17 +788,21 @@
   min-height: 0;
 }
 
+.center > .lens {
+  border-left: 0;
+}
+
 /* --- responsive: laptop -------------------------------------------------- */
 
 @media (max-width: 1439px) {
   .app {
-    grid-template-columns: 44px 184px minmax(500px, 1fr) 300px;
+    grid-template-columns: 44px 184px minmax(500px, 1fr) 360px;
   }
 }
 
 @media (max-width: 1279px) {
   .app {
-    grid-template-columns: 44px 174px minmax(440px, 1fr) 286px;
+    grid-template-columns: 44px 174px minmax(440px, 1fr) 340px;
   }
 
   .faces {

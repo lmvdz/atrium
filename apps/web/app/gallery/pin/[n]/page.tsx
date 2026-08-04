@@ -78,7 +78,6 @@ export default async function PinLoadPage({ params }: { params: Promise<{ n: str
         trailer={load.trailer}
         updatedAt="13:41"
         viewer={f.VIEWER}
-        viewerNote={load.viewerNote}
       />
     </div>
   );

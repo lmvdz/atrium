@@ -501,7 +501,6 @@ describe('the three seams round 6 found dead are live', () => {
         trailer={f.TRAILER}
         updatedAt="13:41"
         viewer={f.VIEWER}
-        viewerNote="here"
       />,
     );
   }

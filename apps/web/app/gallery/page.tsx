@@ -33,7 +33,6 @@ const base = {
   rooms: railFor(f.ROOM.name, f.ATTENTION),
   humans: f.HUMANS,
   viewer: f.VIEWER,
-  viewerNote: `here · ${f.ATTENTION.length} owed to you`,
   focused: 'conversation' as const,
   attention: f.ATTENTION,
   trailer: f.TRAILER,
@@ -129,7 +128,6 @@ const FRAMES: readonly GalleryFrame[] = [
       objectives: IDENTITY.objectives,
       objects: IDENTITY.objects,
       trailer: IDENTITY.trailer,
-      viewerNote: `here · ${IDENTITY.owedCount} owed to you`,
       entries: IDENTITY.timeline({
         seen: true,
         filter: null,
@@ -149,7 +147,6 @@ const FRAMES: readonly GalleryFrame[] = [
     props: {
       ...base,
       rooms: roomsQuiet(f.ROOM.name),
-      viewerNote: 'here · nothing owed',
       attention: [],
       trailer: f.TRAILER_QUIET,
       lastCheck: '13:41',

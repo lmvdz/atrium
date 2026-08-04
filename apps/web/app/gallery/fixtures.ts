@@ -1062,7 +1062,7 @@ export function manyOwed(n: number): readonly AttentionItem[] {
         irreversible: false,
       } as const,
       kind: 'failure',
-      why: 'it failed and the explanation is owed to you',
+      why: 'it failed and you are owed an explanation',
     },
     {
       state: {

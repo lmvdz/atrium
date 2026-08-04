@@ -322,7 +322,6 @@ export function RoomSession() {
       /* `owedCount`, not `attention.length` — round 10, D5. The pin's array holds
          acted-on items now, so its length is the number of things that were ever
          owed here rather than the number that still are. */
-      viewerNote={`here · ${view.owedCount} owed to you`}
     />
   );
 }

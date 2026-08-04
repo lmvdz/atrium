@@ -36,7 +36,6 @@ const FRAME: RoomFrameProps = {
   rooms: ROOMS,
   humans: f.HUMANS,
   viewer: f.VIEWER,
-  viewerNote: 'here · 4 owed to you',
   focused: 'conversation',
   attention: f.ATTENTION,
   trailer: f.TRAILER,

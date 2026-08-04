@@ -12,7 +12,7 @@ import {
 import type { ReplayData } from '@/lib/replay-data';
 import { activeAnswerMatchesClientMessage, replayReceipt } from '@/lib/replay-view';
 import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
-import { boundTo, needsViewer, withFilter } from '@/src/components';
+import { boundTo, withFilter } from '@/src/components';
 import { quotationFrom } from '@/src/components/model/quotation';
 import {
   attachmentDownloadUrl,
@@ -251,7 +251,6 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const activeMentionTargetId = mentionTargets.some((target) => target.id === mentionTargetId)
     ? mentionTargetId
     : null;
-  const owed = view.attention.filter((item) => needsViewer(item.state)).length;
   const subscribed = live.subscribed && connection === 'open';
   const unreadFilterScope = view.entries.find((entry) => entry.type === 'since-you-left')?.entryIds;
 
@@ -548,7 +547,6 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         trailer={view.trailer}
         updatedAt={view.updatedAt}
         viewer={view.viewer}
-        viewerNote={`${subscribed ? 'here' : connection} · ${owed} owed to you`}
       />
     </main>
   );

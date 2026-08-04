@@ -466,6 +466,12 @@ export const AGREEMENT = String.raw`((options) => {
     claims.length = 0;
     const all = [root].concat(Array.from(root.querySelectorAll('*')));
     for (const el of all) {
+      /* CATCHES: treating Next's RSC transport as product copy. A serialized
+         object with an owed property is executable page data, not a sentence
+         a participant can see or hear; scanning it made chunk boundaries decide
+         whether the same screen passed. Rendered descendants and announced
+         attributes remain the allowlisted evidence surface. */
+      if (el.matches('script, style, template, noscript')) continue;
       elements += 1;
       const own = ownText(el);
       strings += readString(own, el, 'own-text');

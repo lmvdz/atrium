@@ -346,16 +346,7 @@ describe('a surface indicator says its count as a count', () => {
      chip. "#identity-service12" is a room and the number of things it owes you,
      said as one word — and the number is the half that matters. */
   it('a rail room chip says its badge as a badge', () => {
-    render(
-      <Rail
-        humans={f.HUMANS}
-        rooms={ROOMS}
-        viewer={f.VIEWER}
-        viewerNote="here"
-        workspaceName="atrium"
-        workspaceSub="4 rooms"
-      />,
-    );
+    render(<Rail humans={f.HUMANS} rooms={ROOMS} workspaceName="atrium" workspaceSub="4 rooms" />);
     const names = screen
       .getAllByRole('button')
       .map((el) => el.getAttribute('aria-label') ?? el.textContent ?? '');
@@ -375,14 +366,7 @@ describe('a surface indicator says its count as a count', () => {
      glanceable shorthand for something that is also written down. */
   it('every human row says its presence in words, not only in a dot', () => {
     const { container } = render(
-      <Rail
-        humans={f.HUMANS}
-        rooms={ROOMS}
-        viewer={f.VIEWER}
-        viewerNote="here"
-        workspaceName="atrium"
-        workspaceSub="4 rooms"
-      />,
+      <Rail humans={f.HUMANS} rooms={ROOMS} workspaceName="atrium" workspaceSub="4 rooms" />,
     );
     const dots = [...container.querySelectorAll('[data-presence]')];
     expect(dots.length, 'the rail rendered no presence dots').toBe(f.HUMANS.length);

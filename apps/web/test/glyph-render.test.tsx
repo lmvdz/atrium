@@ -200,8 +200,6 @@ describe('an aggregate glyph moves when the set it counts moves', () => {
       <Rail
         humans={[]}
         rooms={[{ id: 'r1', name: 'here', unseen: 0, owed: owedSummary(items), current: true }]}
-        viewer={{ id: 'lars', name: 'lars', presence: 'here', note: null, isViewer: true }}
-        viewerNote="here"
         workspaceName="atrium"
         workspaceSub="1 room"
       />,

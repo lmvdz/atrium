@@ -185,7 +185,7 @@ button {
  * ======================================================================== */
 
 .atr-mono {
-  font-family: 'IBM Plex Mono', ui-monospace, sfmono-regular, menlo, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, sfmono-regular, menlo, monospace;
 }
 
 /* THE ONLY `letter-spacing` DECLARATION IN THE APP. Anything wearing the label
@@ -195,7 +195,7 @@ button {
    identical specificity, so which of the two wins would depend on stylesheet
    order. Every label states its own colour beside it instead. */
 .atr-lbl {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   line-height: 1;
   letter-spacing: 0.14em;
@@ -203,7 +203,7 @@ button {
 
 /* machine metadata — mono, 10px, no tracking (tracking belongs to labels) */
 .atr-meta {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   color: var(--tx2);
 }
@@ -289,7 +289,7 @@ button {
 }
 
 .atr-chip {
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   border: 1px solid var(--line);
   background: var(--bg7);
