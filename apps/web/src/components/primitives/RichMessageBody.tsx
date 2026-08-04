@@ -10,6 +10,24 @@ import styles from './rich-message.module.css';
 const RICH_BLOCK =
   /(^|\n)(?:#{1,6}\s|>\s|[-*+]\s|\d+\.\s|```|~~~|\|.+\|\s*$)|\[[ xX]\]\s|\*\*[^*]+\*\*|~~[^~]+~~|`[^`\n]+`|https?:\/\//m;
 
+type StructuredCodeKind = 'terminal' | 'tool' | 'test' | 'artifact';
+
+const STRUCTURED_CODE_KIND: Readonly<Record<string, StructuredCodeKind>> = {
+  artifact: 'artifact',
+  bash: 'terminal',
+  console: 'terminal',
+  sh: 'terminal',
+  shell: 'terminal',
+  tap: 'test',
+  terminal: 'terminal',
+  test: 'test',
+  'test-result': 'test',
+  tool: 'tool',
+  'tool-call': 'tool',
+  'tool-result': 'tool',
+  zsh: 'terminal',
+};
+
 export function hasRichMessageSyntax(source: string): boolean {
   return RICH_BLOCK.test(source);
 }
@@ -54,8 +72,14 @@ function Code({
       </code>
     );
   }
+  const structuredKind = language === undefined ? undefined : STRUCTURED_CODE_KIND[language];
   return (
-    <code className={className} data-code-language={language ?? 'text'} {...props}>
+    <code
+      className={[className, structuredKind && styles[structuredKind]].filter(Boolean).join(' ')}
+      data-code-language={language ?? 'text'}
+      data-structured-code={structuredKind}
+      {...props}
+    >
       {children}
     </code>
   );

@@ -45,4 +45,24 @@ describe('lossless rich message rendering', () => {
     expect(container.textContent).toContain('-old');
     expect(container.textContent).toContain('+new');
   });
+
+  /* CATCHES: flattening harness output back into an undifferentiated code
+     fence, which removes the machine-readable distinction the shell uses to
+     present terminal, tool, test, and artifact output without rewriting it. */
+  it.each([
+    ['terminal', 'terminal', '$ pnpm test\n30 passed'],
+    ['tool-result', 'tool', '{"path":"src/app.tsx"}'],
+    ['test-result', 'test', 'PASS composer.test.tsx'],
+    ['artifact', 'artifact', 'report.json\napplication/json'],
+  ])('preserves a %s fence as an authored %s block', (language, kind, words) => {
+    const source = `\`\`\`${language}\n${words}\n\`\`\``;
+    const { container } = rich(source);
+    const block = container.querySelector(`[data-structured-code="${kind}"]`);
+    expect(block).not.toBeNull();
+    expect(block?.getAttribute('data-code-language')).toBe(language);
+    expect(block?.textContent).toBe(`${words}\n`);
+    expect(
+      container.querySelector('[data-authored-source]')?.getAttribute('data-authored-source'),
+    ).toBe(source);
+  });
 });

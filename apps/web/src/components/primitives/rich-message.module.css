@@ -60,6 +60,32 @@
   font-family: 'IBM Plex Mono', monospace;
   white-space: pre;
 }
+.rich pre:has(> code[data-structured-code]) {
+  border-left-width: 3px;
+  position: relative;
+}
+.rich pre:has(> code[data-structured-code='terminal']) {
+  background: color-mix(in srgb, var(--bg2) 90%, var(--tx0));
+  border-left-color: var(--tx2);
+}
+.rich pre:has(> code[data-structured-code='tool']) {
+  background: color-mix(in srgb, var(--bg2) 88%, var(--blu2));
+  border-left-color: var(--blu2);
+}
+.rich pre:has(> code[data-structured-code='test']) {
+  background: color-mix(in srgb, var(--bg2) 88%, var(--grn2));
+  border-left-color: var(--grn2);
+}
+.rich pre:has(> code[data-structured-code='artifact']) {
+  background: color-mix(in srgb, var(--bg2) 88%, var(--amb2));
+  border-left-color: var(--amb2);
+}
+.terminal,
+.tool,
+.test,
+.artifact {
+  tab-size: 2;
+}
 .rich table {
   border-collapse: collapse;
   display: block;
