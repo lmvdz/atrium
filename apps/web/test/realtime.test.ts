@@ -1796,22 +1796,25 @@ describe('optimism is limited to your own message row', () => {
    * body while dropping reply, mention or attachment metadata. An uncertain
    * commit would then duplicate the message or silently change what the person
    * sent when the socket returns.
-   */
+  */
   it('retries an uncertain send with the exact idempotency key and metadata', async () => {
+    const attachment = {
+      key: `${ROOM}/proof.txt`,
+      name: 'proof.txt',
+      contentType: 'text/plain',
+      size: 17,
+      capability: 'original-upload-grant',
+    };
     const clientMessageId = client.sendMessage(ROOM, 'exact words survive the wire', {
       replyToId: '00000000-0000-4000-8000-000000000001',
       mentionUserIds: ['00000000-0000-4000-8000-000000000002'],
-      attachments: [
-        {
-          key: `${ROOM}/proof.txt`,
-          name: 'proof.txt',
-          contentType: 'text/plain',
-          size: 17,
-          capability: 'original-upload-grant',
-        },
-      ],
+      attachments: [attachment],
     });
     const original = latest().commands().at(-1);
+    // The caller owns this object. Retaining its reference would let unrelated
+    // UI cleanup rewrite the supposedly exact retry after the first frame left.
+    attachment.name = 'mutated-after-send.txt';
+    attachment.capability = 'replacement-grant';
     latest().drop();
 
     await new Promise((resolve) => setTimeout(resolve, 20));

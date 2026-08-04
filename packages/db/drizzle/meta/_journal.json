@@ -99,6 +99,13 @@
       "when": 1786185600001,
       "tag": "0013_structured_mentions",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1785812598893,
+      "tag": "0014_actor_scoped_message_retries",
+      "breakpoints": true
     }
   ]
 }

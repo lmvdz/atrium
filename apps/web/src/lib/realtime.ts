@@ -1514,6 +1514,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     sendMessage: (roomId, body, messageOptions = {}) => {
       const room = view(roomId);
       const clientMessageId = `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
+      const attachments = (messageOptions.attachments ?? []).map((attachment) => ({
+        ...attachment,
+      }));
       room.pending.push({
         clientMessageId,
         body,
@@ -1521,7 +1524,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         status: 'pending',
         commandName: 'send_message',
         replyToId: messageOptions.replyToId ?? null,
-        attachments: messageOptions.attachments ?? [],
+        attachments,
         mentionUserIds: [...(messageOptions.mentionUserIds ?? [])],
       });
       const commandId = command({
@@ -1530,7 +1533,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         body,
         clientMessageId,
         replyToId: messageOptions.replyToId ?? null,
-        attachments: messageOptions.attachments ?? [],
+        attachments,
         mentionUserIds: messageOptions.mentionUserIds ?? [],
       });
       inFlight.set(commandId, { roomId, clientMessageId });
@@ -1578,6 +1581,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     answerMessage: (roomId, questionId, body, attachments = []) => {
       const room = view(roomId);
       const clientMessageId = `${options.userId}:${now()}:${(nextCommandId + 1).toString(36)}`;
+      const attachmentSnapshot = attachments.map((attachment) => ({ ...attachment }));
       room.pending.push({
         clientMessageId,
         body,
@@ -1585,7 +1589,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         status: 'pending',
         commandName: 'answer_message',
         questionId,
-        attachments,
+        attachments: attachmentSnapshot,
       });
       const commandId = command({
         name: 'answer_message',
@@ -1593,7 +1597,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         questionId,
         body,
         clientMessageId,
-        attachments,
+        attachments: attachmentSnapshot,
       });
       inFlight.set(commandId, { roomId, clientMessageId });
       changed(roomId);

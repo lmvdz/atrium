@@ -892,7 +892,12 @@ export const messages = pgTable(
   (t) => [
     uniqueIndex('messages_seq_key').on(t.seq),
     index('messages_room_seq_idx').on(t.roomId, t.seq),
-    uniqueIndex('messages_room_client_id_key').on(t.roomId, t.clientMessageId),
+    /** Retry keys are owned by their authenticated author, matching command receipts. */
+    uniqueIndex('messages_room_author_client_id_key').on(
+      t.roomId,
+      t.authorId,
+      t.clientMessageId,
+    ),
     /** The composite-FK target: lets other tables demand "in *this* room". */
     uniqueIndex('messages_room_id_key').on(t.roomId, t.id),
     /**

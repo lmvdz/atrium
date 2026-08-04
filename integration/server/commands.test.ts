@@ -216,6 +216,35 @@ describe('send_message', () => {
   });
 
   /**
+   * CATCHES: reserving clientMessageId room-wide while durable command receipts
+   * reserve it per authenticated actor. Another member could otherwise send a
+   * guessed key first and make the rightful actor's distinct command fail in
+   * projection, despite having no receipt in that actor's namespace.
+   */
+  it('lets two authenticated authors own the same retry key independently', async () => {
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    const sharedKey = 'member-owned-retry-key';
+
+    expect((await alice.command(send(room.roomId, 'alice words', sharedKey))).type).toBe('ack');
+    expect((await bob.command(send(room.roomId, 'bob words', sharedKey))).type).toBe('ack');
+
+    const rows = await handle.db
+      .select()
+      .from(messages)
+      .where(eq(messages.roomId, room.roomId));
+    expect(
+      rows
+        .map(({ authorId, body, clientMessageId }) => ({ authorId, body, clientMessageId }))
+        .sort((left, right) => left.body.localeCompare(right.body)),
+    ).toEqual([
+      { authorId: room.people.alice, body: 'alice words', clientMessageId: sharedKey },
+      { authorId: room.people.bob, body: 'bob words', clientMessageId: sharedKey },
+    ]);
+    expect(await ledgerCount()).toBe(2);
+  });
+
+  /**
    * CATCHES: treating clientMessageId as optimistic-display metadata rather
    * than durable whole-command idempotency. A socket can disappear after the
    * commit and before its ack; replaying the exact frame must recover the one
