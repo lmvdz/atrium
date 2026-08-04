@@ -39,6 +39,10 @@ below only as the repository copy of the requirements.
   projection refresh after interpreted bursts are wired through the production
   realtime protocol. Authorization is rechecked for commands and listeners;
   membership revocation evicts the passive listener.
+- Attention reconciliation retains one complete provider window behind the
+  claimed slice. This lets a reading minted at a slice boundary reach people on
+  the next pass without exposing the model to extra prompt context or letting
+  unrelated later conversation reclassify the reading.
 - Attachment grants bind room, member, message metadata, object key, media type
   and size. A send and its bound semantic answer commit atomically.
 - The five-participant acceptance drives 200 messages across two objectives,
@@ -79,10 +83,13 @@ Final combined-tree gates:
 - `pnpm lint`: exit 0; 15 warnings and 51 infos are the repository's known
   design-harness diagnostics, not new errors.
 - `pnpm typecheck`: pass.
-- `pnpm test --maxWorkers=2`: 3,029/3,029 after the final blind remedies.
-- `pnpm test:integration`: 170/170 against compose-managed real Postgres; the
+- `pnpm test --maxWorkers=2`: 3,030/3,030 after the final boundary regression.
+  An uncapped run made two repository source scanners exceed their fixed
+  five-second timeout; the controlled run proves the same assertions without
+  weakening or changing them.
+- `pnpm test:integration`: 171/171 against compose-managed real Postgres; the
   harness removed its container and network.
-- Playwright at `--workers=2`: 167/167 in 3.8 minutes, including replay
+- Playwright at `--workers=2`: 168/168 in 3.3 minutes, including replay
   authorization, exact structured-mention persistence and the five-participant
   multiplayer run.
 - `pnpm -r build`: pass, including the optimized Next production build.
@@ -123,8 +130,12 @@ After the user identified WIRE v8 as the current design authority, the product
 frame, bundled mono font, tokens, rail, timeline, pin, composer and state pane
 were converged on that reference. A fresh rendered-only critic passed the
 resulting frame as a coherent WIRE interpretation; its only caveat was that the
-rail remained slightly wider than the canonical reference to preserve readable
-room and presence text.
+rail remained wider than the canonical folded rail to preserve readable room
+and presence text. A second fresh critic inspected isolated replay captures at
+1340×820 and 1440×900 in both themes and passed them without overflow, clipping,
+composer collision or replay-control collision. It measured the Current-state
+surface as dominant, the Needs-you surface at 752–826 pixels, and the docked
+Conversation surface at 359–379 pixels with readable message lines.
 
 ## Deliberately excluded
 
@@ -137,6 +148,12 @@ room and presence text.
   through another open-ended hardening campaign. Changes there are only Phase 2
   assembly seams or cold-boot requirements.
 - No branch was pushed and no live tracker state was changed.
+- The worker currently logs bounded-window refusals for some proposals outside
+  the active room because the in-memory attention fold is global while the job
+  reconciles one room. The refusals do not write a disposition, alter the room's
+  persisted result or fail the acceptance witnesses. Redesigning that fold was
+  deliberately excluded from this Phase 2 remedy rather than inferred from log
+  volume alone.
 
 ## Unresolved external verification
 

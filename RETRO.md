@@ -1035,3 +1035,12 @@ dismissed it. The replay adapter now resolves the accepted object's current
 title and source while retaining an owed, actionable mention state until the
 recipient acts. Lesson kept: **derive attention lifecycle from the recipient's
 disposition, not from the lifecycle of the record that caused it.**
+
+**A bounded worker still needs a collar around the boundary it owns.** A
+proposal at the end of one provider slice could be honestly refused before its
+later evidence arrived, then disappear from the next slice when history was
+configured to zero. Reading the whole room fixed that case but let unrelated
+future conversation reclassify the canonical replay. Attention reconciliation
+now retains exactly one provider window behind the claimed slice and keeps the
+same bounded forward tail. Lesson kept: **widen evidence only as far as the
+measured boundary requires; an unbounded remedy changes the question.**
