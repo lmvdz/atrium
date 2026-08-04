@@ -17,10 +17,12 @@ import {
   replayReceiptSubject,
 } from '@/lib/replay-view';
 import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
-import { boundTo, withFilter } from '@/src/components';
+import { AttachmentPreview, boundTo, withFilter } from '@/src/components';
+import type { MessageAttachmentRecord } from '@/src/components/model/quotation';
 import { quotationFrom } from '@/src/components/model/quotation';
 import {
   attachmentDownloadUrl,
+  downloadAttachment,
   type UploadedAttachment,
   uploadAttachment,
 } from '@/src/lib/attachments';
@@ -73,9 +75,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   >([]);
   const attachmentPreviewUrls = useRef(new Set<string>());
   const [attachmentNote, setAttachmentNote] = useState<string>();
-  const [sentAttachmentPreviews, setSentAttachmentPreviews] = useState<
-    Readonly<Record<string, string>>
-  >({});
+  const [previewAttachment, setPreviewAttachment] = useState<MessageAttachmentRecord | null>(null);
   const pendingUploads = useRef(0);
   const [uploading, setUploading] = useState(false);
   const [binding, setBinding] = useState<ComposerBinding>({ mode: 'free' });
@@ -92,30 +92,6 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     [],
   );
 
-  useEffect(() => {
-    let current = true;
-    const images = data.messages.flatMap((message) =>
-      message.attachments
-        .filter((attachment) => attachment.contentType.startsWith('image/'))
-        .map((attachment) => ({ messageId: message.id, attachment })),
-    );
-    void Promise.all(
-      images.map(async ({ messageId, attachment }) => {
-        const url = await attachmentDownloadUrl(roomId, attachment);
-        return [`${messageId}:${attachment.key}`, url] as const;
-      }),
-    )
-      .then((entries) => {
-        if (current) setSentAttachmentPreviews(Object.fromEntries(entries));
-      })
-      .catch(() => {
-        // A preview is optional presentation. The attachment's explicit download
-        // remains available and reports its own refusal if authorization changed.
-      });
-    return () => {
-      current = false;
-    };
-  }, [data.messages, roomId]);
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
   const [unreadWindow, setUnreadWindow] = useState<
@@ -414,8 +390,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         filter={filter}
         focused={focused}
         handlers={{
-          attachmentPreviewUrl: (messageId, attachment) =>
-            sentAttachmentPreviews[`${messageId}:${attachment.key}`],
+          loadAttachmentPreviewUrl: (_messageId, attachment) =>
+            attachmentDownloadUrl(roomId, attachment),
           attachments: attachments.map((attachment) => ({
             id: attachment.id,
             name: attachment.name,
@@ -510,12 +486,11 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           onCloseReceipt: () => setReceiptId(null),
           onJumpToMessage: jumpToMessage,
           onJumpToSource: (_itemId, messageId) => jumpToMessage(messageId),
-          onOpenAttachment: (_messageId, attachment) => {
-            void attachmentDownloadUrl(roomId, attachment)
-              .then((url) => window.open(url, '_blank', 'noopener'))
-              .catch((failure: unknown) =>
-                setError(failure instanceof Error ? failure.message : String(failure)),
-              );
+          onOpenAttachment: (_messageId, attachment) => setPreviewAttachment(attachment),
+          onDownloadAttachment: (_messageId, attachment) => {
+            void downloadAttachment(roomId, attachment).catch((failure: unknown) =>
+              setError(failure instanceof Error ? failure.message : String(failure)),
+            );
           },
           onOpenTag: (messageId) => {
             if (messageId.startsWith('pending:')) {
@@ -676,6 +651,13 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         updatedAt={view.updatedAt}
         viewer={view.viewer}
       />
+      {previewAttachment === null ? null : (
+        <AttachmentPreview
+          attachment={previewAttachment}
+          loadUrl={(attachment) => attachmentDownloadUrl(roomId, attachment)}
+          onClose={() => setPreviewAttachment(null)}
+        />
+      )}
     </main>
   );
 }

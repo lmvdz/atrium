@@ -24,6 +24,7 @@ import type {
   SurfaceId,
 } from '../../../../src/components';
 import {
+  AttachmentPreview,
   boundTo,
   citationFrom,
   messageEntry,
@@ -31,6 +32,8 @@ import {
   rationale,
   withFilter,
 } from '../../../../src/components';
+import type { MessageAttachmentRecord } from '../../../../src/components/model/quotation';
+import { attachmentDownloadUrl, downloadAttachment } from '../../../../src/lib/attachments';
 import { RoomFrame } from '../../../gallery/RoomFrame';
 import styles from './replay.module.css';
 
@@ -51,6 +54,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
   const [localRecords, setLocalRecords] = useState<readonly MessageRecord[]>([]);
   const [receiptId, setReceiptId] = useState<string | null>(null);
   const [targetMessageId, setTargetMessageId] = useState<string | null>(null);
+  const [previewAttachment, setPreviewAttachment] = useState<MessageAttachmentRecord | null>(null);
   const localSequence = useRef(0);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [focused, setFocused] = useState<SurfaceId>('conversation');
@@ -288,6 +292,12 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
           onCloseReceipt: () => setReceiptId(null),
           onJumpToMessage: jumpToMessage,
           onJumpToSource: (_itemId, messageId) => jumpToMessage(messageId),
+          onOpenAttachment: (_messageId, attachment) => setPreviewAttachment(attachment),
+          loadAttachmentPreviewUrl: (_messageId, attachment) =>
+            attachmentDownloadUrl(data.room.id, attachment),
+          onDownloadAttachment: (_messageId, attachment) => {
+            void downloadAttachment(data.room.id, attachment);
+          },
           onRetypeToClaim: (objectId) => {
             const object = objects.find((candidate) => candidate.id === objectId);
             if (object)
@@ -356,6 +366,13 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         updatedAt={view.updatedAt}
         viewer={view.viewer}
       />
+      {previewAttachment === null ? null : (
+        <AttachmentPreview
+          attachment={previewAttachment}
+          loadUrl={(attachment) => attachmentDownloadUrl(data.room.id, attachment)}
+          onClose={() => setPreviewAttachment(null)}
+        />
+      )}
       {binding.mode === 'free' ? (
         <nav aria-label="Replay controls" className={styles.controls}>
           <span className={styles.controlLabel}>REPLAY POSITION</span>

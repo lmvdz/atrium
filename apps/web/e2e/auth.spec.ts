@@ -401,7 +401,7 @@ test.describe('auth and workspaces', () => {
     await founder.getByRole('combobox', { name: 'Message #general' }).fill('Attached evidence.');
     await founder.getByRole('button', { name: 'Send' }).click();
 
-    const attachment = invitee.getByRole('button', { name: /evidence\.png/ });
+    const attachment = invitee.getByRole('button', { name: 'Preview evidence.png' });
     await expect(attachment).toBeVisible();
     await expect(attachment.locator('[data-sent-attachment-thumbnail]')).toBeVisible();
     const downloadPromise = invitee.waitForEvent('download');

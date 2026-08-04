@@ -55,3 +55,16 @@ export async function attachmentDownloadUrl(
   const body = (await response.json()) as { url: string };
   return body.url;
 }
+
+/** A download is a distinct user act from preview and always gets a fresh grant. */
+export async function downloadAttachment(
+  roomId: string,
+  attachment: Pick<UploadedAttachment, 'key' | 'name'>,
+): Promise<void> {
+  const url = await attachmentDownloadUrl(roomId, attachment);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = attachment.name;
+  anchor.rel = 'noopener';
+  anchor.click();
+}

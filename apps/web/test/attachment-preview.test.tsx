@@ -1,0 +1,88 @@
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AttachmentPreview } from '../src/components';
+import type { MessageAttachmentRecord } from '../src/components/model/quotation';
+
+const image: MessageAttachmentRecord = {
+  key: 'room/capture.png',
+  name: 'capture.png',
+  contentType: 'image/png',
+  size: 2048,
+};
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe('attachment preview', () => {
+  /* CATCHES: opening the signed object URL directly, which provides no dialog,
+     no metadata, no keyboard dismissal, and no focus route back to the source. */
+  it('opens an accessible image dialog and restores focus after Escape', async () => {
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const onClose = vi.fn();
+    const view = render(
+      <AttachmentPreview
+        attachment={image}
+        loadUrl={async () => 'https://objects.invalid/capture-one'}
+        onClose={onClose}
+      />,
+    );
+    expect(screen.getByRole('dialog', { name: 'Preview capture.png' })).toBeDefined();
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Close attachment preview' }),
+    );
+    expect(screen.getByText('image/png · 2 KB')).toBeDefined();
+    await screen.findByRole('img', { name: 'capture.png' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    view.unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  /* CATCHES: caching an expired presigned URL forever; an image error must ask
+     the authorization route for a fresh URL without mutating the attachment. */
+  it('refreshes an expired image URL once', async () => {
+    const loadUrl = vi
+      .fn<(attachment: MessageAttachmentRecord) => Promise<string>>()
+      .mockResolvedValueOnce('https://objects.invalid/expired')
+      .mockResolvedValueOnce('https://objects.invalid/fresh');
+    render(<AttachmentPreview attachment={image} loadUrl={loadUrl} onClose={() => undefined} />);
+    const rendered = await screen.findByRole('img', { name: 'capture.png' });
+    expect(rendered.getAttribute('src')).toContain('expired');
+    fireEvent.error(rendered);
+    await waitFor(() => expect(loadUrl).toHaveBeenCalledTimes(2));
+    expect((await screen.findByRole('img', { name: 'capture.png' })).getAttribute('src')).toContain(
+      'fresh',
+    );
+  });
+
+  /* CATCHES: making the only click target both preview and download; the
+     explicit download action must acquire a fresh URL and name the original. */
+  it('downloads through a distinct icon using a fresh authorization', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const loadUrl = vi.fn(async () => 'https://objects.invalid/fresh-download');
+    render(<AttachmentPreview attachment={image} loadUrl={loadUrl} onClose={() => undefined} />);
+    await screen.findByRole('img', { name: 'capture.png' });
+    fireEvent.click(screen.getByRole('button', { name: 'Download capture.png' }));
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+    expect(loadUrl).toHaveBeenCalledTimes(2);
+  });
+
+  /* CATCHES: treating every attachment as an image and leaving other files
+     with a broken image element instead of an honest open/download treatment. */
+  it('gives a non-image an explicit download fallback', async () => {
+    render(
+      <AttachmentPreview
+        attachment={{ ...image, name: 'notes.pdf', contentType: 'application/pdf' }}
+        loadUrl={async () => 'https://objects.invalid/notes'}
+        onClose={() => undefined}
+      />,
+    );
+    expect(await screen.findByText('This file has no inline preview.')).toBeDefined();
+    expect(screen.getAllByRole('button', { name: /download/i })).toHaveLength(2);
+  });
+});

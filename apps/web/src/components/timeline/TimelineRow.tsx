@@ -41,6 +41,7 @@
  * ------------------------------------------------------------------------- */
 
 import Image from 'next/image';
+import { useEffect, useRef, useState } from 'react';
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution, useCitedRecord, useHere } from '../model/ledger';
 import type { MessageAttachmentRecord, MessageId, Quotation } from '../model/quotation';
@@ -92,10 +93,15 @@ export type TimelineRowProps = {
   readonly actions?: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
   readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
+  readonly onDownloadAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
   readonly attachmentPreviewUrl?: (
     messageId: string,
     attachment: MessageAttachmentRecord,
   ) => string | undefined;
+  readonly loadAttachmentPreviewUrl?: (
+    messageId: string,
+    attachment: MessageAttachmentRecord,
+  ) => Promise<string>;
 } & NoGlyph;
 
 const TAG_CLASS: Readonly<Record<RowTag['tone'], string | undefined>> = {
@@ -122,14 +128,18 @@ export function TimelineRow({
   actions = [],
   onOpenTag,
   onOpenAttachment,
+  onDownloadAttachment,
   attachmentPreviewUrl,
+  loadAttachmentPreviewUrl,
 }: TimelineRowProps) {
   return isAuthored(entry) ? (
     <AuthoredRow
       actions={actions}
       entry={entry}
       onOpenAttachment={onOpenAttachment}
+      onDownloadAttachment={onDownloadAttachment}
       attachmentPreviewUrl={attachmentPreviewUrl}
+      loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
       onOpenTag={onOpenTag}
     />
   ) : (
@@ -210,16 +220,23 @@ function AuthoredRow({
   actions,
   onOpenTag,
   onOpenAttachment,
+  onDownloadAttachment,
   attachmentPreviewUrl,
+  loadAttachmentPreviewUrl,
 }: {
   readonly entry: AuthoredMessageEntry;
   readonly actions: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
   readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
+  readonly onDownloadAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
   readonly attachmentPreviewUrl?: (
     messageId: string,
     attachment: MessageAttachmentRecord,
   ) => string | undefined;
+  readonly loadAttachmentPreviewUrl?: (
+    messageId: string,
+    attachment: MessageAttachmentRecord,
+  ) => Promise<string>;
 }) {
   /* THE LOOKUP A CALL SITE CANNOT SKIP. The name is not read off the entry; it
      is read out of the record register by the id the entry cites, so it holds
@@ -317,26 +334,18 @@ function AuthoredRow({
         {attribution.attachments.length === 0 ? null : (
           <div className={styles.attachments} data-attachments={attribution.messageId}>
             {attribution.attachments.map((attachment) => (
-              <button
-                data-attachment-key={attachment.key}
+              <AttachmentCard
+                attachment={attachment}
+                initialUrl={attachmentPreviewUrl?.(attribution.messageId, attachment)}
                 key={attachment.key}
-                onClick={() => onOpenAttachment?.(attribution.messageId, attachment)}
-                type="button"
-              >
-                {!attachment.contentType.startsWith('image/') ||
-                attachmentPreviewUrl?.(attribution.messageId, attachment) === undefined ? null : (
-                  <Image
-                    alt=""
-                    data-sent-attachment-thumbnail={attachment.key}
-                    height={72}
-                    src={attachmentPreviewUrl(attribution.messageId, attachment) ?? ''}
-                    unoptimized
-                    width={96}
-                  />
-                )}
-                <span data-attachment-name={attachment.name}>{attachment.name}</span>
-                <span aria-hidden="true"> · {formatBytes(attachment.size)}</span>
-              </button>
+                loadUrl={
+                  loadAttachmentPreviewUrl === undefined
+                    ? undefined
+                    : () => loadAttachmentPreviewUrl(attribution.messageId, attachment)
+                }
+                onDownload={() => onDownloadAttachment?.(attribution.messageId, attachment)}
+                onOpen={() => onOpenAttachment?.(attribution.messageId, attachment)}
+              />
             ))}
           </div>
         )}
@@ -360,6 +369,97 @@ function AuthoredRow({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function AttachmentCard({
+  attachment,
+  initialUrl,
+  loadUrl,
+  onOpen,
+  onDownload,
+}: {
+  readonly attachment: MessageAttachmentRecord;
+  readonly initialUrl?: string;
+  readonly loadUrl?: () => Promise<string>;
+  readonly onOpen: () => void;
+  readonly onDownload: () => void;
+}) {
+  const root = useRef<HTMLDivElement>(null);
+  const [url, setUrl] = useState(initialUrl);
+  const requested = useRef(false);
+
+  useEffect(() => {
+    if (!attachment.contentType.startsWith('image/') || loadUrl === undefined || requested.current)
+      return;
+    const request = () => {
+      if (requested.current) return;
+      requested.current = true;
+      void loadUrl()
+        .then(setUrl)
+        .catch(() => undefined);
+    };
+    if (typeof IntersectionObserver === 'undefined' || root.current === null) {
+      request();
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+        request();
+      },
+      { rootMargin: '120px' },
+    );
+    observer.observe(root.current);
+    return () => observer.disconnect();
+  }, [attachment.contentType, loadUrl]);
+
+  return (
+    <div className={styles.attachment} ref={root}>
+      <button
+        aria-label={`Preview ${attachment.name}`}
+        className={styles.attachmentOpen}
+        data-attachment-key={attachment.key}
+        onClick={onOpen}
+        type="button"
+      >
+        {url === undefined ? null : (
+          <Image
+            alt=""
+            data-sent-attachment-thumbnail={attachment.key}
+            height={72}
+            onError={() => {
+              if (loadUrl === undefined) return;
+              void loadUrl()
+                .then(setUrl)
+                .catch(() => setUrl(undefined));
+            }}
+            src={url}
+            unoptimized
+            width={96}
+          />
+        )}
+        <span data-attachment-name={attachment.name}>{attachment.name}</span>
+        <span aria-hidden="true"> · {formatBytes(attachment.size)}</span>
+      </button>
+      <button
+        aria-label={`Download ${attachment.name}`}
+        className={styles.attachmentDownload}
+        onClick={onDownload}
+        title="download original"
+        type="button"
+      >
+        <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 24 24" width="14">
+          <path
+            d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeWidth="2"
+          />
+        </svg>
+      </button>
     </div>
   );
 }

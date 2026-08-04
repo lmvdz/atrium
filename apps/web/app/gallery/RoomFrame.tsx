@@ -121,10 +121,15 @@ export interface RoomFrameHandlers {
   readonly onRowAction?: (entryId: string, actionId: string) => void;
   readonly onOpenTag?: (entryId: string) => void;
   readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
+  readonly onDownloadAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
   readonly attachmentPreviewUrl?: (
     messageId: string,
     attachment: MessageAttachmentRecord,
   ) => string | undefined;
+  readonly loadAttachmentPreviewUrl?: (
+    messageId: string,
+    attachment: MessageAttachmentRecord,
+  ) => Promise<string>;
   readonly onMarkSeen?: (entryId: string) => void;
   readonly onUnmarkSeen?: (entryId: string) => void;
   readonly onOpenAttention?: (itemId: string) => void;
@@ -343,11 +348,13 @@ function Frame(props: RoomFrameProps) {
           />
           <Timeline
             attachmentPreviewUrl={on.attachmentPreviewUrl}
+            loadAttachmentPreviewUrl={on.loadAttachmentPreviewUrl}
             entries={props.entries}
             filter={props.filter}
             onFilter={on.onFilter}
             onMarkSeen={on.onMarkSeen}
             onOpenAttachment={on.onOpenAttachment}
+            onDownloadAttachment={on.onDownloadAttachment}
             onOpenTag={on.onOpenTag}
             onRowAction={on.onRowAction}
             onTogglePeek={on.onTogglePeek}

@@ -47,10 +47,15 @@ export interface TimelineProps {
   readonly onRowAction?: (entryId: string, actionId: string) => void;
   readonly onOpenTag?: (entryId: string) => void;
   readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
+  readonly onDownloadAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
   readonly attachmentPreviewUrl?: (
     messageId: string,
     attachment: MessageAttachmentRecord,
   ) => string | undefined;
+  readonly loadAttachmentPreviewUrl?: (
+    messageId: string,
+    attachment: MessageAttachmentRecord,
+  ) => Promise<string>;
   readonly onMarkSeen?: (entryId: string) => void;
   readonly onUnmarkSeen?: (entryId: string) => void;
   /** replace the default reply/quote/link set without forking this component */
@@ -73,7 +78,9 @@ export function Timeline({
   onRowAction,
   onOpenTag,
   onOpenAttachment,
+  onDownloadAttachment,
   attachmentPreviewUrl,
+  loadAttachmentPreviewUrl,
   onMarkSeen,
   onUnmarkSeen,
   rowActions = ROW_ACTIONS,
@@ -130,9 +137,11 @@ export function Timeline({
             <TimelineRow
               actions={actions}
               attachmentPreviewUrl={attachmentPreviewUrl}
+              loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
               entry={entry}
               key={entry.id}
               onOpenAttachment={onOpenAttachment}
+              onDownloadAttachment={onDownloadAttachment}
               onOpenTag={onOpenTag}
             />
           );

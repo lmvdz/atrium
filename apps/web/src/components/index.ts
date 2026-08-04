@@ -34,6 +34,7 @@ export { DEFAULT_HOLD_MS, HoldToAct } from './primitives/HoldToAct';
 export { MessageBody } from './primitives/MessageBody';
 export { hasRichMessageSyntax, RichMessageBody } from './primitives/RichMessageBody';
 export { Quoted, SystemVoice } from './primitives/Voice';
+export { AttachmentPreview } from './timeline/AttachmentPreview';
 export { RoutineCollapse } from './timeline/RoutineCollapse';
 export { SinceYouLeftDivider } from './timeline/SinceYouLeftDivider';
 export { SystemRow } from './timeline/SystemRow';
