@@ -32,6 +32,8 @@ import { databaseUrl } from './env.js';
 /** Every table the app owns, in an order TRUNCATE ... CASCADE makes irrelevant. */
 const APP_TABLES = [
   'core_events',
+  'message_references',
+  'attachments',
   'corrections',
   'object_sources',
   'proposal_sources',
