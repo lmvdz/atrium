@@ -42,6 +42,12 @@
   text-decoration-color: var(--blu3);
   text-underline-offset: 2px;
 }
+.mention {
+  background: var(--replybg);
+  color: var(--blu2);
+  font-weight: 600;
+  padding: 0 2px;
+}
 .rich :not(pre) > code {
   background: var(--bg7);
   border: 1px solid var(--line);
@@ -85,6 +91,26 @@
 .test,
 .artifact {
   tab-size: 2;
+}
+.syntaxComment {
+  color: var(--tx3);
+  font-style: italic;
+}
+.syntaxKeyword,
+.syntaxOperator {
+  color: var(--red2);
+}
+.syntaxString {
+  color: var(--grn2);
+}
+.syntaxNumber {
+  color: var(--amb2);
+}
+.syntaxFunction {
+  color: var(--blu2);
+}
+.syntaxPunctuation {
+  color: var(--tx2);
 }
 .rich table {
   border-collapse: collapse;

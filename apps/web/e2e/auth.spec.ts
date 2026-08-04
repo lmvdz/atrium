@@ -138,16 +138,37 @@ test.describe('auth and workspaces', () => {
     for (const page of [founder, invitee]) {
       await expect(page.locator('[data-frame="live"]')).toBeVisible();
       await expect(page.getByRole('textbox', { name: 'Message #general' })).toBeEnabled();
-      const people = page.getByRole('navigation', { name: 'Rooms and people' });
-      await expect(people).toContainText('Ada');
-      await expect(people).toContainText('Grace');
-      await expect(people.locator('[data-presence="here"]')).toHaveCount(2);
+      const call = page.getByRole('region', { name: 'Call pane' });
+      await expect(call.getByLabel('Ada · here')).toBeVisible();
+      await expect(call.getByLabel('Grace · here')).toBeVisible();
+      await expect(call.locator('[data-live-presence="here"]')).toHaveCount(2);
     }
 
     const words = `The authenticated live frame carries this message ${Date.now()}.`;
     await founder.getByRole('textbox', { name: 'Message #general' }).fill(words);
     await founder.getByRole('button', { name: 'Send' }).click();
     await expect(invitee.getByRole('region', { name: 'Conversation' })).toContainText(words);
+
+    // CATCHES: a structured mention forcing the whole authored message back to
+    // plain text, flattening Markdown/newlines, or retaining only the visible
+    // @label while dropping the certified user id sent beside it.
+    const richLead = `**Deployment note ${Date.now()}**`;
+    const founderComposer = founder.getByRole('textbox', { name: 'Message #general' });
+    await founderComposer.fill(`${richLead}\n\n@Gra`);
+    await founder.getByRole('button', { name: '@Grace', exact: true }).click();
+    const mentionedDraft = await founderComposer.inputValue();
+    await founderComposer.fill(`${mentionedDraft}\n\n\`\`\`ts\nconst ready = true;\n\`\`\``);
+    await founder.getByRole('button', { name: 'Send' }).click();
+    const richRow = invitee.locator('[data-message-id]').filter({ hasText: 'Deployment note' });
+    await expect(richRow.locator('strong')).toContainText('Deployment note');
+    await expect(richRow.locator('[data-rich-mention="true"]')).toHaveText('@Grace');
+    await expect(richRow.locator('[data-syntax-highlighted="true"]')).toContainText(
+      'const ready = true;',
+    );
+    await expect(richRow.locator('[data-authored-source]')).toHaveAttribute(
+      'data-authored-source',
+      /\n\n@Grace \n\n```ts\nconst ready = true;/,
+    );
 
     const sourceRow = invitee.locator('[data-message-id]').filter({ hasText: words });
     await sourceRow.getByRole('button', { name: 'reply' }).focus();
@@ -283,7 +304,10 @@ test.describe('auth and workspaces', () => {
     await loserBound.fill('');
     await loser.getByRole('button', { name: 'Cancel answering' }).click();
 
-    const bytes = Buffer.from('persisted object bytes\n', 'utf8');
+    const bytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    );
     let uploadTarget = '';
     let releaseUpload: (() => void) | undefined;
     const uploadGate = new Promise<void>((resolve) => {
@@ -311,8 +335,8 @@ test.describe('auth and workspaces', () => {
       }
     });
     await founder.getByLabel('Choose an attachment').setInputFiles({
-      name: 'evidence.txt',
-      mimeType: 'text/plain',
+      name: 'evidence.png',
+      mimeType: 'image/png',
       buffer: bytes,
     });
     // CATCHES: Send remaining live during a PUT, which sent this draft without
@@ -323,18 +347,19 @@ test.describe('auth and workspaces', () => {
     await expect(
       founder.locator('[data-attachment-note="true"]'),
       `attachment failures: ${failedUploads.join(' | ')}`,
-    ).toContainText('evidence.txt attached');
+    ).toContainText('evidence.png attached');
     await founder.unroute(/:59000\//);
     expect(new URL(uploadTarget).port).toBe('59000');
     await founder.getByRole('textbox', { name: 'Message #general' }).fill('Attached evidence.');
     await founder.getByRole('button', { name: 'Send' }).click();
 
-    const attachment = invitee.getByRole('button', { name: /evidence\.txt/ });
+    const attachment = invitee.getByRole('button', { name: /evidence\.png/ });
     await expect(attachment).toBeVisible();
+    await expect(attachment.locator('[data-sent-attachment-thumbnail]')).toBeVisible();
     const downloadPromise = invitee.waitForEvent('download');
     await attachment.click();
     const download = await downloadPromise;
-    expect(download.suggestedFilename()).toBe('evidence.txt');
+    expect(download.suggestedFilename()).toBe('evidence.png');
     const downloadedPath = await download.path();
     if (!downloadedPath) throw new Error('the browser did not persist the downloaded attachment');
     expect(await readFile(downloadedPath)).toEqual(bytes);

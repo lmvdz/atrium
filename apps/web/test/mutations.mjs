@@ -288,12 +288,19 @@ const LEDGER = [
     file: 'src/components/timeline/Timeline.tsx',
     find: `            <TimelineRow
               actions={actions}
+              attachmentPreviewUrl={attachmentPreviewUrl}
               entry={entry}
               key={entry.id}
               onOpenAttachment={onOpenAttachment}
               onOpenTag={onOpenTag}
             />`,
-    replace: '<TimelineRow actions={actions} entry={entry} key={entry.id} />',
+    replace: `            <TimelineRow
+              actions={actions}
+              attachmentPreviewUrl={attachmentPreviewUrl}
+              entry={entry}
+              key={entry.id}
+              onOpenAttachment={onOpenAttachment}
+            />`,
     test: 'test/timeline-handlers.test.tsx',
   },
   {

@@ -4,8 +4,9 @@ import { RichMessageBody } from '../src/components';
 import { AttributionLedger } from '../src/components/model/ledger';
 import type { MessageRecord } from '../src/components/model/quotation';
 import { quotationFrom } from '../src/components/model/quotation';
+import type { BodySegment } from '../src/components/model/records';
 
-function rich(source: string) {
+function rich(source: string, body?: readonly BodySegment[]) {
   const record: MessageRecord = {
     id: 'rich-message',
     actor: 'lars',
@@ -18,7 +19,7 @@ function rich(source: string) {
   if (citation === null) throw new Error('typed record produced no citation');
   return render(
     <AttributionLedger messages={[record]} room="general">
-      <RichMessageBody citation={citation} />
+      <RichMessageBody body={body} citation={citation} />
     </AttributionLedger>,
   );
 }
@@ -61,6 +62,36 @@ describe('lossless rich message rendering', () => {
     expect(block).not.toBeNull();
     expect(block?.getAttribute('data-code-language')).toBe(language);
     expect(block?.textContent).toBe(`${words}\n`);
+    expect(
+      container.querySelector('[data-authored-source]')?.getAttribute('data-authored-source'),
+    ).toBe(source);
+  });
+
+  /* CATCHES: selecting a structured mention making the entire message fall
+     back to plain inline runs, so surrounding Markdown stops being rich. */
+  it('renders Markdown and a certified mention in the same authored body', () => {
+    const source = '**Please review** @Grace\n\n```ts\nconst ready = true;\n```';
+    const body: readonly BodySegment[] = [
+      { kind: 'text', text: '**Please review** ' },
+      { kind: 'mention', text: 'Grace' },
+      { kind: 'text', text: '\n\n```ts\nconst ready = true;\n```' },
+    ];
+    const { container } = rich(source, body);
+    expect(screen.getByText('Please review').tagName).toBe('STRONG');
+    expect(container.querySelector('[data-rich-mention]')?.textContent).toBe('@Grace');
+    expect(
+      container.querySelector('[data-authored-source]')?.getAttribute('data-authored-source'),
+    ).toBe(source);
+  });
+
+  /* CATCHES: retaining a language label on a fence while rendering every token
+     with the same style, which claims syntax highlighting without performing it. */
+  it('tokenizes supported code without changing its authored text', () => {
+    const source = '```ts\nconst answer = "yes";\n```';
+    const { container } = rich(source);
+    const code = container.querySelector('[data-syntax-highlighted="true"]');
+    expect(code?.textContent).toBe('const answer = "yes";\n');
+    expect(code?.querySelectorAll('[class]').length).toBeGreaterThan(1);
     expect(
       container.querySelector('[data-authored-source]')?.getAttribute('data-authored-source'),
     ).toBe(source);

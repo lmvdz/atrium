@@ -1796,7 +1796,7 @@ describe('optimism is limited to your own message row', () => {
    * body while dropping reply, mention or attachment metadata. An uncertain
    * commit would then duplicate the message or silently change what the person
    * sent when the socket returns.
-  */
+   */
   it('retries an uncertain send with the exact idempotency key and metadata', async () => {
     const attachment = {
       key: `${ROOM}/proof.txt`,

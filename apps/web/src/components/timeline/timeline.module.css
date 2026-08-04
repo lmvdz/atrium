@@ -191,6 +191,15 @@
   text-align: left;
 }
 
+.attachments img {
+  background: var(--bg3);
+  display: block;
+  height: 72px;
+  margin: -1px -4px 5px;
+  object-fit: cover;
+  width: 96px;
+}
+
 .attachments button:hover,
 .attachments button:focus-visible {
   border-color: var(--amb1);

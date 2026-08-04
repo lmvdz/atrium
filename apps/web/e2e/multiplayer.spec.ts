@@ -278,11 +278,12 @@ test.describe
         for (const message of manifest.messages.slice(40, 160)) {
           if (message.mention !== null) {
             const sender = pages[message.author] as Page;
-            const targetId = users[message.mention];
-            await sender.getByLabel('Mention a person').selectOption(targetId);
             const composer = sender.getByRole('textbox', { name: 'Message #general' });
-            await expect(sender.getByLabel('Mention a person')).toHaveValue(targetId);
-            await expect(composer).toHaveValue('');
+            await sender.getByLabel('Mention a person or agent').click();
+            await sender
+              .getByRole('button', { name: `@${names[message.mention]}`, exact: true })
+              .click();
+            await expect(composer).toHaveValue(`@${names[message.mention]} `);
             await composer.fill(message.body);
             await sender.getByRole('button', { name: 'Send' }).click();
           } else if (message.attachment) {

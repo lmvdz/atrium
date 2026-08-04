@@ -40,6 +40,7 @@
  * a row that quietly renders an empty actor cell is a row nobody finds out about.
  * ------------------------------------------------------------------------- */
 
+import Image from 'next/image';
 import type { NoGlyph } from '../model/glyph';
 import { useAttribution, useCitedRecord, useHere } from '../model/ledger';
 import type { MessageAttachmentRecord, MessageId, Quotation } from '../model/quotation';
@@ -91,6 +92,10 @@ export type TimelineRowProps = {
   readonly actions?: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
   readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
+  readonly attachmentPreviewUrl?: (
+    messageId: string,
+    attachment: MessageAttachmentRecord,
+  ) => string | undefined;
 } & NoGlyph;
 
 const TAG_CLASS: Readonly<Record<RowTag['tone'], string | undefined>> = {
@@ -117,12 +122,14 @@ export function TimelineRow({
   actions = [],
   onOpenTag,
   onOpenAttachment,
+  attachmentPreviewUrl,
 }: TimelineRowProps) {
   return isAuthored(entry) ? (
     <AuthoredRow
       actions={actions}
       entry={entry}
       onOpenAttachment={onOpenAttachment}
+      attachmentPreviewUrl={attachmentPreviewUrl}
       onOpenTag={onOpenTag}
     />
   ) : (
@@ -203,11 +210,16 @@ function AuthoredRow({
   actions,
   onOpenTag,
   onOpenAttachment,
+  attachmentPreviewUrl,
 }: {
   readonly entry: AuthoredMessageEntry;
   readonly actions: readonly RowAction[];
   readonly onOpenTag?: (entryId: string) => void;
   readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
+  readonly attachmentPreviewUrl?: (
+    messageId: string,
+    attachment: MessageAttachmentRecord,
+  ) => string | undefined;
 }) {
   /* THE LOOKUP A CALL SITE CANNOT SKIP. The name is not read off the entry; it
      is read out of the record register by the id the entry cites, so it holds
@@ -226,13 +238,11 @@ function AuthoredRow({
   if (diverged !== null) throw new Error(diverged);
   refuseElsewhere(attribution.room, here, attribution.messageId);
   const authoredLength = bodyText(entry.body).length;
-  const rich =
-    entry.body.every((segment) => segment.kind === 'text') &&
-    hasRichMessageSyntax(attribution.text);
+  const rich = hasRichMessageSyntax(attribution.text);
   const authoredBody = (
     <div data-row-body={attribution.messageId}>
       {rich ? (
-        <RichMessageBody citation={entry.attribution} />
+        <RichMessageBody body={entry.body} citation={entry.attribution} />
       ) : (
         <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
       )}
@@ -307,6 +317,17 @@ function AuthoredRow({
                 onClick={() => onOpenAttachment?.(attribution.messageId, attachment)}
                 type="button"
               >
+                {!attachment.contentType.startsWith('image/') ||
+                attachmentPreviewUrl?.(attribution.messageId, attachment) === undefined ? null : (
+                  <Image
+                    alt=""
+                    data-sent-attachment-thumbnail={attachment.key}
+                    height={72}
+                    src={attachmentPreviewUrl(attribution.messageId, attachment) ?? ''}
+                    unoptimized
+                    width={96}
+                  />
+                )}
                 <span data-attachment-name={attachment.name}>{attachment.name}</span>
                 <span aria-hidden="true"> · {formatBytes(attachment.size)}</span>
               </button>

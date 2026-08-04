@@ -1,3 +1,5 @@
+'use client';
+
 /* ---------------------------------------------------------------------------
  * RoomFrame — assembles the library into ONE FULL FRAME.
  *
@@ -118,6 +120,10 @@ export interface RoomFrameHandlers {
   readonly onRowAction?: (entryId: string, actionId: string) => void;
   readonly onOpenTag?: (entryId: string) => void;
   readonly onOpenAttachment?: (messageId: string, attachment: MessageAttachmentRecord) => void;
+  readonly attachmentPreviewUrl?: (
+    messageId: string,
+    attachment: MessageAttachmentRecord,
+  ) => string | undefined;
   readonly onMarkSeen?: (entryId: string) => void;
   readonly onUnmarkSeen?: (entryId: string) => void;
   readonly onOpenAttention?: (itemId: string) => void;
@@ -337,6 +343,7 @@ function Frame(props: RoomFrameProps) {
             updatedAt={props.updatedAt}
           />
           <Timeline
+            attachmentPreviewUrl={on.attachmentPreviewUrl}
             entries={props.entries}
             filter={props.filter}
             onFilter={on.onFilter}
@@ -493,8 +500,11 @@ function CallDock({ humans, roomName }: { humans: readonly HumanSummary[]; roomN
           <div className={frame.callPeople}>
             {humans.map((human, index) => (
               <span
+                aria-label={`${systemText(human.name, 'CallDock human')} · ${human.presence}`}
                 className={`${frame.callAvatar} ${live && index === 0 ? frame.speaking : ''}`}
+                data-live-presence={human.presence}
                 key={human.id}
+                role="img"
                 title={systemText(human.name, 'CallDock human')}
               >
                 {initials(systemText(human.name, 'CallDock human'))}

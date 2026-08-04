@@ -68,6 +68,9 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   >([]);
   const attachmentPreviewUrls = useRef(new Set<string>());
   const [attachmentNote, setAttachmentNote] = useState<string>();
+  const [sentAttachmentPreviews, setSentAttachmentPreviews] = useState<
+    Readonly<Record<string, string>>
+  >({});
   const pendingUploads = useRef(0);
   const [uploading, setUploading] = useState(false);
   const [binding, setBinding] = useState<ComposerBinding>({ mode: 'free' });
@@ -83,6 +86,31 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     },
     [],
   );
+
+  useEffect(() => {
+    let current = true;
+    const images = data.messages.flatMap((message) =>
+      message.attachments
+        .filter((attachment) => attachment.contentType.startsWith('image/'))
+        .map((attachment) => ({ messageId: message.id, attachment })),
+    );
+    void Promise.all(
+      images.map(async ({ messageId, attachment }) => {
+        const url = await attachmentDownloadUrl(roomId, attachment);
+        return [`${messageId}:${attachment.key}`, url] as const;
+      }),
+    )
+      .then((entries) => {
+        if (current) setSentAttachmentPreviews(Object.fromEntries(entries));
+      })
+      .catch(() => {
+        // A preview is optional presentation. The attachment's explicit download
+        // remains available and reports its own refusal if authorization changed.
+      });
+    return () => {
+      current = false;
+    };
+  }, [data.messages, roomId]);
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
   const [unreadWindow, setUnreadWindow] = useState<
@@ -341,6 +369,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         filter={filter}
         focused={focused}
         handlers={{
+          attachmentPreviewUrl: (messageId, attachment) =>
+            sentAttachmentPreviews[`${messageId}:${attachment.key}`],
           attachments: attachments.map((attachment) => ({
             id: attachment.key,
             name: attachment.name,
