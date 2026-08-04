@@ -432,10 +432,19 @@ describe('generated migration', () => {
     );
 
     const journal = JSON.parse(readFileSync(join(migrationsDir, 'meta', '_journal.json'), 'utf8'));
-    const entries = journal.entries as { idx: number; tag: string }[];
+    const entries = journal.entries as { idx: number; tag: string; when: number }[];
     expect(entries.map((entry) => entry.idx)).toEqual(files.map((_, index) => index));
     expect(entries.map((entry) => entry.tag)).toEqual(
       files.map((file) => file.replace(/\.sql$/, '')),
+    );
+    /**
+     * Mutation: generate a later-numbered migration with an earlier timestamp.
+     * Drizzle compares each folder timestamp to the latest applied row, so an
+     * upgrade silently skips that migration even though fresh databases pass.
+     */
+    const latest = entries.at(-1);
+    expect(latest?.when).toBeGreaterThan(
+      Math.max(...entries.slice(0, -1).map((entry) => entry.when)),
     );
   });
 
