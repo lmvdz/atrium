@@ -472,6 +472,16 @@ describe('draft-driven command and mention completion', () => {
  * as round 2's dead demo at a smaller scale.
  * ------------------------------------------------------------------------- */
 describe('the gallery frame forwards every composer seam', () => {
+  /* CATCHES: painting mux/by-agent/by-project as bordered pseudo-tabs when no
+     handler or alternate projection exists, making inert labels look usable. */
+  it('states the active tree projection without advertising unavailable modes', () => {
+    render(<RoomFrame {...FRAME} />);
+    expect(screen.getByText('view: tree · by goal')).toBeDefined();
+    expect(screen.queryByText('mux')).toBeNull();
+    expect(screen.queryByText('by agent')).toBeNull();
+    expect(screen.queryByText('by project')).toBeNull();
+  });
+
   /* CATCHES: keeping the empty Needs-you header/body mounted on product frames,
      consuming the space recovered when contextual references left the pin. */
   it('can remove the entire empty attention region without hiding real obligations', () => {

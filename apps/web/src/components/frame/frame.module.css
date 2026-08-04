@@ -661,28 +661,10 @@
   min-width: 8px;
 }
 
-.modeGroup {
-  display: inline-flex;
-  font-size: 10px;
-}
-
-.modeOn,
-.modeOff {
-  border: 1px solid var(--line);
-  padding: 1px 9px;
-}
-
-.modeGroup > span + span {
-  border-left: 0;
-}
-
-.modeOn {
-  background: var(--bg5);
-  color: var(--tx0);
-}
-
-.modeOff {
+.modeStatus {
   color: var(--tx2);
+  font-size: 10px;
+  padding: 1px 0;
 }
 
 .hereCount {

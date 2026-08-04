@@ -31,15 +31,11 @@ export function RoomHead({ room, surfaces, working, settled }: RoomHeadProps) {
   return (
     <header className={styles.roomhead}>
       <div className={styles.roomheadTop}>
-        <span className={styles.modeGroup}>
-          <span className={styles.modeOn}>tree</span>
-          <span className={styles.modeOff}>mux</span>
-        </span>
-        <span className={styles.modeGroup}>
-          <span className={styles.modeOn}>by goal</span>
-          <span className={styles.modeOff}>by agent</span>
-          <span className={styles.modeOff}>by project</span>
-        </span>
+        {/* Tree/by-goal is the only implemented projection. These used to be
+            bordered spans reading like tabs for mux/by-agent/by-project even
+            though no interaction existed. State the active view; do not paint
+            unavailable navigation. */}
+        <span className={styles.modeStatus}>view: tree · by goal</span>
         <div className={styles.faces}>
           {room.members.map((member) => (
             <span

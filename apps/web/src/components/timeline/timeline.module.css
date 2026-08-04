@@ -69,13 +69,7 @@
   column-gap: 12px;
   padding: 4px 24px 4px 16px;
   position: relative;
-  transition:
-    background 0.12s ease,
-    box-shadow 0.12s ease;
-}
-
-.mrow:hover {
-  background: var(--bg3);
+  transition: box-shadow 0.12s ease;
 }
 
 /* the target of a cross-room jump */
