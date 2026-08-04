@@ -303,9 +303,36 @@ test.describe('durable typed room references', () => {
       );
       await expect(contextualMarker).toBeVisible();
 
+      // CATCHES: keeping a reference permanently in the conversation bucket
+      // after durable provenance places its source beneath an objective.
+      await sql`
+        INSERT INTO object_sources (room_id, object_id, message_id)
+        VALUES (${roomId}::uuid, ${objectId}::uuid, ${message.id}::uuid)
+      `;
+      await reader.reload();
+      await expect
+        .poll(
+          () =>
+            reader.evaluate(
+              () =>
+                (
+                  window as unknown as { __typedReferenceSockets?: WebSocket[] }
+                ).__typedReferenceSockets?.some((socket) => socket.readyState === WebSocket.OPEN) ??
+                false,
+            ),
+          { message: 'the reloaded recipient has an authorized realtime subscription' },
+        )
+        .toBe(true);
+      await expect(reader.locator('[data-presence="here"]')).toHaveCount(2);
+      const objectiveMarker = reader.locator(
+        `[data-objective-id="${objectId}"] [data-reference-message="${message.id}"]`,
+      );
+      await expect(objectiveMarker).toBeVisible();
+      await expect(contextualMarker).toHaveCount(0);
+
       // CATCHES: making the contextual marker cosmetic. Its click must jump to
       // the exact durable message and resolve the underlying attention row.
-      await contextualMarker.click();
+      await objectiveMarker.click();
       await expect(readerRow).toHaveClass(/targeted/);
       await expect
         .poll(async () => {
@@ -315,7 +342,17 @@ test.describe('durable typed room references', () => {
           return row?.status;
         })
         .toBe('resolved');
-      await expect(contextualMarker).toHaveCount(0);
+      await expect(objectiveMarker).toHaveCount(0);
+
+      // CATCHES: recovering space from the empty pin by creating an internal
+      // scroll trap that leaves the composer below a short viewport.
+      await reader.setViewportSize({ width: 1440, height: 500 });
+      await expect(reader.getByRole('region', { name: 'Needs you' })).toHaveCount(0);
+      const readerComposer = reader.getByRole('combobox', { name: /Message #/ });
+      await expect(readerComposer).toBeVisible();
+      const composerBox = await readerComposer.boundingBox();
+      expect(composerBox).not.toBeNull();
+      expect((composerBox?.y ?? 500) + (composerBox?.height ?? 1)).toBeLessThanOrEqual(500);
 
       const semanticComposer = owner.getByRole('combobox', { name: /Message #/ });
       await semanticComposer.fill('@');
