@@ -171,23 +171,13 @@ describe('the layout states the narrowest window it works in', () => {
     expect(notice?.textContent).toMatch(/scrolls sideways/);
   });
 
-  /* AND THE FLOOR IS REAL RATHER THAN DECORATIVE: the grid's own tracks at the
-     narrowest breakpoint have to FIT inside the number the notice states, or the
-     sentence is stating a width the layout still overflows. Read off the
-     stylesheet, summed, rather than trusted to the comment beside it. */
-  it('the declared floor is wide enough for the narrowest track set', () => {
-    const sets = [...FRAME_CSS.matchAll(/grid-template-columns:\s*([^;]+);/g)]
-      .map((hit) => hit[1] ?? '')
-      .filter((value) => /minmax\(\s*\d+px/.test(value));
-    expect(sets.length, 'no four-column track set found in the frame stylesheet').toBeGreaterThan(
-      0,
+  /* CATCHES restoring the pre-v8 permanent room rail or widening the dock: the
+     authority's default frame is exactly a 44px strip, one fluid workspace and
+     a 300px conversation dock. The 1340 floor belongs to that whole canvas;
+     inventing a fake pixel minimum for its fluid track would prove nothing. */
+  it('uses the v8 default strip, fluid workspace and dock tracks', () => {
+    expect(FRAME_CSS, 'the frame is not the v8 three-column default').toMatch(
+      /grid-template-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+300px;/,
     );
-    const widths = sets.map((set) =>
-      [...set.matchAll(/(\d+)px/g)].reduce((total, hit) => total + Number(hit[1] ?? 0), 0),
-    );
-    expect(
-      Math.min(...widths),
-      'the narrowest track set is wider than the minimum the page states',
-    ).toBeLessThanOrEqual(MINIMUM_WIDTH);
   });
 });

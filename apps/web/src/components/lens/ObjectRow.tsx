@@ -40,24 +40,36 @@ export function ObjectRow({ object, onOpenReceipt }: ObjectRowProps) {
       title="open the receipt — what happened, who checked it, and what it rests on"
       type="button"
     >
-      <Glyph className={styles.oitemGlyph} decorative={false} state={object.state} />
-      <span>
-        <span className={styles.oitemText}>
+      <span className={styles.sessionCell}>
+        <Glyph className={styles.oitemGlyph} decorative={false} state={object.state} />
+        <span className={styles.oitemText} data-truncates="name">
           <ClaimText content={slot(object.text)} state={object.state} />
         </span>
-        <span className={styles.oitemMeta}>
-          {/* EVERY FACT IS A CALLER STRING THIS ROW PRINTS. Round 7: the same
-              shape as `AttentionItem.facts` — a metadata line under an object's
-              own sentence, page-authored, and printed raw. */}
-          {object.facts.map((fact, index) => (
-            <span key={fact}>
-              {index === 0 ? null : <span aria-hidden="true">· </span>}
-              <span className={WARN.test(fact) ? styles.warn : undefined}>
-                {systemText(fact, 'ObjectRow fact')}
-              </span>
+      </span>
+      <span className={styles.stateCell} data-truncates="name">
+        {systemText(object.state.verification, 'ObjectRow verification')}
+      </span>
+      <span className={styles.latestCell} data-truncates="name">
+        {/* EVERY FACT IS A CALLER STRING THIS ROW PRINTS. Round 7: the same
+            shape as `AttentionItem.facts` — a metadata line under an object's
+            own sentence, page-authored, and printed raw. */}
+        {object.facts.map((fact, index) => (
+          <span key={fact}>
+            {index === 0 ? null : <span aria-hidden="true">· </span>}
+            <span className={WARN.test(fact) ? styles.warn : undefined}>
+              {systemText(fact, 'ObjectRow fact')}
             </span>
-          ))}
-        </span>
+          </span>
+        ))}
+      </span>
+      <span className={styles.lensCell} data-truncates="name">
+        {systemText(object.kind, 'ObjectRow kind')}
+      </span>
+      <span className={styles.spendCell} data-truncates="name">
+        —
+      </span>
+      <span className={styles.ageCell} data-truncates="name">
+        —
       </span>
     </button>
   );

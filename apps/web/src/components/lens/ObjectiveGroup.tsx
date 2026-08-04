@@ -63,20 +63,32 @@ export function ObjectiveGroup({
         }
         type="button"
       >
-        <span aria-hidden="true" className={styles.objTwisty}>
-          {objective.open ? '▾' : '▸'}
-        </span>
-        <span>
-          <span className={styles.objTitle}>
+        <span className={styles.sessionCell}>
+          <span aria-hidden="true" className={styles.objTwisty}>
+            {objective.open ? '▾' : '▸'}
+          </span>
+          <span className={styles.objTitle} data-truncates="name">
             {systemText(objective.title, 'ObjectiveGroup title')}
           </span>
-          <span className={styles.objCount}>
-            {plural(mine.length, 'object')} ·{' '}
-            {owedHere > 0 ? <span className={styles.warn}>{owedHere} need you</span> : 'all clear'}
-          </span>
         </span>
-        <span className={`${styles.status} ${STATUS_CLASS[objective.status] ?? ''} atr-lbl`}>
-          {systemText(objective.status, 'ObjectiveGroup status').toUpperCase()}
+        <span
+          className={`${styles.stateCell} ${STATUS_CLASS[objective.status] ?? ''}`}
+          data-truncates="name"
+        >
+          {systemText(objective.status, 'ObjectiveGroup status')}
+        </span>
+        <span className={styles.latestCell} data-truncates="name">
+          {plural(mine.length, 'object')} ·{' '}
+          {owedHere > 0 ? <span className={styles.warn}>{owedHere} need you</span> : 'all clear'}
+        </span>
+        <span className={styles.lensCell} data-truncates="name">
+          objective
+        </span>
+        <span className={styles.spendCell} data-truncates="name">
+          —
+        </span>
+        <span className={styles.ageCell} data-truncates="name">
+          —
         </span>
       </button>
 

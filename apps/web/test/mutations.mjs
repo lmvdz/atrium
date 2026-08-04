@@ -1512,14 +1512,14 @@ const LEDGER = [
   {
     name: 'the minimum-width notice drifts from the floor the stylesheet declares',
     file: 'src/components/frame/AppFrame.tsx',
-    find: 'export const MINIMUM_WIDTH = 1024;',
+    find: 'export const MINIMUM_WIDTH = 1340;',
     replace: 'export const MINIMUM_WIDTH = 900;',
     test: 'test/viewport.test.tsx',
   },
   {
     name: 'the notice is revealed at a width that is not the floor',
     file: 'src/components/frame/frame.module.css',
-    find: '@media (max-width: 1023px) {\n  .belowMin {',
+    find: '@media (max-width: 1339px) {\n  .belowMin {',
     replace: '@media (max-width: 900px) {\n  .belowMin {',
     test: 'test/viewport.test.tsx',
   },

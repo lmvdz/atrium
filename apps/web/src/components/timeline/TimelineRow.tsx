@@ -64,6 +64,7 @@ import { ClaimText } from '../primitives/ClaimText';
 import { Glyph } from '../primitives/Glyph';
 import { MessageBody } from '../primitives/MessageBody';
 import primitives from '../primitives/primitives.module.css';
+import { hasRichMessageSyntax, RichMessageBody } from '../primitives/RichMessageBody';
 import { SystemVoice } from '../primitives/Voice';
 import styles from './timeline.module.css';
 
@@ -225,10 +226,17 @@ function AuthoredRow({
   if (diverged !== null) throw new Error(diverged);
   refuseElsewhere(attribution.room, here, attribution.messageId);
   const authoredLength = bodyText(entry.body).length;
+  const rich =
+    entry.body.every((segment) => segment.kind === 'text') &&
+    hasRichMessageSyntax(attribution.text);
   const authoredBody = (
-    <span data-row-body={attribution.messageId}>
-      <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
-    </span>
+    <div data-row-body={attribution.messageId}>
+      {rich ? (
+        <RichMessageBody citation={entry.attribution} />
+      ) : (
+        <ClaimText content={slot(<MessageBody body={entry.body} />)} state={entry.state} />
+      )}
+    </div>
   );
 
   /* THE ROW AND THE LEDGER ARE THE SAME REGISTER, OR THIS DOES NOT RENDER — and

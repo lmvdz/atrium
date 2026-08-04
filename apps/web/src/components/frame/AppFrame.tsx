@@ -35,17 +35,17 @@ export interface AppFrameProps {
  * The narrowest window this shell fits in, in CSS pixels.
  *
  * ONE NUMBER, IN TWO PLACES THAT ARE CHECKED AGAINST EACH OTHER. `.app` declares
- * `min-width: 1024px`; this states it to the reader. `test/viewport.test.tsx`
+ * `min-width: 1340px`; this states it to the reader. `test/viewport.test.tsx`
  * reads both out of the sources and asserts they agree, and that the media query
  * which reveals the notice sits exactly one pixel below — a floor that moves
  * while the sentence stays put is a sentence that lies.
  */
-export const MINIMUM_WIDTH = 1024;
+export const MINIMUM_WIDTH = 1340;
 
 export function AppFrame({ strip, rail, workspace, lens, boxed = false, label }: AppFrameProps) {
   return (
     <>
-      {/* THE FLOOR, STATED — r8 D10. Below 1024px the four columns are wider
+      {/* THE FLOOR, STATED — r8 D10. Below 1340px the three V8 columns are wider
           than the window and the page scrolls sideways; that was true before
           this notice and nothing said it. The page still works and still
           scrolls: this is the shell declaring its own bound, the same way every

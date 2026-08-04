@@ -15,7 +15,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { KeyboardEvent, Ref } from 'react';
-import { Fragment } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import type { Arming } from '../../src/components';
 import {
   AppFrame,
@@ -65,6 +65,12 @@ import { ThemeToggle } from '../theme-toggle';
  * gallery's frames are stills and pass none of them; `/` passes all of them.
  */
 export interface RoomFrameHandlers {
+  readonly attachments?: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly contentType?: string;
+    readonly previewUrl?: string;
+  }[];
   /* THE THREE THIS RECORD DID NOT HAVE.
 
      Round 6's blind critic clicked all 53 visible controls on `/` and found 17
@@ -133,6 +139,7 @@ export interface RoomFrameHandlers {
   readonly composerRef?: Ref<HTMLTextAreaElement>;
   readonly onSend?: (draft: string) => void;
   readonly onAttach?: (file: File) => void;
+  readonly onRemoveAttachment?: (id: string) => void;
   readonly onMention?: (userId: string | null) => void;
   readonly attachmentNote?: string;
   readonly onCancelBinding?: () => void;
@@ -205,43 +212,7 @@ function Frame(props: RoomFrameProps) {
     <AppFrame
       boxed={props.boxed ?? true}
       label={props.label ?? 'atrium'}
-      lens={slot(
-        <section aria-label="Room activity dock" className={frame.conversationDock} key="dock">
-          <div className={frame.dockHead}>
-            <span className="atr-lbl">CONVERSATION</span>
-            <span className="atr-meta">#{systemText(props.room.name, 'RoomFrame dock room')}</span>
-          </div>
-          <Timeline
-            compact
-            entries={props.entries}
-            filter={props.filter}
-            onFilter={on.onFilter}
-            onMarkSeen={on.onMarkSeen}
-            onOpenAttachment={on.onOpenAttachment}
-            onOpenTag={on.onOpenTag}
-            onRowAction={on.onRowAction}
-            onTogglePeek={on.onTogglePeek}
-            onUnmarkSeen={on.onUnmarkSeen}
-          />
-          <Composer
-            attachmentNote={on.attachmentNote}
-            binding={props.binding}
-            disabled={props.composerEnabled === false}
-            footNote={props.composerNote}
-            mentionTargetId={props.mentionTargetId}
-            mentionTargets={props.mentionTargets}
-            onAttach={on.onAttach}
-            onCancelBinding={on.onCancelBinding}
-            onChange={on.onComposerChange}
-            onKeyDown={on.onComposerKeyDown}
-            onMention={on.onMention}
-            onSend={on.onSend}
-            roomName={props.room.name}
-            textareaRef={on.composerRef}
-            value={on.composerValue}
-          />
-        </section>,
-      )}
+      lens={slot(<CallDock humans={props.humans} key="dock" roomName={props.room.name} />)}
       rail={slot(
         <Rail
           key="rail"
@@ -277,6 +248,11 @@ function Frame(props: RoomFrameProps) {
         <Fragment key="workspace">
           <RoomHead
             room={props.room}
+            settled={
+              props.objects.filter((object) =>
+                ['verified', 'accepted'].includes(object.state.verification),
+              ).length
+            }
             surfaces={slot(
               <SurfaceIndicators
                 key="surfaces"
@@ -294,6 +270,11 @@ function Frame(props: RoomFrameProps) {
                 )}
               />,
             )}
+            working={
+              props.objects.filter(
+                (object) => !['verified', 'accepted'].includes(object.state.verification),
+              ).length
+            }
           />
           {props.jump === undefined ? (
             <div />
@@ -305,6 +286,14 @@ function Frame(props: RoomFrameProps) {
               onReveal={on.onJumpToMessage}
             />
           )}
+          <div aria-hidden="true" className={frame.treeColumns}>
+            <span>SESSION</span>
+            <span>STATE</span>
+            <span>LATEST</span>
+            <span>LENS</span>
+            <span>SPEND</span>
+            <span>AGE</span>
+          </div>
           <Pin
             items={props.attention}
             lastCheck={props.lastCheck}
@@ -347,8 +336,200 @@ function Frame(props: RoomFrameProps) {
             roomName={props.room.name}
             updatedAt={props.updatedAt}
           />
+          <Timeline
+            entries={props.entries}
+            filter={props.filter}
+            onFilter={on.onFilter}
+            onMarkSeen={on.onMarkSeen}
+            onOpenAttachment={on.onOpenAttachment}
+            onOpenTag={on.onOpenTag}
+            onRowAction={on.onRowAction}
+            onTogglePeek={on.onTogglePeek}
+            onUnmarkSeen={on.onUnmarkSeen}
+          />
+          <Composer
+            attachmentNote={on.attachmentNote}
+            attachments={on.attachments}
+            binding={props.binding}
+            disabled={props.composerEnabled === false}
+            footNote={props.composerNote}
+            mentionTargetId={props.mentionTargetId}
+            mentionTargets={props.mentionTargets}
+            onAttach={on.onAttach}
+            onCancelBinding={on.onCancelBinding}
+            onChange={on.onComposerChange}
+            onKeyDown={on.onComposerKeyDown}
+            onMention={on.onMention}
+            onRemoveAttachment={on.onRemoveAttachment}
+            onSend={on.onSend}
+            roomName={props.room.name}
+            textareaRef={on.composerRef}
+            value={on.composerValue}
+          />
         </Fragment>,
       ])}
     />
+  );
+}
+
+function CallDock({ humans, roomName }: { humans: readonly HumanSummary[]; roomName: string }) {
+  const [tab, setTab] = useState<'call' | 'files'>('call');
+  const [muted, setMuted] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [live, setLive] = useState(true);
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => setElapsed((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+
+  const time = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`;
+
+  return (
+    <section aria-label="Call pane" className={frame.callDock}>
+      <div className={frame.callTabs}>
+        <button aria-pressed={tab === 'call'} onClick={() => setTab('call')} type="button">
+          <span aria-hidden="true" className={frame.callGlyph}>
+            ((•))
+          </span>{' '}
+          call
+        </button>
+        <button aria-pressed={tab === 'files'} onClick={() => setTab('files')} type="button">
+          files
+        </button>
+        <span aria-hidden="true" className={frame.foldPane}>
+          »
+        </span>
+      </div>
+      {tab === 'files' ? (
+        <div className={frame.filesPane}>
+          <span>SHARED IN #{systemText(roomName, 'CallDock room')}</span>
+          <p>No files have been shared in this room.</p>
+        </div>
+      ) : (
+        <>
+          <div className={frame.callStatus}>
+            <span aria-hidden="true" className={`${frame.callDot} ${live ? 'atr-pulse' : ''}`} />
+            <strong>{live ? `LIVE ${time}` : `ENDED · ${time}`}</strong>
+            <span className={frame.callControls}>
+              <button
+                aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
+                aria-pressed={muted}
+                onClick={() => setMuted((value) => !value)}
+                type="button"
+              >
+                <svg aria-hidden="true" fill="none" height="13" viewBox="0 0 24 24" width="13">
+                  <path
+                    d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                  />
+                  <path
+                    d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeWidth="2"
+                  />
+                  {muted ? (
+                    <path
+                      d="m2 2 20 20"
+                      stroke="currentColor"
+                      strokeLinecap="round"
+                      strokeWidth="2"
+                    />
+                  ) : null}
+                </svg>
+              </button>
+              <button
+                aria-label={sharing ? 'Stop sharing screen' : 'Share screen'}
+                aria-pressed={sharing}
+                onClick={() => setSharing((value) => !value)}
+                type="button"
+              >
+                <svg aria-hidden="true" fill="none" height="13" viewBox="0 0 24 24" width="13">
+                  <rect
+                    height="14"
+                    rx="2"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    width="20"
+                    x="2"
+                    y="3"
+                  />
+                  <path
+                    d="M8 21h8M12 17v4"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeWidth="2"
+                  />
+                </svg>
+              </button>
+              <button
+                aria-label="Hang up"
+                className={frame.hangUp}
+                disabled={!live}
+                onClick={() => {
+                  setLive(false);
+                  setSharing(false);
+                }}
+                type="button"
+              >
+                <svg aria-hidden="true" fill="none" height="13" viewBox="0 0 24 24" width="13">
+                  <path
+                    d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91M22 2 2 22"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                  />
+                </svg>
+              </button>
+            </span>
+          </div>
+          <div className={frame.callPeople}>
+            {humans.map((human, index) => (
+              <span
+                className={`${frame.callAvatar} ${live && index === 0 ? frame.speaking : ''}`}
+                key={human.id}
+                title={systemText(human.name, 'CallDock human')}
+              >
+                {initials(systemText(human.name, 'CallDock human'))}
+              </span>
+            ))}
+            <span className={`${frame.callAvatar} ${frame.atriumAvatar}`}>A</span>
+            <span>
+              {live
+                ? `${humans.length + 1} on the call · atrium is the voice agent`
+                : 'call ended · transcript saved to room history'}
+            </span>
+          </div>
+          {sharing ? (
+            <div className={frame.shareNotice}>
+              <span className="atr-pulse" /> You are sharing your screen
+            </div>
+          ) : null}
+          <div className={frame.callTranscript}>
+            <div>
+              <small>atrium · system</small>
+              <p>{live ? 'Call is live. Spoken turns will appear here.' : 'Call ended.'}</p>
+            </div>
+            {live ? (
+              <div className={frame.speakingLine}>
+                <small>atrium · listening</small>
+                <span>
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              </div>
+            ) : null}
+          </div>
+        </>
+      )}
+    </section>
   );
 }

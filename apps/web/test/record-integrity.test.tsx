@@ -83,6 +83,16 @@ describe('no optional field reaches a rendered string unguarded', () => {
     expect(container.textContent ?? '').not.toMatch(LEAKED);
   });
 
+  /* CATCHES: letting the browser's default `white-space: normal` flatten
+     authored paragraph breaks even though the ledger preserved them. */
+  it('the rendered authored body preserves whitespace and line breaks', () => {
+    const css = readFileSync(
+      resolve(process.cwd(), 'src/components/timeline/timeline.module.css'),
+      'utf8',
+    );
+    expect(css).toMatch(/\.body \[data-row-body\]\s*\{[^}]*white-space:\s*pre-wrap/s);
+  });
+
   /* CATCHES: making `list()` join with a separator regardless of presence, so
      an absent fact leaves a dangling "·" that reads like a missing value. */
   it('absent parts collapse instead of leaving separators behind', () => {

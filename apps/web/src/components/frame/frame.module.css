@@ -3,12 +3,14 @@
 
 .app {
   display: grid;
-  grid-template-columns: 44px 190px minmax(560px, 1fr) 380px;
+  /* Atrium v8.dc.html is the authority: the default frame is the 44px
+     workspace strip, one fluid tree/state workspace, and a 300px dock. The
+     old 190px room rail was a pre-v8 information architecture left visible
+     after the palette moved on. */
+  grid-template-columns: 44px minmax(0, 1fr) 300px;
   height: 100vh;
-  /* the narrowest supported width is 1124 CSS px; a classic scrollbar eats ~15
-     of those, so the floor is set below the viewport target rather than at it.
-     The ≤1279 track set needs 998px, so 1024 is a real floor, not a guess. */
-  min-width: 1024px;
+  min-height: 720px;
+  min-width: 1340px;
   overflow: hidden;
 }
 
@@ -62,7 +64,7 @@
   display: none;
 }
 
-@media (max-width: 1023px) {
+@media (max-width: 1339px) {
   .belowMin {
     display: block;
     position: fixed;
@@ -99,7 +101,6 @@
   border: 1px solid var(--grnbd);
   background: var(--grnav);
   color: var(--grn2);
-  display: grid;
   place-items: center;
   font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 11px;
@@ -117,6 +118,11 @@
   flex: 1;
 }
 
+.wsSpacer,
+.wsYou {
+  display: none;
+}
+
 .wsYou {
   width: 26px;
   height: 26px;
@@ -132,10 +138,10 @@
 }
 
 .iconbtn {
+  display: none;
   width: 22px;
   height: 22px;
   border-radius: 5px;
-  display: grid;
   place-items: center;
   border: 1px solid transparent;
   color: var(--tx2);
@@ -160,9 +166,12 @@
 /* --- rail ---------------------------------------------------------------- */
 
 .rail {
+  /* V8 ships with the optional room rail folded. Room navigation remains in
+     the live route and will return through the V8 fold affordance; retaining a
+     permanently visible legacy column is the mismatch this batch removes. */
+  display: none;
   background: var(--bg2);
   border-right: 1px solid var(--line);
-  display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 0;
 }
@@ -339,10 +348,26 @@
 
 .center {
   background: var(--bg0);
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+.treeColumns {
+  display: grid;
+  grid-template-columns: 279px 92px minmax(0, 1fr) 84px 62px 36px;
+  gap: 10px;
+  margin: 10px 20px 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  color: var(--tx4);
+  font-size: 8.5px;
+  letter-spacing: 0.14em;
+}
+
+.treeColumns span:nth-last-child(-n + 3) {
+  text-align: right;
 }
 
 /* WIRE v8 makes the evolving state the wide operator workspace and docks the
@@ -353,7 +378,7 @@
   background: var(--bg0);
   border-left: 1px solid var(--line);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
   min-width: 0;
 }
@@ -370,21 +395,256 @@
   color: var(--tx2);
   display: flex;
   justify-content: space-between;
-  min-height: 32px;
+  min-height: 25px;
+  padding: 0;
+}
+
+.dockTabOn {
+  align-self: stretch;
+  border-right: 1px solid var(--line);
+  color: var(--tx0);
+  display: flex;
+  min-width: 136px;
   padding: 0 12px;
+  align-items: center;
+  justify-content: center;
+}
+
+.dockLiveGlyph {
+  color: var(--grn2);
+  margin-right: 5px;
+}
+
+.dockStatus {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  color: var(--tx0);
+  display: flex;
+  gap: 8px;
+  min-height: 48px;
+  padding: 8px 14px;
+}
+
+.dockDot {
+  background: var(--grn);
+  border-radius: 50%;
+  height: 7px;
+  width: 7px;
+}
+
+.dockRoster {
+  display: flex;
+  margin-left: auto;
+}
+
+.dockAvatar {
+  background: var(--bg5);
+  border: 1px solid var(--line2);
+  border-radius: 50%;
+  color: var(--tx1);
+  display: grid;
+  font-size: 8px;
+  height: 20px;
+  margin-left: -4px;
+  place-items: center;
+  width: 20px;
+}
+
+.dockHead > :global(.atr-meta) {
+  padding-right: 12px;
+}
+
+.callDock {
+  background: var(--bg0);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.callTabs {
+  align-items: stretch;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex: none;
+  min-height: 26px;
+}
+.callTabs button {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line);
+  color: var(--tx2);
+  flex: 1;
+  font: inherit;
+  font-size: 10px;
+  padding: 5px 0;
+}
+.callTabs button[aria-pressed='true'] {
+  background: var(--bg3);
+  color: var(--tx0);
+}
+.callGlyph {
+  color: var(--grn);
+}
+.foldPane {
+  color: var(--tx3);
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+}
+.callStatus {
+  align-items: center;
+  color: var(--tx0);
+  display: flex;
+  flex: none;
+  gap: 8px;
+  min-height: 42px;
+  padding: 8px 14px 6px;
+}
+.callStatus strong {
+  font-size: 12px;
+}
+.callDot {
+  background: var(--grn);
+  border-radius: 50%;
+  height: 7px;
+  width: 7px;
+}
+.callControls {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+.callControls button {
+  background: transparent;
+  border: 0;
+  color: var(--tx2);
+  font: inherit;
+  padding: 2px;
+}
+.callControls button[aria-pressed='true'],
+.callControls .hangUp {
+  color: var(--red2);
+}
+.callPeople {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  color: var(--tx2);
+  display: flex;
+  flex: none;
+  font-size: 9.5px;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 14px 8px;
+}
+.callAvatar {
+  background: #2a3a4d;
+  border-radius: 50%;
+  color: #9fc1e8;
+  display: inline-grid;
+  flex: 0 0 22px;
+  font-size: 9px;
+  font-weight: 600;
+  height: 22px;
+  place-items: center;
+}
+.atriumAvatar {
+  background: var(--grnav);
+  color: #9bd4ac;
+}
+.speaking {
+  box-shadow: 0 0 0 1.5px var(--grn);
+}
+.shareNotice {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  color: var(--tx1);
+  display: flex;
+  font-size: 10px;
+  gap: 8px;
+  padding: 6px 14px;
+}
+.shareNotice span {
+  background: var(--grn);
+  border-radius: 50%;
+  height: 6px;
+  width: 6px;
+}
+.callTranscript {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: flex-end;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px;
+}
+.callTranscript small {
+  color: var(--tx3);
+  font-size: 9px;
+}
+.callTranscript p {
+  color: var(--tx2);
+  font-size: 10px;
+  margin: 2px 0 0;
+}
+.speakingLine span {
+  align-items: flex-end;
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  margin-top: 3px;
+}
+.speakingLine i {
+  animation: atr-eq 0.7s infinite;
+  background: var(--grn);
+  display: block;
+  height: 10px;
+  width: 3px;
+}
+.speakingLine i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.speakingLine i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+.filesPane {
+  color: var(--tx3);
+  flex: 1;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  padding: 10px 14px;
+}
+.filesPane p {
+  color: var(--tx2);
+  letter-spacing: 0;
+}
+
+@keyframes atr-eq {
+  0%,
+  100% {
+    height: 3px;
+  }
+  50% {
+    height: 10px;
+  }
 }
 
 .roomhead {
   border-bottom: 1px solid var(--line);
-  padding: 9px 20px 0;
+  padding: 12px 20px 9px;
   background: var(--bg0);
 }
 
 .roomheadTop {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
+  white-space: nowrap;
 }
 
 .roomheadTop h2 {
@@ -394,6 +654,61 @@
   color: var(--tx0);
   flex: none;
   white-space: nowrap;
+}
+
+.roomheadSpacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.modeGroup {
+  display: inline-flex;
+  font-size: 10px;
+}
+
+.modeOn,
+.modeOff {
+  border: 1px solid var(--line);
+  padding: 1px 9px;
+}
+
+.modeGroup > span + span {
+  border-left: 0;
+}
+
+.modeOn {
+  background: var(--bg5);
+  color: var(--tx0);
+}
+
+.modeOff {
+  color: var(--tx2);
+}
+
+.hereCount {
+  color: var(--tx2);
+  font-size: 9.5px;
+}
+
+.workCounts {
+  color: var(--tx2);
+  display: flex;
+  font-size: 10px;
+  gap: 8px;
+}
+
+.workCounts span:first-child {
+  color: var(--grn2);
+}
+
+.roomContext {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
 }
 
 .roomheadHash {
@@ -443,7 +758,7 @@
    navigate. That fact lives in the group's accessible name. */
 
 .surfaces {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 3px;
   margin-top: 5px;
@@ -563,6 +878,7 @@
   border-top: 1px solid var(--line);
   background: var(--bg0);
   padding: 7px 20px 9px;
+  position: relative;
 }
 
 .mentionBar {
@@ -580,6 +896,118 @@
   color: var(--tx0);
   font: inherit;
   font-size: 10px;
+}
+
+.mentionMenu {
+  background: var(--bg3);
+  border: 1px solid var(--line2);
+  bottom: calc(100% + 6px);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 60%);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  left: 20px;
+  padding: 7px 10px;
+  position: absolute;
+  width: min(480px, calc(100% - 40px));
+  z-index: 30;
+}
+
+.mentionMenu button {
+  background: transparent;
+  border: 1px solid var(--line2);
+  color: var(--blu2);
+  font: inherit;
+  font-size: 9.5px;
+  padding: 1px 8px;
+}
+
+.mentionMenu button:hover,
+.mentionMenu button[aria-pressed='true'] {
+  border-color: var(--blu2);
+  color: var(--tx0);
+}
+.mentionMenu .artifactMention {
+  color: var(--grn2);
+}
+.mentionMenu > span {
+  color: var(--tx2);
+  font-size: 9.5px;
+}
+
+.attachmentChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0;
+}
+.attachmentChips > span {
+  align-items: center;
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  color: var(--tx1);
+  display: inline-flex;
+  font-size: 9.5px;
+  gap: 6px;
+  padding: 1px 8px;
+}
+.attachmentChips img {
+  border: 1px solid var(--line2);
+  height: 34px;
+  object-fit: cover;
+  width: 46px;
+}
+.attachmentChips button {
+  background: transparent;
+  border: 0;
+  color: var(--tx3);
+  font: inherit;
+  padding: 0;
+}
+.attachmentChips button:hover {
+  color: var(--tx0);
+}
+
+.commandMenu {
+  background: var(--bg3);
+  border: 1px solid var(--line2);
+  bottom: calc(100% + 6px);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 60%);
+  display: flex;
+  flex-direction: column;
+  left: 20px;
+  position: absolute;
+  width: min(480px, calc(100% - 40px));
+  z-index: 30;
+}
+
+.commandMenu > div {
+  border-bottom: 1px solid var(--line);
+  color: var(--tx3);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  padding: 5px 12px;
+}
+
+.commandMenu button {
+  align-items: baseline;
+  background: transparent;
+  border: 0;
+  color: var(--tx1);
+  display: flex;
+  font: inherit;
+  gap: 10px;
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.commandMenu button:hover {
+  background: var(--bg6);
+}
+.commandMenu small {
+  color: var(--tx2);
+  font-size: 9.5px;
+  margin-left: auto;
 }
 
 /* BRIEF concept 4: the binding banner. Your next message resolves the named
@@ -705,6 +1133,9 @@
   min-width: 0;
   width: 100%;
   line-height: 1.45;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
 }
 
 /* THE PRIMARY INPUT PAINTS THE SAME RING AS EVERY OTHER CONTROL.
@@ -746,6 +1177,30 @@
   padding: 0 8px 6px 0;
 }
 
+.composerTool,
+.composerSend {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--tx3);
+  display: inline-flex;
+  font: inherit;
+  font-size: 12px;
+  justify-content: center;
+  padding: 3px;
+}
+
+.composerTool:hover,
+.composerSend:hover {
+  color: var(--tx0);
+}
+.composerAttach {
+  position: static;
+}
+.composerSend {
+  color: var(--grn2);
+}
+
 .cfoot {
   margin-top: 5px;
   display: flex;
@@ -768,14 +1223,57 @@
   flex: 1;
 }
 
-.conversationDock .composer {
-  padding-left: 8px;
-  padding-right: 8px;
+/* V8's command line belongs to the main workspace, not the conversation dock.
+   Keep the same Composer behavior and provenance boundary, but paint its
+   existing textarea as the bottom-bound terminal prompt from the authority. */
+.center > .composer .ctxbar {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0 0 3px;
 }
 
-.conversationDock .cfoot {
-  column-gap: 5px;
-  flex-wrap: wrap;
+.center > .composer .cbox,
+.center > .composer .cbox:focus-within {
+  background: transparent;
+  border: 0;
+  grid-template-areas:
+    'prompt input'
+    '. tools';
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.center > .composer .cbox::before {
+  align-self: center;
+  color: var(--grn);
+  content: '›';
+  font-size: 11px;
+  grid-area: prompt;
+}
+
+.center > .composer .cbox textarea {
+  grid-area: input;
+  min-height: 25px;
+  padding: 3px 8px;
+}
+
+.center > .composer .cboxRight {
+  grid-area: tools;
+  justify-content: flex-end;
+  padding: 2px 0 0;
+}
+
+/* WIRE paints the composer as a command line, not a boxed field. Keep the
+   keyboard focus cue, but use the same restrained green as its prompt and
+   caret instead of flashing a bright neutral rectangle across the frame. */
+.center > .composer .cbox textarea:focus-visible {
+  outline: 1px solid var(--grn2);
+  outline-offset: -1px;
+}
+
+.center > .composer .cfoot {
+  font-size: 9px;
+  margin-top: 3px;
 }
 
 /* --- lens ---------------------------------------------------------------- */
@@ -790,22 +1288,7 @@
 
 .center > .lens {
   border-left: 0;
+  flex: 1;
 }
 
 /* --- responsive: laptop -------------------------------------------------- */
-
-@media (max-width: 1439px) {
-  .app {
-    grid-template-columns: 44px 184px minmax(500px, 1fr) 360px;
-  }
-}
-
-@media (max-width: 1279px) {
-  .app {
-    grid-template-columns: 44px 174px minmax(440px, 1fr) 340px;
-  }
-
-  .faces {
-    display: none;
-  }
-}

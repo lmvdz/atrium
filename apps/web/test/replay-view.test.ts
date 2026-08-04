@@ -6,6 +6,7 @@ import { reopenQuestion } from '../lib/replay-transitions';
 import {
   activeAnswerMatchesClientMessage,
   activeAnswerMessageId,
+  mentionBody,
   replayAt,
   replayReceipt,
   replayView,
@@ -22,6 +23,21 @@ const at = new Date('2026-08-02T12:00:00.000Z');
  */
 const liveRoomSession = workspacePath('apps/web/app/app/[workspace]/[room]/LiveRoomSession.tsx');
 const replayDataSource = workspacePath('apps/web/lib/replay-data.ts');
+
+describe('structured mention rendering', () => {
+  /* CATCHES: highlighting every @word from punctuation alone, or dropping the
+     authored casing while deriving a mention. Only server-certified target ids
+     become mention runs and their concatenation remains the exact source. */
+  it('segments only certified mention targets without rewriting their words', () => {
+    expect(
+      mentionBody('ask @Priya, not @unknown', ['u-priya'], new Map([['u-priya', 'priya']])),
+    ).toEqual([
+      { kind: 'text', text: 'ask ' },
+      { kind: 'mention', text: 'Priya' },
+      { kind: 'text', text: ', not @unknown' },
+    ]);
+  });
+});
 
 function data(): ReplayData {
   return {

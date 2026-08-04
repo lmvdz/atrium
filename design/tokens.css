@@ -13,22 +13,22 @@
 
 /* WIRE — the product surface */
 :root {
-  --bg0: #0a0b0c;
-  --bg1: #0c0d0f;
-  --bg2: #0d0f10;
-  --bg3: #101312;
-  --bg4: #121615;
-  --bg5: #151918;
+  --bg0: #101312;
+  --bg1: #0d1010;
+  --bg2: #0d1010;
+  --bg3: #141817;
+  --bg4: #151a17;
+  --bg5: #141817;
   --bg6: #1a1f1d;
-  --bg7: #0f1211;
-  --line: #1f2226;
-  --line2: #2a2e33;
-  --line3: #3a3f45;
-  --tx0: #e8eaec;
-  --tx1: #c9ced3;
-  --tx2: #9aa1a8;
-  --tx3: #565b61;
-  --tx4: #3f4348;
+  --bg7: #141817;
+  --line: #22282a;
+  --line2: #2c3335;
+  --line3: #4a5450;
+  --tx0: #e6ece7;
+  --tx1: #c9d2cb;
+  --tx2: #77827b;
+  --tx3: #4a5450;
+  --tx4: #3f464b;
   --grn: #5cb27a;
   --grn2: #78c991;
   --grn3: #6fa383;
@@ -69,26 +69,26 @@
 /* Compatibility only: old preferences keep WIRE rather than reviving v6. */
 html.atr-dark {
   /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
-  --bg0: #0a0b0c;
-  --bg1: #0c0d0f;
-  --bg2: #0b0c0e;
-  --bg3: #0d0f10;
-  --bg4: #101214;
-  --bg5: #15181b;
-  --bg6: #1a1d21;
-  --bg7: #0e1012;
+  --bg0: #101312;
+  --bg1: #0d1010;
+  --bg2: #0d1010;
+  --bg3: #141817;
+  --bg4: #151a17;
+  --bg5: #141817;
+  --bg6: #1a1f1d;
+  --bg7: #141817;
 
   /* neutral rules - line (hairline) / line2 (divider) / line3 (emphatic) */
-  --line: #1f2226;
-  --line2: #2a2e33;
-  --line3: #3a3f45;
+  --line: #22282a;
+  --line2: #2c3335;
+  --line3: #4a5450;
 
   /* neutral text - tx0 (primary) ... tx4 (faintest) */
-  --tx0: #e8eaec;
-  --tx1: #c9ced3;
-  --tx2: #9aa1a8;
-  --tx3: #6d747c;
-  --tx4: #575e66;
+  --tx0: #e6ece7;
+  --tx1: #c9d2cb;
+  --tx2: #77827b;
+  --tx3: #4a5450;
+  --tx4: #3f464b;
 
   /* green - verified / settled / passing */
   --grn: #5cb27a;

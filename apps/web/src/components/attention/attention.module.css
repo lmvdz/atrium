@@ -4,13 +4,13 @@
 /* corpus turn 17: owed floats up and opens, clean compresses to a count, the
    pin FOLDS rather than scrolls. Budgeted to stay under ~240px at 820h. */
 .pin {
-  background: var(--bg2);
-  border-bottom: 1px solid var(--line2);
-  padding: 6px 20px 5px;
+  background: var(--bg0);
+  border-bottom: 0;
+  padding: 0 20px 6px;
 }
 
 .pinHead {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 8px;
   margin-bottom: 5px;
@@ -99,8 +99,8 @@
 .pinList {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-height: min(340px, 34vh);
+  gap: 2px;
+  max-height: min(260px, 30vh);
   overflow: hidden;
 }
 

@@ -2,7 +2,7 @@ import type { HumanSummary, MessageRecord, TimelineEntry } from '../src/componen
 import { messageEntry, sinceYouLeft, systemStatement } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
 import type { ReplayData } from './replay-data';
-import { replayView } from './replay-view';
+import { mentionBody, replayView } from './replay-view';
 
 const TALK = {
   kind: 'event',
@@ -47,6 +47,7 @@ export function liveRoomView(
   unreadWindow?: LiveUnreadWindow,
 ) {
   const base = replayView(data, viewerId);
+  const participantName = new Map(base.humans.map((human) => [human.id, human.name]));
   const pendingRecords: MessageRecord[] = live.pending.map((pending) => ({
     id: `pending:${pending.clientMessageId}`,
     at: clock(pending.at),
@@ -67,6 +68,10 @@ export function liveRoomView(
     const pending = live.pending[index];
     return messageEntry(record, {
       state: TALK,
+      body:
+        pending?.commandName === 'send_message'
+          ? mentionBody(pending.body, pending.mentionUserIds, participantName)
+          : undefined,
       viewer: base.viewer.name,
       tag:
         pending?.status === 'failed' && pending.retryable === true

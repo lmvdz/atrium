@@ -122,6 +122,11 @@
   min-width: 0;
 }
 
+.body [data-row-body] {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .longMessage {
   border-left: 2px solid var(--line3);
   padding-left: 7px;
@@ -527,7 +532,8 @@
 .feedCompact .mrow {
   box-sizing: border-box;
   column-gap: 5px;
-  grid-template-columns: 34px 10px minmax(42px, 58px) minmax(0, 1fr);
+  grid-template-columns: 34px 10px minmax(0, 1fr);
+  row-gap: 1px;
   min-width: 0;
   padding-left: 8px;
   padding-right: 8px;
@@ -536,7 +542,13 @@
 
 .feedCompact .body,
 .feedCompact .systemBody {
+  grid-column: 1 / -1;
   overflow-wrap: anywhere;
+  padding-left: 5px;
+}
+
+.feedCompact .actor {
+  text-align: left;
 }
 
 .feedCompact .sylCounts {

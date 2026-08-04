@@ -13,8 +13,8 @@
  * The shell is a shell: it takes the binding state and renders it. It holds no
  * draft state of its own (#25 and #27 own that).
  *
- * THE FOOTER'S CONTRACT IS IMPLEMENTED. Round 2's gauntlet: the foot printed
- * "↵ send · ⇧↵ newline" while `onKeyDown` was undefined, there was no
+ * THE SEND CONTRACT IS IMPLEMENTED. Round 2's gauntlet: the foot printed a
+ * keyboard contract while `onKeyDown` was undefined, there was no
  * `value`/`onChange`/ref seam, and `onSend?: () => void` took no argument — so a
  * consumer could not implement the sentence the component was printing without
  * forking the file. That is round 1's `data-hold` defect in a different
@@ -24,15 +24,15 @@
  * Both halves are here now:
  *   - the SEAM: `value` / `onChange` / `onKeyDown` / `textareaRef`, so a
  *     controlled consumer (#25, #27) owns the draft without touching this file.
- *   - the BEHAVIOUR: Enter sends and Shift+Enter does not, out of the box, and
- *     `onSend` receives the draft. Uncontrolled callers get the advertised
- *     behaviour for free; a consumer's own `onKeyDown` runs first and can
- *     `preventDefault()` to take the key over entirely.
+ *   - the BEHAVIOUR: Enter sends, Shift+Enter remains authored input, and the
+ *     explicit send control sends the same exact draft. The UI does not need
+ *     to narrate that conventional keyboard contract.
  *
  * It still holds no draft state: the uncontrolled path reads the textarea it
  * already has a ref to, rather than mirroring the value into React state.
  * ------------------------------------------------------------------------- */
 
+import Image from 'next/image';
 import type { ChangeEvent, KeyboardEvent, Ref } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAttribution } from '../model/ledger';
@@ -64,6 +64,13 @@ export interface ComposerProps {
   readonly onSend?: (draft: string) => void;
   readonly onAttach?: (file: File) => void;
   readonly attachmentNote?: string;
+  readonly attachments?: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly contentType?: string;
+    readonly previewUrl?: string;
+  }[];
+  readonly onRemoveAttachment?: (id: string) => void;
   /** Explicit structured request targeting, kept separate from the authored body. */
   readonly mentionTargets?: readonly { readonly id: string; readonly label: string }[];
   readonly mentionTargetId?: string | null;
@@ -84,6 +91,8 @@ export function Composer({
   onSend,
   onAttach,
   attachmentNote,
+  attachments = [],
+  onRemoveAttachment,
   mentionTargets = [],
   mentionTargetId = null,
   onMention,
@@ -113,6 +122,9 @@ export function Composer({
      mirrored to React state purely so it can be PAINTED — a control that is
      refusing to send has to say it is refusing. */
   const [composingNow, setComposingNow] = useState(false);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [draftMirror, setDraftMirror] = useState(value ?? '');
   const setComposing = useCallback((value: boolean) => {
     composing.current = value;
     setComposingNow(value);
@@ -126,6 +138,45 @@ export function Composer({
      otherwise. Reading the element is what keeps this component stateless while
      still being able to keep the footer's promise. */
   const draft = useCallback(() => value ?? own.current?.value ?? '', [value]);
+  const insert = useCallback(
+    (text: string) => {
+      const next = `${draft()}${text}`;
+      if (value === undefined && own.current !== null) own.current.value = next;
+      onChange?.(next);
+      own.current?.focus();
+    },
+    [draft, onChange, value],
+  );
+  const replaceDraft = useCallback(
+    (next: string) => {
+      setDraftMirror(next);
+      if (value === undefined && own.current !== null) own.current.value = next;
+      onChange?.(next);
+      own.current?.focus();
+    },
+    [onChange, value],
+  );
+  const visibleDraft = value ?? draftMirror;
+  const slashMatch = /^\/(\S*)$/.exec(visibleDraft);
+  const slashQuery = slashMatch?.[1]?.toLowerCase() ?? '';
+  const commands = [
+    ['/plan ', 'open or describe a plan'],
+    ['/call', 'start or address the room call'],
+    ['/invite ', 'invite a person'],
+    ['/mux', 'focus active work'],
+    ['/share', 'share an artifact or screen'],
+  ] as const;
+  const visibleCommands = commands.filter(([command]) =>
+    command.slice(1).trim().startsWith(slashQuery),
+  );
+  const mentionMatch = /(^|\s)@([^\s@]*)$/.exec(visibleDraft);
+  const mentionQuery = mentionMatch?.[2]?.toLocaleLowerCase() ?? '';
+  const visibleMentions = mentionTargets.filter((target) =>
+    target.label.toLocaleLowerCase().startsWith(mentionQuery),
+  );
+  const visibleArtifacts = attachments.filter((attachment) =>
+    attachment.name.toLocaleLowerCase().startsWith(mentionQuery),
+  );
 
   const send = useCallback(() => {
     /* Refused from EVERY control, not just the one that had the key event. A
@@ -161,7 +212,6 @@ export function Composer({
       const native = event.nativeEvent;
       if (native.isComposing || native.keyCode === 229 || composing.current) return;
       if (event.key !== 'Enter' || event.shiftKey) return;
-      /* "↵ send · ⇧↵ newline", which is what the foot says two lines down. */
       event.preventDefault();
       send();
     },
@@ -171,6 +221,10 @@ export function Composer({
   const attach = useCallback(
     (node: HTMLTextAreaElement | null) => {
       own.current = node;
+      if (node !== null) {
+        node.style.height = 'auto';
+        node.style.height = `${node.scrollHeight}px`;
+      }
       if (typeof textareaRef === 'function') textareaRef(node);
       else if (textareaRef !== null && textareaRef !== undefined) {
         (textareaRef as { current: HTMLTextAreaElement | null }).current = node;
@@ -178,6 +232,14 @@ export function Composer({
     },
     [textareaRef],
   );
+
+  useEffect(() => {
+    void value;
+    const node = own.current;
+    if (node === null) return;
+    node.style.height = 'auto';
+    node.style.height = `${node.scrollHeight}px`;
+  }, [value]);
 
   /* THE ROOM NAME AND THE FOOT NOTE ARE STRINGS THIS COMPONENT PRINTS. The foot
      note is a whole page-authored sentence the consumer supplies — it is what
@@ -231,26 +293,92 @@ export function Composer({
         <ReplyBanner onCancel={onCancelBinding} to={binding.to} />
       ) : null}
 
-      {binding.mode !== 'free' || mentionTargets.length === 0 || onMention === undefined ? null : (
-        <label className={styles.mentionBar}>
-          <span className="atr-lbl">MENTION</span>
-          <select
-            aria-label="Mention a person"
-            disabled={disabled}
-            onChange={(event) => onMention(event.target.value || null)}
-            value={mentionTargetId ?? ''}
-          >
-            <option value="">Choose a person…</option>
-            {mentionTargets.map((target) => (
-              <option key={target.id} value={systemText(target.id, 'Composer mention target id')}>
-                {systemText(target.label, 'Composer mention target')}
-              </option>
-            ))}
-          </select>
-          <span data-voice="system">
-            routes this message as a request; its words stay unchanged
-          </span>
-        </label>
+      {attachments.length === 0 ? null : (
+        <div className={styles.attachmentChips}>
+          {attachments.map((attachment) => (
+            <span key={attachment.id}>
+              {attachment.previewUrl === undefined ||
+              !attachment.contentType?.startsWith('image/') ? null : (
+                <Image alt="" height={34} src={attachment.previewUrl} unoptimized width={46} />
+              )}
+              ▤ {systemText(attachment.name, 'Composer attachment')}
+              {onRemoveAttachment === undefined ? null : (
+                <button
+                  aria-label={`Remove ${systemText(attachment.name, 'Composer attachment')}`}
+                  onClick={() => onRemoveAttachment(attachment.id)}
+                  type="button"
+                >
+                  ×
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {binding.mode !== 'free' ||
+      (!mentionOpen && mentionMatch === null) ||
+      mentionTargets.length === 0 ||
+      onMention === undefined ? null : (
+        <div className={styles.mentionMenu}>
+          {visibleMentions.map((target) => (
+            <button
+              aria-pressed={mentionTargetId === target.id}
+              key={target.id}
+              onClick={() => {
+                const prefix =
+                  mentionMatch === null
+                    ? visibleDraft
+                    : visibleDraft.slice(0, mentionMatch.index) + (mentionMatch[1] ?? '');
+                replaceDraft(`${prefix}@${target.label} `);
+                onMention(target.id);
+                setMentionOpen(false);
+              }}
+              type="button"
+            >
+              @{systemText(target.label, 'Composer mention target')}
+            </button>
+          ))}
+          {visibleArtifacts.map((attachment) => (
+            <button
+              className={styles.artifactMention}
+              key={attachment.id}
+              onClick={() => {
+                const prefix =
+                  mentionMatch === null
+                    ? visibleDraft
+                    : visibleDraft.slice(0, mentionMatch.index) + (mentionMatch[1] ?? '');
+                replaceDraft(`${prefix}@${attachment.name} `);
+                setMentionOpen(false);
+              }}
+              type="button"
+            >
+              ▤ @{systemText(attachment.name, 'Composer attachment mention')}
+            </button>
+          ))}
+          {visibleMentions.length === 0 && visibleArtifacts.length === 0 ? (
+            <span>No matching person, agent, or attached artifact</span>
+          ) : null}
+        </div>
+      )}
+
+      {!slashOpen && slashMatch === null ? null : (
+        <div className={styles.commandMenu}>
+          <div>COMMANDS · select to insert</div>
+          {visibleCommands.map(([command, description]) => (
+            <button
+              key={command}
+              onClick={() => {
+                replaceDraft(command);
+                setSlashOpen(false);
+              }}
+              type="button"
+            >
+              <span>{command}</span>
+              <small>{description}</small>
+            </button>
+          ))}
+        </div>
       )}
 
       {/* `data-composer-box` names the element whose BORDER is the binding cue,
@@ -289,7 +417,10 @@ export function Composer({
                whose composition events are least reliable. The guaranteed exits
                are compositionend, blur and unmount; this one is the fast path. */
             if (native.isComposing === false) setComposing(false);
+            setDraftMirror(event.target.value);
             onChange?.(event.target.value);
+            event.target.style.height = 'auto';
+            event.target.style.height = `${event.target.scrollHeight}px`;
           }}
           onCompositionEnd={() => setComposing(false)}
           onCompositionStart={() => setComposing(true)}
@@ -325,17 +456,68 @@ export function Composer({
                 type="file"
               />
               <button
-                className="atr-btn"
+                aria-label="Attach a file"
+                className={`${styles.composerTool} ${styles.composerAttach}`}
                 disabled={disabled}
                 onClick={() => fileInput.current?.click()}
+                title="attach a file"
                 type="button"
               >
-                Attach
+                <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 24 24" width="14">
+                  <path
+                    d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                  />
+                </svg>
               </button>
             </>
           )}
           <button
-            className="atr-btn"
+            aria-expanded={mentionOpen}
+            aria-label="Mention a person or agent"
+            className={styles.composerTool}
+            disabled={disabled}
+            onClick={() => {
+              if (mentionMatch === null) insert('@');
+              setMentionOpen(true);
+              setSlashOpen(false);
+            }}
+            title="mention a person or agent"
+            type="button"
+          >
+            <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 24 24" width="14">
+              <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="2" />
+              <path
+                d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeWidth="2"
+              />
+            </svg>
+          </button>
+          <button
+            aria-expanded={slashOpen}
+            aria-label="Open commands"
+            className={styles.composerTool}
+            disabled={disabled}
+            onClick={() => {
+              replaceDraft('/');
+              setSlashOpen(true);
+              setMentionOpen(false);
+            }}
+            title="commands"
+            type="button"
+          >
+            <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 24 24" width="14">
+              <path d="m15 4-6 16" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+            </svg>
+          </button>
+          <button
+            aria-label="Send"
+            className={styles.composerSend}
             disabled={disabled}
             onClick={send}
             /* KEEP THE COMPOSITION ALIVE ACROSS THE CLICK. Pressing a button
@@ -349,7 +531,16 @@ export function Composer({
             onMouseDown={(event) => event.preventDefault()}
             type="button"
           >
-            Send
+            <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 24 24" width="14">
+              <path
+                d="m22 2-7 20-4-9-9-4Z"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+              />
+              <path d="M22 2 11 13" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+            </svg>
           </button>
         </div>
       </div>
@@ -365,12 +556,7 @@ export function Composer({
               choosing a candidate — <span className={styles.key}>↵</span> accepts it; the message
               is not sent until the composition ends
             </span>
-          ) : (
-            <>
-              <span className={styles.key}>↵</span> send · <span className={styles.key}>⇧↵</span>{' '}
-              newline
-            </>
-          )}
+          ) : null}
         </span>
         <span className={styles.cfootSpacer} />
         {foot === null ? null : <span data-composer-note="true">{foot}</span>}

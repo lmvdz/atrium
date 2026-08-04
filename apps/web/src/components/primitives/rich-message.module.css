@@ -1,0 +1,105 @@
+.rich {
+  color: var(--tx1);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.rich > :first-child {
+  margin-top: 0;
+}
+.rich > :last-child {
+  margin-bottom: 0;
+}
+.rich p,
+.rich ul,
+.rich ol,
+.rich blockquote,
+.rich pre,
+.rich table {
+  margin: 5px 0;
+}
+.rich h1,
+.rich h2,
+.rich h3,
+.rich h4,
+.rich h5,
+.rich h6 {
+  color: var(--tx0);
+  font-size: 1em;
+  margin: 8px 0 4px;
+}
+.rich ul,
+.rich ol {
+  padding-left: 20px;
+}
+.rich blockquote {
+  border-left: 2px solid var(--line3);
+  color: var(--tx2);
+  padding-left: 9px;
+}
+.rich a {
+  color: var(--blu2);
+  text-decoration: underline;
+  text-decoration-color: var(--blu3);
+  text-underline-offset: 2px;
+}
+.rich :not(pre) > code {
+  background: var(--bg7);
+  border: 1px solid var(--line);
+  color: var(--tx0);
+  padding: 0 3px;
+}
+.rich pre {
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  max-height: 420px;
+  overflow: auto;
+  padding: 9px 11px;
+}
+.rich pre code {
+  display: block;
+  font-family: 'IBM Plex Mono', monospace;
+  white-space: pre;
+}
+.rich table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.rich th,
+.rich td {
+  border: 1px solid var(--line2);
+  padding: 3px 7px;
+  text-align: left;
+}
+.rich th {
+  background: var(--bg3);
+  color: var(--tx0);
+}
+.rich input[type='checkbox'] {
+  accent-color: var(--grn);
+}
+.blockedImage {
+  color: var(--tx2);
+  font-style: italic;
+}
+.diff span {
+  display: block;
+  min-height: 1lh;
+}
+.diffAdd {
+  background: var(--grnbg);
+  color: var(--grn2);
+}
+.diffRemove {
+  background: var(--redbg);
+  color: var(--red2);
+}
+.diffHunk {
+  background: var(--replybg);
+  color: var(--blu2);
+}
+.diffFile {
+  color: var(--tx0);
+  font-weight: 600;
+}

@@ -32,6 +32,7 @@ export { Glyph } from './primitives/Glyph';
 export type { Arming, HoldToActProps } from './primitives/HoldToAct';
 export { DEFAULT_HOLD_MS, HoldToAct } from './primitives/HoldToAct';
 export { MessageBody } from './primitives/MessageBody';
+export { hasRichMessageSyntax, RichMessageBody } from './primitives/RichMessageBody';
 export { Quoted, SystemVoice } from './primitives/Voice';
 export { RoutineCollapse } from './timeline/RoutineCollapse';
 export { SinceYouLeftDivider } from './timeline/SinceYouLeftDivider';

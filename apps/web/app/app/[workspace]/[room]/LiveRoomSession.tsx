@@ -63,7 +63,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [mentionTargetId, setMentionTargetId] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const [attachments, setAttachments] = useState<
+    Array<UploadedAttachment & { readonly previewUrl?: string }>
+  >([]);
+  const attachmentPreviewUrls = useRef(new Set<string>());
   const [attachmentNote, setAttachmentNote] = useState<string>();
   const pendingUploads = useRef(0);
   const [uploading, setUploading] = useState(false);
@@ -72,6 +75,14 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     clientMessageId: string;
     questionId: string;
   } | null>(null);
+
+  useEffect(
+    () => () => {
+      for (const url of attachmentPreviewUrls.current) URL.revokeObjectURL(url);
+      attachmentPreviewUrls.current.clear();
+    },
+    [],
+  );
   const [focused, setFocused] = useState<SurfaceId>('conversation');
   const [filter, setFilter] = useState<AttentionClass | null>(null);
   const [unreadWindow, setUnreadWindow] = useState<
@@ -278,6 +289,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     // A bound answer is complete only once the canonical semantic projection,
     // not its command ack, says the question was answered.
     setDraft('');
+    for (const url of attachmentPreviewUrls.current) URL.revokeObjectURL(url);
+    attachmentPreviewUrls.current.clear();
     setAttachments([]);
     setAttachmentNote(undefined);
     setBinding({ mode: 'free' });
@@ -328,6 +341,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         filter={filter}
         focused={focused}
         handlers={{
+          attachments: attachments.map((attachment) => ({
+            id: attachment.key,
+            name: attachment.name,
+            contentType: attachment.contentType,
+            previewUrl: attachment.previewUrl,
+          })),
           composerValue: draft,
           onComposerChange: (next) => {
             setDraft(next);
@@ -363,6 +382,8 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               });
               setDraft('');
               setMentionTargetId(null);
+              for (const url of attachmentPreviewUrls.current) URL.revokeObjectURL(url);
+              attachmentPreviewUrls.current.clear();
               setAttachments([]);
               setAttachmentNote(undefined);
               setBinding({ mode: 'free' });
@@ -375,7 +396,11 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             setAttachmentNote(`uploading ${file.name} directly to object storage`);
             void uploadAttachment(roomId, file)
               .then((uploaded) => {
-                setAttachments((current) => [...current, uploaded]);
+                const previewUrl = file.type.startsWith('image/')
+                  ? URL.createObjectURL(file)
+                  : undefined;
+                if (previewUrl !== undefined) attachmentPreviewUrls.current.add(previewUrl);
+                setAttachments((current) => [...current, { ...uploaded, previewUrl }]);
                 setAttachmentNote(`${uploaded.name} attached · ${uploaded.size} bytes`);
               })
               .catch((failure: unknown) => {
@@ -388,6 +413,15 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               });
           },
           onMention: setMentionTargetId,
+          onRemoveAttachment: (id) =>
+            setAttachments((current) => {
+              const removed = current.find((attachment) => attachment.key === id);
+              if (removed?.previewUrl !== undefined) {
+                URL.revokeObjectURL(removed.previewUrl);
+                attachmentPreviewUrls.current.delete(removed.previewUrl);
+              }
+              return current.filter((attachment) => attachment.key !== id);
+            }),
           attachmentNote,
           onCancelBinding: () => {
             if (boundSubmission === null) setBinding({ mode: 'free' });

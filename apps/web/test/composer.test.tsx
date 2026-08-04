@@ -53,11 +53,10 @@ function box(): HTMLTextAreaElement {
   return screen.getByRole('textbox') as HTMLTextAreaElement;
 }
 
-describe('the composer keeps the promise its footer prints', () => {
-  /* CATCHES the exact defect: a footer that says Enter sends while nothing
-     handles Enter. If this fails, the copy is a claim about behaviour that does
-     not exist. */
-  it('Enter sends the draft, and the draft is what arrives', () => {
+describe('the composer keeps its send contract', () => {
+  /* CATCHES: deleting the conventional Enter send path while leaving only the
+     pointer-oriented send control. */
+  it('Enter sends the exact draft', () => {
     const sent: string[] = [];
     render(
       <Composer
@@ -86,7 +85,7 @@ describe('the composer keeps the promise its footer prints', () => {
       />,
     );
     fireEvent.change(box(), { target: { value: 'typed, therefore quotable' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.keyDown(box(), { key: 'Enter' });
     expect(sent).toEqual(['typed, therefore quotable']);
   });
 
@@ -100,14 +99,24 @@ describe('the composer keeps the promise its footer prints', () => {
     expect(sent).toEqual([]);
   });
 
+  /* CATCHES: normalizing the textarea value before send. Paragraph breaks are
+     authored bytes, not presentation hints, and must reach the record intact. */
+  it('sends a multiline draft without flattening it', () => {
+    const sent: string[] = [];
+    render(<Composer binding={FREE} footNote={FOOT} onSend={(d) => sent.push(d)} roomName="r" />);
+    fireEvent.change(box(), { target: { value: 'first line\n\nsecond paragraph' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent).toEqual(['first line\n\nsecond paragraph']);
+  });
+
   /* CATCHES: sending emptiness. An empty message is not a message, and the row
      it would produce would carry a quotation minted from nothing. */
   it('an empty or whitespace draft sends nothing', () => {
     const sent: string[] = [];
     render(<Composer binding={FREE} footNote={FOOT} onSend={(d) => sent.push(d)} roomName="r" />);
-    fireEvent.keyDown(box(), { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     fireEvent.change(box(), { target: { value: '   ' } });
-    fireEvent.keyDown(box(), { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(sent).toEqual([]);
   });
 
@@ -155,7 +164,7 @@ describe('the composer keeps the promise its footer prints', () => {
         value="the consumer's words"
       />,
     );
-    fireEvent.keyDown(box(), { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(sent).toEqual(["the consumer's words"]);
   });
 
@@ -209,10 +218,10 @@ describe('the composer keeps the promise its footer prints', () => {
     fireEvent.change(box(), { target: { value: 'にほんg' } });
     fireEvent.keyDown(box(), { key: 'Enter', isComposing: true });
     expect(sent, 'accepting an IME candidate sent a half-composed message').toEqual([]);
-    // and the same key AFTER composition ends does send, so this is not a mute
+    // and the explicit send control works after composition ends
     fireEvent.compositionEnd(box());
     fireEvent.change(box(), { target: { value: '日本語' } });
-    fireEvent.keyDown(box(), { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(sent).toEqual(['日本語']);
   });
 
@@ -247,9 +256,43 @@ describe('the composer keeps the promise its footer prints', () => {
   /* CATCHES: the copy and the behaviour drifting apart in the other direction —
      the footer being edited to promise something else. The sentence on screen
      is the sentence this file tests. */
-  it('the footer still prints the contract these tests hold it to', () => {
+  it('the footer no longer advertises the removed modifier-key contract', () => {
     render(<Composer binding={FREE} footNote="x" roomName="r" />);
-    expect(screen.getByText(/send/).textContent?.replace(/\s+/g, ' ')).toContain('↵ send · ⇧↵');
+    expect(screen.queryByText(/↵ send/)).toBeNull();
+  });
+});
+
+describe('draft-driven command and mention completion', () => {
+  /* CATCHES: opening commands only from the slash button, leaving a slash typed
+     into the primary input inert even though V8 promises keyboard completion. */
+  it('typing slash opens and filters commands', () => {
+    render(<Composer binding={FREE} roomName="r" />);
+    fireEvent.change(box(), { target: { value: '/in' } });
+    expect(screen.getByRole('button', { name: /invite/i })).toBeDefined();
+    expect(screen.queryByRole('button', { name: /plan/i })).toBeNull();
+  });
+
+  /* CATCHES: painting @name without preserving the structured user id used by
+     attention routing. The selected words and routing target move together. */
+  it('typing at-sign filters mentions and selecting one inserts words plus id', () => {
+    const drafts: string[] = [];
+    const targets: Array<string | null> = [];
+    render(
+      <Composer
+        binding={FREE}
+        mentionTargets={[
+          { id: 'u-priya', label: 'priya' },
+          { id: 'u-maya', label: 'maya' },
+        ]}
+        onChange={(draft) => drafts.push(draft)}
+        onMention={(id) => targets.push(id)}
+        roomName="r"
+      />,
+    );
+    fireEvent.change(box(), { target: { value: 'ask @pr' } });
+    fireEvent.click(screen.getByRole('button', { name: '@priya' }));
+    expect(drafts.at(-1)).toBe('ask @priya ');
+    expect(targets).toEqual(['u-priya']);
   });
 });
 

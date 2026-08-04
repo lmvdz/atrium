@@ -7,6 +7,7 @@ import {
 } from '@atrium/core';
 import type {
   AttentionItem,
+  BodySegment,
   CorrectionEntry,
   EpistemicState,
   HumanSummary,
@@ -32,6 +33,32 @@ import {
 } from '../src/components';
 import type { ReplayData } from './replay-data';
 import type { ReplayCorrectionTransition } from './replay-transitions';
+
+export function mentionBody(
+  text: string,
+  mentionUserIds: readonly string[],
+  participantName: ReadonlyMap<string, string>,
+): readonly BodySegment[] | undefined {
+  const names = mentionUserIds
+    .map((id) => participantName.get(id))
+    .filter((name): name is string => name !== undefined)
+    .sort((left, right) => right.length - left.length);
+  if (names.length === 0) return undefined;
+  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(`@(${escaped.join('|')})(?![\\p{L}\\p{N}_-])`, 'giu');
+  const body: BodySegment[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    const at = match.index;
+    const words = match[0];
+    if (at > cursor) body.push({ kind: 'text', text: text.slice(cursor, at) });
+    body.push({ kind: 'mention', text: words.slice(1) });
+    cursor = at + words.length;
+  }
+  if (cursor === 0) return undefined;
+  if (cursor < text.length) body.push({ kind: 'text', text: text.slice(cursor) });
+  return body;
+}
 
 const TALK: EpistemicState = {
   kind: 'event',
@@ -166,6 +193,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
          in its source message. Human speech stays discussion; the Current-state
          object and its receipt carry the derived epistemic status. */
       state: TALK,
+      body: mentionBody(message.body, message.mentionUserIds ?? [], participantName),
       replyTo: reply ? quotationFrom(reply) : null,
       viewer: viewerName,
     });

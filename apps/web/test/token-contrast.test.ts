@@ -192,8 +192,8 @@ const DARK = block('html.atr-dark');
    class on WIRE. A persisted preference would look current while a fresh visit
    rendered the superseded product. Both entry points must begin at the WIRE
    canvas; their inset ramps may still differ slightly during migration. */
-if (LIGHT.bg0 !== '#0a0b0c' || DARK.bg0 !== '#0a0b0c') {
-  throw new Error('token-contrast: both root entry points must begin on the WIRE #0a0b0c canvas');
+if (LIGHT.bg0 !== '#101312' || DARK.bg0 !== '#101312') {
+  throw new Error('token-contrast: both root entry points must begin on the v8 #101312 canvas');
 }
 
 function channel(c: number): number {
