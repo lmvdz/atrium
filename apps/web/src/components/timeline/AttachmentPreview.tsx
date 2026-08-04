@@ -25,6 +25,7 @@ function formatBytes(size: number): string {
  */
 export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPreviewProps) {
   const close = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const [url, setUrl] = useState<string>();
   const [error, setError] = useState<string>();
@@ -36,9 +37,25 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     close.current?.focus();
     const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      onClose();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const controls = [
+        ...(dialog.current?.querySelectorAll<HTMLElement>('button, [href]') ?? []),
+      ].filter((control) => !control.hasAttribute('disabled') && control.tabIndex >= 0);
+      if (controls.length === 0) return;
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
     };
     window.addEventListener('keydown', keyDown);
     return () => {
@@ -94,6 +111,7 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
         aria-label={`Preview ${name}`}
         aria-modal="true"
         className={styles.dialog}
+        ref={dialog}
         role="dialog"
       >
         <header className={styles.header}>

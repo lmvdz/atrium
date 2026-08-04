@@ -101,6 +101,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const [openAttentionId, setOpenAttentionId] = useState<string>();
   const [openObjectives, setOpenObjectives] = useState<Readonly<Record<string, boolean>>>({});
   const [receiptId, setReceiptId] = useState<string | null>(null);
+  const [targetMessageId, setTargetMessageId] = useState<string | null>(null);
   const [pendingSupersession, setPendingSupersession] = useState<PendingSupersession | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshLeaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -360,6 +361,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const jumpToMessage = (messageId: string) => {
     setReceiptId(null);
     setFocused('conversation');
+    setTargetMessageId(messageId);
     requestAnimationFrame(() => {
       const row = [...document.querySelectorAll<HTMLElement>('[data-message-id]')].find(
         (candidate) => candidate.dataset.messageId === messageId,
@@ -390,7 +392,9 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             ? `${live.typing.length} typing · ordered through ${live.lastSeq}`
             : `${connection} · waiting for an authorized room subscription`)
         }
-        entries={withFilter(view.entries, filter, unreadFilterScope ?? [])}
+        entries={withFilter(view.entries, filter, unreadFilterScope ?? []).map((entry) =>
+          entry.type === 'message' ? { ...entry, targeted: entry.id === targetMessageId } : entry,
+        )}
         filter={filter}
         focused={focused}
         handlers={{

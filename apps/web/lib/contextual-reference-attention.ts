@@ -14,12 +14,7 @@ export function contextualReferenceAttention(
   data: ReplayData,
   viewerId: string | undefined,
 ): readonly ContextualReferenceAttention[] {
-  const resolvedViewerId =
-    data.participants.find((participant) => participant.id === viewerId)?.id ??
-    data.participants.find((participant) =>
-      data.attention.some((item) => item.userId === participant.id && item.status === 'pending'),
-    )?.id ??
-    data.participants[0]?.id;
+  const resolvedViewerId = data.participants.find((participant) => participant.id === viewerId)?.id;
   if (resolvedViewerId === undefined) return [];
 
   const pending = data.attention.filter(

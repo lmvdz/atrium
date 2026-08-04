@@ -43,6 +43,40 @@ describe('attachment preview', () => {
     opener.remove();
   });
 
+  /* CATCHES: declaring aria-modal while Tab can leave the dialog and reach the
+     obscured room controls behind it. */
+  it('keeps keyboard focus inside the modal', async () => {
+    render(
+      <AttachmentPreview
+        attachment={image}
+        loadUrl={async () => 'https://objects.invalid/capture-one'}
+        onClose={() => undefined}
+      />,
+    );
+    const close = screen.getByRole('button', { name: 'Close attachment preview' });
+    const actualSize = screen.getByRole('button', { name: 'actual size' });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(document.activeElement).toBe(actualSize);
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(close);
+  });
+
+  /* CATCHES: painting a backdrop affordance whose click never closes the
+     preview, leaving pointer users dependent on the header control. */
+  it('closes from the backdrop', () => {
+    const onClose = vi.fn();
+    render(
+      <AttachmentPreview
+        attachment={image}
+        loadUrl={async () => 'https://objects.invalid/capture-one'}
+        onClose={onClose}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview backdrop' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   /* CATCHES: caching an expired presigned URL forever; an image error must ask
      the authorization route for a fresh URL without mutating the attachment. */
   it('refreshes an expired image URL once', async () => {

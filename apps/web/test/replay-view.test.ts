@@ -140,9 +140,19 @@ describe('contextual direct-reference placement', () => {
     snapshot.attention.push(mention('mine', 'm1'));
     snapshot.attention.push(mention('theirs', 'm1', 'bob'));
     snapshot.attention.push({ ...mention('resolved', 'm2'), status: 'resolved', resolvedAt: at });
+    snapshot.attention.push({ ...mention('dismissed', 'm3'), status: 'dismissed', resolvedAt: at });
     expect(contextualReferenceAttention(snapshot, 'alice').map((item) => item.attentionId)).toEqual(
       ['mine'],
     );
+  });
+
+  /* CATCHES: guessing a viewer from whichever participant owns a pending
+     reference, which leaks that person's attention on an anonymous replay. */
+  it('projects no personal attention without an exact current viewer', () => {
+    const snapshot = data();
+    snapshot.attention.push(mention('alice-private', 'm1'));
+    expect(contextualReferenceAttention(snapshot, undefined)).toEqual([]);
+    expect(contextualReferenceAttention(snapshot, 'not-a-participant')).toEqual([]);
   });
 });
 
