@@ -127,7 +127,14 @@ export function surfaceIndicators(owed: number, objects: number): readonly Surfa
 export type BodySegment =
   | { readonly kind: 'text'; readonly text: string }
   | { readonly kind: 'code'; readonly text: string }
-  | { readonly kind: 'mention'; readonly text: string };
+  | {
+      readonly kind: 'mention';
+      readonly text: string;
+      readonly referenceKind?: 'human' | 'attachment' | 'proposal' | 'object';
+      readonly targetId?: string;
+      readonly resolution?: string;
+      readonly legacy?: boolean;
+    };
 
 /**
  * The text one segment PUTS ON SCREEN.

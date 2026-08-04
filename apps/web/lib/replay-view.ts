@@ -31,33 +31,68 @@ import {
   systemStatement,
   trailerFor,
 } from '../src/components';
+import type { MessageReference, MessageReferenceKind } from '../src/lib/typed-references';
 import type { ReplayData } from './replay-data';
 import type { ReplayCorrectionTransition } from './replay-transitions';
 
-export function mentionBody(
+export interface ReferenceResolution {
+  readonly kind: MessageReferenceKind;
+  readonly targetId: string;
+  readonly label?: string;
+  readonly state?: string;
+}
+
+/** Mark exact stored spans; resolution is metadata and never replaces authored words. */
+export function typedReferenceBody(
   text: string,
-  mentionUserIds: readonly string[],
-  participantName: ReadonlyMap<string, string>,
+  references: readonly MessageReference[],
+  resolve: (kind: MessageReferenceKind, targetId: string) => ReferenceResolution | undefined,
 ): readonly BodySegment[] | undefined {
-  const names = mentionUserIds
-    .map((id) => participantName.get(id))
-    .filter((name): name is string => name !== undefined)
-    .sort((left, right) => right.length - left.length);
-  if (names.length === 0) return undefined;
-  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const pattern = new RegExp(`@(${escaped.join('|')})(?![\\p{L}\\p{N}_-])`, 'giu');
+  if (references.length === 0) return undefined;
+  const ordered = [...references].sort((left, right) => left.ordinal - right.ordinal);
   const body: BodySegment[] = [];
   let cursor = 0;
-  for (const match of text.matchAll(pattern)) {
-    const at = match.index;
-    const words = match[0];
-    if (at > cursor) body.push({ kind: 'text', text: text.slice(cursor, at) });
-    body.push({ kind: 'mention', text: words.slice(1) });
-    cursor = at + words.length;
+  for (const reference of ordered) {
+    if (
+      !reference.surface.startsWith('@') ||
+      reference.start < cursor ||
+      reference.end <= reference.start ||
+      reference.end > text.length ||
+      text.slice(reference.start, reference.end) !== reference.surface
+    ) {
+      // A corrupt projection must not turn unproved metadata into authored markup.
+      return undefined;
+    }
+    if (reference.start > cursor) {
+      body.push({ kind: 'text', text: text.slice(cursor, reference.start) });
+    }
+    const resolution = resolve(reference.kind, reference.targetId);
+    body.push({
+      kind: 'mention',
+      text: reference.surface.startsWith('@') ? reference.surface.slice(1) : reference.surface,
+      referenceKind: reference.kind,
+      targetId: reference.targetId,
+      resolution:
+        resolution === undefined
+          ? `${reference.kind} unavailable`
+          : [resolution.label, resolution.state].filter(Boolean).join(' · '),
+    });
+    cursor = reference.end;
   }
-  if (cursor === 0) return undefined;
   if (cursor < text.length) body.push({ kind: 'text', text: text.slice(cursor) });
   return body;
+}
+
+export function mentionBody(
+  _text: string,
+  _mentionUserIds: readonly string[],
+  _participantName: ReadonlyMap<string, string>,
+): readonly BodySegment[] | undefined {
+  // Pre-0015 rows recorded target ids but no authored spans. Searching the
+  // body for a current display name would fabricate provenance, especially
+  // after rename. Render the immutable body plainly and disclose degradation
+  // in system voice on the row instead.
+  return undefined;
 }
 
 const TALK: EpistemicState = {
@@ -80,6 +115,9 @@ export function replayAt(data: ReplayData, messageCount: number): ReplayData {
   return {
     ...data,
     messages: visibleMessages,
+    messageReferences: (data.messageReferences ?? []).filter((reference) =>
+      visibleMessages.some((message) => message.id === reference.messageId),
+    ),
     interpretations: [],
     proposals: [],
     proposalSources: [],
@@ -184,6 +222,66 @@ export function replayView(data: ReplayData, viewerId?: string) {
       objectives: objectives.map((objective) => objective.id),
     }));
   const objects = [...accepted, ...staged];
+  const currentHumanName = new Map(
+    (data.referenceHumans ?? data.participants).map((person) => [person.id, person.name]),
+  );
+  const currentParticipantIds = new Set(data.participants.map((person) => person.id));
+  const attachmentById = new Map(
+    (data.referenceAttachments ?? []).map((attachment) => [attachment.id, attachment]),
+  );
+  const referencesByMessage = new Map<string, MessageReference[]>();
+  for (const reference of data.messageReferences ?? []) {
+    const current = referencesByMessage.get(reference.messageId) ?? [];
+    current.push(reference);
+    referencesByMessage.set(reference.messageId, current);
+  }
+  const resolveReference = (
+    kind: MessageReferenceKind,
+    targetId: string,
+  ): ReferenceResolution | undefined => {
+    if (kind === 'human') {
+      const label = currentHumanName.get(targetId);
+      return label === undefined
+        ? undefined
+        : {
+            kind,
+            targetId,
+            label,
+            state: currentParticipantIds.has(targetId) ? undefined : 'no longer in room',
+          };
+    }
+    if (kind === 'attachment') {
+      const attachment = attachmentById.get(targetId);
+      return attachment === undefined
+        ? undefined
+        : { kind, targetId, label: attachment.name, state: attachment.contentType };
+    }
+    if (kind === 'proposal') {
+      const proposal = data.proposals.find((candidate) => candidate.id === targetId);
+      return proposal === undefined
+        ? undefined
+        : {
+            kind,
+            targetId,
+            label: payloadText(proposal.type, proposal.payload),
+            state: proposal.status,
+          };
+    }
+    const object = data.objects.find((candidate) => candidate.id === targetId);
+    return object === undefined
+      ? undefined
+      : {
+          kind,
+          targetId,
+          label: payloadText(object.type, object.payload),
+          state:
+            object.retractedAt !== null
+              ? 'retracted'
+              : object.supersededById !== null
+                ? 'superseded'
+                : 'accepted',
+        };
+  };
 
   const messageEntries: TimelineEntry[] = data.messages.map((message, index) => {
     const record = records[index] as MessageRecord;
@@ -193,9 +291,19 @@ export function replayView(data: ReplayData, viewerId?: string) {
          in its source message. Human speech stays discussion; the Current-state
          object and its receipt carry the derived epistemic status. */
       state: TALK,
-      body: mentionBody(message.body, message.mentionUserIds ?? [], participantName),
+      body: referencesByMessage.has(message.id)
+        ? typedReferenceBody(
+            message.body,
+            referencesByMessage.get(message.id) ?? [],
+            resolveReference,
+          )
+        : mentionBody(message.body, message.mentionUserIds ?? [], participantName),
       replyTo: reply ? quotationFrom(reply) : null,
       viewer: viewerName,
+      note:
+        referencesByMessage.has(message.id) || (message.mentionUserIds?.length ?? 0) === 0
+          ? null
+          : systemStatement('legacy mention metadata has no verified authored span'),
     });
   });
   const entries: TimelineEntry[] =
@@ -214,16 +322,18 @@ export function replayView(data: ReplayData, viewerId?: string) {
           ...messageEntries,
         ];
 
-  const sourceFor = (subjectKind: 'object' | 'proposal', subjectId: string) => {
+  const sourceFor = (subjectKind: 'object' | 'proposal' | 'message', subjectId: string) => {
     const sourceId =
-      subjectKind === 'proposal'
-        ? data.proposalSources.find((source) => source.proposalId === subjectId)?.messageId
-        : (data.objectSources.find((source) => source.objectId === subjectId)?.messageId ??
-          (() => {
-            const proposalId = data.objects.find((object) => object.id === subjectId)?.proposalId;
-            return data.proposalSources.find((source) => source.proposalId === proposalId)
-              ?.messageId;
-          })());
+      subjectKind === 'message'
+        ? subjectId
+        : subjectKind === 'proposal'
+          ? data.proposalSources.find((source) => source.proposalId === subjectId)?.messageId
+          : (data.objectSources.find((source) => source.objectId === subjectId)?.messageId ??
+            (() => {
+              const proposalId = data.objects.find((object) => object.id === subjectId)?.proposalId;
+              return data.proposalSources.find((source) => source.proposalId === proposalId)
+                ?.messageId;
+            })());
     const source = sourceId ? recordById.get(sourceId) : undefined;
     return source ? citationFrom(source) : null;
   };
@@ -269,9 +379,11 @@ export function replayView(data: ReplayData, viewerId?: string) {
             }
           : subjectState,
       title:
-        (acceptedFromProposal
-          ? payloadText(acceptedFromProposal.type, acceptedFromProposal.payload)
-          : subject?.text) ??
+        (item.subjectKind === 'message'
+          ? 'direct reference in a message'
+          : acceptedFromProposal
+            ? payloadText(acceptedFromProposal.type, acceptedFromProposal.payload)
+            : subject?.text) ??
         (proposalSubject
           ? payloadText(proposalSubject.type, proposalSubject.payload)
           : 'an item whose semantic record is unavailable'),

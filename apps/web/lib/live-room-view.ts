@@ -2,7 +2,7 @@ import type { HumanSummary, MessageRecord, TimelineEntry } from '../src/componen
 import { messageEntry, sinceYouLeft, systemStatement } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
 import type { ReplayData } from './replay-data';
-import { mentionBody, replayView } from './replay-view';
+import { mentionBody, replayView, typedReferenceBody } from './replay-view';
 
 const TALK = {
   kind: 'event',
@@ -70,7 +70,15 @@ export function liveRoomView(
       state: TALK,
       body:
         pending?.commandName === 'send_message'
-          ? mentionBody(pending.body, pending.mentionUserIds, participantName)
+          ? pending.references.length > 0
+            ? typedReferenceBody(pending.body, pending.references, (kind, targetId) => {
+                if (kind === 'human') {
+                  const label = participantName.get(targetId);
+                  return label === undefined ? undefined : { kind, targetId, label };
+                }
+                return { kind, targetId, label: kind };
+              })
+            : mentionBody(pending.body, pending.mentionUserIds, participantName)
           : undefined,
       viewer: base.viewer.name,
       tag:
@@ -80,7 +88,11 @@ export function liveRoomView(
       note:
         pending?.status === 'failed'
           ? systemStatement(pending.error ?? 'the send did not complete')
-          : null,
+          : pending?.commandName === 'send_message' &&
+              pending.mentionUserIds.length > 0 &&
+              pending.references.length === 0
+            ? systemStatement('legacy mention metadata has no verified authored span')
+            : null,
     });
   });
   const humans = base.humans.map((human) => ({

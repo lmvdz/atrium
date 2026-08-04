@@ -7,11 +7,13 @@ import {
   coreEvents,
   corrections,
   interpretations,
+  messageReferences,
   messages,
   objectRelations,
   objectSources,
   proposalSources,
   proposals,
+  attachments as roomAttachments,
   rooms,
   users,
   workspaces,
@@ -76,6 +78,22 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     .orderBy(asc(messages.seq));
 
   const messageIds = roomMessages.map((message) => message.id);
+  const references =
+    messageIds.length === 0
+      ? []
+      : await database
+          .select()
+          .from(messageReferences)
+          .where(inArray(messageReferences.messageId, messageIds))
+          .orderBy(asc(messageReferences.messageId), asc(messageReferences.ordinal));
+  const referencedHumanIds = [
+    ...new Set(references.filter((reference) => reference.kind === 'human').map((r) => r.targetId)),
+  ];
+  const referencedAttachmentIds = [
+    ...new Set(
+      references.filter((reference) => reference.kind === 'attachment').map((r) => r.targetId),
+    ),
+  ];
 
   const participantIds = await roomMemberIds(database, roomId);
   const [
@@ -88,6 +106,8 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     fixes,
     messageEvents,
     roomCursor,
+    referenceHumans,
+    referenceAttachments,
   ] = await Promise.all([
     participantIds.length === 0
       ? Promise.resolve([])
@@ -139,6 +159,28 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
       .where(eq(coreEvents.roomId, roomId))
       .orderBy(desc(coreEvents.roomSeq))
       .limit(1),
+    referencedHumanIds.length === 0
+      ? Promise.resolve([])
+      : database
+          .select({ id: users.id, name: users.displayName })
+          .from(users)
+          .where(inArray(users.id, referencedHumanIds)),
+    referencedAttachmentIds.length === 0
+      ? Promise.resolve([])
+      : database
+          .select({
+            id: roomAttachments.id,
+            name: roomAttachments.name,
+            contentType: roomAttachments.contentType,
+            size: roomAttachments.size,
+          })
+          .from(roomAttachments)
+          .where(
+            and(
+              eq(roomAttachments.roomId, roomId),
+              inArray(roomAttachments.id, referencedAttachmentIds),
+            ),
+          ),
   ]);
 
   const messagePositions = messageEvents.flatMap((event) => {
@@ -175,6 +217,9 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     room,
     participants,
     messages: roomMessages,
+    messageReferences: references,
+    referenceHumans,
+    referenceAttachments,
     interpretations: roomInterpretations,
     proposals: roomProposals,
     proposalSources: proposalProvenance,
@@ -190,9 +235,17 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
 
 type LoadedReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
 type LoadedReplayMessage = LoadedReplayData['messages'][number];
+type LoadedReplayAttention = LoadedReplayData['attention'][number];
 export type ReplayData = Omit<
   LoadedReplayData,
-  'loadReceipt' | 'loadedThrough' | 'messagePositions' | 'messages'
+  | 'loadReceipt'
+  | 'loadedThrough'
+  | 'messagePositions'
+  | 'messages'
+  | 'messageReferences'
+  | 'referenceHumans'
+  | 'referenceAttachments'
+  | 'attention'
 > & {
   /** Optional only for hand-built fixtures; every server load mints a fresh commit receipt. */
   readonly loadReceipt?: string;
@@ -202,6 +255,18 @@ export type ReplayData = Omit<
     /** Optional only for hand-built fixtures created before structured mentions existed. */
     readonly mentionUserIds?: readonly string[];
   })[];
+  /** Optional only for hand-built fixtures and pre-0015 snapshots. */
+  readonly messageReferences?: LoadedReplayData['messageReferences'];
+  readonly referenceHumans?: LoadedReplayData['referenceHumans'];
+  readonly referenceAttachments?: LoadedReplayData['referenceAttachments'];
+  /** Generated FK columns are database enforcement plumbing, not view input. */
+  readonly attention: Array<
+    Omit<LoadedReplayAttention, 'subjectObjectId' | 'subjectProposalId' | 'subjectMessageId'> & {
+      readonly subjectObjectId?: string | null;
+      readonly subjectProposalId?: string | null;
+      readonly subjectMessageId?: string | null;
+    }
+  >;
   /** Optional only so hand-built unit fixtures can describe pre-ledger imports. */
   readonly messagePositions?: LoadedReplayData['messagePositions'];
   /** Optional only for hand-built fixtures created before live route coordination. */

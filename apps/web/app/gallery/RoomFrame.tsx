@@ -60,6 +60,7 @@ import type {
 } from '../../src/components/model';
 import { needsViewer } from '../../src/components/model';
 import type { MessageAttachmentRecord } from '../../src/components/model/quotation';
+import type { MessageReference, ReferenceTarget } from '../../src/lib/typed-references';
 import { ThemeToggle } from '../theme-toggle';
 
 /**
@@ -143,10 +144,9 @@ export interface RoomFrameHandlers {
      wrong about the library. */
   readonly onComposerKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   readonly composerRef?: Ref<HTMLTextAreaElement>;
-  readonly onSend?: (draft: string) => void;
+  readonly onSend?: (draft: string, references: readonly MessageReference[]) => void;
   readonly onAttach?: (file: File) => void;
   readonly onRemoveAttachment?: (id: string) => void;
-  readonly onMention?: (userId: string | null) => void;
   readonly attachmentNote?: string;
   readonly onCancelBinding?: () => void;
 }
@@ -188,8 +188,7 @@ export interface RoomFrameProps {
   readonly supersessionCandidates?: readonly StateObject[];
   readonly pendingReplacementId?: string;
   readonly acceptObjectives?: readonly { readonly id: string; readonly label: string }[];
-  readonly mentionTargets?: readonly { readonly id: string; readonly label: string }[];
-  readonly mentionTargetId?: string | null;
+  readonly referenceTargets?: readonly ReferenceTarget[];
   readonly boxed?: boolean;
   readonly label?: string;
   readonly handlers?: RoomFrameHandlers;
@@ -360,13 +359,11 @@ function Frame(props: RoomFrameProps) {
             binding={props.binding}
             disabled={props.composerEnabled === false}
             footNote={props.composerNote}
-            mentionTargetId={props.mentionTargetId}
-            mentionTargets={props.mentionTargets}
+            referenceTargets={props.referenceTargets}
             onAttach={on.onAttach}
             onCancelBinding={on.onCancelBinding}
             onChange={on.onComposerChange}
             onKeyDown={on.onComposerKeyDown}
-            onMention={on.onMention}
             onRemoveAttachment={on.onRemoveAttachment}
             onSend={on.onSend}
             roomName={props.room.name}

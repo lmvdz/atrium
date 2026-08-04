@@ -25,17 +25,13 @@ const liveRoomSession = workspacePath('apps/web/app/app/[workspace]/[room]/LiveR
 const replayDataSource = workspacePath('apps/web/lib/replay-data.ts');
 
 describe('structured mention rendering', () => {
-  /* CATCHES: highlighting every @word from punctuation alone, or dropping the
-     authored casing while deriving a mention. Only server-certified target ids
-     become mention runs and their concatenation remains the exact source. */
+  /* CATCHES: laundering pre-span mentionUserIds into the new validated typed
+     representation by regex-searching a current display name. No historical
+     source span can be fabricated, so the body remains plain. */
   it('segments only certified mention targets without rewriting their words', () => {
     expect(
       mentionBody('ask @Priya, not @unknown', ['u-priya'], new Map([['u-priya', 'priya']])),
-    ).toEqual([
-      { kind: 'text', text: 'ask ' },
-      { kind: 'mention', text: 'Priya' },
-      { kind: 'text', text: ', not @unknown' },
-    ]);
+    ).toBeUndefined();
   });
 });
 

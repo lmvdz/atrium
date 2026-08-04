@@ -30,6 +30,7 @@ import {
   type RealtimeClient,
   type RoomView,
 } from '@/src/lib/realtime';
+import type { ReferenceTarget } from '@/src/lib/typed-references';
 import { RoomFrame } from '../../../gallery/RoomFrame';
 import styles from './live-room.module.css';
 
@@ -67,7 +68,6 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   >('idle');
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
-  const [mentionTargetId, setMentionTargetId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<
     Array<UploadedAttachment & { readonly previewUrl?: string }>
   >([]);
@@ -291,12 +291,32 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const acceptObjectives = objectives
     .filter((objective) => objective.status !== 'proposed')
     .map((objective) => ({ id: objective.id, label: objective.title }));
-  const mentionTargets = view.humans
-    .filter((human) => human.id !== viewerId)
-    .map((human) => ({ id: human.id, label: human.name }));
-  const activeMentionTargetId = mentionTargets.some((target) => target.id === mentionTargetId)
-    ? mentionTargetId
-    : null;
+  const referenceTargets: readonly ReferenceTarget[] = [
+    ...view.humans.map((human) => ({ kind: 'human' as const, id: human.id, label: human.name })),
+    ...attachments.map((attachment) => ({
+      kind: 'attachment' as const,
+      id: attachment.id,
+      label: attachment.name,
+      detail: 'attached to this message',
+    })),
+    ...data.proposals.map((proposal) => ({
+      kind: 'proposal' as const,
+      id: proposal.id,
+      label: view.objects.find((object) => object.id === proposal.id)?.text ?? proposal.type,
+      detail: proposal.status,
+    })),
+    ...data.objects.map((object) => ({
+      kind: 'object' as const,
+      id: object.id,
+      label: view.objects.find((candidate) => candidate.id === object.id)?.text ?? object.type,
+      detail:
+        object.retractedAt !== null
+          ? 'retracted'
+          : object.supersededById !== null
+            ? 'superseded'
+            : 'accepted',
+    })),
+  ];
   const subscribed = live.subscribed && connection === 'open';
   const unreadFilterScope = view.entries.find((entry) => entry.type === 'since-you-left')?.entryIds;
 
@@ -397,7 +417,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           attachmentPreviewUrl: (messageId, attachment) =>
             sentAttachmentPreviews[`${messageId}:${attachment.key}`],
           attachments: attachments.map((attachment) => ({
-            id: attachment.key,
+            id: attachment.id,
             name: attachment.name,
             contentType: attachment.contentType,
             previewUrl: attachment.previewUrl,
@@ -407,7 +427,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
             setDraft(next);
             clientRef.current?.setTyping(roomId, next.trim().length > 0);
           },
-          onSend: (text) => {
+          onSend: (text, references) => {
             const body = authoredBody(text);
             if (body === null || !subscribed || pendingUploads.current > 0) return;
             if (binding.mode === 'bound') {
@@ -434,11 +454,10 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               clientRef.current?.sendMessage(roomId, body, {
                 attachments,
                 replyToId: binding.mode === 'replying' ? binding.to.messageId : null,
-                mentionUserIds: activeMentionTargetId ? [activeMentionTargetId] : [],
+                references: [...references],
                 semantic,
               });
               setDraft('');
-              setMentionTargetId(null);
               for (const url of attachmentPreviewUrls.current) URL.revokeObjectURL(url);
               attachmentPreviewUrls.current.clear();
               setAttachments([]);
@@ -469,15 +488,14 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
                 setUploading(pendingUploads.current > 0);
               });
           },
-          onMention: setMentionTargetId,
           onRemoveAttachment: (id) =>
             setAttachments((current) => {
-              const removed = current.find((attachment) => attachment.key === id);
+              const removed = current.find((attachment) => attachment.id === id);
               if (removed?.previewUrl !== undefined) {
                 URL.revokeObjectURL(removed.previewUrl);
                 attachmentPreviewUrls.current.delete(removed.previewUrl);
               }
-              return current.filter((attachment) => attachment.key !== id);
+              return current.filter((attachment) => attachment.id !== id);
             }),
           attachmentNote,
           onCancelBinding: () => {
@@ -641,8 +659,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         label="live"
         lastCheck={view.updatedAt}
         messages={view.records}
-        mentionTargets={mentionTargets}
-        mentionTargetId={activeMentionTargetId}
+        referenceTargets={referenceTargets}
         objectives={objectives}
         objects={view.objects}
         openAttentionId={openAttentionId}

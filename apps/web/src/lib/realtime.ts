@@ -248,6 +248,7 @@ export type SocketFactory = (url: string) => SocketLike;
 /* ── client state ───────────────────────────────────────────────────────── */
 
 interface PendingAttachment {
+  id: string;
   key: string;
   name: string;
   contentType: string;
@@ -263,6 +264,7 @@ interface PendingMessageBase {
   status: 'pending' | 'failed';
   error?: string;
   attachments: PendingAttachment[];
+  references: import('./typed-references').MessageReference[];
   /**
    * Whether sending the identical frame again is a sensible thing to offer.
    *
@@ -279,6 +281,7 @@ export type PendingMessage = PendingMessageBase &
     | {
         commandName: 'send_message';
         replyToId: string | null;
+        /** Degraded metadata retained only while old clients/rows coexist. */
         mentionUserIds: string[];
       }
     | {
@@ -933,6 +936,7 @@ export interface RealtimeClient {
     options?: {
       replyToId?: string | null;
       attachments?: Array<{
+        id: string;
         key: string;
         name: string;
         contentType: string;
@@ -940,6 +944,7 @@ export interface RealtimeClient {
         capability: string;
       }>;
       mentionUserIds?: string[];
+      references?: import('./typed-references').MessageReference[];
       /** Marks explicit semantic intent so a reload can finish proposal staging. */
       semantic?: boolean;
     },
@@ -953,6 +958,7 @@ export interface RealtimeClient {
     questionId: string,
     body: string,
     attachments?: Array<{
+      id: string;
       key: string;
       name: string;
       contentType: string;
@@ -1529,6 +1535,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         commandName: 'send_message',
         replyToId: messageOptions.replyToId ?? null,
         attachments,
+        references: messageOptions.references?.map((reference) => ({ ...reference })) ?? [],
         mentionUserIds: [...(messageOptions.mentionUserIds ?? [])],
       });
       const commandId = command({
@@ -1538,6 +1545,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         clientMessageId,
         replyToId: messageOptions.replyToId ?? null,
         attachments,
+        references: messageOptions.references ?? [],
         mentionUserIds: messageOptions.mentionUserIds ?? [],
       });
       inFlight.set(commandId, { roomId, clientMessageId });
@@ -1565,6 +1573,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
               clientMessageId: pending.clientMessageId,
               replyToId: pending.replyToId,
               attachments: pending.attachments,
+              references: pending.references,
               mentionUserIds: pending.mentionUserIds,
             })
           : command({
@@ -1601,6 +1610,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         commandName: 'answer_message',
         questionId,
         attachments: attachmentSnapshot,
+        references: [],
       });
       const commandId = command({
         name: 'answer_message',

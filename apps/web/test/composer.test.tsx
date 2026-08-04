@@ -285,23 +285,79 @@ describe('draft-driven command and mention completion', () => {
      attention routing. The selected words and routing target move together. */
   it('typing at-sign filters mentions and selecting one inserts words plus id', () => {
     const drafts: string[] = [];
-    const targets: Array<string | null> = [];
+    let sentReferences: readonly import('../src/lib/typed-references').MessageReference[] = [];
     render(
       <Composer
         binding={FREE}
-        mentionTargets={[
-          { id: 'u-priya', label: 'priya' },
-          { id: 'u-maya', label: 'maya' },
+        referenceTargets={[
+          { kind: 'human', id: 'u-priya', label: 'priya' },
+          { kind: 'human', id: 'u-maya', label: 'maya' },
         ]}
         onChange={(draft) => drafts.push(draft)}
-        onMention={(id) => targets.push(id)}
+        onSend={(_draft, references) => {
+          sentReferences = references;
+        }}
         roomName="r"
       />,
     );
     fireEvent.change(box(), { target: { value: 'ask @pr' } });
     fireEvent.click(screen.getByRole('button', { name: '@priya' }));
     expect(drafts.at(-1)).toBe('ask @priya ');
-    expect(targets).toEqual(['u-priya']);
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sentReferences).toEqual([
+      {
+        ordinal: 0,
+        kind: 'human',
+        targetId: 'u-priya',
+        start: 4,
+        end: 10,
+        surface: '@priya',
+      },
+    ]);
+  });
+
+  /* CATCHES: identifying a selected reference by its visible label, which sends
+     the first same-named user instead of the stable id on the clicked row. */
+  it('keeps the selected stable id when two targets have the same label', () => {
+    let sent: readonly import('../src/lib/typed-references').MessageReference[] = [];
+    render(
+      <Composer
+        binding={FREE}
+        referenceTargets={[
+          { kind: 'human', id: 'user-one', label: 'sam', detail: 'first' },
+          { kind: 'human', id: 'user-two', label: 'sam', detail: 'second' },
+        ]}
+        onSend={(_draft, references) => {
+          sent = references;
+        }}
+        roomName="r"
+      />,
+    );
+    fireEvent.change(box(), { target: { value: '@sa' } });
+    fireEvent.click(screen.getByRole('button', { name: /@sam · second/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent[0]?.targetId).toBe('user-two');
+  });
+
+  /* CATCHES: retaining a stable id after the user edits inside the selected
+     authored surface, making metadata claim a span the author changed. */
+  it('invalidates a selected reference when its authored surface is edited', () => {
+    let sent: readonly import('../src/lib/typed-references').MessageReference[] = [];
+    render(
+      <Composer
+        binding={FREE}
+        referenceTargets={[{ kind: 'attachment', id: 'attachment-id', label: 'map.png' }]}
+        onSend={(_draft, references) => {
+          sent = references;
+        }}
+        roomName="r"
+      />,
+    );
+    fireEvent.change(box(), { target: { value: '@map' } });
+    fireEvent.click(screen.getByRole('button', { name: /@map\.png/ }));
+    fireEvent.change(box(), { target: { value: '@map-old.png ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sent).toEqual([]);
   });
 });
 

@@ -26,9 +26,7 @@ describe('typed reference spans', () => {
       reconcileMessageReferences(before, after, [
         { ordinal: 0, kind: 'human', targetId: 'u2', start: 4, end: 8, surface: '@sam' },
       ]),
-    ).toEqual([
-      { ordinal: 0, kind: 'human', targetId: 'u2', start: 11, end: 15, surface: '@sam' },
-    ]);
+    ).toEqual([{ ordinal: 0, kind: 'human', targetId: 'u2', start: 11, end: 15, surface: '@sam' }]);
   });
 
   /* CATCHES: treating the one computed edit delta as applicable to every
@@ -198,9 +196,7 @@ describe('typed reference spans', () => {
     ]);
     expect(
       segments
-        ?.map((segment) =>
-          segment.kind === 'mention' ? `@${segment.text}` : segment.text,
-        )
+        ?.map((segment) => (segment.kind === 'mention' ? `@${segment.text}` : segment.text))
         .join(''),
     ).toBe(body);
   });

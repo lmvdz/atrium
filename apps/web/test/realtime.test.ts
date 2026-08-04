@@ -1824,22 +1824,33 @@ describe('optimism is limited to your own message row', () => {
    */
   it('retries an uncertain send with the exact idempotency key and metadata', async () => {
     const attachment = {
+      id: '00000000-0000-4000-8000-000000000003',
       key: `${ROOM}/proof.txt`,
       name: 'proof.txt',
       contentType: 'text/plain',
       size: 17,
       capability: 'original-upload-grant',
     };
-    const clientMessageId = client.sendMessage(ROOM, 'exact words survive the wire', {
+    const reference = {
+      ordinal: 0,
+      kind: 'human' as const,
+      targetId: '00000000-0000-4000-8000-000000000002',
+      start: 0,
+      end: 6,
+      surface: '@priya',
+    };
+    const clientMessageId = client.sendMessage(ROOM, '@priya exact words survive the wire', {
       replyToId: '00000000-0000-4000-8000-000000000001',
       mentionUserIds: ['00000000-0000-4000-8000-000000000002'],
       attachments: [attachment],
+      references: [reference],
     });
     const original = latest().commands().at(-1);
     // The caller owns this object. Retaining its reference would let unrelated
     // UI cleanup rewrite the supposedly exact retry after the first frame left.
     attachment.name = 'mutated-after-send.txt';
     attachment.capability = 'replacement-grant';
+    reference.surface = '@mutated';
     latest().drop();
 
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1939,6 +1950,7 @@ describe('optimism is limited to your own message row', () => {
       replyToId: 'message-before',
       attachments: [
         {
+          id: '00000000-0000-4000-8000-000000000004',
           key: 'room-1/file',
           name: 'proof.txt',
           contentType: 'text/plain',
@@ -1952,6 +1964,7 @@ describe('optimism is limited to your own message row', () => {
       replyToId: 'message-before',
       attachments: [
         {
+          id: '00000000-0000-4000-8000-000000000004',
           key: 'room-1/file',
           name: 'proof.txt',
           contentType: 'text/plain',

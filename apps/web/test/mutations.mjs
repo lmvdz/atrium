@@ -219,10 +219,10 @@ const LEDGER = [
     test: 'test/composer.test.tsx',
   },
   {
-    name: 'onSend goes back to taking no argument',
+    name: 'onSend drops the stable typed references selected with the authored draft',
     file: 'src/components/frame/Composer.tsx',
-    find: '    onSend?.(text);',
-    replace: '    onSend?.(undefined as unknown as string);',
+    find: '    onSend?.(text, normalizeMessageReferences(text, references.current));',
+    replace: '    onSend?.(text, []);',
     test: 'test/composer.test.tsx',
   },
   {

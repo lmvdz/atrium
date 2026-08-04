@@ -6,6 +6,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAttribution } from '../model/ledger';
 import type { Quotation } from '../model/quotation';
+import { systemText } from '../model/quotation';
 import type { BodySegment } from '../model/records';
 import { segmentText } from '../model/records';
 import styles from './rich-message.module.css';
@@ -157,10 +158,19 @@ function mentionMarkdown(body: readonly BodySegment[]): string {
     .map((segment, index) => {
       const words = segmentText(segment);
       if (segment.kind !== 'mention') return words;
-      const label = words.replace(/[\\[\]]/g, '\\$&');
+      const label = words.replace(/[\\[\]`*{}_<>#+.!|~-]/g, '\\$&');
       return `[${label}](#atrium-mention-${index})`;
     })
     .join('');
+}
+
+function referenceForHref(
+  body: readonly BodySegment[],
+  href: string | undefined,
+): Extract<BodySegment, { readonly kind: 'mention' }> | undefined {
+  const index = Number(href?.slice('#atrium-mention-'.length));
+  const segment = Number.isSafeInteger(index) ? body[index] : undefined;
+  return segment?.kind === 'mention' ? segment : undefined;
 }
 
 function Code({
@@ -261,16 +271,31 @@ export function RichMessageBody({
     <div className={styles.rich} data-authored-source={source} data-rich-message="true">
       <Markdown
         components={{
-          a: ({ children, href, ...props }) =>
-            href?.startsWith('#atrium-mention-') ? (
-              <span className={styles.mention} data-rich-mention="true">
+          a: ({ children, href, ...props }) => {
+            const reference = href?.startsWith('#atrium-mention-')
+              ? referenceForHref(body ?? [], href)
+              : undefined;
+            return href?.startsWith('#atrium-mention-') ? (
+              <span
+                className={styles.mention}
+                data-reference-kind={reference?.referenceKind}
+                data-reference-legacy={reference?.legacy ? 'true' : undefined}
+                data-reference-target={reference?.targetId}
+                data-rich-mention="true"
+                title={
+                  reference?.resolution === undefined
+                    ? undefined
+                    : systemText(reference.resolution, 'RichMessageBody reference resolution')
+                }
+              >
                 {children}
               </span>
             ) : (
               <a {...props} href={href} rel="noreferrer noopener" target="_blank">
                 {children}
               </a>
-            ),
+            );
+          },
           code: (props) => <Code {...props} citation={citation} />,
           img: SafeImage,
         }}

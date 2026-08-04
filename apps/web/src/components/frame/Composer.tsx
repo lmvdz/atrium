@@ -35,6 +35,8 @@
 import Image from 'next/image';
 import type { ChangeEvent, KeyboardEvent, Ref } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { MessageReference, ReferenceTarget } from '../../lib/typed-references';
+import { normalizeMessageReferences, reconcileMessageReferences } from '../../lib/typed-references';
 import { useAttribution } from '../model/ledger';
 import type { Quotation } from '../model/quotation';
 import { quotationRef, systemText } from '../model/quotation';
@@ -61,7 +63,7 @@ export interface ComposerProps {
   readonly onKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   readonly textareaRef?: Ref<HTMLTextAreaElement>;
   /** receives the draft the footer promises Enter will send */
-  readonly onSend?: (draft: string) => void;
+  readonly onSend?: (draft: string, references: readonly MessageReference[]) => void;
   readonly onAttach?: (file: File) => void;
   readonly attachmentNote?: string;
   readonly attachments?: readonly {
@@ -71,10 +73,8 @@ export interface ComposerProps {
     readonly previewUrl?: string;
   }[];
   readonly onRemoveAttachment?: (id: string) => void;
-  /** Explicit structured request targeting, kept separate from the authored body. */
-  readonly mentionTargets?: readonly { readonly id: string; readonly label: string }[];
-  readonly mentionTargetId?: string | null;
-  readonly onMention?: (userId: string | null) => void;
+  /** Same-room targets already authorized for selection by the server projection. */
+  readonly referenceTargets?: readonly ReferenceTarget[];
   /** A replay may permit only a bound answer, never free historical chat. */
   readonly disabled?: boolean;
 }
@@ -93,9 +93,7 @@ export function Composer({
   attachmentNote,
   attachments = [],
   onRemoveAttachment,
-  mentionTargets = [],
-  mentionTargetId = null,
-  onMention,
+  referenceTargets = [],
   disabled = false,
 }: ComposerProps) {
   const own = useRef<HTMLTextAreaElement | null>(null);
@@ -125,6 +123,7 @@ export function Composer({
   const [mentionOpen, setMentionOpen] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
   const [draftMirror, setDraftMirror] = useState(value ?? '');
+  const references = useRef<readonly MessageReference[]>([]);
   const setComposing = useCallback((value: boolean) => {
     composing.current = value;
     setComposingNow(value);
@@ -171,11 +170,8 @@ export function Composer({
   );
   const mentionMatch = /(^|\s)@([^\s@]*)$/.exec(visibleDraft);
   const mentionQuery = mentionMatch?.[2]?.toLocaleLowerCase() ?? '';
-  const visibleMentions = mentionTargets.filter((target) =>
+  const visibleMentions = referenceTargets.filter((target) =>
     target.label.toLocaleLowerCase().startsWith(mentionQuery),
-  );
-  const visibleArtifacts = attachments.filter((attachment) =>
-    attachment.name.toLocaleLowerCase().startsWith(mentionQuery),
   );
 
   const send = useCallback(() => {
@@ -184,10 +180,11 @@ export function Composer({
     if (composing.current) return;
     const text = draft();
     if (text.trim().length === 0) return;
-    onSend?.(text);
+    onSend?.(text, normalizeMessageReferences(text, references.current));
     /* An uncontrolled composer clears itself; a controlled one is the
        consumer's to clear, and clearing it here would fight their state. */
     if (value === undefined && own.current !== null) own.current.value = '';
+    references.current = [];
   }, [draft, onSend, value]);
 
   const keyDown = useCallback(
@@ -318,46 +315,46 @@ export function Composer({
 
       {binding.mode !== 'free' ||
       (!mentionOpen && mentionMatch === null) ||
-      mentionTargets.length === 0 ||
-      onMention === undefined ? null : (
+      referenceTargets.length === 0 ? null : (
         <div className={styles.mentionMenu}>
           {visibleMentions.map((target) => (
             <button
-              aria-pressed={mentionTargetId === target.id}
-              key={target.id}
+              data-reference-kind={target.kind}
+              data-reference-target={target.id}
+              key={`${target.kind}:${target.id}`}
               onClick={() => {
                 const prefix =
                   mentionMatch === null
                     ? visibleDraft
                     : visibleDraft.slice(0, mentionMatch.index) + (mentionMatch[1] ?? '');
-                replaceDraft(`${prefix}@${target.label} `);
-                onMention(target.id);
+                const suffix = ' ';
+                const surface = `@${target.label}`;
+                const next = `${prefix}${surface}${suffix}`;
+                const retained = reconcileMessageReferences(visibleDraft, next, references.current);
+                references.current = normalizeMessageReferences(next, [
+                  ...retained,
+                  {
+                    kind: target.kind,
+                    targetId: target.id,
+                    start: prefix.length,
+                    end: prefix.length + surface.length,
+                    surface,
+                  },
+                ]);
+                replaceDraft(next);
                 setMentionOpen(false);
               }}
               type="button"
             >
-              @{systemText(target.label, 'Composer mention target')}
+              {target.kind === 'human' ? null : <span aria-hidden="true">▤ </span>}@
+              {systemText(target.label, 'Composer reference target')}
+              {target.detail === undefined ? null : (
+                <small> · {systemText(target.detail, 'Composer reference detail')}</small>
+              )}
             </button>
           ))}
-          {visibleArtifacts.map((attachment) => (
-            <button
-              className={styles.artifactMention}
-              key={attachment.id}
-              onClick={() => {
-                const prefix =
-                  mentionMatch === null
-                    ? visibleDraft
-                    : visibleDraft.slice(0, mentionMatch.index) + (mentionMatch[1] ?? '');
-                replaceDraft(`${prefix}@${attachment.name} `);
-                setMentionOpen(false);
-              }}
-              type="button"
-            >
-              ▤ @{systemText(attachment.name, 'Composer attachment mention')}
-            </button>
-          ))}
-          {visibleMentions.length === 0 && visibleArtifacts.length === 0 ? (
-            <span>No matching person, agent, or attached artifact</span>
+          {visibleMentions.length === 0 ? (
+            <span>No matching person, attachment, proposal, or object</span>
           ) : null}
         </div>
       )}
@@ -417,6 +414,10 @@ export function Composer({
                whose composition events are least reliable. The guaranteed exits
                are compositionend, blur and unmount; this one is the fast path. */
             if (native.isComposing === false) setComposing(false);
+            references.current = normalizeMessageReferences(
+              event.target.value,
+              reconcileMessageReferences(visibleDraft, event.target.value, references.current),
+            );
             setDraftMirror(event.target.value);
             onChange?.(event.target.value);
             event.target.style.height = 'auto';

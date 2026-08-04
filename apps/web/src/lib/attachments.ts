@@ -1,6 +1,7 @@
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 export interface UploadedAttachment {
+  id: string;
   key: string;
   name: string;
   contentType: string;
@@ -22,6 +23,7 @@ export async function uploadAttachment(roomId: string, file: File): Promise<Uplo
   });
   if (!response.ok) throw new Error('the attachment upload was refused');
   const signed = (await response.json()) as {
+    id: string;
     url: string;
     key: string;
     headers: Record<string, string>;
@@ -30,6 +32,7 @@ export async function uploadAttachment(roomId: string, file: File): Promise<Uplo
   const uploaded = await fetch(signed.url, { method: 'PUT', headers: signed.headers, body: file });
   if (!uploaded.ok) throw new Error(`the object store refused the upload (${uploaded.status})`);
   return {
+    id: signed.id,
     key: signed.key,
     name: file.name,
     contentType,

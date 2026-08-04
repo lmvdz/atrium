@@ -110,6 +110,7 @@ export interface MessageRecord {
 }
 
 export interface MessageAttachmentRecord {
+  readonly id?: string;
   readonly key: string;
   readonly name: string;
   readonly contentType: string;
