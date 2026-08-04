@@ -537,11 +537,21 @@ export async function runInterpretation(
 
   await markSucceeded(deps.db, claimed, result.raw);
 
+  /* A proposal minted at the end of the preceding provider slice must survive
+     into this projection's evidence collar. `contextMessagesBefore` may be
+     zero (the replay intentionally measures that setting), so attention keeps
+     one complete provider window behind the current slice. It still uses the
+     same bounded forward tail: folding the entire future room would let
+     unrelated later conversation silently reclassify a staged reading. */
+  const attentionContext = await readContext(deps.db, roomId, claimed, {
+    ...config,
+    contextMessagesBefore: Math.max(config.contextMessagesBefore, config.maxWindowMessages),
+  });
   const attention = await reconcileStoredAttention({
     db: deps.db,
     state: deps.ledger.coreState(),
     roomId,
-    messages: context,
+    messages: attentionContext,
     now: startedAt,
   });
   if (attention.refusals.length > 0) {

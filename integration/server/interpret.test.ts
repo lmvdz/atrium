@@ -960,6 +960,59 @@ describe('in-job acceptance', () => {
   });
 
   /**
+   * Mutation: reuse the current provider slice as the evidence window for the
+   * room-wide attention fold without retaining one complete provider window
+   * behind it. The first pass ends at the proposal's citation and honestly
+   * refuses it; the second pass has later evidence but configured zero history
+   * no longer contains the citation. The reading then remains staged forever
+   * with no persisted route to a person.
+   */
+  it('revisits a boundary reading from the preceding provider window', async () => {
+    const body = 'We will preserve the durable reconnect cursor.';
+    const source = await insertMessage(room.people.alice as string, body);
+    provider.respond = (request) =>
+      (request.sourceMessages?.some((message) => message.id === source) ?? false)
+        ? [
+            {
+              type: 'decision',
+              text: body,
+              subject: null,
+              confidence: 0.95,
+              quote: body,
+              messageIds: [source],
+            },
+          ]
+        : [];
+    const deps = {
+      db: handle.db,
+      ledger,
+      provider,
+      routing: { default: MODEL_DEFAULT, escalation: MODEL_ESCALATION },
+      logger,
+      config: { maxWindowMessages: 1, contextMessagesBefore: 0 },
+    };
+
+    const first = await runInterpretation(deps, { roomId: room.roomId });
+    expect(first.proposalsRecorded).toHaveLength(1);
+    expect(
+      await handle.db.select().from(attentionItems).where(eq(attentionItems.roomId, room.roomId)),
+    ).toHaveLength(0);
+
+    await insertMessage(room.people.bob as string, 'The room continued after that decision.');
+    await runInterpretation(deps, { roomId: room.roomId });
+
+    const routed = await handle.db
+      .select({ userId: attentionItems.userId, reason: attentionItems.reason })
+      .from(attentionItems)
+      .where(eq(attentionItems.roomId, room.roomId));
+    expect(routed).toHaveLength(2);
+    expect(routed.map((row) => row.userId).sort()).toEqual(
+      [room.people.alice as string, room.people.bob as string].sort(),
+    );
+    expect(routed.every((row) => row.reason.kind === 'decision_pending')).toBe(true);
+  });
+
+  /**
    * **The #86 receipt: the worker's acceptance reaches the fold.**
    *
    * Before #86, `atrium_receipt_window` ended at the cited message while core
