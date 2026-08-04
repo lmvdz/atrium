@@ -1,0 +1,56 @@
+{
+  "protocolVersion": 1,
+  "template": true,
+  "runId": "replace-with-stable-run-id",
+  "openingId": "replace-with-stable-opening-id",
+  "project": "atrium-campaign",
+  "stratum": "local-deterministic-interpretation",
+  "observer": "pseudonymous-observer",
+  "startedAt": "2026-08-03T14:00:00.000Z",
+  "endedAt": "2026-08-03T14:03:00.000Z",
+  "absence": {
+    "startedAt": "2026-08-03T08:00:00.000Z",
+    "endedAt": "2026-08-03T14:00:00.000Z",
+    "projectChanged": true
+  },
+  "capabilities": ["browser"],
+  "reorientation": {
+    "durationMs": 180000,
+    "questions": [
+      {
+        "id": "current-decisions",
+        "answered": true,
+        "evidenceRefs": ["replace:accepted-object-id"]
+      },
+      { "id": "open-questions", "answered": true, "evidenceRefs": ["replace:accepted-object-id"] },
+      { "id": "who-owes-what", "answered": true, "evidenceRefs": ["replace:accepted-object-id"] },
+      {
+        "id": "current-objective",
+        "answered": true,
+        "evidenceRefs": ["replace:accepted-object-id"]
+      }
+    ]
+  },
+  "outcomes": {
+    "questionsReviewed": 1,
+    "repeatedQuestions": 0,
+    "dueCommitmentsReviewed": 0,
+    "forgottenCommitments": 0,
+    "relevantDecisionsReviewed": 1,
+    "missedDecisions": 0,
+    "interpretations": { "reviewed": 1, "incorrect": 0, "unreviewed": 0 },
+    "attentionItems": { "reviewed": 1, "useful": 1, "unreviewed": 0 },
+    "workSessionMs": 3600000,
+    "manualOrganizationMs": 0
+  },
+  "evidence": {
+    "projectChanged": ["replace:change-during-absence"],
+    "repeatedQuestions": ["replace:room-window"],
+    "forgottenCommitments": ["replace:commitment-projection"],
+    "missedDecisions": ["replace:decision-projection"],
+    "interpretations": ["replace:proposal-review-set"],
+    "attentionItems": ["replace:attention-review-set"],
+    "manualOrganization": ["replace:observer-timer"]
+  },
+  "interventions": []
+}
