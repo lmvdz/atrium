@@ -1,15 +1,15 @@
 import type { AcceptedObject, Actor, CoreState, Relation } from '@atrium/core';
 import {
   acceptedObjects,
-  attachments as storedAttachments,
   attentionItems,
   corrections,
-  messages,
   messageReferences,
+  messages,
   objectRelations,
   objectSources,
   proposalSources,
   proposals,
+  attachments as storedAttachments,
 } from '@atrium/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { CommandError, type ProjectionContext, type Tx } from './ledger.js';

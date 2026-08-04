@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { advanceSeenSeq } from '@atrium/auth';
+import { advanceSeenSeq, roomMemberIds } from '@atrium/auth';
 import {
   type AcceptedObject,
   AcceptedObjectType,
@@ -17,13 +17,8 @@ import {
   parseSemanticCommand,
   type Relation,
 } from '@atrium/core';
-import {
-  acceptedObjects,
-  type Database,
-  memberships,
-  messages,
-  proposals,
-} from '@atrium/db';
+import type { Database } from '@atrium/db';
+import { acceptedObjects, messages, proposals } from '@atrium/db/schema';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
@@ -410,20 +405,16 @@ async function validateMessageReferences(input: {
     priorEnd = reference.end;
   }
 
-  const ids = (kind: z.infer<typeof MessageReference>['kind']) =>
-    [...new Set(references.filter((reference) => reference.kind === kind).map((r) => r.targetId))];
+  const ids = (kind: z.infer<typeof MessageReference>['kind']) => [
+    ...new Set(references.filter((reference) => reference.kind === kind).map((r) => r.targetId)),
+  ];
   const humanIds = ids('human');
   const attachmentIds = ids('attachment');
   const proposalIds = ids('proposal');
   const objectIds = ids('object');
 
-  const [humanRows, proposalRows, objectRows] = await Promise.all([
-    humanIds.length === 0
-      ? []
-      : tx
-          .select({ id: memberships.userId })
-          .from(memberships)
-          .where(and(eq(memberships.roomId, roomId), inArray(memberships.userId, humanIds))),
+  const [effectiveHumanIds, proposalRows, objectRows] = await Promise.all([
+    humanIds.length === 0 ? ([] as string[]) : roomMemberIds(tx as unknown as Database, roomId),
     proposalIds.length === 0
       ? []
       : tx
@@ -439,7 +430,7 @@ async function validateMessageReferences(input: {
   ]);
   const uploaded = new Set(input.attachments.map((attachment) => attachment.id));
   if (
-    humanRows.length !== humanIds.length ||
+    humanIds.some((id) => !effectiveHumanIds.includes(id)) ||
     proposalRows.length !== proposalIds.length ||
     objectRows.length !== objectIds.length ||
     attachmentIds.some((id) => !uploaded.has(id))
@@ -538,7 +529,10 @@ export function createCommandService({
                 : 'an attachment capability is invalid or expired',
             );
           }
-          if (new Set(persistedAttachments.map((attachment) => attachment.id)).size !== persistedAttachments.length) {
+          if (
+            new Set(persistedAttachments.map((attachment) => attachment.id)).size !==
+            persistedAttachments.length
+          ) {
             throw new CommandError(
               'invalid',
               command.references.some((reference) => reference.kind === 'attachment')

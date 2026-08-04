@@ -9,12 +9,7 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { describeError } from '../support/constraints.js';
-import {
-  openDatabase,
-  resetDatabase,
-  type SeededRoom,
-  seedRoom,
-} from '../support/harness.js';
+import { openDatabase, resetDatabase, type SeededRoom, seedRoom } from '../support/harness.js';
 
 const handle = openDatabase(5);
 let roomA: SeededRoom;
@@ -166,9 +161,7 @@ describe('durable typed reference conformance', () => {
       targetId: roomA.people.alice as string,
     };
     await refusedWith('message reference surface does not match authored body', () =>
-      handle.db
-        .insert(messageReferences)
-        .values({ ...base, start: 2, end: 8, surface: '@alice' }),
+      handle.db.insert(messageReferences).values({ ...base, start: 2, end: 8, surface: '@alice' }),
     );
     await refusedWith('message reference surface does not match authored body', () =>
       handle.db.insert(messageReferences).values({ ...base, start: 0, end: 1, surface: '😀' }),

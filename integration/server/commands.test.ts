@@ -71,7 +71,7 @@ const send = (
   clientMessageId,
   replyToId: null,
   attachments: [],
-  mentionUserIds: [],
+  references: [],
 });
 
 /**
@@ -259,8 +259,21 @@ describe('send_message', () => {
     await alice.subscribe(room.roomId);
     const reconnectAttachmentId = randomUUID();
     const command = {
-      ...send(room.roomId, '@bob The exact authored message survives reconnect.', 'uncertain-send-1'),
-      references: [{ ordinal: 0, kind: 'human' as const, targetId: room.people.bob as string, start: 0, end: 4, surface: '@bob' }],
+      ...send(
+        room.roomId,
+        '@bob The exact authored message survives reconnect.',
+        'uncertain-send-1',
+      ),
+      references: [
+        {
+          ordinal: 0,
+          kind: 'human' as const,
+          targetId: room.people.bob as string,
+          start: 0,
+          end: 4,
+          surface: '@bob',
+        },
+      ],
       attachments: [
         {
           id: reconnectAttachmentId,
@@ -359,7 +372,13 @@ describe('send_message', () => {
     expect(accepted.type).toBe('ack');
     const event = await lastEvent<{ attachments: unknown[] }>(room.roomId);
     expect(event.attachments).toEqual([
-      { id: attachment.id, key: attachment.key, name: 'proof.txt', contentType: 'text/plain', size: 5 },
+      {
+        id: attachment.id,
+        key: attachment.key,
+        name: 'proof.txt',
+        contentType: 'text/plain',
+        size: 5,
+      },
     ]);
     expect(JSON.stringify(event)).not.toContain('real-grant');
   });
@@ -411,6 +430,7 @@ describe('send_message', () => {
           replyToId: null,
           clientMessageId: `batch-${index}`,
           attachments: [],
+          references: [],
         })),
         project: async (context) => {
           projected += 1;
