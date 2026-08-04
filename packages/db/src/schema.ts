@@ -105,13 +105,24 @@ export const attentionClass = pgEnum('attention_class', [
 
 export const attentionStatus = pgEnum('attention_status', ['pending', 'resolved', 'dismissed']);
 
+/** Closed alphabet for durable authored references. */
+export const messageReferenceKind = pgEnum('message_reference_kind', [
+  'human',
+  'attachment',
+  'proposal',
+  'object',
+]);
+
 /**
  * What an attention item is *about* — @atrium/core's `AttentionSubjectKind`,
  * routed here from #21. A `needs_decision` item points at a **proposal**: a
  * decision never auto-accepts, so at the moment somebody has to rule on one
  * there is no accepted object to point at yet. See `attention_items`.
  */
-export const attentionSubjectKind = pgEnum('attention_subject_kind', ['object', 'proposal']);
+/** Checked-text vocabulary; exported for core/schema parity without a phantom DB enum. */
+export const attentionSubjectKind = {
+  enumValues: ['object', 'proposal', 'message'] as const,
+};
 
 /**
  * Mirrors `@atrium/core`'s `CorrectionAction`, and the parity assert at the foot
@@ -869,6 +880,35 @@ export const commandReceipts = pgTable(
   ],
 );
 
+export const attachments = pgTable(
+  'attachments',
+  {
+    id: uuid('id').primaryKey(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+    name: text('name').notNull(),
+    contentType: text('content_type').notNull(),
+    size: integer('size').notNull(),
+    claimedByMessageId: uuid('claimed_by_message_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('attachments_room_id_key').on(t.roomId, t.id),
+    uniqueIndex('attachments_room_key_key').on(t.roomId, t.key),
+    foreignKey({
+      name: 'attachments_claim_message_same_room_fk',
+      columns: [t.roomId, t.claimedByMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }),
+    check('attachments_name_not_blank', sql`length(${t.name}) > 0`),
+    check('attachments_content_type_not_blank', sql`length(${t.contentType}) > 0`),
+    check('attachments_size_positive', sql`${t.size} > 0`),
+    check('attachments_size_bounded', sql`${t.size} <= 26214400`),
+  ],
+);
+
 export const messages = pgTable(
   'messages',
   {
@@ -921,6 +961,8 @@ export const messages = pgTable(
 );
 
 export interface MessageAttachment {
+  /** Absent only on pre-0015 legacy JSON rows. New events require it. */
+  id?: string;
   key: string;
   name: string;
   contentType: string;
@@ -1133,6 +1175,43 @@ export const acceptedObjects = pgTable(
   ],
 );
 
+/**
+ * A selected address inside authored message text. `surface` is evidence, not a
+ * label cache: the projection validates it against the UTF-16 body slice before
+ * inserting this row. The trigger installed by migration 0015 independently
+ * validates the closed target alphabet and anchors every target to stored room
+ * data rather than to the caller-supplied room id.
+ */
+export const messageReferences = pgTable(
+  'message_references',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id').notNull(),
+    messageId: uuid('message_id').notNull(),
+    ordinal: integer('ordinal').notNull(),
+    kind: messageReferenceKind('kind').notNull(),
+    targetId: uuid('target_id').notNull(),
+    start: integer('start').notNull(),
+    end: integer('end').notNull(),
+    surface: text('surface').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('message_references_message_ordinal_key').on(t.messageId, t.ordinal),
+    uniqueIndex('message_references_room_id_key').on(t.roomId, t.id),
+    index('message_references_target_idx').on(t.roomId, t.kind, t.targetId),
+    foreignKey({
+      name: 'message_references_message_same_room_fk',
+      columns: [t.roomId, t.messageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }).onDelete('cascade'),
+    check('message_references_ordinal_nonnegative', sql`${t.ordinal} >= 0`),
+    check('message_references_span_nonempty', sql`${t.start} >= 0 AND ${t.end} > ${t.start}`),
+    check('message_references_surface_not_blank', sql`length(${t.surface}) > 0`),
+    check('message_references_surface_is_address', sql`left(${t.surface}, 1) = '@'`),
+  ],
+);
+
 /** Provenance for objects created directly by a human, with no proposal. */
 export const objectSources = pgTable(
   'object_sources',
@@ -1271,7 +1350,7 @@ export const attentionItems = pgTable(
      * refuse it — but a refusal at the right column beats a refusal three
      * inferences away.
      */
-    subjectKind: attentionSubjectKind('subject_kind').notNull(),
+    subjectKind: text('subject_kind').$type<AttentionSubjectKind>().notNull(),
     /** The accepted object, or the staged proposal — see `subject_kind`. */
     subjectId: uuid('subject_id').notNull(),
     /** Non-null exactly when `subject_kind = 'object'`. Carries that edge's FK. */
@@ -1281,6 +1360,10 @@ export const attentionItems = pgTable(
     /** Non-null exactly when `subject_kind = 'proposal'`. Same, for proposals. */
     subjectProposalId: uuid('subject_proposal_id').generatedAlwaysAs(
       sql`CASE WHEN "subject_kind" = 'proposal' THEN "subject_id" END`,
+    ),
+    /** Non-null exactly when `subject_kind = 'message'`. */
+    subjectMessageId: uuid('subject_message_id').generatedAlwaysAs(
+      sql`CASE WHEN "subject_kind" = 'message' THEN "subject_id" END`,
     ),
     class: attentionClass('class').notNull(),
     /**
@@ -1320,6 +1403,10 @@ export const attentionItems = pgTable(
      * variant's own fields are @atrium/core's to validate.
      */
     check('attention_items_reason_has_kind', sql`length(coalesce(${t.reason}->>'kind', '')) > 0`),
+    check(
+      'attention_items_subject_kind_allowlist',
+      sql`${t.subjectKind} IN ('object', 'proposal', 'message')`,
+    ),
     /**
      * "Needs you" must never point at something from a room you cannot see —
      * and that has to keep holding now that "something" is two tables.
@@ -1333,6 +1420,11 @@ export const attentionItems = pgTable(
       name: 'attention_items_proposal_same_room_fk',
       columns: [t.roomId, t.subjectProposalId],
       foreignColumns: [proposals.roomId, proposals.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'attention_items_message_same_room_fk',
+      columns: [t.roomId, t.subjectMessageId],
+      foreignColumns: [messages.roomId, messages.id],
     }).onDelete('cascade'),
   ],
 );

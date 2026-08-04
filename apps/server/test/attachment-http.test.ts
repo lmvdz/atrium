@@ -17,6 +17,7 @@ afterEach(async () => {
 
 async function start(options: { authenticated?: boolean; member?: boolean } = {}) {
   const upload = vi.fn(async () => ({
+    id: '44444444-4444-4444-8444-444444444444',
     url: 'http://object.test/upload',
     key: `${ROOM}/object`,
     headers: { 'content-type': 'text/plain' },

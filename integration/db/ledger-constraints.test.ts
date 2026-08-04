@@ -3378,6 +3378,8 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
     // provenance link tables the reducer never reads.
     expect(of('c')).toEqual([
       'accepted_objects_room_id_rooms_id_fk',
+      'attachments_room_id_rooms_id_fk',
+      'attention_items_message_same_room_fk',
       'attention_items_object_same_room_fk',
       'attention_items_proposal_same_room_fk',
       'attention_items_room_id_rooms_id_fk',
@@ -3397,6 +3399,7 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'interpretations_message_id_messages_id_fk',
       'memberships_room_id_rooms_id_fk',
       'memberships_user_id_users_id_fk',
+      'message_references_message_same_room_fk',
       'messages_room_id_rooms_id_fk',
       'object_sources_message_same_room_fk',
       'object_sources_object_same_room_fk',

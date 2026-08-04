@@ -24,6 +24,7 @@ export type DownloadRequest = z.infer<typeof DownloadRequest>;
 
 export interface AttachmentSigner {
   upload(request: UploadRequest): Promise<{
+    id: string;
     url: string;
     key: string;
     headers: Readonly<Record<string, string>>;
@@ -31,7 +32,7 @@ export interface AttachmentSigner {
     capability: string;
   }>;
   download(request: DownloadRequest): Promise<{ url: string; expiresIn: number }>;
-  verify(attachment: UploadRequest & { key: string; capability: string }): boolean;
+  verify(attachment: UploadRequest & { id: string; key: string; capability: string }): boolean;
 }
 
 export interface AttachmentSignerOptions {
@@ -60,6 +61,7 @@ export function createAttachmentSigner(options: AttachmentSignerOptions): Attach
   });
   const capabilityPayload = (input: {
     roomId: string;
+    id: string;
     key: string;
     name: string;
     contentType: string;
@@ -68,6 +70,7 @@ export function createAttachmentSigner(options: AttachmentSignerOptions): Attach
   }) =>
     JSON.stringify([
       input.roomId,
+      input.id,
       input.key,
       input.name,
       input.contentType,
@@ -80,7 +83,8 @@ export function createAttachmentSigner(options: AttachmentSignerOptions): Attach
   return {
     upload: async (request) => {
       const input = UploadRequest.parse(request);
-      const key = `${input.roomId}/${randomUUID()}`;
+      const id = randomUUID();
+      const key = `${input.roomId}/${id}`;
       const expiresAt = Math.floor(Date.now() / 1000) + ATTACHMENT_URL_TTL_SECONDS;
       const command = new PutObjectCommand({
         Bucket: options.bucket,
@@ -93,13 +97,14 @@ export function createAttachmentSigner(options: AttachmentSignerOptions): Attach
         signableHeaders: new Set(['content-length', 'content-type']),
       });
       return {
+        id,
         url,
         key,
         headers: {
           'content-type': input.contentType,
         },
         expiresIn: ATTACHMENT_URL_TTL_SECONDS,
-        capability: `${expiresAt}.${signature(capabilityPayload({ ...input, key, expiresAt }))}`,
+        capability: `${expiresAt}.${signature(capabilityPayload({ ...input, id, key, expiresAt }))}`,
       };
     },
     download: async (request) => {

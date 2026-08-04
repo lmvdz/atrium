@@ -1,9 +1,11 @@
 import type { AcceptedObject, Actor, CoreState, Relation } from '@atrium/core';
 import {
   acceptedObjects,
+  attachments as storedAttachments,
   attentionItems,
   corrections,
   messages,
+  messageReferences,
   objectRelations,
   objectSources,
   proposalSources,
@@ -121,6 +123,37 @@ async function projectMessagePosted(
     attachments: event.attachments,
     mentionUserIds: event.mentionUserIds ?? [],
   });
+  if (event.attachments.length > 0) {
+    await tx.insert(storedAttachments).values(
+      event.attachments.map((attachment) => ({
+        ...attachment,
+        roomId,
+        claimedByMessageId: event.messageId,
+      })),
+    );
+  }
+  for (const reference of [...(event.references ?? [])].sort((a, b) => a.ordinal - b.ordinal)) {
+    const [stored] = await tx
+      .insert(messageReferences)
+      .values({ ...reference, roomId, messageId: event.messageId })
+      .returning({ id: messageReferences.id });
+    if (!stored) throw new Error('message reference insert returned no identity');
+    if (reference.kind === 'human') {
+      await tx
+        .insert(attentionItems)
+        .values({
+          roomId,
+          userId: reference.targetId,
+          subjectKind: 'message',
+          subjectId: event.messageId,
+          class: 'mention',
+          reason: { kind: 'mention', request: event.body },
+          status: 'pending',
+          createdAt: new Date(event.at),
+        })
+        .onConflictDoNothing();
+    }
+  }
   // Same transaction, same statement batch, no gap. `pg-boss`'s `fromDrizzle`
   // adapter writes the job row through `tx`, so there is no instant at which
   // the message is durable and the job is not.

@@ -50,6 +50,7 @@ function entry(roomId: string, roomSeq: number): LedgerEntry {
       replyToId: null,
       clientMessageId: null,
       attachments: [],
+      references: [],
     } as RoomEvent,
   };
 }

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { advanceSeenSeq, roomMemberIds } from '@atrium/auth';
+import { advanceSeenSeq } from '@atrium/auth';
 import {
   type AcceptedObject,
   AcceptedObjectType,
@@ -17,12 +17,18 @@ import {
   parseSemanticCommand,
   type Relation,
 } from '@atrium/core';
-import { type Database, messages } from '@atrium/db';
-import { and, eq } from 'drizzle-orm';
+import {
+  acceptedObjects,
+  type Database,
+  memberships,
+  messages,
+  proposals,
+} from '@atrium/db';
+import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
 import { type ProjectionHooks, projectRoomEvent } from './projections.js';
-import { MessageAttachment, type RoomEvent } from './room-events.js';
+import { MessageAttachment, MessageReference, type RoomEvent } from './room-events.js';
 import type { Authorizer, MembershipPair, Session } from './session.js';
 
 /**
@@ -78,6 +84,7 @@ function answerMessageFingerprint(input: {
   questionId: string;
   body: string;
   attachments: readonly {
+    id: string;
     key: string;
     name: string;
     contentType: string;
@@ -89,11 +96,12 @@ function answerMessageFingerprint(input: {
   // reinterpret an old retry key. Upload capabilities are intentionally absent:
   // they authorize a fresh write, but are not part of the durable meaning.
   const canonical = JSON.stringify([
-    'answer_message/v1',
+    'answer_message/v2',
     input.roomId,
     input.questionId,
     input.body,
     input.attachments.map((attachment) => [
+      attachment.id,
       attachment.key,
       attachment.name,
       attachment.contentType,
@@ -108,25 +116,34 @@ function sendMessageFingerprint(input: {
   body: string;
   replyToId: string | null;
   attachments: readonly {
+    id: string;
     key: string;
     name: string;
     contentType: string;
     size: number;
   }[];
-  mentionUserIds: readonly string[];
+  references: readonly z.infer<typeof MessageReference>[];
 }): string {
   const canonical = JSON.stringify([
-    'send_message/v1',
+    'send_message/v2',
     input.roomId,
     input.body,
     input.replyToId,
     input.attachments.map((attachment) => [
+      attachment.id,
       attachment.key,
       attachment.name,
       attachment.contentType,
       attachment.size,
     ]),
-    input.mentionUserIds,
+    input.references.map((reference) => [
+      reference.ordinal,
+      reference.kind,
+      reference.targetId,
+      reference.start,
+      reference.end,
+      reference.surface,
+    ]),
   ]);
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
@@ -212,7 +229,7 @@ export const Command = z.discriminatedUnion('name', [
     clientMessageId: z.string().min(1).max(128).nullable().default(null),
     replyToId: Id.nullable().default(null),
     attachments: AttachmentList,
-    mentionUserIds: z.array(Id).max(20).default([]),
+    references: z.array(MessageReference).max(100).default([]),
   }),
   z.object({ name: z.literal('record_proposal'), roomId: Id, proposal: ProposalDraft }),
   z.object({
@@ -364,6 +381,73 @@ export interface CommandService {
   stillMembers: (pairs: readonly MembershipPair[]) => Promise<Set<string>>;
 }
 
+const REFERENCE_UNAVAILABLE = 'reference is unavailable';
+
+async function validateMessageReferences(input: {
+  tx: Pick<Database, 'select'>;
+  roomId: string;
+  body: string;
+  attachments: readonly z.infer<typeof MessageAttachment>[];
+  references: readonly z.infer<typeof MessageReference>[];
+}): Promise<void> {
+  const { tx, roomId, body, references } = input;
+  const ordinals = new Set<number>();
+  const ordered = [...references].sort((a, b) => a.start - b.start || a.end - b.end);
+  let priorEnd = -1;
+  for (const [index, reference] of ordered.entries()) {
+    if (
+      ordinals.has(reference.ordinal) ||
+      reference.ordinal !== index ||
+      reference.end > body.length ||
+      reference.start >= reference.end ||
+      reference.start < priorEnd ||
+      !reference.surface.startsWith('@') ||
+      body.slice(reference.start, reference.end) !== reference.surface
+    ) {
+      throw new CommandError('invalid', REFERENCE_UNAVAILABLE);
+    }
+    ordinals.add(reference.ordinal);
+    priorEnd = reference.end;
+  }
+
+  const ids = (kind: z.infer<typeof MessageReference>['kind']) =>
+    [...new Set(references.filter((reference) => reference.kind === kind).map((r) => r.targetId))];
+  const humanIds = ids('human');
+  const attachmentIds = ids('attachment');
+  const proposalIds = ids('proposal');
+  const objectIds = ids('object');
+
+  const [humanRows, proposalRows, objectRows] = await Promise.all([
+    humanIds.length === 0
+      ? []
+      : tx
+          .select({ id: memberships.userId })
+          .from(memberships)
+          .where(and(eq(memberships.roomId, roomId), inArray(memberships.userId, humanIds))),
+    proposalIds.length === 0
+      ? []
+      : tx
+          .select({ id: proposals.id })
+          .from(proposals)
+          .where(and(eq(proposals.roomId, roomId), inArray(proposals.id, proposalIds))),
+    objectIds.length === 0
+      ? []
+      : tx
+          .select({ id: acceptedObjects.id })
+          .from(acceptedObjects)
+          .where(and(eq(acceptedObjects.roomId, roomId), inArray(acceptedObjects.id, objectIds))),
+  ]);
+  const uploaded = new Set(input.attachments.map((attachment) => attachment.id));
+  if (
+    humanRows.length !== humanIds.length ||
+    proposalRows.length !== proposalIds.length ||
+    objectRows.length !== objectIds.length ||
+    attachmentIds.some((id) => !uploaded.has(id))
+  ) {
+    throw new CommandError('invalid', REFERENCE_UNAVAILABLE);
+  }
+}
+
 export function createCommandService({
   db,
   ledger,
@@ -437,7 +521,7 @@ export function createCommandService({
         const persistedAttachments = command.attachments.map(
           ({ capability: _capability, ...attachment }) => MessageAttachment.parse(attachment),
         );
-        const prepare = async () => {
+        const prepare = async (tx: Tx) => {
           if (command.attachments.length > 0 && !attachmentCapabilities) {
             throw new CommandError('invalid', 'attachments are not configured');
           }
@@ -447,21 +531,28 @@ export function createCommandService({
                 attachmentCapabilities?.verify({ ...attachment, roomId: command.roomId }) !== true,
             )
           ) {
-            throw new CommandError('invalid', 'an attachment capability is invalid or expired');
+            throw new CommandError(
+              'invalid',
+              command.references.some((reference) => reference.kind === 'attachment')
+                ? REFERENCE_UNAVAILABLE
+                : 'an attachment capability is invalid or expired',
+            );
           }
-          if (command.mentionUserIds.length > 0) {
-            const uniqueTargets = [...new Set(command.mentionUserIds)];
-            if (uniqueTargets.length !== command.mentionUserIds.length) {
-              throw new CommandError('invalid', 'mention targets must be unique');
-            }
-            const members = new Set(await roomMemberIds(db, command.roomId));
-            if (uniqueTargets.some((userId) => !members.has(userId))) {
-              throw new CommandError(
-                'invalid',
-                'every mention target must be a current room member',
-              );
-            }
+          if (new Set(persistedAttachments.map((attachment) => attachment.id)).size !== persistedAttachments.length) {
+            throw new CommandError(
+              'invalid',
+              command.references.some((reference) => reference.kind === 'attachment')
+                ? REFERENCE_UNAVAILABLE
+                : 'an attachment capability is invalid or expired',
+            );
           }
+          await validateMessageReferences({
+            tx,
+            roomId: command.roomId,
+            body: command.body,
+            attachments: persistedAttachments,
+            references: command.references,
+          });
         };
         const build = ({ id, at }: { id: string; at: string }): RoomEvent => ({
           id,
@@ -473,11 +564,23 @@ export function createCommandService({
           replyToId: command.replyToId,
           clientMessageId: command.clientMessageId,
           attachments: persistedAttachments,
-          mentionUserIds: command.mentionUserIds,
+          references: command.references,
         });
         if (command.clientMessageId === null) {
-          await prepare();
-          return appendAndProject(session, command.roomId, build);
+          const batch = await ledger.appendBatch({
+            roomId: command.roomId,
+            actor: actorOf(session),
+            requireClean: true,
+            authorize: async (tx) => {
+              await requireMembership(session, command.roomId, tx);
+            },
+            prepare,
+            builds: [build],
+            project: (context) => projectRoomEvent(context, projectionHooks),
+          });
+          const entry = batch.entries[0];
+          if (!entry) throw new Error('send_message batch committed without an entry');
+          return { kind: 'appended', ...entry, issues: [...entry.issues] };
         }
         const batch = await ledger.appendBatch({
           roomId: command.roomId,
@@ -495,7 +598,7 @@ export function createCommandService({
               body: command.body,
               replyToId: command.replyToId,
               attachments: persistedAttachments,
-              mentionUserIds: command.mentionUserIds,
+              references: command.references,
             }),
             expectedEventTypes: ['message_posted'],
           },
@@ -560,6 +663,7 @@ export function createCommandService({
               replyToId: null,
               clientMessageId: command.clientMessageId,
               attachments: persistedAttachments,
+              references: [],
             }),
             ({ id, at }) => {
               const question = ledger.coreState().objects[command.questionId];

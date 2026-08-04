@@ -257,11 +257,13 @@ describe('send_message', () => {
     });
     const alice = await connect(room.people.alice as string);
     await alice.subscribe(room.roomId);
+    const reconnectAttachmentId = randomUUID();
     const command = {
-      ...send(room.roomId, 'The exact authored message survives reconnect.', 'uncertain-send-1'),
-      mentionUserIds: [room.people.bob as string],
+      ...send(room.roomId, '@bob The exact authored message survives reconnect.', 'uncertain-send-1'),
+      references: [{ ordinal: 0, kind: 'human' as const, targetId: room.people.bob as string, start: 0, end: 4, surface: '@bob' }],
       attachments: [
         {
+          id: reconnectAttachmentId,
           key: `${room.roomId}/reconnect-proof.txt`,
           name: 'reconnect-proof.txt',
           contentType: 'text/plain',
@@ -292,9 +294,9 @@ describe('send_message', () => {
     expect(rows[0]).toMatchObject({
       body: command.body,
       clientMessageId: command.clientMessageId,
-      mentionUserIds: command.mentionUserIds,
       attachments: [
         {
+          id: reconnectAttachmentId,
           key: `${room.roomId}/reconnect-proof.txt`,
           name: 'reconnect-proof.txt',
           contentType: 'text/plain',
@@ -335,6 +337,7 @@ describe('send_message', () => {
     });
     const alice = await connect(room.people.alice as string);
     const attachment = {
+      id: randomUUID(),
       key: `${room.roomId}/object`,
       name: 'proof.txt',
       contentType: 'text/plain',
@@ -356,7 +359,7 @@ describe('send_message', () => {
     expect(accepted.type).toBe('ack');
     const event = await lastEvent<{ attachments: unknown[] }>(room.roomId);
     expect(event.attachments).toEqual([
-      { key: attachment.key, name: 'proof.txt', contentType: 'text/plain', size: 5 },
+      { id: attachment.id, key: attachment.key, name: 'proof.txt', contentType: 'text/plain', size: 5 },
     ]);
     expect(JSON.stringify(event)).not.toContain('real-grant');
   });
@@ -1196,6 +1199,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
       clientMessageId: 'attached-bound-answer',
       attachments: [
         {
+          id: randomUUID(),
           key: `${room.roomId}/release.tar.zst`,
           name: 'release.tar.zst',
           contentType: 'application/zstd',

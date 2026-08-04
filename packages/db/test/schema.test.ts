@@ -328,20 +328,28 @@ describe('composite (room_id, id) foreign keys', () => {
     // reference is the easiest place in a schema to quietly lose one.
     expect(compositeFks(attentionItems)).toContainEqual(['room_id', 'subject_object_id']);
     expect(compositeFks(attentionItems)).toContainEqual(['room_id', 'subject_proposal_id']);
+    expect(compositeFks(attentionItems)).toContainEqual(['room_id', 'subject_message_id']);
     expect(compositeFks(corrections)).toContainEqual(['room_id', 'object_id']);
     expect(compositeFks(messages)).toContainEqual(['room_id', 'reply_to_id']);
   });
 
-  it('keeps the attention subject discriminated, and both targets generated', () => {
+  it('keeps the attention subject allowlisted, and all targets generated', () => {
     const columns = getTableConfig(attentionItems).columns;
     const named = (name: string) => columns.find((column) => column.name === name);
-    expect(named('subject_kind')?.enumValues).toEqual(['object', 'proposal']);
+    // Mutation: leave subject_kind as an enum whose newly-added value cannot be
+    // consumed in the same transactional migration, or omit the closed CHECK
+    // after converting it to text.
+    expect(named('subject_kind')?.getSQLType()).toBe('text');
+    expect(getTableConfig(attentionItems).checks.map((check) => check.name)).toContain(
+      'attention_items_subject_kind_allowlist',
+    );
     expect(named('subject_id')?.notNull).toBe(true);
     // Generated, not written. It is what makes "exactly one target is set, and
     // it is the one the discriminator names" true by construction rather than
     // by a check constraint somebody has to keep in step.
     expect(named('subject_object_id')?.generated).toBeDefined();
     expect(named('subject_proposal_id')?.generated).toBeDefined();
+    expect(named('subject_message_id')?.generated).toBeDefined();
     // And the old bare column is gone, not merely unused: a `needs_decision`
     // item pointing at a proposal was unstorable while it existed.
     expect(named('object_id')).toBeUndefined();

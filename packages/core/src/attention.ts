@@ -10,8 +10,8 @@ import type { CoreState, ObjectRecord } from './state.js';
 
 /**
  * Attention items are a *projection*, never source truth (issue #3). They are
- * stored so the UI can page them, but they are always recomputable from the
- * accepted-object graph.
+ * stored so the UI can page them, but they are always recomputable from durable
+ * semantic state or, for direct typed mentions, committed message references.
  *
  * A rationale is required by design: an attention item that cannot say why it
  * needs this person specifically is not allowed to exist (research brief,
@@ -49,7 +49,7 @@ export type AttentionStatus = z.infer<typeof AttentionStatus>;
  * become polymorphic. Core is the layer that discovered it; the migration is not
  * this ticket's.)
  */
-export const AttentionSubjectKind = z.enum(['object', 'proposal']);
+export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message']);
 export type AttentionSubjectKind = z.infer<typeof AttentionSubjectKind>;
 
 /* ─────────────────────────────────────────────────────────────────────────

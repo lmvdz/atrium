@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { createAttachmentSigner, MAX_ATTACHMENT_BYTES, UploadRequest } from '../src/attachments.js';
 import { Command } from '../src/commands.js';
@@ -37,6 +38,7 @@ describe('direct attachment capabilities', () => {
     expect(
       signer().verify({
         roomId: ROOM,
+        id: signed.id,
         key: signed.key,
         name: 'proof.txt',
         contentType: 'text/plain',
@@ -57,6 +59,7 @@ describe('direct attachment capabilities', () => {
     });
     const granted = {
       roomId: ROOM,
+      id: signed.id,
       key: signed.key,
       name: 'proof.txt',
       contentType: 'text/plain',
@@ -67,6 +70,9 @@ describe('direct attachment capabilities', () => {
     expect(authority.verify({ ...granted, contentType: 'application/octet-stream' })).toBe(false);
     expect(authority.verify({ ...granted, size: 6 })).toBe(false);
     expect(authority.verify({ ...granted, key: `${ROOM}/another-object` })).toBe(false);
+    // Mutation: omit attachment id from the capability payload, allowing one
+    // upload grant to be claimed under a different durable identity.
+    expect(authority.verify({ ...granted, id: randomUUID() })).toBe(false);
   });
 
   /** Mutation: remove the 25 MB bound from either presigning or the command. */
