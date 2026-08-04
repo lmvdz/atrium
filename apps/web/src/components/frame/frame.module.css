@@ -1226,15 +1226,15 @@
 /* V8's command line belongs to the main workspace, not the conversation dock.
    Keep the same Composer behavior and provenance boundary, but paint its
    existing textarea as the bottom-bound terminal prompt from the authority. */
-.center > .composer .ctxbar {
+.composer .ctxbar {
   background: transparent;
   border: 0;
   border-radius: 0;
   padding: 0 0 3px;
 }
 
-.center > .composer .cbox,
-.center > .composer .cbox:focus-within {
+.composer .cbox,
+.composer .cbox:focus-within {
   background: transparent;
   border: 0;
   grid-template-areas:
@@ -1243,7 +1243,7 @@
   grid-template-columns: auto minmax(0, 1fr);
 }
 
-.center > .composer .cbox::before {
+.composer .cbox::before {
   align-self: center;
   color: var(--grn);
   content: '›';
@@ -1251,13 +1251,13 @@
   grid-area: prompt;
 }
 
-.center > .composer .cbox textarea {
+.composer .cbox textarea {
   grid-area: input;
   min-height: 25px;
   padding: 3px 8px;
 }
 
-.center > .composer .cboxRight {
+.composer .cboxRight {
   grid-area: tools;
   justify-content: flex-end;
   padding: 2px 0 0;
@@ -1266,12 +1266,12 @@
 /* WIRE paints the composer as a command line, not a boxed field. Keep the
    keyboard focus cue, but use the same restrained green as its prompt and
    caret instead of flashing a bright neutral rectangle across the frame. */
-.center > .composer .cbox textarea:focus-visible {
+.composer .cbox textarea:focus-visible {
   outline: 1px solid var(--grn2);
   outline-offset: -1px;
 }
 
-.center > .composer .cfoot {
+.composer .cfoot {
   font-size: 9px;
   margin-top: 3px;
 }
