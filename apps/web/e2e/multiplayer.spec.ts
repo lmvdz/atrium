@@ -170,18 +170,22 @@ test.describe
       const pages = await Promise.all(contexts.map((context) => context.newPage()));
       const emails = Array.from({ length: 5 }, (_, index) => uniqueEmail(`multi-${index}`));
       const names = ['Aster', 'Birch', 'Cedar', 'Dahlia', 'Elm'];
-      /* STILL RED, and now on ONE precise assertion rather than a 240s timeout.
-         The mention attention row is projected — it was missing entirely before
-         — but the query below reads its `statement` as null where this expects
-         the sent body. The row is `subjectKind: 'proposal'`,
-         `proposalStatus: 'accepted'`, and the COALESCE covers
-         `statement`/`question`/`title` on both the proposal and the accepted
-         object; `open_question` payloads use `question`
-         (packages/core/src/semantic-command.ts:48), so one of those two things
-         is not what it appears. NOT resolved: whether the projection should
-         carry a statement for a mention row at all is a product question about
-         what the pin can show, and it is not answerable from this spec alone.
-         What the row's statement SHOULD be is the ground truth still missing.
+      /* STILL RED, and the remaining failure is NOT any of the six problems
+         fixed on the way here — it ALTERNATES between two later points in the
+         semantic-acceptance stage across otherwise identical runs at one
+         worker: "claim <id> has no live attention route" (the pin has no route
+         to a staged claim yet) and the accepted-object walk below it. That is a
+         timing dependency between the interpretation worker and the attention
+         projection, and it is the next thing to chase here — it has nothing to
+         do with mentions, composers or locators.
+
+         What was fixed to reach it, all measured, all recorded at the line they
+         touch: the two stale locators; the mention picked AFTER the body so
+         `reconcileMessageReferences` keeps the reference; the mention row's
+         statement read from `reason.request` where the projection puts it; the
+         subject asserted as `message` rather than `proposal`; the pin/reference
+         split; and the certified id read from `message_references` rather than
+         from `messages.mention_user_ids`, which this product never fills.
 
          THE BODY A MENTIONED MESSAGE IS ACTUALLY SENT WITH.
          The mention has to be IN the text. `reconcileMessageReferences` drops
@@ -545,9 +549,39 @@ test.describe
            `onOpenReferences`, not through a pin action. Not rewritten blind:
            this is a 240-second scenario and the rewrite is only verifiable by
            running it. */
+        /* THE PIN SHOWS OBLIGATIONS; A MENTION IS A POINTER, AND HAS ITS OWN
+           SURFACE. This required EVERY pending attention row to render in the
+           pin. The mention does not, by design: `LiveRoomSession` builds
+           `contextualAttentionIds` from `view.referenceAttention` and hands the
+           pin `actionableAttention`, which excludes them — a typed human
+           reference becomes a marker on the message it was written in, and an
+           "unfiled direct references" line in the state lens.
+
+           The call, and it is reversible: the product is right and this check
+           was stale. `referenceAttention` is a built surface with its own
+           rendering, not an oversight, and "you were named in this message" is
+           answered by taking the reader TO that message — which the pin, a list
+           of things to act on, cannot do. If that goes the other way and a
+           mention should be a pin card, this reverts to the plain equality and
+           the exclusion below comes out.
+
+           WHAT THE OLD ONE CAUGHT: a pending attention row that renders
+           nowhere. WHAT THIS ONE CATCHES: exactly the same, and it is now
+           stated over BOTH surfaces rather than one — the pin must render every
+           obligation, and the mention must render as a reachable reference. The
+           old form could not distinguish "not rendered" from "rendered
+           somewhere else", which is why it read as a defect for a session. */
+        const pinAttention = pendingAttention.filter((item) => item.reasonKind !== 'mention');
         expect([...renderedAttentionIds].sort()).toEqual(
-          pendingAttention.map((item) => item.id).sort(),
+          pinAttention.map((item) => item.id).sort(),
         );
+        const referenceMarker = absentee.getByRole('button', {
+          name: 'Open 1 direct reference in its message',
+        });
+        await expect(
+          referenceMarker,
+          'the mention renders on neither surface: not a pin card, and no reference marker',
+        ).toBeVisible();
         const mentionAttention = pendingAttention.find((item) => item.reasonKind === 'mention');
         /* THE SUBJECT OF A MENTION IS THE MESSAGE THAT CARRIED IT.
            This asserted `subjectKind: 'proposal'` with `proposalStatus:
@@ -572,7 +606,14 @@ test.describe
           reasonKind: 'mention',
         });
         if (!mentionAttention?.id) throw new Error('the structured mention has no attention row');
-        await actOnAttention(absentee, mentionAttention.id, 'dismiss');
+        /* AND IT IS RESOLVED THROUGH THE SURFACE THAT SHOWS IT.
+           `actOnAttention` drives the pin's own controls, which a mention no
+           longer appears in. The reference marker resolves it — `onOpenReferences`
+           calls `resolveAttention(roomId, attentionId, 'resolved')` — so opening
+           the reference is what clears the row, and that is the affordance a
+           reader actually has. The persisted check below is unchanged: the row
+           still has to leave `pending` in the database. */
+        await referenceMarker.click();
         await eventually(
           async () =>
             String(
@@ -580,8 +621,14 @@ test.describe
                 await sql`SELECT status::text FROM attention_items WHERE id=${mentionAttention.id}::uuid`
               )[0]?.status ?? '',
             ),
-          (status) => status === 'dismissed',
-          'one-click mention dismissal to reach the persisted attention fold',
+          /* RESOLVED, not dismissed — the terminal state names what the reader
+             did. `onOpenReferences` calls `resolveAttention(…, 'resolved')`:
+             opening the message you were named in ANSWERS the mention, where
+             the pin's `dismiss` says "not for me". The property under test is
+             unchanged and is the one that matters: the row leaves `pending` in
+             the database because of something the reader actually clicked. */
+          (status) => status === 'resolved',
+          'one-click mention resolution to reach the persisted attention fold',
         );
         await openScenarioSocket(absentee, roomId);
 
@@ -632,13 +679,18 @@ test.describe
           (message) => message.semantic === 'objective',
         );
         const objectiveIds = objectiveMessages.map(
-          (message) => acceptedObjectives.find((object) => object.statement === message.body)?.id,
+          /* `sentBody`, not `body`: a mentioned message reaches the fold with
+             its `@Name` in the text, so the semantic statement carries it too. */
+          (message) =>
+            acceptedObjectives.find((object) => object.statement === sentBody(message))?.id,
         );
         if (objectiveIds.some((id) => !id)) {
           throw new Error('both authored objectives did not reach the accepted fold');
         }
         for (const proposal of pending.filter((candidate) => candidate.type !== 'objective')) {
-          const fixture = manifest.messages.find((message) => message.body === proposal.statement);
+          const fixture = manifest.messages.find(
+            (message) => sentBody(message) === proposal.statement,
+          );
           if (!fixture)
             throw new Error(
               `semantic fixture has no objective ground truth: ${proposal.statement}`,
@@ -693,14 +745,41 @@ test.describe
 
         const mentionedFixture = manifest.messages[74];
         if (!mentionedFixture) throw new Error('structured mention fixture is missing');
-        const [mentionedMessage] = await sql<{ body: string; mentionUserIds: string[] }[]>`
-          SELECT body, mention_user_ids::text[] AS "mentionUserIds"
-          FROM messages
-          WHERE room_id=${roomId}::uuid AND body=${sentBody(mentionedFixture)}
+        /* THE CERTIFIED ID LIVES ON THE REFERENCE, NOT ON THE MESSAGE ROW.
+           This read `messages.mention_user_ids` and required the absentee's id
+           in it. That column is empty for every message this product sends:
+           `LiveRoomSession` passes `references` to `sendMessage` and never
+           `mentionUserIds`, so the array defaults to `{}`. Verified against the
+           row — body correct, mentions `{}` — while the attention row for the
+           same mention exists, because `projections.ts` builds it from the
+           REFERENCE.
+
+           WHAT THE OLD ONE CAUGHT: a structured mention that renders its label
+           but drops the certified user id, leaving the visible `@name` as the
+           only record of who was meant. WHAT THIS ONE CATCHES: exactly that,
+           read from the register the product actually writes — and more of it,
+           because the reference carries the span and surface too, so a mention
+           whose id is right but whose text no longer matches is caught as well.
+
+           NOT FIXED, and worth a decision: `mention_user_ids` is a second
+           register for the same fact, and it is not merely unused —
+           `attention-projection.ts:93` still computes its targets from it. That
+           path is reading a column the client never fills. Either the column
+           goes, or something fills it; leaving both is the "two registers for
+           one fact" shape AGENTS.md names. */
+        const [mentionedMessage] = await sql<
+          { body: string; kind: string; targetId: string; surface: string }[]
+        >`
+          SELECT m.body, r.kind::text, r.target_id::text AS "targetId", r.surface
+          FROM messages m
+          JOIN message_references r ON r.message_id = m.id
+          WHERE m.room_id=${roomId}::uuid AND m.body=${sentBody(mentionedFixture)}
         `;
         expect(mentionedMessage).toEqual({
           body: sentBody(mentionedFixture),
-          mentionUserIds: [users[manifest.absentee]],
+          kind: 'human',
+          targetId: users[manifest.absentee],
+          surface: `@${names[manifest.absentee]}`,
         });
 
         const objects = await sql<
@@ -717,7 +796,9 @@ test.describe
          * objects, but it no longer exercises state across two objectives.
          */
         for (const object of objects.filter((candidate) => candidate.type !== 'objective')) {
-          const fixture = manifest.messages.find((message) => message.body === object.statement);
+          const fixture = manifest.messages.find(
+            (message) => sentBody(message) === object.statement,
+          );
           if (!fixture) {
             throw new Error(`accepted object has no objective ground truth: ${object.statement}`);
           }
