@@ -21,8 +21,8 @@ conversation follow. It strictly contains `build/live-multiplayer`,
 | `pnpm lint` | documented as always 1 | **0** — see below |
 | `pnpm test --maxWorkers=2` | — | **3109 / 3109** |
 | `pnpm test:integration` | — | **189 / 189** |
-| `pnpm test:e2e` **at 4 workers** | — | **168 passed · 1 failed** |
-| `pnpm test:e2e` at 8 workers | 157 passed · 11 failed | 162–165 passed, 4–7 failed, *shifting* |
+| `pnpm test:e2e` **at 4 workers** | — | **169 passed · 0 failed** — green, twice |
+| `pnpm test:e2e` at 8 workers | 157 passed · 11 failed | 165 passed · 4 failed — oversubscribed, see below |
 
 **`pnpm lint` exits 0 now.** The previous handoff recorded it as exiting 1 "and
 always has", on `design/*.mjs` and `scripts/mutation-ledger.mjs`. Those files
@@ -175,19 +175,18 @@ default while the test carries 71 awaited steps across two contexts, two
 signups, an attachment round trip and a rich mention. It now sets 120s. That is
 a harness budget, not an assertion — every check in it is unchanged.)
 
-## Still red at 4 workers — 1
+## Nothing is red at 4 workers
 
-`multiplayer.spec.ts`, and the remaining failure is none of the six problems
-fixed on the way to it. It **alternates** between two points in the
-semantic-acceptance stage across identical runs at one worker: "claim <id> has
-no live attention route", and the accepted-object walk below it. That is a
-timing dependency between the interpretation worker and the attention
-projection. Start there; it has nothing to do with mentions, composers or
-locators.
+The gate is green: **169 passed, 0 failed**, run twice. The same tree at 8
+workers reports 165/4, which is the oversubscription measured below and not the
+product.
 
-### What was fixed to reach it
+### What the multiplayer scenario turned out to be
 
-Two real **composer defects**, both independent of the scenario, both
+It began as a 240s timeout on a locator that had never existed in this tree.
+Eight distinct problems, each measured:
+
+**Two real composer defects**, both independent of the scenario, both now
 unit-covered:
 
 - The reference control inserted a bare `@` at the caret. `mentionMatch` is
@@ -198,12 +197,14 @@ unit-covered:
   `setDraftMirror` — invisible to a controlled consumer (every route in the
   app), broken for an uncontrolled one.
 
-Then four stale assertions in the spec, each retargeted at the register the
-product actually writes: the mention picked AFTER the body so
+**Six stale expectations in the spec**, each retargeted at the register the
+product actually writes: the two locators; the mention picked AFTER the body so
 `reconcileMessageReferences` keeps the reference; the row's statement read from
-`reason.request`; its subject asserted as `message`, not `proposal`; and the
+`reason.request`; its subject asserted as `message`, not `proposal`; the
 certified id read from `message_references` rather than
-`messages.mention_user_ids`.
+`messages.mention_user_ids`; and the acceptance loop reading its filter from
+`DEFAULT_ACCEPTANCE_RULES` instead of demanding a human route for `claim` and
+`open_question`, which the policy accepts on their own.
 
 ### Two decisions taken, both reversible
 
@@ -219,7 +220,8 @@ reverts to a plain equality.
 **`mention_user_ids` is a second register for the same fact, and it is not
 merely unused.** `attention-projection.ts:93` computes its targets from it while
 the client never fills it. Either the column goes, or something fills it.
-Leaving both is the shape AGENTS.md names. Not touched.
+Leaving both is the shape AGENTS.md names. **Not touched — this is the one
+loose thread worth pulling next.**
 
 ## Process notes
 
