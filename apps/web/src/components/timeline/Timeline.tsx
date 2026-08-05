@@ -106,8 +106,14 @@ export function Timeline({
       return;
     }
 
-    const retainedInOrder = previousMessageIds.every((id, index) => messageIds[index] === id);
-    const firstAppendedId = retainedInOrder ? messageIds[previousMessageIds.length] : undefined;
+    const previousIds = new Set(previousMessageIds);
+    const lastRetainedIndex = messageIds.reduce(
+      (last, id, index) => (previousIds.has(id) ? index : last),
+      -1,
+    );
+    const firstAppendedId = messageIds.find(
+      (id, index) => index > lastRetainedIndex && !previousIds.has(id),
+    );
     if (firstAppendedId === undefined) return;
 
     if (followingRef.current) {

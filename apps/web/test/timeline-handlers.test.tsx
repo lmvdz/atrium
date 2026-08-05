@@ -164,6 +164,26 @@ describe('conversation follow mode', () => {
     await waitFor(() => expect(requests.at(-1)).toEqual({ top: 1000, behavior: 'smooth' }));
     expect(screen.queryByRole('button', { name: '↓ new messages' })).toBeNull();
   });
+
+  /* CATCHES: loading older history above the rows already on screen being
+     mistaken for incoming chat and stealing the reader's place. */
+  it('does not call prepended history a new message', async () => {
+    const firstMessageIndex = ENTRIES.findIndex((entry) => entry.type === 'message');
+    const initial = ENTRIES.slice(firstMessageIndex + 1);
+    const { container, rerender } = render(<Timeline entries={initial} filter={null} />);
+    const feed = container.querySelector('[data-region="conversation"]') as HTMLElement;
+    setScrollGeometry(feed, { height: 300, top: 300 });
+    fireEvent.scroll(feed);
+    rerender(
+      <AttributionLedger messages={f.RECORDS} room="users-migration">
+        <Timeline entries={ENTRIES} filter={null} />
+      </AttributionLedger>,
+    );
+    await waitFor(() =>
+      expect(feed.querySelectorAll('[data-message-id]').length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByRole('button', { name: '↓ new messages' })).toBeNull();
+  });
 });
 
 describe('objective header actions', () => {
