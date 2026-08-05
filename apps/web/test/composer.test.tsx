@@ -665,3 +665,35 @@ describe('a composition that ends any way at all releases the send', () => {
     expect(event.defaultPrevented, 'Send takes focus away from the composition').toBe(true);
   });
 });
+
+describe('the reference control opens a mention that can be matched', () => {
+  /* CATCHES: the reference control inserting an `@` that cannot start a mention.
+     `mentionMatch` is `/(^|\s)@([^\s@]*)$/` — the `@` counts only at the start
+     of the draft or after whitespace — and the control inserted a bare `@` at
+     the caret regardless. After any non-space character the token did not
+     match, `selectMention` took its `mentionMatch === null` branch, and picking
+     a target appended a SECOND `@`. Measured on the live route against a corpus
+     body ending in "?": the draft came out `…catch-up?@@Elm `.
+     Both halves are driven here: the draft that needs a separator, and the one
+     that already ends in whitespace and must not gain a second space. */
+  it('the reference control inserts an @ that can start a mention', () => {
+    const drafts: string[] = [];
+    render(
+      <Composer
+        binding={FREE}
+        referenceTargets={[{ kind: 'human', id: 'u-elm', label: 'Elm' }]}
+        onChange={(draft) => drafts.push(draft)}
+        roomName="r"
+      />,
+    );
+    fireEvent.change(box(), { target: { value: 'which trace proves ordered catch-up?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reference a person or room item' }));
+    expect(drafts.at(-1)).toBe('which trace proves ordered catch-up? @');
+    fireEvent.click(screen.getByRole('option', { name: '@Elm' }));
+    expect(drafts.at(-1)).toBe('which trace proves ordered catch-up? @Elm ');
+
+    fireEvent.change(box(), { target: { value: 'ping ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reference a person or room item' }));
+    expect(drafts.at(-1), 'a draft already ending in space must not gain a second').toBe('ping @');
+  });
+});

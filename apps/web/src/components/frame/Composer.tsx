@@ -140,15 +140,6 @@ export function Composer({
      otherwise. Reading the element is what keeps this component stateless while
      still being able to keep the footer's promise. */
   const draft = useCallback(() => value ?? own.current?.value ?? '', [value]);
-  const insert = useCallback(
-    (text: string) => {
-      const next = `${draft()}${text}`;
-      if (value === undefined && own.current !== null) own.current.value = next;
-      onChange?.(next);
-      own.current?.focus();
-    },
-    [draft, onChange, value],
-  );
   const replaceDraft = useCallback(
     (next: string) => {
       setDraftMirror(next);
@@ -157,6 +148,19 @@ export function Composer({
       own.current?.focus();
     },
     [onChange, value],
+  );
+  /* APPENDING GOES THROUGH `replaceDraft`, so the component's own mirror moves
+     with the field. This wrote the DOM value and called `onChange` but never
+     `setDraftMirror`, which is invisible to a CONTROLLED consumer — `value`
+     comes back through props — and broken for an uncontrolled one, where
+     `visibleDraft` falls back to the mirror. The mention flow is the case that
+     shows it: the reference control appends `@`, and `selectMention` then reads
+     a `visibleDraft` that predates it, finds no `@` to replace and appends its
+     own — so the draft ends up carrying the target twice over. The live route
+     holds its own draft, which is why only the uncontrolled path was wrong. */
+  const insert = useCallback(
+    (text: string) => replaceDraft(`${draft()}${text}`),
+    [draft, replaceDraft],
   );
   const visibleDraft = value ?? draftMirror;
   const slashMatch = /^\/(\S*)$/.exec(visibleDraft);
@@ -566,7 +570,21 @@ export function Composer({
             className={styles.composerTool}
             disabled={disabled}
             onClick={() => {
-              if (mentionMatch === null) insert('@');
+              /* THE `@` THIS INSERTS HAS TO BE ABLE TO START A MENTION.
+                 `mentionMatch` is `/(^|\s)@([^\s@]*)$/` — the `@` counts only at
+                 the start of the draft or after whitespace. This inserted a bare
+                 `@` at the caret regardless, so after any non-space character
+                 the token it created did not match, `selectMention` fell into
+                 its `mentionMatch === null` branch, and picking a target
+                 appended a SECOND `@`: type "who owns this?", click this
+                 control, choose a person, and the draft reads
+                 "who owns this?@@Grace ". Measured on the live route with a
+                 real corpus body ending in "?".
+                 The separator is derived from the same rule the match uses, so
+                 there is no second definition of what can precede a mention. */
+              if (mentionMatch === null) {
+                insert(visibleDraft === '' || /\s$/.test(visibleDraft) ? '@' : ' @');
+              }
               setMentionOpen(true);
               setMentionDismissedDraft(null);
               setSlashOpen(false);

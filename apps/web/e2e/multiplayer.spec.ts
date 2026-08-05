@@ -170,6 +170,34 @@ test.describe
       const pages = await Promise.all(contexts.map((context) => context.newPage()));
       const emails = Array.from({ length: 5 }, (_, index) => uniqueEmail(`multi-${index}`));
       const names = ['Aster', 'Birch', 'Cedar', 'Dahlia', 'Elm'];
+      /* STILL RED, and now on ONE precise assertion rather than a 240s timeout.
+         The mention attention row is projected — it was missing entirely before
+         — but the query below reads its `statement` as null where this expects
+         the sent body. The row is `subjectKind: 'proposal'`,
+         `proposalStatus: 'accepted'`, and the COALESCE covers
+         `statement`/`question`/`title` on both the proposal and the accepted
+         object; `open_question` payloads use `question`
+         (packages/core/src/semantic-command.ts:48), so one of those two things
+         is not what it appears. NOT resolved: whether the projection should
+         carry a statement for a mention row at all is a product question about
+         what the pin can show, and it is not answerable from this spec alone.
+         What the row's statement SHOULD be is the ground truth still missing.
+
+         THE BODY A MENTIONED MESSAGE IS ACTUALLY SENT WITH.
+         The mention has to be IN the text. `reconcileMessageReferences` drops
+         any reference whose span an edit touches, which is correct and
+         deliberate: a structured mention whose text the author removed is a
+         claim about a message that does not mention them. This scenario used to
+         pick a mention and then `fill(message.body)` over the top of it, which
+         deleted the `@Name ` and took the certified user id with it — so no
+         `mention` attention row was projected and the equality below came up
+         exactly one item short. Written against the pre-typed-references
+         composer, where a mention rode beside the draft rather than in it.
+         Appending leaves the reference's span untouched, so it survives to the
+         fold. One expression, used by the send, by the expected attention set,
+         and by the persisted-body check, so the three cannot drift. */
+      const sentBody = (message: ScenarioMessage) =>
+        message.mention === null ? message.body : `${message.body} @${names[message.mention]} `;
       const runId = randomUUID().slice(0, 8);
 
       try {
@@ -296,34 +324,23 @@ test.describe
                WHAT THIS ONE CATCHES: the same thing, now that it can reach the
                control at all. The assertion below is untouched — the draft still
                has to end up exactly `@name `. */
+            /* BODY FIRST, MENTION LAST — the order matters twice over.
+               Picking the mention first and then filling the body over it
+               deletes the reference (see `sentBody`). Filling `@Name ` + body
+               keeps the reference but moves the mention to the FRONT of the
+               text, and the semantic fixtures are classified from the body:
+               prefixing seq 75 stopped "Open question:" leading its own
+               sentence and the run failed on "all eight semantic fixtures to
+               become proposals" instead. Typing the body and then inserting the
+               mention at the caret leaves both intact — the sentence still
+               opens the way the classifier reads, and the reference's span is
+               at the end where no later edit touches it. */
+            await composer.fill(message.body);
             await sender.getByLabel('Reference a person or room item').click();
             await sender
               .getByRole('option', { name: `@${names[message.mention]}`, exact: true })
               .click();
-            await expect(composer).toHaveValue(`@${names[message.mention]} `);
-            /* STALE AGAINST THE TYPED-REFERENCES CONTRACT, AND STILL RED BELOW.
-               `fill` REPLACES the draft, so the `@Name ` this just inserted is
-               deleted before Send. `reconcileMessageReferences` (lib/typed-
-               references.ts) drops any reference whose span an edit touches,
-               which is correct and deliberate — a structured mention whose text
-               the author removed is a claim about a message that does not
-               mention them. So the certified user id goes with it, no `mention`
-               attention row is projected for the absentee, and the equality at
-               ~line 429 is short by exactly that one item.
-
-               This scenario was written against the pre-typed-references
-               composer, where the mention rode beside the draft rather than in
-               it. Making it coherent means the mention text has to survive into
-               the body — which moves three things together: the manifest's body
-               for seq 75, the `statement` in `expectedAttention`, and the
-               `body` equality in the persisted-message check below. Left alone
-               rather than guessed at: eight other assertions read
-               `message.body`, and a manifest edit made without running this
-               2-minute scenario end to end would be a change nothing measured.
-
-               The locator repair above is separate and stands on its own — it
-               is what let the run reach this assertion at all. */
-            await composer.fill(message.body);
+            await expect(composer).toHaveValue(sentBody(message));
             await sender.getByRole('button', { name: 'Send' }).click();
           } else if (message.attachment) {
             const sender = pages[message.author] as Page;
@@ -441,7 +458,7 @@ test.describe
           .concat(
             manifest.messages
               .filter((message) => message.mention === manifest.absentee)
-              .map((message) => ({ reasonKind: 'mention', statement: message.body })),
+              .map((message) => ({ reasonKind: 'mention', statement: sentBody(message) })),
           )
           .sort((left, right) => left.statement.localeCompare(right.statement));
         expect(
@@ -622,10 +639,10 @@ test.describe
         const [mentionedMessage] = await sql<{ body: string; mentionUserIds: string[] }[]>`
           SELECT body, mention_user_ids::text[] AS "mentionUserIds"
           FROM messages
-          WHERE room_id=${roomId}::uuid AND body=${mentionedFixture.body}
+          WHERE room_id=${roomId}::uuid AND body=${sentBody(mentionedFixture)}
         `;
         expect(mentionedMessage).toEqual({
-          body: mentionedFixture.body,
+          body: sentBody(mentionedFixture),
           mentionUserIds: [users[manifest.absentee]],
         });
 
