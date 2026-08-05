@@ -6,123 +6,134 @@ truth.
 ## What this branch is
 
 `fix/live-v8-fidelity` carries the WIRE v8 frame convergence, the rich composer,
-typed room references, attachment preview/download, the collapsible workspace
-split and conversation follow. It strictly contains `build/live-multiplayer`,
+typed room references, attachment preview, the collapsible workspace split and
+conversation follow. It strictly contains `build/live-multiplayer`,
 `build/replay-app`, `join/worker-on-fixed-window` and `phase3/dogfood-protocol`.
 
-**It is not merged, and it should not be merged until its browser gate is green.**
-`main` carries the Phase 2 tree instead — the tree that passed both independent
-full-diff reviews and its own browser gate.
+**It is not merged.** `main` carries the Phase 2 tree instead — the one that
+passed both independent full-diff reviews and its own browser gate. Tickets #25
+and #27 are closed against that tree, with their receipts on the tracker.
 
-## The finding that supersedes the previous handoff
+## The browser gate
 
-The previous handoff asked the next context to chase a conversation-follow defect
-the user could see and no test could reproduce. That framing was wrong in one
-specific way: **the test that would have reproduced it was never run.**
+`pnpm test:e2e`, 8 workers, 16-core machine:
 
-`pnpm test:e2e` on this branch, 2026-08-05, 8 workers, 16-core machine:
-
-| tree | result |
+| when | result |
 | --- | --- |
-| `build/live-multiplayer` (Phase 2) | 160 passed, 9 failed — all timeouts or auth-flow content, zero product assertions |
-| `fix/live-v8-fidelity` (this branch) | **101 passed, 76 failed** — roughly fifty are product-shaped assertion failures |
+| start of this session | **101 passed · 76 failed** |
+| end of this session | **157 passed · 11 failed**, and the follow specs now fail on the behaviour instead of a locator |
 
-The previous session's green receipts came from `apps/web` unit tests and two
-focused specs. Neither covers the frame.
+The Phase 2 tree measures 160 passed / 9 failed, and those nine pass in
+isolation at two workers — the flaky auth/mail set.
 
-### Cause one — the runner viewport is below the product's own floor
+## What was wrong
 
-`AppFrame.tsx` moved `MINIMUM_WIDTH` from 1024 to 1340 and `frame.module.css`
-moved its media query to `max-width: 1339px`. `apps/web/playwright.config.ts`
-sets no viewport, so every project inherits `devices['Desktop Chrome']` at
-1280×720 — below the floor the product declares for itself.
+**The runner sat below the product's own floor.** `MINIMUM_WIDTH` moved 1024 →
+1340 and `playwright.config.ts` set no viewport, so every spec inherited Desktop
+Chrome's 1280×720 and rendered the below-minimum notice instead of the product.
+`test/viewport.test.tsx` stayed green throughout because it compared the constant
+to the stylesheet and both had moved together. It reads the runner now, and both
+mutations are negative-controlled.
 
-`apps/web/test/viewport.test.tsx` still passes. It reads the constant and the CSS
-and asserts they agree with each other. Both moved together; the runner did not,
-and no artifact related the two. This is the "prose that names its authority is
-not thereby correct" shape with two sources instead of one.
+**The floor was the overflow.** At 1280 every offender's right edge was exactly
+1340 — inherited from `.app`'s own `min-width`. The grid is
+`44px minmax(0, 1fr) 300px`: 344 fixed pixels. Nothing needed 1340. The floor is
+1280, measured. Four specs were still driving 1124 or 1240, widths the shell now
+refuses in words; inside a frame the product says does not fit, what gets
+measured is the refusal.
 
-### Cause two — the room rail is hidden and its replacement does not exist
+**Five controls were made invisible while left in the page.** The room rail, the
+surface indicators, the Current state head, the theme control, and the strip's
+identity block — each `display: none`, each still in the DOM and still announced
+to a screen reader, none with a replacement. Four are restored, and the rail got
+the fold affordance its own comment had promised. **The strip's identity block
+(`.wsSpacer`, `.wsYou`) is still hidden.** It is not a control and no check
+covers it, which is exactly why it needs a decision rather than a default.
 
-```css
-.rail {
-  /* V8 ships with the optional room rail folded. Room navigation remains in
-     the live route and will return through the V8 fold affordance; retaining a
-     permanently visible legacy column is the mismatch this batch removes. */
-  display: none;
+**The palette failed AA.** v8 changed `--tx2` from `#9aa1a8` to `#77827b` while
+lightening the backgrounds under it: 4.49:1 on `--bg3`/`--bg5`/`--bg7`, 4.19:1 on
+`--bg6`, against 7.15–7.54:1 before. That is the component library's standard
+secondary text — `.actor`, `.time`, `.tag`, `.glyph`, `.link`, `.systemBody` —
+and none of it is v8's own chrome. `--tx2` is now `#7e8982`, clearing 4.5 on all
+eight surfaces. Separately: thirteen rules below the 10px type floor, and
+`--tx3`/`--tx4` carrying text although neither has ever reached AA against
+anything in either palette. `design/CONVENTIONS.md` records both, and the scope
+of its own "never edit tokens.css" rule.
+
+**Two failures were the instrument, not the product.** The composer's reference
+button was reported dead because its effect — inserting `@` into the draft —
+lives on a DOM property that `innerHTML` and `innerText` cannot see. The
+class-filter check was a hydration race: it clicked as soon as the
+server-rendered region was visible. Both were fixed in the instrument.
+
+## Still red — and where to start
+
+**1. The follow defect is now reproducible in a fixture test.** This is the
+first thing to work on.
+
+`conversation-follow.spec.ts` had been red since it was written, and not for a
+product reason: it located the composer by `getByRole('combobox', { name:
+/Message #/ })`, and the fixture route opens with the composer BOUND to an owed
+decision, so its accessible name is "Answer … in your own words" and the pattern
+never matched. That is why the previous session's evidence that follow works came
+from the authenticated two-account spec alone while this pair was dark.
+
+Located by role, the check now sends and appends — and fails on the assertion
+that matters:
+
+```
+expected |scrollTop - min(maxScroll, row.offsetTop)| <= 2
+received 70
 ```
 
-The fold affordance is not built. On the fixture route there is now no room
-navigation at all, which `smoke.spec.ts` reports as *"the rail renders no room
-chips, so the ordering above is measuring nothing"* and which makes every
-`agreement.spec.ts` rail drive time out with the button present and invisible, at
-all four widths.
+Seventy pixels, deterministic, at 1280×500. Start here. It is the first
+mechanical reproduction of the thing the user has been reporting by eye. Note
+that the row being followed is the viewer's OWN sent message, which may not be
+"unread" — the follow target implemented in `943eeeb` is
+`min(maxScroll, firstUnreadRow.offsetTop)`, so the test and the implementation
+may disagree about which row is the target. Settle which is right before
+changing either. **Do not add a sixth scrolling algorithm before that is
+settled** — five commits in the previous session did exactly that with every
+test green.
 
-### Cause three — two nested landmarks are both named Conversation
+**2. The pin eats the conversation at a 420px viewport height** — 41.9px where
+the check requires more than 50.4. This one is a consequence of restoring the
+Current state head and the surface indicators: they cost vertical budget. The fix
+is the pin yielding, or the shell declaring a minimum height the way it declares
+a minimum width. Do not fix it by hiding those surfaces again.
 
-The workspace split wraps the feed in
-`<section aria-label="Conversation pane" class="splitConversation">`, around
-`<section aria-label="Conversation" data-region="conversation">`. Playwright's
-`getByRole('region', { name: 'Conversation' })` now resolves to two elements, and
-`auth.spec.ts` and `ws-auth.spec.ts` fail on the ambiguity rather than on
-anything about messages.
+**3. `replay.spec.ts` ×3** — the corpus walk, the divider counts, the reopen
+case. Not yet triaged against the current tree.
 
-This one is worth reading beside the follow defect. The CSS is right — the outer
-pane is `overflow: hidden` and the inner feed keeps `overflow-y: auto` — so the
-feed does still own the scroll. But an ambiguous accessible name on the scroll
-container is the same class of defect as an ambiguous scroll owner, and
-diagnostic 5 of the previous handoff was asking exactly this question.
+**4. `multiplayer.spec.ts` and `auth.spec.ts`, one each** — both are in the
+flaky-under-load set. Re-run in isolation at two workers before believing them.
 
-## Failure counts by spec, this branch
+## What not to do
 
-| spec | failed |
-| --- | ---: |
-| `gallery.spec.ts` | 36 |
-| `agreement.spec.ts` | 13 |
-| `smoke.spec.ts` | 11 |
-| `replay.spec.ts` | 8 |
-| `conversation-follow.spec.ts` | 4 |
-| `auth` / `surface` / `ws-auth` / `multiplayer` | 1 each |
-
-Full logs are not committed. Reproduce with `pnpm test:e2e`.
-
-## Recommended next objective
-
-> Restore a browser gate over the V8 frame. Set the runner viewport at or above
-> the product's declared floor; decide whether the folded rail's replacement
-> affordance is built now or the specs are retargeted to the V8 information
-> architecture, and say which and why; give the two nested Conversation regions
-> distinct accessible names; then re-run and triage what still fails. That
-> residue is the actual product-defect list, and it is where the conversation
-> follow defect should be hunted — the four `conversation-follow.spec.ts`
-> failures currently cannot find the composer at all.
-
-Do not fix the failures by loosening the assertions. Several of them name the
-mutation they catch; a spec retargeted to the V8 IA must state what the old one
-caught and what the new one catches.
-
-## Still open, unchanged
-
-The user's real `/app/lars/general` session did not visibly follow the live edge.
-That report stands and is not explained by anything above. The diagnostics the
-previous handoff listed are still the right ones to collect, but collect them
-after the gate is honest, not before.
+Do not fix a failing check by loosening it. Several of these specs name the
+mutation they catch; a spec retargeted to the v8 information architecture has to
+state what the old one caught and what the new one catches, and every commit in
+this range does.
 
 ## Image preview follow-up
 
-`71810dc` added actual-size scroll canvas, 25–400% zoom, centered 100% entry,
-fit-to-window and pointer-drag panning. The focused suite passes; the user has
-not visually retested. Check: actual size opens centered; all four edges reachable
-by scroll and drag; zoom buttons usable at narrow widths; fit-to-window restores
-the whole image; dragging neither closes the backdrop nor selects the image.
+`71810dc` added an actual-size scroll canvas, 25–400% zoom, centered 100% entry,
+fit-to-window and pointer-drag panning. Focused tests pass; the user has not
+visually retested. Check: actual size opens centered; all four edges reachable by
+scroll and drag; zoom buttons usable at narrow widths; fit-to-window restores the
+whole image; dragging neither closes the backdrop nor selects the image.
 
 ## Process notes
 
-- Browser suites: 8 workers is fine on 16 cores; the auth specs are the flaky
-  set and their failures should be re-run in isolation before being believed.
-- `pnpm test:integration` and `pnpm test:e2e` both manage their own containers.
-  Preserve `atrium-postgres-1` and `atrium-minio-1`; they are the user's normal
-  local infrastructure.
-- `gh` reached github.com from this machine on 2026-08-05, so the live tracker is
-  readable here even though `AGENTS.md` records it as unreachable from a
-  sandboxed shell.
+- Browser suites: 8 workers is fine on 16 cores. The auth specs are the flaky
+  set; re-run failures in isolation at two workers before believing them.
+- `pnpm test:integration` and `pnpm test:e2e` manage their own containers.
+  Preserve `atrium-postgres-1` and `atrium-minio-1` — the user's own local
+  infrastructure.
+- **`pnpm lint` exits 1, and always has**, on `design/*.mjs` and
+  `scripts/mutation-ledger.mjs`. No `apps/` or `packages/` source is among them.
+  Check it as `pnpm lint >/dev/null; echo $?` — a pipeline ending in `tail`
+  reports `tail`'s status, which is how the Phase 2 receipt came to claim exit 0.
+- `gh` reached github.com from an ordinary shell on this machine, so the live
+  tracker is readable here even though `AGENTS.md` records it as unreachable from
+  a sandbox.

@@ -1,10 +1,23 @@
 import { expect, test } from '@playwright/test';
 
 test('the live edge follows a newly sent message in the rendered workspace', async ({ page }) => {
-  await page.setViewportSize({ width: 1124, height: 500 });
+  /* 1124 was inside the supported range while the shell's floor was 1024; the
+     floor is 1280 now, so this drove the frame at a width the product refuses
+     in words and the composer was never reachable. The HEIGHT is the point of
+     this check — 500px is what makes the feed overflow — and it is unchanged. */
+  await page.setViewportSize({ width: 1280, height: 500 });
   await page.goto('/');
   const feed = page.locator('[data-region="conversation"]');
-  const composer = page.getByRole('combobox', { name: /Message #/ });
+  /* BY ROLE, NOT BY THE NAME THE BINDING GIVES IT. This read
+     `getByRole('combobox', { name: /Message #/ })`, and the fixture route opens
+     with the composer BOUND to an owed decision — so its accessible name is
+     "Answer … in your own words" and the pattern never matched. Both of these
+     checks have been red since they were written, which is why the previous
+     session's evidence that follow works came from the authenticated two-account
+     spec alone while the fixture pair covering the same behaviour was dark.
+     There is exactly one combobox on this page; the check should say that
+     rather than depend on which item the composer happens to be answering. */
+  const composer = page.locator('textarea[role="combobox"]');
   await expect(feed).toBeVisible();
   const message = [
     'browser follow probe',
@@ -30,14 +43,18 @@ test('the live edge follows a newly sent message in the rendered workspace', asy
 });
 
 test('a paused conversation marks and counts the oldest unseen boundary', async ({ page }) => {
-  await page.setViewportSize({ width: 1124, height: 500 });
+  /* 1124 was inside the supported range while the shell's floor was 1024; the
+     floor is 1280 now, so this drove the frame at a width the product refuses
+     in words and the composer was never reachable. The HEIGHT is the point of
+     this check — 500px is what makes the feed overflow — and it is unchanged. */
+  await page.setViewportSize({ width: 1280, height: 500 });
   await page.goto('/');
   const feed = page.locator('[data-region="conversation"]');
   await feed.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
   });
-  const composer = page.getByRole('combobox', { name: /Message #/ });
+  const composer = page.locator('textarea[role="combobox"]');
   await composer.fill('unseen boundary probe');
   await page.getByRole('button', { name: 'Send' }).click();
   await expect(feed.locator('[data-unread-divider="1"]')).toHaveText('1 new message');
