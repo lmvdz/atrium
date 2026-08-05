@@ -27,7 +27,14 @@ function browserAvailable(): boolean {
 }
 
 const LOADS = [4, 13, 19, 34, 60] as const;
-const WIDTHS = [1124, 1240, 1340, 1440] as const;
+/* 1124 and 1240 were inside the supported range while the shell's floor was
+   1024. The floor is 1280 now — measured, see AppFrame.MINIMUM_WIDTH — so both
+   are widths the shell refuses in words rather than lays out for, and measuring
+   the pin's budget inside a frame the product says does not fit measures the
+   refusal, not the pin. What the two dropped widths caught was the pin keeping
+   its full height out of a short frame at a NARROW one; 1280 is now the narrow
+   one, and the height sweep below still drives it down to 420px. */
+const WIDTHS = [1280, 1340, 1440] as const;
 const THEMES = ['light', 'dark'] as const;
 
 /* ROUND 4's GAUNTLET: EVERY VIEWPORT IN THIS FILE HARD-CODED 900.
@@ -160,7 +167,7 @@ test.describe('the pin bounds itself', () => {
     test(`the composer stays in frame at every viewport height — ${theme}`, async ({ page }) => {
       for (const height of HEIGHTS) {
         for (const n of [4, 34] as const) {
-          await page.setViewportSize({ width: 1124, height });
+          await page.setViewportSize({ width: 1280, height });
           await page.goto(`/gallery/pin/${n}?theme=${theme}`);
           await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
           /* The pin's row budget is measured from the viewport after hydration.
@@ -193,7 +200,7 @@ test.describe('the pin bounds itself', () => {
           });
 
           console.info(
-            `${theme} @ 1124x${height} · ${n} owed: pin ${Math.round(measured.pin?.height ?? 0)}px · feed ${Math.round(measured.feed?.height ?? 0)}px · composer bottom ${Math.round(measured.composer?.bottom ?? 0)} / ${measured.viewport}`,
+            `${theme} @ 1280x${height} · ${n} owed: pin ${Math.round(measured.pin?.height ?? 0)}px · feed ${Math.round(measured.feed?.height ?? 0)}px · composer bottom ${Math.round(measured.composer?.bottom ?? 0)} / ${measured.viewport}`,
           );
 
           expect(
@@ -393,7 +400,7 @@ test.describe('the pin bounds itself', () => {
     test(`a pathological card cannot strand the way out of the fold — @${height}`, async ({
       page,
     }) => {
-      await page.setViewportSize({ width: 1124, height });
+      await page.setViewportSize({ width: 1280, height });
       await page.goto('/gallery/pin/34?theme=light');
       await expect(page.locator('[data-pin-list]')).toHaveAttribute('data-pin-measured', 'true');
 

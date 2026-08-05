@@ -93,7 +93,10 @@
   tab-size: 2;
 }
 .syntaxComment {
-  color: var(--tx3);
+  /* --tx3 is 2.43:1 on this surface and cannot reach AA on any WIRE surface —
+     see the note on .lensCell and CONVENTIONS. A code comment is text a reader
+     is meant to read; the replay contrast sweep counted 1,792 of them. */
+  color: var(--tx2);
   font-style: italic;
 }
 .syntaxKeyword,
