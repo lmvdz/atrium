@@ -225,6 +225,38 @@ export function RoomFrame(props: RoomFrameProps) {
 
 const DEFAULT_STATE_SHARE = 60;
 const SNAP_EDGE = 4;
+/** the separator's own row, `min-height: 9px` in frame.module.css */
+const SEPARATOR = 9;
+
+/* ---------------------------------------------------------------------------
+ * WHAT THE CONVERSATION PANE HAS TO BE ABLE TO SHOW.
+ *
+ * The split was two `fr` rows and nothing else, which is a RATIO with no floor:
+ * whatever the frame's height, Current state took 60% of it whether or not it
+ * had 60% of it worth of content. Measured at 1280 wide, the gallery pin frame,
+ * every height (this is `pin-bound.spec.ts`'s own sweep):
+ *
+ *     420px viewport → state pane 185.1px holding a 131.8px pin — 53px of slack
+ *                      conversation pane 123.4px, composer 81.5, FEED 41.9
+ *
+ * The chrome does not yield either: the room head is 74.5px and the composer
+ * 81.5px at every height from 380 to 900. So at a short frame the ratio hands
+ * the surface with slack more room while the conversation goes to a sliver, and
+ * below 460px the feed is smaller than the check's floor.
+ *
+ * Note the brief's first suggestion does not apply: the pin is in the STATE
+ * pane, not the conversation's, so a pin that yielded would return its pixels
+ * to Current state and the feed would not gain one. It is the split that has no
+ * floor, and it is the state pane that yields here.
+ *
+ * The floor is what the pane must be able to show, not a number chosen to clear
+ * an assertion: the composer, which is 81.5px measured and does not shrink, plus
+ * two message rows at the 42px a compact WIRE row measures. A conversation that
+ * cannot show two messages and the box to answer them in is not a conversation.
+ * ------------------------------------------------------------------------- */
+const COMPOSER_HEIGHT = 82;
+const COMPACT_ROW = 42;
+const CONVERSATION_FLOOR = COMPOSER_HEIGHT + 2 * COMPACT_ROW;
 
 /**
  * Current State and Conversation are independent surfaces. Keeping their
@@ -240,27 +272,53 @@ function WorkspaceSplit({
 }) {
   const root = useRef<HTMLDivElement>(null);
   const [stateShare, setStateShare] = useState(DEFAULT_STATE_SHARE);
+  /* The frame's own height, measured, for the same reason `pinBudgetFor` reads
+     `window.innerHeight`: a share is a proportion and a floor is pixels, and
+     nothing can reconcile them without knowing how many pixels there are. The
+     server renders the requested share and this corrects it once measured. */
+  const [available, setAvailable] = useState(0);
+  useEffect(() => {
+    const element = root.current;
+    if (element === null) return;
+    setAvailable(element.getBoundingClientRect().height);
+    /* Absent under jsdom, where every rect is zeros anyway — and a height of 0
+       is measured below as "nothing was measured", so the requested share
+       passes through untouched rather than being capped against a zero. */
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => setAvailable(element.getBoundingClientRect().height));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const snapped = (value: number) => {
     if (value <= SNAP_EDGE) return 0;
     if (value >= 100 - SNAP_EDGE) return 100;
     return Math.round(Math.max(0, Math.min(100, value)));
   };
+  /* The most Current state can take while the conversation still clears its
+     floor. Only binds when the frame is too short to satisfy both — at 900 it
+     computes 78% and the requested 60 passes through untouched. A DELIBERATE
+     collapse is not capped: `End` means hide the conversation, and a floor that
+     overrode it would be the control refusing to do what it says. */
+  const ceiling =
+    available === 0 ? 100 : Math.max(0, ((available - SEPARATOR - CONVERSATION_FLOOR) / available) * 100);
+  const effectiveShare =
+    stateShare === 0 || stateShare === 100 ? stateShare : Math.min(stateShare, ceiling);
   const resizeFromPointer = (event: ReactPointerEvent<HTMLElement>) => {
     const bounds = root.current?.getBoundingClientRect();
     if (bounds === undefined || bounds.height === 0) return;
     setStateShare(snapped(((event.clientY - bounds.top) / bounds.height) * 100));
   };
   const rows =
-    stateShare === 0
+    effectiveShare === 0
       ? '0px 9px minmax(0, 1fr)'
-      : stateShare === 100
+      : effectiveShare === 100
         ? 'minmax(0, 1fr) 9px 0px'
-        : `minmax(0, ${stateShare}fr) 9px minmax(0, ${100 - stateShare}fr)`;
+        : `minmax(0, ${effectiveShare}fr) 9px minmax(0, ${100 - effectiveShare}fr)`;
   return (
     <div
       className={frame.workspaceSplit}
-      data-conversation-collapsed={stateShare === 100 ? 'true' : undefined}
-      data-state-collapsed={stateShare === 0 ? 'true' : undefined}
+      data-conversation-collapsed={effectiveShare === 100 ? 'true' : undefined}
+      data-state-collapsed={effectiveShare === 0 ? 'true' : undefined}
       data-workspace-split="true"
       ref={root}
       style={{ gridTemplateRows: rows } as CSSProperties}
@@ -284,8 +342,11 @@ function WorkspaceSplit({
         aria-orientation="horizontal"
         aria-valuemax={100}
         aria-valuemin={0}
-        aria-valuenow={stateShare}
-        aria-valuetext={`Current state ${stateShare}%; conversation ${100 - stateShare}%`}
+        /* WHAT THE PANES ARE, NOT WHAT WAS ASKED FOR. Announcing the requested
+           share while the frame is laid out at the capped one would be the
+           control claiming a position it does not hold. */
+        aria-valuenow={Math.round(effectiveShare)}
+        aria-valuetext={`Current state ${Math.round(effectiveShare)}%; conversation ${100 - Math.round(effectiveShare)}%`}
         className={frame.workspaceSeparator}
         onDoubleClick={() => setStateShare(DEFAULT_STATE_SHARE)}
         onKeyDown={(event) => {

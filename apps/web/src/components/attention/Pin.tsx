@@ -35,10 +35,10 @@
  * NOT owed to this person never do — they compress to a derived glyph count.
  * ------------------------------------------------------------------------- */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { needsViewer } from '../model/glyph';
 import type { AttentionItem, GlyphCount, PinFold, TrailerSummary } from '../model/records';
-import { foldPin, PIN_COMPACT_BUDGET, pinBudgetFor } from '../model/records';
+import { foldPin, PIN_COMPACT_BUDGET, pinBeltFor, pinBudgetForBelt } from '../model/records';
 import { plural } from '../model/text';
 import { AggregateGlyph } from '../primitives/Glyph';
 import type { Arming } from '../primitives/HoldToAct';
@@ -127,21 +127,72 @@ export function Pin({
      nothing measured. */
   const [budget, setBudget] = useState(PIN_COMPACT_BUDGET);
   const [measured, setMeasured] = useState(false);
+  /* AND THE BOX IT IS ACTUALLY IN, which is not the viewport.
+     The belt is a share of `vh`, but the pin is laid out inside the workspace
+     split's Current-state pane — a share of the FRAME, which is the viewport
+     less the room head. While that pane took a flat 60% the two never crossed:
+     at 420px the pane was 185.1px and the belt 126px, so the belt bound first
+     and the mismatch was invisible. Once the pane yields to the conversation's
+     floor it is 138.5px, and a card that grows past its clamp takes the pin to
+     185.5px — past the pane's bottom edge, where `.splitState`'s
+     `overflow: hidden` clips it. The "N more owed" control was made a SIBLING
+     of the clipped list precisely so a grown card could not eat it, and it was
+     eaten anyway, one container further out: measured at 420, the control sat
+     at y=266 in a pane ending at y=241, and `elementFromPoint` returned the
+     conversation surface stacked above it.
+     So the pin yields to whichever is smaller, and the budget is derived from
+     the SAME number the box is capped at rather than from a parallel one. */
+  const rootRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [belt, setBelt] = useState<number | null>(null);
   useEffect(() => {
     const measure = () => {
-      setBudget(pinBudgetFor(window.innerHeight));
+      const fromViewport = pinBeltFor(window.innerHeight);
+      const root = rootRef.current;
+      const list = listRef.current;
+      const container = root?.parentElement ?? null;
+      /* The pin's own chrome — head, the overflow control, padding — is
+         everything it is that the list is not, so it holds whatever the list's
+         height happens to be at the moment it is read. */
+      const chrome =
+        root === null || list === null
+          ? 0
+          : root.getBoundingClientRect().height - list.getBoundingClientRect().height;
+      /* A box that reports no height has not told us anything — jsdom gives
+         every rect zeros, and so does a container that has not been laid out
+         yet. Reading that as "no room" would fold the pin to nothing on the
+         evidence of a measurement that did not happen, which is the same error
+         as the server guessing a viewport. It constrains only when it has a
+         height to constrain with. */
+      const room = container === null ? 0 : container.clientHeight - chrome;
+      const fromContainer =
+        container === null || container.clientHeight <= 0 ? Number.POSITIVE_INFINITY : room;
+      const available = Math.max(0, Math.min(fromViewport, fromContainer));
+      setBelt(available);
+      setBudget(pinBudgetForBelt(available));
       setMeasured(true);
     };
     measure();
     window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
+    /* The pane resizes without the window doing so — the split's own divider,
+       and the conversation floor binding as the frame shortens. */
+    const container = rootRef.current?.parentElement ?? null;
+    const observer =
+      container === null || typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(measure);
+    observer?.observe(container as Element);
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer?.disconnect();
+    };
   }, []);
   const fold = foldPin(items, { openId, page, budget });
   /* The items the head glyph is about: what still needs this person. */
   const owedItems = items.filter((item) => needsViewer(item.state));
 
   return (
-    <section aria-label="Needs you" className={styles.pin} data-region="needs-you">
+    <section aria-label="Needs you" className={styles.pin} data-region="needs-you" ref={rootRef}>
       <div className={styles.pinHead}>
         {/* THE HEAD GLYPH IS THE HARDEST THING IN THE PIN, and it is a component
             over a SET rather than a character over a count — see AggregateGlyph.
@@ -177,6 +228,12 @@ export function Pin({
         <>
           <div
             className={styles.pinList}
+            ref={listRef}
+            /* The measured belt, when there is one. The stylesheet's
+               `min(260px, 30vh)` is the server's answer and stays the ceiling —
+               this only ever takes space away, never adds it. */
+            style={belt === null ? undefined : { maxHeight: `${belt}px` }}
+            data-pin-belt={belt === null ? undefined : String(Math.round(belt))}
             data-pin-budget={String(budget)}
             /* The server cannot see a viewport, so it renders the full budget and
                this flips once the effect has measured. The e2e waits for it

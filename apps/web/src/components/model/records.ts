@@ -1204,13 +1204,24 @@ export const PIN_GEOMETRY = {
   beltShare: 0.34,
 } as const;
 
-/** How many compressed rows fit beside the open card in a viewport this tall. */
-export function pinBudgetFor(viewportHeight: number): number {
+/** The belt a viewport this tall allows, before the pin's own container is
+    consulted. `Pin` takes the smaller of this and the room its pane leaves. */
+export function pinBeltFor(viewportHeight: number): number {
   const g = PIN_GEOMETRY;
-  const available = Math.min(g.beltMax, viewportHeight * g.beltShare);
+  return Math.min(g.beltMax, viewportHeight * g.beltShare);
+}
+
+/** How many compressed rows fit beside the open card in a belt this tall. */
+export function pinBudgetForBelt(available: number): number {
+  const g = PIN_GEOMETRY;
   const fixed = g.card + g.gap + g.overflow;
   const rows = Math.floor((available - fixed) / (g.row + g.gap));
   return Math.max(0, Math.min(PIN_COMPACT_BUDGET, rows));
+}
+
+/** How many compressed rows fit beside the open card in a viewport this tall. */
+export function pinBudgetFor(viewportHeight: number): number {
+  return pinBudgetForBelt(pinBeltFor(viewportHeight));
 }
 
 export interface PinFold {
