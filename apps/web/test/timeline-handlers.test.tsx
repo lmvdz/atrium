@@ -9,11 +9,17 @@
  * ------------------------------------------------------------------------- */
 
 import type { RenderResult } from '@testing-library/react';
-import { cleanup, fireEvent, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
-import { CrossRoomJump, ObjectiveGroup, ReceiptView, Timeline } from '../src/components';
+import {
+  AttributionLedger,
+  CrossRoomJump,
+  ObjectiveGroup,
+  ReceiptView,
+  Timeline,
+} from '../src/components';
 import { renderWith } from './harness';
 
 afterEach(cleanup);
@@ -99,6 +105,64 @@ describe('the feed forwards what its children accept', () => {
     );
     expect(screen.getAllByRole('button', { name: 'pin it' }).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'reply' })).toBeNull();
+  });
+});
+
+describe('conversation follow mode', () => {
+  function setScrollGeometry(feed: HTMLElement, values: { height: number; top: number }): void {
+    Object.defineProperties(feed, {
+      clientHeight: { configurable: true, value: values.height },
+      scrollHeight: { configurable: true, value: 1000 },
+      scrollTop: { configurable: true, writable: true, value: values.top },
+    });
+  }
+
+  /* CATCHES: every appended message forcing the reader back to the bottom after
+     they deliberately scrolled up. The first missed message remains the jump
+     target even when another message arrives behind it. */
+  it('pauses following while scrolled up and jumps to the oldest unread message', async () => {
+    const appended = [...ENTRIES].reverse().find((entry) => entry.type === 'message');
+    if (appended?.type !== 'message') throw new Error('the feed fixture has no message to append');
+    const appendedIndex = ENTRIES.findIndex((entry) => entry.id === appended.id);
+    const initial = ENTRIES.slice(0, appendedIndex);
+    const { container, rerender } = render(<Timeline entries={initial} filter={null} />);
+    const feed = container.querySelector('[data-region="conversation"]') as HTMLElement;
+    setScrollGeometry(feed, { height: 300, top: 300 });
+    fireEvent.scroll(feed);
+
+    rerender(
+      <AttributionLedger messages={f.RECORDS} room="users-migration">
+        <Timeline entries={ENTRIES} filter={null} />
+      </AttributionLedger>,
+    );
+    const control = await screen.findByRole('button', { name: '↓ new messages' });
+    const row = container.querySelector(`[data-message-id="${appended.id}"]`) as HTMLElement;
+    let request: boolean | ScrollIntoViewOptions | undefined;
+    row.scrollIntoView = (options) => {
+      request = options;
+    };
+    fireEvent.click(control);
+    expect(request).toEqual({ behavior: 'smooth', block: 'start' });
+    expect(screen.queryByRole('button', { name: '↓ new messages' })).toBeNull();
+  });
+
+  /* CATCHES: an appended message staying below the viewport while the reader is
+     already following the live edge. The movement is smooth, not a hard jump. */
+  it('gently follows appended messages while already at the bottom', async () => {
+    const initial = ENTRIES.slice(0, -1);
+    const { container, rerender } = render(<Timeline entries={initial} filter={null} />);
+    const feed = container.querySelector('[data-region="conversation"]') as HTMLElement;
+    setScrollGeometry(feed, { height: 300, top: 700 });
+    const requests: ScrollToOptions[] = [];
+    feed.scrollTo = (options) => requests.push(options as ScrollToOptions);
+    fireEvent.scroll(feed);
+    rerender(
+      <AttributionLedger messages={f.RECORDS} room="users-migration">
+        <Timeline entries={ENTRIES} filter={null} />
+      </AttributionLedger>,
+    );
+    await waitFor(() => expect(requests.at(-1)).toEqual({ top: 1000, behavior: 'smooth' }));
+    expect(screen.queryByRole('button', { name: '↓ new messages' })).toBeNull();
   });
 });
 

@@ -13,6 +13,7 @@
  * Every handler a child accepts is now reachable from here.
  * ------------------------------------------------------------------------- */
 
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MessageAttachmentRecord } from '../model/quotation';
 import { systemText } from '../model/quotation';
 import type { AttentionClass, TimelineEntry } from '../model/records';
@@ -85,6 +86,61 @@ export function Timeline({
   onUnmarkSeen,
   rowActions = ROW_ACTIONS,
 }: TimelineProps) {
+  const feedRef = useRef<HTMLElement>(null);
+  const previousMessageIdsRef = useRef<readonly string[] | null>(null);
+  const followingRef = useRef(true);
+  const [oldestUnreadId, setOldestUnreadId] = useState<string | null>(null);
+  const messageIds = useMemo(
+    () => entries.filter((entry) => entry.type === 'message').map((entry) => entry.id),
+    [entries],
+  );
+
+  useEffect(() => {
+    const feed = feedRef.current;
+    const previousMessageIds = previousMessageIdsRef.current;
+    previousMessageIdsRef.current = messageIds;
+    if (feed === null) return;
+
+    if (previousMessageIds === null) {
+      feed.scrollTop = feed.scrollHeight;
+      return;
+    }
+
+    const retainedInOrder = previousMessageIds.every((id, index) => messageIds[index] === id);
+    const firstAppendedId = retainedInOrder ? messageIds[previousMessageIds.length] : undefined;
+    if (firstAppendedId === undefined) return;
+
+    if (followingRef.current) {
+      if (typeof feed.scrollTo === 'function') {
+        feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+      } else {
+        feed.scrollTop = feed.scrollHeight;
+      }
+    } else {
+      setOldestUnreadId((current) => current ?? firstAppendedId);
+    }
+  }, [messageIds]);
+
+  function handleScroll(): void {
+    const feed = feedRef.current;
+    if (feed === null) return;
+    const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight <= 12;
+    followingRef.current = atBottom;
+    if (atBottom) setOldestUnreadId(null);
+  }
+
+  function scrollToOldestUnread(): void {
+    const feed = feedRef.current;
+    if (feed === null || oldestUnreadId === null) return;
+    const row = Array.from(feed.children).find(
+      (child) => child.getAttribute('data-message-id') === oldestUnreadId,
+    );
+    if (row instanceof HTMLElement && typeof row.scrollIntoView === 'function') {
+      row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    setOldestUnreadId(null);
+  }
+
   /* THE LIFT IS SAID IN WORDS, NOT ONLY IN A BACKGROUND — round 10, D3.
      What a filter did was carried by `--bg3` and a 2px inset stripe: nothing in
      `textContent`, `aria-label` or `title` reported it, so the one surface whose
@@ -111,6 +167,8 @@ export function Timeline({
         .join(' ')}
       data-compact={compact ? 'true' : undefined}
       data-region="conversation"
+      onScroll={handleScroll}
+      ref={feedRef}
     >
       {filter === null ? null : (
         <p
@@ -168,6 +226,11 @@ export function Timeline({
           />
         );
       })}
+      {oldestUnreadId === null ? null : (
+        <button className={styles.newMessages} onClick={scrollToOldestUnread} type="button">
+          ↓ new messages
+        </button>
+      )}
     </section>
   );
 }

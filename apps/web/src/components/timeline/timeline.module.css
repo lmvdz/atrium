@@ -24,6 +24,27 @@
   flex: none;
 }
 
+.newMessages {
+  position: sticky;
+  bottom: 6px;
+  align-self: flex-end;
+  z-index: 4;
+  margin: 6px 16px 0;
+  border: 1px solid var(--amb1);
+  background: var(--ambbg);
+  color: var(--amb2);
+  padding: 5px 8px;
+  font: 10.5px / 1 var(--font-mono);
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.newMessages:hover,
+.newMessages:focus-visible {
+  background: var(--ambbg5);
+  color: var(--tx0);
+}
+
 /* FILTERING LIFTS WHAT MATCHES; it does not fade the rest, and it never hides
    anything. "A row you cannot see is a row you cannot check" was the caption,
    and `opacity: .3` made it false — measured, the row's text landed at
