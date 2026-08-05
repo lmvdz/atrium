@@ -1,8 +1,17 @@
 /* The state lens: objectives, objects, and the receipt behind each one.
    No hex, rgb() or hsl(): every colour is a token from design/tokens.css. */
 
+/* THE FOURTH SURFACE v8 HID WITH NOTHING PUT IN ITS PLACE, after the room
+   rail, the surface indicators and the strip's identity block. This head is
+   where Current state says what it contains — the object counts, how many are
+   settled, unverified and open, how many await you, when it was last updated —
+   and it carries the live pulse that says the surface is following. None of
+   that moved anywhere; it was made invisible while still being announced.
+   Restored. If v8 means to drop it, the counts need rehousing first: a surface
+   that cannot say what it holds is the defect CONVENTIONS' count rules exist
+   to prevent. */
 .lensHead {
-  display: none;
+  display: block;
 }
 
 .lensHeadTop {

@@ -41,9 +41,31 @@ export function ObjectRow({
   const references = referenceAttention.filter(
     (reference) => reference.location.kind === 'object' && reference.location.id === object.id,
   );
+  /* THE ROW STATES ITS OWN NAME, because six adjacent cells do not.
+     v8 laid this row out as a tree grid — sentence, verification, facts, kind,
+     spend, age — and adjacent elements with no text node between them are
+     announced welded: "accepted by lars" beside "29 Jul 11:20" reads as
+     "lars29 Jul 11:20", and that beside "answer-bound" reads as
+     "11:20answer-bound". Eighteen rows in the gallery announced that way. It is
+     the defect `Rail.tsx` records against its own room chips ("#identity-service12"
+     — the badge saying twelve things are owed is the half that gets eaten), and
+     the remedy is the same one: compose the name here with separators the
+     platform cannot swallow, rather than leave it to how two spans happen to
+     join. The facts' own `·` separators are `aria-hidden`, so they are absent
+     from the computed name — which is exactly why the weld appears there. */
+  const rowName = [
+    systemText(object.text, 'ObjectRow text'),
+    systemText(object.state.verification, 'ObjectRow verification'),
+    ...object.facts.map((fact) => systemText(fact, 'ObjectRow fact')),
+    systemText(object.kind, 'ObjectRow kind'),
+  ]
+    .map((part) => String(part).trim())
+    .filter((part) => part.length > 0)
+    .join(' — ');
   return (
     <div className={styles.oitemWrap}>
       <button
+        aria-label={rowName}
         className={[styles.oitem, settled ? styles.oitemSettled : null, 'atr-rise']
           .filter(Boolean)
           .join(' ')}

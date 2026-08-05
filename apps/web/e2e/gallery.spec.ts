@@ -271,6 +271,14 @@ test.describe('gallery', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/?theme=light');
     await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
+    /* VISIBLE IS NOT INTERACTIVE. `[data-region="needs-you"]` is in the
+       server-rendered HTML, so it is visible before React has attached a single
+       handler — and the first click then lands on a button that does nothing.
+       This failed for exactly that reason and passed the moment a diagnostic
+       added two round-trips ahead of the click, which is the signature of a
+       race rather than a defect. The per-route sweep in this same file already
+       waits for this; so does every check below that drives a control. */
+    await page.waitForLoadState('networkidle');
 
     const seen: Record<string, string[]> = {};
     for (const attentionClass of ['need', 'change', 'discussion', 'routine']) {
