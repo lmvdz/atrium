@@ -95,6 +95,8 @@ export function Timeline({
    * told from a scroll gesture. See `handleScroll` for the measurement.
    */
   const placedRef = useRef(0);
+  /** the feed's shape as of the last scroll event, so a reshape is detectable */
+  const geometryRef = useRef({ scrollHeight: 0, clientHeight: 0 });
   const scrollFrameRef = useRef<number | null>(null);
   const automaticScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [unread, setUnread] = useState<{
@@ -158,6 +160,38 @@ export function Timeline({
     [],
   );
 
+  /* FOLLOWING MEANS STAYING AT THE LIVE EDGE WHEN THE BOX CHANGES SHAPE.
+     The pane is not a fixed height: it shrinks as the composer grows under the
+     typist and grows back when the draft is sent. Measured at 1280x500 on `/`,
+     a 19-line draft takes the feed from 56px to 22px.
+
+     Nothing was re-pinning it, so the first-render bottom-pin's own position
+     became 34px off the live edge without the reader touching anything, and the
+     scroll event delivered afterwards was judged against the NEW geometry:
+     "the reader scrolled away". Follow switched off, the viewer's own sent
+     message was filed as unread, and the pane never moved — 70px on Chromium,
+     85px on Firefox, deterministic on both.
+
+     Comparing positions instead of geometry fixes Chromium but not Firefox,
+     which does not report the clamped `scrollTop` before the event arrives.
+     This is the fix that does not depend on either: if we are following, we are
+     at the bottom, so put us at the bottom. Then every engine's scroll event
+     finds `atBottom` true, because it IS true.
+
+     Absent under jsdom, where nothing resizes and the unit tests set geometry
+     by hand. */
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (feed === null || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (!followingRef.current) return;
+      feed.scrollTop = feed.scrollHeight;
+      placedRef.current = feed.scrollTop;
+    });
+    observer.observe(feed);
+    return () => observer.disconnect();
+  }, []);
+
   /* A SCROLL EVENT IS NOT A SCROLL GESTURE, AND THE GEOMETRY IT ARRIVES WITH IS
      NOT THE GEOMETRY IT HAPPENED IN.
 
@@ -192,9 +226,27 @@ export function Timeline({
     if (feed === null) return;
     if (automaticScrollRef.current) return;
     const position = feed.scrollTop;
-    if (position === placedRef.current) return;
+    const scrollHeight = feed.scrollHeight;
+    const clientHeight = feed.clientHeight;
+    /* DID THE BOX CHANGE SHAPE SINCE WE LAST LOOKED?
+       If it did, the position moving is the layout moving, not the reader. This
+       is the whole defect, and it is why comparing positions alone was not
+       enough: Firefox delivers the scroll event BEFORE the ResizeObserver
+       callback — measured t=860 vs t=861 — so by the time anything could
+       re-pin the feed, this handler had already called it a gesture. The
+       geometry is the evidence that arrives WITH the event. */
+    const reshaped =
+      scrollHeight !== geometryRef.current.scrollHeight ||
+      clientHeight !== geometryRef.current.clientHeight;
+    geometryRef.current = { scrollHeight, clientHeight };
+    const moved = position !== placedRef.current;
     placedRef.current = position;
-    const atBottom = feed.scrollHeight - position - feed.clientHeight <= 12;
+    /* A reshape can put us back on the live edge but never take us off it: the
+       reader has not asked for anything. The ResizeObserver above restores the
+       edge itself; this only refuses to draw a conclusion from the reshape. */
+    if (reshaped && followingRef.current) return;
+    if (!moved && !reshaped) return;
+    const atBottom = scrollHeight - position - clientHeight <= 12;
     followingRef.current = atBottom;
     if (atBottom) setUnread(null);
   }

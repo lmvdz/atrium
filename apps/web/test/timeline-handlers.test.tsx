@@ -127,7 +127,24 @@ describe('conversation follow mode', () => {
     const initial = ENTRIES.slice(0, appendedIndex);
     const { container, rerender } = render(<Timeline entries={initial} filter={null} />);
     const feed = container.querySelector('[data-region="conversation"]') as HTMLElement;
-    setScrollGeometry(feed, { height: 300, top: 300 });
+    /* THE BOX GETS ITS SHAPE, AND THEN THE READER MOVES IN IT — two steps.
+       This did both in one event: it defined a 300px-tall box AND a scroll
+       position 700px off the bottom, then fired a single `scroll`. The product
+       now distinguishes those, because it has to — the composer grows under the
+       typist and takes the pane from 56px to 22px, and the scroll event that
+       follows is the layout moving, not the reader. A stimulus that changes the
+       shape and the position together is ambiguous, and reading it as a gesture
+       is exactly the bug that stranded the pane 70px short on Chromium and 85px
+       on Firefox.
+
+       WHAT THE OLD ONE CAUGHT: an appended message forcing a reader who
+       deliberately scrolled up back to the bottom, instead of marking and
+       counting the boundary. WHAT THIS ONE CATCHES: the same, and it can no
+       longer pass by treating a reshape as a scroll — the reader is at the live
+       edge first, and only then scrolls away. */
+    setScrollGeometry(feed, { height: 300, top: 700 });
+    fireEvent.scroll(feed);
+    feed.scrollTop = 300;
     fireEvent.scroll(feed);
 
     rerender(

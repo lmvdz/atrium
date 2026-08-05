@@ -300,7 +300,9 @@ function WorkspaceSplit({
      collapse is not capped: `End` means hide the conversation, and a floor that
      overrode it would be the control refusing to do what it says. */
   const ceiling =
-    available === 0 ? 100 : Math.max(0, ((available - SEPARATOR - CONVERSATION_FLOOR) / available) * 100);
+    available === 0
+      ? 100
+      : Math.max(0, ((available - SEPARATOR - CONVERSATION_FLOOR) / available) * 100);
   const effectiveShare =
     stateShare === 0 || stateShare === 100 ? stateShare : Math.min(stateShare, ceiling);
   const resizeFromPointer = (event: ReactPointerEvent<HTMLElement>) => {
