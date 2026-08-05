@@ -1,130 +1,128 @@
-# Atrium handoff — 2026-08-04
+# Atrium handoff — 2026-08-05
 
 Read `AGENTS.md`, then `init.md`, then this file. The code remains the source of
-truth. This handoff records the state of the current UI fidelity session; it does
-not replace the tracker or the product semantics in `init.md`.
+truth.
 
-## Current checkout
+## What this branch is
 
-- Branch: `fix/live-v8-fidelity`
-- Worktree was clean when this handoff was written.
-- The development UI was served at `http://127.0.0.1:3000` and the server at
-  `http://127.0.0.1:4000` during the session. Both development processes should
-  be stopped after this handoff. The normal `atrium-postgres-1` and
-  `atrium-minio-1` Docker containers predated this task and are deliberately
-  preserved.
-- Node: `/Users/lars/.local/share/mise/installs/node/22.22.2/bin`
-- pnpm: `/Users/lars/.local/share/mise/installs/pnpm/10.15.0/pnpm`
+`fix/live-v8-fidelity` carries the WIRE v8 frame convergence, the rich composer,
+typed room references, attachment preview/download, the collapsible workspace
+split and conversation follow. It strictly contains `build/live-multiplayer`,
+`build/replay-app`, `join/worker-on-fixed-window` and `phase3/dogfood-protocol`.
 
-## What was built in this session
+**It is not merged, and it should not be merged until its browser gate is green.**
+`main` carries the Phase 2 tree instead — the tree that passed both independent
+full-diff reviews and its own browser gate.
 
-The relevant commits, newest first:
+## The finding that supersedes the previous handoff
 
-- `71810dc` — image previews now have a true actual-size scroll canvas, 25–400%
-  controls, centered 100% entry, fit-to-window, and pointer-drag panning.
-- `cffc99e` — conversation follow animation is owned by Atrium rather than
-  native smooth scrolling, so projection refreshes should not cancel it. Added
-  a two-account authenticated realtime acceptance test and a narrowly scoped
-  Firefox Playwright project.
-- `943eeeb` — follow target is explicitly
-  `min(maxScroll, firstUnreadRow.offsetTop)`.
-- `957e352` — counted horizontal unread divider and matching jump button.
-- `5644a2f` — optimistic-to-persisted message identity reconciliation no longer
-  looks like a history prepend.
-- `5076fe7` — initial conversation follow-mode implementation.
-- `8609075` — vertically resizable Current State / Conversation panes, complete
-  collapse at either edge, keyboard controls, and 60/40 reset.
-- `624ef0a` — removed dishonest/inert process-tree view chrome and the broad row
-  hover box.
+The previous handoff asked the next context to chase a conversation-follow defect
+the user could see and no test could reproduce. That framing was wrong in one
+specific way: **the test that would have reproduced it was never run.**
 
-Earlier commits on this branch contain attachment thumbnails/downloads, typed
-references, contextual mentions, and rich composer work. Inspect `git log` rather
-than reconstructing those changes from this summary.
+`pnpm test:e2e` on this branch, 2026-08-05, 8 workers, 16-core machine:
 
-## Verification receipts
+| tree | result |
+| --- | --- |
+| `build/live-multiplayer` (Phase 2) | 160 passed, 9 failed — all timeouts or auth-flow content, zero product assertions |
+| `fix/live-v8-fidelity` (this branch) | **101 passed, 76 failed** — roughly fifty are product-shaped assertion failures |
 
-- Latest full web unit run: 34 files, **744/744** passing.
-- Latest web typecheck: passed.
-- Conversation follow focused unit suite: 35/35 passing.
-- A real two-account authenticated live-room follow test passes in Chromium and
-  Playwright Firefox. It sends 12 remote messages to establish overflow, then a
-  tall remote message, and measures the reader pane's actual `scrollTop` against
-  the capped first-unread target.
-- Playwright Firefox 153 runtime was installed locally for that check.
-- Image preview focused suite: 7/7 passing.
-- `.next` was deleted and the dev server was rebuilt cleanly after the user
-  asked whether the package was stale. The served development bundle was also
-  inspected and contained the current follow implementation.
+The previous session's green receipts came from `apps/web` unit tests and two
+focused specs. Neither covers the frame.
 
-## Unresolved: the user's real conversation still did not visibly follow
+### Cause one — the runner viewport is below the product's own floor
 
-This is the first thing the next context should address.
+`AppFrame.tsx` moved `MINIMUM_WIDTH` from 1024 to 1340 and `frame.module.css`
+moved its media query to `max-width: 1339px`. `apps/web/playwright.config.ts`
+sets no viewport, so every project inherits `devices['Desktop Chrome']` at
+1280×720 — below the floor the product declares for itself.
 
-The user repeatedly reported that the conversation pane barely moved or did not
-move at all, in both Firefox and Chrome, despite all fixture and authenticated
-two-account tests passing. Do **not** add another inferred scrolling algorithm
-before observing their actual session. The test route and served bundle are
-current, so “stale package” was not supported by the evidence.
+`apps/web/test/viewport.test.tsx` still passes. It reads the constant and the CSS
+and asserts they agree with each other. Both moved together; the runner did not,
+and no artifact related the two. This is the "prose that names its authority is
+not thereby correct" shape with two sources instead of one.
 
-Start by reproducing in the user's existing `/app/lars/general` room and capture
-these facts at the moment a message arrives:
+### Cause two — the room rail is hidden and its replacement does not exist
 
-1. Does `[data-unread-divider]` appear? Does the counted jump button appear?
-2. Before and after the event, record the conversation element's `scrollTop`,
-   `scrollHeight`, `clientHeight`, and the first new row's `offsetTop` and
-   `getBoundingClientRect()`.
-3. Record whether the timeline component remounts across `router.refresh()` and
-   whether its first-render branch (`previousMessageIds === null`) is what runs.
-4. Record the exact message-ID sequence across optimistic append, ack removal,
-   and persisted projection refresh.
-5. Determine whether the visible scrollbar belongs to
-   `[data-region="conversation"]` or another ancestor in the user's actual DOM.
+```css
+.rail {
+  /* V8 ships with the optional room rail folded. Room navigation remains in
+     the live route and will return through the V8 fold affordance; retaining a
+     permanently visible legacy column is the mismatch this batch removes. */
+  display: none;
+```
 
-Prefer a temporary, visible development diagnostic or browser-console capture
-that reports those values from the real pane. Remove it after finding the cause.
-The existing acceptance test is
-`apps/web/e2e/live-conversation-follow.spec.ts`; keep it, but do not treat it as
-proof that the user's reported defect is resolved.
+The fold affordance is not built. On the fixture route there is now no room
+navigation at all, which `smoke.spec.ts` reports as *"the rail renders no room
+chips, so the ordering above is measuring nothing"* and which makes every
+`agreement.spec.ts` rail drive time out with the button present and invisible, at
+all four widths.
 
-## Image preview follow-up
+### Cause three — two nested landmarks are both named Conversation
 
-The last user screenshot showed actual-size mode clipping an oversized image so
-top/left pixels were unreachable. Commit `71810dc` fixes the underlying centered
-flex-overflow issue and adds zoom/pan. The focused tests pass, but the user had
-not yet visually retested it when the session ended. First visual retest should
-check:
+The workspace split wraps the feed in
+`<section aria-label="Conversation pane" class="splitConversation">`, around
+`<section aria-label="Conversation" data-region="conversation">`. Playwright's
+`getByRole('region', { name: 'Conversation' })` now resolves to two elements, and
+`auth.spec.ts` and `ws-auth.spec.ts` fail on the ambiguity rather than on
+anything about messages.
 
-- actual size opens centered at 100%;
-- all four edges are reachable by scroll and drag;
-- zoom buttons remain usable at narrow widths;
-- fit-to-window restores the entire image;
-- dragging does not close the backdrop or select the image.
+This one is worth reading beside the follow defect. The CSS is right — the outer
+pane is `overflow: hidden` and the inner feed keeps `overflow-y: auto` — so the
+feed does still own the scroll. But an ambiguous accessible name on the scroll
+container is the same class of defect as an ambiguous scroll owner, and
+diagnostic 5 of the previous handoff was asking exactly this question.
 
-If browser coverage is added, exercise a real large raster image rather than an
-SVG or a mocked intrinsic size.
+## Failure counts by spec, this branch
 
-## Process and cleanup notes
+| spec | failed |
+| --- | ---: |
+| `gallery.spec.ts` | 36 |
+| `agreement.spec.ts` | 13 |
+| `smoke.spec.ts` | 11 |
+| `replay.spec.ts` | 8 |
+| `conversation-follow.spec.ts` | 4 |
+| `auth` / `surface` / `ws-auth` / `multiplayer` | 1 each |
 
-- Do not leave E2E Postgres/MinIO or ports 3100/4100 running. This session's
-  `atrium-e2e-postgres` and `atrium-e2e-minio` containers were removed.
-- Preserve `atrium-postgres-1` and `atrium-minio-1`; they are the user's normal
-  local infrastructure.
-- Browser suites are heavy; keep workers at 2 or fewer.
-- The Playwright config now has a `firefox-conversation-follow` project scoped
-  only to the two conversation-follow spec files, so it does not double the full
-  suite.
+Full logs are not committed. Reproduce with `pnpm test:e2e`.
 
 ## Recommended next objective
 
-> Reproduce and resolve the conversation follow failure in the user's actual
-> `/app/lars/general` session. Instrument the real conversation scroll owner and
-> message reconciliation lifecycle, identify why its measured behavior differs
-> from the passing two-account Chromium/Firefox acceptance test, implement the
-> smallest evidence-backed fix, add a regression that catches that exact cause,
-> visually confirm the first unread row and counted divider land correctly, and
-> remove all temporary diagnostics and test-owned services before handoff.
+> Restore a browser gate over the V8 frame. Set the runner viewport at or above
+> the product's declared floor; decide whether the folded rail's replacement
+> affordance is built now or the specs are retargeted to the V8 information
+> architecture, and say which and why; give the two nested Conversation regions
+> distinct accessible names; then re-run and triage what still fails. That
+> residue is the actual product-defect list, and it is where the conversation
+> follow defect should be hunted — the four `conversation-follow.spec.ts`
+> failures currently cannot find the composer at all.
 
-After that defect is closed and visually confirmed, return to the repository's
-actual campaign priority: joining the verified live data route to the verified
-three-surface component system and replay work described in `AGENTS.md`,
-`init.md`, and the live tracker/`docs/TRACKER.md`.
+Do not fix the failures by loosening the assertions. Several of them name the
+mutation they catch; a spec retargeted to the V8 IA must state what the old one
+caught and what the new one catches.
+
+## Still open, unchanged
+
+The user's real `/app/lars/general` session did not visibly follow the live edge.
+That report stands and is not explained by anything above. The diagnostics the
+previous handoff listed are still the right ones to collect, but collect them
+after the gate is honest, not before.
+
+## Image preview follow-up
+
+`71810dc` added actual-size scroll canvas, 25–400% zoom, centered 100% entry,
+fit-to-window and pointer-drag panning. The focused suite passes; the user has
+not visually retested. Check: actual size opens centered; all four edges reachable
+by scroll and drag; zoom buttons usable at narrow widths; fit-to-window restores
+the whole image; dragging neither closes the backdrop nor selects the image.
+
+## Process notes
+
+- Browser suites: 8 workers is fine on 16 cores; the auth specs are the flaky
+  set and their failures should be re-run in isolation before being believed.
+- `pnpm test:integration` and `pnpm test:e2e` both manage their own containers.
+  Preserve `atrium-postgres-1` and `atrium-minio-1`; they are the user's normal
+  local infrastructure.
+- `gh` reached github.com from this machine on 2026-08-05, so the live tracker is
+  readable here even though `AGENTS.md` records it as unreachable from a
+  sandboxed shell.
