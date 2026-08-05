@@ -370,6 +370,59 @@
   text-align: right;
 }
 
+.workspaceSplit {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.splitState,
+.splitConversation {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.splitConversation > [data-region='conversation'] {
+  flex: 1;
+}
+
+.workspaceSeparator {
+  align-items: center;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  cursor: row-resize;
+  display: flex;
+  justify-content: center;
+  margin: 0;
+  min-height: 9px;
+  padding: 0;
+  touch-action: none;
+  width: 100%;
+  z-index: 2;
+}
+
+.workspaceSeparator::after {
+  background: var(--tx2);
+  content: '';
+  height: 1px;
+  width: 34px;
+}
+
+.workspaceSeparator:hover,
+.workspaceSeparator:focus-visible {
+  background: var(--bg3);
+}
+
+.workspaceSplit[data-state-collapsed='true'] .workspaceSeparator,
+.workspaceSplit[data-conversation-collapsed='true'] .workspaceSeparator {
+  background: var(--ambbg5);
+}
+
 /* WIRE v8 makes the evolving state the wide operator workspace and docks the
    room conversation at the right. The three Phase-2 surfaces remain
    simultaneous: Needs you is pinned above Current state, while Conversation

@@ -16,9 +16,9 @@
  * a session); `/` drives the same component through `RoomSession`.
  * ------------------------------------------------------------------------- */
 
-import type { KeyboardEvent, Ref } from 'react';
-import { Fragment, useEffect, useState } from 'react';
-import type { Arming } from '../../src/components';
+import type { CSSProperties, KeyboardEvent, PointerEvent as ReactPointerEvent, Ref } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import type { Arming, Slot } from '../../src/components';
 import {
   AppFrame,
   AttributionLedger,
@@ -221,6 +221,87 @@ export function RoomFrame(props: RoomFrameProps) {
   );
 }
 
+const DEFAULT_STATE_SHARE = 60;
+const SNAP_EDGE = 4;
+
+/**
+ * Current State and Conversation are independent surfaces. Keeping their
+ * sizing in one component prevents either child from borrowing the other's
+ * height and makes the boundary operable by pointer and keyboard.
+ */
+function WorkspaceSplit({
+  statePane,
+  conversationPane,
+}: {
+  statePane: Slot;
+  conversationPane: Slot;
+}) {
+  const root = useRef<HTMLDivElement>(null);
+  const [stateShare, setStateShare] = useState(DEFAULT_STATE_SHARE);
+  const snapped = (value: number) => {
+    if (value <= SNAP_EDGE) return 0;
+    if (value >= 100 - SNAP_EDGE) return 100;
+    return Math.round(Math.max(0, Math.min(100, value)));
+  };
+  const resizeFromPointer = (event: ReactPointerEvent<HTMLElement>) => {
+    const bounds = root.current?.getBoundingClientRect();
+    if (bounds === undefined || bounds.height === 0) return;
+    setStateShare(snapped(((event.clientY - bounds.top) / bounds.height) * 100));
+  };
+  const rows =
+    stateShare === 0
+      ? '0px 9px minmax(0, 1fr)'
+      : stateShare === 100
+        ? 'minmax(0, 1fr) 9px 0px'
+        : `minmax(0, ${stateShare}fr) 9px minmax(0, ${100 - stateShare}fr)`;
+  return (
+    <div
+      className={frame.workspaceSplit}
+      data-conversation-collapsed={stateShare === 100 ? 'true' : undefined}
+      data-state-collapsed={stateShare === 0 ? 'true' : undefined}
+      data-workspace-split="true"
+      ref={root}
+      style={{ gridTemplateRows: rows } as CSSProperties}
+    >
+      <section aria-label="Current state pane" className={frame.splitState}>
+        {statePane.node}
+      </section>
+      <hr
+        aria-label="Resize current state and conversation panes"
+        aria-orientation="horizontal"
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={stateShare}
+        aria-valuetext={`Current state ${stateShare}%; conversation ${100 - stateShare}%`}
+        className={frame.workspaceSeparator}
+        onDoubleClick={() => setStateShare(DEFAULT_STATE_SHARE)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowUp') setStateShare((value) => snapped(value - 5));
+          else if (event.key === 'ArrowDown') setStateShare((value) => snapped(value + 5));
+          else if (event.key === 'Home') setStateShare(0);
+          else if (event.key === 'End') setStateShare(100);
+          else return;
+          event.preventDefault();
+        }}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          resizeFromPointer(event);
+        }}
+        onPointerMove={(event) => {
+          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+          resizeFromPointer(event);
+        }}
+        onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
+        tabIndex={0}
+        title="drag to resize · Home hides state · End hides conversation · double-click resets"
+      />
+      <section aria-label="Conversation pane" className={frame.splitConversation}>
+        {conversationPane.node}
+      </section>
+    </div>
+  );
+}
+
 function Frame(props: RoomFrameProps) {
   const on = props.handlers ?? {};
   return (
@@ -301,91 +382,101 @@ function Frame(props: RoomFrameProps) {
               onReveal={on.onJumpToMessage}
             />
           )}
-          <div aria-hidden="true" className={frame.treeColumns}>
-            <span>SESSION</span>
-            <span>STATE</span>
-            <span>LATEST</span>
-            <span>LENS</span>
-            <span>SPEND</span>
-            <span>AGE</span>
-          </div>
-          {props.hideEmptyAttention &&
-          !props.attention.some((item) => needsViewer(item.state)) ? null : (
-            <Pin
-              items={props.attention}
-              lastCheck={props.lastCheck}
-              onAct={on.onAct}
-              onArm={on.onArm}
-              onFold={on.onFoldPin}
-              onJumpToSource={on.onJumpToSource}
-              onOpen={on.onOpenAttention}
-              onPage={on.onPagePin}
-              onShowRest={on.onShowRest}
-              openId={props.openAttentionId}
-              trailer={props.trailer}
-              viewer={props.viewer.name}
-            />
-          )}
-          <StateLens
-            objectives={props.objectives}
-            objects={props.objects}
-            onOpenReceipt={on.onOpenReceipt}
-            onOpenReferences={on.onOpenReferences}
-            onToggleObjective={on.onToggleObjective}
-            referenceAttention={props.referenceAttention}
-            receipt={
-              props.receipt === undefined
-                ? undefined
-                : slot(
-                    <ReceiptView
-                      acceptObjectives={props.acceptObjectives}
-                      key={props.receipt.id}
-                      onAccept={on.onAcceptReceipt}
-                      onAnswer={on.onAnswerReceipt}
-                      onBack={on.onCloseReceipt}
-                      onJump={on.onJumpToMessage}
-                      onReopen={on.onReopen}
-                      onRetypeToClaim={on.onRetypeToClaim}
-                      onSupersede={on.onSupersedeReceipt}
-                      pendingReplacementId={props.pendingReplacementId}
-                      receipt={props.receipt}
-                      supersessionCandidates={props.supersessionCandidates}
-                    />,
-                  )
-            }
-            roomName={props.room.name}
-            updatedAt={props.updatedAt}
-          />
-          <Timeline
-            attachmentPreviewUrl={on.attachmentPreviewUrl}
-            loadAttachmentPreviewUrl={on.loadAttachmentPreviewUrl}
-            entries={props.entries}
-            filter={props.filter}
-            onFilter={on.onFilter}
-            onMarkSeen={on.onMarkSeen}
-            onOpenAttachment={on.onOpenAttachment}
-            onDownloadAttachment={on.onDownloadAttachment}
-            onOpenTag={on.onOpenTag}
-            onRowAction={on.onRowAction}
-            onTogglePeek={on.onTogglePeek}
-            onUnmarkSeen={on.onUnmarkSeen}
-          />
-          <Composer
-            attachmentNote={on.attachmentNote}
-            attachments={on.attachments}
-            binding={props.binding}
-            disabled={props.composerEnabled === false}
-            footNote={props.composerNote}
-            referenceTargets={props.referenceTargets}
-            onAttach={on.onAttach}
-            onCancelBinding={on.onCancelBinding}
-            onChange={on.onComposerChange}
-            onKeyDown={on.onComposerKeyDown}
-            onRemoveAttachment={on.onRemoveAttachment}
-            onSend={on.onSend}
-            roomName={props.room.name}
-            textareaRef={on.composerRef}
-            value={on.composerValue}
+          <WorkspaceSplit
+            statePane={slot(
+              <Fragment key="state-pane">
+                <div aria-hidden="true" className={frame.treeColumns}>
+                  <span>SESSION</span>
+                  <span>STATE</span>
+                  <span>LATEST</span>
+                  <span>LENS</span>
+                  <span>SPEND</span>
+                  <span>AGE</span>
+                </div>
+                {props.hideEmptyAttention &&
+                !props.attention.some((item) => needsViewer(item.state)) ? null : (
+                  <Pin
+                    items={props.attention}
+                    lastCheck={props.lastCheck}
+                    onAct={on.onAct}
+                    onArm={on.onArm}
+                    onFold={on.onFoldPin}
+                    onJumpToSource={on.onJumpToSource}
+                    onOpen={on.onOpenAttention}
+                    onPage={on.onPagePin}
+                    onShowRest={on.onShowRest}
+                    openId={props.openAttentionId}
+                    trailer={props.trailer}
+                    viewer={props.viewer.name}
+                  />
+                )}
+                <StateLens
+                  objectives={props.objectives}
+                  objects={props.objects}
+                  onOpenReceipt={on.onOpenReceipt}
+                  onOpenReferences={on.onOpenReferences}
+                  onToggleObjective={on.onToggleObjective}
+                  referenceAttention={props.referenceAttention}
+                  receipt={
+                    props.receipt === undefined
+                      ? undefined
+                      : slot(
+                          <ReceiptView
+                            acceptObjectives={props.acceptObjectives}
+                            key={props.receipt.id}
+                            onAccept={on.onAcceptReceipt}
+                            onAnswer={on.onAnswerReceipt}
+                            onBack={on.onCloseReceipt}
+                            onJump={on.onJumpToMessage}
+                            onReopen={on.onReopen}
+                            onRetypeToClaim={on.onRetypeToClaim}
+                            onSupersede={on.onSupersedeReceipt}
+                            pendingReplacementId={props.pendingReplacementId}
+                            receipt={props.receipt}
+                            supersessionCandidates={props.supersessionCandidates}
+                          />,
+                        )
+                  }
+                  roomName={props.room.name}
+                  updatedAt={props.updatedAt}
+                />
+              </Fragment>,
+            )}
+            conversationPane={slot(
+              <Fragment key="conversation-pane">
+                <Timeline
+                  attachmentPreviewUrl={on.attachmentPreviewUrl}
+                  loadAttachmentPreviewUrl={on.loadAttachmentPreviewUrl}
+                  entries={props.entries}
+                  filter={props.filter}
+                  onFilter={on.onFilter}
+                  onMarkSeen={on.onMarkSeen}
+                  onOpenAttachment={on.onOpenAttachment}
+                  onDownloadAttachment={on.onDownloadAttachment}
+                  onOpenTag={on.onOpenTag}
+                  onRowAction={on.onRowAction}
+                  onTogglePeek={on.onTogglePeek}
+                  onUnmarkSeen={on.onUnmarkSeen}
+                />
+                <Composer
+                  attachmentNote={on.attachmentNote}
+                  attachments={on.attachments}
+                  binding={props.binding}
+                  disabled={props.composerEnabled === false}
+                  footNote={props.composerNote}
+                  referenceTargets={props.referenceTargets}
+                  onAttach={on.onAttach}
+                  onCancelBinding={on.onCancelBinding}
+                  onChange={on.onComposerChange}
+                  onKeyDown={on.onComposerKeyDown}
+                  onRemoveAttachment={on.onRemoveAttachment}
+                  onSend={on.onSend}
+                  roomName={props.room.name}
+                  textareaRef={on.composerRef}
+                  value={on.composerValue}
+                />
+              </Fragment>,
+            )}
           />
         </Fragment>,
       ])}

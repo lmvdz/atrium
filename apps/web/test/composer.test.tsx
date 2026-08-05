@@ -482,6 +482,25 @@ describe('the gallery frame forwards every composer seam', () => {
     expect(screen.queryByText('by project')).toBeNull();
   });
 
+  /* CATCHES: visually separating state and conversation with an inert rule;
+     the separator must resize and make both edge-collapse states reachable to
+     a keyboard reader, then offer a deterministic reset. */
+  it('resizes and collapses both workspace panes from the keyboard', () => {
+    const { container } = render(<RoomFrame {...FRAME} />);
+    const separator = screen.getByRole('separator', {
+      name: 'Resize current state and conversation panes',
+    });
+    expect(separator.getAttribute('aria-valuenow')).toBe('60');
+    fireEvent.keyDown(separator, { key: 'ArrowUp' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('55');
+    fireEvent.keyDown(separator, { key: 'Home' });
+    expect(container.querySelector('[data-state-collapsed="true"]')).not.toBeNull();
+    fireEvent.keyDown(separator, { key: 'End' });
+    expect(container.querySelector('[data-conversation-collapsed="true"]')).not.toBeNull();
+    fireEvent.doubleClick(separator);
+    expect(separator.getAttribute('aria-valuenow')).toBe('60');
+  });
+
   /* CATCHES: keeping the empty Needs-you header/body mounted on product frames,
      consuming the space recovered when contextual references left the pin. */
   it('can remove the entire empty attention region without hiding real obligations', () => {

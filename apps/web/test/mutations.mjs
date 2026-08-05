@@ -1093,8 +1093,8 @@ const LEDGER = [
   {
     name: 'the frame drops the lens’s objective and receipt handlers again',
     file: 'app/gallery/RoomFrame.tsx',
-    find: '            onOpenReceipt={on.onOpenReceipt}\n            onOpenReferences={on.onOpenReferences}\n            onToggleObjective={on.onToggleObjective}\n',
-    replace: '            onOpenReferences={on.onOpenReferences}\n',
+    find: '                  onOpenReceipt={on.onOpenReceipt}\n                  onOpenReferences={on.onOpenReferences}\n                  onToggleObjective={on.onToggleObjective}\n',
+    replace: '                  onOpenReferences={on.onOpenReferences}\n',
     test: 'test/frame-handlers.test.tsx',
   },
   {
