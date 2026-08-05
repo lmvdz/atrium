@@ -13,6 +13,7 @@
  * around. See model/slot.ts for what the slot stops and what it does not.
  * ------------------------------------------------------------------------- */
 
+import { useState } from 'react';
 import { systemText } from '../model/quotation';
 import type { Slot } from '../model/slot';
 import styles from './frame.module.css';
@@ -35,31 +36,66 @@ export interface AppFrameProps {
  * The narrowest window this shell fits in, in CSS pixels.
  *
  * ONE NUMBER, IN TWO PLACES THAT ARE CHECKED AGAINST EACH OTHER. `.app` declares
- * `min-width: 1340px`; this states it to the reader. `test/viewport.test.tsx`
+ * `min-width: 1280px`; this states it to the reader. `test/viewport.test.tsx`
  * reads both out of the sources and asserts they agree, and that the media query
  * which reveals the notice sits exactly one pixel below — a floor that moves
  * while the sentence stays put is a sentence that lies.
+ *
+ * THE FLOOR IS MEASURED, NOT DECLARED. The v8 batch set this to 1340 and the
+ * browser audit then reported every element on the page ending at exactly 1340
+ * in a 1280 viewport — the offenders inherited this container's own `min-width`,
+ * so the number WAS the overflow. The grid is `44px minmax(0, 1fr) 300px`: 344
+ * fixed pixels, leaving 936 fluid at 1280, more than the 680 the pre-v8 shell
+ * lived on at 1024 while also carrying a 190px rail. The audit at 1280 is what
+ * makes this number true; if you move it, move it because the audit said so.
  */
-export const MINIMUM_WIDTH = 1340;
+export const MINIMUM_WIDTH = 1280;
 
 export function AppFrame({ strip, rail, workspace, lens, boxed = false, label }: AppFrameProps) {
+  /* THE FOLD IS A CONTROL, NOT A COMMENT.
+     v8 folds the room rail by default, and the batch that adopted v8 shipped
+     that as `display: none` with a comment promising the affordance "will return
+     through the V8 fold affordance". It did not return, so inside a room there
+     was no way to reach another room at all — a person had to leave for the
+     workspace page — and every check that drove the rail timed out against a
+     button that was in the DOM and could never be seen. A hidden column with no
+     control to open it is not a folded rail; it is a deleted one with the markup
+     still in the page, which also means assistive technology still finds it.
+     Folded is the default, so the v8 canvas is what the reader gets first. */
+  const [railOpen, setRailOpen] = useState(false);
   return (
     <>
-      {/* THE FLOOR, STATED — r8 D10. Below 1340px the three V8 columns are wider
-          than the window and the page scrolls sideways; that was true before
-          this notice and nothing said it. The page still works and still
-          scrolls: this is the shell declaring its own bound, the same way every
-          refusal in this codebase says what it could not do rather than going
-          quiet. See frame.module.css, `.belowMin`. */}
+      {/* THE FLOOR, STATED — r8 D10. Below the floor the shell is wider than the
+          window and the page scrolls sideways; that was true before this notice
+          and nothing said it. The page still works and still scrolls: this is
+          the shell declaring its own bound, the same way every refusal in this
+          codebase says what it could not do rather than going quiet. See
+          frame.module.css, `.belowMin`. */}
       <div className={styles.belowMin} data-below-minimum-width={String(MINIMUM_WIDTH)}>
-        this layout needs a window at least {MINIMUM_WIDTH} pixels wide — the four columns are wider
-        than this one, so the page scrolls sideways
+        this layout needs a window at least {MINIMUM_WIDTH} pixels wide — the three columns are
+        wider than this one, so the page scrolls sideways
       </div>
       <div
-        className={[styles.app, boxed ? styles.boxed : null].filter(Boolean).join(' ')}
+        className={[styles.app, railOpen ? styles.appRailOpen : null, boxed ? styles.boxed : null]
+          .filter(Boolean)
+          .join(' ')}
         data-frame={label ?? 'atrium'}
+        data-rail={railOpen ? 'open' : 'folded'}
       >
         <aside className={styles.ws} aria-label="Workspace">
+          {/* `#` is this app's rooms mark already — `Rail`'s own room rows carry
+              it — so the control is drawn in the vocabulary the page uses rather
+              than in a new one. The accessible name says which way the button
+              goes; `aria-expanded` says which way it currently is. */}
+          <button
+            aria-expanded={railOpen}
+            aria-label={railOpen ? 'Hide rooms and people' : 'Show rooms and people'}
+            className={styles.railFold}
+            onClick={() => setRailOpen((open) => !open)}
+            type="button"
+          >
+            <span aria-hidden="true">#</span>
+          </button>
           {strip.node}
         </aside>
         {rail.node}

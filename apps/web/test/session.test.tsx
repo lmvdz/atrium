@@ -271,7 +271,16 @@ describe('the status line reports what the page did, and nothing before it did a
   it('a control that fires writes what it did into the line', () => {
     render(<RoomSession />);
     const rows = screen.getAllByRole('button');
-    const chip = rows.find((button) => (button.textContent ?? '').includes('#'));
+    /* IN THE RAIL, not merely carrying the rail's mark. This read `includes('#')`
+       alone, and the frame's new fold control — whose entire visible text is `#`,
+       because that is this app's rooms mark — matched it first. The test then
+       pressed the fold, which opens a column rather than choosing a room, and
+       reported the status line missing. The selector now says the thing it
+       always meant: a chip inside the rooms nav. It still catches a room chip
+       that stops writing what it did, which is the mutation it is here for. */
+    const chip = rows.find(
+      (button) => button.closest('nav') !== null && (button.textContent ?? '').includes('#'),
+    );
     expect(chip, 'no room chip to press').toBeDefined();
     if (chip !== undefined) fireEvent.click(chip);
     const note = document.querySelector('[data-composer-note]');

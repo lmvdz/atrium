@@ -58,10 +58,16 @@ export function RoomHead({ room, surfaces, working, settled }: RoomHeadProps) {
           </h2>
         ) : (
           <div className={styles.workCounts} title={topic}>
-            <h2 className={styles.roomContext}>
-              <span aria-hidden="true">#</span>
-              {name}
-            </h2>
+            {/* NO DECORATIVE MARK INSIDE A VISUALLY HIDDEN HEADING. This
+                carried an `aria-hidden` `#` span, which no screen reader
+                announces (it is aria-hidden) and no reader sees (the heading is
+                sr-only geometry) — a mark with no consumer. It was also a real
+                child box inside a 1px clipping parent, which is precisely the
+                shape `e2e/audit.ts` reports as a broken track set with the
+                evidence swallowed, at every width and in both themes. Deleting
+                the mark is the fix; exempting the element would have taught the
+                sweep to ignore the shape it exists to find. */}
+            <h2 className={styles.roomContext}>{name}</h2>
             <span>{working} working</span>
             <span>· {settled} settled</span>
           </div>

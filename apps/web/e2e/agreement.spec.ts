@@ -46,6 +46,17 @@ interface Screen {
   readonly drive?: (page: import('@playwright/test').Page) => Promise<void>;
 }
 
+/* THE RAIL IS FOLDED BY DEFAULT NOW, so reaching a room is two acts rather than
+   one: open the fold, then choose. This helper is why every rail-driven screen
+   below says `openRail` instead of repeating the control's name — and it is the
+   step whose absence made all twelve of these cases time out at every width
+   against a button that was in the DOM and could never be seen. */
+async function openRail(page: import('@playwright/test').Page): Promise<void> {
+  const fold = page.getByRole('button', { name: 'Show rooms and people' });
+  await fold.click();
+  await expect(page.locator('[data-frame][data-rail="open"]').first()).toBeVisible();
+}
+
 const SCREENS: readonly Screen[] = [
   { name: 'the room as it loads', path: '/', roots: null },
   {
@@ -53,6 +64,7 @@ const SCREENS: readonly Screen[] = [
     path: '/',
     roots: null,
     drive: async (page) => {
+      await openRail(page);
       await page.locator('nav button', { hasText: 'identity-service' }).click();
     },
   },
@@ -61,6 +73,7 @@ const SCREENS: readonly Screen[] = [
     path: '/',
     roots: null,
     drive: async (page) => {
+      await openRail(page);
       await page.locator('nav button', { hasText: 'identity-service' }).click();
       await page.locator('[data-attention-id] button', { hasText: 'Answer it' }).click();
     },
@@ -78,6 +91,7 @@ const SCREENS: readonly Screen[] = [
     path: '/',
     roots: null,
     drive: async (page) => {
+      await openRail(page);
       await page.locator('nav button', { hasText: 'design' }).click();
     },
   },
@@ -154,6 +168,7 @@ test.describe('two elements on one screen, one question', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/');
     await page.waitForSelector('[data-region="needs-you"]');
+    await openRail(page);
     await page.locator('nav button', { hasText: 'identity-service' }).click();
     await page.locator('[data-attention-id] button', { hasText: 'Answer it' }).click();
     await page.waitForTimeout(80);

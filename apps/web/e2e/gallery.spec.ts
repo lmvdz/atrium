@@ -26,8 +26,24 @@ const FRAMES = [
   'zero-owed',
 ] as const;
 
-/** The two design targets plus the two edges of the supported range. */
-const WIDTHS = [1124, 1280, 1340, 1440] as const;
+/**
+ * The two design targets plus the two edges of the supported range.
+ *
+ * WHAT MOVED AND WHAT IT COSTS. This list read `[1124, 1280, 1340, 1440]` while
+ * the shell's floor was 1024. The v8 batch raised the floor to 1340 without
+ * touching this list, so the 1124 and 1280 cases began reporting real overflow
+ * — every offender's right edge landing at exactly 1340, because they inherited
+ * `.app`'s own `min-width`. The floor is now measured at 1280 and this list
+ * starts there.
+ *
+ * The old 1124 case asserted that nothing clips, nothing sits below 10px and
+ * every pair passes AA *at 1124*. That claim is gone: 1124 is below the floor
+ * and the shell now refuses it in words rather than laying out for it. What
+ * replaces it is the below-floor case in `smoke.spec.ts`, which drives 1124 in
+ * a real engine and pins that the notice appears — a different claim about the
+ * same width, and the honest one now that the range has moved.
+ */
+const WIDTHS = [1280, 1340, 1440] as const;
 
 const THEMES = ['light', 'dark'] as const;
 

@@ -173,11 +173,52 @@ describe('the layout states the narrowest window it works in', () => {
 
   /* CATCHES restoring the pre-v8 permanent room rail or widening the dock: the
      authority's default frame is exactly a 44px strip, one fluid workspace and
-     a 300px conversation dock. The 1340 floor belongs to that whole canvas;
-     inventing a fake pixel minimum for its fluid track would prove nothing. */
+     a 300px conversation dock. The floor belongs to that whole canvas; inventing
+     a fake pixel minimum for its fluid track would prove nothing. */
   it('uses the v8 default strip, fluid workspace and dock tracks', () => {
     expect(FRAME_CSS, 'the frame is not the v8 three-column default').toMatch(
       /grid-template-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+300px;/,
     );
+  });
+
+  /* ---------------------------------------------------------------------------
+     THE FOURTH SOURCE, AND THE ONE THAT WAS MISSING.
+
+     CATCHES: the floor moving while the browser gate keeps running below it.
+     That is not hypothetical — it happened. The v8 batch moved `MINIMUM_WIDTH`
+     and the stylesheet together from 1024 to 1340, so all three assertions above
+     stayed green, while `playwright.config.ts` went on inheriting the 1280×720
+     viewport that `devices['Desktop Chrome']` supplies. Every spec that sets no
+     viewport of its own then rendered the below-minimum notice instead of the
+     product, and 76 of 177 browser tests failed at once — none of them naming
+     the width, because none of them knew about it.
+
+     Three sources agreeing with each other is not the same as the system being
+     consistent. The runner is where the claim is finally cashed, so the runner
+     is in the enumeration now.
+
+     WHAT THIS CANNOT SEE: a spec that calls `setViewportSize` itself, which many
+     deliberately do. This pins the DEFAULT every other spec inherits.
+     ------------------------------------------------------------------------ */
+  it('the browser runner defaults to the floor the shell declares', () => {
+    const config = readFileSync(find('apps/web/playwright.config.ts'), 'utf8');
+    const declared = config.match(
+      /const FRAME_FLOOR = \{\s*width:\s*(\d+),\s*height:\s*(\d+)\s*\}/,
+    );
+    expect(declared, 'playwright.config.ts states no frame floor to check').not.toBe(null);
+    expect(
+      Number(declared?.[1]),
+      'the browser gate runs at a width the shell does not lay out for',
+    ).toBe(MINIMUM_WIDTH);
+
+    /* A default stated and then overwritten by a device spread is worse than no
+       default: it reads as covered. Both projects restate it after the spread,
+       and this is what proves they still do. */
+    const spreads = [...config.matchAll(/\.\.\.devices\[[^\]]+\][^}]*\}/g)].map((hit) => hit[0]);
+    expect(spreads.length, 'no device spread found, so this check reached nothing').toBe(2);
+    expect(
+      spreads.filter((spread) => !spread.includes('viewport: FRAME_FLOOR')),
+      'a project spreads a device descriptor and lets its 1280x720 viewport win',
+    ).toEqual([]);
   });
 });

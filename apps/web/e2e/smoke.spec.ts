@@ -405,7 +405,12 @@ test.describe('shell', () => {
    * the DOM, in `data-truncates`. This is the denominator — every clipped
    * element, not the ones somebody remembered.
    * ---------------------------------------------------------------------- */
-  for (const width of [1124, 1440] as const) {
+  /* 1124 was the narrow end of this pair while the floor was 1024. The floor is
+     1280 now, so the narrow end is 1280 — a width the shell lays out for. The
+     clipping this catches is a function of column width, so moving the narrow
+     end up narrows what it can catch: a string that clips at 1124 and not at
+     1280 is no longer reachable here. It is also no longer a supported width. */
+  for (const width of [1280, 1440] as const) {
     for (const state of ['initial', 'receipt-open'] as const) {
       test(`every clipped string on / names a route that is TRUE — @ ${width} ${state}`, async ({
         page,
@@ -627,17 +632,22 @@ test.describe('shell', () => {
   /* ---------------------------------------------------------------------------
    * BELOW THE FLOOR — r8 D10, in a real engine at a real width.
    *
-   * Every width this suite has ever measured is 1124 or above, which is above
-   * the shell's declared `min-width: 1024px`. The r8 blind review went below it
-   * and found 664px of horizontal overflow at 360 and 304px at 720, with nothing
-   * on screen stating or refusing a minimum — correct behaviour over an input
-   * range nobody had stated, which is this round's shape everywhere else.
+   * Every width the layout suites measure is at or above the shell's declared
+   * `min-width`. The r8 blind review went below it and found 664px of horizontal
+   * overflow at 360 and 304px at 720, with nothing on screen stating or refusing
+   * a minimum — correct behaviour over an input range nobody had stated, which is
+   * that round's shape everywhere else.
    *
    * `test/viewport.test.tsx` proves the rule exists and states the right number.
    * JSDOM does not evaluate media queries, so THIS is where a browser proves the
    * notice actually appears below the floor and actually does not above it.
+   *
+   * 1124 IS IN THIS LIST BECAUSE IT LEFT THE OTHER ONE. It was a laid-out width
+   * while the floor was 1024 and is a refused width now that the floor is 1280.
+   * A width that changes side has to change list, or the range between the old
+   * floor and the new one is measured by nothing at all.
    * ------------------------------------------------------------------------- */
-  for (const width of [360, 720, 1023] as const) {
+  for (const width of [360, 720, 1023, 1124] as const) {
     test(`the shell states its minimum width @ ${width}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto('/');

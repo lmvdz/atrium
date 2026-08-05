@@ -20,6 +20,15 @@ import {
  */
 const environment = serverEnvironment();
 
+/**
+ * The width the shell declares as its floor, and the height the vertical
+ * workspace split needs before the conversation pane can overflow at all.
+ * `MINIMUM_WIDTH` in `src/components/frame/AppFrame.tsx` is the authority for
+ * the width; this file cannot import it (that module is TSX in the app graph),
+ * so `test/viewport.test.tsx` reads both and asserts they are one number.
+ */
+const FRAME_FLOOR = { width: 1280, height: 900 } as const;
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -46,13 +55,37 @@ export default defineConfig({
      * hour does not accumulate against a counter the dev server keeps in memory.
      */
     extraHTTPHeaders: { 'x-forwarded-for': `203.0.113.${1 + Math.floor(Math.random() * 254)}` },
+    /**
+     * THE RUNNER SITS AT THE PRODUCT'S FLOOR, DELIBERATELY.
+     *
+     * `devices['Desktop Chrome']` is 1280×720 and this file used to accept that
+     * default. When the v8 batch raised the shell's `min-width` to 1340, every
+     * spec that sets no viewport of its own began running BELOW the floor the
+     * product declares for itself — the below-minimum notice instead of the
+     * product — and 76 of 177 browser tests went red at once. `viewport.test.tsx`
+     * did not catch it: it compares the constant to the stylesheet, and both
+     * moved together. Nothing related either to the runner.
+     *
+     * So the default is stated here rather than inherited, and it is the floor
+     * itself: the width most likely to break is the one the gate runs at. Height
+     * is 900 rather than 720 because the workspace splits vertically and a 720
+     * window leaves the conversation pane too short to scroll, which is a
+     * different test from the one most specs mean to be running.
+     *
+     * If `MINIMUM_WIDTH` in `src/components/frame/AppFrame.tsx` moves again,
+     * this moves with it.
+     */
+    viewport: FRAME_FLOOR,
   },
+  /* Each device descriptor carries its own 1280×720 viewport, and a project's
+     `use` outranks the top-level one — so the floor has to be restated after
+     every spread or the spread silently puts the height back to 720. */
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: FRAME_FLOOR } },
     {
       name: 'firefox-conversation-follow',
       testMatch: /(?:conversation-follow|live-conversation-follow)\.spec\.ts/,
-      use: { ...devices['Desktop Firefox'] },
+      use: { ...devices['Desktop Firefox'], viewport: FRAME_FLOOR },
     },
   ],
   webServer: [

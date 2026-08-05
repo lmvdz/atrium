@@ -10,7 +10,7 @@
   grid-template-columns: 44px minmax(0, 1fr) 300px;
   height: 100vh;
   min-height: 0;
-  min-width: 1340px;
+  min-width: 1280px;
   overflow: hidden;
 }
 
@@ -64,7 +64,7 @@
   display: none;
 }
 
-@media (max-width: 1339px) {
+@media (max-width: 1279px) {
   .belowMin {
     display: block;
     position: fixed;
@@ -166,9 +166,13 @@
 /* --- rail ---------------------------------------------------------------- */
 
 .rail {
-  /* V8 ships with the optional room rail folded. Room navigation remains in
-     the live route and will return through the V8 fold affordance; retaining a
-     permanently visible legacy column is the mismatch this batch removes. */
+  /* V8 ships the room rail FOLDED, not deleted. `AppFrame` renders the fold
+     control in the workspace strip and puts `.appRailOpen` on the layout root
+     when it is open; that rule, below, is the only thing that reveals this
+     column. Folding it with no control to unfold it — which is what the v8
+     adoption batch shipped — leaves a room with no route to another room, and
+     leaves this nav in the accessibility tree while no sighted reader can
+     reach it. */
   display: none;
   background: var(--bg2);
   border-right: 1px solid var(--line);
@@ -378,6 +382,41 @@
 }
 
 .splitState,
+/* THE FOLD, OPEN. The base grid is the v8 default — strip, fluid workspace,
+   dock — and this is the same canvas with the rail's 190px inserted after the
+   strip. The width is the pre-v8 rail's own, which is what its rows were
+   measured and clipped-string-checked at; inventing a new one here would put
+   every one of those measurements out of date at the same time. */
+.appRailOpen {
+  grid-template-columns: 44px 190px minmax(0, 1fr) 300px;
+}
+
+.appRailOpen .rail {
+  display: grid;
+}
+
+/* The strip's fold control. A flat terminal instrument like every other v8
+   control: no radius, the strip's own palette, and it states which way it goes
+   through its accessible name rather than through a rotation nobody can read. */
+.railFold {
+  background: transparent;
+  border: 1px solid var(--grnbd);
+  color: var(--grn2);
+  cursor: pointer;
+  display: grid;
+  flex: none;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+  height: 28px;
+  place-items: center;
+  width: 28px;
+}
+
+.railFold[aria-expanded='true'] {
+  background: var(--grnav);
+  color: var(--grn);
+}
+
 .splitConversation {
   display: flex;
   flex-direction: column;
