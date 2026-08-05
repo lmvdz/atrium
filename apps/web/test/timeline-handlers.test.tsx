@@ -139,12 +139,8 @@ describe('conversation follow mode', () => {
     expect(container.querySelector('[data-unread-divider="1"]')?.textContent).toBe('1 new message');
     const row = container.querySelector(`[data-message-id="${appended.id}"]`) as HTMLElement;
     Object.defineProperty(row, 'offsetTop', { configurable: true, value: 640 });
-    let request: ScrollToOptions | undefined;
-    feed.scrollTo = (options) => {
-      request = options as ScrollToOptions;
-    };
     fireEvent.click(control);
-    expect(request).toEqual({ behavior: 'smooth', top: 640 });
+    await waitFor(() => expect(feed.scrollTop).toBe(640));
     expect(screen.queryByRole('button', { name: '↓ 1 new message' })).toBeNull();
   });
 
@@ -165,11 +161,7 @@ describe('conversation follow mode', () => {
     if (appended?.type !== 'message') throw new Error('the feed fixture does not append a message');
     const row = container.querySelector(`[data-message-id="${appended.id}"]`) as HTMLElement;
     Object.defineProperty(row, 'offsetTop', { configurable: true, value: 900 });
-    let request: ScrollToOptions | undefined;
-    feed.scrollTo = (options) => {
-      request = options as ScrollToOptions;
-    };
-    await waitFor(() => expect(request).toEqual({ behavior: 'smooth', top: 700 }));
+    await waitFor(() => expect(feed.scrollTop).toBe(700));
     expect(screen.queryByRole('button', { name: /new message/ })).toBeNull();
   });
 

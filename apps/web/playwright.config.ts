@@ -47,7 +47,14 @@ export default defineConfig({
      */
     extraHTTPHeaders: { 'x-forwarded-for': `203.0.113.${1 + Math.floor(Math.random() * 254)}` },
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      name: 'firefox-conversation-follow',
+      testMatch: /(?:conversation-follow|live-conversation-follow)\.spec\.ts/,
+      use: { ...devices['Desktop Firefox'] },
+    },
+  ],
   webServer: [
     {
       // `localhost`, not `127.0.0.1`: Next's dev server only serves client

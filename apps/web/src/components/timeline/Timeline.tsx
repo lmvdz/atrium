@@ -90,6 +90,7 @@ export function Timeline({
   const previousMessageIdsRef = useRef<readonly string[] | null>(null);
   const followingRef = useRef(true);
   const automaticScrollRef = useRef(false);
+  const scrollFrameRef = useRef<number | null>(null);
   const automaticScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [unread, setUnread] = useState<{
     readonly oldestId: string;
@@ -124,7 +125,10 @@ export function Timeline({
 
     if (followingRef.current) {
       automaticScrollRef.current = true;
-      requestAnimationFrame(() => scrollMessageIntoView(feed, firstAppendedId));
+      if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = requestAnimationFrame(() =>
+        scrollMessageIntoView(feed, firstAppendedId, scrollFrameRef),
+      );
       if (automaticScrollTimerRef.current !== null) clearTimeout(automaticScrollTimerRef.current);
       automaticScrollTimerRef.current = setTimeout(() => {
         automaticScrollRef.current = false;
@@ -140,6 +144,7 @@ export function Timeline({
   useEffect(
     () => () => {
       if (automaticScrollTimerRef.current !== null) clearTimeout(automaticScrollTimerRef.current);
+      if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
     },
     [],
   );
@@ -156,13 +161,15 @@ export function Timeline({
   function scrollToOldestUnread(): void {
     const feed = feedRef.current;
     if (feed === null || unread === null) return;
-    scrollMessageIntoView(feed, unread.oldestId);
+    scrollMessageIntoView(feed, unread.oldestId, scrollFrameRef);
     setUnread(null);
   }
 
   function stopAutomaticFollowing(): void {
     automaticScrollRef.current = false;
     followingRef.current = false;
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = null;
   }
 
   /* THE LIFT IS SAID IN WORDS, NOT ONLY IN A BACKGROUND — round 10, D3.
@@ -267,17 +274,37 @@ export function Timeline({
   );
 }
 
-function scrollMessageIntoView(feed: HTMLElement, messageId: string): void {
-  const row = Array.from(feed.children).find(
-    (child) => child.getAttribute('data-message-id') === messageId,
-  );
-  if (!(row instanceof HTMLElement)) return;
-  const furthestDown = Math.max(0, feed.scrollHeight - feed.clientHeight);
-  const firstUnreadAtTop = Math.max(0, row.offsetTop);
-  const target = Math.min(furthestDown, firstUnreadAtTop);
-  if (typeof feed.scrollTo === 'function') {
-    feed.scrollTo({ top: target, behavior: 'smooth' });
-  } else {
-    feed.scrollTop = target;
-  }
+function scrollMessageIntoView(
+  feed: HTMLElement,
+  messageId: string,
+  frameRef: { current: number | null },
+): void {
+  if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+  const startedAt = performance.now();
+  const startedFrom = feed.scrollTop;
+  const durationMs = 160;
+
+  const move = () => {
+    const row = Array.from(feed.children).find(
+      (child) => child.getAttribute('data-message-id') === messageId,
+    );
+    if (!(row instanceof HTMLElement)) {
+      frameRef.current = null;
+      return;
+    }
+    const furthestDown = Math.max(0, feed.scrollHeight - feed.clientHeight);
+    const firstUnreadAtTop = Math.max(0, row.offsetTop);
+    const target = Math.min(furthestDown, firstUnreadAtTop);
+    const progress = Math.min(1, (performance.now() - startedAt) / durationMs);
+    const eased = 1 - (1 - progress) ** 3;
+    feed.scrollTop = startedFrom + (target - startedFrom) * eased;
+    if (progress < 1) {
+      frameRef.current = requestAnimationFrame(move);
+    } else {
+      feed.scrollTop = target;
+      frameRef.current = null;
+    }
+  };
+
+  frameRef.current = requestAnimationFrame(move);
 }
