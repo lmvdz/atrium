@@ -19,9 +19,9 @@ conversation follow. It strictly contains `build/live-multiplayer`,
 | `pnpm -r build` | — | **0** |
 | `pnpm typecheck` | — | **0** |
 | `pnpm lint` | documented as always 1 | **0** — see below |
-| `pnpm test --maxWorkers=2` | — | **3108 / 3108** |
+| `pnpm test --maxWorkers=2` | — | **3109 / 3109** |
 | `pnpm test:integration` | — | **189 / 189** |
-| `pnpm test:e2e` (8 workers) | 157 passed · 11 failed | **163 passed · 6 failed** |
+| `pnpm test:e2e` (8 workers) | 157 passed · 11 failed | **163 passed · 6 failed** — last full run before the composer fixes below; not re-run since |
 
 **`pnpm lint` exits 0 now.** The previous handoff recorded it as exiting 1 "and
 always has", on `design/*.mjs` and `scripts/mutation-ledger.mjs`. Those files
@@ -165,19 +165,36 @@ the 8-worker full run. Verified this session, each of them:
 
 Two are **deterministic**:
 
-**`multiplayer.spec.ts` — diagnosed, deliberately left.** Two stale locators
-fixed (`Mention a person or agent` → `Reference a person or room item`, and the
-targets are `role="option"`, not buttons), which moved the run 150 seconds
-further in and unmasked a real one: the scenario picks a mention, then calls
-`fill(message.body)`, which REPLACES the draft and deletes the `@Name ` it just
-inserted. `reconcileMessageReferences` drops any reference whose span an edit
-touches — correct and deliberate, a mention whose text the author removed is a
-claim about a message that does not mention them. So no `mention` attention row
-is projected and the equality is short by exactly that item. Making it coherent
-means the mention text has to survive into the body, which moves three things
-together: the manifest's body for seq 75, the `statement` in `expectedAttention`,
-and the `body` equality in the persisted-message check. Not guessed at — eight
-other assertions read `message.body`.
+**`multiplayer.spec.ts` — now red on one precise assertion, not a timeout.**
+Chasing it found **two real composer defects**, both independent of it and both
+now fixed and unit-covered:
+
+- The reference control inserted a bare `@` at the caret. `mentionMatch` is
+  `/(^|\s)@([^\s@]*)$/` — the `@` counts at the start of the draft or after
+  whitespace — so after any non-space character the token did not match,
+  `selectMention` took its null branch, and picking a target appended a SECOND
+  `@`. Type "who owns this?", click the control, pick a person: `this?@@Grace `.
+- `insert` wrote the DOM value and called `onChange` but never
+  `setDraftMirror`. Invisible to a CONTROLLED consumer — every route in the app
+  — and broken for an uncontrolled one, where `visibleDraft` falls back to the
+  mirror and the component reads a draft predating its own append.
+
+The existing mention checks all type the `@` themselves, which is why neither
+was visible. The spec now types the body and picks the mention last (prefixing
+was tried and rejected: the semantic fixtures are classified from the body, and
+a leading `@Name ` stopped "Open question:" opening its own sentence and failed
+the run on "all eight semantic fixtures to become proposals").
+
+What is left: the mention attention row IS projected now — it was absent
+entirely before — and the run reaches the equality it was written for. It fails
+there, with the row reading `statement: null` where the check expects the sent
+body, at `subjectKind: 'proposal'`, `proposalStatus: 'accepted'`. The query
+coalesces `statement`/`question`/`title` over both the proposal and the accepted
+object, and `open_question` payloads use `question`
+(`packages/core/src/semantic-command.ts:48`) — so one of those two is not what it
+appears. **Whether a mention row should carry a statement at all is a product
+question about what the pin can show**, and the ground truth is not derivable
+from the spec. That is the next thing to settle here.
 
 **`replay.spec.ts` — derives every replay-divider count. Unresolved.** Left
 failing rather than wrapped in a workaround. Measured, and it repeats: the
