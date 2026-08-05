@@ -424,8 +424,19 @@ test.describe
         >`
           SELECT a.id::text, a.subject_kind AS "subjectKind", p.id::text AS "proposalId",
                  p.status::text AS "proposalStatus", a.reason->>'kind' AS "reasonKind",
+                 /* A MENTION'S SUBJECT IS THE MESSAGE, so its text is not in a
+                    proposal or an object payload and both joins miss it.
+                    apps/server/src/projections.ts writes the typed human
+                    reference as subjectKind 'message', subjectId
+                    event.messageId, reason { kind: mention, request:
+                    event.body } — the body is right there on the reason. This
+                    read only the semantic payloads, so every mention row came
+                    back with a null statement and could not be compared to
+                    anything. Verified against the row itself: subject_kind was
+                    'message' and both joins were null. */
                  COALESCE(p.payload->>'statement', p.payload->>'question', p.payload->>'title',
-                          o.payload->>'statement', o.payload->>'question', o.payload->>'title')
+                          o.payload->>'statement', o.payload->>'question', o.payload->>'title',
+                          a.reason->>'request')
                    AS statement
           FROM attention_items a
           LEFT JOIN proposals p ON p.room_id=a.room_id AND p.id=a.subject_id
@@ -505,13 +516,59 @@ test.describe
           await next.click();
         }
         expect(renderedCommitment).toBe(true);
+        /* STILL RED HERE, and this is the last of it — a PRODUCT-DESIGN question,
+           not a defect, and not mine to settle.
+
+           This asserts every pending attention row is rendered IN THE PIN. The
+           mention row is not, and deliberately so: `LiveRoomSession` builds
+           `contextualAttentionIds` from `view.referenceAttention` and feeds the
+           pin `actionableAttention`, which excludes them. A typed human mention
+           is routed to the message's own reference marker and the state lens's
+           "unfiled direct references" line instead of becoming a pin card.
+
+           Verified end to end: the unrendered id is exactly the mention row —
+           `subject_kind` message, `class` mention, `status` pending — read back
+           out of the database by id.
+
+           So the question is whether being mentioned is an OBLIGATION (pin: what
+           needs THIS person) or a POINTER (a contextual reference on the row it
+           was written in). The product currently says pointer. The pin's own
+           charter says "what needs you", and a mention is the clearest case of
+           someone asking for you by name. Both readings are defensible and the
+           check cannot decide it.
+
+           Whichever way it goes, this assertion has to change shape: either the
+           pin gains mention cards, or this compares against the pin's own set
+           and the mention is asserted against the surface that does render it.
+           The dismissal below goes with it — `actOnAttention` drives the pin,
+           and a mention that lives on a reference marker is resolved through
+           `onOpenReferences`, not through a pin action. Not rewritten blind:
+           this is a 240-second scenario and the rewrite is only verifiable by
+           running it. */
         expect([...renderedAttentionIds].sort()).toEqual(
           pendingAttention.map((item) => item.id).sort(),
         );
         const mentionAttention = pendingAttention.find((item) => item.reasonKind === 'mention');
+        /* THE SUBJECT OF A MENTION IS THE MESSAGE THAT CARRIED IT.
+           This asserted `subjectKind: 'proposal'` with `proposalStatus:
+           'accepted'`, which is `packages/core/src/attention.ts`'s
+           `computeMentions` path — it defaults `subjectKind` to `'object'` and
+           belongs to mentions derived from semantic content. A TYPED human
+           reference does not go through it: `projections.ts` writes the row
+           directly against the message, in the same transaction as the
+           reference insert.
+
+           WHAT THE OLD ONE CAUGHT: a mention whose subject never reached the
+           accepted fold — a real guard for the semantic path, and unreachable
+           here, because this scenario's mention is a typed reference and its
+           subject is a message that has no proposal to be accepted.
+           WHAT THIS ONE CATCHES: the typed reference landing as an attention row
+           against the RIGHT subject. `subjectKind` is the whole point — a
+           mention filed against an object instead of the message it was written
+           in loses the provenance the row exists to carry — and the statement
+           equality above already pins the body. */
         expect(mentionAttention).toMatchObject({
-          subjectKind: 'proposal',
-          proposalStatus: 'accepted',
+          subjectKind: 'message',
           reasonKind: 'mention',
         });
         if (!mentionAttention?.id) throw new Error('the structured mention has no attention row');
