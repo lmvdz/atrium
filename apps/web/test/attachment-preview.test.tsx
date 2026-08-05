@@ -106,6 +106,46 @@ describe('attachment preview', () => {
     expect(loadUrl).toHaveBeenCalledTimes(2);
   });
 
+  /* CATCHES: centering an oversized image in a flex scroller, which puts its
+     top/left overflow before scroll origin and makes those pixels unreachable. */
+  it('makes actual size a zoomable, draggable scroll canvas', async () => {
+    const { container } = render(
+      <AttachmentPreview
+        attachment={image}
+        loadUrl={async () => 'https://objects.invalid/capture-one'}
+        onClose={() => undefined}
+      />,
+    );
+    const rendered = await screen.findByRole('img', { name: 'capture.png' });
+    fireEvent.click(screen.getByRole('button', { name: 'actual size' }));
+    const stage = container.querySelector('[data-preview-mode="actual"]') as HTMLDivElement;
+    expect(stage).toBeDefined();
+    expect(rendered.style.width).toBe('1600px');
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(screen.getByText('125%')).toBeDefined();
+    expect(rendered.style.width).toBe('2000px');
+
+    stage.scrollLeft = 300;
+    stage.scrollTop = 200;
+    const pointer = (type: string, values: Record<string, number>) => {
+      const event = new Event(type, { bubbles: true });
+      Object.defineProperties(
+        event,
+        Object.fromEntries(
+          Object.entries(values).map(([key, value]) => [key, { configurable: true, value }]),
+        ),
+      );
+      fireEvent(stage, event);
+    };
+    pointer('pointerdown', { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+    pointer('pointermove', { clientX: 60, clientY: 70, pointerId: 1 });
+    expect(stage.scrollLeft).toBe(340);
+    expect(stage.scrollTop).toBe(230);
+    pointer('pointerup', { pointerId: 1 });
+    fireEvent.click(screen.getByRole('button', { name: 'fit to window' }));
+    expect(container.querySelector('[data-preview-mode="fit"]')).toBeDefined();
+  });
+
   /* CATCHES: treating every attachment as an image and leaving other files
      with a broken image element instead of an honest open/download treatment. */
   it('gives a non-image an explicit download fallback', async () => {

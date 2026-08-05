@@ -26,10 +26,15 @@ function formatBytes(size: number): string {
 export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPreviewProps) {
   const close = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const [url, setUrl] = useState<string>();
   const [error, setError] = useState<string>();
   const [actualSize, setActualSize] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [imageSize, setImageSize] = useState({ width: 1600, height: 1200 });
+  const [dragging, setDragging] = useState(false);
+  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const [generation, setGeneration] = useState(0);
   const retried = useRef(false);
 
@@ -98,6 +103,22 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
   const isImage = attachment.contentType.startsWith('image/');
   const name = systemText(attachment.name, 'AttachmentPreview name');
   const contentType = systemText(attachment.contentType, 'AttachmentPreview contentType');
+  const setScale = (next: number) => setZoom(Math.min(4, Math.max(0.25, next)));
+  const toggleActualSize = () => {
+    setActualSize((current) => {
+      const next = !current;
+      if (next) {
+        setZoom(1);
+        requestAnimationFrame(() => {
+          const viewport = stage.current;
+          if (viewport === null) return;
+          viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+          viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+        });
+      }
+      return next;
+    });
+  };
   return (
     <div className={styles.backdrop} data-attachment-preview="true">
       <button
@@ -120,14 +141,41 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
             {contentType} · {formatBytes(attachment.size)}
           </span>
           {isImage ? (
-            <button
-              aria-pressed={actualSize}
-              className={styles.action}
-              onClick={() => setActualSize((current) => !current)}
-              type="button"
-            >
-              {actualSize ? 'fit to window' : 'actual size'}
-            </button>
+            <div className={styles.zoomControls}>
+              {actualSize ? (
+                <>
+                  <button
+                    aria-label="Zoom out"
+                    className={styles.icon}
+                    disabled={zoom <= 0.25}
+                    onClick={() => setScale(zoom - 0.25)}
+                    type="button"
+                  >
+                    −
+                  </button>
+                  <span aria-live="polite" className={styles.zoomLevel}>
+                    {Math.round(zoom * 100)}%
+                  </span>
+                  <button
+                    aria-label="Zoom in"
+                    className={styles.icon}
+                    disabled={zoom >= 4}
+                    onClick={() => setScale(zoom + 0.25)}
+                    type="button"
+                  >
+                    +
+                  </button>
+                </>
+              ) : null}
+              <button
+                aria-pressed={actualSize}
+                className={styles.action}
+                onClick={toggleActualSize}
+                type="button"
+              >
+                {actualSize ? 'fit to window' : 'actual size'}
+              </button>
+            </div>
           ) : null}
           <button
             aria-label={`Download ${name}`}
@@ -162,7 +210,50 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
             </svg>
           </button>
         </header>
-        <div className={styles.stage}>
+        <div
+          className={[
+            styles.stage,
+            actualSize ? styles.stageActual : null,
+            dragging ? styles.dragging : null,
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          data-preview-mode={actualSize ? 'actual' : 'fit'}
+          onPointerDown={(event) => {
+            if (!actualSize || event.button !== 0) return;
+            const viewport = stage.current;
+            if (viewport === null) return;
+            if (typeof viewport.setPointerCapture === 'function') {
+              viewport.setPointerCapture(event.pointerId);
+            }
+            drag.current = {
+              x: event.clientX,
+              y: event.clientY,
+              left: viewport.scrollLeft,
+              top: viewport.scrollTop,
+            };
+            setDragging(true);
+          }}
+          onPointerMove={(event) => {
+            const viewport = stage.current;
+            const origin = drag.current;
+            if (viewport === null || origin === null) return;
+            viewport.scrollLeft = origin.left - (event.clientX - origin.x);
+            viewport.scrollTop = origin.top - (event.clientY - origin.y);
+          }}
+          onPointerUp={(event) => {
+            const viewport = stage.current;
+            if (
+              typeof viewport?.hasPointerCapture === 'function' &&
+              viewport.hasPointerCapture(event.pointerId)
+            ) {
+              viewport.releasePointerCapture(event.pointerId);
+            }
+            drag.current = null;
+            setDragging(false);
+          }}
+          ref={stage}
+        >
           {error !== undefined ? (
             <div className={styles.fallback} role="alert">
               <span>{error}</span>
@@ -179,6 +270,10 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
               alt={name}
               className={actualSize ? styles.actual : styles.fit}
               height={1200}
+              onLoad={(event) => {
+                const rendered = event.currentTarget;
+                setImageSize({ width: rendered.naturalWidth, height: rendered.naturalHeight });
+              }}
               onError={() => {
                 if (retried.current) {
                   setError('the preview URL expired; retry to request another');
@@ -189,6 +284,11 @@ export function AttachmentPreview({ attachment, loadUrl, onClose }: AttachmentPr
               }}
               priority
               src={url}
+              style={
+                actualSize
+                  ? { width: imageSize.width * zoom, height: imageSize.height * zoom }
+                  : undefined
+              }
               unoptimized
               width={1600}
             />

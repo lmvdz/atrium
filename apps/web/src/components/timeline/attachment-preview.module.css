@@ -61,6 +61,19 @@
   padding: 4px 7px;
 }
 
+.zoomControls {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.zoomLevel {
+  color: var(--tx2);
+  font: 9.5px / 1 var(--font-mono);
+  min-width: 36px;
+  text-align: center;
+}
+
 .icon {
   align-items: center;
   display: inline-flex;
@@ -87,6 +100,18 @@
   padding: 12px;
 }
 
+.stageActual {
+  align-items: flex-start;
+  cursor: grab;
+  justify-content: flex-start;
+  overscroll-behavior: contain;
+  user-select: none;
+}
+
+.stageActual.dragging {
+  cursor: grabbing;
+}
+
 .fit {
   height: 100%;
   object-fit: contain;
@@ -94,6 +119,7 @@
 }
 
 .actual {
+  flex: none;
   height: auto;
   max-width: none;
   width: auto;
