@@ -313,6 +313,30 @@ test.describe('persisted three-surface replay', () => {
    */
   test('derives every replay-divider count from the rows its filter lifts', async ({ page }) => {
     await page.goto('/replay/atrium-replay/typescript-9998');
+    /* CLICK ONLY WHAT REACT HAS ATTACHED TO.
+       This clicked the chip as soon as the locator resolved, and the first
+       click did nothing every time while the second worked — which read as
+       "the first click is swallowed" and cost most of a session.
+
+       Read off the node itself: before the click the button has NO React
+       internal properties at all (`Object.keys(button)` is empty), and after it
+       they are there with `onClick` a function. The markup is server-rendered
+       and fully clickable; React simply has not hydrated it yet, so the click
+       lands on a node with no handler. This route hydrates a 111-message corpus
+       — 27,126px of feed — which is why it is slow enough to lose the race here
+       and nowhere else, and why every instrumented copy of this check passed:
+       the extra round-trips were accidentally waiting for hydration.
+
+       `data-hydrated` on the theme control is the product's own signal that
+       React has attached, set from an effect and therefore only after the root
+       commits. One root, so it speaks for the timeline too — and `smoke.spec.ts`
+       already uses it for exactly this.
+
+       WHAT THE OLD ONE CAUGHT, in principle: a divider count that disagrees with
+       the rows its filter lifts. WHAT THIS ONE CATCHES: the same, and it can now
+       reach the control to find out. Nothing about the counts is relaxed — every
+       class is still driven, and the note still has to name the chip's number. */
+    await expect(page.getByTestId('theme-toggle')).toHaveAttribute('data-hydrated', 'true');
 
     const divider = page.locator('[data-row="since-you-left"]');
     for (const attentionClass of ['need', 'change', 'discussion', 'routine'] as const) {
